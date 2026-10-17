@@ -72,6 +72,9 @@ pub struct GameData {
     /// Every game asset, keyed "Type:name".
     pub assets: serde_json::Map<String, Value>,
     pub group_prefabs: Value,
+    /// Habitat panels: per group, each Panel's transform, colliders and bounds; the bounds of
+    /// every panel look (panels.rs).
+    pub panels: Value,
     pub singletons: Value,
     /// World objects that come with the dumped planet's scene.
     pub scene_world_objects: Vec<Value>,
@@ -161,6 +164,7 @@ impl GameData {
             layouts,
             assets,
             group_prefabs: root["groupPrefabs"].take(),
+            panels: root["panels"].take(),
             singletons: root["singletons"].take(),
             scene_world_objects: root["sceneWorldObjects"].as_array().cloned().unwrap_or_default(),
         })

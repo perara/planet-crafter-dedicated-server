@@ -41,7 +41,9 @@ namespace PcdsExtractor
             }, 120000);
             if (layouts)
             {
-                result["layouts"] = Layouts();
+                JObject panels = new JObject();
+                result["layouts"] = Layouts(panels);
+                result["panels"] = new JObject { ["groups"] = panels, ["looks"] = Extractor.OnMain(() => PanelLooks()) };
             }
             return result;
         }
@@ -195,7 +197,8 @@ namespace PcdsExtractor
 
         // Spawns one world object per group (and both container variants for items), lets them
         // initialise for a second, records what a joining client would receive, then removes them.
-        static JObject Layouts()
+        // `panels` gets each building's habitat panels (PanelsOf).
+        static JObject Layouts(JObject panels)
         {
             List<(string key, WorldObject wo, GameObject go)> spawned = Extractor.OnMain(() =>
             {
@@ -214,6 +217,10 @@ namespace PcdsExtractor
                             if (go != null)
                             {
                                 list.Add((group.GetId() + (fromDb ? "#static" : ""), wo, go));
+                                if (!fromDb && go.GetComponentInChildren<Panel>() != null)
+                                {
+                                    panels[group.GetId()] = PanelsOf(go);
+                                }
                             }
                         }
                         catch (Exception e)
@@ -257,6 +264,76 @@ namespace PcdsExtractor
                 }
                 return layouts;
             }, 300000);
+        }
+
+        // Habitat panels, for Panel.GetContingousPanels (the raycast that opens compartments built
+        // side by side into each other): each Panel of a building, relative to the building, with
+        // the box colliders on the panel's own object (what the ray hits; panels have no others).
+        static JArray PanelsOf(GameObject go)
+        {
+            Transform root = go.transform;
+            Quaternion inverse = Quaternion.Inverse(root.rotation);
+            return new JArray(go.GetComponentsInChildren<Panel>().Select(p => new JObject
+            {
+                ["panelType"] = p.GetPanelType().ToString(),
+                ["position"] = Vector(inverse * (p.transform.position - root.position)),
+                ["rotation"] = Vector(inverse * p.transform.rotation),
+                ["boxes"] = new JArray(p.GetComponents<BoxCollider>().Where(b => b.enabled).Select(b => new JArray(Vector(b.center), Vector(b.size)))),
+            }));
+        }
+
+        // For every look PanelsResources puts inside a panel (Panel.SetPanel), the bounds the ray
+        // starts from (BoundsHelper.GetBoundsOfChildren) and aligns with (Panel.GetBoundsOfPanel),
+        // in a panel at the origin with identity rotation; "underground" when
+        // GetPanelUndergroundGameObject differs.
+        static JObject PanelLooks()
+        {
+            PanelsResources resources = Managers.GetManager<PanelsResources>();
+            JObject looks = new JObject();
+            foreach (DataConfig.BuildPanelSubType type in Enum.GetValues(typeof(DataConfig.BuildPanelSubType)))
+            {
+                GameObject look = resources.GetPanelGameObject(type);
+                if (look == null)
+                {
+                    continue;
+                }
+                JObject entry = LookBounds(look);
+                GameObject underground = resources.GetPanelUndergroundGameObject(type);
+                if (underground != look)
+                {
+                    entry["underground"] = LookBounds(underground);
+                }
+                looks[type.ToString()] = entry;
+            }
+            return looks;
+        }
+
+        static JObject LookBounds(GameObject look)
+        {
+            GameObject panel = new GameObject("pcds-panel-look");
+            panel.transform.position = new Vector3(0f, 5000f, 0f);
+            try
+            {
+                GameObject obj = UnityEngine.Object.Instantiate(look);
+                obj.transform.SetParent(panel.transform);
+                obj.transform.localPosition = Vector3.zero;
+                obj.transform.localRotation = Quaternion.identity;
+                return new JObject
+                {
+                    ["bounds"] = Bounds(BoundsHelper.GetBoundsOfChildren(panel), panel.transform.position),
+                    ["panelBounds"] = Bounds(Panel.GetBoundsOfPanel(panel), panel.transform.position),
+                };
+            }
+            finally
+            {
+                UnityEngine.Object.Destroy(panel);
+            }
+        }
+
+        // [min, max] relative to `origin`.
+        static JArray Bounds(Bounds b, Vector3 origin)
+        {
+            return new JArray(Vector(b.min - origin), Vector(b.max - origin));
         }
 
         static bool IsGameObjectType(UnityEngine.Object o)
