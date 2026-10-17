@@ -161,7 +161,7 @@ import json, sys
 players = json.load(sys.stdin)["players"]
 for p in players:
     steam = p["steamId"] + (" (verified)" if p["verified"] else "") if p["steamId"] else "-"
-    print(f"{p[\"id\"]:>4}  {p[\"name\"] or \"(joining)\":<24} {p[\"ip\"]:<16} {steam:<28} {p[\"connectedSeconds\"]}s")
+    print("{:>4}  {:<24} {:<16} {:<28} {}s".format(p["id"], p["name"] or "(joining)", p["ip"], steam, p["connectedSeconds"]))
 print(f"{len(players)} online")'
 }
 
@@ -304,7 +304,7 @@ fetch_bepinex() {
   local zip="$CACHE/BepInEx_win_x64_$BEPINEX_VERSION.zip"
   if [[ ! -f "$zip" ]]; then
     mkdir -p "$CACHE"
-    say "downloading BepInEx $BEPINEX_VERSION (the mod loader the extractor runs in)"
+    say "downloading BepInEx $BEPINEX_VERSION (the mod loader the extractor runs in)" >&2
     curl -fsSL -o "$zip.part" "https://github.com/BepInEx/BepInEx/releases/download/v$BEPINEX_VERSION/BepInEx_win_x64_$BEPINEX_VERSION.zip"
     mv "$zip.part" "$zip"
   fi
