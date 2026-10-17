@@ -90,9 +90,10 @@ fn remove_ownership(game: &mut Game, object: u64) {
     game.net.set(object, "GroupNetworkContainer", "_transformSync", enc::bool(false));
 }
 
-/// Players in the game: (client, player position). The server has no player of its own.
+/// Players in the game (PlayersManager.playersControllers: set up by PlayerReady, loading ones
+/// are not): (client, player position). The server has no player of its own.
 fn players(game: &Game) -> Vec<(u64, [f32; 3])> {
-    game.clients.values().filter_map(|c| Some((c.id, game.net.objects.get(&c.player?)?.position))).collect()
+    game.clients.values().filter(|c| c.ready.is_some()).filter_map(|c| Some((c.id, game.net.objects.get(&c.player?)?.position))).collect()
 }
 
 fn distance2(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -114,4 +115,16 @@ fn nearest(game: &Game, position: [f32; 3]) -> (u64, f32) {
 /// Squared distance from a client's player to a position; MAX for the server and absent players.
 fn player_distance2(game: &Game, client: u64, position: [f32; 3]) -> f32 {
     players(game).into_iter().find(|(c, _)| *c == client).map(|(_, p)| distance2(p, position)).unwrap_or(f32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn loading_players_do_not_count() {
+        let Some(mut g) = crate::game::test_game(crate::game::tests::save()) else { return };
+        crate::game::tests::join(&mut g, 1, "Ann");
+        let loading = crate::game::tests::approve(&mut g, 2);
+        g.net.move_object(loading, [10.0, 0.0, 10.0], None);
+        assert_eq!(super::nearest(&g, [10.0, 0.0, 10.0]).0, 1, "client 2 stands there but is still loading");
+    }
 }
