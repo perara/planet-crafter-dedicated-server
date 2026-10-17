@@ -156,8 +156,6 @@ reads today):
   **portal world instances are empty**.
 - **Habitat compartments built side by side do not open into each other.** Build a door or glass
   panel on the shared wall and deconstruct it to get the corridor.
-- **Floating machines** (algae generators, water collectors, fish farms) do not follow the water
-  level as terraformation raises it.
 - **Sleeping does not skip the night** (the game sends the server no signal for it).
 
 Where the server has to approximate what the game's physics would decide (positions on a

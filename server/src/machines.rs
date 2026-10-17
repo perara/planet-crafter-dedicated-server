@@ -70,6 +70,8 @@ struct Machine {
     unit_generation: Vec<&'static str>,
     /// WorldUnitMultiplierViaInventory: (unit, influencedByHunger).
     unit_multipliers: Vec<(&'static str, bool)>,
+    /// MachineFloater on water: (updateWaterSurfaceInterval, next update).
+    floater: Option<(f32, f32)>,
 }
 
 /// DataConfig.WorldUnitType names world objects keep generation for.
@@ -265,6 +267,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
         destruct_if_full: false,
         unit_generation: Vec::new(),
         unit_multipliers: Vec::new(),
+        floater: None,
     };
     // MachineGrowerBase and its subclasses on the root, in component order (growth fuses).
     for c in game.data.group_prefabs[&game.data.groups[group].id]["components"].as_array().into_iter().flatten() {
@@ -301,6 +304,11 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
         m.vegetation = Some(growers::Vegetation::new(&f, wo, now));
     }
     m.destruct_if_full = root(game, group, "MachineDestructInventoryIfFull").is_some();
+    // MachineFloater.Start: those not marked notOnWater follow the water surface. One on a child
+    // moves the world object of its parent too (GetComponentInParent<WorldObjectAssociated>).
+    let floaters = components(game, group, "MachineFloater", false);
+    let interval = floaters.iter().filter(|f| f["notOnWater"].as_bool() != Some(true)).map(|f| f32_of(f, "updateWaterSurfaceInterval")).find(|i| *i > 0.0);
+    m.floater = interval.map(|i| (i, now + i));
     if let Some(f) = harvestable {
         m.harvestable = Some(growers::Harvestable::new(&f));
     }
@@ -461,6 +469,32 @@ pub fn tick(game: &mut Game) {
     for wo in ids {
         production::tick(game, wo, now);
         growers::tick(game, wo, now);
+        if let Some((interval, due)) = game.ext.machines.list.get(&wo).and_then(|m| m.floater) {
+            if now >= due {
+                game.ext.machines.list.get_mut(&wo).unwrap().floater = Some((interval, now + interval));
+                float_on_water(game, wo);
+            }
+        }
+    }
+}
+
+/// MachineFloater.SetReferencePositionOnSurface: the world object of a floating machine goes to
+/// the water surface under it, a quarter meter down, with its rotation reset. Each client's own
+/// MachineFloater moves what it shows; the network object's position is what a late joiner gets.
+/// Runs while the machine's planet is loaded (its game object is active).
+// ponytail: the cast starts at the world object's position, not at a floater child's own offset.
+fn float_on_water(game: &mut Game, wo: i32) {
+    if !is_active(game, wo) {
+        return;
+    }
+    let p = game.wos[&wo].position;
+    let Some(surface) = crate::water::surface_below(game, [p[0], p[1] + 5.0, p[2]], 105.0) else { return };
+    let position = [p[0], surface - 0.25, p[2]];
+    let w = game.wos.get_mut(&wo).unwrap();
+    w.position = position;
+    w.rotation = [0.0, 0.0, 0.0, 1.0];
+    if let Some(net) = w.net {
+        game.net.move_object(net, position, None);
     }
 }
 
@@ -670,6 +704,35 @@ pub(crate) mod tests {
         w.planet = planet;
         game.instantiate(id, false, 0);
         id
+    }
+
+    #[test]
+    fn floating_machines_follow_the_rising_water() {
+        let Some(mut game) = game() else { return };
+        // A Prime lake whose water rises from 45 m (TerraformStage4-Water) to 70 m (Lakes).
+        let set_terraformation = |game: &mut Game, total: f32| {
+            let planet = game.planet_hash();
+            game.units.planet_mut(planet).unwrap().units.iter_mut().filter(|u| u.kind == crate::units::Kind::Terraformation).for_each(|u| u.total = total);
+        };
+        set_terraformation(&mut game, 26.5e6);
+        let algae = build(&mut game, "AlgaeGenerator1", [1420.0, 54.0, -800.0]);
+        let sunk = build(&mut game, "AlgaeGenerator1", [1430.0, 50.0, -800.0]);
+        let lamp = build(&mut game, "OutsideLamp1", [1440.0, 54.0, -800.0]);
+        game.time += 1.0;
+        tick(&mut game);
+        assert_eq!(game.wos[&algae].position[1], 54.0, "every 2 s");
+        game.time += 1.0;
+        tick(&mut game);
+        let y = |game: &Game, wo: i32| game.wos[&wo].position[1];
+        assert!((y(&game, algae) - 56.98).abs() < 1e-3, "{}: a quarter meter under the surface at 57.23", y(&game, algae));
+        let net = game.wos[&algae].net.unwrap();
+        assert_eq!(game.net.objects[&net].position, game.wos[&algae].position, "late joiners see it there");
+        assert_eq!(y(&game, sunk), 50.0, "more than 5 m under: the ray starts inside the water");
+        assert_eq!(y(&game, lamp), 54.0, "not a floater");
+        set_terraformation(&mut game, 28.85e6);
+        game.time += 2.0;
+        tick(&mut game);
+        assert!((y(&game, algae) - 58.235).abs() < 1e-3, "{}", y(&game, algae));
     }
 
     #[test]
