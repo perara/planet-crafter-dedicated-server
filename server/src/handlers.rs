@@ -54,7 +54,7 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
                 w.planet_linked = a.i(0);
             }
         }
-        "Panel.ChangePanelServerRpc" => change_panel(game, object, behaviour, a),
+        "Panel.ChangePanelServerRpc" => change_panel(game, object, behaviour, a.i(0), a.b(1), a.b(2)),
         "LockNetworkPlayerPosition.SetPlayerLockedServerRpc" => {
             // A vehicle has one per seat: the RPC's own behaviour.
             game.net.set_behaviour_var(object, behaviour, "_active", enc::bool(a.b(0)));
@@ -125,8 +125,7 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
 
 /// Panel.ChangePanelServerRpc: the panel's look; the world object keeps every panel's type.
 /// The RPC addresses one of the object's Panel behaviours by index.
-fn change_panel(game: &mut Game, object: u64, index: u16, a: &Args) {
-    let (sub_type, refresh, disolve) = (a.i(0), a.b(1), a.b(2));
+pub fn change_panel(game: &mut Game, object: u64, index: u16, sub_type: i32, refresh: bool, disolve: bool) {
     let current = game.net.behaviour_var(object, index, "_currentSubPanelType").cloned();
     if current.is_none() || matches!(current, Some(VarValue::Plain(ref v)) if *v == enc::enumeration(sub_type)) {
         return;
@@ -142,10 +141,7 @@ fn change_panel(game: &mut Game, object: u64, index: u16, a: &Args) {
             .behaviours
             .iter()
             .filter(|b| b.class == "Panel")
-            .map(|b| match b.vars.iter().find(|v| v.name == "_currentSubPanelType").map(|v| &v.value) {
-                Some(VarValue::Plain(v)) if v.len() == 4 => i32::from_le_bytes(v[..4].try_into().unwrap()),
-                _ => 0,
-            })
+            .map(crate::panels::sub_type)
             .collect();
         if let Some(w) = game.net.objects[&object].wo.and_then(|w| game.wos.get_mut(&w)) {
             w.panels = Some(panels);

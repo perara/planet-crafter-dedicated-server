@@ -167,6 +167,9 @@ impl Game {
                 i += 1;
             }
         }
+        if constructible && !from_db {
+            crate::panels::change_contiguous_panels(self, &mut o);
+        }
         let keep_server_ownership = !own_prefab && crate::objects::container_keeps_server_ownership(self, group);
         if owner != 0 && !keep_server_ownership {
             o.owner = owner;

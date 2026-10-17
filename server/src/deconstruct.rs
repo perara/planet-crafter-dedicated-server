@@ -22,6 +22,7 @@ pub fn deconstruct(game: &mut Game, client: u64, object: u64, time: f32) {
     game.ext.deconstructing.insert(wo);
     game.net.rpc(Target::All, object, "GroupNetworkBase.DeconstructClientRpc", &[json!(time)]);
     game.net.rpc(Target::Only(client), object, "GroupNetworkBase.StartDeconstructClientRpc", &[]);
+    crate::panels::reset_contiguous_panels(game, object);
     crate::scene::schedule(game, time, crate::scene::Timer::FinalDeconstruct(wo, client));
 }
 

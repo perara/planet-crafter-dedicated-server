@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::game::Game;
-use crate::geometry::{conj, mul, rotate, sub};
+use crate::geometry::{conj, mul, q, rotate, sub, v3};
 
 #[derive(Clone, Debug)]
 struct Volume {
@@ -30,13 +30,6 @@ struct Volume {
 pub struct Water {
     /// Planet id -> its water volumes (loaded from scenes/<planet>.json).
     planets: HashMap<String, Vec<Volume>>,
-}
-
-fn v3(v: &Value) -> [f32; 3] {
-    [0, 1, 2].map(|i| v[i].as_f64().unwrap_or(0.0) as f32)
-}
-fn q(v: &Value) -> [f32; 4] {
-    [0, 1, 2, 3].map(|i| v[i].as_f64().unwrap_or(if i == 3 { 1.0 } else { 0.0 }) as f32)
 }
 
 fn load(game: &Game, planet: &str) -> Vec<Volume> {

@@ -68,6 +68,9 @@ pub struct GameData {
     /// Every game asset, keyed "Type:name".
     pub assets: serde_json::Map<String, Value>,
     pub group_prefabs: Value,
+    /// Habitat panels: per group, each Panel's transform, colliders and bounds; the bounds of
+    /// every panel look (panels.rs).
+    pub panels: Value,
     pub singletons: Value,
 }
 
@@ -154,6 +157,7 @@ impl GameData {
             layouts,
             assets,
             group_prefabs: root["groupPrefabs"].take(),
+            panels: root["panels"].take(),
             singletons: root["singletons"].take(),
         })
     }
