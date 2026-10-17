@@ -204,7 +204,8 @@ fn main() {
         std::process::exit(1)
     });
     // The save as it was before this server touched it (as every backup: none with PCDS_BACKUPS=0).
-    if let Err(e) = save::backup(&save_path, Duration::ZERO, backups_kept()) {
+    // At most one per 10 minutes: a crash loop must not push the hourly backups out.
+    if let Err(e) = save::backup(&save_path, Duration::from_secs(600), backups_kept()) {
         eprintln!("backup failed: {e}");
     }
     let session_number: u32 = env("PCDS_SESSION").map(|s| s.parse().expect("PCDS_SESSION: a number")).unwrap_or(4242);

@@ -34,7 +34,9 @@ const LAST: u16 = 0x4000;
 /// sent, datagrams read per poll, connections in all and per IP, and how long a handshake may
 /// go without data.
 const MAX_BATCH: usize = 1 << 20;
-const MAX_QUEUED: usize = 8 << 20;
+// Room for the world a late-game save sends on join (saves reach several MB); only approved
+// clients (PCDS_MAX_PLAYERS) get that much sent.
+const MAX_QUEUED: usize = 64 << 20;
 const MAX_DATAGRAMS: usize = 4096;
 const MAX_CONNECTIONS: usize = 128;
 const MAX_PER_IP: usize = 8;
@@ -535,7 +537,7 @@ mod tests {
         let token = [5; 8];
         handshake(&mut server, "127.0.0.1:9".parse().unwrap(), token);
         let batch = vec![0; 1 << 20];
-        for _ in 0..7 {
+        for _ in 0..(MAX_QUEUED >> 20) - 1 {
             server.send(&token, &batch);
         }
         assert!(server.connections.contains_key(&token));

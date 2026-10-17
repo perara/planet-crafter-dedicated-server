@@ -199,6 +199,9 @@ write_unit() {
 [Unit]
 Description=Planet Crafter dedicated server
 After=network-online.target
+# A server that keeps crashing stops after 5 starts in 10 minutes.
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
