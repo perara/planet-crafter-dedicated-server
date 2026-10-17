@@ -117,6 +117,10 @@ IP the game's reported SteamID cannot be checked, so those players are identifie
 The admin API listens on 127.0.0.1. To reach the web page from another machine, use an SSH
 tunnel (`ssh -L 7782:127.0.0.1:7782 server`) rather than exposing it.
 
+To run a second server on the same machine, give it its own folder and unit names:
+`PCDS_HOME=/srv/world2 PCDS_UNIT=pcds-world2 ./pcds setup ...` (and the same two variables for
+every later `pcds` command), with other ports in its `server.env`.
+
 ## Game updates
 
 Players and the server must run the same game version; players with another version are

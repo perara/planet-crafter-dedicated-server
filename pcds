@@ -30,7 +30,9 @@ EXT_GAME="$EXT/game"
 EXT_LOG="$EXT_GAME/BepInEx/LogOutput.log"
 CACHE="$RUN/cache"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-UNIT=pcds.service
+# PCDS_HOME and PCDS_UNIT give a second server on the same machine its own folder and units.
+UNIT_NAME="${PCDS_UNIT:-pcds}"
+UNIT="$UNIT_NAME.service"
 APP_ID=1284190
 BEPINEX_VERSION=5.4.23.5
 BEPINEX_SHA256=82f9878551030f54657792c0740d9d51a09500eeae1fba21106b0c441e6732c4
@@ -59,12 +61,24 @@ server_bin() {
     return
   fi
   [[ -x "$SRC/target/release/pcds-server" ]] || build_server >&2
+  steam_lib "$SRC/target/release"
   echo "$SRC/target/release/pcds-server"
 }
 
 build_server() {
   need cargo "install Rust (https://rustup.rs), or use a release, which ships bin/pcds-server"
   (cd "$SRC" && cargo build --release)
+  steam_lib "$SRC/target/release"
+}
+
+# The server finds the Steam API library next to itself; cargo leaves it in the steamworks
+# crate's build output.
+steam_lib() {
+  [[ -f "$1/libsteam_api.so" ]] && return
+  local lib
+  lib="$(ls -t "$1"/build/steamworks-sys-*/out/libsteam_api.so 2> /dev/null | head -1)"
+  [[ -n "$lib" ]] || die "no libsteam_api.so in $1/build (rebuild with 'pcds build')"
+  cp "$lib" "$1/"
 }
 
 # Copy then rename, so a running server keeps its mapped copy.
@@ -169,7 +183,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-Environment=PCDS_HOME=$RUN
+Environment=PCDS_HOME=$RUN PCDS_UNIT=$UNIT_NAME
 EnvironmentFile=$ENV_FILE
 ExecStart=$ROOT/pcds run
 Restart=on-failure
@@ -179,16 +193,16 @@ TimeoutStopSec=60
 [Install]
 WantedBy=default.target
 EOF
-  cat > "$UNIT_DIR/pcds-update.service" << EOF
+  cat > "$UNIT_DIR/$UNIT_NAME-update.service" << EOF
 [Unit]
 Description=Planet Crafter dedicated server: pick up game updates
 
 [Service]
 Type=oneshot
-Environment=PCDS_HOME=$RUN
+Environment=PCDS_HOME=$RUN PCDS_UNIT=$UNIT_NAME
 ExecStart=$ROOT/pcds update
 EOF
-  cat > "$UNIT_DIR/pcds-update.timer" << EOF
+  cat > "$UNIT_DIR/$UNIT_NAME-update.timer" << EOF
 [Unit]
 Description=Planet Crafter dedicated server: hourly game update check
 
@@ -205,14 +219,14 @@ EOF
 cmd_install_service() {
   [[ -f "$WORLD" ]] || die "run 'pcds setup' first"
   write_unit
-  systemctl --user enable --now "$UNIT" pcds-update.timer
+  systemctl --user enable --now "$UNIT" "$UNIT_NAME-update.timer"
   say "the server now starts at login and checks for game updates hourly"
   say "to keep it running while you are logged out: loginctl enable-linger $USER"
 }
 
 cmd_uninstall_service() {
-  systemctl --user disable --now "$UNIT" pcds-update.timer 2> /dev/null || true
-  rm -f "$UNIT_DIR/$UNIT" "$UNIT_DIR/pcds-update.service" "$UNIT_DIR/pcds-update.timer"
+  systemctl --user disable --now "$UNIT" "$UNIT_NAME-update.timer" 2> /dev/null || true
+  rm -f "$UNIT_DIR/$UNIT" "$UNIT_DIR/$UNIT_NAME-update.service" "$UNIT_DIR/$UNIT_NAME-update.timer"
   systemctl --user daemon-reload
   say "removed the systemd units (run/ is kept)"
 }
