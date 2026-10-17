@@ -500,7 +500,8 @@ impl Game {
             "InventoriesHandler.AddWorldObjectToInventoryServerRpc" => {
                 let (id, hash, inv, grabbed) = (a.i(0), a.i(1), a.i(2), a.b(3));
                 let mut created = false;
-                if !self.wos.contains_key(&id) {
+                // Scene world objects have positive ids; 0 would make a fresh one.
+                if id > 0 && !self.wos.contains_key(&id) {
                     if let Some(g) = self.data.group_by_hash(hash) {
                         self.create_world_object(g, id, false);
                         created = true;

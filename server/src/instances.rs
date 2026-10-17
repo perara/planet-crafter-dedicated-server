@@ -247,6 +247,10 @@ pub fn load_instance(game: &mut Game, owner: i32, position: [f32; 3], rotation: 
 /// LoadInstanceFromSceneServerRpc: a planet's scene wreck (ProceduralSceneInstance) asks for
 /// its generator the first time; the world seed and its position make the seed.
 fn load_instance_from_scene(game: &mut Game, id: i32, position: [f32; 3], rotation: [f32; 4], difficulty: i32) {
+    // Scene world objects have positive ids; 0 would make a fresh one.
+    if id <= 0 {
+        return;
+    }
     if game.wos.get(&id).is_some_and(|w| !w.dont_save) {
         return;
     }
@@ -614,7 +618,10 @@ pub fn tick(game: &mut Game) {
 pub fn rpc(game: &mut Game, _client: u64, object: u64, name: &str, a: &Args) -> bool {
     match name {
         "WorldInstanceHandler.UpdateChoicesServerRpc" => {
-            let choices: Vec<(i32, i32)> = (0..a.i(0).max(0)).map(|_| (game.rng.range(1, i32::MAX), game.rng.range(15 * 60, 35 * 60))).collect();
+            // The portal window asks for 3 (UiWindowPortalGenerator._numberOfInstancesToShow); a
+            // client asking for millions would make the server allocate them.
+            let count = a.i(0).clamp(0, 16);
+            let choices: Vec<(i32, i32)> = (0..count).map(|_| (game.rng.range(1, i32::MAX), game.rng.range(15 * 60, 35 * 60))).collect();
             game.set_on(HANDLER, "_currentChoices", encode_choices(&choices));
             state(game).choices = choices;
         }

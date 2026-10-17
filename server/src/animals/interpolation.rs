@@ -54,6 +54,10 @@ pub fn rpc(game: &mut Game, client: u64, name: &str, a: &Args) -> bool {
 /// StartInterpolationServerRpc: a running move only speeds up; otherwise a move starts if it
 /// leaves its end (up from 0, down from above 0).
 fn start(game: &mut Game, wo: i32, speed: f32, direction: i32) {
+    // Scene world objects have positive ids; 0 would make a fresh one.
+    if wo <= 0 {
+        return;
+    }
     if let Some(i) = game.ext.animals.interpolation.active.get_mut(&wo) {
         if speed > i.speed {
             i.speed = speed;

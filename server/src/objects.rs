@@ -375,7 +375,8 @@ impl Game {
             "WorldObjectsHandler.DestroyWorldObjectFromSceneServerRpc" => {
                 let (id, hash, disolve) = (a.i(0), a.i(1), a.f(2));
                 let mut created = false;
-                if !self.wos.contains_key(&id) {
+                // Scene world objects have positive ids; 0 would make a fresh one.
+                if id > 0 && !self.wos.contains_key(&id) {
                     if let Some(g) = self.data.group_by_hash(hash) {
                         self.create_world_object(g, id, true);
                         created = true;
@@ -394,7 +395,8 @@ impl Game {
             "WorldObjectsHandler.DisableWorldObjectFromSceneServerRpc" => {
                 let (id, hash, update_lists, generate_at) = (a.i(0), a.i(1), a.b(2), a.v3(3));
                 let mut created = false;
-                if !self.wos.contains_key(&id) {
+                // Scene world objects have positive ids; 0 would make a fresh one.
+                if id > 0 && !self.wos.contains_key(&id) {
                     if let Some(g) = self.data.group_by_hash(hash) {
                         self.create_world_object(g, id, true);
                         created = true;
@@ -459,6 +461,9 @@ impl Game {
                     }
                     return true;
                 }
+                if id <= 0 {
+                    return true;
+                }
                 if !self.wos.contains_key(&id) {
                     let Some(g) = self.data.group_by_hash(hash) else { return true };
                     self.create_world_object(g, id, true);
@@ -518,6 +523,9 @@ impl Game {
     }
 
     fn set_scene_growth(&mut self, id: i32, hash: i32, count: [i32; 2]) {
+        if id <= 0 {
+            return;
+        }
         if !self.wos.contains_key(&id) {
             let Some(g) = self.data.group_by_hash(hash) else { return };
             self.create_world_object(g, id, true);

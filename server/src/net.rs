@@ -216,28 +216,31 @@ fn list_item(ty: &str, r: &mut crate::wire::Reader) -> Option<()> {
 
 /// Applies a NetworkVariableDelta a client sent for variables its object lets the owner write.
 /// Unknown layouts are left alone (the message is still passed on as is).
-pub fn apply_delta(net: &mut Net, client: u64, body: &[u8]) {
+/// Applies a delta the owning client wrote; false (nothing to pass on) when the sender does
+/// not own the object.
+pub fn apply_delta(net: &mut Net, client: u64, body: &[u8]) -> bool {
     let mut r = crate::wire::Reader::new(body);
-    let (Some(object), Some(behaviour)) = (r.packed_u64(), r.packed_u16()) else { return };
+    let (Some(object), Some(behaviour)) = (r.packed_u64(), r.packed_u16()) else { return false };
     if r.i32().is_none() {
-        return;
+        return false;
     }
-    let Some(o) = net.objects.get_mut(&object) else { return };
+    let Some(o) = net.objects.get_mut(&object) else { return false };
     if o.owner != client {
-        return;
+        return false;
     }
-    let Some(b) = o.behaviours.iter_mut().find(|b| b.index == behaviour) else { return };
+    let Some(b) = o.behaviours.iter_mut().find(|b| b.index == behaviour) else { return false };
     for v in &mut b.vars {
-        let Some(dirty) = r.bool() else { return };
+        let Some(dirty) = r.bool() else { return true };
         if !dirty {
             continue;
         }
         if v.ty.starts_with("NetworkList") {
-            return;
+            return true;
         }
-        let Some(bytes) = read_value(&v.ty, &mut r) else { return };
+        let Some(bytes) = read_value(&v.ty, &mut r) else { return true };
         v.value = VarValue::Plain(bytes);
     }
+    true
 }
 
 impl NetObj {

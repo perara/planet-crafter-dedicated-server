@@ -435,8 +435,14 @@ impl Game {
     /// for late joiners and the save (WorldObjectAssociated.SavePositionAndRotation), and pass
     /// it on to everyone else.
     fn transform(&mut self, client: u64, body: &[u8]) {
+        // As Netcode: only the owner moves an object.
+        let mut r = Reader::new(body);
+        let Some(object) = r.packed_u64() else { return };
+        if self.net.objects.get(&object).is_none_or(|o| o.owner != client) {
+            return;
+        }
         if let Some(u) = crate::transform::update(body) {
-            if let Some(o) = self.net.objects.get_mut(&u.object).filter(|o| o.owner == client) {
+            if let Some(o) = self.net.objects.get_mut(&u.object) {
                 u.apply(&mut o.position, &mut o.rotation);
                 let (position, rotation) = (o.position, o.rotation);
                 if let Some(w) = o.wo.and_then(|wo| self.wos.get_mut(&wo)) {
@@ -450,8 +456,9 @@ impl Game {
 
     /// Variables the owning client writes (drop physics state, emotes): apply and pass on.
     fn owner_variables(&mut self, client: u64, body: &[u8]) {
-        net::apply_delta(&mut self.net, client, body);
-        self.out_to(Target::Except(client), (NETWORK_VARIABLE_DELTA, body.to_vec()));
+        if net::apply_delta(&mut self.net, client, body) {
+            self.out_to(Target::Except(client), (NETWORK_VARIABLE_DELTA, body.to_vec()));
+        }
     }
 
     fn incoming_rpc(&mut self, client: u64, body: &[u8]) {
@@ -719,5 +726,148 @@ pub mod tests {
         let mut s = json!({"mode": "Chill", "dyingConsequencesLabel": "DropAllItems"});
         convert_old_format_to_new(&mut s);
         assert_eq!(s["dyingConsequencesLabel"], "DropAllItems", "new saves are left alone");
+    }
+
+    /// Hostile input from joined clients never crashes the server: every server RPC with
+    /// hostile values (other players' ids, extremes, huge strings), garbage after real RPC
+    /// headers, and ticks in between. Prints each RPC that panicked, then fails.
+    #[test]
+    fn hostile_rpcs_do_not_crash_the_server() {
+        let Some(dir) = crate::test_data() else { return };
+        let table: Value = serde_json::from_str(&std::fs::read_to_string(format!("{dir}/rpcs.json")).unwrap()).unwrap();
+        let mut names: Vec<String> = table.as_object().unwrap().values().filter(|r| r["to"] == "server").filter_map(|r| r["name"].as_str().map(String::from)).collect();
+        names.sort();
+        struct Lcg(u64);
+        impl Lcg {
+            fn next(&mut self) -> u64 {
+                self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                self.0 >> 33
+            }
+        }
+        fn pick(r: &mut Lcg, g: &Game) -> Value {
+            let ids: Vec<i64> = match r.next() % 4 {
+                0 => g.wos.keys().map(|k| *k as i64).collect(),
+                1 => g.inventories.keys().map(|k| *k as i64).collect(),
+                2 => g.net.objects.keys().map(|k| *k as i64).collect(),
+                _ => g.data.groups.iter().map(|gr| gr.hash as i64).collect(),
+            };
+            let any = |r: &mut Lcg| ids.get((r.next() % ids.len().max(1) as u64) as usize).copied().unwrap_or(0);
+            match r.next() % 12 {
+                0 => json!(-1),
+                1 => json!(0),
+                2 => json!(i32::MAX),
+                3 => json!(i32::MIN),
+                4 => json!(u64::MAX),
+                5 => json!(1.0e30),
+                6 => json!("x".repeat((r.next() % 5000) as usize)),
+                7 => {
+                    let n = r.next() % 40;
+                    json!((0..n).map(|_| any(r)).collect::<Vec<_>>())
+                }
+                8 => json!([r.next() as f32, -1.0e30, 0.5, 2.0]),
+                9 => json!(r.next() % 2 == 0),
+                _ => json!(any(r)),
+            }
+        }
+        // PCDS_FUZZ_ROUNDS / PCDS_FUZZ_SEED for longer runs than the test suite's.
+        let rounds: u64 = std::env::var("PCDS_FUZZ_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500);
+        let mut r = Lcg(std::env::var("PCDS_FUZZ_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(0x9e37_79b9_7f4a_7c15));
+        let world = || {
+            let mut g = test_game(save()).unwrap();
+            join(&mut g, 1, "Ann");
+            join(&mut g, 2, "Bob");
+            g
+        };
+        let mut g = world();
+        let mut failures: std::collections::BTreeMap<String, String> = Default::default();
+        static WHERE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+        let quiet = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|info| {
+            *WHERE.lock().unwrap() = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        }));
+        for round in 0..rounds {
+            let name = names[(r.next() % names.len() as u64) as usize].clone();
+            let args: Vec<Value> = (0..r.next() % 9).map(|_| pick(&mut r, &g)).collect();
+            let client = 1 + r.next() % 2;
+            let objects: Vec<u64> = g.net.objects.keys().copied().collect();
+            let object = objects[(r.next() % objects.len() as u64) as usize];
+            let behaviour = (r.next() % 6) as u16;
+            let (hash, mut body) = g.net.spec.encode(&name, &args);
+            if r.next() % 8 == 0 {
+                // Truncated or trailing garbage.
+                let cut = (r.next() as usize) % (body.len() + 1);
+                body.truncate(cut);
+                body.extend((0..r.next() % 16).map(|_| r.next() as u8));
+            }
+            let mut w = Writer::new();
+            w.packed_u64(client).packed_u64(object).packed_u16(behaviour).packed_u32(hash).bytes(&body);
+            let message = w.0;
+            if std::env::var_os("PCDS_FUZZ_TRACE").is_some() {
+                eprintln!("FUZZ {round} {name} {}", Value::Array(args.clone()).to_string().chars().take(200).collect::<String>());
+            }
+            let mut outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.incoming_rpc(client, &message))).err().map(|e| (name.clone(), e));
+            if outcome.is_none() && round % 50 == 0 {
+                g.time += 0.7;
+                outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.tick())).err().map(|e| (format!("tick after {name}"), e));
+            }
+            // The main loop sends and clears the queue every tick.
+            g.net.out.clear();
+            if let Some((what, e)) = outcome {
+                let why = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+                let at = WHERE.lock().unwrap().clone();
+                failures.entry(format!("{at} {what}")).or_insert(format!("{why} (args {})", Value::Array(args.clone())));
+                // The world may be half-changed after a panic: start over.
+                g = world();
+            }
+        }
+        std::panic::set_hook(quiet);
+        for (name, why) in &failures {
+            eprintln!("PANIC {name}: {}", why.chars().take(300).collect::<String>());
+        }
+        assert!(failures.is_empty(), "{} RPCs panicked", failures.len());
+    }
+
+    /// Garbage message batches (random kinds, truncated bodies, real object ids up front) and
+    /// connection churn never crash the server.
+    #[test]
+    fn garbage_batches_do_not_crash_the_server() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        join(&mut g, 2, "Bob");
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let kinds = [CONNECTION_REQUEST, NETWORK_TRANSFORM, NETWORK_VARIABLE_DELTA, protocol::RPC, 0, 99];
+        for round in 0..20_000u64 {
+            let client = 1 + next() % 3;
+            if next() % 500 == 0 {
+                g.disconnect(client);
+                g.connect(client, None, false, Some("127.0.0.1".into()));
+            }
+            let objects: Vec<u64> = g.net.objects.keys().copied().collect();
+            let mut body = Writer::new();
+            body.packed_u64(objects[(next() % objects.len() as u64) as usize]).packed_u16((next() % 8) as u16);
+            for _ in 0..next() % 64 {
+                body.u8(next() as u8);
+            }
+            let kind = kinds[(next() % kinds.len() as u64) as usize];
+            let mut batch = wire::batch(&[(kind, body.0)]);
+            if next() % 4 == 0 {
+                let cut = (next() as usize) % (batch.len() + 1);
+                batch.truncate(cut);
+            }
+            if next() % 10 == 0 {
+                batch = (0..next() % 200).map(|_| next() as u8).collect();
+            }
+            g.receive(client, &batch);
+            if round % 200 == 0 {
+                g.time += 0.5;
+                g.tick();
+            }
+        }
     }
 }

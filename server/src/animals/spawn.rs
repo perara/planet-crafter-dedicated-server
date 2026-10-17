@@ -245,6 +245,10 @@ fn spawner_unregistered(game: &mut Game, wo: i32) {
 /// SpawnAnimalsDelayed after its first frame: the spawner instance starts (its world object and
 /// inventory), then DNA sequences seeded from the world seed and position go into it.
 fn spawn_delayed(game: &mut Game, p: Pending) {
+    // Scene world objects have positive ids; 0 would make a fresh one.
+    if p.wo <= 0 {
+        return;
+    }
     if !game.ext.animals.spawn.spawners.contains_key(&p.wo) {
         if !game.wos.contains_key(&p.wo) {
             // WorldObjectFromScene on the spawner prefab (its group is not in the game data).

@@ -420,4 +420,43 @@ mod tests {
         }
         assert!(matches!(events.as_slice(), [Event::Connected(..), Event::Data(_, b)] if b == b"abc"));
     }
+
+    /// Garbage datagrams, before and after a handshake, never crash the transport.
+    #[test]
+    fn garbage_datagrams_do_not_crash_the_transport() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = server.socket.local_addr().unwrap();
+        let c = client(0);
+        c.connect(addr).unwrap();
+        let token = [9, 8, 7, 6, 5, 4, 3, 2];
+        c.send(&[b'U', b'T', b'P', 1, REQUEST, 9, 8, 7, 6, 5, 4, 3, 2]).unwrap();
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for round in 0..20_000u32 {
+            let mut d: Vec<u8> = match next() % 4 {
+                0 => vec![b'U', b'T', b'P', 1, (next() % 8) as u8],
+                1 => {
+                    let mut d = vec![DATA];
+                    d.extend_from_slice(&token);
+                    d.push((next() % 5) as u8);
+                    d
+                }
+                2 => vec![DATA],
+                _ => Vec::new(),
+            };
+            d.extend((0..next() % 1500).map(|_| next() as u8));
+            let _ = c.send(&d);
+            if round % 64 == 0 {
+                server.poll();
+                server.flush();
+            }
+        }
+        server.poll();
+        server.flush();
+    }
 }
