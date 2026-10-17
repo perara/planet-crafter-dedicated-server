@@ -73,13 +73,11 @@ impl Game {
             }
             None => {
                 println!("client {client}: {name} ({id}) ready, new player");
-                let pod = crate::scene::starting_pod_group(self).and_then(|g| self.first_world_object_of_group(g, 0));
-                let Some(pod) = pod.and_then(|w| self.wos.get(&w)) else {
+                let Some((position, rotation)) = self.new_player_spawn() else {
                     eprintln!("no starting pod: cannot place a new player");
                     return;
                 };
-                let (position, yaw) = (pod.position, crate::geometry::euler_y(pod.rotation));
-                let planet = self.save.settings["planetId"].as_str().unwrap_or("Prime").to_string();
+                let planet = self.planet_id().to_string();
                 let inventory = self.create_inventory(START_INVENTORY_SIZE, 0, 0, &[], &[]);
                 let equipment = self.create_inventory(START_EQUIPMENT_SIZE, 0, 0, &[], &[]);
                 // _joiningPlayersInventory: a hosted game gives everyone who joins a starter kit.
@@ -92,7 +90,7 @@ impl Game {
                     inventory,
                     equipment,
                     position,
-                    rotation: crate::geometry::from_euler_y(yaw),
+                    rotation,
                     planet,
                     total_crafted: 0,
                     total_tokens: 0,
@@ -102,6 +100,21 @@ impl Game {
             }
         };
         self.setup_player(client, state);
+    }
+
+    /// Where PlayerReadyServerRpc puts a new player: the host's respawn position on the planet
+    /// the session is on (PlayerStatus.GetRespawnPosition). A dedicated server has no host, so
+    /// no place the host last breathed in: the first livable place stands for it
+    /// (GetFirstLivablePosition, the game's own fallback; the escape pod and the arrival pod are
+    /// livable). Without one, the starting pod (the game's branch without a host player).
+    fn new_player_spawn(&self) -> Option<([f32; 3], [f32; 4])> {
+        let livable = crate::instances::first_livable_position(self);
+        if livable != [0.0; 3] {
+            return Some((livable, [0.0, 0.0, 0.0, 1.0]));
+        }
+        let pod = crate::scene::starting_pod_group(self).and_then(|g| self.first_world_object_of_group(g, 0))?;
+        let pod = &self.wos[&pod];
+        Some((pod.position, crate::geometry::from_euler_y(crate::geometry::euler_y(pod.rotation))))
     }
 
     fn setup_player(&mut self, client: u64, mut state: PlayerState) {
@@ -296,8 +309,58 @@ pub fn update_saved_players(game: &mut Game) {
     }
 }
 
+/// The saved player a save moved back into the game treats as its host: SavedDataHandler.
+/// InitSavedData loads the host's planet (the starting planet without one). The server keeps its
+/// planet in pcdsCurrentPlanet, which the game does not read, so the player saved last on that
+/// planet is marked host; none when nobody is saved there. The cost: whoever hosts that save
+/// without a character of their own takes the marked player's (PlayerReadyServerRpc gives a
+/// host the host entry); hosts with their own character keep theirs.
+pub fn mark_host(players: &mut [Value], planet: &str) {
+    let host = players.iter().rposition(|p| p["planetId"].as_str() == Some(planet));
+    for (i, p) in players.iter_mut().enumerate() {
+        p["host"] = json!(Some(i) == host);
+    }
+}
+
 /// Inventory changes that matter to players: equipment changes what the player can carry.
 pub fn inventory_changed(game: &mut Game, inventory: i32, wo: i32, added: bool) {
     crate::equipment::inventory_changed(game, inventory, wo, added);
 }
 
+#[cfg(test)]
+mod tests {
+    use crate::data::stable_hash;
+    use crate::game::tests::join;
+
+    #[test]
+    fn the_last_player_saved_on_the_current_planet_is_the_host() {
+        let mut save = crate::game::tests::save();
+        save.players = vec![serde_json::json!({"id": 5, "name": "Old", "host": true, "planetId": "Selenea", "totalCraftedObjects": 0, "totalTerraTokenEarned": 0})];
+        save.stats["craftedObjects"] = serde_json::json!(42);
+        let Some(mut g) = crate::game::test_game(save) else { return };
+        for (client, name) in [(1, "Ann"), (2, "Bob")] {
+            join(&mut g, client, name);
+            g.disconnect(client);
+        }
+        let saved = g.snapshot();
+        let hosts: Vec<&str> = saved.players.iter().filter(|p| p["host"] == true).filter_map(|p| p["name"].as_str()).collect();
+        assert_eq!(hosts, vec!["Bob"], "the game would load Bob's planet, Prime");
+        // Loaded back by this server, the host it marked does not take the world's craft count.
+        let Some(g) = crate::game::test_game(saved) else { return };
+        let bob = g.saved_players.iter().find(|p| p["name"] == "Bob").unwrap();
+        assert_eq!(bob["totalCraftedObjects"], 0);
+    }
+
+    #[test]
+    fn new_players_spawn_where_the_host_would_respawn() {
+        let Some(mut g) = crate::planets::tests::game() else { return };
+        // The escape pod is the first livable place: its pivot, one meter up.
+        let ann = join(&mut g, 1, "Ann");
+        assert_eq!(g.net.objects[&ann].position, [558.2, 3.47, 494.1]);
+        // Travelled to Selenea, nothing built there yet: the arrival pod (livable too).
+        crate::planets::switch_to_planet(&mut g, stable_hash("Selenea"), 0, 0);
+        let bob = join(&mut g, 2, "Bob");
+        assert_eq!(g.net.objects[&bob].position, [-415.0, 35.65, -82.0]);
+        assert_eq!(g.clients[&2].ready.as_ref().unwrap().planet, "Selenea");
+    }
+}

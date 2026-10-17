@@ -7,13 +7,14 @@ use crate::game::{Args, Game};
 use crate::net::{enc, ListEvent, Target, VarValue};
 
 /// Clients other than `client` whose player is within `range` of `client`'s player
-/// (NetworkUtils.GetAllButSenderClientParamsInRange).
+/// (NetworkUtils.GetAllButSenderClientParamsInRange), among PlayersManager.playersControllers
+/// (players set up by PlayerReady; loading ones are not).
 pub fn others_in_range(game: &Game, client: u64, range: f32) -> Vec<u64> {
     let Some(me) = game.player_object(client).and_then(|o| game.net.objects.get(&o)).map(|o| o.position) else { return Vec::new() };
     game.clients
         .values()
-        .filter(|c| c.id != client && c.approved)
-        .filter(|c| c.player.and_then(|o| game.net.objects.get(&o)).is_some_and(|o| o.position.iter().zip(me).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt() <= range))
+        .filter(|c| c.id != client && c.ready.is_some())
+        .filter(|c| c.player.and_then(|o| game.net.objects.get(&o)).is_some_and(|o| o.position.iter().zip(me).map(|(a, b)| (a - b) * (a - b)).sum::<f32>() < range * range))
         .map(|c| c.id)
         .collect()
 }
@@ -341,5 +342,16 @@ mod tests {
         g.time += 0.8;
         super::default_colors_tick(&mut g);
         assert_eq!(g.wos[&id].color, [1.0, 0.969676554, 0.8443396, 1.0]);
+    }
+
+    #[test]
+    fn range_relays_skip_loading_players() {
+        let Some(mut g) = crate::game::test_game(crate::game::tests::save()) else { return };
+        let ann = crate::game::tests::join(&mut g, 1, "Ann");
+        crate::game::tests::join(&mut g, 2, "Bob");
+        let loading = crate::game::tests::approve(&mut g, 3);
+        let at = g.net.objects[&ann].position;
+        g.net.move_object(loading, at, None);
+        assert_eq!(super::others_in_range(&g, 1, 5.0), vec![2]);
     }
 }

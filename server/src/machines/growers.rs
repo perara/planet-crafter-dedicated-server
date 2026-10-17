@@ -445,6 +445,29 @@ fn create_new_growable(game: &mut Game, wo: i32) -> bool {
     true
 }
 
+/// OnEnable on the server, once the second inventory is known: the session arrived on the
+/// grower's planet. Items grown back while it was away were spawned on the grower's pivot
+/// (CreateNewGrowable on an inactive grower); each moves onto a growing spot.
+pub fn harvestable_enabled(game: &mut Game, wo: i32) {
+    let Some(second) = harvestable(game, wo).and_then(|h| h.second) else { return };
+    let (pivot, machine_rotation) = (game.wos[&wo].position, game.wos[&wo].rotation);
+    let mut random = MathRandom::new(game.rng.range(1, 9999) as u32);
+    for item in items(game, second) {
+        let Some(at) = game.wos.get(&item).map(|w| w.position) else { continue };
+        if (0..3).map(|i| (at[i] - pivot[i]) * (at[i] - pivot[i])).sum::<f32>() >= EPSILON {
+            continue;
+        }
+        // GetRandomPosition gets 21 tries; here the first always lands (random_position).
+        let (position, normal) = random_position(game, wo, &mut random, machine_rotation);
+        let rotation = mul(look_rotation(normal), mul(axis_angle(2, random.range(0.0, 360.0)), axis_angle(0, 90.0)));
+        let w = game.wos.get_mut(&item).unwrap();
+        (w.position, w.rotation) = (position, rotation);
+        if let Some(net) = w.net {
+            game.net.move_object(net, position, Some(rotation));
+        }
+    }
+}
+
 /// The growing spots (spawnOnThis) of the prefabs that grow on one, in the machine's frame, and
 /// the height of the soil others raycast onto; measured on the game (the dump has no transforms).
 const SPOTS: &[(&str, [f32; 3])] = &[("VegetableGrower1", [0.00476, 1.249, 0.03]), ("VegetableGrower2", [0.00476, 1.249, 0.03])];
@@ -652,6 +675,23 @@ mod tests {
         let net = game.wos[&vegetable].net.unwrap();
         let active = game.net.get(net, "GroupNetworkContainer", "_active");
         assert!(matches!(active, Some(crate::net::VarValue::Plain(b)) if *b == enc::bool(false)), "{active:?}");
+    }
+
+    #[test]
+    fn crops_grown_while_away_move_onto_the_spot_when_the_session_arrives() {
+        let Some(mut game) = game() else { return };
+        let grower = build(&mut game, "VegetableGrower1", [50.0, 5.0, 0.0]);
+        let aqualis = crate::data::stable_hash("Aqualis");
+        game.wos.get_mut(&grower).unwrap().planet = aqualis;
+        crate::machines::tick(&mut game);
+        let (seeds, second) = (game.wos[&grower].linked_inventory, game.wos[&grower].secondary_inventories[0]);
+        game.add_new_item(game.data.group("Vegetable0Seed").unwrap(), seeds, 0);
+        let vegetable = game.inventories[&second].items[0];
+        assert_eq!(game.wos[&vegetable].position, [50.0, 5.0, 0.0], "spawned on the inactive grower's pivot");
+        crate::planets::switch_to_planet(&mut game, aqualis, 0, 0);
+        assert_eq!(game.wos[&vegetable].position, [50.00476, 6.249, 0.03]);
+        let net = game.wos[&vegetable].net.unwrap();
+        assert_eq!(game.net.objects[&net].position, [50.00476, 6.249, 0.03], "late joiners see it there");
     }
 
     use crate::game::Args;
