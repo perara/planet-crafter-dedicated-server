@@ -1,0 +1,776 @@
+//! Machines: the game components on buildings that act on the world over time (generators,
+//! growers, crafters...), server side. Each placed world object gets the machine components its
+//! prefab root carries, wired the way WorldObjectsHandler.InstantiateWorldObject wires them
+//! (WorldObjectAssociated.SetWorldObject, then InventoryAssociated.SetInventory); their
+//! coroutines are timers against game.time, their inventory delegates run from
+//! Inventory.PropagateModification (inventory_changed).
+//!
+//! What the server cannot know without the game's physics is approximated, each marked
+//! `ponytail:`: raycasts (spawn points of grown vegetables, water), overlap spheres (machines in
+//! range use world object positions) and collider bounds. Ore veins under extractors are cast
+//! against the vein colliders of the scene dump (veins.rs).
+
+mod growers;
+mod production;
+mod veins;
+
+use std::collections::HashMap;
+
+use indexmap::IndexMap;
+use serde_json::{json, Value};
+
+use crate::game::{Args, Game};
+use crate::model::WorldObject;
+use crate::net::Target;
+
+#[derive(Default)]
+pub struct Machines {
+    /// World object -> has energy (machines with a RequireEnergy component).
+    pub energy: HashMap<i32, bool>,
+    /// The machine components of instantiated world objects, in instantiation order.
+    list: IndexMap<i32, Machine>,
+    /// Inventory -> the machine whose delegates listen to it (inventoryContentModified).
+    listening: HashMap<i32, i32>,
+    /// ActionGrabable.grabedEvent: grown item -> (harvesting machine, the item's network object).
+    grab: IndexMap<i32, (i32, u64)>,
+    /// Machines whose Start (or a coroutine's first `yield return null`) is due next tick.
+    starting: Vec<i32>,
+    /// MachineAutoCrafter._instancedAutocrafters.
+    autocrafters: i32,
+    /// WorldObjectsHandler.GetHasInitiatedAllObjects.
+    loaded: bool,
+    /// The current planet's ore veins.
+    veins: Option<veins::State>,
+}
+
+impl Machines {
+    pub fn with_energy(&self) -> Vec<i32> {
+        self.energy.keys().copied().collect()
+    }
+}
+
+/// One world object's machine components.
+struct Machine {
+    /// The inventory InventoryAssociated.SetInventory gave the machines (0: none).
+    linked: i32,
+    /// MachineGrowerBase._growSpeedMultiplier (optimizers' growth fuses).
+    grow_multiplier: f32,
+    /// MachineGrowerBase components on the root: (counts for growth fuses).
+    growers: Vec<bool>,
+    generator: Option<production::Generator>,
+    linked_grower: Option<growers::LinkedGrower>,
+    converter: Option<f32>,
+    vegetation: Option<growers::Vegetation>,
+    harvestable: Option<growers::Harvestable>,
+    autocrafter: Option<production::AutoCrafter>,
+    disintegrator: Option<production::Disintegrator>,
+    optimizer: Option<production::Optimizer>,
+    destruct_if_full: bool,
+    /// WorldUnitGenerationViaInventory unit indices.
+    unit_generation: Vec<&'static str>,
+    /// WorldUnitMultiplierViaInventory: (unit, influencedByHunger).
+    unit_multipliers: Vec<(&'static str, bool)>,
+}
+
+/// DataConfig.WorldUnitType names world objects keep generation for.
+const UNITS: [&str; 8] = crate::gamedata::UNIT_TYPES;
+
+fn unit_name(name: &str) -> Option<&'static str> {
+    UNITS.iter().copied().find(|u| *u == name).or(match name {
+        "Terraformation" => Some("Terraformation"),
+        "Biomass" => Some("Biomass"),
+        _ => None,
+    })
+}
+
+/// Serialized fields of a group's prefab components of one type; `root` keeps those on the
+/// prefab's root object only (GetComponent rather than GetComponentInChildren).
+fn components<'a>(game: &'a Game, group: usize, ty: &str, root: bool) -> Vec<&'a Value> {
+    game.data.group_prefabs[&game.data.groups[group].id]["components"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["type"] == ty && (!root || c["path"] == ""))
+        .map(|c| &c["fields"])
+        .collect()
+}
+
+/// The first such component on the prefab root.
+fn root(game: &Game, group: usize, ty: &str) -> Option<Value> {
+    components(game, group, ty, true).first().map(|v| (*v).clone())
+}
+
+/// GetComponent<MachineRocketBackAndForth>() (its trade and interplanetary subclasses).
+fn is_rocket_platform(game: &Game, group: usize) -> bool {
+    root(game, group, "MachineRocketBackAndForthTrade").is_some() || root(game, group, "MachineRocketBackAndForthInterplanetaryExchange").is_some()
+}
+
+fn f32_of(v: &Value, key: &str) -> f32 {
+    v[key].as_f64().unwrap_or(0.0) as f32
+}
+
+fn has_energy(game: &Game, wo: i32) -> bool {
+    game.ext.machines.energy.get(&wo).copied().unwrap_or(false)
+}
+
+/// gameObject.activeInHierarchy: world objects of other planets are inactive.
+fn is_active(game: &Game, wo: i32) -> bool {
+    game.wos.get(&wo).is_some_and(|w| w.planet_hash() == game.planet_hash())
+}
+
+fn net_has(game: &Game, wo: i32, class: &str) -> bool {
+    game.wos.get(&wo).and_then(|w| w.net).and_then(|n| game.net.objects.get(&n)).is_some_and(|o| o.behaviour(class).is_some())
+}
+
+fn items(game: &Game, inventory: i32) -> Vec<i32> {
+    game.inventories.get(&inventory).map(|i| i.items.clone()).unwrap_or_default()
+}
+
+fn is_full(game: &Game, inventory: i32) -> bool {
+    game.inventories.get(&inventory).is_none_or(|i| i.is_full())
+}
+
+fn group_ref(game: &Game, group: usize, field: &str) -> Option<usize> {
+    game.data.group_of_ref(game.data.groups[group].fields[field].as_str()?)
+}
+
+/// GroupsHandler.GetGroupsViaGameObject.
+fn group_of_game_object(game: &Game, go: &str) -> Option<usize> {
+    game.data.groups.iter().position(|g| g.fields["associatedGameObject"].as_str() == Some(go))
+}
+
+fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f32>().sqrt()
+}
+
+// ---- the server calling its own handlers (sender 0: the host, whose replies stay local) ----
+
+/// InventoriesHandler.AddItemToInventory(group, inventory) from the server.
+fn add_new(game: &mut Game, group: usize, inventory: i32) -> bool {
+    game.add_new_item(group, inventory, 0).0
+}
+
+/// InventoriesHandler.RemoveItemFromInventory from the server (RemoveItemFromInventoryServerRpc).
+fn remove_item(game: &mut Game, wo: i32, inventory: i32, destroy: bool) -> bool {
+    let ok = game.wos.contains_key(&wo) && game.inventory_remove(inventory, wo);
+    if ok {
+        if destroy {
+            game.destroy_world_object(wo, false);
+        }
+        game.propagate(inventory, wo, false);
+        game.dirty_inventory(inventory, 0, false);
+    }
+    ok
+}
+
+/// InventoriesHandler.RemoveAndDestroyAllItemsFromInventory from the server.
+fn remove_and_destroy_all(game: &mut Game, inventory: i32) {
+    game.inventories_rpc(0, "InventoriesHandler.RemoveAndDestroyAllItemsFromInventoryServerRpc", &Args(vec![json!(inventory)]));
+}
+
+/// LinkedGroupsProxy.SetLinkedGroups from the server: the network list and the world object.
+fn set_linked_groups(game: &mut Game, wo: i32, groups: &[usize]) {
+    let hashes: Vec<i32> = groups.iter().map(|g| game.data.groups[*g].hash).collect();
+    match game.wos.get(&wo).and_then(|w| w.net) {
+        Some(net) if net_has(game, wo, "LinkedGroupsProxy") => crate::handlers::set_linked_groups(game, net, &hashes),
+        _ => {
+            if let Some(w) = game.wos.get_mut(&wo) {
+                w.linked_groups = Some(groups.to_vec());
+            }
+        }
+    }
+}
+
+/// WorldUnit.ForceResetValues of one unit of a planet (0: the current one).
+fn force_reset(game: &mut Game, unit: &str, planet: i32) {
+    let planet = if planet == 0 { game.planet_hash() } else { planet };
+    let Some(kind) = crate::units::Kind::from_name(unit) else { return };
+    if let Some(p) = game.units.planet_mut(planet) {
+        p.units.iter_mut().filter(|u| u.kind == kind).for_each(|u| u.force_reset = true);
+    }
+}
+
+// ---- hooks ------------------------------------------------------------------------------
+
+pub fn init(game: &mut Game) {
+    game.ext.machines.loaded = true;
+    // MachineOptimizer.WaitBeforeInit: optimizers loaded with the world apply their fuses now.
+    let optimizers: Vec<i32> = game.ext.machines.list.iter().filter(|(_, m)| m.optimizer.is_some()).map(|(k, _)| *k).collect();
+    for wo in optimizers {
+        production::change_multiplier(game, wo);
+    }
+}
+
+pub fn rpc(game: &mut Game, client: u64, object: u64, _behaviour: u16, name: &str, a: &Args) -> bool {
+    let wo = game.net.objects.get(&object).and_then(|o| o.wo);
+    // The back-and-forth rocket platforms' growth is the rockets port's.
+    if name.starts_with("GrowthProxy.") && wo.and_then(|w| game.wos.get(&w)).is_some_and(|w| is_rocket_platform(game, w.group)) {
+        return false;
+    }
+    match name {
+        "GrowthProxy.GetCurrentGrowthServerRpc" => {
+            let value = wo.map(|w| growers::growth(game, w)).unwrap_or(0.0);
+            game.net.rpc(Target::Only(client), object, "GrowthProxy.SetCurrentGrowthClientRpc", &[json!(value)]);
+        }
+        "GrowthProxy.ResetCurrentGrowthServerRpc" => {
+            if let Some(w) = wo {
+                growers::reset_current_growth(game, w, a.f(0));
+            }
+        }
+        "ConstructibleProxy.MachineOutsideGrowerUpdateStartServerRpc" => {
+            if let Some((state, growth)) = wo.and_then(|w| growers::outside_grower_state(game, w)) {
+                game.net.rpc(Target::Only(client), object, "ConstructibleProxy.MachineOutsideGrowerUpdateStartClientRpc", &[json!(state), json!(growth)]);
+            }
+        }
+        "ConstructibleProxy.StartCraftAnimationServerRpc" => {
+            game.net.rpc(Target::Except(client), object, "ConstructibleProxy.StartCraftAnimationClientRpc", &[json!(a.i(0))]);
+        }
+        "ConstructibleProxy.RecycleContentServerRpc" => {
+            if let Some(w) = wo {
+                production::recycle_content(game, w, a.v3(0), a.v3(1));
+            }
+        }
+        "GeneticTraitHandler.CreateNewTraitWorldObjectServerRpc" => {
+            let Some(group) = game.data.group(crate::genetics::TRAIT_GROUP) else { return true };
+            let id = game.create_world_object(group, 0, true);
+            if let (Some(w), Some(data)) = (game.wos.get_mut(&id), a.0.first()) {
+                crate::genetics::set_trait_serialized(w, data);
+            }
+            if !game.add_existing_item(id, a.i(1), true, 0) {
+                game.destroy_world_object(id, false);
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// A world object got its network object (InstantiateWorldObject / ConstructibleProxy spawn):
+/// its machine components start as the game wires them.
+pub fn on_instantiated(game: &mut Game, wo: i32) {
+    let Some(w) = game.wos.get(&wo) else { return };
+    let (group, linked, position) = (w.group, w.linked_inventory, w.position);
+    let mut m = Machine {
+        linked: 0,
+        grow_multiplier: 1.0,
+        growers: Vec::new(),
+        generator: None,
+        linked_grower: None,
+        converter: None,
+        vegetation: None,
+        harvestable: None,
+        autocrafter: None,
+        disintegrator: None,
+        optimizer: None,
+        destruct_if_full: false,
+        unit_generation: Vec::new(),
+        unit_multipliers: Vec::new(),
+    };
+    // MachineGrowerBase and its subclasses on the root, in component order (growth fuses).
+    for c in game.data.group_prefabs[&game.data.groups[group].id]["components"].as_array().into_iter().flatten() {
+        if c["path"] != "" {
+            continue;
+        }
+        match c["type"].as_str().unwrap_or("") {
+            "MachineGrowerBase" | "MachineGrowerVegetationStatic" | "MachineGrowerVegetationHarvestable" => m.growers.push(true),
+            "MachineGrowerIfLinkedGroup" | "MachineFlockSpawner" => m.growers.push(false),
+            _ => {}
+        }
+    }
+    let now = game.time;
+    // Awake.
+    if let Some(f) = root(game, group, "MachineAutoCrafter") {
+        game.ext.machines.autocrafters += 1;
+        m.autocrafter = Some(production::AutoCrafter::new(&f, now, game.ext.machines.autocrafters));
+    }
+    if let Some(f) = root(game, group, "MachineGrowerIfLinkedGroup") {
+        m.linked_grower = Some(growers::LinkedGrower::new(&f, now));
+    }
+    if root(game, group, "MachineConvertRecipe").is_some() {
+        m.converter = Some(now);
+    }
+    let harvestable = root(game, group, "MachineGrowerVegetationHarvestable");
+    // RequireEnergy (WorldObjectAssociated.SetWorldObject -> AddToRequester).
+    if root(game, group, "RequireEnergy").is_some() {
+        let planet = game.wos[&wo].planet_hash();
+        let enough = crate::energy::has_enough(game, planet);
+        game.ext.machines.energy.insert(wo, enough);
+    }
+    // MachineGrowerVegetationStatic.SetWorldObjectForGrower.
+    if let Some(f) = root(game, group, "MachineGrowerVegetationStatic") {
+        m.vegetation = Some(growers::Vegetation::new(&f, wo, now));
+    }
+    m.destruct_if_full = root(game, group, "MachineDestructInventoryIfFull").is_some();
+    if let Some(f) = harvestable {
+        m.harvestable = Some(growers::Harvestable::new(&f));
+    }
+    // InventoryAssociated.SetInventory.
+    if linked != 0 && game.inventories.contains_key(&linked) {
+        m.linked = linked;
+        if let Some(f) = root(game, group, "InventoryAuthorizedGroups") {
+            set_authorized_groups(game, linked, &f);
+        }
+        if let Some(f) = root(game, group, "MachineGenerator") {
+            // TryToCastRay casts only while the machine is active: one on another planet keeps
+            // its saved linked groups until a travel brings it in (production::mining_rays).
+            let cast = is_active(game, wo);
+            if cast {
+                veins::cast(game, wo, &f);
+            }
+            m.generator = Some(production::Generator::new(game, &f, wo, now, cast));
+        }
+        if let Some(f) = root(game, group, "MachineDisintegrator") {
+            m.disintegrator = Some(production::Disintegrator::new(&f, now));
+        }
+        if let Some(f) = root(game, group, "MachineOptimizer") {
+            m.optimizer = Some(production::Optimizer::new(&f));
+        }
+        for f in components(game, group, "WorldUnitGenerationViaInventory", true) {
+            m.unit_generation.extend(f["worldUnitType"].as_str().and_then(unit_name));
+        }
+        // The space multipliers' WorldUnitMultiplierViaInventory is the rockets port's.
+        let space = game.data.groups[group].id.starts_with("SpaceMultiplier");
+        for f in components(game, group, "WorldUnitMultiplierViaInventory", true).into_iter().filter(|_| !space) {
+            if let Some(u) = f["worldUnitType"].as_str().and_then(unit_name) {
+                m.unit_multipliers.push((u, f["influencedByHunger"].as_bool().unwrap_or(false)));
+            }
+        }
+        game.ext.machines.listening.insert(linked, wo);
+    }
+    let (has_vegetation, has_optimizer, has_harvestable) = (m.vegetation.is_some(), m.optimizer.is_some(), m.harvestable.is_some());
+    let (unit_generation, unit_multipliers) = (m.unit_generation.clone(), m.unit_multipliers.clone());
+    let destruct = m.destruct_if_full && m.linked != 0;
+    let wants_start = has_harvestable;
+    game.ext.machines.list.insert(wo, m);
+    if linked != 0 && game.ext.machines.listening.get(&linked) == Some(&wo) {
+        if has_vegetation {
+            growers::vegetation_inventory_set(game, wo);
+        }
+        if destruct {
+            production::try_to_clean(game, wo);
+        }
+        if has_optimizer && game.ext.machines.loaded {
+            production::change_multiplier(game, wo);
+        }
+        for unit in unit_generation {
+            unit_generation_changed(game, wo, unit);
+        }
+        for (unit, hunger) in unit_multipliers {
+            let planet = game.wos.get(&wo).map(|w| w.planet_hash()).unwrap_or(0);
+            for item in items(game, linked) {
+                update_generation_multiplier(game, wo, unit, hunger, item, true, 1.0);
+            }
+            force_reset(game, unit, planet);
+        }
+    }
+    if wants_start {
+        game.ext.machines.starting.push(wo);
+    }
+    // ConstructibleProxy.OnNetworkSpawn: WorldObjectsHandler.onConstructibleInstantiated.
+    if game.ext.machines.loaded && net_has(game, wo, "ConstructibleProxy") && game.data.groups[group].constructible {
+        production::constructible_instantiated(game, wo, position);
+    }
+}
+
+pub fn on_destroyed(game: &mut Game, wo: &WorldObject) {
+    let machines = &mut game.ext.machines;
+    machines.energy.remove(&wo.id);
+    if machines.list.shift_remove(&wo.id).is_some() {
+        machines.listening.retain(|_, m| *m != wo.id);
+    }
+    // ConstructibleProxy.OnDestroy: WorldObjectsHandler.onConstructibleDestroyed.
+    production::constructible_destroyed(game, wo.id);
+}
+
+/// RequireEnergy.ChangeComponentsStatuts: every machine kind of the object (growers, flock
+/// spawners, generators, autocrafters, disintegrators) runs only while this is true.
+pub fn set_has_energy(game: &mut Game, wo: i32, enough: bool) {
+    if let Some(e) = game.ext.machines.energy.get_mut(&wo) {
+        *e = enough;
+    }
+}
+
+pub fn inventory_changed(game: &mut Game, inventory: i32, wo: i32, added: bool) {
+    // InventoryDestroyWhenEmpty (death canisters).
+    if let Some(owner) = game.ext.destroy_when_empty.get(&inventory).copied() {
+        if game.inventories.get(&inventory).is_some_and(|i| i.items.is_empty()) {
+            game.ext.destroy_when_empty.remove(&inventory);
+            game.destroy_world_object(owner, true);
+        }
+    }
+    let Some(machine) = game.ext.machines.listening.get(&inventory).copied() else { return };
+    let Some(m) = game.ext.machines.list.get(&machine) else { return };
+    if m.linked == inventory {
+        // The delegates in the order InventoryAssociated.SetInventory registered them.
+        let (vegetation, harvestable, destruct, optimizer) = (m.vegetation.is_some(), m.harvestable.is_some(), m.destruct_if_full, m.optimizer.is_some());
+        let (unit_generation, unit_multipliers) = (m.unit_generation.clone(), m.unit_multipliers.clone());
+        if vegetation {
+            growers::vegetation_inventory_modified(game, machine, added);
+        }
+        if harvestable {
+            growers::seed_inventory_modified(game, machine, true, added);
+        }
+        if destruct {
+            production::try_to_clean(game, machine);
+        }
+        if optimizer {
+            production::change_multiplier(game, machine);
+            production::optimizer_update(game, machine);
+        }
+        for unit in unit_generation {
+            unit_generation_changed(game, machine, unit);
+        }
+        for (unit, hunger) in unit_multipliers {
+            update_generation_multiplier(game, machine, unit, hunger, wo, added, 1.0);
+            let planet = game.wos.get(&machine).map(|w| w.planet_hash()).unwrap_or(0);
+            force_reset(game, unit, planet);
+        }
+    }
+    if game.ext.machines.list.get(&machine).and_then(|m| m.harvestable.as_ref()).and_then(|h| h.second) == Some(inventory) {
+        growers::second_inventory_modified(game, machine, wo, added);
+    }
+}
+
+/// ActionGrabable.grabedEvent of a picked-up object.
+pub fn grabbed(game: &mut Game, wo: i32) {
+    if let Some((machine, _)) = game.ext.machines.grab.shift_remove(&wo) {
+        growers::vegetable_grabbed(game, machine, wo);
+    }
+}
+
+pub fn scene_object_removed(_game: &mut Game, _wo: i32) {}
+
+pub fn tick(game: &mut Game) {
+    veins::ensure(game);
+    // Start / `yield return null`: the frame after instantiation.
+    for wo in std::mem::take(&mut game.ext.machines.starting) {
+        if !game.ext.machines.list.contains_key(&wo) {
+            continue;
+        }
+        if game.ext.machines.list[&wo].harvestable.is_some() {
+            growers::harvestable_init(game, wo);
+        }
+    }
+    // ActionGrabable.OnDestroy fires grabedEvent when the item's game object goes.
+    let gone: Vec<i32> = game.ext.machines.grab.iter().filter(|(_, (_, net))| !game.net.objects.contains_key(net)).map(|(k, _)| *k).collect();
+    for item in gone {
+        grabbed(game, item);
+    }
+    let now = game.time;
+    let ids: Vec<i32> = game.ext.machines.list.keys().copied().collect();
+    for wo in ids {
+        production::tick(game, wo, now);
+        growers::tick(game, wo, now);
+    }
+}
+
+// ---- inventory listeners ----------------------------------------------------------------
+
+/// InventoryAssociated.SetInventory: InventoryAuthorizedGroups on the inventory.
+fn set_authorized_groups(game: &mut Game, inventory: i32, f: &Value) {
+    let groups = |categories: &str, sub_categories: &str| -> Vec<usize> {
+        let list = |k: &str| f[k].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
+        let mut out: Vec<usize> = Vec::new();
+        let items = || game.data.groups.iter().enumerate().filter(|(_, g)| !g.constructible);
+        for c in list(categories) {
+            out.extend(items().filter(|(i, g)| g.str("itemCategory") == c && !out.contains(i)).map(|(i, _)| i).collect::<Vec<_>>());
+        }
+        for c in list(sub_categories) {
+            out.extend(items().filter(|(i, g)| g.str("itemSubCategory") == c && !out.contains(i)).map(|(i, _)| i).collect::<Vec<_>>());
+        }
+        out
+    };
+    let authorized = groups("authorizedItemCategories", "authorizedItemSubCategories");
+    let unauthorized = groups("unauthorizedItemCategories", "unauthorizedItemSubCategories");
+    let equipment = authorized.first().is_some_and(|g| game.data.groups[*g].str("itemCategory") == "Equipment");
+    if let Some(inv) = game.inventories.get_mut(&inventory) {
+        inv.authorized = authorized;
+        inv.unauthorized = unauthorized;
+        inv.is_equipment |= equipment;
+    }
+}
+
+/// WorldUnitGenerationViaInventory.OnInventoryModified.
+fn unit_generation_changed(game: &mut Game, wo: i32, unit: &str) {
+    let Some(index) = crate::model::unit_index(unit) else { return };
+    let linked = game.ext.machines.list.get(&wo).map(|m| m.linked).unwrap_or(0);
+    let empty = game.inventories.get(&linked).is_none_or(|i| i.items.is_empty());
+    let Some(w) = game.wos.get_mut(&wo) else { return };
+    w.unit_generation[index] = if empty { 0.0 } else { game.data.groups[w.group].units[index] };
+    force_reset(game, unit, 0);
+}
+
+/// WorldUnitMultiplierViaInventory.UpdateGenerationMultiplier.
+fn update_generation_multiplier(game: &mut Game, wo: i32, unit: &str, hunger: bool, item: i32, added: bool, multiplier: f32) {
+    // The game's world objects keep no multiplier for other units (it throws there).
+    let Some(index) = crate::model::unit_index(unit) else { return };
+    let Some(i) = game.wos.get(&item) else { return };
+    let mut num = game.data.groups[i.group].units[index] / 100.0 * if added { 1.0 } else { -1.0 } * multiplier;
+    if hunger {
+        let i = game.wos.get_mut(&item).unwrap();
+        if added {
+            if i.hunger < 0.0 {
+                num *= 0.5;
+            }
+            i.unit_multiplier[index] = num;
+        } else {
+            num = -i.unit_multiplier[index];
+            i.unit_multiplier[index] = 0.0;
+        }
+    }
+    if let Some(w) = game.wos.get_mut(&wo) {
+        w.unit_multiplier[index] += num;
+    }
+}
+
+/// WorldUnitMultiplierViaInventory.RefreshGenerationMultiplier (animal shelters' hunger).
+#[allow(dead_code)]
+pub fn refresh_generation_multiplier(game: &mut Game, machine: i32, item: i32, multiplier: f32) {
+    let units = game.ext.machines.list.get(&machine).map(|m| m.unit_multipliers.clone()).unwrap_or_default();
+    let planet = game.wos.get(&machine).map(|w| w.planet_hash()).unwrap_or(0);
+    for (unit, hunger) in units {
+        update_generation_multiplier(game, machine, unit, hunger, item, false, multiplier);
+        update_generation_multiplier(game, machine, unit, hunger, item, true, multiplier);
+        force_reset(game, unit, planet);
+    }
+}
+
+// ---- ActionDeconstructible.CheckDeconstructOnServer ---------------------------------------
+
+/// DeconstructStatus.
+const OK: i32 = 0;
+const SOMETHING_INSIDE: i32 = 1;
+const INVENTORY_NOT_EMPTY: i32 = 2;
+
+/// ActionDeconstructible.CheckDeconstructOnServer: 0 Ok, 1 SomethingInside, 2 InventoryNotEmpty.
+pub fn deconstruct_status(game: &Game, wo: i32) -> i32 {
+    let Some(w) = game.wos.get(&wo) else { return OK };
+    // GroupNetworkBase.DeconstructServerRpc: GetComponentInChildren<ActionDeconstructible>().
+    let Some(action) = components(game, w.group, "ActionDeconstructible", false).first().map(|v| (*v).clone()) else { return OK };
+    if !something_inside_check(game, w, &action) {
+        return SOMETHING_INSIDE;
+    }
+    let allow_full = action["canDeconstructIfContainerNotEmpty"].as_bool().unwrap_or(false);
+    // InstantiateWorldObject adds an InventoryAssociated to anything with a linked inventory;
+    // one that never got its inventory looks up id -1, which does not exist.
+    let associated = !components(game, w.group, "InventoryAssociated", true).is_empty() || w.linked_inventory != 0;
+    if !allow_full && associated {
+        if game.inventories.get(&w.linked_inventory).is_none_or(|i| !i.items.is_empty()) {
+            return INVENTORY_NOT_EMPTY;
+        }
+        if w.secondary_inventories.iter().any(|i| game.inventories.get(i).is_some_and(|i| !i.items.is_empty())) {
+            return INVENTORY_NOT_EMPTY;
+        }
+    }
+    OK
+}
+
+/// CheckSomethingInsideIfNeeded: no other building (but base building parts) inside the
+/// detection collider, and no underground panels other than plain walls and floors.
+fn something_inside_check(game: &Game, w: &WorldObject, action: &Value) -> bool {
+    let mut result = true;
+    if action["checkInsideBeforeDeconstruction"].as_bool() == Some(true) {
+        if let Some(bounds) = inside_bounds(game, w) {
+            for id in &game.constructed {
+                let Some(other) = game.wos.get(id) else { continue };
+                let g = &game.data.groups[other.group];
+                if other.id != w.id && bounds.contains(other.position) && g.constructible && g.str("groupCategory") != "BaseBuilding" {
+                    result = false;
+                }
+            }
+        }
+    }
+    if action["checkPanelsBeforeDeconstruction"].as_bool() == Some(true) {
+        if w.panels.as_ref().is_some_and(|p| p.iter().any(|id| ![1, 7, 5].contains(id))) {
+            result = false;
+        }
+    }
+    result
+}
+
+/// An axis-aligned box in world space (UnityEngine.Bounds).
+#[derive(Debug, PartialEq)]
+struct Bounds {
+    min: [f32; 3],
+    max: [f32; 3],
+}
+
+impl Bounds {
+    fn contains(&self, p: [f32; 3]) -> bool {
+        (0..3).all(|i| p[i] >= self.min[i] && p[i] <= self.max[i])
+    }
+
+    /// The world bounds of a local box (center, half extents) on a transform.
+    fn of_box(position: [f32; 3], rotation: [f32; 4], center: [f32; 3], half: [f32; 3]) -> Bounds {
+        let c = growers::rotate(rotation, center);
+        let mut extent = [0.0f32; 3];
+        for axis in 0..3 {
+            let mut unit = [0.0; 3];
+            unit[axis] = half[axis];
+            let r = growers::rotate(rotation, unit);
+            (0..3).for_each(|i| extent[i] += r[i].abs());
+        }
+        Bounds { min: [0, 1, 2].map(|i| position[i] + c[i] - extent[i]), max: [0, 1, 2].map(|i| position[i] + c[i] + extent[i]) }
+    }
+}
+
+/// The deconstruction detection volume of the buildings that check what is inside them.
+// ponytail: the game uses collider (or renderer) bounds, which the data dump does not carry.
+// These boxes (local min, max) were measured on the game by placing a container at growing
+// offsets from an unrotated building and asking it to deconstruct (to ~0.2 m; axes not
+// measured are taken from the measured side). The biolab, Biodome2 and ButterflyDome1 keep their
+// volume away from the pivot and skip the check. Upgrade: dump each ActionDeconstructible's
+// bounds from the game.
+fn inside_bounds(game: &Game, w: &WorldObject) -> Option<Bounds> {
+    const POD: ([f32; 3], [f32; 3]) = ([-4.03, -0.09, -3.84], [4.03, 6.02, 4.22]);
+    const BOXES: &[(&str, ([f32; 3], [f32; 3]))] = &[
+        ("pod", POD),
+        ("podAngle", POD),
+        ("PodUnderground", POD),
+        ("InteriorStairs1", POD),
+        ("Pod4x", ([-11.56, -0.09, -0.31], [3.56, 5.23, 14.44])),
+        ("Pod9xA", ([-11.95, -0.09, -11.95], [11.95, 5.23, 11.95])),
+        ("Pod9xB", ([-8.67, -0.09, -8.67], [8.98, 5.23, 8.67])),
+        ("Pod9xC", ([-12.58, -0.09, -10.55], [10.55, 5.23, 10.55])),
+        ("biodome", ([-8.67, -0.09, -8.83], [8.98, 6.33, 8.98])),
+        ("Aquarium2", ([-7.73, -0.09, -7.73], [7.73, 6.0, 7.73])),
+        ("VegetableGrower1", ([-0.66, -0.09, -0.66], [0.66, 1.5, 0.66])),
+        ("VegetableGrower2", ([-0.66, -0.09, -0.66], [0.66, 1.5, 0.66])),
+    ];
+    let id = game.data.groups[w.group].id.as_str();
+    let (_, (min, max)) = BOXES.iter().find(|(g, _)| *g == id)?;
+    let center = [0, 1, 2].map(|i| (min[i] + max[i]) / 2.0);
+    let half = [0, 1, 2].map(|i| (max[i] - min[i]) / 2.0);
+    Some(Bounds::of_box(w.position, w.rotation, center, half))
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    /// A server on an empty Prime save, with every placed object's machines wired.
+    pub fn game() -> Option<Game> {
+        let mut save = crate::save::SaveFile::empty();
+        save.settings = json!({"planetId": "Prime"});
+        save.world = json!({});
+        save.stats = json!({});
+        save.planets = vec![json!({"planetId": "Prime"})];
+        crate::game::test_game(save)
+    }
+
+    /// Builds a group at a position the way CreateAndInstantiateWorldObjectServerRpc does.
+    pub fn build(game: &mut Game, group: &str, position: [f32; 3]) -> i32 {
+        let g = game.data.group(group).unwrap();
+        let id = game.new_world_object_id();
+        game.create_world_object(g, id, true);
+        let planet = game.planet_hash();
+        let w = game.wos.get_mut(&id).unwrap();
+        w.position = position;
+        w.rotation = [0.0, 0.0, 0.0, 1.0];
+        w.planet = planet;
+        game.instantiate(id, false, 0);
+        id
+    }
+
+    #[test]
+    fn rotated_boxes_grow_their_world_bounds() {
+        let b = Bounds::of_box([10.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [2.0, 1.0, 1.0]);
+        assert_eq!(b, Bounds { min: [8.0, 0.0, -1.0], max: [12.0, 2.0, 1.0] });
+        let quarter = crate::geometry::from_euler_y(90.0);
+        let r = Bounds::of_box([0.0; 3], quarter, [0.0; 3], [2.0, 1.0, 1.0]);
+        assert!((r.max[0] - 1.0).abs() < 1e-5 && (r.max[2] - 2.0).abs() < 1e-5);
+        let diagonal = Bounds::of_box([0.0; 3], crate::geometry::from_euler_y(45.0), [0.0; 3], [1.0, 1.0, 1.0]);
+        assert!((diagonal.max[0] - 2f32.sqrt()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn deconstruction_checks_what_is_inside() {
+        let Some(mut game) = game() else { return };
+        let pod = build(&mut game, "pod", [100.0, 10.0, 100.0]);
+        assert_eq!(deconstruct_status(&game, pod), OK);
+        let inside = build(&mut game, "Container1", [100.5, 10.5, 100.0]);
+        assert_eq!(deconstruct_status(&game, pod), SOMETHING_INSIDE);
+        game.destroy_world_object(inside, true);
+        // The game's edges: inside at 3.94 m, outside at 4.13 m along x.
+        let edge = build(&mut game, "Container1", [103.94, 11.0, 100.0]);
+        assert_eq!(deconstruct_status(&game, pod), SOMETHING_INSIDE);
+        game.destroy_world_object(edge, true);
+        build(&mut game, "Container1", [104.13, 11.0, 100.0]);
+        assert_eq!(deconstruct_status(&game, pod), OK);
+        // A container with something in it.
+        let chest = build(&mut game, "Container1", [200.0, 10.0, 100.0]);
+        assert_eq!(deconstruct_status(&game, chest), OK);
+        let inv = game.wos[&chest].linked_inventory;
+        game.add_new_item(game.data.group("Iron").unwrap(), inv, 0);
+        assert_eq!(deconstruct_status(&game, chest), INVENTORY_NOT_EMPTY);
+    }
+
+    #[test]
+    fn inventories_get_their_authorized_groups() {
+        let Some(mut game) = game() else { return };
+        let iron = game.data.group("Iron").unwrap();
+        let tube = build(&mut game, "Vegetube1", [10.0, 5.0, 0.0]);
+        let inv = game.wos[&tube].linked_inventory;
+        assert!(!game.add_new_item(iron, inv, 0).0, "vegetubes only take plant seeds");
+        assert!(game.add_new_item(game.data.group("Seed0").unwrap(), inv, 0).0);
+    }
+
+    /// The ClientRpcs queued so far, by name.
+    pub fn sent(game: &Game) -> Vec<(String, Vec<Value>)> {
+        game.net
+            .out
+            .iter()
+            .filter(|(_, kind, _)| *kind == crate::protocol::CLIENT_RPC)
+            .filter_map(|(_, _, body)| {
+                let mut r = crate::wire::Reader::new(body);
+                let (_, _, method) = (r.packed_u64()?, r.packed_u16()?, r.packed_u32()?);
+                Some((game.net.spec.get(method)?.name.clone(), game.net.spec.decode(method, r.rest())?))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn growth_proxies_answer_and_reset() {
+        let Some(mut game) = game() else { return };
+        let tube = build(&mut game, "Vegetube1", [10.0, 5.0, 0.0]);
+        let net = game.wos[&tube].net.unwrap();
+        game.wos.get_mut(&tube).unwrap().growth = 55.0;
+        game.net.out.clear();
+        rpc(&mut game, 1, net, 2, "GrowthProxy.GetCurrentGrowthServerRpc", &Args(vec![]));
+        assert_eq!(sent(&game), vec![("GrowthProxy.SetCurrentGrowthClientRpc".to_string(), vec![json!(55.0)])]);
+        rpc(&mut game, 1, net, 2, "GrowthProxy.ResetCurrentGrowthServerRpc", &Args(vec![json!(12.5)]));
+        assert_eq!(game.wos[&tube].growth, 12.5);
+        rpc(&mut game, 1, net, 0, "ConstructibleProxy.MachineOutsideGrowerUpdateStartServerRpc", &Args(vec![]));
+        let state = growers::outside_grower_state(&game, tube).unwrap().0;
+        assert_eq!(sent(&game)[2], ("ConstructibleProxy.MachineOutsideGrowerUpdateStartClientRpc".to_string(), vec![json!(state), json!(12.5)]));
+    }
+
+    #[test]
+    fn genetic_traits_are_made_into_an_inventory() {
+        let Some(mut game) = game() else { return };
+        let inv = game.create_inventory(2, 0, 0, &[], &[]);
+        let data = json!([2, [0.5, 0.25, 1.0, 1.0], 7]);
+        rpc(&mut game, 1, 0, 0, "GeneticTraitHandler.CreateNewTraitWorldObjectServerRpc", &Args(vec![data.clone(), json!(inv)]));
+        let id = game.inventories[&inv].items[0];
+        let w = &game.wos[&id];
+        assert_eq!((w.trait_type, w.trait_value, w.color), (2, 7, [0.5, 0.25, 1.0, 1.0]));
+        let count = game.wos.len();
+        rpc(&mut game, 1, 0, 0, "GeneticTraitHandler.CreateNewTraitWorldObjectServerRpc", &Args(vec![data, json!(-50)]));
+        assert_eq!(game.wos.len(), count, "no inventory: the new trait is destroyed again");
+    }
+
+    #[test]
+    fn unit_generation_follows_the_inventory() {
+        let Some(mut game) = game() else { return };
+        let tube = build(&mut game, "Vegetube1", [10.0, 5.0, 0.0]);
+        let oxygen = crate::model::unit_index("Oxygen").unwrap();
+        assert_eq!(game.wos[&tube].unit_generation[oxygen], 0.0);
+        let inv = game.wos[&tube].linked_inventory;
+        game.add_new_item(game.data.group("Seed0").unwrap(), inv, 0);
+        let g = game.wos[&tube].group;
+        assert_eq!(game.wos[&tube].unit_generation[oxygen], game.data.groups[g].units[oxygen]);
+        let seed = game.wos[&tube].unit_multiplier[oxygen];
+        let lirma = game.data.groups[game.data.group("Seed0").unwrap()].units[oxygen] / 100.0;
+        assert_eq!(seed, lirma);
+    }
+}

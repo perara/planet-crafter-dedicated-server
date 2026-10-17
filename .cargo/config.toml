@@ -1,0 +1,3 @@
+# Find libsteam_api.so next to the binary (cargo copies it into target/<profile>).
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN"]

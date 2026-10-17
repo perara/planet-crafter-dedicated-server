@@ -1,0 +1,12 @@
+# Everything a server keeps (world, settings, backups, extracted game tables, the extractor's
+# game view and Wine prefix, downloads).
+/run/
+# Build output.
+/server/target/
+/extractor/bin/
+/extractor/obj/
+# Game tables are extracted from each user's own copy of the game, never committed.
+/server/data/
+# Release packaging.
+/dist/
+__pycache__/

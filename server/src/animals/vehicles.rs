@@ -1,0 +1,470 @@
+//! Vehicles, server side: OwnershipSwitcher (who drives), UpdateNetworkRigidBodyState (a parked
+//! vehicle goes to the nearest player, its physics on or off with distance), VehicleBackToGarage
+//! (recall: the server takes the vehicle and teleports it), VehicleEquipment (modules resize
+//! the vehicle's inventories) and LockNetworkPlayerPosition (seated players move with the seat).
+
+use std::collections::HashMap;
+
+use indexmap::IndexMap;
+use serde_json::{json, Value};
+
+use super::{distance2, nearest, player_distance2};
+use crate::game::{Args, Game};
+use crate::model::WorldObject;
+use crate::net::{enc, Target, VarValue};
+use crate::wire::{Reader, Writer};
+
+/// NetworkTransformState bits.
+const POSITION: [u32; 3] = [2, 4, 8];
+const ROTATION: [u32; 3] = [16, 32, 64];
+const SCALE: [u32; 3] = [128, 256, 512];
+const TELEPORTING: u32 = 1024;
+const QUATERNION_SYNC: u32 = 4096;
+const SYNCHRONIZATION: u32 = 32768;
+const RELIABLE: u32 = 524288;
+/// UpdateRigidBodyState's period, and its wait before the first check.
+const CHECK: f32 = 0.15;
+const FIRST_CHECK: f32 = 1.0;
+/// VehicleBackToGarage._cooldown: at spawn, and after a recall.
+const COOLDOWN_START: f32 = 5.0;
+const COOLDOWN: f32 = 600.0;
+
+struct Vehicle {
+    /// The owner last seen, to apply the server's gain/loss of ownership whoever changed it.
+    owner: u64,
+    /// The server's Rigidbody.isKinematic.
+    kinematic: bool,
+    /// UpdateNetworkRigidBodyState._rbEnabled.
+    rb_enabled: bool,
+    last_position: [f32; 3],
+    next_check: f32,
+    disable_distance: f32,
+}
+
+struct Recall {
+    vehicle: u64,
+    position: [f32; 3],
+    rotation: [f32; 4],
+    update_rb: bool,
+    kinematic: bool,
+}
+
+struct Garage {
+    cooldown: f32,
+    recall: Option<Recall>,
+}
+
+#[derive(Default)]
+pub struct State {
+    vehicles: IndexMap<u64, Vehicle>,
+    garages: IndexMap<u64, Garage>,
+    /// Equipment inventory -> the vehicle's world object (VehicleEquipment).
+    equipment: HashMap<i32, i32>,
+    last_frame: f32,
+}
+
+fn component<'a>(game: &'a Game, wo: &WorldObject, ty: &str) -> Vec<&'a Value> {
+    game.data.prefab_components(&game.data.groups[wo.group].id, ty)
+}
+
+fn has(game: &Game, object: u64, class: &str) -> bool {
+    game.net.behaviour_index(object, class).is_some()
+}
+
+fn position(game: &Game, object: u64) -> [f32; 3] {
+    game.net.objects.get(&object).map(|o| o.position).unwrap_or_default()
+}
+
+pub fn on_instantiated(game: &mut Game, wo: i32) {
+    let Some(w) = game.wos.get(&wo) else { return };
+    let Some(object) = w.net else { return };
+    if has(game, object, "OwnershipSwitcher") {
+        let disable_distance = component(game, w, "UpdateNetworkRigidBodyState").first().and_then(|c| c["_disableDistance"].as_f64()).unwrap_or(30.0) as f32;
+        let (owner, p) = (game.net.objects[&object].owner, w.position);
+        let next_check = game.time + FIRST_CHECK;
+        game.ext.animals.vehicles.vehicles.insert(object, Vehicle { owner, kinematic: false, rb_enabled: true, last_position: p, next_check, disable_distance });
+        // OnNetworkSpawn in behaviour order: OwnershipSwitcher hands a server-owned vehicle to
+        // the nearest client, then UpdateNetworkRigidBodyState reads the body's state.
+        if owner == 0 {
+            reset_ownership(game, object);
+        }
+        let v = game.ext.animals.vehicles.vehicles.get_mut(&object).unwrap();
+        v.rb_enabled = !v.kinematic;
+    }
+    if has(game, object, "VehicleBackToGarage") {
+        game.ext.animals.vehicles.garages.insert(object, Garage { cooldown: COOLDOWN_START, recall: None });
+        game.net.set(object, "VehicleBackToGarage", "_cooldown", enc::float(COOLDOWN_START));
+    }
+    // VehicleEquipment watches the inventory of the InventoryAssociatedProxy beside it.
+    let w = &game.wos[&wo];
+    if let Some(path) = component_path(game, w, "VehicleEquipment") {
+        let index = game.data.group_prefabs[&game.data.groups[w.group].id]["components"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|c| c["type"] == "InventoryAssociatedProxy" && c["path"] == path.as_str())
+            .and_then(|c| c["fields"]["_secondaryInventoryIndex"].as_i64())
+            .unwrap_or(-1);
+        let inventory = if index < 0 { w.linked_inventory } else { w.secondary_inventories.get(index as usize).copied().unwrap_or(0) };
+        game.ext.animals.vehicles.equipment.insert(inventory, wo);
+    }
+}
+
+fn component_path(game: &Game, w: &WorldObject, ty: &str) -> Option<String> {
+    game.data.group_prefabs[&game.data.groups[w.group].id]["components"].as_array()?.iter().find(|c| c["type"] == ty).and_then(|c| c["path"].as_str()).map(str::to_string)
+}
+
+pub fn on_destroyed(game: &mut Game, wo: &WorldObject) {
+    let s = &mut game.ext.animals.vehicles;
+    if let Some(object) = wo.net {
+        s.vehicles.shift_remove(&object);
+        s.garages.shift_remove(&object);
+    }
+    s.equipment.retain(|_, w| *w != wo.id);
+}
+
+pub fn rpc(game: &mut Game, client: u64, object: u64, name: &str, a: &Args) -> bool {
+    match name {
+        "OwnershipSwitcher.AskForOwnershipServerRpc" => {
+            let locked = bool_var(game, object, "OwnershipSwitcher", "_locked");
+            if !locked {
+                if game.net.objects.get(&object).is_some_and(|o| o.owner != client) {
+                    set_owner(game, object, client);
+                }
+                game.net.set(object, "OwnershipSwitcher", "_locked", enc::bool(true));
+            }
+            game.net.rpc(Target::Only(client), object, "OwnershipSwitcher.AskForOwnershipResultClientRpc", &[json!(!locked)]);
+        }
+        "OwnershipSwitcher.ResetOwnershipServerRpc" => reset_ownership(game, object),
+        "UpdateNetworkRigidBodyState.SetVehicleControllerEnabledServerRpc" => {
+            game.net.rpc(Target::All, object, "UpdateNetworkRigidBodyState.SetVehicleControllerEnabledClientRpc", &[json!(a.b(0))]);
+        }
+        "VehicleBackToGarage.MoveVehicleToPositionServerRpc" => move_vehicle_to_position(game, object, a.u(0), a.v3(1), a.q(2)),
+        _ => return false,
+    }
+    true
+}
+
+fn bool_var(game: &Game, object: u64, class: &str, var: &str) -> bool {
+    matches!(game.net.get(object, class, var), Some(VarValue::Plain(b)) if b.first() == Some(&1))
+}
+
+/// ResetOwnershipServerRpc: the nearest client drives, nobody holds the lock.
+fn reset_ownership(game: &mut Game, object: u64) {
+    let nearest = game.nearest_client(position(game, object));
+    if game.net.objects.get(&object).is_some_and(|o| o.owner != nearest) {
+        set_owner(game, object, nearest);
+    }
+    game.net.set(object, "OwnershipSwitcher", "_locked", enc::bool(false));
+}
+
+/// NetworkObject.ChangeOwnership as the server, with what the server's behaviours do when it
+/// gains or loses an object.
+pub fn set_owner(game: &mut Game, object: u64, owner: u64) {
+    game.net.change_owner(object, owner);
+    owner_changed(game, object, owner);
+}
+
+fn owner_changed(game: &mut Game, object: u64, owner: u64) {
+    let Some(v) = game.ext.animals.vehicles.vehicles.get_mut(&object) else { return };
+    let previous = std::mem::replace(&mut v.owner, owner);
+    if previous == owner {
+        return;
+    }
+    if previous == 0 {
+        // UpdateNetworkRigidBodyState.OnOwnershipChanged: the body stops on the server.
+        v.kinematic = true;
+    }
+    if owner == 0 {
+        // OnGainedOwnership: UpdateNetworkRigidBodyState rereads the body, OwnershipSwitcher unlocks.
+        v.rb_enabled = !v.kinematic;
+        game.net.set(object, "OwnershipSwitcher", "_locked", enc::bool(false));
+    }
+}
+
+/// Ownership changed elsewhere (a leaving client's objects go back to the server).
+pub fn watch_owners(game: &mut Game) {
+    let changed: Vec<(u64, u64)> = game.ext.animals.vehicles.vehicles.iter().filter_map(|(o, v)| game.net.objects.get(o).filter(|n| n.owner != v.owner).map(|n| (*o, n.owner))).collect();
+    for (object, owner) in changed {
+        owner_changed(game, object, owner);
+    }
+}
+
+/// NetworkManager.OnClientDisconnectCallback: seats the client held are freed; the objects it
+/// owned are the server's (GroupNetworkContainer.OnGainedOwnership turns transform sync off).
+pub fn client_left(game: &mut Game, client: u64) {
+    let seats: Vec<(u64, u16)> = game
+        .net
+        .objects
+        .values()
+        .flat_map(|o| o.behaviours.iter().filter(|b| b.class == "LockNetworkPlayerPosition").map(move |b| (o.id, b.index)))
+        .filter(|(o, b)| seat(game, *o, *b) == Some(client))
+        .collect();
+    for (object, index) in seats {
+        game.net.set_behaviour_var(object, index, "_active", enc::bool(false));
+        game.net.set_behaviour_var(object, index, "_playerId", enc::ulong(0));
+    }
+    let containers: Vec<u64> = game
+        .net
+        .objects
+        .values()
+        .filter(|o| o.owner == 0 && bool_var(game, o.id, "GroupNetworkContainer", "_transformSync"))
+        .filter(|o| !o.wo.and_then(|w| game.wos.get(&w)).is_some_and(|w| component(game, w, "GroupNetworkContainer").first().is_some_and(|c| c["_alwaysKeepRigidBodyAndNetworkTransformActive"] == true)))
+        .map(|o| o.id)
+        .collect();
+    for object in containers {
+        game.net.set(object, "GroupNetworkContainer", "_transformSync", enc::bool(false));
+    }
+}
+
+/// The client locked into a seat (LockNetworkPlayerPosition behaviour), if active.
+fn seat(game: &Game, object: u64, index: u16) -> Option<u64> {
+    let active = matches!(game.net.behaviour_var(object, index, "_active"), Some(VarValue::Plain(b)) if b.first() == Some(&1));
+    match game.net.behaviour_var(object, index, "_playerId") {
+        Some(VarValue::Plain(b)) if active => Reader::new(b).packed_u64(),
+        _ => None,
+    }
+}
+
+/// MoveVehicleToPositionServerRpc: an unlocked vehicle is recalled to the garage.
+fn move_vehicle_to_position(game: &mut Game, garage: u64, vehicle: u64, position: [f32; 3], rotation: [f32; 4]) {
+    if !game.net.objects.contains_key(&vehicle) || !has(game, vehicle, "OwnershipSwitcher") || bool_var(game, vehicle, "OwnershipSwitcher", "_locked") {
+        return;
+    }
+    let garage_owner = game.net.objects.get(&garage).map(|o| o.owner).unwrap_or(0);
+    if game.net.objects[&vehicle].owner != 0 {
+        set_owner(game, vehicle, garage_owner);
+    }
+    let Some(g) = game.ext.animals.vehicles.garages.get_mut(&garage) else { return };
+    g.recall = Some(Recall { vehicle, position, rotation, update_rb: false, kinematic: false });
+    g.cooldown = COOLDOWN;
+    game.net.set(garage, "VehicleBackToGarage", "_cooldown", enc::float(COOLDOWN));
+}
+
+pub fn inventory_changed(game: &mut Game, inventory: i32, wo: i32, added: bool) {
+    let Some(vehicle) = game.ext.animals.vehicles.equipment.get(&inventory).copied() else { return };
+    // ponytail: an item destroyed out of the equipment is gone before this runs; its type is lost.
+    let (Some(item), Some(v)) = (game.wos.get(&wo), game.wos.get(&vehicle)) else { return };
+    let g = &game.data.groups[item.group];
+    let value = g.fields["value"].as_i64().unwrap_or(0) as i32;
+    let delta = if added { value } else { -value };
+    let at = v.net.map(|o| position(game, o)).unwrap_or(v.position);
+    let linked = v.linked_inventory;
+    let resize = |game: &mut Game, target: i32| {
+        if game.inventories.get(&target).is_some_and(|i| i.size + delta > 1) {
+            game.inventories_rpc(0, "InventoriesHandler.SetInventorySizeServerRpc", &Args(vec![json!(target), json!(delta), json!(at)]));
+        }
+    };
+    let ty = g.str("equipableType").to_string();
+    match ty.as_str() {
+        "BackpackIncrease" => resize(game, linked),
+        "EquipmentIncrease" => resize(game, inventory),
+        "LogisticChip" if !added => {
+            let priority = game.inventories.get(&linked).map(|i| i.logistic.priority).unwrap_or(0);
+            game.inventories_rpc(0, "InventoriesHandler.DirtyInventoryLogisticsServerRpc", &Args(vec![json!(linked), json!([]), json!([]), json!(priority)]));
+        }
+        _ => {}
+    }
+}
+
+/// One frame: garages (LateUpdate), parked vehicles (UpdateRigidBodyState), seats (LateUpdate).
+pub fn frame(game: &mut Game) {
+    let dt = game.time - std::mem::replace(&mut game.ext.animals.vehicles.last_frame, game.time);
+    // Objects despawned without their world object being destroyed.
+    let s = &mut game.ext.animals.vehicles;
+    s.vehicles.retain(|o, _| game.net.objects.contains_key(o));
+    s.garages.retain(|o, _| game.net.objects.contains_key(o));
+    let garages: Vec<u64> = game.ext.animals.vehicles.garages.keys().copied().collect();
+    for garage in garages {
+        garage_frame(game, garage, dt);
+    }
+    let vehicles: Vec<u64> = game.ext.animals.vehicles.vehicles.keys().copied().collect();
+    for object in vehicles {
+        if game.time >= game.ext.animals.vehicles.vehicles[&object].next_check {
+            game.ext.animals.vehicles.vehicles.get_mut(&object).unwrap().next_check += CHECK;
+            rigidbody_check(game, object);
+        }
+        // LockNetworkPlayerPosition.LateUpdate: a seated player is where the seat is.
+        // ponytail: the seat is taken to be the vehicle's origin (seat offsets are not in the data).
+        let p = position(game, object);
+        let indices: Vec<u16> = game.net.objects.get(&object).map(|o| o.behaviours.iter().filter(|b| b.class == "LockNetworkPlayerPosition").map(|b| b.index).collect()).unwrap_or_default();
+        for index in indices {
+            if let Some(player) = seat(game, object, index).and_then(|c| game.player_object(c)) {
+                game.net.move_object(player, p, None);
+            }
+        }
+    }
+}
+
+fn garage_frame(game: &mut Game, garage: u64, dt: f32) {
+    let g = game.ext.animals.vehicles.garages.get_mut(&garage).unwrap();
+    if g.cooldown > 0.0 {
+        g.cooldown = (g.cooldown - dt).max(0.0);
+        let value = g.cooldown;
+        game.net.set(garage, "VehicleBackToGarage", "_cooldown", enc::float(value));
+    }
+    let g = game.ext.animals.vehicles.garages.get_mut(&garage).unwrap();
+    let Some(r) = g.recall.as_mut() else { return };
+    let vehicle = r.vehicle;
+    let Some(owner) = game.net.objects.get(&vehicle).map(|o| o.owner) else {
+        g.recall = None;
+        return;
+    };
+    if owner != 0 {
+        let garage_owner = game.net.objects.get(&garage).map(|o| o.owner).unwrap_or(0);
+        set_owner(game, vehicle, garage_owner);
+        return;
+    }
+    let Some(v) = game.ext.animals.vehicles.vehicles.get_mut(&vehicle) else { return };
+    if !r.update_rb {
+        r.kinematic = v.kinematic;
+        v.kinematic = true;
+        r.update_rb = true;
+    }
+    let (target, rotation) = (r.position, r.rotation);
+    if distance2(position(game, vehicle), target).sqrt() > 1.0 {
+        teleport(game, vehicle, target, rotation);
+        return;
+    }
+    let g = game.ext.animals.vehicles.garages.get_mut(&garage).unwrap();
+    let kinematic = g.recall.take().map(|r| r.kinematic).unwrap_or(false);
+    if let Some(v) = game.ext.animals.vehicles.vehicles.get_mut(&vehicle) {
+        v.kinematic = kinematic;
+    }
+}
+
+/// UpdateRigidBodyState, one pass: a vehicle at rest goes to the nearest player when its owner
+/// is far; its owner turns physics on only with a player near.
+fn rigidbody_check(game: &mut Game, object: u64) {
+    let p = position(game, object);
+    let v = &game.ext.animals.vehicles.vehicles[&object];
+    if distance2(v.last_position, p).sqrt() < 3.0 {
+        let disable = v.disable_distance;
+        let (closest, d2) = nearest(game, p);
+        let num = d2.sqrt();
+        let owner = game.net.objects.get(&object).map(|o| o.owner).unwrap_or(0);
+        let num2 = player_distance2(game, owner, p).sqrt();
+        if num2 > disable && num < num2 {
+            set_owner(game, object, closest);
+        }
+        let enabled = num < disable;
+        let v = game.ext.animals.vehicles.vehicles.get_mut(&object).unwrap();
+        if enabled != v.rb_enabled {
+            v.rb_enabled = enabled;
+            let owner = game.net.objects.get(&object).map(|o| o.owner).unwrap_or(0);
+            if owner == 0 {
+                v.kinematic = !enabled;
+            }
+            game.net.rpc(Target::Only(owner), object, "UpdateNetworkRigidBodyState.SetRigidBodyEnabledClientRpc", &[json!(enabled)]);
+        }
+    }
+    game.ext.animals.vehicles.vehicles.get_mut(&object).unwrap().last_position = p;
+}
+
+/// NetworkTransform.Teleport by the server as the vehicle's owner: one teleporting state to
+/// every client, laid out like the object's own transform state.
+fn teleport(game: &mut Game, object: u64, position: [f32; 3], rotation: [f32; 4]) {
+    let Some(o) = game.net.objects.get(&object) else { return };
+    let Some(behaviour) = o.behaviours.iter().find(|b| b.class.ends_with("NetworkTransform")).map(|b| b.index) else { return };
+    let bits = (transform_bits(&o.tail, behaviour).unwrap_or(POSITION.iter().chain(&ROTATION).sum()) & !SYNCHRONIZATION) | TELEPORTING | RELIABLE;
+    let message = transform_message(object, behaviour, bits, game.tick_number(), position, rotation, o.scale);
+    game.out_to(Target::All, (crate::protocol::NETWORK_TRANSFORM, message));
+    game.net.move_object(object, position, Some(rotation));
+    if let Some(wo) = game.net.objects.get(&object).and_then(|o| o.wo).and_then(|w| game.wos.get_mut(&w)) {
+        wo.position = position;
+        wo.rotation = rotation;
+    }
+}
+
+/// NetworkTransformMessage: object, behaviour, then the state with the axes `bits` lists.
+fn transform_message(object: u64, behaviour: u16, bits: u32, tick: i32, position: [f32; 3], rotation: [f32; 4], scale: [f32; 3]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.packed_u64(object).packed_i32(behaviour as i32).packed_u32(bits).packed_i32(tick);
+    for (axis, bit) in POSITION.iter().enumerate() {
+        if bits & bit != 0 {
+            w.f32(position[axis]);
+        }
+    }
+    if bits & QUATERNION_SYNC != 0 {
+        w.quat(rotation);
+    } else {
+        let euler = euler_angles(rotation);
+        for (axis, bit) in ROTATION.iter().enumerate() {
+            if bits & bit != 0 {
+                w.f32(euler[axis]);
+            }
+        }
+    }
+    for (axis, bit) in SCALE.iter().enumerate() {
+        if bits & bit != 0 {
+            w.f32(scale[axis]);
+        }
+    }
+    w.0
+}
+
+/// The state bits of a behaviour's transform state in an object's custom sync data.
+fn transform_bits(tail: &[u8], behaviour: u16) -> Option<u32> {
+    let mut r = Reader::new(tail);
+    let count = r.u8()?;
+    for _ in 0..count {
+        let index = r.u16_raw()?;
+        let len = r.i32()? as usize;
+        let start = r.pos;
+        if index == behaviour {
+            return r.packed_u32();
+        }
+        r.pos = start + len;
+    }
+    None
+}
+
+/// Quaternion.eulerAngles: degrees in [0, 360), Z then X then Y.
+fn euler_angles(q: [f32; 4]) -> [f32; 3] {
+    let [x, y, z, w] = q;
+    let sin_x = (2.0 * (w * x - y * z)).clamp(-1.0, 1.0);
+    let ex = sin_x.asin();
+    let (ey, ez) = if sin_x.abs() < 0.9999 {
+        ((2.0 * (w * y + x * z)).atan2(1.0 - 2.0 * (x * x + y * y)), (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (x * x + z * z)))
+    } else {
+        // Gimbal lock: all yaw, no roll.
+        (2.0 * y.atan2(w), 0.0)
+    };
+    [ex, ey, ez].map(|a| a.to_degrees().rem_euclid(360.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn euler_angles_like_unity() {
+        let e = euler_angles([0.0, 0.7071068, 0.0, 0.7071068]);
+        assert!((e[0]).abs() < 1e-3 && (e[1] - 90.0).abs() < 1e-3 && e[2].abs() < 1e-3, "{e:?}");
+        let e = euler_angles(crate::geometry::from_euler_y(-30.0));
+        assert!((e[1] - 330.0).abs() < 1e-3, "{e:?}");
+        let h = std::f32::consts::FRAC_PI_8;
+        let e = euler_angles([h.sin(), 0.0, 0.0, h.cos()]);
+        assert!((e[0] - 45.0).abs() < 1e-3, "{e:?}");
+    }
+
+    #[test]
+    fn teleports_read_back_like_client_transforms() {
+        let bits = (126 | 2048 | 1048576) | TELEPORTING | RELIABLE;
+        let m = transform_message(52, 0, bits, 41963, [553.0, 4.0, 491.0], crate::geometry::from_euler_y(90.0), [1.0; 3]);
+        let (object, p, r) = crate::transform::position_rotation(&m).unwrap();
+        assert_eq!((object, p), (52, [553.0, 4.0, 491.0]));
+        assert!((crate::geometry::euler_y(r.unwrap()) - 90.0).abs() < 1e-3);
+        assert_eq!(m.len(), 2 + 1 + 3 + 3 + 24);
+    }
+
+    #[test]
+    fn reads_the_trucks_transform_bits() {
+        // VehicleTruck's dumped sync tail: ClientNetworkTransform (behaviour 0) state.
+        let tail = crate::world::hex("0100001d000000f363c482040000000000409cc500000000000000800000000000000000");
+        let bits = transform_bits(&tail, 0).unwrap();
+        assert_eq!(bits & 126, 126, "position and euler rotation");
+        assert_eq!(bits & (QUATERNION_SYNC | 16384), 0, "full floats, euler angles");
+        assert!(transform_bits(&tail, 1).is_none());
+    }
+}

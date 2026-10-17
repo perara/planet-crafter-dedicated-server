@@ -1,0 +1,612 @@
+#!/usr/bin/env bash
+# pcds: install and run a Planet Crafter dedicated server on Linux.
+#
+#   pcds setup [--game DIR] [--world SAVE.json | --new [NEW OPTIONS]]
+#                          build or install the server, extract the game tables from your game,
+#                          put a world in place and write the settings and the systemd unit
+#   pcds new [--planet ID] [--start LOCATION] [--seed N] [--set KEY=VALUE]... [--force]
+#                          create a new world (the current one is kept in backups/)
+#   pcds start | stop | restart | status | logs
+#   pcds install-service | uninstall-service    start at login, check for game updates hourly
+#   pcds code | players | save | kick PLAYER | ban PLAYER | unban NAME_OR_IP
+#   pcds gui | token | config | api METHOD PATH [JSON]
+#   pcds extract [--game DIR]   extract the game tables again (needs Wine)
+#   pcds update [--game DIR]    after a game update: extract and restart when the game changed
+#   pcds selftest               a scripted player joins over direct IP and checks the answers
+#   pcds run                    run the server in the foreground (containers, debugging)
+#   pcds build                  build the server (cargo) and the extractor (Docker, .NET SDK)
+#
+# Everything the server keeps lives in run/ next to this script (PCDS_HOME overrides it):
+# world.json, server.env, access.json, backups/, data/<game version>/ and the extractor.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+SRC="$ROOT/server"
+RUN="${PCDS_HOME:-$ROOT/run}"
+ENV_FILE="$RUN/server.env"
+WORLD="$RUN/world.json"
+EXT="$RUN/extractor"
+EXT_GAME="$EXT/game"
+EXT_LOG="$EXT_GAME/BepInEx/LogOutput.log"
+CACHE="$RUN/cache"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+UNIT=pcds.service
+APP_ID=1284190
+BEPINEX_VERSION=5.4.23.5
+BEPINEX_SHA256=82f9878551030f54657792c0740d9d51a09500eeae1fba21106b0c441e6732c4
+EXT_PORT=7791
+EXT_API=7781
+
+die() { echo "pcds: $*" >&2; exit 1; }
+say() { echo "pcds: $*"; }
+need() { command -v "$1" > /dev/null || die "$1 is needed: $2"; }
+
+env_get() { [[ -f "$ENV_FILE" ]] && sed -n "s/^$1=//p" "$ENV_FILE" | tail -1; }
+port() { local listen; listen="$(env_get PCDS_LISTEN)"; echo "${listen##*:}"; }
+json_str() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; }
+# The unit is this installation's when it reads this settings file.
+active() {
+  systemctl --user is-active --quiet "$UNIT" 2> /dev/null &&
+    systemctl --user show -p EnvironmentFiles --value "$UNIT" 2> /dev/null | grep -qF "$ENV_FILE"
+}
+
+# ---- the server binary ---------------------------------------------------------------------
+
+# A release ships bin/; a source checkout builds server/.
+server_bin() {
+  if [[ -x "$ROOT/bin/pcds-server" ]]; then
+    echo "$ROOT/bin/pcds-server"
+    return
+  fi
+  [[ -x "$SRC/target/release/pcds-server" ]] || build_server >&2
+  echo "$SRC/target/release/pcds-server"
+}
+
+build_server() {
+  need cargo "install Rust (https://rustup.rs), or use a release, which ships bin/pcds-server"
+  (cd "$SRC" && cargo build --release)
+}
+
+# Copy then rename, so a running server keeps its mapped copy.
+install_file() { cp "$1" "$2.new" && mv -f "$2.new" "$2"; }
+
+# The server runs from run/bin, so rebuilding never touches a running server.
+install_server() {
+  local bin
+  bin="$(server_bin)"
+  mkdir -p "$RUN/bin/web"
+  install_file "$bin" "$RUN/bin/pcds-server"
+  install_file "$(dirname "$bin")/libsteam_api.so" "$RUN/bin/libsteam_api.so"
+  install_file "$( [[ -f "$ROOT/web/index.html" ]] && echo "$ROOT/web/index.html" || echo "$SRC/web/index.html")" "$RUN/bin/web/index.html"
+}
+
+# The newest extracted game tables.
+data_dir() {
+  local d
+  d="$(ls -d "$RUN"/data/*/ 2> /dev/null | sort -V | tail -1)"
+  [[ -n "$d" && -f "$d/netdata.json" && -f "$d/gamedata.json" ]] && echo "${d%/}"
+  return 0
+}
+
+# ---- settings and the admin API ------------------------------------------------------------
+
+write_env() {
+  [[ -f "$ENV_FILE" ]] && return
+  mkdir -p "$RUN"
+  cat > "$ENV_FILE" << EOF
+# Planet Crafter dedicated server settings. Apply with: pcds restart
+# Direct IP (UDP): players join with HOST:PORT; "off" disables.
+PCDS_LISTEN=0.0.0.0:7777
+# Invite codes through Steam (an anonymous Steam game server; needs steamclient.so,
+# see README); "off" disables.
+PCDS_STEAM=on
+# A game server login token (https://steamcommunity.com/dev/managegameservers, app $APP_ID)
+# keeps the invite code the same across restarts; without one it changes at every start.
+PCDS_STEAM_TOKEN=
+# Last four digits of the invite code.
+PCDS_SESSION=4242
+# Minutes between saves (0: only on stop), and the save backups kept in backups/.
+PCDS_AUTOSAVE=5
+PCDS_BACKUPS=24
+PCDS_BACKUP_MINUTES=60
+# Admin API and web page (pcds gui); keep it on 127.0.0.1 or behind a proxy. "off" disables.
+PCDS_ADMIN=127.0.0.1:7782
+PCDS_ADMIN_TOKEN=$(head -c 18 /dev/urandom | base64 | tr -d '/+=')
+EOF
+  say "settings written to $ENV_FILE"
+}
+
+api() {
+  local method=$1 path=$2 body=${3:-}
+  local token addr
+  token="$(env_get PCDS_ADMIN_TOKEN)"
+  addr="$(env_get PCDS_ADMIN)"
+  [[ -n "$token" && -n "$addr" && "$addr" != off ]] || die "no admin API in $ENV_FILE (PCDS_ADMIN / PCDS_ADMIN_TOKEN)"
+  [[ "$method" != GET && -z "$body" ]] && body='{}'
+  curl -sS --fail-with-body -X "$method" -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+    ${body:+--data "$body"} "http://$addr$path"
+  echo
+}
+
+cmd_status() {
+  if ! active; then
+    echo "state=stopped"
+    return 0
+  fi
+  echo "state=running pid=$(systemctl --user show -p MainPID --value "$UNIT")"
+  api GET /api/status | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+d.pop("units", None)
+print(json.dumps(d, indent=2))' 2> /dev/null || echo "admin API not answering yet"
+}
+
+cmd_players() {
+  api GET /api/status | python3 -c '
+import json, sys
+players = json.load(sys.stdin)["players"]
+for p in players:
+    steam = p["steamId"] + (" (verified)" if p["verified"] else "") if p["steamId"] else "-"
+    print(f"{p[\"id\"]:>4}  {p[\"name\"] or \"(joining)\":<24} {p[\"ip\"]:<16} {steam:<28} {p[\"connectedSeconds\"]}s")
+print(f"{len(players)} online")'
+}
+
+cmd_code() {
+  local code
+  code="$(api GET /api/status | python3 -c 'import json,sys; print(json.load(sys.stdin).get("inviteCode") or "")')"
+  [[ -n "$code" ]] || die "no invite code (server stopped, Steam off, or Steam not reachable; see pcds logs)"
+  echo "$code"
+}
+
+# ---- the systemd units ---------------------------------------------------------------------
+
+write_unit() {
+  mkdir -p "$UNIT_DIR"
+  cat > "$UNIT_DIR/$UNIT" << EOF
+[Unit]
+Description=Planet Crafter dedicated server
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=PCDS_HOME=$RUN
+EnvironmentFile=$ENV_FILE
+ExecStart=$ROOT/pcds run
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target
+EOF
+  cat > "$UNIT_DIR/pcds-update.service" << EOF
+[Unit]
+Description=Planet Crafter dedicated server: pick up game updates
+
+[Service]
+Type=oneshot
+Environment=PCDS_HOME=$RUN
+ExecStart=$ROOT/pcds update
+EOF
+  cat > "$UNIT_DIR/pcds-update.timer" << EOF
+[Unit]
+Description=Planet Crafter dedicated server: hourly game update check
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl --user daemon-reload
+}
+
+cmd_install_service() {
+  [[ -f "$WORLD" ]] || die "run 'pcds setup' first"
+  write_unit
+  systemctl --user enable --now "$UNIT" pcds-update.timer
+  say "the server now starts at login and checks for game updates hourly"
+  say "to keep it running while you are logged out: loginctl enable-linger $USER"
+}
+
+cmd_uninstall_service() {
+  systemctl --user disable --now "$UNIT" pcds-update.timer 2> /dev/null || true
+  rm -f "$UNIT_DIR/$UNIT" "$UNIT_DIR/pcds-update.service" "$UNIT_DIR/pcds-update.timer"
+  systemctl --user daemon-reload
+  say "removed the systemd units (run/ is kept)"
+}
+
+# Foreground run, as the unit does: the newest tables, the world, the settings.
+cmd_run() {
+  local data
+  data="$(data_dir)"
+  [[ -n "$data" ]] || die "no game tables in $RUN/data: run 'pcds extract' (see README)"
+  [[ -f "$WORLD" ]] || die "no world at $WORLD: run 'pcds new' or 'pcds setup --world SAVE.json'"
+  [[ -x "$RUN/bin/pcds-server" ]] || install_server
+  if [[ -z "${PCDS_ADMIN_TOKEN:-}" && -f "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+  fi
+  exec "$RUN/bin/pcds-server" "$data" "$WORLD"
+}
+
+# ---- worlds --------------------------------------------------------------------------------
+
+cmd_new() {
+  local force=0 args=()
+  while (($#)); do
+    case "$1" in
+      --force) force=1 ;;
+      *) args+=("$1") ;;
+    esac
+    shift
+  done
+  local data
+  data="$(data_dir)"
+  [[ -n "$data" ]] || die "no game tables yet: run 'pcds extract' first"
+  if [[ -f "$WORLD" ]]; then
+    ((force)) || die "a world exists at $WORLD; pass --force to replace it (it is kept in backups/)"
+    active && die "stop the server first (pcds stop)"
+    mkdir -p "$RUN/backups"
+    cp -p "$WORLD" "$RUN/backups/world-replaced-$(date -u +%Y%m%d-%H%M%S).json"
+  fi
+  # Made beside, then moved over: a failed creation leaves the current world as it was.
+  rm -rf "$RUN/.new"
+  mkdir -p "$RUN/.new"
+  "$(server_bin)" new "$RUN/.new/world.json" "$data" "${args[@]}"
+  mv -f "$RUN/.new/world.json" "$WORLD"
+  rmdir "$RUN/.new"
+}
+
+# ---- extracting the game tables ------------------------------------------------------------
+
+# Steam's build id for the install a game folder came from.
+buildid_of() {
+  local manifest
+  manifest="$(dirname "$(dirname "$1")")/appmanifest_$APP_ID.acf"
+  [[ -f "$manifest" ]] && sed -n 's/.*"buildid"[[:space:]]*"\([0-9]*\)".*/\1/p' "$manifest"
+  return 0
+}
+
+# The game folder: --game, PCDS_GAME_DIR, the one used last, or a Steam library.
+game_dir() {
+  local d
+  for d in "${1:-}" "${PCDS_GAME_DIR:-}" "$(cat "$RUN/game-dir" 2> /dev/null || true)" \
+    "$HOME/.local/share/Steam/steamapps/common/The Planet Crafter" \
+    "$HOME/.steam/steam/steamapps/common/The Planet Crafter" \
+    "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/The Planet Crafter"; do
+    if [[ -n "$d" && -f "$d/Planet Crafter.exe" && -d "$d/Planet Crafter_Data" ]]; then
+      echo "$d"
+      return
+    fi
+  done
+  die "game not found: pass --game DIR (the folder with 'Planet Crafter.exe', e.g. copied from a PC) or set PCDS_GAME_DIR"
+}
+
+fetch_bepinex() {
+  local zip="$CACHE/BepInEx_win_x64_$BEPINEX_VERSION.zip"
+  if [[ ! -f "$zip" ]]; then
+    mkdir -p "$CACHE"
+    say "downloading BepInEx $BEPINEX_VERSION (the mod loader the extractor runs in)"
+    curl -fsSL -o "$zip.part" "https://github.com/BepInEx/BepInEx/releases/download/v$BEPINEX_VERSION/BepInEx_win_x64_$BEPINEX_VERSION.zip"
+    mv "$zip.part" "$zip"
+  fi
+  echo "$BEPINEX_SHA256  $zip" | sha256sum -c --quiet - || { rm -f "$zip"; die "BepInEx download corrupt; run again"; }
+  echo "$zip"
+}
+
+extractor_dll() {
+  local d
+  for d in "$ROOT/bin/PcdsExtractor.dll" "$ROOT/extractor/bin/Release/net472/PcdsExtractor.dll"; do
+    if [[ -f "$d" ]]; then
+      echo "$d"
+      return
+    fi
+  done
+  build_extractor >&2
+  echo "$ROOT/extractor/bin/Release/net472/PcdsExtractor.dll"
+}
+
+# Needs the extractor game folder (BepInEx and the game's assemblies to compile against).
+build_extractor() {
+  need docker "to build the extractor (or use a release, which ships bin/PcdsExtractor.dll)"
+  [[ -d "$EXT_GAME/BepInEx/core" ]] || die "no extractor game folder yet: run 'pcds extract' once"
+  local game
+  game="$(readlink -f "$EXT_GAME/Planet Crafter_Data")"
+  mkdir -p "$CACHE/nuget"
+  docker run --rm -v "$ROOT:/src" -v "$EXT_GAME:/game" -v "${game%/*}:${game%/*}:ro" -v "$CACHE/nuget:/root/.nuget/packages" \
+    -w /src/extractor -e GameDir=/game mcr.microsoft.com/dotnet/sdk:8.0 \
+    bash -c "dotnet build -c Release -nologo -v q && chown -R $(id -u):$(id -g) /src/extractor /root/.nuget/packages"
+}
+
+# A view of the game with BepInEx and the extractor installed: the program files are copied
+# (Wine finds the game's folder from them), everything else is linked, so nothing is written
+# into your game.
+prepare_extractor() {
+  local game=$1 entry zip
+  zip="$(fetch_bepinex)"
+  rm -rf "$EXT_GAME.new"
+  mkdir -p "$EXT_GAME.new"
+  for entry in "$game"/*; do
+    case "$entry" in
+      *.exe | *.dll) cp -p "$entry" "$EXT_GAME.new/" ;;
+      *) ln -s "$entry" "$EXT_GAME.new/" ;;
+    esac
+  done
+  (cd "$EXT_GAME.new" && unzip -qo "$zip")
+  # The game then starts without asking for the Steam client.
+  echo "$APP_ID" > "$EXT_GAME.new/steam_appid.txt"
+  mkdir -p "$EXT_GAME.new/BepInEx/plugins" "$EXT_GAME.new/BepInEx/config"
+  printf '[Extractor]\r\nSaveName = Extract-1\r\nPort = %s\r\nApiPort = %s\r\nApiToken = %s\r\n' \
+    "$EXT_PORT" "$EXT_API" "$(head -c 18 /dev/urandom | base64 | tr -d '/+=')" > "$EXT_GAME.new/BepInEx/config/pcds.extractor.cfg"
+  rm -rf "$EXT_GAME"
+  mv "$EXT_GAME.new" "$EXT_GAME"
+  cp -p "$(extractor_dll)" "$EXT_GAME/BepInEx/plugins/PcdsExtractor.dll"
+}
+
+ext_api() {
+  local token
+  token="$(sed -n 's/^ApiToken = //p' "$EXT_GAME/BepInEx/config/pcds.extractor.cfg" | tr -d '\r')"
+  curl -sS --fail-with-body -X "$1" -H "Authorization: Bearer $token" ${3:+--data "$3"} "http://127.0.0.1:$EXT_API$2"
+}
+
+ext_env() {
+  export WINEPREFIX="$EXT/prefix" WINEDEBUG=-all WINEDLLOVERRIDES="winhttp=n,b"
+}
+
+start_extractor() {
+  need wine "to run the game once for the extraction (e.g. 'apt install wine', 'dnf install wine', 'pacman -S wine')"
+  ext_env
+  if [[ ! -d "$WINEPREFIX/drive_c" ]]; then
+    say "creating the Wine prefix (first run only)"
+    wineboot -i > /dev/null 2>&1 || true
+  fi
+  # No sound device: the game would otherwise play its music on this machine.
+  wine reg add 'HKCU\Software\Wine\Drivers' /v Audio /d '' /f > /dev/null 2>&1 || true
+  local runner=()
+  if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && command -v xvfb-run > /dev/null; then
+    runner=(xvfb-run -a)
+  fi
+  rm -f "$EXT_LOG"
+  (cd "$EXT_GAME" && setsid "${runner[@]}" wine "Planet Crafter.exe" -batchmode -nographics -logFile "Z:${EXT//\//\\}\\player.log" > "$EXT/wine.log" 2>&1 < /dev/null &)
+  local _
+  for _ in $(seq 600); do
+    grep -qs "PCDS READY" "$EXT_LOG" && return 0
+    sleep 1
+  done
+  stop_extractor
+  die "the game did not start; see $EXT_LOG and $EXT/wine.log"
+}
+
+stop_extractor() {
+  ext_env
+  ext_api POST /api/stop '{}' > /dev/null 2>&1 || true
+  local _
+  for _ in $(seq 30); do
+    grep -qs "PCDS STOPPED" "$EXT_LOG" && break
+    sleep 1
+  done
+  sleep 2
+  wineserver -k 2> /dev/null || true
+}
+
+# PlanetData's stable hash of a planet id (the game's String.GetStableHashCode).
+planet_hash() {
+  python3 -c '
+import sys
+def h(s):
+    i32 = lambda x: ((x + 2**31) % 2**32) - 2**31
+    u = [ord(c) for c in s]; h1 = h2 = 5381; i = 0
+    while i < len(u):
+        h1 = i32((i32(h1 << 5) + h1) ^ u[i])
+        if i == len(u) - 1: break
+        h2 = i32((i32(h2 << 5) + h2) ^ u[i + 1]); i += 2
+    return i32(h1 + i32(h2 * 1566083941))
+print(h(sys.argv[1]))' "$1"
+}
+
+# Runs the game once with the extractor and writes run/data/<game version>/.
+cmd_extract() {
+  local game_arg=""
+  while (($#)); do
+    case "$1" in
+      --game) game_arg="${2:?--game DIR}"; shift ;;
+      *) die "unknown option $1" ;;
+    esac
+    shift
+  done
+  local game bin version out raw probe planets planet current
+  game="$(game_dir "$game_arg")"
+  bin="$(server_bin)"
+  mkdir -p "$RUN"
+  echo "$game" > "$RUN/game-dir"
+  say "extracting the game tables from $game"
+  prepare_extractor "$game"
+  start_extractor
+  trap stop_extractor EXIT
+  version="$(ext_api GET /api/status | python3 -c 'import json,sys; print(json.load(sys.stdin)["gameVersion"])')"
+  # Hidden until complete: data_dir only picks finished versions.
+  out="$RUN/data/.$version.new"
+  rm -rf "$out"
+  mkdir -p "$out/scenes"
+  raw="$(mktemp)"
+  probe="$(mktemp)"
+  ext_api GET /api/netdata > "$raw"
+  "$bin" extract "$raw" "$out" > /dev/null
+  # Again with a scripted player joined (with the tables just written), for the layout a
+  # joining player gets.
+  printf '{"name":"Extractor","ready":false,"steps":[{"wait":90000}]}' > "$probe"
+  timeout 120 "$bin" probe "127.0.0.1:$EXT_PORT" "$out" "$probe" > "$EXT/probe.log" 2>&1 &
+  local joiner=$! joined=0
+  for _ in $(seq 40); do
+    sleep 2
+    ext_api GET /api/netdata > "$raw"
+    if python3 -c 'import json,sys; sys.exit(0 if any(o.get("player") and o.get("owner") for o in json.load(open(sys.argv[1]))["objects"]) else 1)' "$raw"; then
+      joined=1
+      break
+    fi
+  done
+  kill "$joiner" 2> /dev/null || true
+  wait "$joiner" 2> /dev/null || true
+  ((joined)) || die "the scripted player did not join the game; see $EXT/probe.log"
+  "$bin" extract "$raw" "$out"
+  ext_api GET /api/gamedata > "$out/gamedata.json"
+  planets="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(" ".join(v["id"] for k,v in d["assets"].items() if k.startswith("PlanetData:") and v.get("steamAppId")==0 and v.get("showInBuild")))' "$out/gamedata.json")"
+  for planet in $planets; do
+    current="$(ext_api GET /api/status | python3 -c 'import json,sys; print(json.load(sys.stdin)["planet"])')"
+    if [[ "$current" != "$planet" ]]; then
+      say "travelling to $planet"
+      printf '{"name":"Traveller","steps":[{"rpc":"PlanetNetworkLoader.SwitchToPlanetServerRpc","on":"PlanetNetworkLoader","args":[%s,0,0],"after":2000},{"wait":5000}]}' "$(planet_hash "$planet")" > "$probe"
+      # The game refuses players for a while after the game data dump (it is still removing
+      # what it spawned), so travel is retried until the planet changes.
+      for _ in $(seq 5); do
+        timeout 60 "$bin" probe "127.0.0.1:$EXT_PORT" "$out" "$probe" > /dev/null 2>&1 || true
+        for _ in $(seq 12); do
+          sleep 5
+          current="$(ext_api GET /api/status 2> /dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["planet"])' 2> /dev/null || true)"
+          [[ "$current" == "$planet" ]] && break 2
+        done
+      done
+      [[ "$current" == "$planet" ]] || die "the game did not reach $planet"
+      sleep 15
+    fi
+    ext_api GET /api/scenedata > "$out/scenes/$planet.json"
+  done
+  rm -f "$raw" "$probe"
+  stop_extractor
+  trap - EXIT
+  buildid_of "$game" > "$out/buildid"
+  rm -rf "$RUN/data/$version"
+  mv "$out" "$RUN/data/$version"
+  say "game tables for $version in $RUN/data/$version (planets: $planets)"
+}
+
+cmd_update() {
+  local game_arg="" game installed current data
+  while (($#)); do
+    case "$1" in
+      --game) game_arg="${2:?--game DIR}"; shift ;;
+      *) die "unknown option $1" ;;
+    esac
+    shift
+  done
+  game="$(game_dir "$game_arg")"
+  data="$(data_dir)"
+  current="$(buildid_of "$game")"
+  installed="$( [[ -n "$data" ]] && cat "$data/buildid" 2> /dev/null || true)"
+  if [[ -n "$data" && -n "$current" && "$current" == "$installed" ]]; then
+    say "up to date (game build $current)"
+    return 0
+  fi
+  say "game build ${installed:-unknown} -> ${current:-unknown}"
+  cmd_extract --game "$game"
+  if active; then
+    systemctl --user restart "$UNIT"
+    say "server restarted on the new tables"
+  fi
+}
+
+# ---- setup and checks ----------------------------------------------------------------------
+
+steamclient_check() {
+  [[ "$(env_get PCDS_STEAM)" == off ]] && return 0
+  local f
+  for f in "$HOME/.steam/sdk64/steamclient.so" "$HOME/.local/share/Steam/linux64/steamclient.so" "$HOME/.steam/steam/linux64/steamclient.so"; do
+    [[ -f "$f" ]] && return 0
+  done
+  echo "pcds: invite codes need Valve's steamclient.so: install steamcmd and run 'steamcmd +quit' once" \
+    "(it creates ~/.steam/sdk64), or set PCDS_STEAM=off in $ENV_FILE for direct IP only" >&2
+}
+
+cmd_setup() {
+  local game_arg="" world="" new=0 new_args=()
+  while (($#)); do
+    case "$1" in
+      --game) game_arg="${2:?--game DIR}"; shift ;;
+      --world) world="${2:?--world SAVE.json}"; shift ;;
+      --new) new=1 ;;
+      *) ((new)) && new_args+=("$1") || die "unknown option $1" ;;
+    esac
+    shift
+  done
+  local tool
+  for tool in curl python3 unzip sha256sum systemctl; do
+    need "$tool" "install it with your package manager"
+  done
+  mkdir -p "$RUN"
+  install_server
+  if [[ -z "$(data_dir)" ]]; then
+    cmd_extract ${game_arg:+--game "$game_arg"}
+  fi
+  if [[ -n "$world" ]]; then
+    [[ -f "$world" ]] || die "no save at $world"
+    if [[ -f "$WORLD" ]]; then
+      mkdir -p "$RUN/backups"
+      cp -p "$WORLD" "$RUN/backups/world-replaced-$(date -u +%Y%m%d-%H%M%S).json"
+    fi
+    cp "$world" "$WORLD"
+    say "world copied from $world"
+  elif ((new)); then
+    cmd_new --force "${new_args[@]}"
+  elif [[ ! -f "$WORLD" ]]; then
+    die "no world yet: pass --world SAVE.json (a save from your game) or --new"
+  fi
+  write_env
+  write_unit
+  steamclient_check
+  say "ready: 'pcds start' runs it now, 'pcds install-service' starts it at login"
+}
+
+cmd_selftest() {
+  active || die "start the server first (pcds start)"
+  local data script out
+  data="$(data_dir)"
+  script="$(mktemp)"
+  printf '{"name":"PcdsSelftest","steps":[{"wait":2000}]}' > "$script"
+  out="$(PROBE_NAME=PcdsSelftest timeout 60 "$(server_bin)" probe "127.0.0.1:$(port)" "$data" "$script" 2>&1 || true)"
+  rm -f "$script"
+  if grep -q '"joined"' <<< "$out" && grep -q 'InitPlayerClientRpc' <<< "$out"; then
+    say "selftest PASS: a player joined over direct IP on port $(port) and was set up"
+  else
+    echo "$out" | tail -5 >&2
+    die "selftest FAIL (see above and pcds logs)"
+  fi
+}
+
+case "${1:-}" in
+  setup) shift; cmd_setup "$@" ;;
+  new) shift; cmd_new "$@" ;;
+  start | stop | restart)
+    [[ -f "$UNIT_DIR/$UNIT" ]] || die "run 'pcds setup' first"
+    systemctl --user "$1" "$UNIT"
+    ;;
+  status) cmd_status ;;
+  logs) journalctl --user -o cat -u "$UNIT" -n 100 -f ;;
+  install-service) cmd_install_service ;;
+  uninstall-service) cmd_uninstall_service ;;
+  code) cmd_code ;;
+  players) cmd_players ;;
+  save) api POST /api/save ;;
+  kick) api POST /api/kick "{\"player\": $(json_str "${2:?player}")}" ;;
+  ban) api POST /api/ban "{\"player\": $(json_str "${2:?player}")}" ;;
+  unban) api POST /api/unban "{\"value\": $(json_str "${2:?name or ip}")}" ;;
+  gui) echo "http://$(env_get PCDS_ADMIN)/#token=$(env_get PCDS_ADMIN_TOKEN)" ;;
+  token) env_get PCDS_ADMIN_TOKEN ;;
+  config) "${EDITOR:-nano}" "$ENV_FILE" ;;
+  api) api "${2:?method}" "${3:?path}" "${4:-}" ;;
+  extract) shift; cmd_extract "$@" ;;
+  update) shift; cmd_update "$@" ;;
+  selftest) cmd_selftest ;;
+  run) cmd_run ;;
+  build)
+    build_server
+    build_extractor
+    ;;
+  *)
+    sed -n '2,/^set /p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
+    exit 1
+    ;;
+esac

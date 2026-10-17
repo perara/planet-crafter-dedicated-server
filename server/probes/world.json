@@ -1,0 +1,23 @@
+{"name": "WorldProbe", "steps": [
+ {"rpc": "PlayerGaugesHandler.EatServerRpc", "on": "player:PlayerGaugesHandler", "args": [10]},
+ {"rpc": "PlayerGaugesHandler.DrinkServerRpc", "on": "player:PlayerGaugesHandler", "args": [10]},
+ {"rpc": "PlayerGaugesHandler.BreathServerRpc", "on": "player:PlayerGaugesHandler", "args": [10]},
+ {"rpc": "ChatHandler.SendChatMessageServerRpc", "on": "ChatHandler", "args": ["hello world"]},
+ {"rpc": "TokensHandler.GainTokensServerRpc", "on": "TokensHandler", "args": [5]},
+ {"rpc": "PlayersDataManager.SetLightStatusServerRpc", "on": "PlayersDataManager", "args": [true, 2]},
+ {"rpc": "PlayersDataManager.SetSkinStatusServerRpc", "on": "PlayersDataManager", "args": [3]},
+ {"rpc": "PlayersDataManager.GetPlayersPositionsServerRpc", "on": "PlayersDataManager", "args": []},
+ {"rpc": "WorldObjectsHandler.GetEnergyGroupDataServerRpc", "on": "WorldObjectsHandler", "args": []},
+ {"rpc": "WorldObjectsHandler.HasWorldObjectAtPositionServerRpc", "on": "WorldObjectsHandler", "args": [[1, 2, 3]]},
+ {"rpc": "InventoriesHandler.AddWorldObjectToInventoryServerRpc", "on": "InventoriesHandler", "args": [101333311, 1542657923, "$inventory", false]},
+ {"rpc": "WorldObjectsHandler.IsWorldObjectFromSceneActiveServerRpc", "on": "WorldObjectsHandler", "args": [101333311]},
+ {"rpc": "InventoriesHandler.AddNewItemToInventoryServerRpc", "on": "InventoriesHandler", "args": [1400949664, "$inventory"], "capture": {"var": "iron", "rpc": "InventoriesHandler.AddNewItemClientRpc", "arg": 1}},
+ {"rpc": "InventoriesHandler.RemoveItemFromInventoryServerRpc", "on": "InventoriesHandler", "args": ["$iron", "$inventory", false]},
+ {"rpc": "WorldObjectsHandler.DropOnFloorServerRpc", "on": "WorldObjectsHandler", "args": ["$iron", [560, 3, 497], 0.0, true, false, 0, 0.0], "after": 600, "capture": {"var": "dropped", "create": true}},
+ {"rpc": "SettingProxy.SetSettingServerRpc", "on": ["$dropped", 3], "args": [2]},
+ {"rpc": "ColorProxy.SetColorServerRpc", "on": ["$dropped", 4], "args": [[1, 0.5, 0.25, 0.1]]},
+ {"rpc": "InventoriesHandler.AddWorldObjectToInventoryServerRpc", "on": "InventoriesHandler", "args": ["$iron", 1400949664, "$inventory", true]},
+ {"rpc": "WorldObjectsHandler.CreateAndDropOnFloorServerRpc", "on": "WorldObjectsHandler", "args": [-733876036, [561, 3, 497], 0.0, true, true, 0.0], "after": 600},
+ {"rpc": "WorldObjectsHandler.GetGeneticsDetailsServerRpc", "on": "WorldObjectsHandler", "args": [["$iron"]]},
+ {"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc", "on": "InventoriesHandler", "args": [false, 0, "$inventory", 0, null, null]}
+]}

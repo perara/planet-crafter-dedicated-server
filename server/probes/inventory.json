@@ -1,0 +1,14 @@
+{"name": "InventoryProbe", "steps": [
+ {"rpc": "InventoriesHandler.AddNewItemToInventoryServerRpc", "on": "InventoriesHandler", "args": [1400949664, "$inventory"], "capture": {"var": "iron", "rpc": "InventoriesHandler.AddNewItemClientRpc", "arg": 1}},
+ {"rpc": "InventoriesHandler.AddNewItemToInventoryServerRpc", "on": "InventoriesHandler", "args": [1400949664, "$inventory"]},
+ {"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc", "on": "InventoriesHandler", "args": [false, 0, "$inventory", 0, null, null]},
+ {"rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc", "on": "WorldObjectsHandler", "args": [1768717124, [559.5, 2.6, 497.5], [0, 0, 0, 1], true, false, true, false], "after": 600, "capture": {"var": "box", "rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectClientRpc", "arg": 0}},
+ {"rpc": "InventoryAssociatedProxy.GetInventoryIdServerRpc", "on": ["$box", 1], "args": [], "capture": {"var": "boxinv", "rpc": "InventoryAssociatedProxy.GetInventoryIdClientRpc", "arg": 2}},
+ {"rpc": "InventoriesHandler.TransferItemServerRpc", "on": "InventoriesHandler", "args": ["$inventory", "$boxinv", "$iron"]},
+ {"rpc": "TextProxy.SetTextServerRpc", "on": ["$box", 2], "args": ["hello"]},
+ {"rpc": "InventoriesHandler.SortInventoryServerRpc", "on": "InventoriesHandler", "args": ["$boxinv"]},
+ {"rpc": "GroupNetworkBase.DeconstructServerRpc", "on": ["$box", 0], "args": [1.0]},
+ {"rpc": "InventoriesHandler.TransferAllItemsServerRpc", "on": "InventoriesHandler", "args": ["$boxinv", "$inventory"]},
+ {"rpc": "GroupNetworkBase.DeconstructServerRpc", "on": ["$box", 0], "args": [1.0], "after": 2500},
+ {"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc", "on": "InventoriesHandler", "args": [false, 0, "$inventory", 0, null, null]}
+]}

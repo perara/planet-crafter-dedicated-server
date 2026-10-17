@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>PcdsExtractor</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <!-- The game folder with BepInEx installed (pcds build passes it). -->
+    <GameDir Condition="'$(GameDir)' == ''">$(MSBuildThisFileDirectory)../run/extractor/game</GameDir>
+    <Managed>$(GameDir)/Planet Crafter_Data/Managed</Managed>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net472" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="$(GameDir)/BepInEx/core/BepInEx.dll" Private="false" />
+    <Reference Include="$(GameDir)/BepInEx/core/0Harmony.dll" Private="false" />
+    <Reference Include="$(Managed)/Assembly-CSharp.dll" Private="false" />
+    <Reference Include="$(Managed)/UnityEngine.dll" Private="false" />
+    <Reference Include="$(Managed)/UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="$(Managed)/UnityEngine.JSONSerializeModule.dll" Private="false" />
+    <Reference Include="$(Managed)/UnityEngine.PhysicsModule.dll" Private="false" />
+    <Reference Include="$(Managed)/Unity.TextMeshPro.dll" Private="false" />
+    <Reference Include="$(Managed)/Unity.Netcode.Runtime.dll" Private="false" />
+    <Reference Include="$(Managed)/Unity.Networking.Transport.dll" Private="false" />
+    <Reference Include="$(Managed)/Unity.Collections.dll" Private="false" />
+    <Reference Include="$(Managed)/Newtonsoft.Json.dll" Private="false" />
+    <Reference Include="$(Managed)/netstandard.dll" Private="false" />
+  </ItemGroup>
+
+</Project>
