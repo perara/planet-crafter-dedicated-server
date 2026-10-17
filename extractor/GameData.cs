@@ -74,12 +74,44 @@ namespace PcdsExtractor
 
         static JArray Components(GameObject root)
         {
-            return new JArray(root.GetComponentsInChildren<MonoBehaviour>(true).Where(c => c != null && IsGameObjectType(c)).Select(c => new JObject
+            return new JArray(root.GetComponentsInChildren<MonoBehaviour>(true).Where(c => c != null && IsGameObjectType(c)).Select(c =>
             {
-                ["type"] = c.GetType().Name,
-                ["path"] = RelativePath(root.transform, c.transform),
-                ["fields"] = Fields(c, 0),
+                JObject component = new JObject
+                {
+                    ["type"] = c.GetType().Name,
+                    ["path"] = RelativePath(root.transform, c.transform),
+                    ["fields"] = Fields(c, 0),
+                };
+                JObject poses = Poses(root.transform, c);
+                if (poses.Count > 0)
+                {
+                    component["poses"] = poses;
+                }
+                return component;
             }));
+        }
+
+        // Where a component's serialized Transform fields point, relative to the root: spots that
+        // come placed with their building (MachineDeparturePlatform._landingPosition).
+        static JObject Poses(Transform root, MonoBehaviour c)
+        {
+            JObject poses = new JObject();
+            for (Type t = c.GetType(); t != null && t != typeof(MonoBehaviour) && t != typeof(NetworkBehaviour); t = t.BaseType)
+            {
+                foreach (FieldInfo f in t.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+                {
+                    bool serialized = (f.IsPublic && !f.IsNotSerialized) || f.GetCustomAttribute<SerializeField>() != null;
+                    if (serialized && f.FieldType == typeof(Transform) && f.GetValue(c) is Transform target && target != null && !poses.ContainsKey(f.Name))
+                    {
+                        poses[f.Name] = new JObject
+                        {
+                            ["position"] = Vector(root.InverseTransformPoint(target.position)),
+                            ["rotation"] = Vector(Quaternion.Inverse(root.rotation) * target.rotation),
+                        };
+                    }
+                }
+            }
+            return poses;
         }
 
         // Game components that exist once in the loaded scenes: the handlers and managers.

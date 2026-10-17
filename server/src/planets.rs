@@ -5,8 +5,8 @@
 //!
 //! Where the port differs from the game, because the server has no scene:
 //! - The landing spot on a planet that has a departure platform is the platform's
-//!   MachineDeparturePlatform._landingPosition child, whose offset the data does not carry:
-//!   the platform's own position and rotation stand in for it.
+//!   MachineDeparturePlatform._landingPosition child; with game tables extracted before the
+//!   dump carried its pose, the platform's own position and rotation stand in for it.
 //! - The host loads the new planet's scene before planetIsLoaded runs; here it runs right after
 //!   the RPC, in the same tick.
 //! - Only planets in _availablePlanets can be travelled to (the game does not check): the
@@ -86,6 +86,17 @@ fn yaw_degrees(q: [f32; 4]) -> f32 {
     if y < 0.0 { y + 360.0 } else { y }
 }
 
+/// MachineDeparturePlatform.GetLandingTransform: the platform's _landingPosition child, which sits
+/// where the dump's pose (relative to the prefab root) puts it; the platform itself without one.
+fn landing_transform(game: &Game, platform: &WorldObject) -> ([f32; 3], [f32; 4]) {
+    let components = game.data.group_prefabs[&game.data.groups[platform.group].id]["components"].as_array().cloned().unwrap_or_default();
+    let pose = components.iter().find(|c| c["type"] == "MachineDeparturePlatform").map(|c| c["poses"]["_landingPosition"].clone()).filter(|p| !p.is_null());
+    let Some(pose) = pose else { return (platform.position, platform.rotation) };
+    let f = |v: &serde_json::Value, i: usize| v[i].as_f64().unwrap_or(if i == 3 { 1.0 } else { 0.0 }) as f32;
+    let offset = crate::geometry::rotate(platform.rotation, [0, 1, 2].map(|i| f(&pose["position"], i)));
+    ([0, 1, 2].map(|i| platform.position[i] + offset[i]), crate::geometry::mul(platform.rotation, [0, 1, 2, 3].map(|i| f(&pose["rotation"], i))))
+}
+
 /// PlanetNetworkLoader.SwitchToPlanetServerRpc: the session moves to another planet. The
 /// rocket (a world object, 0 for none) has its inventory moved into the arrival pod.
 pub fn switch_to_planet(game: &mut Game, planet_hash: i32, rocket_wo: i32, spawn_index: i32) {
@@ -108,10 +119,8 @@ pub fn switch_to_planet(game: &mut Game, planet_hash: i32, rocket_wo: i32, spawn
         rotation = [0, 1, 2, 3].map(|i| f(&spawn["rotation"], i));
     } else {
         let platforms: Vec<usize> = game.data.singletons["PlanetNetworkLoader"]["_departurePlatformGroups"].as_array().into_iter().flatten().filter_map(|r| game.data.group_of_ref(r.as_str()?)).collect();
-        // ponytail: the platform's landing child has an offset the data lacks; dump it to land exactly.
         if let Some(w) = platforms.iter().find_map(|g| game.first_world_object_of_group(*g, planet_hash)).and_then(|w| game.wos.get(&w)) {
-            position = w.position;
-            rotation = w.rotation;
+            (position, rotation) = landing_transform(game, w);
         }
     }
     let Some(pod_group) = interplanetary_pod(game) else { return };
@@ -277,6 +286,33 @@ pub mod tests {
         assert_eq!(g.wos[&iron].planet, selenea);
         assert!(g.wos[&iron].is_placed());
         assert!(!g.wos.contains_key(&pod), "the old pod is replaced");
+    }
+
+    #[test]
+    fn arrivals_land_on_the_platform_landing_spot() {
+        let Some(mut g) = game() else { return };
+        let platform = g.data.group("DeparturePlatform").unwrap();
+        let has_pose = g.data.group_prefabs["DeparturePlatform"]["components"].as_array().unwrap().iter().any(|c| c["poses"]["_landingPosition"].is_object());
+        if !has_pose {
+            return; // Game tables extracted before the dump carried component poses.
+        }
+        let selenea = stable_hash("Selenea");
+        switch_to_planet(&mut g, selenea, 0, 0);
+        // A departure platform on Selenea, turned a quarter.
+        let id = g.new_world_object_id();
+        g.create_world_object(platform, id, true);
+        let w = g.wos.get_mut(&id).unwrap();
+        (w.position, w.rotation, w.planet) = ([100.0, 20.0, 50.0], crate::geometry::from_euler_y(90.0), selenea);
+        g.instantiate(id, false, 0);
+        switch_to_planet(&mut g, stable_hash("Prime"), 0, 0);
+        g.net.out.clear();
+        switch_to_planet(&mut g, selenea, 0, 0);
+        // _landingPosition sits at (-2.95, 7.062, -9.97) in the platform, turned a quarter more.
+        let pod = g.first_world_object_of_group(interplanetary_pod(&g).unwrap(), selenea).unwrap();
+        let (p, r) = (g.wos[&pod].position, g.wos[&pod].rotation);
+        let expected = [90.03, 27.062, 52.95];
+        assert!((0..3).all(|i| (p[i] - expected[i]).abs() < 1e-3), "{p:?}");
+        assert!((yaw_degrees(r) - 180.0).abs() < 0.01, "{r:?}");
     }
 
     #[test]
