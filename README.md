@@ -17,11 +17,13 @@ once per game version, and nothing from the game is distributed here.
 
 ## Requirements
 
-- Linux x86_64 with systemd.
+- Linux x86_64 with systemd and glibc 2.34 or newer for the release build (Ubuntu 22.04,
+  Debian 12, Fedora 35, RHEL 9 and later). Run it as an ordinary user: `pcds` refuses to run as root.
 - Your copy of The Planet Crafter for Windows, installed through Steam on this machine, or the
   game folder copied from a PC (the folder that contains `Planet Crafter.exe`).
 - Wine, curl, python3 and unzip. Wine is only used once per game version, to run the game
-  headless and read its tables.
+  headless and read its tables. On a machine without a display, also Xvfb (`xvfb-run`; package
+  `xvfb` or `xorg-x11-server-Xvfb`).
 - For invite codes: Valve's `steamclient.so`. Install
   [steamcmd](https://developer.valvesoftware.com/wiki/SteamCMD) and run `steamcmd +quit` once
   (it creates `~/.steam/sdk64`), or have the Steam client installed. Without it, the server
@@ -60,7 +62,9 @@ or with a new world:
 
 `setup` finds the game in your Steam library (or pass `--game DIR`), reads the game tables from
 it, puts the world in place, and writes the settings and a systemd user unit. Your game folder
-is never modified.
+is never modified, and a modded one works too: the extraction leaves the game's own BepInEx,
+doorstop and `steam_appid.txt` out of its copy and brings its own. `setup --new` does not replace
+an existing world (pass `--force` for that), and `setup --world` refuses while the server runs.
 
 Where the game keeps its saves:
 - Windows: `%USERPROFILE%\AppData\LocalLow\MijuGames\Planet Crafter\`
@@ -70,10 +74,21 @@ Where the game keeps its saves:
 
 ```bash
 ./pcds start              # also: stop, restart, status, logs
-./pcds selftest           # a scripted player joins over direct IP and checks the answers
+./pcds selftest           # a scripted connection over direct IP is approved and gets the world
 ./pcds install-service    # start at login and pick up game updates hourly
 loginctl enable-linger $USER   # keep it running while you are logged out
 ```
+
+The selftest does not become a player, so nothing is saved for it.
+
+### Upgrading
+
+- From source: `git pull`, `./pcds build`, then `./pcds restart`.
+- From a release: `./pcds stop` in the old folder, unpack the new tarball, move the old
+  folder's `run/` into the new one, then run `./pcds setup` and `./pcds start` in the new
+  folder (`setup` points the systemd unit at it).
+
+The server installs the newer binary into `run/bin/` by itself when it starts.
 
 ## Joining
 
@@ -97,6 +112,9 @@ loginctl enable-linger $USER   # keep it running while you are logged out
 | `PCDS_BACKUP_MINUTES` | `60` | minutes between backups |
 | `PCDS_ADMIN` | `127.0.0.1:7782` | admin API and web page; `off` disables them |
 | `PCDS_ADMIN_TOKEN` | generated | the admin API's bearer token |
+| `PCDS_MAX_PLAYERS` | `16` | players at once; more are refused with the game's session-full message |
+
+`run/server.env` holds the admin token and is readable by your user only.
 
 ## Administration
 
@@ -111,8 +129,18 @@ loginctl enable-linger $USER   # keep it running while you are logged out
 
 Access lists live in `run/access.json`: `allowedIPs` (addresses or CIDR ranges allowed to
 connect; empty means everyone), `whitelist` (names or SteamID64s; empty means everyone),
-`bannedNames` and `bannedIPs`. SteamIDs are verified for invite-code players only. Over direct
-IP the game's reported SteamID cannot be checked, so those players are identified by their name.
+`bannedNames` and `bannedIPs`. The server reads the file at start and writes it on every ban,
+unban or change from the web page: edit it by hand only while the server is stopped.
+
+- **SteamIDs are verified for invite-code players only.** A SteamID64 entry matches only that
+  verified SteamID, never a player name. A banned SteamID is refused as soon as it connects.
+- **Direct IP is not authenticated.** The game's reported SteamID cannot be checked there, so
+  direct-IP players are identified by their name; anyone can join under any name that is not
+  taken or banned. Use `allowedIPs` or turn direct IP off (`PCDS_LISTEN=off`) when that matters.
+- `ban NAME` bans the name plus the player's SteamID (when they joined by invite code) or IP
+  (direct IP). `unban` removes one entry: unban the name and the SteamID or IP separately
+  (`./pcds unban 7656119...`).
+- A second connection under a name or SteamID that is already playing is refused.
 
 The admin API listens on 127.0.0.1. To reach the web page from another machine, use an SSH
 tunnel (`ssh -L 7782:127.0.0.1:7782 server`) rather than exposing it.
@@ -127,7 +155,10 @@ Players and the server must run the same game version; players with another vers
 refused with the game's version-mismatch message. After a game update, `./pcds update` reads the
 new tables from the updated game and restarts the server (`install-service` runs it every hour).
 On a machine without Steam, copy the updated game folder over and run
-`./pcds update --game DIR`.
+`./pcds update --game DIR`; a copied folder is recognised by a hash of the game's code. The
+server uses the tables that match the installed game. One extraction runs at a time (it locks
+`run/.extract.lock`): it uses ports 7791 and 7781 on 127.0.0.1, which a second server on the
+same machine shares.
 
 ## Worlds and backups
 
@@ -137,7 +168,11 @@ On a machine without Steam, copy the updated game folder over and run
   `--set modifierGaugeDrain=0.5 --set dyingConsequencesLabel=NoConsequences`. `--force` replaces an
   existing world; the old one is kept in `run/backups/`.
 - `run/backups/` keeps timestamped copies of the world (one per `PCDS_BACKUP_MINUTES`, the newest
-  `PCDS_BACKUPS`). To restore one, stop the server and copy it over `run/world.json`.
+  `PCDS_BACKUPS`), named by UTC time. Each start also backs up the world as it was before the
+  server touched it, at most once per 10 minutes. To restore one, stop the server and copy it
+  over `run/world.json`.
+- A server that keeps crashing stops after 5 starts in 10 minutes, so the older backups stay.
+  `./pcds logs` shows why; `systemctl --user reset-failed pcds` and `./pcds start` try again.
 
 ## Differences from hosting in the game
 
@@ -157,6 +192,17 @@ On a machine without Steam, copy the updated game folder over and run
 
 Where the server has to approximate what the game's physics would decide (positions on a
 platform, landing spots, seats, machine ranges), the code says so in a `ponytail:` comment.
+
+## Known limits
+
+- **Direct IP can be spoofed.** Unity Transport lets the client pick its connection token, so
+  someone who forges a player's address can start a session in their name without seeing the
+  answers. Invite codes (Steam networking) do not have this problem.
+- **Connection slots can be flooded.** The server caps connections (128 in all, 8 per IP, 10
+  seconds to send data) to protect its memory; a flood can still keep new players out while it
+  lasts.
+- **Clients are trusted with their own inventories**, as the game does: there are no ownership
+  checks on inventory changes, and no rate limits on game messages.
 
 ## How it works
 
