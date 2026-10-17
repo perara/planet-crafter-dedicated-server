@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use crate::data::{stable_hash, NetData, ObjectDef};
 use crate::gamedata::{GameData, Layout};
 use crate::model::{Inventory, WorldObject};
-use crate::net::{self, enc, ListEvent, Net, NetObj, Target};
+use crate::net::{self, ListEvent, Net, NetObj, Target};
 use crate::protocol::{self, CONNECTION_APPROVED, CONNECTION_REQUEST, NETWORK_TRANSFORM, NETWORK_VARIABLE_DELTA};
 use crate::rpcspec::Spec;
 use crate::save::SaveFile;
@@ -84,7 +84,6 @@ pub struct PlayerState {
     pub total_crafted: u32,
     pub total_tokens: u64,
     pub camera_view: i32,
-    pub host: bool,
     /// Oxygen, thirst, health, toxic.
     pub gauges: [f32; 4],
 }
@@ -274,10 +273,6 @@ impl Game {
         (self.started.elapsed().as_secs_f64() * self.net_data.tick_rate as f64) as i32
     }
 
-    pub fn group_id(&self, group: usize) -> &str {
-        &self.data.groups[group].id
-    }
-
     /// SavedDataHandler.LoadSavedData: world objects, inventories, planets, players; then the
     /// scene's network objects and every placed world object of the current planet.
     fn load(&mut self) {
@@ -326,7 +321,7 @@ impl Game {
     /// The in-scene network objects (handlers and managers) and one WorldUnitsPlanet per planet.
     fn spawn_scene(&mut self) {
         for def in self.net_data.scene_objects.clone() {
-            let mut o = NetObj::from_layout("scene", &layout_of(&def));
+            let mut o = NetObj::from_layout(&layout_of(&def));
             o.id = def.id;
             o.parent = def.parent;
             self.net.add_scene_object(o);
@@ -378,7 +373,7 @@ impl Game {
             }
         }
         let def = self.net_data.prefabs["Player"].clone();
-        let mut o = NetObj::from_layout("Player", &layout_of(&def));
+        let mut o = NetObj::from_layout(&layout_of(&def));
         o.owner = client;
         if !def.spawn_sync.is_empty() {
             o.set_spawn_sync(&crate::world::hex(&def.spawn_sync));
@@ -575,9 +570,6 @@ impl Game {
         [hash.to_le_bytes(), count.to_le_bytes()].concat()
     }
 
-    pub fn bool_var(v: bool) -> Vec<u8> {
-        enc::bool(v)
-    }
 }
 
 #[cfg(test)]

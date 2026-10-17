@@ -463,7 +463,7 @@ fn spawn_animal(game: &mut Game, key: i32, sequence: i32, owner: u64, random_pos
         w.growth
     };
     let owner = if owner != 0 { owner } else { first_owner.unwrap_or(0) };
-    let mut o = NetObj::from_layout(&prefab, &animal_layout(hash, game.tick_number()));
+    let mut o = NetObj::from_layout(&animal_layout(hash, game.tick_number()));
     o.position = position;
     o.wo = Some(sequence);
     o.owner = owner;
@@ -846,7 +846,7 @@ mod tests {
     fn animal_layout_matches_the_captured_spawn_tail() {
         // Sharky as the real server spawned it at (42, 2.5, 40), tick 41963 (captured).
         let l = animal_layout(0x60be7ec3, 41963);
-        let mut o = NetObj::from_layout("Sharky", &l);
+        let mut o = NetObj::from_layout(&l);
         o.position = [42.0, 2.5, 40.0];
         let sync = o.sync();
         let tail = &sync[sync.len() - l.tail.len()..];

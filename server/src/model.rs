@@ -3,7 +3,6 @@
 
 use serde_json::{json, Value};
 
-use crate::data::stable_hash;
 use crate::gamedata::{GameData, UNIT_TYPES};
 
 /// World objects with ids below this come with a planet's scene (WorldObjectsIdHandler).
@@ -293,10 +292,6 @@ pub fn group_ids(groups: &[usize], data: &GameData) -> String {
 
 pub fn unit_index(unit: &str) -> Option<usize> {
     UNIT_TYPES.iter().position(|u| *u == unit)
-}
-
-pub fn planet_hash(planet_id: &str) -> i32 {
-    stable_hash(planet_id)
 }
 
 #[cfg(test)]

@@ -128,7 +128,7 @@ impl Game {
             eprintln!("no network layout for {key}");
             return None;
         };
-        let mut o = NetObj::from_layout(&key, layout);
+        let mut o = NetObj::from_layout(layout);
         let (inventory_size, secondary, hash) = (g.inventory_size, g.secondary_inventories.clone(), g.hash);
         let constructible = g.constructible;
         let energy = g.unit("Energy");

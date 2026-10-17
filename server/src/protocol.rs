@@ -104,8 +104,6 @@ pub fn invite_code(mut value: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn invite_code_matches_the_game() {
         // The plugin logged "invite code pr2rqesRqVB4242" for game server 90295105288932371.

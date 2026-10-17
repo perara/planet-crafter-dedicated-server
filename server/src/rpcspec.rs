@@ -13,13 +13,11 @@ use crate::wire::{Reader, Writer};
 #[derive(Deserialize)]
 pub struct Rpc {
     pub name: String,
-    pub to: String,
     pub args: Vec<Arg>,
 }
 
 #[derive(Deserialize)]
 pub struct Arg {
-    pub name: String,
     #[serde(rename = "type")]
     pub ty: String,
     pub enc: String,

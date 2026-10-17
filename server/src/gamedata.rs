@@ -34,9 +34,6 @@ impl Group {
     pub fn str(&self, key: &str) -> &str {
         self.fields[key].as_str().unwrap_or("")
     }
-    pub fn f32(&self, key: &str) -> f32 {
-        self.fields[key].as_f64().unwrap_or(0.0) as f32
-    }
     pub fn bool(&self, key: &str) -> bool {
         self.fields[key].as_bool().unwrap_or(false)
     }
@@ -63,7 +60,6 @@ pub struct Layout {
 }
 
 pub struct GameData {
-    pub version: String,
     pub groups: Vec<Group>,
     by_id: HashMap<String, usize>,
     by_hash: HashMap<i32, usize>,
@@ -73,8 +69,6 @@ pub struct GameData {
     pub assets: serde_json::Map<String, Value>,
     pub group_prefabs: Value,
     pub singletons: Value,
-    /// World objects that come with the dumped planet's scene.
-    pub scene_world_objects: Vec<Value>,
 }
 
 const DUMP_POSITION: [u8; 12] = [0, 0, 0, 0, 0x00, 0x40, 0x9c, 0xc5, 0, 0, 0, 0];
@@ -154,7 +148,6 @@ impl GameData {
         let by_hash = groups.iter().enumerate().map(|(i, g)| (g.hash, i)).collect();
         let layouts = root["layouts"].as_object().into_iter().flatten().filter_map(|(k, v)| Some((k.clone(), layout(v)?))).collect();
         Ok(GameData {
-            version: root["gameVersion"].as_str().unwrap_or("").into(),
             groups,
             by_id,
             by_hash,
@@ -162,7 +155,6 @@ impl GameData {
             assets,
             group_prefabs: root["groupPrefabs"].take(),
             singletons: root["singletons"].take(),
-            scene_world_objects: root["sceneWorldObjects"].as_array().cloned().unwrap_or_default(),
         })
     }
 

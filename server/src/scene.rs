@@ -5,8 +5,8 @@
 use serde_json::{json, Value};
 
 use crate::data::stable_hash;
-use crate::game::{layout_of, Game};
-use crate::net::{enc, NetObj, Target, VarValue};
+use crate::game::Game;
+use crate::net::{enc, Target, VarValue};
 
 pub enum Timer {
     /// GroupNetworkContainer.DespawnAfterDelay.
@@ -156,10 +156,3 @@ pub fn on_world_object_from_scene_retrieved(game: &mut Game, wo: i32) {
     crate::machines::scene_object_removed(game, wo);
 }
 
-/// One WorldUnitsPlanet object per saved planet, holding its terraformation units.
-pub fn spawn_planet_units(game: &mut Game, planet: &Value) -> Option<u64> {
-    let def = game.net_data.prefabs.get("WorldUnitsPlanet")?.clone();
-    let mut o = NetObj::from_layout("WorldUnitsPlanet", &layout_of(&def));
-    o.init("WorldUnitsPlanet", "_planetIdHash", enc::int(stable_hash(planet["planetId"].as_str()?)));
-    Some(game.net.spawn(o))
-}

@@ -94,7 +94,7 @@ fn departure_platform_is_free_again_once_the_ending_is_over() {
     let Some(mut g) = game(vec![placed(platform, "DeparturePlatform", "300,10,300", "Prime", json!({}))], vec![]) else { return };
     let net = g.wos[&platform].net.unwrap();
     g.connect(1, None, false, None);
-    let state = crate::game::PlayerState { id: 1, name: "a".into(), inventory: 0, equipment: 0, position: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], planet: String::new(), total_crafted: 0, total_tokens: 0, camera_view: 0, host: false, gauges: [100.0; 4] };
+    let state = crate::game::PlayerState { id: 1, name: "a".into(), inventory: 0, equipment: 0, position: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], planet: String::new(), total_crafted: 0, total_tokens: 0, camera_view: 0, gauges: [100.0; 4] };
     g.clients.get_mut(&1).unwrap().ready = Some(state);
     // EndingRiley.
     let args = Args(vec![json!(1), json!(0), json!(0)]);

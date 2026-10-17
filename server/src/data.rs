@@ -16,7 +16,6 @@ pub struct NetData {
     pub scene_objects: Vec<ObjectDef>,
     pub prefabs: HashMap<String, ObjectDef>,
     pub planets: Vec<PlanetDef>,
-    pub groups: HashMap<String, GroupDef>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -66,13 +65,6 @@ pub struct PlanetDef {
     pub starting_planet: bool,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GroupDef {
-    pub hash: i32,
-    pub prefab: Option<String>,
-}
-
 impl NetData {
     pub fn load(path: &str) -> Result<NetData, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
@@ -81,12 +73,6 @@ impl NetData {
 
     pub fn planet_index(&self, id: &str) -> Option<usize> {
         self.planets.iter().position(|p| p.id == id)
-    }
-
-    /// Network prefab spawned for a world object of this group, if the server knows its layout.
-    pub fn prefab_for_group(&self, group: &str) -> Option<&ObjectDef> {
-        let name = self.groups.get(group)?.prefab.as_deref()?;
-        self.prefabs.get(name)
     }
 }
 

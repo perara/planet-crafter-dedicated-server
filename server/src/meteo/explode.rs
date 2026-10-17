@@ -179,7 +179,7 @@ mod tests {
         let Some(mut g) = game() else { return };
         let (explosive, rock) = (g.data.group("Explosive").unwrap(), g.data.group("RockExplodable").unwrap());
         let planet = g.planet_hash();
-        let mut place = |g: &mut crate::game::Game, group: usize, p: [f32; 3]| {
+        let place = |g: &mut crate::game::Game, group: usize, p: [f32; 3]| {
             let id = g.create_world_object(group, 0, true);
             let w = g.wos.get_mut(&id).unwrap();
             w.position = p;
@@ -191,7 +191,7 @@ mod tests {
         let near = place(&mut g, rock, [12.0, 0.0, 10.0]);
         let far = place(&mut g, rock, [30.0, 0.0, 10.0]);
         let bomb_net = g.wos[&bomb].net.unwrap();
-        let mut at = |g: &mut crate::game::Game, t: f32| {
+        let at = |g: &mut crate::game::Game, t: f32| {
             g.time = t;
             super::tick(g);
         };

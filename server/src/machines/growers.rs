@@ -641,7 +641,7 @@ mod tests {
     fn crops_of_growers_on_other_planets_stay_inactive() {
         let Some(mut game) = game() else { return };
         let grower = build(&mut game, "VegetableGrower1", [50.0, 5.0, 0.0]);
-        let aqualis = crate::model::planet_hash("Aqualis");
+        let aqualis = crate::data::stable_hash("Aqualis");
         game.wos.get_mut(&grower).unwrap().planet = aqualis;
         crate::machines::tick(&mut game);
         let (seeds, second) = (game.wos[&grower].linked_inventory, game.wos[&grower].secondary_inventories[0]);

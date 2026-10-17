@@ -194,10 +194,6 @@ impl<'a> Reader<'a> {
         let v = self.packed_u32()?;
         Some(((v >> 1) as i32) ^ -((v & 1) as i32))
     }
-    pub fn i32_array(&mut self) -> Option<Vec<i32>> {
-        let n = self.i32()?;
-        (0..n.max(0)).map(|_| self.i32()).collect()
-    }
     /// FastBufferWriter.WriteValueSafe(string): u32 length, UTF-16LE characters.
     pub fn string(&mut self) -> Option<String> {
         let n = self.u32()? as usize;

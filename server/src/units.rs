@@ -142,9 +142,6 @@ impl PlanetUnits {
     pub fn get(&self, kind: Kind) -> &Unit {
         &self.units[KINDS.iter().position(|k| *k == kind).unwrap()]
     }
-    fn get_mut(&mut self, kind: Kind) -> &mut Unit {
-        &mut self.units[KINDS.iter().position(|k| *k == kind).unwrap()]
-    }
 }
 
 #[derive(Default)]
@@ -189,7 +186,7 @@ pub fn create(game: &mut Game, planet_id: &str, state: Option<&Value>) {
     let terra = [o, h, p, pl, i, a].iter().map(|v| *v as f64).sum::<f64>() + (level(&s, "unitPurificationLevel") as f64).max(0.0);
     let totals = [o, h, p, 0.0, if state.is_some() { terra as f32 } else { 0.0 }, pl + i + a, pl, i, a, purification];
     let units: Vec<Unit> = KINDS.iter().zip(totals).map(|(k, t)| Unit::new(*k, t)).collect();
-    let mut o = crate::net::NetObj::from_layout("WorldUnitsPlanet", &crate::game::layout_of(&game.net_data.prefabs["WorldUnitsPlanet"].clone()));
+    let mut o = crate::net::NetObj::from_layout(&crate::game::layout_of(&game.net_data.prefabs["WorldUnitsPlanet"].clone()));
     o.init("WorldUnitsPlanet", "_planetIdHash", enc::int(hash));
     for u in &units {
         o.init("WorldUnitsPlanet", u.kind.var(), u.bytes());

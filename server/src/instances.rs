@@ -174,7 +174,7 @@ fn spawn_generator(game: &mut Game, index: usize, position: [f32; 3], rotation: 
         tail: Vec::new(),
         tail_position: None,
     };
-    let mut o = NetObj::from_layout(GENERATOR, &layout);
+    let mut o = NetObj::from_layout(&layout);
     o.position = position;
     o.rotation = rotation;
     game.net.spawn(o)

@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::game::{Args, Game, PlayerState, START_EQUIPMENT_SIZE, START_INVENTORY_SIZE};
 use crate::model::{floats_string, parse_floats};
-use crate::net::{enc, Target, VarValue};
+use crate::net::{Target, VarValue};
 
 /// SteamID64 values start here; ids below are direct-IP players known by name.
 pub const FIRST_STEAM_ID: u64 = 0x0110_0001_0000_0000;
@@ -97,7 +97,6 @@ impl Game {
                     total_crafted: 0,
                     total_tokens: 0,
                     camera_view: 0,
-                    host: false,
                     gauges: [100.0, 100.0, 100.0, 0.0],
                 }
             }
@@ -271,7 +270,6 @@ fn saved_state(p: &Value, id: u64, name: &str) -> PlayerState {
         total_crafted: p["totalCraftedObjects"].as_u64().unwrap_or(0) as u32,
         total_tokens: p["totalTerraTokenEarned"].as_u64().unwrap_or(0),
         camera_view: p["cameraView"].as_i64().unwrap_or(0) as i32,
-        host: p["host"].as_bool().unwrap_or(false),
         gauges: [f("playerGaugeOxygen"), f("playerGaugeThirst"), f("playerGaugeHealth"), f("playerGaugeToxic")],
     }
 }
@@ -303,10 +301,3 @@ pub fn inventory_changed(game: &mut Game, inventory: i32, wo: i32, added: bool) 
     crate::equipment::inventory_changed(game, inventory, wo, added);
 }
 
-pub fn is_player_inventory(game: &Game, inventory: i32) -> Option<u64> {
-    game.clients.values().find(|c| c.ready.as_ref().is_some_and(|s| s.inventory == inventory || s.equipment == inventory)).map(|c| c.id)
-}
-
-pub fn gauge_var(v: f32) -> Vec<u8> {
-    enc::float(v)
-}

@@ -67,7 +67,6 @@ pub mod enc {
 #[derive(Clone, Debug)]
 pub enum ListEvent {
     Add(Vec<u8>),
-    Insert(i32, Vec<u8>),
     RemoveAt(i32),
     Value(i32, Vec<u8>),
     Clear,
@@ -79,37 +78,12 @@ fn encode_events(events: &[ListEvent]) -> Vec<u8> {
     for e in events {
         match e {
             ListEvent::Add(item) => w.u8(0).bytes(item),
-            ListEvent::Insert(i, item) => w.u8(1).packed_i32(*i).bytes(item),
             ListEvent::RemoveAt(i) => w.u8(3).packed_i32(*i),
             ListEvent::Value(i, item) => w.u8(4).packed_i32(*i).bytes(item),
             ListEvent::Clear => w.u8(5),
         };
     }
     w.0
-}
-
-/// Events turning `before` into `after`: removals from the back, then changes and additions.
-pub fn list_diff(before: &[Vec<u8>], after: &[Vec<u8>]) -> Vec<ListEvent> {
-    let mut events = Vec::new();
-    let mut current = before.to_vec();
-    while current.len() > after.len() {
-        events.push(ListEvent::RemoveAt(current.len() as i32 - 1));
-        current.pop();
-    }
-    for (i, item) in after.iter().enumerate() {
-        match current.get(i) {
-            Some(old) if old == item => {}
-            Some(_) => {
-                events.push(ListEvent::Value(i as i32, item.clone()));
-                current[i] = item.clone();
-            }
-            None => {
-                events.push(ListEvent::Add(item.clone()));
-                current.push(item.clone());
-            }
-        }
-    }
-    events
 }
 
 #[derive(Clone, Debug)]
@@ -154,7 +128,6 @@ pub struct NetBehaviour {
 pub struct NetObj {
     pub id: u64,
     /// The layout this object was made from (group id, "#static" variant, or prefab name).
-    pub key: String,
     pub hash: u32,
     pub flags: u16,
     pub owner: u64,
@@ -289,10 +262,9 @@ impl NetObj {
         self.tail = r.rest().to_vec();
     }
 
-    pub fn from_layout(key: &str, layout: &Layout) -> NetObj {
+    pub fn from_layout(layout: &Layout) -> NetObj {
         NetObj {
             id: 0,
-            key: key.to_string(),
             hash: layout.hash,
             flags: layout.flags,
             owner: 0,
@@ -501,24 +473,6 @@ impl Net {
         v.dirty = Some(Vec::new());
     }
 
-    /// Replaces a list; the difference goes out as list events.
-    pub fn set_list(&mut self, object: u64, class: &str, name: &str, items: Vec<Vec<u8>>) {
-        let Some(v) = self.objects.get_mut(&object).and_then(|o| o.var_mut(class, name)) else {
-            eprintln!("set_list {class}.{name}: not on object {object}");
-            return;
-        };
-        let before = match &v.value {
-            VarValue::List(b) => b.clone(),
-            VarValue::Plain(_) => return,
-        };
-        let events = list_diff(&before, &items);
-        if events.is_empty() {
-            return;
-        }
-        v.value = VarValue::List(items);
-        v.dirty.get_or_insert_with(Vec::new).extend(events);
-    }
-
     /// Applies explicit list events (when the game's own add/remove order matters).
     pub fn list_events(&mut self, object: u64, class: &str, name: &str, events: Vec<ListEvent>) {
         let Some(v) = self.objects.get_mut(&object).and_then(|o| o.var_mut(class, name)) else { return };
@@ -526,7 +480,6 @@ impl Net {
         for e in &events {
             match e {
                 ListEvent::Add(i) => items.push(i.clone()),
-                ListEvent::Insert(at, i) => items.insert((*at as usize).min(items.len()), i.clone()),
                 ListEvent::RemoveAt(at) => {
                     if (*at as usize) < items.len() {
                         items.remove(*at as usize);
@@ -598,27 +551,6 @@ impl IntoTarget for (u32, Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn list_diff_turns_one_list_into_another() {
-        let a = |v: u8| vec![v];
-        let before = vec![a(1), a(2), a(3)];
-        let after = vec![a(1), a(5)];
-        let events = list_diff(&before, &after);
-        let mut items = before.clone();
-        for e in &events {
-            match e {
-                ListEvent::RemoveAt(i) => {
-                    items.remove(*i as usize);
-                }
-                ListEvent::Value(i, v) => items[*i as usize] = v.clone(),
-                ListEvent::Add(v) => items.push(v.clone()),
-                ListEvent::Insert(i, v) => items.insert(*i as usize, v.clone()),
-                ListEvent::Clear => items.clear(),
-            }
-        }
-        assert_eq!(items, after);
-    }
 
     #[test]
     fn fixed_strings_cut_at_capacity() {
