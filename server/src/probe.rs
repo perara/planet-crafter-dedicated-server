@@ -11,7 +11,8 @@
 //! A step may capture a value from what the server answered, for later steps as "$name":
 //! "capture": {"var": "box", "rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectClientRpc",
 //! "arg": 0} (an RPC argument) or {"var": "crate", "create": true} (the id of the first object
-//! spawned). Targets may then be ["$box", BEHAVIOUR_INDEX]. "ready": false skips the
+//! spawned). Targets may then be ["$box", BEHAVIOUR_INDEX]. "$hash:398a5515" is the first object
+//! of that prefab hash the server spawned for us. "ready": false skips the
 //! PlayerReady the game sends first, so the player stays as it spawned.
 
 use std::net::SocketAddr;
@@ -82,6 +83,7 @@ impl Session {
                     let mut by_hash: std::collections::BTreeMap<String, usize> = Default::default();
                     for o in &objects {
                         *by_hash.entry(format!("{:08x}", o.hash)).or_default() += 1;
+                        self.vars.entry(format!("hash:{:08x}", o.hash)).or_insert(json!(o.id));
                     }
                     json!({"msg": "approved", "client": owner, "objects": objects.len(), "hashes": by_hash})
                 }
@@ -105,8 +107,11 @@ impl Session {
                 let mut r = Reader::new(body);
                 r.u8();
                 match protocol::read_scene_object(&mut r) {
-                    Some(o) => json!({"msg": "create", "id": o.id, "hash": format!("{:08x}", o.hash), "owner": o.owner, "flags": o.flags,
-                                      "position": o.position, "sync": hex_of(&o.sync)}),
+                    Some(o) => {
+                        self.vars.entry(format!("hash:{:08x}", o.hash)).or_insert(json!(o.id));
+                        json!({"msg": "create", "id": o.id, "hash": format!("{:08x}", o.hash), "owner": o.owner, "flags": o.flags,
+                                      "position": o.position, "rotation": o.rotation, "sync": hex_of(&o.sync)})
+                    }
                     None => json!({"msg": "create", "hex": hex_of(body)}),
                 }
             }

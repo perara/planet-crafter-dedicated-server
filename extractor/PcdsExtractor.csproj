@@ -26,6 +26,9 @@
     <Reference Include="$(Managed)/Unity.Networking.Transport.dll" Private="false" />
     <Reference Include="$(Managed)/Unity.Collections.dll" Private="false" />
     <Reference Include="$(Managed)/Newtonsoft.Json.dll" Private="false" />
+    <Reference Include="$(Managed)/Tessera.dll" Private="false" />
+    <Reference Include="$(Managed)/Unity.Mathematics.dll" Private="false" />
+    <Reference Include="$(Managed)/Sylves.dll" Private="false" />
     <Reference Include="$(Managed)/netstandard.dll" Private="false" />
   </ItemGroup>
 

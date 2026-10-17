@@ -14,15 +14,11 @@ const EPSILON: f32 = 1.192_092_9e-7;
 /// The float draws of Unity.Mathematics.Random the growers use. Static growers send the
 /// random state to clients, which replay the same sequence, so it has to match bit for bit.
 pub trait Floats {
-    fn next_float(&mut self) -> f32;
     fn range(&mut self, min: f32, max: f32) -> f32;
     fn direction(&mut self) -> [f32; 2];
 }
 
 impl Floats for MathRandom {
-    fn next_float(&mut self) -> f32 {
-        f32::from_bits(0x3f80_0000 | (self.next_state() >> 9)) - 1.0
-    }
     fn range(&mut self, min: f32, max: f32) -> f32 {
         self.next_float() * (max - min) + min
     }

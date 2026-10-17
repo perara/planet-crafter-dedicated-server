@@ -3,6 +3,7 @@ using System.Net;
 using System.Text;
 using System.Threading;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace PcdsExtractor
 {
@@ -11,7 +12,9 @@ namespace PcdsExtractor
     //   GET  /api/status     state, game version, current planet, world units
     //   GET  /api/netdata    network tables (spawned objects, message versions, RPCs)
     //   GET  /api/gamedata   game data (assets, prefabs, singletons, layouts of every group)
-    //   GET  /api/scenedata  the loaded planet's scene (scene world objects, water, ore veins)
+    //   GET  /api/scenedata  the loaded planet's scene (scene world objects, water, ore veins,
+    //                        its world instance scenes)
+    //   GET  /api/wreckdata  procedural wrecks: layouts of a pool of seeds, the props they hold
     //   GET  /api/manifest   what is spawned, with every network variable (for debugging)
     //   POST /api/stop       quit the game
     internal static class Api
@@ -63,7 +66,12 @@ namespace PcdsExtractor
                         Send(context, 200, Extractor.OnMain(() => NetData.Build().ToString(), 60000));
                         return;
                     case "GET /api/scenedata":
-                        Send(context, 200, GameData.Build(layouts: false).ToString());
+                        JObject scene = GameData.Build(layouts: false);
+                        scene["instanceScenes"] = Extractor.OnMainCoroutine<JToken>(Generation.InstanceScenes, 600000);
+                        Send(context, 200, scene.ToString());
+                        return;
+                    case "GET /api/wreckdata":
+                        Send(context, 200, Extractor.OnMain(() => Generation.Wrecks().ToString(), 900000));
                         return;
                     case "POST /api/stop":
                         Extractor.Instance.RequestStop();

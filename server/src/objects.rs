@@ -109,6 +109,31 @@ impl Game {
         self.wos.values().find(|w| w.group == group && (planet == 0 || w.planet_hash() == planet)).map(|w| w.id)
     }
 
+    /// The server part of CreateAndInstantiateWorldObjectServerRpc: a new world object of the
+    /// group at a place, spawned; returns its id and network object.
+    pub fn create_and_instantiate(&mut self, group: usize, position: [f32; 3], rotation: [f32; 4], disolve: bool, save: bool, icon: bool) -> (i32, u64) {
+        let id = self.new_world_object_id();
+        self.create_world_object(group, id, save);
+        let planet = self.planet_hash();
+        let w = self.wos.get_mut(&id).unwrap();
+        w.position = position;
+        w.rotation = rotation;
+        w.planet = planet;
+        let owner = if self.data.groups[group].usable_type() == "Buildable" { self.nearest_client(position) } else { 0 };
+        let net = self.instantiate(id, false, owner).unwrap_or(0);
+        let has_base = net != 0 && (self.net.behaviour_index(net, "ConstructibleProxy").is_some() || self.net.behaviour_index(net, "GroupNetworkContainer").is_some());
+        if has_base {
+            if disolve {
+                self.net.rpc(Target::All, net, "GroupNetworkBase.StartDisolveAnimationClientRpc", &[]);
+            }
+            if icon {
+                self.constructed.shift_remove(&id);
+                self.net.rpc(Target::All, net, "GroupNetworkBase.AddDeconstructIconClientRpc", &[]);
+            }
+        }
+        (id, net)
+    }
+
     /// InstantiateWorldObject: the world object's network object, with its variables from
     /// the world object, its inventories, and its spawn for everyone.
     pub fn instantiate(&mut self, id: i32, from_db: bool, owner: u64) -> Option<u64> {
@@ -408,25 +433,7 @@ impl Game {
                     self.net.rpc_scene(me, "WorldObjectsHandler.CreateAndInstantiateWorldObjectClientRpc", &[json!(0)]);
                     return true;
                 };
-                let id = self.new_world_object_id();
-                self.create_world_object(group, id, save);
-                let planet = self.planet_hash();
-                let w = self.wos.get_mut(&id).unwrap();
-                w.position = position;
-                w.rotation = rotation;
-                w.planet = planet;
-                let owner = if self.data.groups[group].usable_type() == "Buildable" { self.nearest_client(position) } else { 0 };
-                let net = self.instantiate(id, false, owner).unwrap_or(0);
-                let has_base = net != 0 && (self.net.behaviour_index(net, "ConstructibleProxy").is_some() || self.net.behaviour_index(net, "GroupNetworkContainer").is_some());
-                if has_base {
-                    if disolve {
-                        self.net.rpc(Target::All, net, "GroupNetworkBase.StartDisolveAnimationClientRpc", &[]);
-                    }
-                    if icon {
-                        self.constructed.shift_remove(&id);
-                        self.net.rpc(Target::All, net, "GroupNetworkBase.AddDeconstructIconClientRpc", &[]);
-                    }
-                }
+                let (_, net) = self.create_and_instantiate(group, position, rotation, disolve, save, icon);
                 self.net.rpc_scene(me, "WorldObjectsHandler.CreateAndInstantiateWorldObjectClientRpc", &[json!(net)]);
             }
             "WorldObjectsHandler.CreateAndDropOnFloorServerRpc" => {

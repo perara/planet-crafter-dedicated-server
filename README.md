@@ -148,13 +148,12 @@ On a machine without Steam, copy the updated game folder over and run
 - **Every player sees every animal,** where the game shows them only to players nearby.
 - **Endings do not restart the session:** after a player's ending the server keeps running.
 - **New worlds start from the Standard settings.** Other modes are a matter of `--set`.
-
-Not done yet (host-side generation that needs more data from the game than the extractor
-reads today):
-
-- **Procedural wrecks have nothing inside** (no safes, containers, locked doors or loot), and
-  **portal world instances are empty**.
-- **Sleeping does not skip the night** (the game sends the server no signal for it).
+- **Procedural wrecks come in 64 layouts per size.** The game lays wrecks out from a random
+  seed with a solver the server does not run; `pcds extract` has the game lay out 64 seeds of
+  each wreck size, and the server gives its wrecks those. What a wreck then holds (safes,
+  containers, locked doors, generators, loot) is picked from its seed as in the game. Wrecks a
+  world from the game had already generated keep what they hold.
+- **Sleeping does not skip the night:** the game sends the server no signal for it.
 
 Where the server has to approximate what the game's physics would decide (positions on a
 platform, landing spots, seats, machine ranges), the code says so in a `ponytail:` comment.
@@ -166,8 +165,9 @@ platform, landing spots, seats, machine ranges), the code says so in a `ponytail
   SteamID of an anonymous Steam game server). The game logic ports the game's host-side code,
   class by class.
 - `extractor/` is a BepInEx plugin that `pcds extract` runs in the game, under Wine, on a world
-  of its own on 127.0.0.1. It dumps the network tables, the game data and every free planet's
-  scene to `run/data/<game version>/`. A prebuilt DLL is in `extractor/prebuilt/`.
+  of its own on 127.0.0.1. It dumps the network tables, the game data, every free planet's
+  scene with its world instance scenes, and the procedural wrecks' layouts to
+  `run/data/<game version>/`. A prebuilt DLL is in `extractor/prebuilt/`.
 - `pcds` is the command line that ties them together.
 
 ## Development
