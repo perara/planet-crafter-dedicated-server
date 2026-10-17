@@ -11,7 +11,7 @@ use crate::model::Inventory;
 use crate::net::Target;
 
 /// Inventory ids at or above this are not counted when picking the next id.
-const SPECIAL_INVENTORY_IDS: i32 = 9_999_999;
+pub const SPECIAL_INVENTORY_IDS: i32 = 9_999_999;
 
 impl Game {
     // ---- Inventory (the model) ------------------------------------------------------------

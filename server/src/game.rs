@@ -894,4 +894,45 @@ pub mod tests {
             }
         }
     }
+
+    #[test]
+    fn a_second_player_ready_and_a_second_session_are_refused() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        g.players_rpc(1, "PlayerMainController.PlayerReadyServerRpc", &Args(vec![json!(0), json!("Bob")]));
+        assert_eq!(g.clients[&1].ready.as_ref().unwrap().name, "Ann", "PlayerReady counts once");
+        approve(&mut g, 2);
+        g.players_rpc(2, "PlayerMainController.PlayerReadyServerRpc", &Args(vec![json!(0), json!("ann")]));
+        assert!(g.clients[&2].ready.is_none());
+        assert!(g.kicks.iter().any(|(c, _)| *c == 2), "Ann is already online");
+    }
+
+    #[test]
+    fn client_chosen_inventory_ids_never_replace_inventories() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        g.inventories_rpc(1, "InventoriesHandler.GetOrCreateNewInventoryServerRpc", &Args(vec![json!(true), json!(5), json!(9_999_998), json!(0), json!(null), json!(null)]));
+        let a = g.create_inventory(5, 0, 0, &[], &[]);
+        let b = g.create_inventory(5, 0, 0, &[], &[]);
+        assert_ne!(a, b);
+        assert!(a < crate::inventories::SPECIAL_INVENTORY_IDS && b < crate::inventories::SPECIAL_INVENTORY_IDS);
+        assert!(g.inventories.contains_key(&a) && g.inventories.contains_key(&b));
+    }
+
+    #[test]
+    fn picked_up_debris_outlives_its_despawn_timer() {
+        let Some(mut g) = test_game(save()) else { return };
+        let player = join(&mut g, 1, "Ann");
+        let inventory = g.clients[&1].ready.as_ref().unwrap().inventory;
+        let iron = g.data.group("Iron").unwrap();
+        let id = g.create_world_object(iron, 0, true);
+        g.drop_on_floor(id, [560.0, 3.0, 497.0], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 1.0, false, 0);
+        let hash = g.data.groups[iron].hash;
+        g.inventories_rpc(1, "InventoriesHandler.AddWorldObjectToInventoryServerRpc", &Args(vec![json!(id), json!(hash), json!(inventory), json!(true)]));
+        assert!(g.inventories[&inventory].items.contains(&id));
+        let _ = player;
+        g.time += 2.0;
+        crate::scene::tick(&mut g);
+        assert!(g.wos.contains_key(&id) && g.inventories[&inventory].items.contains(&id), "the despawn timer went with the dropped object");
+    }
 }
