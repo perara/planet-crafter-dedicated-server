@@ -218,7 +218,7 @@ impl Game {
         let scene_handle = net_data.scene_handle;
         // SavedDataHandler.InitSavedData loads the host's planet. This server has no host, so it
         // keeps the planet it travelled to in the world state (pcdsCurrentPlanet; the game
-        // ignores unknown fields).
+        // ignores unknown fields) and marks a saved player host for the game (mark_host).
         let host_planet = save.players.iter().find(|p| p["host"].as_bool() == Some(true)).and_then(|p| p["planetId"].as_str()).filter(|p| !p.is_empty());
         let planet_id = save.world["pcdsCurrentPlanet"].as_str().or(host_planet).or(save.settings["planetId"].as_str()).unwrap_or("Prime").to_string();
         let planet = net_data.planet_index(&planet_id).unwrap_or(0);
@@ -291,8 +291,10 @@ impl Game {
         let crafted = self.save.stats["craftedObjects"].as_u64().unwrap_or(0);
         let all_time = self.save.world["allTimeTerraTokens"].as_u64().unwrap_or(0);
         let single = self.saved_players.len() == 1;
+        // The host this server marks (players::mark_host) is no host: only the game's count here.
+        let game_host = !self.save.world["pcdsCurrentPlanet"].is_string();
         for p in &mut self.saved_players {
-            if (p["host"].as_bool() == Some(true) || p["id"].as_u64() == Some(0) || single) && p["totalCraftedObjects"].as_u64().unwrap_or(0) == 0 && p["totalTerraTokenEarned"].as_u64().unwrap_or(0) == 0 {
+            if ((game_host && p["host"].as_bool() == Some(true)) || p["id"].as_u64() == Some(0) || single) && p["totalCraftedObjects"].as_u64().unwrap_or(0) == 0 && p["totalTerraTokenEarned"].as_u64().unwrap_or(0) == 0 {
                 p["totalCraftedObjects"] = json!(crafted);
                 p["totalTerraTokenEarned"] = json!(all_time);
             }
@@ -529,6 +531,7 @@ impl Game {
             procedural: self.save.procedural.clone(),
         };
         save.world["pcdsCurrentPlanet"] = json!(self.planet_id());
+        crate::players::mark_host(&mut save.players, self.planet_id());
         crate::scene::fill_save(self, &mut save);
         save
     }

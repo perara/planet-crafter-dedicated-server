@@ -309,6 +309,19 @@ pub fn update_saved_players(game: &mut Game) {
     }
 }
 
+/// The saved player a save moved back into the game treats as its host: SavedDataHandler.
+/// InitSavedData loads the host's planet (the starting planet without one). The server keeps its
+/// planet in pcdsCurrentPlanet, which the game does not read, so the player saved last on that
+/// planet is marked host; none when nobody is saved there. The cost: whoever hosts that save
+/// without a character of their own takes the marked player's (PlayerReadyServerRpc gives a
+/// host the host entry); hosts with their own character keep theirs.
+pub fn mark_host(players: &mut [Value], planet: &str) {
+    let host = players.iter().rposition(|p| p["planetId"].as_str() == Some(planet));
+    for (i, p) in players.iter_mut().enumerate() {
+        p["host"] = json!(Some(i) == host);
+    }
+}
+
 /// Inventory changes that matter to players: equipment changes what the player can carry.
 pub fn inventory_changed(game: &mut Game, inventory: i32, wo: i32, added: bool) {
     crate::equipment::inventory_changed(game, inventory, wo, added);
@@ -318,6 +331,25 @@ pub fn inventory_changed(game: &mut Game, inventory: i32, wo: i32, added: bool) 
 mod tests {
     use crate::data::stable_hash;
     use crate::game::tests::join;
+
+    #[test]
+    fn the_last_player_saved_on_the_current_planet_is_the_host() {
+        let mut save = crate::game::tests::save();
+        save.players = vec![serde_json::json!({"id": 5, "name": "Old", "host": true, "planetId": "Selenea", "totalCraftedObjects": 0, "totalTerraTokenEarned": 0})];
+        save.stats["craftedObjects"] = serde_json::json!(42);
+        let Some(mut g) = crate::game::test_game(save) else { return };
+        for (client, name) in [(1, "Ann"), (2, "Bob")] {
+            join(&mut g, client, name);
+            g.disconnect(client);
+        }
+        let saved = g.snapshot();
+        let hosts: Vec<&str> = saved.players.iter().filter(|p| p["host"] == true).filter_map(|p| p["name"].as_str()).collect();
+        assert_eq!(hosts, vec!["Bob"], "the game would load Bob's planet, Prime");
+        // Loaded back by this server, the host it marked does not take the world's craft count.
+        let Some(g) = crate::game::test_game(saved) else { return };
+        let bob = g.saved_players.iter().find(|p| p["name"] == "Bob").unwrap();
+        assert_eq!(bob["totalCraftedObjects"], 0);
+    }
 
     #[test]
     fn new_players_spawn_where_the_host_would_respawn() {
