@@ -448,6 +448,14 @@ pub fn grabbed(game: &mut Game, wo: i32) {
 
 pub fn scene_object_removed(_game: &mut Game, _wo: i32) {}
 
+/// The session arrived on another planet: its machines' game objects become active (OnEnable).
+pub fn planet_loaded(game: &mut Game) {
+    let enabled: Vec<i32> = game.ext.machines.list.iter().filter(|(wo, m)| m.harvestable.is_some() && is_active(game, **wo)).map(|(wo, _)| *wo).collect();
+    for wo in enabled {
+        growers::harvestable_enabled(game, wo);
+    }
+}
+
 pub fn tick(game: &mut Game) {
     veins::ensure(game);
     // Start / `yield return null`: the frame after instantiation.

@@ -71,10 +71,12 @@ fn update_all_world_objects_activation(game: &mut Game) {
 }
 
 /// planetIsLoaded after a planet switch: WorldInstanceHandler closes the opened instance, then
-/// SessionController updates the activations and unlocks the planet.
+/// SessionController updates the activations (the planet's machines wake up) and unlocks the
+/// planet.
 fn planet_loaded(game: &mut Game) {
     crate::instances::unload_world_instance(game);
     update_all_world_objects_activation(game);
+    crate::machines::planet_loaded(game);
     set_planet_unlocked(game, game.planet);
 }
 
