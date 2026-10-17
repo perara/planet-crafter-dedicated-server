@@ -202,7 +202,9 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, name: &str, a: &Args) -> b
         }
         "WorldAnimalSpawnerHandler.SpawnerUnregisteredServerRpc" => spawner_unregistered(game, a.i(0)),
         "WorldAnimalSpawnerHandler.SpawnAnimalsServerRpc" => {
-            let range = a.0.get(2).map(|v| [0, 1].map(|i| v[i].as_i64().unwrap_or(0) as i32)).unwrap_or([0, 0]);
+            // Wild spawners ask for a few animals; a client asking for millions would make
+            // the server create them all in one tick.
+            let range = a.0.get(2).map(|v| [0, 1].map(|i| v[i].as_i64().unwrap_or(0).clamp(0, 20) as i32)).unwrap_or([0, 0]);
             let traits = a.0.get(3).and_then(Value::as_array).cloned().unwrap_or_default();
             game.ext.animals.spawn.pending.push(Pending { wo: a.i(0), position: a.v3(1), range, traits });
         }
@@ -271,7 +273,9 @@ fn spawn_delayed(game: &mut Game, p: Pending) {
         by_type.entry(t[0].as_i64().unwrap_or(0) as i32).or_default().push(t);
     }
     let (Some(dna), Some(trait_group)) = (game.data.group("DNASequence"), game.data.group(crate::genetics::TRAIT_GROUP)) else { return };
-    let count = random.next_int(p.range[0], p.range[1] + 1);
+    // Unity's NextInt needs min < max; a reversed range would wrap to billions.
+    let (min, max) = (p.range[0].min(p.range[1]), p.range[0].max(p.range[1]));
+    let count = random.next_int(min, max + 1).clamp(0, 20);
     for _ in 0..count {
         let sequence = game.create_world_object(dna, 0, false);
         let traits = game.create_inventory(TRAIT_TYPES, -1, sequence, &[], &[]);

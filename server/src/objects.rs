@@ -137,6 +137,10 @@ impl Game {
     /// InstantiateWorldObject: the world object's network object, with its variables from
     /// the world object, its inventories, and its spawn for everyone.
     pub fn instantiate(&mut self, id: i32, from_db: bool, owner: u64) -> Option<u64> {
+        // Already in the world: a second network object would duplicate it.
+        if let Some(net) = self.wos.get(&id)?.net.filter(|n| self.net.objects.contains_key(n)) {
+            return Some(net);
+        }
         let wo = self.wos.get_mut(&id)?;
         wo.from_db = from_db;
         let group = wo.group;
@@ -291,7 +295,7 @@ impl Game {
         }
         self.net.rpc(Target::Only(owner), net, "GroupNetworkContainer.StartAndStopPhysicsAfterDelayClientRpc", &[json!(drop_size), json!(sound), json!(despawn > f32::EPSILON)]);
         if despawn > f32::EPSILON {
-            crate::scene::schedule(self, despawn, crate::scene::Timer::Despawn(id));
+            crate::scene::schedule(self, despawn, crate::scene::Timer::Despawn(id, net));
         }
         if disolve {
             self.net.rpc(Target::All, net, "GroupNetworkBase.StartDisolveAnimationClientRpc", &[]);

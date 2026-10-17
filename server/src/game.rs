@@ -363,7 +363,7 @@ impl Game {
         let (version, session) = data.split_once('|').unwrap_or((data.as_str(), ""));
         let session: u32 = session.parse().unwrap_or(u32::MAX);
         if version != self.net_data.game_version || (session != 0 && session != self.session_number) {
-            println!("client {client}: refused (game {version}, session {session})");
+            println!("client {client}: refused (game {:?}, session {session})", version.chars().take(32).collect::<String>());
             self.kick(client, "MENU_Network_Error_version_mismatch");
             return;
         }
@@ -373,6 +373,18 @@ impl Game {
                 self.kick(client, crate::access::REFUSED);
                 return;
             }
+        }
+        // A banned SteamID never gets the world (names are only known at PlayerReady).
+        if let Some(id) = self.clients.get(&client).and_then(|c| c.verified_steam_id).filter(|id| self.access.steam_id_banned(*id)) {
+            println!("client {client}: refused (SteamID {id} is banned)");
+            self.kick(client, crate::access::REFUSED);
+            return;
+        }
+        let max = std::env::var("PCDS_MAX_PLAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(16usize);
+        if self.clients.values().filter(|c| c.approved).count() >= max {
+            println!("client {client}: refused (server full, {max} players)");
+            self.kick(client, "MULTIPLAYER_Game_Session_Full");
+            return;
         }
         let def = self.net_data.prefabs["Player"].clone();
         let mut o = NetObj::from_layout(&layout_of(&def));
@@ -517,6 +529,13 @@ impl Game {
             self.next_time_sync = self.time + 1.0;
             let tick = self.tick_number();
             self.out_to(Target::All, protocol::time_sync(tick));
+            // A connection that never becomes a player (no request, no PlayerReady) has the
+            // world without the checks PlayerReady makes: give it two minutes.
+            let stalled: Vec<u64> = self.clients.values().filter(|c| c.ready.is_none() && c.since.elapsed().as_secs() > 120).map(|c| c.id).collect();
+            for client in stalled {
+                println!("client {client}: never became a player, disconnecting");
+                self.kick(client, "MENU_Network_Error_Timeout");
+            }
         }
         self.net.flush();
     }
@@ -812,6 +831,11 @@ pub mod tests {
             }
             // The main loop sends and clears the queue every tick.
             g.net.out.clear();
+            if std::env::var_os("PCDS_FUZZ_TRACE").is_some() && round % 500 == 0 {
+                let texts: usize = g.wos.values().map(|w| w.text.len()).sum();
+                let items: usize = g.inventories.values().map(|i| i.items.len()).sum();
+                eprintln!("SIZES {round} wos={} inventories={} items={items} net={} timers={} watchers={} saved={} texts={texts} unhandled={}", g.wos.len(), g.inventories.len(), g.net.objects.len(), g.timers.0.len(), g.watchers.len(), g.saved_players.len(), g.unhandled.len());
+            }
             if let Some((what, e)) = outcome {
                 let why = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
                 let at = WHERE.lock().unwrap().clone();

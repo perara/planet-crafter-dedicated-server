@@ -384,8 +384,14 @@ fn evacuate(game: &mut Game, inside: &dyn Fn(&Game, [f32; 3]) -> bool, respawn: 
         game.net.rpc(Target::Only(client), object, "PlayerStatus.DieAndRespawnClientRpc", &[json!(false), json!(PORTAL_CLOSED), json!(respawn)]);
     }
     let livable = first_livable_position(game);
+    // ProceduralInstancesHandler: saved entries of connected players are skipped (their live
+    // state above is what counts; an autosave may hold them from inside the instance).
+    let online: Vec<u64> = game.clients.values().filter_map(|c| c.ready.as_ref().map(|s| s.id)).collect();
     for i in 0..game.saved_players.len() {
         let p = &game.saved_players[i];
+        if p["id"].as_u64().is_some_and(|id| online.contains(&id)) {
+            continue;
+        }
         let position = parse_floats(p["playerPosition"].as_str().unwrap_or("")).unwrap_or([0.0; 3]);
         if !inside(game, position) {
             continue;

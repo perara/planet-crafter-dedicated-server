@@ -288,7 +288,11 @@ pub fn add_world_object_to_inventory(game: &mut Game, wo: i32, inventory: i32, g
         return false;
     }
     game.propagate(inventory, wo, true);
-    let was_unsaved = game.wos[&wo].dont_save;
+    // The inventory's machine may have destroyed it already (MachineDestructInventoryIfFull).
+    let Some(was_unsaved) = game.wos.get(&wo).map(|w| w.dont_save) else {
+        game.dirty_inventory(inventory, 0, false);
+        return true;
+    };
     game.wos.get_mut(&wo).unwrap().dont_save = false;
     game.update_save_state(wo);
     if was_unsaved {

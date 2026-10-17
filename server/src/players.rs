@@ -10,6 +10,8 @@ use crate::net::{Target, VarValue};
 
 /// SteamID64 values start here; ids below are direct-IP players known by name.
 pub const FIRST_STEAM_ID: u64 = 0x0110_0001_0000_0000;
+/// Ids from name_id start here; below are the connection numbers older saves used.
+const NAME_IDS: u64 = 0x00F0_0000_0000_0000;
 const PLAYERS: &str = "PlayersDataManager";
 
 /// The plugin server's NameId: a stable id for a player known only by name.
@@ -51,19 +53,25 @@ impl Game {
         pairs.iter().filter_map(|(id, n)| Some((self.data.group(id)?, *n))).flat_map(|(g, n)| std::iter::repeat_n(g, n.max(0) as usize)).collect()
     }
 
-    /// PlayerReadyServerRpc: finds the saved player (or makes a new one) and sets them up.
-    fn player_ready(&mut self, client: u64, claimed: u64, name: String) {
-        let Some(c) = self.clients.get(&client) else { return };
-        // Over Steam networking the connection carries the verified SteamID; over direct IP
-        // the reported one is only believed from this machine, else the name decides.
-        let id = match c.verified_steam_id {
+    /// Who a joining player is. Over Steam networking the connection carries the verified
+    /// SteamID; over direct IP the reported one is only believed from this machine, else the
+    /// name decides.
+    fn player_id(&self, client: u64, claimed: u64, name: &str) -> Option<u64> {
+        let c = self.clients.get(&client)?;
+        Some(match c.verified_steam_id {
             Some(steam_id) => steam_id,
             None if c.trusted && claimed >= FIRST_STEAM_ID => claimed,
-            None => name_id(&name),
-        };
+            None => name_id(name),
+        })
+    }
+
+    /// PlayerReadyServerRpc: finds the saved player (or makes a new one) and sets them up.
+    fn player_ready(&mut self, client: u64, claimed: u64, name: String) {
+        let Some(id) = self.player_id(client, claimed, &name) else { return };
         let found = self.saved_players.iter().position(|p| p["id"].as_u64() == Some(id)).or_else(|| {
-            // Older saves keyed direct-IP players by connection number: take a matching name.
-            self.saved_players.iter().position(|p| p["id"].as_u64().is_some_and(|i| i != 0 && i < FIRST_STEAM_ID) && p["name"].as_str() == Some(&name))
+            // Older saves keyed direct-IP players by connection number (small ids, below the
+            // name-based ones): take a matching name.
+            self.saved_players.iter().position(|p| p["id"].as_u64().is_some_and(|i| i != 0 && i < NAME_IDS) && p["name"].as_str() == Some(&name))
         });
         let state = match found {
             Some(i) => {
@@ -224,11 +232,26 @@ impl Game {
         match name {
             "PlayerMainController.PlayerReadyServerRpc" => {
                 let claimed = a.u(0);
-                let player_name = a.s(1).unwrap_or_default();
-                let verified = self.clients.get(&client).and_then(|c| c.verified_steam_id);
+                // Printable, and short enough for logs and the player list.
+                let player_name: String = a.s(1).unwrap_or_default().chars().filter(|c| !c.is_control()).take(64).collect();
+                let Some(c) = self.clients.get(&client) else { return true };
+                // Once per connection: another PlayerReady would take another saved character.
+                if c.ready.is_some() {
+                    return true;
+                }
+                let verified = c.verified_steam_id;
                 if !self.access.name_allowed(&player_name, verified) {
-                    println!("client {client}: refused ({player_name})");
+                    println!("client {client}: refused ({player_name:?})");
                     self.kick(client, crate::access::REFUSED);
+                    return true;
+                }
+                // One session per player: a second one would take the same character (or one
+                // by the same name). A reconnecting player gets in once the old session is gone.
+                let id = self.player_id(client, claimed, &player_name);
+                let online = self.clients.values().filter(|o| o.id != client).filter_map(|o| o.ready.as_ref()).any(|s| Some(s.id) == id || s.name.eq_ignore_ascii_case(&player_name));
+                if online {
+                    println!("client {client}: refused ({player_name:?} is already online)");
+                    self.kick(client, "Already connected");
                     return true;
                 }
                 self.player_ready(client, claimed, player_name);
@@ -316,7 +339,9 @@ pub fn update_saved_players(game: &mut Game) {
 /// without a character of their own takes the marked player's (PlayerReadyServerRpc gives a
 /// host the host entry); hosts with their own character keep theirs.
 pub fn mark_host(players: &mut [Value], planet: &str) {
-    let host = players.iter().rposition(|p| p["planetId"].as_str() == Some(planet));
+    // A Steam player (the game's host always is one), else anyone.
+    let on_planet = |p: &Value| p["planetId"].as_str() == Some(planet);
+    let host = players.iter().rposition(|p| on_planet(p) && p["id"].as_u64().is_some_and(|i| i >= FIRST_STEAM_ID)).or_else(|| players.iter().rposition(on_planet));
     for (i, p) in players.iter_mut().enumerate() {
         p["host"] = json!(Some(i) == host);
     }

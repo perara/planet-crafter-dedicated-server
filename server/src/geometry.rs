@@ -69,6 +69,11 @@ impl MathRandom {
         t
     }
     pub fn next_int(&mut self, min: i32, max: i32) -> i32 {
+        // Unity asserts min < max; a reversed range from a client would wrap to billions.
+        if max <= min {
+            self.next_state();
+            return min;
+        }
         let range = max.wrapping_sub(min) as u32;
         ((self.next_state() as u64 * range as u64) >> 32) as i32 + min
     }

@@ -9,8 +9,9 @@ use crate::game::Game;
 use crate::net::{enc, Target, VarValue};
 
 pub enum Timer {
-    /// GroupNetworkContainer.DespawnAfterDelay.
-    Despawn(i32),
+    /// GroupNetworkContainer.DespawnAfterDelay: (world object, its network object). An Invoke on
+    /// the GameObject: picking the item up despawns it, and the timer goes with it.
+    Despawn(i32, u64),
     /// GroupNetworkBase.FinalDeconstructServer: (world object, deconstructing client).
     FinalDeconstruct(i32, u64),
 }
@@ -21,6 +22,10 @@ pub struct Timers(pub Vec<(f32, Timer)>);
 
 pub fn schedule(game: &mut Game, delay: f32, timer: Timer) {
     let due = game.time + delay;
+    // One despawn per world object: dropping it again replaces the timer.
+    if let Timer::Despawn(wo, _) = timer {
+        game.timers.0.retain(|(_, t)| !matches!(t, Timer::Despawn(w, _) if *w == wo));
+    }
     game.timers.0.push((due, timer));
 }
 
@@ -109,7 +114,11 @@ pub fn tick(game: &mut Game) {
     };
     for timer in due {
         match timer {
-            Timer::Despawn(wo) => game.destroy_world_object(wo, true),
+            Timer::Despawn(wo, net) => {
+                if game.wos.get(&wo).is_some_and(|w| w.net == Some(net)) {
+                    game.destroy_world_object(wo, true);
+                }
+            }
             Timer::FinalDeconstruct(wo, client) => crate::deconstruct::finish(game, wo, client),
         }
     }

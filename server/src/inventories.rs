@@ -133,21 +133,33 @@ impl Game {
         self.inventories.values().map(|i| i.id).filter(|id| *id < SPECIAL_INVENTORY_IDS).max().unwrap_or(0).max(0)
     }
 
+    /// The next id after the biggest, as the game does; the lowest free one once that reaches
+    /// the special ids.
+    fn free_inventory_id(&self) -> i32 {
+        let next = self.biggest_inventory_id() + 1;
+        if next < SPECIAL_INVENTORY_IDS && !self.inventories.contains_key(&next) {
+            return next;
+        }
+        (1..SPECIAL_INVENTORY_IDS).find(|id| !self.inventories.contains_key(id)).unwrap_or(next)
+    }
+
     /// The create path of GetOrCreateNewInventory; returns the inventory id.
     pub fn create_inventory(&mut self, size: i32, id: i32, owner: i32, content: &[usize], authorized: &[usize]) -> i32 {
         if let Some(existing) = self.inventories.get(&id).filter(|_| id != 0 && id != -1) {
             return existing.id;
         }
         let id = match id {
-            0 => self.biggest_inventory_id() + 1,
             -1 => {
                 self.tmp_inventory_id -= 1;
                 self.tmp_inventory_id + 1
             }
-            other => other,
+            // Ids a client picks stay below the special ones and never replace an inventory.
+            other if other > 0 && other < SPECIAL_INVENTORY_IDS && !self.inventories.contains_key(&other) => other,
+            _ => self.free_inventory_id(),
         };
         self.inventories.insert(id, Inventory::new(id, size));
-        for g in content {
+        // No more initial items than the inventory holds.
+        for g in content.iter().take(size.max(0) as usize) {
             let wo = self.create_world_object(*g, 0, true);
             self.inventory_add(id, wo, true);
         }
@@ -347,7 +359,9 @@ impl Game {
                 }
             }
             "InventoriesHandler.GetOrCreateNewInventoryServerRpc" => {
-                self.get_or_create(client, a.b(0), a.i(1), a.i(2), a.i(3), a.ints(4), a.ints(5));
+                // The game's inventories hold a few dozen; a client asking for billions makes
+                // machines that fill them (animal shelters) run away.
+                self.get_or_create(client, a.b(0), a.i(1).clamp(0, 1000), a.i(2), a.i(3), a.ints(4), a.ints(5));
             }
             "InventoriesHandler.TransferItemServerRpc" => {
                 let ok = self.transfer(a.i(0), a.i(1), vec![a.i(2)], Some(client));
@@ -510,16 +524,19 @@ impl Game {
                 let placed = self.wos.get(&id).is_some_and(|w| w.is_placed());
                 if (placed || created) && self.inventories.contains_key(&inv) && self.inventory_add(inv, id, true) {
                     self.propagate(inv, id, true);
-                    let was_unsaved = self.wos[&id].dont_save;
-                    self.wos.get_mut(&id).unwrap().dont_save = false;
-                    self.update_save_state(id);
-                    if was_unsaved {
-                        crate::scene::on_world_object_from_scene_retrieved(self, id);
+                    // The inventory's machine may have destroyed it already
+                    // (MachineDestructInventoryIfFull).
+                    if let Some(was_unsaved) = self.wos.get(&id).map(|w| w.dont_save) {
+                        self.wos.get_mut(&id).unwrap().dont_save = false;
+                        self.update_save_state(id);
+                        if was_unsaved {
+                            crate::scene::on_world_object_from_scene_retrieved(self, id);
+                        }
+                        if grabbed {
+                            crate::machines::grabbed(self, id);
+                        }
+                        self.destroy_go_on_all_clients(id, 0.0);
                     }
-                    if grabbed {
-                        crate::machines::grabbed(self, id);
-                    }
-                    self.destroy_go_on_all_clients(id, 0.0);
                     self.dirty_inventory(inv, client, false);
                     self.add_or_remove_result(client, true);
                 } else {

@@ -34,8 +34,14 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
     let wo = game.net.objects.get(&object).and_then(|o| o.wo);
     match name {
         "TextProxy.SetTextServerRpc" => {
-            let text = a.s(0).unwrap_or_default();
-            game.net.set(object, "TextProxy", "_text", enc::fixed_string(&text, 128));
+            if game.net.behaviour_index(object, "TextProxy").is_none() {
+                return true;
+            }
+            // JSONExport.CleanStringForInsertInJson, then the FixedString128 the variable holds
+            // (the world object takes the variable's value).
+            let bytes = enc::fixed_string(&a.s(0).unwrap_or_default().replace(['@', '|'], " "), 128);
+            let text = String::from_utf8_lossy(&bytes[4..]).into_owned();
+            game.net.set(object, "TextProxy", "_text", bytes);
             if let Some(w) = wo.and_then(|w| game.wos.get_mut(&w)) {
                 w.text = text;
             }

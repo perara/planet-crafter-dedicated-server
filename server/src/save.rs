@@ -22,8 +22,28 @@ pub struct SaveFile {
     pub procedural: Vec<Value>,
 }
 
+/// Splits on `delimiter` outside JSON strings: a name or a sign text may contain '@' or '|'
+/// (JSONExport masks names before splitting for the same reason).
+fn split_outside_strings(text: &str, delimiter: char) -> Vec<&str> {
+    let (mut parts, mut start, mut in_string, mut escaped) = (Vec::new(), 0, false, false);
+    for (i, c) in text.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            c if c == delimiter && !in_string => {
+                parts.push(&text[start..i]);
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
 fn entries(section: &str) -> Vec<Value> {
-    section.split('|').map(str::trim).filter(|s| !s.is_empty()).filter_map(|s| serde_json::from_str(s).ok()).collect()
+    split_outside_strings(section, '|').into_iter().map(str::trim).filter(|s| !s.is_empty()).filter_map(|s| serde_json::from_str(s).ok()).collect()
 }
 
 /// What JSONExport.SaveStringsInFile removes after serializing.
@@ -67,7 +87,7 @@ impl SaveFile {
     pub fn load(path: &str) -> std::io::Result<SaveFile> {
         let text = std::fs::read_to_string(path)?;
         let text = text.trim_start_matches('\u{feff}');
-        let sections: Vec<&str> = text.split('@').collect();
+        let sections = split_outside_strings(text, '@');
         let section = |i: usize| sections.get(i).copied().unwrap_or("");
         let first = |i: usize| entries(section(i)).into_iter().next().unwrap_or(Value::Null);
         Ok(SaveFile {
@@ -86,7 +106,7 @@ impl SaveFile {
 
     pub fn to_text(&self) -> String {
         let one = |v: &Value| serde_json::to_string(v).unwrap_or_default();
-        let list = |items: &[Value]| items.iter().map(one).collect::<Vec<_>>().join("|");
+        let list = |items: &[Value]| items.iter().map(one).collect::<Vec<_>>().join("|\n");
         let sections = [
             one(&self.world),
             list(&self.planets),
@@ -102,11 +122,20 @@ impl SaveFile {
         let mut text = String::from("\u{feff}");
         for s in sections {
             text.push('\r');
-            text.push_str(&s.replace('|', "|\n"));
+            text.push_str(&s);
             text.push_str("\r@");
         }
+        // Only whole fields: ",\"hunger\":0.0" must not cut ",\"hunger\":0.07".
         for d in DEFAULTS {
-            text = text.replace(d, "");
+            let mut from = 0;
+            while let Some(at) = text[from..].find(d).map(|i| i + from) {
+                if text[at + d.len()..].starts_with([',', '}']) {
+                    text.replace_range(at..at + d.len(), "");
+                    from = at;
+                } else {
+                    from = at + d.len();
+                }
+            }
         }
         for key in ["gameMode", "gameDyingConsequences", "gameStartLocation"] {
             // JsonableGameState.CleanSaveStringOfVariables: ,"key":<digit>
@@ -175,6 +204,30 @@ pub fn backup(path: &str, every: Duration, keep: usize) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn delimiters_inside_strings_and_partial_defaults_survive() {
+        let mut save = SaveFile::empty();
+        save.world = json!({"terraTokens": 1});
+        save.players = vec![json!({"id": 1, "name": "Bob@Home|x"}), json!({"id": 2, "name": "Ann"})];
+        save.objects = vec![json!({"id": 5, "gId": "Sign", "text": "a@b|c"}), json!({"id": 6, "gId": "Animal", "hunger": 0.07, "grwth": 3}), json!({"id": 7, "gId": "Animal", "hunger": 0.0})];
+        save.settings = json!({"planetId": "Prime"});
+        let text = save.to_text();
+        assert!(text.contains("\"hunger\":0.07,\"grwth\":3"), "{text}");
+        assert!(!text.contains("\"id\":7,\"gId\":\"Animal\",\"hunger\""), "the default hunger is cut");
+        let dir = std::env::temp_dir().join(format!("pcds-delims-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("w.json");
+        std::fs::write(&path, &text).unwrap();
+        let back = SaveFile::load(path.to_str().unwrap()).unwrap();
+        assert_eq!(back.players.len(), 2);
+        assert_eq!(back.players[0]["name"], "Bob@Home|x");
+        assert_eq!(back.objects.len(), 3);
+        assert_eq!(back.objects[0]["text"], "a@b|c");
+        assert_eq!(back.settings["planetId"], "Prime");
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn round_trips_a_game_save() {

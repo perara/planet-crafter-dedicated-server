@@ -30,6 +30,11 @@ fn ipv4(ip: &str) -> Option<u32> {
     Some(u32::from(addr))
 }
 
+/// A list entry that is a SteamID64.
+fn steam_id(entry: &str) -> Option<u64> {
+    entry.parse().ok().filter(|id| *id >= crate::players::FIRST_STEAM_ID)
+}
+
 /// Exact IPv4 address or a.b.c.d/n range.
 pub fn ip_matches(ip: &str, rule: &str) -> bool {
     let Some((network, bits)) = rule.split_once('/') else { return ip == rule };
@@ -78,9 +83,19 @@ impl Access {
 
     /// Names compare without case; SteamIDs only for verified (Steam) players.
     pub fn name_allowed(&self, name: &str, verified_steam_id: Option<u64>) -> bool {
-        let id = verified_steam_id.map(|i| i.to_string());
-        let listed = |list: &[String]| list.iter().any(|v| v.eq_ignore_ascii_case(name) || id.as_deref() == Some(v.as_str()));
+        // A SteamID entry matches only a verified SteamID, never a name that looks like one.
+        let listed = |list: &[String]| {
+            list.iter().any(|v| match steam_id(v) {
+                Some(entry) => verified_steam_id == Some(entry),
+                None => v.eq_ignore_ascii_case(name),
+            })
+        };
         (self.lists.whitelist.is_empty() || listed(&self.lists.whitelist)) && !listed(&self.lists.banned_names)
+    }
+
+    /// Whether a verified SteamID is banned (checked as soon as it connects).
+    pub fn steam_id_banned(&self, id: u64) -> bool {
+        self.lists.banned_names.iter().any(|v| steam_id(v) == Some(id))
     }
 
     /// Bans a name and, when the player is online, their verified SteamID or their IP.
