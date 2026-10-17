@@ -314,7 +314,8 @@ fetch_bepinex() {
 
 extractor_dll() {
   local d
-  for d in "$ROOT/bin/PcdsExtractor.dll" "$ROOT/extractor/bin/Release/net472/PcdsExtractor.dll"; do
+  # A release's copy, a local build (pcds build), then the one committed with the source.
+  for d in "$ROOT/bin/PcdsExtractor.dll" "$ROOT/extractor/bin/Release/net472/PcdsExtractor.dll" "$ROOT/extractor/prebuilt/PcdsExtractor.dll"; do
     if [[ -f "$d" ]]; then
       echo "$d"
       return
