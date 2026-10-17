@@ -469,6 +469,7 @@ cmd_extract() {
   ((joined)) || die "the scripted player did not join the game; see $EXT/probe.log"
   "$bin" extract "$raw" "$out"
   ext_api GET /api/gamedata > "$out/gamedata.json"
+  ext_api GET /api/wreckdata > "$out/wrecks.json"
   planets="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(" ".join(v["id"] for k,v in d["assets"].items() if k.startswith("PlanetData:") and v.get("steamAppId")==0 and v.get("showInBuild")))' "$out/gamedata.json")"
   for planet in $planets; do
     current="$(ext_api GET /api/status | python3 -c 'import json,sys; print(json.load(sys.stdin)["planet"])')"

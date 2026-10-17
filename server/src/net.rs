@@ -309,6 +309,10 @@ impl NetObj {
             if let Some(slot) = tail.get_mut(at..at + 12) {
                 slot.copy_from_slice(&self.position.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>());
             }
+            // A world object container's state ends with its Euler angles after the position.
+            if let Some(slot) = tail.get_mut(at + 12..).filter(|s| s.len() == 12) {
+                slot.copy_from_slice(&crate::transform::euler_angles(self.rotation).iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>());
+            }
         }
         if tail.is_empty() {
             tail.push(0);

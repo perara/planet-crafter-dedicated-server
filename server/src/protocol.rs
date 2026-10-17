@@ -28,6 +28,7 @@ pub struct SceneObjectInfo {
     pub owner: u64,
     pub parent: Option<u64>,
     pub position: Option<[f32; 3]>,
+    pub rotation: Option<[f32; 4]>,
     pub sync: Vec<u8>,
 }
 
@@ -42,16 +43,17 @@ pub fn read_scene_object(r: &mut Reader) -> Option<SceneObjectInfo> {
             r.packed_u64()?;
         }
     }
-    let mut position = None;
+    let (mut position, mut rotation) = (None, None);
     if flags & HAS_TRANSFORM != 0 {
         position = Some([r.f32()?, r.f32()?, r.f32()?]);
-        r.skip(28)?;
+        rotation = Some([r.f32()?, r.f32()?, r.f32()?, r.f32()?]);
+        r.skip(12)?;
     }
     r.i32()?;
     let n = r.i32()? as usize;
     let sync = r.rest().get(..n)?.to_vec();
     r.skip(n)?;
-    Some(SceneObjectInfo { flags, hash, id, owner, parent, position, sync })
+    Some(SceneObjectInfo { flags, hash, id, owner, parent, position, rotation, sync })
 }
 
 /// ConnectionApprovedMessage: the client's own id and every object it is given.

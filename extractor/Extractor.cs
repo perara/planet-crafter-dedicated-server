@@ -97,6 +97,25 @@ namespace PcdsExtractor
             return result;
         }
 
+        // Runs a coroutine on the main thread and waits for the result it hands to its callback.
+        internal static T OnMainCoroutine<T>(Func<Action<T>, IEnumerator> start, int timeoutMs)
+        {
+            T result = default;
+            using (ManualResetEventSlim done = new ManualResetEventSlim())
+            {
+                MainQueue.Enqueue(() => Instance.StartCoroutine(start(r =>
+                {
+                    result = r;
+                    done.Set();
+                })));
+                if (!done.Wait(timeoutMs))
+                {
+                    throw new TimeoutException("main thread coroutine did not finish");
+                }
+            }
+            return result;
+        }
+
         internal void RequestStop()
         {
             _stop = true;
