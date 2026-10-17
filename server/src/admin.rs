@@ -5,10 +5,18 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
+
+/// Connections served at once (more are closed unanswered), the bytes of one request (line,
+/// headers and body), and how long it may take to arrive.
+const MAX_CONNECTIONS: usize = 16;
+const MAX_REQUEST: u64 = 64 << 10;
+const DEADLINE: Duration = Duration::from_secs(10);
 
 pub struct Request {
     pub method: String,
@@ -19,17 +27,55 @@ pub struct Request {
 }
 
 pub fn start(addr: &str, token: String, web_index: Option<String>) -> std::io::Result<Receiver<Request>> {
-    let listener = TcpListener::bind(addr)?;
+    listen(TcpListener::bind(addr)?, token, web_index)
+}
+
+fn listen(listener: TcpListener, token: String, web_index: Option<String>) -> std::io::Result<Receiver<Request>> {
     let (tx, rx) = channel();
+    let open = Arc::new(AtomicUsize::new(0));
     std::thread::Builder::new().name("pcds-admin".into()).spawn(move || {
         for stream in listener.incoming().flatten() {
-            let (tx, token, web) = (tx.clone(), token.clone(), web_index.clone());
+            // Only this thread adds, so the count cannot pass the cap.
+            if open.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
+                continue;
+            }
+            open.fetch_add(1, Ordering::SeqCst);
+            let (slot, tx, token, web) = (Slot(open.clone()), tx.clone(), token.clone(), web_index.clone());
             std::thread::spawn(move || {
+                let _slot = slot;
                 let _ = serve(stream, &tx, &token, web.as_deref());
             });
         }
     })?;
     Ok(rx)
+}
+
+/// One connection being served; freed when its thread ends, panic or not.
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Reads that all end by one deadline, however slowly the bytes trickle in.
+struct Deadline(TcpStream, Instant);
+
+impl Read for Deadline {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.1.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        self.0.set_read_timeout(Some(left))?;
+        self.0.read(buf)
+    }
+}
+
+/// Equal strings, in time that does not depend on where they differ.
+fn same(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0, |d, (x, y)| d | (x ^ y)) == 0
 }
 
 fn respond(mut stream: TcpStream, status: u16, content_type: &str, body: &str) -> std::io::Result<()> {
@@ -44,8 +90,8 @@ fn respond(mut stream: TcpStream, status: u16, content_type: &str, body: &str) -
 }
 
 fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>) -> std::io::Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    let mut reader = BufReader::new(stream.try_clone()?);
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let mut reader = BufReader::new(Deadline(stream.try_clone()?, Instant::now() + DEADLINE)).take(MAX_REQUEST);
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let mut parts = line.split_whitespace();
@@ -64,7 +110,8 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
             }
         }
     }
-    let mut body = vec![0u8; length.min(1 << 20)];
+    // Past MAX_REQUEST the reader ends: a longer body fails here, unanswered.
+    let mut body = vec![0u8; length.min(MAX_REQUEST as usize)];
     reader.read_exact(&mut body)?;
     if method == "GET" && (path == "/" || path == "/index.html") {
         return match web.and_then(|p| std::fs::read_to_string(p).ok()) {
@@ -72,7 +119,7 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
             None => respond(stream, 404, "text/plain", "no web GUI installed"),
         };
     }
-    if auth != format!("Bearer {token}") {
+    if !same(&auth, &format!("Bearer {token}")) {
         return respond(stream, 401, "application/json", "{\"error\":\"missing or wrong token\"}");
     }
     let body: Value = if body.iter().all(u8::is_ascii_whitespace) { Value::Object(Default::default()) } else {
@@ -88,5 +135,49 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
     match answer.recv_timeout(Duration::from_secs(10)) {
         Ok((status, json)) => respond(stream, status, "application/json", &json),
         Err(_) => respond(stream, 500, "application/json", "{\"error\":\"the game loop did not answer\"}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ask(addr: std::net::SocketAddr, request: &[u8]) -> String {
+        let mut s = TcpStream::connect(addr).unwrap();
+        let _ = s.write_all(request);
+        let mut answer = String::new();
+        let _ = s.read_to_string(&mut answer);
+        answer
+    }
+
+    #[test]
+    fn token_size_and_connection_limits() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let rx = listen(listener, "secret".into(), None).unwrap();
+        let wrong = b"GET /api/status HTTP/1.1\r\nAuthorization: Bearer secreT\r\n\r\n";
+        assert!(ask(addr, wrong).starts_with("HTTP/1.1 401"));
+
+        let client = std::thread::spawn(move || ask(addr, b"GET /api/status HTTP/1.1\r\nAuthorization: Bearer secret\r\n\r\n"));
+        let request = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!((request.method.as_str(), request.path.as_str()), ("GET", "/api/status"));
+        request.reply.send((200, "{}".into())).unwrap();
+        assert!(client.join().unwrap().starts_with("HTTP/1.1 200"));
+
+        // A body past the request limit: closed unanswered, never reaches the game loop.
+        let big = [b"POST /api/save HTTP/1.1\r\nAuthorization: Bearer secret\r\nContent-Length: 100000\r\n\r\n".as_slice(), &[b' '; 100_000]].concat();
+        assert_eq!(ask(addr, &big), "");
+        assert!(rx.try_recv().is_err());
+
+        // MAX_CONNECTIONS idle connections hold every slot: the next is closed unanswered.
+        let idle: Vec<TcpStream> = (0..MAX_CONNECTIONS).map(|_| TcpStream::connect(addr).unwrap()).collect();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(ask(addr, wrong), "");
+        drop(idle);
+        let served = (0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(20));
+            ask(addr, wrong).starts_with("HTTP/1.1 401")
+        });
+        assert!(served, "slots are freed when connections end");
     }
 }

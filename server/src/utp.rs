@@ -30,6 +30,15 @@ const HEARTBEAT_AFTER: Duration = Duration::from_millis(500);
 const TIMEOUT: Duration = Duration::from_secs(30);
 const FIRST: u16 = 0x8000;
 const LAST: u16 = 0x4000;
+/// Hostile-client limits: one batch (or reassembled unreliable message), bytes waiting to be
+/// sent, datagrams read per poll, connections in all and per IP, and how long a handshake may
+/// go without data.
+const MAX_BATCH: usize = 1 << 20;
+const MAX_QUEUED: usize = 8 << 20;
+const MAX_DATAGRAMS: usize = 4096;
+const MAX_CONNECTIONS: usize = 128;
+const MAX_PER_IP: usize = 8;
+const DATA_WITHIN: Duration = Duration::from_secs(10);
 
 pub type Token = [u8; 8];
 
@@ -47,7 +56,11 @@ struct Fragments {
 }
 
 struct Connection {
+    /// Fixed at the handshake: datagrams from anywhere else are dropped.
     addr: SocketAddr,
+    opened: Instant,
+    /// Until the client sent data we send it nothing (a spoofed handshake reflects nothing).
+    data_seen: bool,
     last_receive: Instant,
     last_send: Instant,
     /// Reliable receive: highest sequence seen and which of the 64 before it arrived (bit i
@@ -69,6 +82,8 @@ impl Connection {
     fn new(addr: SocketAddr, now: Instant) -> Connection {
         Connection {
             addr,
+            opened: now,
+            data_seen: false,
             last_receive: now,
             last_send: now,
             received: u16::MAX,
@@ -96,6 +111,12 @@ impl Connection {
 
     /// Records a reliable payload; in-order bytes go to `stream`, early ones wait.
     fn receive_reliable(&mut self, sequence: u16, payload: &[u8]) {
+        // The sender's window starts at or before `next` (unreceived, so unacked): anything
+        // WINDOW or more ahead of it is hostile, neither buffered nor acknowledged.
+        let early = sequence.wrapping_sub(self.next) as i16;
+        if early >= WINDOW as i16 {
+            return;
+        }
         let ahead = sequence.wrapping_sub(self.received) as i16;
         if ahead > 0 {
             self.mask = if ahead >= 64 { 1 } else { (self.mask << ahead) | 1 };
@@ -114,7 +135,7 @@ impl Connection {
                 self.stream.extend_from_slice(&p);
                 self.next = self.next.wrapping_add(1);
             }
-        } else if (sequence.wrapping_sub(self.next) as i16) > 0 {
+        } else if early > 0 {
             self.early.insert(sequence, payload.to_vec());
         }
     }
@@ -127,11 +148,15 @@ impl Connection {
     }
 }
 
-/// Splits off every complete length-prefixed batch at the front of `buffer`.
-fn pop_batches(buffer: &mut Vec<u8>, out: &mut Vec<Vec<u8>>) {
+/// Splits off every complete length-prefixed batch at the front of `buffer`; false when one
+/// claims more than MAX_BATCH (the caller drops what is left).
+fn pop_batches(buffer: &mut Vec<u8>, out: &mut Vec<Vec<u8>>) -> bool {
     let mut at = 0;
     while buffer.len() - at >= 4 {
         let n = i32::from_le_bytes(buffer[at..at + 4].try_into().unwrap()).max(0) as usize;
+        if n > MAX_BATCH {
+            return false;
+        }
         if buffer.len() - at - 4 < n {
             break;
         }
@@ -139,18 +164,21 @@ fn pop_batches(buffer: &mut Vec<u8>, out: &mut Vec<Vec<u8>>) {
         at += 4 + n;
     }
     buffer.drain(..at);
+    true
 }
 
 pub struct Utp {
     socket: UdpSocket,
     connections: HashMap<Token, Connection>,
+    /// Dropped by send() (over MAX_QUEUED); the next poll reports them.
+    dropped: Vec<Token>,
 }
 
 impl Utp {
     pub fn bind(addr: SocketAddr) -> std::io::Result<Utp> {
         let socket = UdpSocket::bind(addr)?;
         socket.set_nonblocking(true)?;
-        Ok(Utp { socket, connections: HashMap::new() })
+        Ok(Utp { socket, connections: HashMap::new(), dropped: Vec::new() })
     }
 
     fn transmit(&mut self, token: &Token, kind: u8, body: &[u8]) {
@@ -179,7 +207,9 @@ impl Utp {
             while Instant::now() < wait {
                 if let Ok((n, from)) = utp.socket.recv_from(&mut buffer) {
                     if from == server && n >= 13 && buffer[..4] == SIGNATURE && buffer[4] == ACCEPT && buffer[5..13] == token {
-                        utp.connections.insert(token, Connection::new(server, Instant::now()));
+                        let mut c = Connection::new(server, Instant::now());
+                        c.data_seen = true;
+                        utp.connections.insert(token, c);
                         return Ok((utp, token));
                     }
                 }
@@ -189,15 +219,17 @@ impl Utp {
         Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "no answer from the server"))
     }
 
-    /// Reads every waiting datagram; also reports connections that went silent.
+    /// Reads up to MAX_DATAGRAMS waiting datagrams; also reports connections that went silent,
+    /// sent no data in time after their handshake, or that send() dropped.
     pub fn poll(&mut self) -> Vec<Event> {
-        let mut events = Vec::new();
+        let mut events: Vec<Event> = self.dropped.drain(..).map(Event::Disconnected).collect();
         let mut buffer = [0u8; 2048];
         let now = Instant::now();
-        while let Ok((n, from)) = self.socket.recv_from(&mut buffer) {
+        for _ in 0..MAX_DATAGRAMS {
+            let Ok((n, from)) = self.socket.recv_from(&mut buffer) else { break };
             self.datagram(&buffer[..n], from, now, &mut events);
         }
-        let silent: Vec<Token> = self.connections.iter().filter(|(_, c)| now - c.last_receive > TIMEOUT).map(|(t, _)| *t).collect();
+        let silent: Vec<Token> = self.connections.iter().filter(|(_, c)| now - c.last_receive > TIMEOUT || (!c.data_seen && now - c.opened > DATA_WITHIN)).map(|(t, _)| *t).collect();
         for token in silent {
             self.connections.remove(&token);
             events.push(Event::Disconnected(token));
@@ -211,9 +243,17 @@ impl Utp {
             if d[3] != SIGNATURE[3] || d[4] != REQUEST {
                 return;
             }
-            if !self.connections.contains_key(&token) {
-                self.connections.insert(token, Connection::new(from, now));
-                events.push(Event::Connected(token, from));
+            match self.connections.get(&token) {
+                Some(c) if c.addr != from => return,
+                Some(_) => {}
+                None => {
+                    let same_ip = self.connections.values().filter(|c| c.addr.ip() == from.ip()).count();
+                    if self.connections.len() >= MAX_CONNECTIONS || same_ip >= MAX_PER_IP {
+                        return;
+                    }
+                    self.connections.insert(token, Connection::new(from, now));
+                    events.push(Event::Connected(token, from));
+                }
             }
             let mut accept = SIGNATURE.to_vec();
             accept.push(ACCEPT);
@@ -225,9 +265,9 @@ impl Utp {
             return;
         }
         let token: Token = d[1..9].try_into().unwrap();
-        let Some(c) = self.connections.get_mut(&token) else { return };
+        let Some(c) = self.connections.get_mut(&token).filter(|c| c.addr == from) else { return };
         c.last_receive = now;
-        c.addr = from;
+        c.data_seen |= d[0] == DATA;
         match d[0] {
             DISCONNECT => {
                 self.connections.remove(&token);
@@ -244,7 +284,12 @@ impl Utp {
                         if body[0] == PAYLOAD {
                             c.receive_reliable(sequence, &body[16..]);
                             c.ack_due = true;
-                            pop_batches(&mut c.stream, &mut batches);
+                            if !pop_batches(&mut c.stream, &mut batches) {
+                                eprintln!("utp: {from}: a batch over {} MiB, dropped", MAX_BATCH >> 20);
+                                self.disconnect(&token);
+                                events.push(Event::Disconnected(token));
+                                return;
+                            }
                         }
                     }
                     // Unreliable: an optional 2-byte sequence (pipeline 2), then a fragment header.
@@ -261,7 +306,10 @@ impl Utp {
                                 f.broken = true;
                             }
                             f.next = (sequence + 1) & 0x3FFF;
-                            if !f.broken {
+                            f.broken |= f.buffer.len() + body.len() - 2 > MAX_BATCH;
+                            if f.broken {
+                                f.buffer = Vec::new();
+                            } else {
                                 f.buffer.extend_from_slice(&body[2..]);
                                 if header & LAST != 0 {
                                     let mut whole = std::mem::take(&mut f.buffer);
@@ -278,12 +326,18 @@ impl Utp {
         }
     }
 
-    /// Queues one Netcode batch on the reliable stream.
+    /// Queues one Netcode batch on the reliable stream; a client that lets more than
+    /// MAX_QUEUED pile up (never acks) is dropped, and the next poll reports it.
     pub fn send(&mut self, token: &Token, batch: &[u8]) {
-        if let Some(c) = self.connections.get_mut(token) {
-            c.queued.extend_from_slice(&(batch.len() as i32).to_le_bytes());
-            c.queued.extend_from_slice(batch);
+        let Some(c) = self.connections.get_mut(token) else { return };
+        if c.queued.len() + batch.len() > MAX_QUEUED {
+            eprintln!("utp: {}: over {} MiB waiting to be sent, dropped", c.addr, MAX_QUEUED >> 20);
+            self.disconnect(token);
+            self.dropped.push(*token);
+            return;
         }
+        c.queued.extend_from_slice(&(batch.len() as i32).to_le_bytes());
+        c.queued.extend_from_slice(batch);
     }
 
     /// Sends what fits in the window, resends what was not acknowledged, acks, heartbeats.
@@ -294,6 +348,9 @@ impl Utp {
             let mut datagrams: Vec<(u8, Vec<u8>)> = Vec::new();
             {
                 let c = self.connections.get_mut(&token).unwrap();
+                if !c.data_seen {
+                    continue;
+                }
                 for i in 0..c.in_flight.len() {
                     if now - c.in_flight[i].2 >= RESEND {
                         let (sequence, payload) = (c.in_flight[i].0, c.in_flight[i].1.clone());
@@ -419,6 +476,131 @@ mod tests {
             server.datagram(&d, from, Instant::now(), &mut events);
         }
         assert!(matches!(events.as_slice(), [Event::Connected(..), Event::Data(_, b)] if b == b"abc"));
+    }
+
+    fn handshake(server: &mut Utp, from: SocketAddr, token: Token) -> Vec<Event> {
+        let mut events = Vec::new();
+        server.datagram(&[[b'U', b'T', b'P', 1, REQUEST].as_slice(), &token].concat(), from, Instant::now(), &mut events);
+        events
+    }
+
+    fn reliable(token: &Token, sequence: u16, bytes: &[u8]) -> Vec<u8> {
+        [[DATA].as_slice(), token, &[RELIABLE, PAYLOAD, 0, 0, 0], &sequence.to_le_bytes(), &u16::MAX.to_le_bytes(), &u64::MAX.to_le_bytes(), bytes].concat()
+    }
+
+    /// One whole batch on unreliable pipeline 1.
+    fn unreliable(token: &Token, batch: &[u8]) -> Vec<u8> {
+        [[DATA].as_slice(), token, &[1], &(FIRST | LAST).to_le_bytes(), &(batch.len() as i32).to_le_bytes(), batch].concat()
+    }
+
+    #[test]
+    fn hostile_reliable_streams() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let (from, token) = ("127.0.0.1:9".parse().unwrap(), [3; 8]);
+        handshake(&mut server, from, token);
+        let mut events = Vec::new();
+        // Early packets wait only within the window of the next one due; the rest are dropped.
+        for sequence in [1, 63, 64, 1000, 40000] {
+            server.datagram(&reliable(&token, sequence, b"x"), from, Instant::now(), &mut events);
+        }
+        let c = &server.connections[&token];
+        let mut early: Vec<u16> = c.early.keys().copied().collect();
+        early.sort();
+        assert_eq!((early, c.received), (vec![1, 63], 63));
+        // A batch claiming 2 GiB drops the client.
+        server.datagram(&reliable(&token, 0, &i32::MAX.to_le_bytes()), from, Instant::now(), &mut events);
+        assert!(matches!(events.as_slice(), [Event::Disconnected(t)] if *t == token));
+        assert!(server.connections.is_empty());
+    }
+
+    #[test]
+    fn unreliable_reassembly_is_capped() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let (from, token) = ("127.0.0.1:9".parse().unwrap(), [4; 8]);
+        handshake(&mut server, from, token);
+        let mut events = Vec::new();
+        let fragment = |header: u16| [[DATA].as_slice(), &token, &[1], &header.to_le_bytes(), &[0; 1400]].concat();
+        server.datagram(&fragment(FIRST), from, Instant::now(), &mut events);
+        for sequence in 1..800 {
+            server.datagram(&fragment(sequence), from, Instant::now(), &mut events);
+            assert!(server.connections[&token].fragments[0].buffer.len() <= MAX_BATCH);
+        }
+        server.datagram(&fragment(LAST | 800), from, Instant::now(), &mut events);
+        assert!(events.is_empty() && server.connections[&token].fragments[0].buffer.is_empty());
+    }
+
+    #[test]
+    fn a_client_that_never_acks_is_dropped() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let token = [5; 8];
+        handshake(&mut server, "127.0.0.1:9".parse().unwrap(), token);
+        let batch = vec![0; 1 << 20];
+        for _ in 0..7 {
+            server.send(&token, &batch);
+        }
+        assert!(server.connections.contains_key(&token));
+        server.send(&token, &batch);
+        assert!(!server.connections.contains_key(&token));
+        assert!(matches!(server.poll().as_slice(), [Event::Disconnected(t)] if *t == token));
+    }
+
+    #[test]
+    fn connection_limits() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        for i in 0..=MAX_PER_IP as u8 {
+            handshake(&mut server, SocketAddr::from(([127, 0, 0, 2], 1000 + i as u16)), [i, 1, 0, 0, 0, 0, 0, 0]);
+        }
+        assert_eq!(server.connections.len(), MAX_PER_IP);
+        for i in 0..200u8 {
+            handshake(&mut server, SocketAddr::from(([127, 1, 0, i], 9)), [i, 2, 0, 0, 0, 0, 0, 0]);
+        }
+        assert_eq!(server.connections.len(), MAX_CONNECTIONS);
+    }
+
+    /// A handshake alone gets nothing but its accept (spoofed ones reflect nothing more), and
+    /// expires without data.
+    #[test]
+    fn nothing_but_the_accept_before_data() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = server.socket.local_addr().unwrap();
+        let c = client(0);
+        c.connect(addr).unwrap();
+        let token = [6; 8];
+        c.send(&[[b'U', b'T', b'P', 1, REQUEST].as_slice(), &token].concat()).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        server.poll();
+        assert_eq!(recv(&c)[4], ACCEPT);
+        server.connections.get_mut(&token).unwrap().last_send -= Duration::from_secs(1);
+        server.flush();
+        c.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        assert!(c.recv(&mut [0; 64]).is_err(), "no heartbeat before data");
+        c.send(&[[DATA].as_slice(), &token].concat()).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        server.poll();
+        server.connections.get_mut(&token).unwrap().last_send -= Duration::from_secs(1);
+        server.flush();
+        assert_eq!(recv(&c), [[HEARTBEAT].as_slice(), &token].concat());
+
+        let mute = [7; 8];
+        handshake(&mut server, "127.0.0.1:9".parse().unwrap(), mute);
+        server.connections.get_mut(&mute).unwrap().opened -= DATA_WITHIN + Duration::from_secs(1);
+        assert!(matches!(server.poll().as_slice(), [Event::Disconnected(t)] if *t == mute));
+    }
+
+    /// The handshake fixes the address: nothing from elsewhere counts, not even a disconnect.
+    #[test]
+    fn datagrams_from_another_address_are_dropped() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let (home, other): (SocketAddr, SocketAddr) = ("127.0.0.1:9".parse().unwrap(), "127.0.0.3:9".parse().unwrap());
+        let token = [8; 8];
+        handshake(&mut server, home, token);
+        let mut events = handshake(&mut server, other, token);
+        server.datagram(&unreliable(&token, b"z"), other, Instant::now(), &mut events);
+        server.datagram(&[[DISCONNECT].as_slice(), &token].concat(), other, Instant::now(), &mut events);
+        assert!(events.is_empty());
+        assert_eq!(server.connections[&token].addr, home);
+        server.datagram(&unreliable(&token, b"z"), home, Instant::now(), &mut events);
+        assert!(matches!(events.as_slice(), [Event::Data(_, b)] if b == b"z"));
     }
 
     /// Garbage datagrams, before and after a handshake, never crash the transport.

@@ -91,6 +91,10 @@ const APP_ID: &str = "1284190";
 const CHUNK: usize = 524_288;
 /// DisconnectReasonMessage: shown to a kicked or refused player.
 const DISCONNECT_REASON: u32 = 8;
+/// The most a client's "Split" message may add up to (two of the game's chunks).
+const MAX_SPLIT: usize = 1 << 20;
+/// Autosave interval bounds, in minutes (larger ones overflow the clock).
+const MAX_AUTOSAVE: u64 = 1440;
 
 enum Link {
     /// Steam networking: the connection carries the verified SteamID.
@@ -199,12 +203,16 @@ fn main() {
         }
         std::process::exit(1)
     });
+    // The save as it was before this server touched it (as every backup: none with PCDS_BACKUPS=0).
+    if let Err(e) = save::backup(&save_path, Duration::ZERO, backups_kept()) {
+        eprintln!("backup failed: {e}");
+    }
     let session_number: u32 = env("PCDS_SESSION").map(|s| s.parse().expect("PCDS_SESSION: a number")).unwrap_or(4242);
     let version = net_data.game_version.clone();
     let mut game = Game::new(net_data, data, spec, save, &dir);
     let beside_save = |name: &str| std::path::Path::new(&save_path).with_file_name(name).to_string_lossy().to_string();
     game.access = access::Access::load(Some(env("PCDS_ACCESS").unwrap_or_else(|| beside_save("access.json"))));
-    let mut autosave_minutes: u64 = env("PCDS_AUTOSAVE").and_then(|s| s.parse().ok()).unwrap_or(5);
+    let mut autosave_minutes: u64 = env("PCDS_AUTOSAVE").and_then(|s| s.parse().ok()).unwrap_or(5).min(MAX_AUTOSAVE);
     game.session_number = session_number;
     println!("world: {} world objects, {} network objects, planet {}, game {version}", game.wos.len(), game.net.objects.len(), game.planet_id());
 
@@ -264,6 +272,8 @@ fn main() {
     let mut loops = (0u32, Instant::now(), 0u32);
 
     let mut links: HashMap<u64, Link> = HashMap::new();
+    // The client behind each direct-IP connection, from its Connected event to its end.
+    let mut ip_clients: HashMap<utp::Token, u64> = HashMap::new();
     let mut approved: HashSet<u64> = HashSet::new();
     let mut pending_drop: Vec<(u64, Instant)> = Vec::new();
     let mut next_client = 1u64;
@@ -273,7 +283,9 @@ fn main() {
         if loops.1.elapsed() >= Duration::from_secs(1) {
             loops = (0, Instant::now(), loops.0);
         }
-        let mut joined: Vec<Link> = Vec::new();
+        // Client ids are given as connections appear, so a connection that also sends or ends
+        // within this loop is found.
+        let mut joined: Vec<(u64, Link)> = Vec::new();
         let mut incoming: Vec<(u64, Vec<u8>)> = Vec::new();
         let mut gone: Vec<u64> = Vec::new();
         if let Some((steam, listen)) = &steam {
@@ -285,36 +297,46 @@ fn main() {
                     }
                     ListenSocketEvent::Connected(event) => {
                         let steam_id = event.remote().steam_id().map(|id| id.raw()).unwrap_or(0);
-                        joined.push(Link::Steam { steam_id, connection: event.take_connection(), split: None });
+                        joined.push((next_client, Link::Steam { steam_id, connection: event.take_connection(), split: None }));
+                        next_client += 1;
                     }
                     ListenSocketEvent::Disconnected(event) => {
                         let peer = event.remote().steam_id().map(|id| id.raw()).unwrap_or(0);
                         println!("{peer}: disconnected ({:?})", event.end_reason());
-                        gone.extend(links.iter().filter(|(_, l)| matches!(l, Link::Steam { steam_id, .. } if *steam_id == peer)).map(|(c, _)| *c));
+                        let all = links.iter().map(|(c, l)| (*c, l)).chain(joined.iter().map(|(c, l)| (*c, l)));
+                        gone.extend(all.filter(|(_, l)| matches!(l, Link::Steam { steam_id, .. } if *steam_id == peer)).map(|(c, _)| c));
                     }
                 }
             }
             for (client, link) in links.iter_mut() {
                 if let Link::Steam { connection, split, .. } = link {
                     for message in connection.receive_messages(64).unwrap_or_default() {
-                        incoming.extend(reassemble(split, message.data()).map(|batch| (*client, batch)));
+                        match reassemble(split, message.data()) {
+                            Ok(batch) => incoming.extend(batch.map(|batch| (*client, batch))),
+                            Err(e) => {
+                                println!("client {client}: dropped ({e})");
+                                gone.push(*client);
+                                break;
+                            }
+                        }
                     }
                 }
             }
         }
         if let Some(utp) = &mut utp {
-            let by_token = |token: &utp::Token| links.iter().find(|(_, l)| matches!(l, Link::Ip(t, _) if t == token)).map(|(c, _)| *c);
             for event in utp.poll() {
                 match event {
-                    utp::Event::Connected(token, addr) => joined.push(Link::Ip(token, addr)),
-                    utp::Event::Data(token, batch) => incoming.extend(by_token(&token).map(|c| (c, batch))),
-                    utp::Event::Disconnected(token) => gone.extend(by_token(&token)),
+                    utp::Event::Connected(token, addr) => {
+                        ip_clients.insert(token, next_client);
+                        joined.push((next_client, Link::Ip(token, addr)));
+                        next_client += 1;
+                    }
+                    utp::Event::Data(token, batch) => incoming.extend(ip_clients.get(&token).map(|c| (*c, batch))),
+                    utp::Event::Disconnected(token) => gone.extend(ip_clients.remove(&token)),
                 }
             }
         }
-        for link in joined {
-            let client = next_client;
-            next_client += 1;
+        for (client, link) in joined {
             let (verified, trusted, ip) = match &link {
                 Link::Steam { steam_id, .. } => {
                     println!("client {client}: connected over Steam as {steam_id}");
@@ -333,13 +355,22 @@ fn main() {
             if links.remove(&client).is_some() {
                 println!("client {client}: left");
                 approved.remove(&client);
-                game.disconnect(client);
+                guarded(&mut game, client, &save_path, |game| game.disconnect(client));
             }
         }
         for (client, batch) in incoming {
-            game.receive(client, &batch);
+            // Gone or kicked: nothing more from it reaches the game (the reason still goes out).
+            let kicked = pending_drop.iter().any(|(c, _)| *c == client) || game.kicks.iter().any(|(c, _)| *c == client);
+            if links.contains_key(&client) && !kicked {
+                guarded(&mut game, client, &save_path, |game| game.receive(client, &batch));
+            }
         }
-        game.tick();
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| game.tick())).is_err() {
+            // The whole world may be half-updated: keep what there is and let systemd restart.
+            eprintln!("the game tick panicked: saving and stopping");
+            persist(&mut game, &save_path);
+            std::process::exit(1);
+        }
         if std::mem::take(&mut game.save_requested) {
             persist(&mut game, &save_path);
         }
@@ -374,13 +405,14 @@ fn main() {
                 match link {
                     Link::Steam { connection, .. } => drop(connection),
                     Link::Ip(token, _) => {
+                        ip_clients.remove(&token);
                         if let Some(utp) = utp.as_mut() {
                             utp.disconnect(&token);
                         }
                     }
                 }
                 approved.remove(client);
-                game.disconnect(*client);
+                guarded(&mut game, *client, &save_path, |game| game.disconnect(*client));
             }
         }
         pending_drop.retain(|(_, due)| *due > now);
@@ -533,7 +565,7 @@ fn admin_request(game: &mut Game, r: &admin::Request, ctx: &Status, stop: &Atomi
         }
         ("POST", "/api/settings") => {
             if let Some(m) = r.body["autosaveMinutes"].as_u64() {
-                *autosave = m;
+                *autosave = m.min(MAX_AUTOSAVE);
             }
             ok()
         }
@@ -541,10 +573,23 @@ fn admin_request(game: &mut Game, r: &admin::Request, ctx: &Status, stop: &Atomi
     }
 }
 
+fn backups_kept() -> usize {
+    env("PCDS_BACKUPS").and_then(|s| s.parse().ok()).unwrap_or(24)
+}
+
+/// One client's share of the game. A panic there (the hook printed it) kicks that client and
+/// saves at once instead of ending the server for everyone.
+fn guarded(game: &mut Game, client: u64, save_path: &str, work: impl FnOnce(&mut Game)) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(game))).is_err() {
+        eprintln!("client {client}: the server panicked on it; kicked, saving");
+        game.kick(client, "Server error");
+        persist(game, save_path);
+    }
+}
+
 fn persist(game: &mut Game, path: &str) {
-    let every = env("PCDS_BACKUP_MINUTES").and_then(|s| s.parse().ok()).unwrap_or(60);
-    let keep = env("PCDS_BACKUPS").and_then(|s| s.parse().ok()).unwrap_or(24);
-    if let Err(e) = save::backup(path, Duration::from_secs(every * 60), keep) {
+    let every: u64 = env("PCDS_BACKUP_MINUTES").and_then(|s| s.parse().ok()).unwrap_or(60);
+    if let Err(e) = save::backup(path, Duration::from_secs(every.saturating_mul(60)), backups_kept()) {
         eprintln!("backup failed: {e}");
     }
     match game.snapshot().write(path) {
@@ -604,18 +649,83 @@ fn send(connection: &NetConnection, batch: &[u8]) {
     });
 }
 
-fn reassemble(split: &mut Option<(Vec<u8>, usize)>, data: &[u8]) -> Option<Vec<u8>> {
+/// A client's messages back into batches. Err for a split the game never sends (a count other
+/// than 1..=9, or over MAX_SPLIT in all): the caller drops the client.
+fn reassemble(split: &mut Option<(Vec<u8>, usize)>, data: &[u8]) -> Result<Option<Vec<u8>>, &'static str> {
     if let Some((buffer, left)) = split {
+        if buffer.len() + data.len() > MAX_SPLIT {
+            return Err("split message over 1 MiB");
+        }
         buffer.extend_from_slice(data);
         *left -= 1;
         if *left == 0 {
-            return split.take().map(|(buffer, _)| buffer);
+            return Ok(split.take().map(|(buffer, _)| buffer));
         }
-        return None;
+        return Ok(None);
     }
     if data.len() == 6 && &data[..5] == b"Split" {
-        *split = Some((Vec::with_capacity(CHUNK * 2), (data[5] - b'0') as usize));
-        return None;
+        let n = char::from(data[5]).to_digit(10).filter(|n| (1..=9).contains(n)).ok_or("bad split count")?;
+        *split = Some((Vec::new(), n as usize));
+        return Ok(None);
     }
-    Some(data.to_vec())
+    Ok(Some(data.to_vec()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn steam_splits_are_bounded() {
+        let mut split = None;
+        assert_eq!(reassemble(&mut split, b"batch"), Ok(Some(b"batch".to_vec())));
+        for bad in [b"Split0", b"Split/", b"Split:"] {
+            assert!(reassemble(&mut None, bad).is_err());
+        }
+        assert_eq!(reassemble(&mut split, b"Split2"), Ok(None));
+        assert_eq!(reassemble(&mut split, b"ab"), Ok(None));
+        assert_eq!(reassemble(&mut split, b"cd"), Ok(Some(b"abcd".to_vec())));
+        assert!(split.is_none());
+        reassemble(&mut split, b"Split3").unwrap();
+        reassemble(&mut split, &vec![0; MAX_SPLIT]).unwrap();
+        assert!(reassemble(&mut split, b"x").is_err());
+    }
+
+    /// A panic in one client's work kicks it and saves; the next loop goes on.
+    #[test]
+    fn a_panicking_client_is_kicked_and_the_world_saved() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let dir = std::env::temp_dir().join(format!("pcds-guarded-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("world.json").to_string_lossy().to_string();
+        guarded(&mut game, 7, &path, |_| panic!("test panic"));
+        assert_eq!(game.kicks.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [7]);
+        assert!(!SaveFile::load(&path).unwrap().objects.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn autosave_minutes_are_clamped() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let request = admin::Request { method: "POST".into(), path: "/api/settings".into(), body: serde_json::json!({"autosaveMinutes": 160_000_000_000_000_000u64}), reply: std::sync::mpsc::channel().0 };
+        let ctx = Status { invite_code: None, network: "ip", port: 0, started: Instant::now(), autosave_minutes: 5, loop_rate: 0, save_path: "" };
+        let mut autosave = 5;
+        admin_request(&mut game, &request, &ctx, &AtomicBool::new(false), &mut autosave, &HashMap::new());
+        assert_eq!(autosave, MAX_AUTOSAVE);
+        let _ = Instant::now() + Duration::from_secs(autosave * 60);
+    }
+
+    /// The startup copy is made even when a spaced backup was just taken.
+    #[test]
+    fn the_original_save_is_kept() {
+        let dir = std::env::temp_dir().join(format!("pcds-original-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("world.json");
+        std::fs::write(&path, "original").unwrap();
+        save::backup(path.to_str().unwrap(), Duration::from_secs(3600), 24).unwrap();
+        std::thread::sleep(Duration::from_millis(1100));
+        save::backup(path.to_str().unwrap(), Duration::ZERO, 24).unwrap();
+        assert_eq!(std::fs::read_dir(dir.join("backups")).unwrap().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
