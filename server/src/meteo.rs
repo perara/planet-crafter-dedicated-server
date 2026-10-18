@@ -209,7 +209,7 @@ fn try_to_launch(game: &mut Game) {
         game.ext.meteo.queue.remove(0);
     } else if m.queue.is_empty() && m.selected == -1 {
         let chance = num(singleton(game, HANDLER), "eventChanceOnOneHundred");
-        if chance > game.rng.rangef(0.0, 100.0) {
+        if chance * game.rules.meteo.event_chance > game.rng.rangef(0.0, 100.0) {
             launch_random(game);
         }
     }

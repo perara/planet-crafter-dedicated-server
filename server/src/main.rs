@@ -21,6 +21,7 @@
 //!   PCDS_ADMIN        admin API and web GUI address, default 127.0.0.1:7782; "off" disables
 //!   PCDS_ADMIN_TOKEN  the admin API's bearer token (the API is off without one)
 //!   PCDS_ACCESS       access lists file, default access.json next to the save
+//!   PCDS_RULES        server rules file, default rules.json next to the save (rules.rs)
 //!   PCDS_WEB          the web GUI page, default web/index.html next to the binary
 //!   PCDS_TRACE        log every incoming message and RPC
 
@@ -56,6 +57,7 @@ mod panels;
 mod planets;
 mod players;
 mod probe;
+mod rules;
 mod protocol;
 mod rockets;
 mod rpcspec;
@@ -213,8 +215,15 @@ fn main() {
     }
     let session_number: u32 = env("PCDS_SESSION").map(|s| s.parse().expect("PCDS_SESSION: a number")).unwrap_or(4242);
     let version = net_data.game_version.clone();
-    let mut game = Game::new(net_data, data, spec, save, &dir);
     let beside_save = |name: &str| std::path::Path::new(&save_path).with_file_name(name).to_string_lossy().to_string();
+    // A rules file that does not hold up stops the start, before the world loads.
+    let rules_path = env("PCDS_RULES").unwrap_or_else(|| beside_save("rules.json"));
+    let loaded_rules = rules::Rules::load(&rules_path).and_then(|r| r.validate(&data).map(|_| r)).unwrap_or_else(|e| {
+        eprintln!("rules: {e}");
+        std::process::exit(1)
+    });
+    let mut game = Game::new(net_data, data, spec, save, &dir);
+    rules::start(&mut game, loaded_rules, rules_path);
     game.access = access::Access::load(Some(env("PCDS_ACCESS").unwrap_or_else(|| beside_save("access.json"))));
     let mut autosave_minutes: u64 = env("PCDS_AUTOSAVE").and_then(|s| s.parse().ok()).unwrap_or(5).min(MAX_AUTOSAVE);
     game.session_number = session_number;
@@ -514,6 +523,7 @@ fn admin_request(game: &mut Game, r: &admin::Request, ctx: &Status, stop: &Atomi
                 "uptimeSeconds": ctx.started.elapsed().as_secs(),
                 "autosaveMinutes": ctx.autosave_minutes,
                 "tickRate": game.net_data.tick_rate,
+                "rules": rules::changes(&game.rules),
                 "fps": ctx.loop_rate,
                 "planet": game.planet_id(),
                 "terraformation": terraformation,
@@ -567,6 +577,12 @@ fn admin_request(game: &mut Game, r: &admin::Request, ctx: &Status, stop: &Atomi
             enforce(game);
             ok()
         }
+        ("GET", "/api/rules") => (200, serde_json::json!({"rules": game.rules, "defaults": rules::Rules::default()}).to_string()),
+        // A JSON merge patch of the rules: {"speed": {"growth": 2}}; null resets a rule.
+        ("POST", "/api/rules") => match game.rules.patched(&r.body).and_then(|new| rules::set(game, new)) {
+            Ok(()) => (200, serde_json::json!({"rules": game.rules}).to_string()),
+            Err(e) => (400, serde_json::json!({"error": e}).to_string()),
+        },
         ("POST", "/api/settings") => {
             if let Some(m) = r.body["autosaveMinutes"].as_u64() {
                 *autosave = m.min(MAX_AUTOSAVE);
@@ -706,6 +722,21 @@ mod tests {
         assert_eq!(game.kicks.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [7]);
         assert!(!SaveFile::load(&path).unwrap().objects.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rules_change_through_the_api_and_bad_ones_are_refused() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let post = |game: &mut Game, body: serde_json::Value| {
+            let request = admin::Request { method: "POST".into(), path: "/api/rules".into(), body, reply: std::sync::mpsc::channel().0 };
+            let ctx = Status { invite_code: None, network: "ip", port: 0, started: Instant::now(), autosave_minutes: 5, loop_rate: 0, save_path: "" };
+            admin_request(game, &request, &ctx, &AtomicBool::new(false), &mut 5, &HashMap::new()).0
+        };
+        assert_eq!(post(&mut game, serde_json::json!({"speed": {"growth": 2}})), 200);
+        assert_eq!(game.rules.speed.growth, 2.0);
+        assert_eq!(post(&mut game, serde_json::json!({"speed": {"growth": -1}})), 400);
+        assert_eq!(post(&mut game, serde_json::json!({"sped": {}})), 400);
+        assert_eq!(game.rules.speed.growth, 2.0, "a refused change keeps the rules");
     }
 
     #[test]

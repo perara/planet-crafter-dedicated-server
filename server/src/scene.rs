@@ -20,6 +20,14 @@ pub enum Timer {
 #[derive(Default)]
 pub struct Timers(pub Vec<(f32, Timer)>);
 
+/// Rules: a dropped world object's despawn moves to `delay` seconds from now (0: never).
+pub fn set_despawn(game: &mut Game, wo: i32, delay: f32) {
+    game.timers.0.retain(|(_, t)| !matches!(t, Timer::Despawn(w, _) if *w == wo));
+    if let Some(net) = game.wos.get(&wo).and_then(|w| w.net).filter(|_| delay > f32::EPSILON) {
+        schedule(game, delay, Timer::Despawn(wo, net));
+    }
+}
+
 pub fn schedule(game: &mut Game, delay: f32, timer: Timer) {
     let due = game.time + delay;
     // One despawn per world object: dropping it again replaces the timer.
@@ -93,6 +101,7 @@ pub fn init(game: &mut Game) {
 
 /// PlanetUnlocker.OnClientConnectCallback: every unlocked (saved) planet.
 pub fn on_client_approved(game: &mut Game, client: u64) {
+    crate::machines::client_approved(game, client);
     let planets: Vec<i32> = game.save.planets.iter().filter_map(|p| p["planetId"].as_str()).map(stable_hash).collect();
     for hash in planets {
         game.net.rpc_scene(Target::Only(client), "PlanetUnlocker.UnlockPlanetClientRpc", &[json!(hash)]);

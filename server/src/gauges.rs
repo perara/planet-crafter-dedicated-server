@@ -86,12 +86,17 @@ pub fn start(game: &mut Game, client: u64, object: u64, gauges: [f32; 4], equipm
             set_f(game, object, max, INITIAL);
         }
     }
-    let outside = -1.9 * drain(game);
+    let outside = -1.9 * drain(game) * game.rules.gauges.oxygen_drain;
     game.ext.gauges.0.insert(object, State { client, next_tick: game.time, rebreather, outside_oxygen: outside });
 }
 
 fn add(game: &mut Game, object: u64, var: &str, max: &str, delta: f32) {
-    let v = (get_f(game, object, var) + delta).clamp(0.0, get_f(game, object, max).max(0.0));
+    let max = get_f(game, object, max).max(0.0);
+    let mut v = (get_f(game, object, var) + delta).clamp(0.0, max);
+    // Rules: noDeath keeps the vital gauges at 1 or more.
+    if game.rules.gauges.no_death {
+        v = v.max(1.0f32.min(max));
+    }
     set_f(game, object, var, v);
 }
 
@@ -111,13 +116,13 @@ fn stage_value(game: &Game, field: &str) -> f64 {
 
 /// SetOutsideOxygenChangeValue.
 fn outside_oxygen(game: &mut Game, object: u64, rebreather: bool) -> f32 {
-    let rate = -1.9 * drain(game);
+    let rate = -1.9 * drain(game) * game.rules.gauges.oxygen_drain;
     let terra = crate::units::value(game, crate::units::Kind::Terraformation, 0);
     let no_need = stage_value(game, "noNeedForOxygenStage");
     let mut outside = rate;
     if get_b(game, object, "_playerIsUnderWater") {
         if terra > no_need {
-            outside = UNDERWATER_OXYGEN * drain(game);
+            outside = UNDERWATER_OXYGEN * drain(game) * game.rules.gauges.oxygen_drain;
         }
     } else if terra > no_need {
         outside = INSIDE_OXYGEN;
@@ -146,8 +151,8 @@ pub fn tick(game: &mut Game) {
             // PlayerEffects only live on the client that ate the food: no effect here.
             let oxygen = if get_b(game, object, "_playerCanBreath") { INSIDE_OXYGEN } else { s.outside_oxygen };
             add(game, object, "_oxygenValue", "_oxygenMaxValue", oxygen * TICK);
-            add(game, object, "_thirstValue", "_thirstMaxValue", -0.13 * drain(game) * TICK);
-            add_health(game, object, -0.06 * drain(game) * TICK);
+            add(game, object, "_thirstValue", "_thirstMaxValue", -0.13 * drain(game) * game.rules.gauges.thirst_drain * TICK);
+            add_health(game, object, -0.06 * drain(game) * game.rules.gauges.food_drain * TICK);
             let toxic_rate = -1.0 * drain(game);
             if toxic_rate.abs() > 0.0 && get_f(game, object, "_healthValue") > 0.0 {
                 let filter = 1.0 - crate::equipment::equipment_value(game, s.client, "ToxinsFilter") as f32 / 100.0;

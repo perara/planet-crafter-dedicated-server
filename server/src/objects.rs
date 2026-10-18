@@ -302,9 +302,28 @@ impl Game {
         }
     }
 
-    pub fn create_and_drop_on_floor(&mut self, group: usize, position: [f32; 3], drop_size: f32, save: bool, nearest: bool, despawn: f32, sender: u64) {
+    pub fn create_and_drop_on_floor(&mut self, group: usize, position: [f32; 3], drop_size: f32, save: bool, nearest: bool, despawn: f32, sender: u64) -> i32 {
         let id = self.create_world_object(group, 0, save);
         self.drop_on_floor(id, position, [0.0, 0.0, 0.0, 1.0], drop_size, false, nearest, 0, despawn, false, sender);
+        id
+    }
+
+    /// Rules: a building past its limit (limits.buildings) comes down at once, its materials
+    /// back to the builder as a deconstruction gives them, with a word in the chat. (Letting it
+    /// be built first returns the materials whatever the client took for it.)
+    fn over_building_limit(&mut self, client: u64, id: i32, group: usize) {
+        let Some(&max) = self.rules.limits.buildings.get(&self.data.groups[group].id) else { return };
+        if !self.wos.contains_key(&id) || self.group_count(true, group) <= max as i32 {
+            return;
+        }
+        if let Some(inventory) = self.clients.get(&client).and_then(|c| c.ready.as_ref()).map(|s| s.inventory) {
+            let position = self.wos[&id].position;
+            self.retrieve_resources_from_deconstruction(id, self.data.groups[group].hash, inventory, position, client);
+        }
+        self.destroy_go_on_all_clients(id, 0.0);
+        self.destroy_world_object(id, false);
+        let message = format!("This world allows {max} of {}: it was taken down and its materials returned", self.data.groups[group].id);
+        self.net.rpc_scene(Target::Only(client), "ChatHandler.ReceiveChatMessageClientRpc", &[json!(0), json!(message)]);
     }
 
     /// RetrieveResourcesFromDeconstructionServerRpc.
@@ -439,12 +458,18 @@ impl Game {
                     self.net.rpc_scene(me, "WorldObjectsHandler.CreateAndInstantiateWorldObjectClientRpc", &[json!(0)]);
                     return true;
                 };
-                let (_, net) = self.create_and_instantiate(group, position, rotation, disolve, save, icon);
+                let (id, net) = self.create_and_instantiate(group, position, rotation, disolve, save, icon);
                 self.net.rpc_scene(me, "WorldObjectsHandler.CreateAndInstantiateWorldObjectClientRpc", &[json!(net)]);
+                self.over_building_limit(client, id, group);
             }
             "WorldObjectsHandler.CreateAndDropOnFloorServerRpc" => {
                 if let Some(group) = self.data.group_by_hash(a.i(0)) {
-                    self.create_and_drop_on_floor(group, a.v3(1), a.f(2), a.b(3), a.b(4), a.f(5), client);
+                    let despawn = a.f(5);
+                    let id = self.create_and_drop_on_floor(group, a.v3(1), a.f(2), a.b(3), a.b(4), despawn, client);
+                    // Rules: what the game drops with a despawn time is a meteor's material.
+                    if let Some(seconds) = self.rules.meteo.material_despawn_seconds.filter(|_| despawn > f32::EPSILON) {
+                        crate::scene::set_despawn(self, id, seconds);
+                    }
                 }
             }
             "WorldObjectsHandler.DropOnFloorServerRpc" => {

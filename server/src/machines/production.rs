@@ -30,22 +30,23 @@ pub(super) fn next_due(m: &super::Machine) -> f32 {
 pub fn tick(game: &mut Game, wo: i32, now: f32) {
     let Some(m) = game.ext.machines.list.get(&wo) else { return };
     let [cast, generate, craft, disintegrate] = due(m, now);
+    let speed = game.rules.speed.machines;
     if cast {
         mining_rays(game, wo, now);
     }
     if generate {
         let g = game.ext.machines.get_mut(&wo).unwrap().generator.as_mut().unwrap();
-        g.next = now + g.period();
+        g.next = now + g.period() / speed;
         try_to_generate(game, wo);
     }
     if craft {
         let a = game.ext.machines.get_mut(&wo).unwrap().autocrafter.as_mut().unwrap();
-        a.next = now + a.period;
+        a.next = now + a.period / speed;
         try_to_craft(game, wo);
     }
     if disintegrate {
         let d = game.ext.machines.get_mut(&wo).unwrap().disintegrator.as_mut().unwrap();
-        d.next = now + d.period;
+        d.next = now + d.period / speed;
         if has_energy(game, wo) {
             try_to_disintegrate(game, wo);
         }
@@ -183,10 +184,10 @@ fn mining_rays(game: &mut Game, wo: i32, now: f32) {
 
 /// AddToGenerationSpeedMultiplier: the loop restarts with the new period.
 fn add_generation_speed(game: &mut Game, wo: i32, add: f32) {
-    let now = game.time;
+    let (now, speed) = (game.time, game.rules.speed.machines);
     if let Some(g) = game.ext.machines.get_mut(&wo).and_then(|m| m.generator.as_mut()) {
         g.speed += add;
-        g.next = now + g.period();
+        g.next = now + g.period() / speed;
     }
 }
 
@@ -436,7 +437,7 @@ fn fuse_value(game: &Game, fuse: usize) -> f32 {
 }
 
 /// MachineGrowerBase.AddToGrowthSpeedMultiplier on each grower component of a machine.
-fn add_growth_speed(game: &mut Game, wo: i32, add: f32) {
+pub(super) fn add_growth_speed(game: &mut Game, wo: i32, add: f32) {
     let Some(m) = game.ext.machines.get_mut(&wo) else { return };
     // Every component keeps its own multiplier, all the same.
     let count = m.growers.len();

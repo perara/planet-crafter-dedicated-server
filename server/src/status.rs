@@ -46,7 +46,10 @@ pub fn handle_dying_consequences(game: &mut Game, client: u64) {
     let Some(state) = game.clients.get(&client).and_then(|c| c.ready.clone()) else { return };
     let Some(object) = game.player_object(client) else { return };
     let position = game.net.objects.get(&object).map(|o| o.position).unwrap_or([0.0; 3]);
-    let consequence = game.save.settings["dyingConsequencesLabel"].as_str().unwrap_or("DropSomeItems").to_string();
+    let consequence = match &game.rules.death.consequences {
+        Some(c) => c.clone(),
+        None => game.save.settings["dyingConsequencesLabel"].as_str().unwrap_or("DropSomeItems").to_string(),
+    };
     let status = if consequence == "NoConsequences" {
         0
     } else if crate::instances::is_inside_an_instance(game, position) {
@@ -90,7 +93,7 @@ fn drop_some(game: &mut Game, state: &crate::game::PlayerState, position: [f32; 
     if items.is_empty() {
         return 0;
     }
-    let chance = if items.len() <= 4 { 100.0 } else { LOSE_CHANCE };
+    let chance = if items.len() <= 4 { 100.0 } else { game.rules.death.drop_chance.unwrap_or(LOSE_CHANCE) };
     let mut dropped = Vec::new();
     for wo in items.iter().rev() {
         if chance > game.rng.range(0, 100) as f32 && dropped.len() < 30 && !game.wos.get(wo).is_some_and(|w| game.data.groups[w.group].bool("cantBeDestroyed")) {

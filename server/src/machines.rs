@@ -10,7 +10,7 @@
 //! range use world object positions) and collider bounds. Ore veins under extractors are cast
 //! against the vein colliders of the scene dump (veins.rs).
 
-mod growers;
+pub(crate) mod growers;
 mod production;
 mod veins;
 
@@ -359,8 +359,13 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     let (unit_generation, unit_multipliers) = (m.unit_generation.clone(), m.unit_multipliers.clone());
     let destruct = m.destruct_if_full && m.linked != 0;
     let wants_start = has_harvestable;
+    let grows = m.growers.iter().any(|g| *g);
     game.ext.machines.next_due = f32::NEG_INFINITY;
     game.ext.machines.list.insert(wo, m);
+    // Rules: growth speed, as a growth fuse would add it.
+    if grows && game.rules.speed.growth != 1.0 {
+        production::add_growth_speed(game, wo, game.rules.speed.growth - 1.0);
+    }
     if linked != 0 && game.ext.machines.listening.get(&linked) == Some(&wo) {
         if has_vegetation {
             growers::vegetation_inventory_set(game, wo);
@@ -458,6 +463,28 @@ pub fn grabbed(game: &mut Game, wo: i32) {
 }
 
 pub fn scene_object_removed(_game: &mut Game, _wo: i32) {}
+
+/// Rules: the growth speed changed by `add`, for every grower there is.
+pub fn add_growth_speed_to_all(game: &mut Game, add: f32) {
+    let growers: Vec<i32> = game.ext.machines.list.iter().filter(|(_, m)| m.growers.iter().any(|g| *g)).map(|(wo, _)| *wo).collect();
+    for wo in growers {
+        production::add_growth_speed(game, wo, add);
+    }
+}
+
+/// Rules: a joining client hears the growth speed of every grower (its own copies start at 1).
+pub fn client_approved(game: &mut Game, client: u64) {
+    let add = game.rules.speed.growth - 1.0;
+    if add == 0.0 {
+        return;
+    }
+    let growers: Vec<(u64, usize)> = game.ext.machines.list.iter().filter(|(_, m)| m.growers.iter().any(|g| *g)).filter_map(|(wo, m)| Some((game.wos.get(wo)?.net?, m.growers.len()))).collect();
+    for (net, count) in growers {
+        for _ in 0..count {
+            game.net.rpc(Target::Only(client), net, "ConstructibleProxy.SetGrowerSpeedMultiplierClientRpc", &[json!(add)]);
+        }
+    }
+}
 
 /// The session arrived on another planet: its machines' game objects become active (OnEnable).
 pub fn planet_loaded(game: &mut Game) {

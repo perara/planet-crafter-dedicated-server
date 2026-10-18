@@ -158,6 +158,9 @@ pub struct Game {
     /// Clients the transport should drop, with the reason they are shown.
     pub kicks: Vec<(u64, String)>,
     pub access: crate::access::Access,
+    pub rules: crate::rules::Rules,
+    /// Where set() keeps the rules (None: not kept, as in tests).
+    pub rules_path: Option<String>,
     /// The invite code's last 4 digits (SavedDataHandler.sessionId).
     pub session_number: u32,
     next_time_sync: f32,
@@ -257,6 +260,8 @@ impl Game {
             ext: Default::default(),
             kicks: Vec::new(),
             access: crate::access::Access::load(None),
+            rules: Default::default(),
+            rules_path: None,
             session_number: 4242,
             next_time_sync: 0.0,
             unhandled: Default::default(),
@@ -388,7 +393,7 @@ impl Game {
             self.kick(client, crate::access::REFUSED);
             return;
         }
-        let max = std::env::var("PCDS_MAX_PLAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(16usize);
+        let max = self.rules.max_players();
         if self.clients.values().filter(|c| c.approved).count() >= max {
             println!("client {client}: refused (server full, {max} players)");
             self.kick(client, "MULTIPLAYER_Game_Session_Full");

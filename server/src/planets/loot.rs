@@ -121,6 +121,12 @@ pub fn generated_groups(game: &mut Game, f: &Value, settings: Option<&Value>) ->
             }
         }
     }
+    // Rules: more or less of the same loot, up to the container's size.
+    let amount = game.rules.loot.amount;
+    if amount != 1.0 && !list.is_empty() {
+        let n = (list.len() as f32 * amount).round() as usize;
+        list = list.iter().copied().cycle().take(n).collect();
+    }
     list.truncate(if size == 0 { 10 } else { size }.max(0) as usize);
     list
 }

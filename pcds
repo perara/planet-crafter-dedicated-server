@@ -10,6 +10,8 @@
 #   pcds install-service | uninstall-service    start at login, check for game updates hourly
 #   pcds code | players | save | kick PLAYER | ban PLAYER | unban NAME_OR_IP
 #   pcds gui | token | config | api METHOD PATH [JSON]
+#   pcds rules [set SECTION.RULE=VALUE ... | reset]
+#                          show or change the server rules (rules.json; README "Server rules")
 #   pcds extract [--game DIR]   extract the game tables again (needs Wine)
 #   pcds update [--game DIR]    after a game update: extract and restart when the game changed
 #   pcds selftest               a scripted player joins over direct IP and checks the answers
@@ -17,7 +19,8 @@
 #   pcds build                  build the server (cargo) and the extractor (Docker, .NET SDK)
 #
 # Everything the server keeps lives in run/ next to this script (PCDS_HOME overrides it):
-# world.json, server.env, access.json, backups/, data/<game version>/ and the extractor.
+# world.json, server.env, access.json, rules.json, backups/, data/<game version>/ and the
+# extractor.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -618,6 +621,39 @@ cmd_setup() {
   say "ready: 'pcds start' runs it now, 'pcds install-service' starts it at login"
 }
 
+# The rules through the admin API: shown, set as SECTION.RULE=VALUE (values are JSON, else
+# text; null resets one), or all reset to the game's behaviour.
+cmd_rules() {
+  case "${1:-}" in
+    "") api GET /api/rules | python3 -m json.tool ;;
+    set)
+      shift
+      (($#)) || die "pcds rules set SECTION.RULE=VALUE ... ('pcds rules' lists them)"
+      api POST /api/rules "$(python3 -c '
+import json, sys
+patch = {}
+for arg in sys.argv[1:]:
+    key, sep, value = arg.partition("=")
+    if not sep or "." not in key:
+        sys.exit("pcds: " + arg + ": expected SECTION.RULE=VALUE")
+    try:
+        value = json.loads(value)
+    except ValueError:
+        pass
+    *path, last = key.split(".")
+    node = patch
+    for p in path:
+        node = node.setdefault(p, {})
+    node[last] = value
+print(json.dumps(patch))' "$@")" | python3 -m json.tool
+      ;;
+    reset)
+      api POST /api/rules "$(api GET /api/rules | python3 -c 'import json, sys; print(json.dumps({k: None for k in json.load(sys.stdin)["defaults"]}))')" | python3 -m json.tool
+      ;;
+    *) die "pcds rules [set SECTION.RULE=VALUE ... | reset]" ;;
+  esac
+}
+
 cmd_selftest() {
   active || die "start the server first (pcds start)"
   local data script out
@@ -661,6 +697,7 @@ case "${1:-}" in
   token) env_get PCDS_ADMIN_TOKEN ;;
   config) "${EDITOR:-nano}" "$ENV_FILE" ;;
   api) api "${2:?method}" "${3:?path}" "${4:-}" ;;
+  rules) shift; cmd_rules "$@" ;;
   extract) shift; cmd_extract "$@" ;;
   update) shift; cmd_update "$@" ;;
   selftest) cmd_selftest ;;

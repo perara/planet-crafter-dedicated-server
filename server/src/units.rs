@@ -217,13 +217,14 @@ fn from_world_objects(game: &Game, planet: i32, unit: &mut Unit) -> bool {
     let ty = unit.kind.unit_type();
     let index = crate::model::unit_index(ty);
     let mut multiplier = 0.0;
+    let pace = if unit.kind == Kind::Energy { 1.0 } else { game.rules.speed.terraformation };
     for id in &game.constructed {
         let Some(w) = game.wos.get(id) else { continue };
         if w.planet_hash() != planet {
             continue;
         }
         let Some(index) = index else { continue };
-        let generation = w.unit_generation(index);
+        let generation = w.unit_generation(index) * pace;
         if generation > 0.0 {
             unit.increase += generation;
         } else if generation < 0.0 {
