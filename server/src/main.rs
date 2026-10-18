@@ -297,6 +297,8 @@ fn main() {
         Some("tables-diff") => native::diff::run(&args[2..]),
         Some("native-layout") => native::tables::layout(&args[2..]),
         Some("native-il") => native::tables::il(&args[2..]),
+        Some("native-wrecks") => native::wrecks::debug(&args[2..]),
+        Some("native-reach") => native::wrecks::reach(&args[2..]),
         Some("new-save") => newworld::run(&args[2..]),
         Some("split") => split::front(&args[2..]),
         Some("split-game") => split::game(&args[2..]),
