@@ -17,8 +17,6 @@ pub struct Assembly {
     /// Field and MethodDef row (minus 1) → (type index, position in its list).
     field_at: Vec<Option<(usize, usize)>>,
     method_at: Vec<Option<(usize, usize)>>,
-    /// An attribute argument had another assembly's enum, read as int32.
-    guessed_enums: bool,
 }
 
 /// A TypeDef row. A nested type is named "Outer/Inner", in its outermost type's namespace.
@@ -85,7 +83,7 @@ pub struct Attr {
 }
 
 /// An attribute argument. Enums are Int or UInt (their underlying type), a char is UInt, a
-/// null array is empty, and one the reader cannot decode is Other and ends the list.
+/// null array is empty.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AttrArg {
     Bool(bool),
@@ -96,10 +94,11 @@ pub enum AttrArg {
     /// System.Type, by its assembly-qualified name.
     Type(Option<String>),
     Array(Vec<AttrArg>),
-    Other,
 }
 
-/// A type by name. scope: the AssemblyRef a TypeRef points into; None for one defined here.
+/// A type by name. scope: the assembly that defines it (a TypeDef's own, the AssemblyRef a
+/// TypeRef points into); None when the name does not say (attribute blobs without an assembly,
+/// lookups by name).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeName {
     pub scope: Option<String>,
@@ -146,13 +145,20 @@ pub enum TypeSig {
 /// Several assemblies together: resolve names across them.
 pub struct Assemblies(pub Vec<Assembly>);
 
+/// Deeper type signatures and attribute values are malformed (real ones nest a few levels).
+const MAX_SIG_DEPTH: usize = 64;
+
+fn invalid(path: &Path, why: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, format!("{}: {why}", path.display()))
+}
+
 impl Assembly {
-    /// Reads the assembly at `path`. Another assembly's enum in an attribute argument is read as
-    /// int32; Assemblies::load_dir reads those with their real underlying type.
-    pub fn load(path: &Path) -> io::Result<Assembly> {
-        let data = std::fs::read(path)?;
-        Assembly::parse(data, &|_| None)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("{}: not a .NET assembly", path.display())))
+    /// The assembly at `path` without its attributes (Assemblies::load_dir reads those, as their
+    /// enum arguments may be other assemblies' types). None: a PE file without a CLI header (a
+    /// native DLL); a .NET assembly the reader cannot read fully is an error.
+    fn read(path: &Path) -> io::Result<Option<Assembly>> {
+        let Some(img) = Image::parse(std::fs::read(path)?).map_err(|e| invalid(path, &e))? else { return Ok(None) };
+        Assembly::parse(img).map(Some).map_err(|e| invalid(path, &e))
     }
 
     /// In TypeDef table order: index 0 is <Module>.
@@ -195,13 +201,13 @@ impl Assembly {
                 Some(Member::Method { owner: type_of(t)?, name: m.name.clone(), params: m.params.iter().map(|p| p.1.clone()).collect(), instance: m.flags & 0x10 == 0, ret: m.ret.clone(), generic: Vec::new() })
             }
             MEMBER_REF => {
-                let owner = self.type_sig(img.refer(MEMBER_REF, row, 0))?;
+                let owner = self.type_sig(img.refer(MEMBER_REF, row, 0), 0)?;
                 let name = img.string(img.cell(MEMBER_REF, row, 1));
                 let sig = img.blob(img.cell(MEMBER_REF, row, 2));
                 if sig.first() == Some(&0x06) {
                     return Some(Member::Field { owner, name });
                 }
-                let (ret, params) = self.method_sig(&mut Reader::new(sig))?;
+                let (ret, params) = self.method_sig(&mut Reader::new(sig), 0)?;
                 Some(Member::Method { owner, name, params, instance: sig.first()? & 0x20 != 0, ret, generic: Vec::new() })
             }
             METHOD_SPEC => {
@@ -210,7 +216,7 @@ impl Assembly {
                 // MethodSpec instantiation (II.23.2.15): 0x0A, the count, the type arguments.
                 let mut b = Reader::new(img.blob(img.cell(METHOD_SPEC, row, 1)));
                 if b.u8() == Some(0x0A) {
-                    let args = (0..b.compressed()?).map(|_| self.sig_type(&mut b)).collect::<Option<Vec<_>>>()?;
+                    let args = (0..b.compressed()?).map(|_| self.sig_type(&mut b, 0)).collect::<Option<Vec<_>>>()?;
                     if let Member::Method { generic, .. } = &mut m {
                         *generic = args;
                     }
@@ -226,9 +232,7 @@ impl Assembly {
         (token >> 24 == 0x70).then(|| self.img.user_string(token & 0xFF_FFFF)).flatten()
     }
 
-    /// `foreign`: the underlying type of an enum another assembly defines, if known.
-    fn parse(data: Vec<u8>, foreign: &dyn Fn(&TypeName) -> Option<TypeSig>) -> Option<Assembly> {
-        let img = Image::parse(data)?;
+    fn parse(img: Image) -> Result<Assembly, String> {
         let name = match img.rows(ASSEMBLY) {
             0 => img.string(img.cell(MODULE, 1, 1)),
             _ => img.string(img.cell(ASSEMBLY, 1, 7)),
@@ -267,20 +271,17 @@ impl Assembly {
                 }
             })
             .collect();
-        let mut asm = Assembly { name, types, img, field_at: Vec::new(), method_at: Vec::new(), guessed_enums: false };
-        asm.read_members();
-        let (attrs, guessed) = asm.read_attributes(foreign);
-        asm.set_attributes(attrs);
-        asm.guessed_enums = guessed;
-        Some(asm)
+        let mut asm = Assembly { name, types, img, field_at: Vec::new(), method_at: Vec::new() };
+        asm.read_members()?;
+        Ok(asm)
     }
 
     /// Base types, fields, methods, interfaces, generic parameters and layouts.
-    fn read_members(&mut self) {
+    fn read_members(&mut self) -> Result<(), String> {
         self.field_at = vec![None; self.img.rows(FIELD) as usize];
         self.method_at = vec![None; self.img.rows(METHOD) as usize];
         for i in 0..self.types.len() {
-            let (extends, fields, methods) = self.members(i as u32 + 1);
+            let (extends, fields, methods) = self.members(i as u32 + 1)?;
             let t = &mut self.types[i];
             t.extends = extends;
             for (k, (row, f)) in fields.into_iter().enumerate() {
@@ -297,10 +298,11 @@ impl Assembly {
             }
         }
         for r in 1..=self.img.rows(INTERFACE_IMPL) {
-            let sig = self.type_sig(self.img.refer(INTERFACE_IMPL, r, 1));
-            if let (Some(t), Some(sig)) = (slot(&mut self.types, self.img.cell(INTERFACE_IMPL, r, 0)), sig) {
-                t.interfaces.push(sig);
-            }
+            let sig = self.type_sig(self.img.refer(INTERFACE_IMPL, r, 1), 0);
+            let (Some(t), Some(sig)) = (slot(&mut self.types, self.img.cell(INTERFACE_IMPL, r, 0)), sig) else {
+                return Err(format!("InterfaceImpl row {r}: type or interface unreadable"));
+            };
+            t.interfaces.push(sig);
         }
         for r in 1..=self.img.rows(GENERIC_PARAM) {
             let (owner, row) = self.img.refer(GENERIC_PARAM, r, 2);
@@ -336,64 +338,70 @@ impl Assembly {
                 self.types[t].fields[k].offset = Some(self.img.cell(FIELD_LAYOUT, r, 0));
             }
         }
+        Ok(())
     }
 
     /// TypeDef row `row`'s base type, and its fields and methods with their rows.
     #[allow(clippy::type_complexity)]
-    fn members(&self, row: u32) -> (Option<TypeSig>, Vec<(u32, FieldDef)>, Vec<(u32, MethodDef)>) {
+    fn members(&self, row: u32) -> Result<(Option<TypeSig>, Vec<(u32, FieldDef)>, Vec<(u32, MethodDef)>), String> {
         let img = &self.img;
+        let t = &self.types[row as usize - 1];
+        let bad = |what: &str| format!("{}.{}: {what}: signature malformed or nested deeper than {MAX_SIG_DEPTH}", t.namespace, t.name);
         let fields = img.run(TYPE_DEF, row, 4, FIELD, FIELD_PTR).into_iter().map(|f| {
-            let field = FieldDef {
-                name: img.string(img.cell(FIELD, f, 1)),
-                flags: img.cell(FIELD, f, 0) as u16,
-                sig: self.field_sig(img.blob(img.cell(FIELD, f, 2))),
-                attributes: Vec::new(),
-                offset: None,
-                constant: None,
-            };
-            (f, field)
+            let name = img.string(img.cell(FIELD, f, 1));
+            let sig = self.field_sig(img.blob(img.cell(FIELD, f, 2))).ok_or_else(|| bad(&format!("field {name}")))?;
+            Ok((f, FieldDef { name, flags: img.cell(FIELD, f, 0) as u16, sig, attributes: Vec::new(), offset: None, constant: None }))
         });
-        let methods = img.run(TYPE_DEF, row, 5, METHOD, METHOD_PTR).into_iter().map(|m| (m, self.method(m)));
-        (self.type_sig(img.refer(TYPE_DEF, row, 3)), fields.collect(), methods.collect())
+        let methods = img.run(TYPE_DEF, row, 5, METHOD, METHOD_PTR).into_iter().map(|m| Ok((m, self.method(m).ok_or_else(|| bad(&format!("method {}", img.string(img.cell(METHOD, m, 3)))))?)));
+        // Row 0: no base type (System.Object, interfaces, <Module>).
+        let extends = match img.refer(TYPE_DEF, row, 3) {
+            (_, 0) => None,
+            base => Some(self.type_sig(base, 0).ok_or_else(|| bad("base type"))?),
+        };
+        Ok((extends, fields.collect::<Result<_, String>>()?, methods.collect::<Result<_, String>>()?))
     }
 
-    fn method(&self, m: u32) -> MethodDef {
+    fn method(&self, m: u32) -> Option<MethodDef> {
         let img = &self.img;
-        let (ret, types) = self.method_sig(&mut Reader::new(img.blob(img.cell(METHOD, m, 4)))).unwrap_or((TypeSig::Unknown(0), Vec::new()));
+        let (ret, types) = self.method_sig(&mut Reader::new(img.blob(img.cell(METHOD, m, 4))), 0)?;
         // Param rows by sequence number: 0 is the return value, 1.. the parameters.
         let names: Vec<(u32, String)> = img.run(METHOD, m, 5, PARAM, PARAM_PTR).into_iter().map(|p| (img.cell(PARAM, p, 1), img.string(img.cell(PARAM, p, 2)))).collect();
         let params = types.into_iter().zip(1..).map(|(t, seq)| (names.iter().find(|n| n.0 == seq).map(|n| n.1.clone()).unwrap_or_default(), t)).collect();
-        MethodDef { name: img.string(img.cell(METHOD, m, 3)), flags: img.cell(METHOD, m, 2) as u16, rva: img.cell(METHOD, m, 0), ret, params, attributes: Vec::new() }
+        Some(MethodDef { name: img.string(img.cell(METHOD, m, 3)), flags: img.cell(METHOD, m, 2) as u16, rva: img.cell(METHOD, m, 0), ret, params, attributes: Vec::new() })
     }
 
-    /// The attributes on types, fields and methods, with their parents (table, row), and whether
-    /// an enum argument was guessed to be int32.
+    /// The attributes on types, fields and methods, with their parents (table, row). `foreign`:
+    /// the underlying type of an enum another assembly defines.
     #[allow(clippy::type_complexity)]
-    fn read_attributes(&self, foreign: &dyn Fn(&TypeName) -> Option<TypeSig>) -> (Vec<((usize, u32), Attr)>, bool) {
+    fn read_attributes(&self, foreign: &dyn Fn(&TypeName) -> Option<TypeSig>) -> Result<Vec<((usize, u32), Attr)>, String> {
         let img = &self.img;
-        let guessed = Cell::new(false);
+        let missing = Cell::new(None);
         let underlying = |n: &TypeName| {
             let local = n.scope.as_ref().is_none_or(|s| *s == self.name).then(|| self.find(&n.namespace, &n.name)).flatten();
             let found = match local {
                 Some(t) => enum_base(&self.types[t]),
                 None => foreign(n),
             };
-            found.unwrap_or_else(|| {
-                guessed.set(true);
-                TypeSig::I4
-            })
+            if found.is_none() {
+                missing.set(Some(n.full()));
+            }
+            found
         };
-        let attrs = (1..=img.rows(CUSTOM_ATTRIBUTE))
-            .filter_map(|r| {
-                let parent = img.refer(CUSTOM_ATTRIBUTE, r, 0);
-                if ![TYPE_DEF, FIELD, METHOD].contains(&parent.0) {
-                    return None;
-                }
-                let (ty, params) = self.ctor(img.refer(CUSTOM_ATTRIBUTE, r, 1))?;
-                Some((parent, decode_attr(ty, &params, img.blob(img.cell(CUSTOM_ATTRIBUTE, r, 2)), &underlying)))
-            })
-            .collect();
-        (attrs, guessed.get())
+        let mut attrs = Vec::new();
+        for r in 1..=img.rows(CUSTOM_ATTRIBUTE) {
+            let parent = img.refer(CUSTOM_ATTRIBUTE, r, 0);
+            if ![TYPE_DEF, FIELD, METHOD].contains(&parent.0) {
+                continue;
+            }
+            let (ty, params) = self.ctor(img.refer(CUSTOM_ATTRIBUTE, r, 1)).ok_or_else(|| format!("CustomAttribute row {r}: constructor unreadable"))?;
+            let full = ty.full();
+            let attr = decode_attr(ty, &params, img.blob(img.cell(CUSTOM_ATTRIBUTE, r, 2)), &underlying).ok_or_else(|| match missing.take() {
+                Some(e) => format!("[{full}] (CustomAttribute row {r}): argument of type {e}, which no loaded assembly defines as an enum"),
+                None => format!("[{full}] (CustomAttribute row {r}): arguments malformed or nested deeper than {MAX_SIG_DEPTH}"),
+            })?;
+            attrs.push((parent, attr));
+        }
+        Ok(attrs)
     }
 
     fn set_attributes(&mut self, attrs: Vec<((usize, u32), Attr)>) {
@@ -422,13 +430,13 @@ impl Assembly {
                 let (owner, _) = (*self.method_at.get((row as usize).checked_sub(1)?)?)?;
                 (self.name_of(TYPE_DEF, owner as u32 + 1)?, img.cell(METHOD, row, 4))
             }
-            MEMBER_REF => match self.type_sig(img.refer(MEMBER_REF, row, 0))? {
+            MEMBER_REF => match self.type_sig(img.refer(MEMBER_REF, row, 0), 0)? {
                 TypeSig::Class(ty) | TypeSig::GenericInst { ty, .. } => (ty, img.cell(MEMBER_REF, row, 2)),
                 _ => return None,
             },
             _ => return None,
         };
-        Some((ty, self.method_sig(&mut Reader::new(img.blob(sig)))?.1))
+        Some((ty, self.method_sig(&mut Reader::new(img.blob(sig)), 0)?.1))
     }
 
     /// A TypeDef or TypeRef row's name.
@@ -437,7 +445,7 @@ impl Assembly {
         match table {
             TYPE_DEF => {
                 let t = self.types.get((row as usize).checked_sub(1)?)?;
-                Some(TypeName { scope: None, namespace: t.namespace.clone(), name: t.name.clone() })
+                Some(TypeName { scope: Some(self.name.clone()), namespace: t.namespace.clone(), name: t.name.clone() })
             }
             TYPE_REF if (1..=img.rows(TYPE_REF)).contains(&row) => {
                 let (mut namespace, mut name) = (img.string(img.cell(TYPE_REF, row, 2)), img.string(img.cell(TYPE_REF, row, 1)));
@@ -451,47 +459,57 @@ impl Assembly {
                     namespace = img.string(img.cell(TYPE_REF, scope.1, 2));
                     scope = img.refer(TYPE_REF, scope.1, 0);
                 }
-                let scope = (scope.0 == ASSEMBLY_REF).then(|| img.string(img.cell(ASSEMBLY_REF, scope.1, 6)));
+                let scope = match scope.0 {
+                    ASSEMBLY_REF => Some(img.string(img.cell(ASSEMBLY_REF, scope.1, 6))),
+                    MODULE => Some(self.name.clone()), // this module's own type
+                    _ => None,
+                };
                 Some(TypeName { scope, namespace, name })
             }
             _ => None,
         }
     }
 
-    /// A TypeDefOrRef target: a TypeDef or TypeRef as a class, a TypeSpec decoded.
-    fn type_sig(&self, (table, row): (usize, u32)) -> Option<TypeSig> {
+    /// A TypeDefOrRef target: a TypeDef or TypeRef as a class, a TypeSpec decoded. `depth`: the
+    /// signature nesting so far.
+    fn type_sig(&self, (table, row): (usize, u32), depth: usize) -> Option<TypeSig> {
         match table {
-            TYPE_SPEC => self.sig_type(&mut Reader::new(self.img.blob(self.img.cell(TYPE_SPEC, row, 0)))),
+            TYPE_SPEC => self.sig_type(&mut Reader::new(self.img.blob(self.img.cell(TYPE_SPEC, row, 0))), depth),
             _ => self.name_of(table, row).map(TypeSig::Class),
         }
     }
 
-    /// FieldSig (II.23.2.4); Unknown(0) when malformed.
-    fn field_sig(&self, blob: &[u8]) -> TypeSig {
+    /// FieldSig (II.23.2.4); None when malformed.
+    fn field_sig(&self, blob: &[u8]) -> Option<TypeSig> {
         let mut r = Reader::new(blob);
-        (r.u8() == Some(0x06)).then(|| self.sig_type(&mut r)).flatten().unwrap_or(TypeSig::Unknown(0))
+        (r.u8() == Some(0x06)).then(|| self.sig_type(&mut r, 0)).flatten()
     }
 
     /// MethodDefSig or MethodRefSig (II.23.2.1-3): the return type and parameter types.
-    fn method_sig(&self, r: &mut Reader) -> Option<(TypeSig, Vec<TypeSig>)> {
+    fn method_sig(&self, r: &mut Reader, depth: usize) -> Option<(TypeSig, Vec<TypeSig>)> {
         if r.u8()? & 0x10 != 0 {
             r.compressed()?; // generic parameter count
         }
         let n = r.compressed()?;
-        let ret = self.sig_type(r)?;
-        Some((ret, (0..n).map(|_| self.sig_type(r)).collect::<Option<_>>()?))
+        let ret = self.sig_type(r, depth)?;
+        Some((ret, (0..n).map(|_| self.sig_type(r, depth)).collect::<Option<_>>()?))
     }
 
-    /// One type in a signature (II.23.2.12), custom modifiers skipped.
-    fn sig_type(&self, r: &mut Reader) -> Option<TypeSig> {
+    /// One type in a signature (II.23.2.12), custom modifiers skipped; None when malformed or
+    /// nested deeper than MAX_SIG_DEPTH.
+    fn sig_type(&self, r: &mut Reader, depth: usize) -> Option<TypeSig> {
+        if depth > MAX_SIG_DEPTH {
+            return None;
+        }
+        let depth = depth + 1;
         Some(match r.u8()? {
-            0x0F => TypeSig::Ptr(Box::new(self.sig_type(r)?)),
-            0x10 => TypeSig::ByRef(Box::new(self.sig_type(r)?)),
+            0x0F => TypeSig::Ptr(Box::new(self.sig_type(r, depth)?)),
+            0x10 => TypeSig::ByRef(Box::new(self.sig_type(r, depth)?)),
             0x11 => TypeSig::ValueType(self.sig_token(r)?),
             0x12 => TypeSig::Class(self.sig_token(r)?),
             0x13 => TypeSig::Var(r.compressed()?),
             0x14 => {
-                let ty = self.sig_type(r)?;
+                let ty = self.sig_type(r, depth)?;
                 let rank = r.compressed()?;
                 // Sizes, then lower bounds: counted lists of compressed integers.
                 for _ in 0..2 {
@@ -504,22 +522,22 @@ impl Assembly {
             0x15 => {
                 let value_type = r.u8()? == 0x11;
                 let ty = self.sig_token(r)?;
-                let args = (0..r.compressed()?).map(|_| self.sig_type(r)).collect::<Option<_>>()?;
+                let args = (0..r.compressed()?).map(|_| self.sig_type(r, depth)).collect::<Option<_>>()?;
                 TypeSig::GenericInst { ty, value_type, args }
             }
             0x1B => {
-                self.method_sig(r)?;
+                self.method_sig(r, depth)?;
                 TypeSig::FnPtr
             }
-            0x1D => TypeSig::SzArray(Box::new(self.sig_type(r)?)),
+            0x1D => TypeSig::SzArray(Box::new(self.sig_type(r, depth)?)),
             0x1E => TypeSig::MVar(r.compressed()?),
             // modreq, modopt: a type token, then the type.
             0x1F | 0x20 => {
                 r.compressed()?;
-                return self.sig_type(r);
+                return self.sig_type(r, depth);
             }
             // The vararg sentinel, pinned: then the type.
-            0x41 | 0x45 => return self.sig_type(r),
+            0x41 | 0x45 => return self.sig_type(r, depth),
             b => primitive(b).unwrap_or(TypeSig::Unknown(b)),
         })
     }
@@ -533,21 +551,29 @@ impl Assembly {
 }
 
 impl Assemblies {
-    /// Every *.dll in `dir` that is a .NET assembly (others are skipped), in file name order.
+    /// Every *.dll in `dir` that is a .NET assembly, in file name order. Native DLLs (no CLI
+    /// header) are skipped; a .NET assembly the reader cannot read fully fails the load.
     pub fn load_dir(dir: &Path) -> io::Result<Assemblies> {
-        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
-            .filter_map(|e| Some(e.ok()?.path()))
-            .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("dll")))
-            .collect();
-        paths.sort();
-        let mut set = Assemblies(paths.iter().filter_map(|p| Assembly::load(p).ok()).collect());
-        // Other assemblies' enums in attribute arguments: read again now that they resolve.
-        for i in 0..set.0.len() {
-            if set.0[i].guessed_enums {
-                let (attrs, guessed) = set.0[i].read_attributes(&|n| set.enum_base(n));
-                set.0[i].set_attributes(attrs);
-                set.0[i].guessed_enums = guessed;
+        let mut paths = Vec::new();
+        for e in std::fs::read_dir(dir)? {
+            let p = e?.path();
+            if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("dll")) {
+                paths.push(p);
             }
+        }
+        paths.sort();
+        let mut loaded = Vec::new();
+        for p in paths {
+            if let Some(a) = Assembly::read(&p)? {
+                loaded.push((p, a));
+            }
+        }
+        let (paths, list): (Vec<PathBuf>, Vec<Assembly>) = loaded.into_iter().unzip();
+        let mut set = Assemblies(list);
+        // Attributes once every assembly is loaded: their enum arguments may be other assemblies'.
+        for (i, path) in paths.iter().enumerate() {
+            let attrs = set.0[i].read_attributes(&|n| set.enum_base(n)).map_err(|e| invalid(path, &e))?;
+            set.0[i].set_attributes(attrs);
         }
         Ok(set)
     }
@@ -614,44 +640,41 @@ fn enum_base(t: &TypeDef) -> Option<TypeSig> {
 
 /// A custom attribute blob (II.23.3): prolog 0x0001, the constructor's arguments, then named
 /// field and property arguments.
-fn decode_attr(ty: TypeName, params: &[TypeSig], blob: &[u8], underlying: &dyn Fn(&TypeName) -> TypeSig) -> Attr {
+/// None when malformed, or when an enum argument's `underlying` type is unknown.
+fn decode_attr(ty: TypeName, params: &[TypeSig], blob: &[u8], underlying: &dyn Fn(&TypeName) -> Option<TypeSig>) -> Option<Attr> {
     let mut attr = Attr { ty, fixed: Vec::new(), named: Vec::new() };
+    // No blob: a constructor without arguments.
+    if blob.is_empty() && params.is_empty() {
+        return Some(attr);
+    }
     let mut r = Reader::new(blob);
-    if r.u16() != Some(1) {
-        if !blob.is_empty() {
-            attr.fixed.push(AttrArg::Other);
-        }
-        return attr;
+    if r.u16()? != 1 {
+        return None;
     }
     for p in params {
-        let Some(a) = arg(&mut r, p, underlying) else {
-            attr.fixed.push(AttrArg::Other);
-            return attr;
-        };
-        attr.fixed.push(a);
+        attr.fixed.push(arg(&mut r, p, underlying, 0)?);
     }
-    for _ in 0..r.u16().unwrap_or(0) {
-        let Some(named) = named_arg(&mut r, underlying) else {
-            attr.named.push((String::new(), AttrArg::Other));
-            break;
-        };
-        attr.named.push(named);
+    for _ in 0..r.u16()? {
+        attr.named.push(named_arg(&mut r, underlying)?);
     }
-    attr
+    Some(attr)
 }
 
 /// A NamedArg: FIELD (0x53) or PROPERTY (0x54), its type, name and value.
-fn named_arg(r: &mut Reader, underlying: &dyn Fn(&TypeName) -> TypeSig) -> Option<(String, AttrArg)> {
+fn named_arg(r: &mut Reader, underlying: &dyn Fn(&TypeName) -> Option<TypeSig>) -> Option<(String, AttrArg)> {
     r.u8()?;
-    let ty = elem_type(r)?;
+    let ty = elem_type(r, 0)?;
     let name = r.ser_string()?.unwrap_or_default();
-    Some((name, arg(r, &ty, underlying)?))
+    Some((name, arg(r, &ty, underlying, 0)?))
 }
 
 /// A FieldOrPropType (II.23.3): the type of a named or boxed argument.
-fn elem_type(r: &mut Reader) -> Option<TypeSig> {
+fn elem_type(r: &mut Reader, depth: usize) -> Option<TypeSig> {
+    if depth > MAX_SIG_DEPTH {
+        return None;
+    }
     Some(match r.u8()? {
-        0x1D => TypeSig::SzArray(Box::new(elem_type(r)?)),
+        0x1D => TypeSig::SzArray(Box::new(elem_type(r, depth + 1)?)),
         0x50 => TypeSig::Class(TypeName { scope: None, namespace: "System".into(), name: "Type".into() }),
         0x51 => TypeSig::Object,
         0x55 => TypeSig::ValueType(parse_type_name(&r.ser_string()??)),
@@ -660,9 +683,13 @@ fn elem_type(r: &mut Reader) -> Option<TypeSig> {
 }
 
 /// One argument value (II.23.3 Elem) of type `ty`; an enum as its underlying type.
-fn arg(r: &mut Reader, ty: &TypeSig, underlying: &dyn Fn(&TypeName) -> TypeSig) -> Option<AttrArg> {
+fn arg(r: &mut Reader, ty: &TypeSig, underlying: &dyn Fn(&TypeName) -> Option<TypeSig>, depth: usize) -> Option<AttrArg> {
     use AttrArg as A;
     use TypeSig as T;
+    if depth > MAX_SIG_DEPTH {
+        return None;
+    }
+    let depth = depth + 1;
     Some(match ty {
         T::Bool => A::Bool(r.u8()? != 0),
         T::Char | T::U2 => A::UInt(r.u16()?.into()),
@@ -679,15 +706,15 @@ fn arg(r: &mut Reader, ty: &TypeSig, underlying: &dyn Fn(&TypeName) -> TypeSig) 
         T::Class(n) if n.namespace == "System" && n.name == "Type" => A::Type(r.ser_string()?),
         // Boxed: the value's own type first.
         T::Object => {
-            let ty = elem_type(r)?;
-            return arg(r, &ty, underlying);
+            let ty = elem_type(r, depth)?;
+            return arg(r, &ty, underlying, depth);
         }
         T::SzArray(item) => match r.u32()? {
             u32::MAX => A::Array(Vec::new()),
-            n => A::Array((0..n).map(|_| arg(r, item, underlying)).collect::<Option<_>>()?),
+            n => A::Array((0..n).map(|_| arg(r, item, underlying, depth)).collect::<Option<_>>()?),
         },
-        T::ValueType(n) => match underlying(n) {
-            base @ (T::Bool | T::Char | T::I1 | T::U1 | T::I2 | T::U2 | T::I4 | T::U4 | T::I8 | T::U8) => return arg(r, &base, underlying),
+        T::ValueType(n) => match underlying(n)? {
+            base @ (T::Bool | T::Char | T::I1 | T::U1 | T::I2 | T::U2 | T::I4 | T::U4 | T::I8 | T::U8) => return arg(r, &base, underlying, depth),
             _ => return None,
         },
         _ => return None,
@@ -708,7 +735,7 @@ fn parse_type_name(s: &str) -> TypeName {
 
 /// A Constant value (II.22.9) of element type `ty` as i64, when an integer, bool or char.
 fn constant(ty: u8, blob: &[u8]) -> Option<i64> {
-    match arg(&mut Reader::new(blob), &primitive(ty)?, &|_| TypeSig::I4)? {
+    match arg(&mut Reader::new(blob), &primitive(ty)?, &|_| None, 0)? {
         AttrArg::Bool(b) => Some(b.into()),
         AttrArg::Int(i) => Some(i),
         AttrArg::UInt(u) => Some(u as i64),
@@ -889,55 +916,63 @@ struct Image {
 }
 
 impl Image {
-    /// The DOS and PE headers, the CLI header (data directory 14) and the metadata root (II.24-25).
-    fn parse(data: Vec<u8>) -> Option<Image> {
+    /// The DOS and PE headers, the CLI header (data directory 14) and the metadata root
+    /// (II.24-25). None: a PE file without a CLI header, so not a .NET assembly.
+    fn parse(data: Vec<u8>) -> Result<Option<Image>, String> {
+        const BAD: &str = "truncated PE headers";
         let d = &data[..];
-        if d.get(..2)? != b"MZ" {
-            return None;
+        if d.get(..2) != Some(b"MZ") {
+            return Err("not a PE file (no MZ header)".into());
         }
-        let pe = Reader::at(d, 0x3C).u32()? as usize;
-        if d.get(pe..pe + 4)? != b"PE\0\0" {
-            return None;
+        let pe = Reader::at(d, 0x3C).u32().ok_or(BAD)? as usize;
+        if d.get(pe..pe + 4) != Some(b"PE\0\0") {
+            return Err("not a PE file (no PE signature)".into());
         }
-        let count = usize::from(Reader::at(d, pe + 6).u16()?);
+        let count = usize::from(Reader::at(d, pe + 6).u16().ok_or(BAD)?);
         let opt = pe + 24;
-        let section_table = opt + usize::from(Reader::at(d, pe + 20).u16()?);
+        let section_table = opt + usize::from(Reader::at(d, pe + 20).u16().ok_or(BAD)?);
         // The data directories follow 96 bytes of PE32 or 112 of PE32+ optional header.
-        let dirs = match Reader::at(d, opt).u16()? {
+        let dirs = match Reader::at(d, opt).u16().ok_or(BAD)? {
             0x10B => opt + 96,
             0x20B => opt + 112,
-            _ => return None,
+            m => return Err(format!("unknown PE optional header magic {m:#x}")),
         };
-        if Reader::at(d, dirs - 4).u32()? <= 14 {
-            return None;
+        if Reader::at(d, dirs - 4).u32().ok_or(BAD)? <= 14 {
+            return Ok(None);
         }
-        let cli = Reader::at(d, dirs + 14 * 8).u32()?;
+        let cli = Reader::at(d, dirs + 14 * 8).u32().ok_or(BAD)?;
+        if cli == 0 {
+            return Ok(None);
+        }
         let sections = (0..count)
             .map(|i| {
                 let mut r = Reader::at(d, section_table + i * 40 + 8);
                 Some([r.u32()?, r.u32()?, r.u32()?, r.u32()?])
             })
-            .collect::<Option<_>>()?;
+            .collect::<Option<_>>()
+            .ok_or(BAD)?;
         let mut img = Image { data, sections, strings: 0..0, blob: 0..0, us: 0..0, tables: Vec::new() };
         img.metadata(cli)?;
-        Some(img)
+        Ok(Some(img))
     }
 
     /// The metadata root ("BSJB"), its streams, and the tables stream's header (II.24.2).
-    fn metadata(&mut self, cli: u32) -> Option<()> {
+    fn metadata(&mut self, cli: u32) -> Result<(), String> {
+        const BAD: &str = "truncated CLI metadata";
         let d = &self.data[..];
-        let root = self.offset(Reader::at(d, self.offset(cli)? + 8).u32()?)?;
+        let header = self.offset(cli).ok_or("CLI header outside the file's sections")?;
+        let root = self.offset(Reader::at(d, header + 8).u32().ok_or(BAD)?).ok_or("metadata root outside the file's sections")?;
         let mut r = Reader::at(d, root);
-        if r.u32()? != 0x424A_5342 {
-            return None;
+        if r.u32() != Some(0x424A_5342) {
+            return Err("no metadata signature (BSJB)".into());
         }
         r.p += 8; // versions, reserved
-        let len = r.u32()? as usize;
+        let len = r.u32().ok_or(BAD)? as usize;
         r.p += len + 2; // version string, flags
         let mut tables = None;
-        for _ in 0..r.u16()? {
-            let (at, size) = (root + r.u32()? as usize, r.u32()? as usize);
-            let name = d.get(r.p..)?.split(|&b| b == 0).next()?;
+        for _ in 0..r.u16().ok_or(BAD)? {
+            let (at, size) = (root + r.u32().ok_or(BAD)? as usize, r.u32().ok_or(BAD)? as usize);
+            let name = d.get(r.p..).ok_or(BAD)?.split(|&b| b == 0).next().ok_or(BAD)?;
             r.p += (name.len() + 4) & !3; // the name, NUL-terminated, padded to 4 bytes
             match name {
                 b"#~" | b"#-" => tables = Some(at..at + size),
@@ -947,19 +982,20 @@ impl Image {
                 _ => {} // #GUID: nothing reads it
             }
         }
-        let stream = tables?;
+        let stream = tables.ok_or("no #~ tables stream")?;
         let mut r = Reader::at(d, stream.start + 6);
-        let heaps = r.u8()?;
+        let heaps = r.u8().ok_or(BAD)?;
         r.p += 1;
-        let present = r.u64()?;
+        let present = r.u64().ok_or(BAD)?;
         r.p += 8; // sorted
         if present >> SCHEMA.len() != 0 {
-            return None; // a table ECMA-335 does not define: its row size, so the rest, is unknown
+            // Its row size, so where every later table starts, is unknown.
+            return Err(format!("metadata has tables ECMA-335 does not define (present mask {present:#x})"));
         }
         let mut rows = [0u32; SCHEMA.len()];
         for (t, n) in rows.iter_mut().enumerate() {
             if present >> t & 1 == 1 {
-                *n = r.u32()?;
+                *n = r.u32().ok_or(BAD)?;
             }
         }
         if heaps & 0x40 != 0 {
@@ -995,15 +1031,16 @@ impl Image {
             })
             .collect();
         if at > stream.end.min(d.len()) {
-            return None;
-        }        self.tables = tables;
-        Some(())
+            return Err("metadata tables run past their stream".into());
+        }
+        self.tables = tables;
+        Ok(())
     }
 
     /// The file offset of an RVA: in a section's file data, or None.
     fn offset(&self, rva: u32) -> Option<usize> {
         let &[_, va, _, at] = self.sections.iter().find(|&&[_, va, size, _]| rva >= va && rva - va < size)?;
-        Some((rva - va + at) as usize)
+        Some((rva - va).checked_add(at)? as usize)
     }
 
     fn rows(&self, table: usize) -> u32 {
@@ -1143,10 +1180,18 @@ mod tests {
         TypeName { scope: None, namespace: namespace.into(), name: name.into() }
     }
 
+    fn csharp(namespace: &str, class: &str) -> TypeName {
+        TypeName { scope: Some("Assembly-CSharp".into()), ..name(namespace, class) }
+    }
+
+    fn assembly<'a>(game: &'a Assemblies, name: &str) -> &'a Assembly {
+        game.0.iter().find(|a| a.name == name).unwrap()
+    }
+
     #[test]
     fn reads_group_data_and_its_base_chain() {
-        let Some(dir) = managed() else { return };
-        let asm = Assembly::load(&dir.join("Assembly-CSharp.dll")).unwrap();
+        let Some(game) = game() else { return };
+        let asm = assembly(game, "Assembly-CSharp");
         assert_eq!(asm.name, "Assembly-CSharp");
         assert_eq!(asm.types()[0].name, "<Module>");
         for class in ["GroupData", "GroupDataItem"] {
@@ -1160,13 +1205,12 @@ mod tests {
         let names: Vec<_> = group.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names[..5], ["id", "associatedGameObject", "icon", "recipeIngredients", "hideInCrafter"]);
         let list = TypeName { scope: Some("mscorlib".into()), ..name("System.Collections.Generic", "List`1") };
-        assert_eq!(group.fields[3].sig, TypeSig::GenericInst { ty: list, value_type: false, args: vec![TypeSig::Class(name("SpaceCraft", "GroupDataItem"))] });
+        assert_eq!(group.fields[3].sig, TypeSig::GenericInst { ty: list, value_type: false, args: vec![TypeSig::Class(csharp("SpaceCraft", "GroupDataItem"))] });
         // A nested enum, and a [Tooltip("...")] string argument.
         let unit = group.fields.iter().find(|f| f.name == "unlockingWorldUnit").unwrap();
-        assert_eq!(unit.sig, TypeSig::ValueType(name("SpaceCraft", "DataConfig/WorldUnitType")));
+        assert_eq!(unit.sig, TypeSig::ValueType(csharp("SpaceCraft", "DataConfig/WorldUnitType")));
         assert!(asm.find("SpaceCraft", "DataConfig/WorldUnitType").is_some());
         assert!(matches!(&unit.attributes[0].fixed[..], [AttrArg::String(Some(s))] if !s.is_empty()), "{:?}", unit.attributes);
-        let Some(game) = game() else { return };
         let mut chain = Vec::new();
         let mut at = game.resolve(&name("SpaceCraft", "GroupDataItem"));
         while let Some((a, t)) = at {
@@ -1182,8 +1226,8 @@ mod tests {
 
     #[test]
     fn reports_serialize_field_on_private_fields() {
-        let Some(dir) = managed() else { return };
-        let asm = Assembly::load(&dir.join("Assembly-CSharp.dll")).unwrap();
+        let Some(game) = game() else { return };
+        let asm = assembly(game, "Assembly-CSharp");
         let serialized: Vec<_> = asm
             .types()
             .iter()
@@ -1244,7 +1288,7 @@ mod tests {
     fn loads_and_resolves_across_the_managed_folder() {
         let Some(game) = game() else { return };
         let dlls = std::fs::read_dir(managed().unwrap()).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "dll")).count();
-        println!("{} of {dlls} DLLs; enums guessed in {:?}", game.0.len(), game.0.iter().filter(|a| a.guessed_enums).map(|a| &a.name).collect::<Vec<_>>());
+        println!("{} of {dlls} DLLs", game.0.len());
         assert_eq!(game.0.len(), dlls);
         for a in &game.0 {
             assert_eq!(a.types()[0].name, "<Module>", "{}", a.name);
@@ -1258,5 +1302,82 @@ mod tests {
             assert_eq!(game.0[a].name, assembly);
             assert_eq!(game.0[a].types()[t].name, class);
         }
+    }
+
+    /// A base type an assembly defines resolves into that assembly, not into the first one (in
+    /// file name order) that has a type of the same name.
+    #[test]
+    fn local_base_types_resolve_into_their_own_assembly() {
+        let Some(game) = game() else { return };
+        let mut elsewhere = Vec::new();
+        for a in &game.0 {
+            for t in a.types() {
+                let Some(TypeSig::Class(b) | TypeSig::GenericInst { ty: b, .. }) = &t.extends else { continue };
+                if b.scope.as_deref() == Some(a.name.as_str()) {
+                    assert_eq!(game.assembly_of(b).unwrap().name, a.name, "{}.{} : {}", t.namespace, t.name, b.full());
+                    if game.assembly_of(&name(&b.namespace, &b.name)).unwrap().name != a.name {
+                        elsewhere.push(format!("{}: {}.{} : {}", a.name, t.namespace, t.name, b.full()));
+                    }
+                }
+            }
+        }
+        println!("{} local base types that resolve elsewhere by name alone: {elsewhere:#?}", elsewhere.len());
+        let md2 = assembly(game, "mscorlib").find("Mono.Security.Cryptography", "MD2Managed").unwrap();
+        let Some(TypeSig::Class(base)) = &assembly(game, "mscorlib").types()[md2].extends else { panic!() };
+        assert_eq!(game.assembly_of(base).unwrap().name, "mscorlib");
+    }
+
+    fn empty() -> Assembly {
+        let img = Image { data: Vec::new(), sections: Vec::new(), strings: 0..0, blob: 0..0, us: 0..0, tables: Vec::new() };
+        Assembly { name: "t".into(), types: Vec::new(), img, field_at: Vec::new(), method_at: Vec::new() }
+    }
+
+    #[test]
+    fn fails_signatures_and_attribute_values_nested_too_deep() {
+        let nested = |n: usize, leaf: u8| [vec![0x1D; n], vec![leaf]].concat();
+        let a = empty();
+        assert!(a.sig_type(&mut Reader::new(&nested(10, 0x08)), 0).is_some());
+        assert_eq!(a.sig_type(&mut Reader::new(&nested(100_000, 0x08)), 0), None);
+        assert!(elem_type(&mut Reader::new(&nested(10, 0x08)), 0).is_some());
+        assert_eq!(elem_type(&mut Reader::new(&nested(100_000, 0x08)), 0), None);
+        // A boxed value boxing a boxed value ...
+        assert_eq!(arg(&mut Reader::new(&[0x51; 100_000]), &TypeSig::Object, &|_| None, 0), None);
+    }
+
+    #[test]
+    fn fails_an_enum_argument_whose_type_is_unknown() {
+        let e = TypeSig::ValueType(name("X", "E"));
+        let blob = [1, 0, 5, 0, 0, 0, 0, 0];
+        assert_eq!(decode_attr(name("X", "A"), std::slice::from_ref(&e), &blob, &|_| None), None);
+        let attr = decode_attr(name("X", "A"), &[e], &blob, &|_| Some(TypeSig::I4)).unwrap();
+        assert_eq!(attr.fixed, [AttrArg::Int(5)]);
+    }
+
+    #[test]
+    fn rva_offsets_do_not_overflow() {
+        let img = Image { data: Vec::new(), sections: vec![[0x1000, 0x1000, 0x1000, u32::MAX - 0x10]], strings: 0..0, blob: 0..0, us: 0..0, tables: Vec::new() };
+        assert_eq!(img.offset(0x1004), Some(u32::MAX as usize - 0xC));
+        assert_eq!(img.offset(0x1020), None);
+    }
+
+    /// A PE32 file with no sections and `cli` as its CLI header's RVA.
+    fn pe(cli: u32) -> Vec<u8> {
+        let mut d = vec![0u8; 0x200];
+        d[..2].copy_from_slice(b"MZ");
+        d[0x3C..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+        d[0x40..0x44].copy_from_slice(b"PE\0\0");
+        d[0x54..0x56].copy_from_slice(&224u16.to_le_bytes()); // optional header size
+        d[0x58..0x5A].copy_from_slice(&0x10Bu16.to_le_bytes());
+        d[0xB4..0xB8].copy_from_slice(&16u32.to_le_bytes()); // data directories
+        d[0x128..0x12C].copy_from_slice(&cli.to_le_bytes());
+        d
+    }
+
+    /// A native DLL is no assembly; a .NET one the reader cannot read is an error.
+    #[test]
+    fn tells_native_dlls_from_unreadable_assemblies() {
+        assert!(matches!(Image::parse(pe(0)), Ok(None)));
+        assert!(Image::parse(pe(0x2000)).err().unwrap().contains("CLI header"));
+        assert!(Image::parse(b"not a PE file".to_vec()).err().unwrap().contains("MZ"));
     }
 }
