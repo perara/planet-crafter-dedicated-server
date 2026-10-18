@@ -140,6 +140,14 @@ impl Game {
                 state.position = self.wos[&pod].position;
             }
         }
+        // A saved backpack or equipment that is gone (an older server let clients destroy
+        // them) comes back empty, rather than the player pointing at a missing inventory.
+        if !self.inventories.contains_key(&state.inventory) {
+            state.inventory = self.create_inventory(START_INVENTORY_SIZE, state.inventory, 0, &[], &[]);
+        }
+        if !self.inventories.contains_key(&state.equipment) {
+            state.equipment = self.create_inventory(START_EQUIPMENT_SIZE, state.equipment, 0, &[], &[]);
+        }
         let me = Target::Only(client);
         self.net.move_object(object, state.position, Some(state.rotation));
         self.net.rpc(me, object, "PlayerMainController.InitPlayerClientRpc", &[json!(state.inventory), json!(state.equipment), json!(state.position), json!(state.rotation), json!(state.camera_view)]);

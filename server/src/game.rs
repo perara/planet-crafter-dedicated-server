@@ -191,6 +191,9 @@ pub struct Game {
     next_time_sync: f32,
     #[serde(skip)]
     unhandled: std::collections::HashSet<String>,
+    /// Clients refused a change to another player's inventory (logged once each).
+    #[serde(skip)]
+    pub refused_inventories: std::collections::HashSet<u64>,
     /// RPCs refused for the object they were sent to (logged once each).
     #[serde(skip)]
     misrouted: std::collections::HashSet<String>,
@@ -295,6 +298,7 @@ impl Game {
             next_time_sync: 0.0,
             unhandled: Default::default(),
             misrouted: Default::default(),
+            refused_inventories: Default::default(),
             save_requested: false,
         };
         game.sim_time = sim_time;

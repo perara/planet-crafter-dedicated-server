@@ -183,6 +183,36 @@ impl Game {
         }
     }
 
+    // ---- players' inventories --------------------------------------------------------------
+
+    /// The player whose backpack or equipment an inventory is, in the game or saved.
+    pub fn inventory_player(&self, inventory: i32) -> Option<u64> {
+        let ready = self.clients.values().filter_map(|c| c.ready.as_ref()).find(|s| s.inventory == inventory || s.equipment == inventory).map(|s| s.id);
+        ready.or_else(|| {
+            let mine = |p: &&serde_json::Value| ["inventoryId", "equipmentId"].iter().any(|k| p[*k].as_i64() == Some(inventory as i64));
+            self.saved_players.iter().find(mine).map(|p| p["id"].as_u64().unwrap_or(0))
+        })
+    }
+
+    /// Whether a client's change would touch another player's backpack or equipment (logged
+    /// once per client). Nothing in the game has one client change another's: death drops,
+    /// deconstruction and petting rewards are the server's own, on the player concerned.
+    pub fn others_inventory(&mut self, client: u64, inventory: i32) -> bool {
+        let Some(owner) = self.inventory_player(inventory) else { return false };
+        if self.clients.get(&client).and_then(|c| c.ready.as_ref()).is_some_and(|s| s.id == owner) {
+            return false;
+        }
+        if self.refused_inventories.insert(client) {
+            eprintln!("client {client}: a change to another player's inventory {inventory} refused (logged once per client)");
+        }
+        true
+    }
+
+    /// Whether a world object is in another player's backpack or equipment.
+    pub fn others_item(&mut self, client: u64, wo: i32) -> bool {
+        self.holder(wo).is_some_and(|inv| self.others_inventory(client, inv))
+    }
+
     // ---- InventoriesHandler ---------------------------------------------------------------
 
     fn biggest_inventory_id(&self) -> i32 {
@@ -190,13 +220,14 @@ impl Game {
     }
 
     /// The next id after the biggest, as the game does; the lowest free one once that reaches
-    /// the special ids.
+    /// the special ids. Never a player's (one whose inventory went would get a stranger's).
     fn free_inventory_id(&self) -> i32 {
+        let free = |id: &i32| !self.inventories.contains_key(id) && self.inventory_player(*id).is_none();
         let next = self.biggest_inventory_id() + 1;
-        if next < SPECIAL_INVENTORY_IDS && !self.inventories.contains_key(&next) {
+        if next < SPECIAL_INVENTORY_IDS && free(&next) {
             return next;
         }
-        (1..SPECIAL_INVENTORY_IDS).find(|id| !self.inventories.contains_key(id)).unwrap_or(next)
+        (1..SPECIAL_INVENTORY_IDS).find(free).unwrap_or(next)
     }
 
     /// The create path of GetOrCreateNewInventory; returns the inventory id.
@@ -210,7 +241,7 @@ impl Game {
                 self.tmp_inventory_id + 1
             }
             // Ids a client picks stay below the special ones and never replace an inventory.
-            other if other > 0 && other < SPECIAL_INVENTORY_IDS && !self.inventories.contains_key(&other) => other,
+            other if other > 0 && other < SPECIAL_INVENTORY_IDS && !self.inventories.contains_key(&other) && self.inventory_player(other).is_none() => other,
             _ => self.free_inventory_id(),
         };
         self.inventories.insert(id, Inventory::new(id, size));
@@ -268,7 +299,12 @@ impl Game {
         self.retrieve_inventory(Target::Only(client), inventory);
     }
 
+    /// InventoriesHandler.DestroyInventory; never a player's backpack or equipment (an object
+    /// linked to one, GenerateRandomAppearanceObjectServerRpc, took it with it).
     pub fn destroy_inventory(&mut self, id: i32, destroy_go: bool) {
+        if self.inventory_player(id).is_some() {
+            return;
+        }
         let Some(inv) = self.inventories.shift_remove(&id) else { return };
         inv.items.iter().for_each(|wo| self.release(*wo));
         self.destroy_world_objects(&inv.items, destroy_go);
@@ -423,6 +459,29 @@ impl Game {
 
     /// The InventoriesHandler RPCs; false when `name` is not one of them.
     pub fn inventories_rpc(&mut self, client: u64, name: &str, a: &Args) -> bool {
+        // What a change touches: another player's backpack or equipment, or an item in one, is
+        // refused (the game's host takes these from anyone).
+        let (touched, items): (Vec<i32>, Vec<i32>) = match name {
+            "InventoriesHandler.TransferItemServerRpc" | "InventoriesHandler.TransferAllSameGroupServerRpc" | "InventoriesHandler.TransferAllItemsServerRpc" => (vec![a.i(0), a.i(1)], vec![]),
+            "InventoriesHandler.AddNewItemToInventoryServerRpc" | "InventoriesHandler.RemoveItemsFromInventoryServerRpc" => (vec![a.i(1)], vec![]),
+            "InventoriesHandler.AddExistingItemToInventoryServerRpc" | "InventoriesHandler.RemoveItemFromInventoryServerRpc" => (vec![a.i(1)], vec![a.i(0)]),
+            "InventoriesHandler.RemoveWorldObjectsFromInventoryServerRpc" => (vec![a.i(1)], a.ints(0).unwrap_or_default()),
+            "InventoriesHandler.RemoveAndDestroyAllItemsFromInventoryServerRpc"
+            | "InventoriesHandler.DirtyInventoryLogisticsServerRpc"
+            | "InventoriesHandler.SetInventorySizeServerRpc"
+            | "InventoriesHandler.LockInventoryContentServerRpc"
+            | "InventoriesHandler.SortInventoryServerRpc" => (vec![a.i(0)], vec![]),
+            "InventoriesHandler.AddWorldObjectToInventoryServerRpc" => (vec![a.i(2)], vec![a.i(0)]),
+            _ => (vec![], vec![]),
+        };
+        if touched.iter().any(|i| self.others_inventory(client, *i)) || items.iter().any(|w| self.others_item(client, *w)) {
+            match name {
+                "InventoriesHandler.AddNewItemToInventoryServerRpc" => self.net.rpc_scene(Target::Only(client), "InventoriesHandler.AddNewItemClientRpc", &[json!(false), json!(0)]),
+                "InventoriesHandler.DirtyInventoryLogisticsServerRpc" | "InventoriesHandler.SortInventoryServerRpc" => {}
+                _ => self.add_or_remove_result(client, false),
+            }
+            return true;
+        }
         match name {
             "InventoriesHandler.GetOrCreateNewInventoryFromWoIDServerRpc" => {
                 match self.wos.get(&a.i(0)).map(|w| w.linked_inventory) {

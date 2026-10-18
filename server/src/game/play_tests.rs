@@ -290,3 +290,78 @@ fn player_names_cannot_break_the_save() {
     assert_eq!(name, "a' b c");
     assert_eq!(SaveFile::from_text(&text).players[0]["name"], "a' b c");
 }
+
+/// H4: one player cannot empty, take from, resize, lock or destroy another's backpack or
+/// equipment, in the game or saved; their own still works, and so do the server's own changes
+/// (a death drop).
+#[test]
+fn other_players_inventories_are_theirs() {
+    let Some(mut g) = test_game(save()) else { return };
+    join(&mut g, 1, "Ann");
+    join(&mut g, 2, "Bob");
+    let mine = g.clients[&1].ready.as_ref().unwrap().inventory;
+    let (bob_inv, bob_eq) = g.clients[&2].ready.as_ref().map(|s| (s.inventory, s.equipment)).unwrap();
+    let before = g.inventories[&bob_inv].clone();
+    assert!(!before.items.is_empty(), "Bob has the starter kit");
+    let iron = g.data.groups[g.data.group("Iron").unwrap()].hash;
+    let item = before.items[0];
+    let attacks: Vec<(&str, Vec<Value>)> = vec![
+        ("InventoriesHandler.TransferAllItemsServerRpc", vec![json!(bob_inv), json!(mine)]),
+        ("InventoriesHandler.TransferItemServerRpc", vec![json!(bob_inv), json!(mine), json!(item)]),
+        ("InventoriesHandler.AddExistingItemToInventoryServerRpc", vec![json!(item), json!(mine), json!(true)]),
+        ("InventoriesHandler.RemoveAndDestroyAllItemsFromInventoryServerRpc", vec![json!(bob_inv)]),
+        ("InventoriesHandler.RemoveWorldObjectsFromInventoryServerRpc", vec![json!([item]), json!(bob_inv), json!(true)]),
+        ("InventoriesHandler.SetInventorySizeServerRpc", vec![json!(bob_inv), json!(-1000), json!([0.0, 0.0, 0.0])]),
+        ("InventoriesHandler.LockInventoryContentServerRpc", vec![json!(bob_inv), json!(true), json!(1.0e6)]),
+        ("InventoriesHandler.AddNewItemToInventoryServerRpc", vec![json!(iron), json!(bob_eq)]),
+        ("WorldObjectsHandler.DestroyWorldObjectServerRpc", vec![json!(item), json!(true)]),
+        ("WorldObjectsHandler.DropOnFloorServerRpc", vec![json!(item), json!([1.0, 2.0, 3.0]), json!(0.0), json!(false), json!(false), json!(0), json!(0.0)]),
+        // An object linked to Bob's backpack, then destroyed: it would take the backpack along.
+        ("WorldObjectsHandler.GenerateRandomAppearanceObjectServerRpc", vec![json!(100.0), json!(iron), json!(205_555_555), json!(bob_inv), json!([1.0, 2.0, 3.0]), json!([0.0, 0.0, 0.0, 1.0])]),
+        ("WorldObjectsHandler.DestroyWorldObjectServerRpc", vec![json!(205_555_555), json!(true)]),
+    ];
+    for (name, args) in &attacks {
+        rpc(&mut g, 1, 0, name, args.clone());
+        let now = &g.inventories[&bob_inv];
+        assert_eq!((&now.items, now.size), (&before.items, before.size), "{name}");
+        assert!(g.wos.get(&item).is_some_and(|w| w.lock_time == 0.0 && !w.is_placed()), "{name}");
+        assert!(g.inventories[&bob_eq].items.is_empty(), "{name}");
+    }
+    // Saved, not in the game: still Bob's.
+    g.disconnect(2);
+    rpc(&mut g, 1, 0, "InventoriesHandler.TransferAllItemsServerRpc", vec![json!(bob_inv), json!(mine)]);
+    assert_eq!(g.inventories[&bob_inv].items, before.items);
+    // Ann's own inventory is hers.
+    rpc(&mut g, 1, 0, "InventoriesHandler.AddNewItemToInventoryServerRpc", vec![json!(iron), json!(mine)]);
+    assert_eq!(g.inventories[&mine].items.len(), before.items.len() + 1);
+    // The server's own change: Bob comes back and dies, and drops his things.
+    join(&mut g, 2, "Bob");
+    assert_eq!(g.clients[&2].ready.as_ref().unwrap().inventory, bob_inv);
+    g.rules.death.consequences = Some("DropAllItems".to_string());
+    crate::status::handle_dying_consequences(&mut g, 2);
+    assert!(g.inventories[&bob_inv].items.len() < before.items.len(), "a death drop takes from the backpack");
+}
+
+/// H4: an inventory id is never handed out while a player's (gone) inventory has it, and a
+/// player whose saved backpack is gone gets a new empty one.
+#[test]
+fn player_inventory_ids_stay_theirs() {
+    let Some(mut g) = test_game(save()) else { return };
+    join(&mut g, 1, "Ann");
+    join(&mut g, 2, "Bob");
+    let bob_inv = g.clients[&2].ready.as_ref().unwrap().inventory;
+    g.disconnect(2);
+    g.destroy_inventory(bob_inv, true);
+    assert!(g.inventories.contains_key(&bob_inv), "a player's inventory is never destroyed");
+    // As an older server could leave it: gone.
+    let gone = g.inventories.shift_remove(&bob_inv).unwrap();
+    gone.items.iter().for_each(|wo| g.release(*wo));
+    for _ in 0..3 {
+        assert_ne!(g.create_inventory(5, 0, 0, &[], &[]), bob_inv);
+    }
+    assert_ne!(g.create_inventory(5, bob_inv, 0, &[], &[]), bob_inv, "not by asking for it either");
+    join(&mut g, 2, "Bob");
+    let inv = g.clients[&2].ready.as_ref().unwrap().inventory;
+    assert!(g.inventories.get(&inv).is_some_and(|i| i.items.is_empty() && i.size == START_INVENTORY_SIZE));
+    assert_eq!(holders_mismatch(&g), None);
+}

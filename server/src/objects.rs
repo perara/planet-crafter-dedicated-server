@@ -394,7 +394,11 @@ impl Game {
                 self.crafted_total += 1;
                 self.net.rpc_scene(Target::All, "WorldObjectsHandler.AddOneToTotalCraftClientRpc", &[]);
             }
-            "WorldObjectsHandler.DestroyWorldObjectServerRpc" => self.destroy_world_object(a.i(0), a.b(1)),
+            "WorldObjectsHandler.DestroyWorldObjectServerRpc" => {
+                if !self.others_item(client, a.i(0)) {
+                    self.destroy_world_object(a.i(0), a.b(1));
+                }
+            }
             "WorldObjectsHandler.DestroyWorldObjectFromSceneServerRpc" => {
                 let (id, hash, disolve) = (a.i(0), a.i(1), a.f(2));
                 let mut created = false;
@@ -446,7 +450,9 @@ impl Game {
                 }
             }
             "WorldObjectsHandler.RetrieveResourcesFromDeconstructionServerRpc" => {
-                self.retrieve_resources_from_deconstruction(a.i(0), a.i(1), a.i(2), a.v3(3), a.u(4));
+                if !self.others_inventory(client, a.i(2)) {
+                    self.retrieve_resources_from_deconstruction(a.i(0), a.i(1), a.i(2), a.v3(3), a.u(4));
+                }
             }
             "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc" => {
                 let (hash, position, rotation, disolve, check, save, icon) = (a.i(0), a.v3(1), a.q(2), a.b(3), a.b(4), a.b(5), a.b(6));
@@ -472,6 +478,7 @@ impl Game {
                     }
                 }
             }
+            "WorldObjectsHandler.DropOnFloorServerRpc" | "WorldObjectsHandler.DropOnFloorWithRotationServerRpc" if self.others_item(client, a.i(0)) => {}
             "WorldObjectsHandler.DropOnFloorServerRpc" => {
                 self.drop_on_floor(a.i(0), a.v3(1), [0.0, 0.0, 0.0, 1.0], a.f(2), a.b(3), a.b(4), a.i(5), a.f(6), false, client);
             }
@@ -504,8 +511,9 @@ impl Game {
                     w.position = position;
                     w.rotation = rotation;
                     w.planet = planet;
-                    if inventory >= 0 {
-                        w.linked_inventory = inventory;
+                    // Never a player's: destroying the object would take the inventory along.
+                    if inventory >= 0 && self.inventory_player(inventory).is_none() {
+                        self.wos.get_mut(&id).unwrap().linked_inventory = inventory;
                     }
                 } else {
                     self.destroy_go_rpc(me, id, 0.0);

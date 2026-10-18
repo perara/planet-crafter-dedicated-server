@@ -278,6 +278,7 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, _behaviour: u16, name: &st
                 production::recycle_content(game, w, a.v3(0), a.v3(1));
             }
         }
+        "GeneticTraitHandler.CreateNewTraitWorldObjectServerRpc" if game.others_inventory(client, a.i(1)) => {}
         "GeneticTraitHandler.CreateNewTraitWorldObjectServerRpc" => {
             let Some(group) = game.data.group(crate::genetics::TRAIT_GROUP) else { return true };
             let id = game.create_world_object(group, 0, true);
