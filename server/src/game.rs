@@ -489,6 +489,9 @@ impl Game {
     fn incoming_rpc(&mut self, client: u64, body: &[u8]) {
         let mut r = Reader::new(body);
         let (Some(_sender), Some(object), Some(behaviour), Some(method)) = (r.packed_u64(), r.packed_u64(), r.packed_u16(), r.packed_u32()) else { return };
+        if self.animator_relay(client, object, behaviour, method, r.rest()) {
+            return;
+        }
         let Some(args) = self.net.spec.decode(method, r.rest()) else {
             eprintln!("client {client}: undecodable RPC {method}");
             return;
@@ -498,6 +501,27 @@ impl Game {
             println!("trace client {client} rpc {name} on {object}/{behaviour} {}", Value::Array(args.clone()));
         }
         self.rpc(client, object, behaviour, &name, Args(args));
+    }
+
+    /// NetworkAnimator.Send*ServerRpc of an owner-authoritative animator (the animals'
+    /// ClientNetworkAnimator): as Netcode, only from the owner, passed on unchanged as the
+    /// matching ClientRpc to every client but the sender. The message is INetworkSerializable,
+    /// so its bytes go through undecoded.
+    // ponytail: the server keeps no animator, so a late joiner gets the spawn-time parameters
+    // until the owner's next change; keep the last ParametersUpdate per object if that shows.
+    fn animator_relay(&mut self, client: u64, object: u64, behaviour: u16, method: u32, body: &[u8]) -> bool {
+        let Some(name) = self.net.spec.get(method).map(|r| r.name.clone()) else { return false };
+        let Some(client_rpc) = name.strip_prefix("NetworkAnimator.").and_then(|m| m.strip_suffix("ServerRpc")).map(|m| format!("NetworkAnimator.{m}ClientRpc")) else { return false };
+        let Some(hash) = self.net.spec.hash(&client_rpc) else {
+            eprintln!("rpc {name}: no {client_rpc} to pass it on");
+            return true;
+        };
+        if self.net.objects.get(&object).is_some_and(|o| o.owner == client) {
+            let mut w = Writer::new();
+            w.packed_u64(object).packed_u16(behaviour).packed_u32(hash).bytes(body);
+            self.out_to(Target::Except(client), (protocol::CLIENT_RPC, w.0));
+        }
+        true
     }
 
     /// Hands an RPC to the ported handler that owns it.
@@ -684,6 +708,26 @@ pub mod tests {
         game.players_rpc(client, "PlayerMainController.PlayerReadyServerRpc", &Args(vec![json!(0), json!(name)]));
         assert!(game.clients[&client].ready.is_some());
         object
+    }
+
+    /// An animal's owner animates it for everyone else; nobody else can.
+    #[test]
+    fn animator_server_rpcs_reach_the_other_clients_as_client_rpcs() {
+        let Some(mut g) = test_game(save()) else { return };
+        let ann = join(&mut g, 1, "Ann");
+        join(&mut g, 2, "Bob");
+        let message = vec![3, 1, 4, 1, 5];
+        let send = |g: &mut Game, client: u64| {
+            let mut w = Writer::new();
+            w.packed_u64(client).packed_u64(ann).packed_u16(7).packed_u32(g.net.spec.hash("NetworkAnimator.SendAnimTriggerServerRpc").unwrap()).bytes(&message);
+            g.net.out.clear();
+            g.receive(client, &wire::batch(&[(protocol::RPC, w.0)]));
+            g.net.out.iter().filter(|m| m.1 == protocol::CLIENT_RPC).map(|(to, _, body)| (*to, body.clone())).collect::<Vec<_>>()
+        };
+        let mut w = Writer::new();
+        w.packed_u64(ann).packed_u16(7).packed_u32(g.net.spec.hash("NetworkAnimator.SendAnimTriggerClientRpc").unwrap()).bytes(&message);
+        assert!(matches!(&send(&mut g, 1)[..], [(Target::Except(1), body)] if *body == w.0));
+        assert!(send(&mut g, 2).is_empty(), "not the owner");
     }
 
     fn transform_message(object: u64, flags: u32, floats: &[f32]) -> Vec<u8> {
