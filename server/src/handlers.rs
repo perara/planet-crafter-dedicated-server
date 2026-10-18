@@ -224,7 +224,14 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
             let Some(w) = wo.and_then(|w| game.wos.get(&w)) else { return true };
             let group = game.data.groups[w.group].id.clone();
             let nth = game.net.objects.get(&object).and_then(|o| o.behaviours.iter().filter(|b| b.class == "InventoryAssociatedProxy").position(|b| b.index == behaviour));
-            let index = nth.and_then(|n| game.data.prefab_components(&group, "InventoryAssociatedProxy").get(n).and_then(|c| c["_secondaryInventoryIndex"].as_i64()));
+            // A group without a prefab of its own is spawned in GroupNetworkContainerWithInventory,
+            // whose one proxy keeps the default index (-1: the linked inventory).
+            let container = game.data.layouts.get(&group).is_some_and(|l| l.prefab.starts_with("GroupNetworkContainer"));
+            let index = if container && nth == Some(0) {
+                Some(-1)
+            } else {
+                nth.and_then(|n| game.data.prefab_components(&group, "InventoryAssociatedProxy").get(n).and_then(|c| c["_secondaryInventoryIndex"].as_i64()))
+            };
             // GetRequestedInventoryData: (world object, its linked or n-th secondary inventory).
             let inventory = match index {
                 Some(i) if i < 0 => Some(w.linked_inventory),
@@ -667,6 +674,24 @@ mod tests {
         let at = g.net.objects[&ann].position;
         g.net.move_object(loading, at, None);
         assert_eq!(super::others_in_range(&g, 1, 5.0), vec![2]);
+    }
+
+    /// A group without a prefab of its own (FusionGenerator1, the wrecks' locked doors) is
+    /// spawned in GroupNetworkContainerWithInventory: its proxy tells the linked inventory
+    /// (sweep_feed: the game answered, this server did not).
+    #[test]
+    fn a_container_prefabs_proxy_tells_the_linked_inventory() {
+        let Some(mut g) = crate::planets::tests::game() else { return };
+        for group in ["FusionGenerator1", "WreckEntryLocked1"] {
+            let gi = g.data.group(group).unwrap();
+            let (id, net) = g.create_and_instantiate(gi, [565.0, 3.0, 500.0], [0.0, 0.0, 0.0, 1.0], false, true, false);
+            let proxy = g.net.objects[&net].behaviours.iter().find(|b| b.class == "InventoryAssociatedProxy").unwrap().index;
+            g.net.out.clear();
+            super::rpc(&mut g, 1, net, proxy, "InventoryAssociatedProxy.GetInventoryIdServerRpc", &Args(vec![]));
+            let rpc = crate::testkit::one(&g, "InventoryAssociatedProxy.GetInventoryIdClientRpc");
+            assert_ne!(g.wos[&id].linked_inventory, 0, "{group}");
+            assert_eq!(rpc[2], json!(g.wos[&id].linked_inventory), "{group}");
+        }
     }
 
     #[test]
