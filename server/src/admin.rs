@@ -1,7 +1,8 @@
 //! Admin API and web GUI over HTTP on 127.0.0.1, the same endpoints as the plugin server's
 //! (so its web GUI works unchanged): GET /api/status, POST /api/save, /api/stop, /api/kick,
 //! /api/ban, /api/unban, /api/access, /api/settings. Every /api call needs
-//! "Authorization: Bearer <token>". A thread serves HTTP; the game loop answers requests.
+//! "Authorization: Bearer <token>". A thread serves HTTP; the game loop answers requests,
+//! but for /api/chat (chathooks.rs), answered here: its long poll must not hold the game loop.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -11,6 +12,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+
+use crate::chathooks::Feed;
 
 /// Connections served at once (more are closed unanswered), the bytes of one request (line,
 /// headers and body), and how long it may take to arrive.
@@ -26,11 +29,11 @@ pub struct Request {
     pub reply: Sender<(u16, String)>,
 }
 
-pub fn start(addr: &str, token: String, web_index: Option<String>) -> std::io::Result<Receiver<Request>> {
-    listen(TcpListener::bind(addr)?, token, web_index)
+pub fn start(addr: &str, token: String, web_index: Option<String>, chat: Arc<Feed>) -> std::io::Result<Receiver<Request>> {
+    listen(TcpListener::bind(addr)?, token, web_index, chat)
 }
 
-fn listen(listener: TcpListener, token: String, web_index: Option<String>) -> std::io::Result<Receiver<Request>> {
+pub fn listen(listener: TcpListener, token: String, web_index: Option<String>, chat: Arc<Feed>) -> std::io::Result<Receiver<Request>> {
     let (tx, rx) = channel();
     let open = Arc::new(AtomicUsize::new(0));
     std::thread::Builder::new().name("pcds-admin".into()).spawn(move || {
@@ -40,10 +43,10 @@ fn listen(listener: TcpListener, token: String, web_index: Option<String>) -> st
                 continue;
             }
             open.fetch_add(1, Ordering::SeqCst);
-            let (slot, tx, token, web) = (Slot(open.clone()), tx.clone(), token.clone(), web_index.clone());
+            let (slot, tx, token, web, chat) = (Slot(open.clone()), tx.clone(), token.clone(), web_index.clone(), chat.clone());
             std::thread::spawn(move || {
                 let _slot = slot;
-                let _ = serve(stream, &tx, &token, web.as_deref());
+                let _ = serve(stream, &tx, &token, web.as_deref(), &chat);
             });
         }
     })?;
@@ -84,18 +87,22 @@ fn respond(mut stream: TcpStream, status: u16, content_type: &str, body: &str) -
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
+        503 => "Service Unavailable",
         _ => "Error",
     };
     write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
 }
 
-fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>) -> std::io::Result<()> {
+fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>, chat: &Feed) -> std::io::Result<()> {
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut reader = BufReader::new(Deadline(stream.try_clone()?, Instant::now() + DEADLINE)).take(MAX_REQUEST);
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let mut parts = line.split_whitespace();
-    let (method, path) = (parts.next().unwrap_or("").to_string(), parts.next().unwrap_or("").split('?').next().unwrap_or("").to_string());
+    let method = parts.next().unwrap_or("").to_string();
+    let target = parts.next().unwrap_or("");
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let (path, query) = (path.to_string(), query.to_string());
     let (mut auth, mut length) = (String::new(), 0usize);
     loop {
         let mut header = String::new();
@@ -128,6 +135,10 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
             Err(e) => return respond(stream, 400, "application/json", &serde_json::json!({ "error": e.to_string() }).to_string()),
         }
     };
+    if path.starts_with("/api/chat") {
+        let (status, json) = crate::chathooks::api(chat, &method, &path, &query, &body);
+        return respond(stream, status, "application/json", &json);
+    }
     let (reply, answer) = channel();
     if tx.send(Request { method, path, body, reply }).is_err() {
         return respond(stream, 500, "application/json", "{\"error\":\"server stopping\"}");
@@ -154,7 +165,7 @@ mod tests {
     fn token_size_and_connection_limits() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let rx = listen(listener, "secret".into(), None).unwrap();
+        let rx = listen(listener, "secret".into(), None, crate::chathooks::State::default().feed).unwrap();
         let wrong = b"GET /api/status HTTP/1.1\r\nAuthorization: Bearer secreT\r\n\r\n";
         assert!(ask(addr, wrong).starts_with("HTTP/1.1 401"));
 
