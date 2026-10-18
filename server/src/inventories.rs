@@ -313,6 +313,10 @@ impl Game {
     }
 
     fn transfer(&mut self, from: i32, to: i32, items: Vec<i32>, editing: Option<u64>) -> bool {
+        // Added where it already is, then removed: the game loses the item from the inventory.
+        if from == to {
+            return false;
+        }
         let time = self.time;
         let mut moved = Vec::new();
         for wo in items {

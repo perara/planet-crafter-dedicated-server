@@ -93,3 +93,17 @@ fn only_deconstructible_objects_come_apart() {
         }
     }
 }
+
+/// L1: a transfer from an inventory to itself changes nothing (the game loses the item).
+#[test]
+fn a_transfer_to_the_same_inventory_keeps_the_item() {
+    let Some(mut g) = test_game(save()) else { return };
+    join(&mut g, 1, "Ann");
+    let inv = g.clients[&1].ready.as_ref().unwrap().inventory;
+    let items = g.inventories[&inv].items.clone();
+    for name in ["InventoriesHandler.TransferItemServerRpc", "InventoriesHandler.TransferAllItemsServerRpc"] {
+        let args = if name.contains("All") { vec![json!(inv), json!(inv)] } else { vec![json!(inv), json!(inv), json!(items[0])] };
+        rpc(&mut g, 1, 0, name, args);
+        assert_eq!(g.inventories[&inv].items, items, "{name}");
+    }
+}
