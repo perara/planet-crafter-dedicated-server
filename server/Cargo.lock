@@ -137,6 +137,7 @@ version = "0.3.0"
 dependencies = [
  "ctrlc",
  "indexmap",
+ "libc",
  "serde",
  "serde_json",
  "steamworks",

@@ -168,7 +168,7 @@ pub fn run(args: &[String]) {
     let request = hex(std::fs::read_to_string(format!("{dir}/connection-request.hex")).expect("connection-request.hex").trim());
     let script: Value = serde_json::from_str(&std::fs::read_to_string(script).expect("script")).expect("script JSON");
     let addr: SocketAddr = addr.parse().expect("HOST:PORT");
-    let (utp, token) = Utp::connect(addr, Duration::from_secs(10)).unwrap_or_else(|e| panic!("{addr}: {e}"));
+    let (utp, token) = Utp::connect("0.0.0.0:0".parse().unwrap(), addr, Duration::from_secs(10)).unwrap_or_else(|e| panic!("{addr}: {e}"));
     let mut s = Session { utp, token, started: Instant::now(), client: 0, player: 0, inventory: 0, equipment: 0, vars: Default::default() };
     s.send(&[(CONNECTION_REQUEST, request)]);
     let player_hash = data.prefabs["Player"].hash;

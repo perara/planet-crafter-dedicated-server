@@ -8,6 +8,7 @@
 //!                    [--set KEY=VALUE ...]   (a new world, see newworld.rs)
 //!        pcds-server --version [DATA_DIR]
 //!        pcds-server probe HOST:PORT DATA_DIR SCRIPT.json   (a scripted test player)
+//!        pcds-server load HOST:PORT DATA_DIR [PLAYERS] [SECONDS]   (a load test, see load.rs)
 //!        pcds-server extract RAW.json OUT_DIR   (a new game version's tables, see extract.rs)
 //! Environment:
 //!   PCDS_LISTEN       direct-IP address, default 0.0.0.0:7777; "off" disables
@@ -46,6 +47,7 @@ mod idmap;
 mod hooks;
 mod instances;
 mod inventories;
+mod load;
 mod logistics;
 mod machines;
 mod meteo;
@@ -180,10 +182,17 @@ fn start_steam(version: &str, session_number: u32) -> Result<(Server, ListenSock
     Ok((steam, listen, code))
 }
 
+/// The pause between frames, as the game's: timers, the game tick and Steam run once per frame.
+const FRAME: Duration = Duration::from_millis(5);
+/// Other players' movement goes out at most this often (a 60 fps host's rate; clients
+/// interpolate movement), everything else at once.
+const MOVEMENT_EVERY: Duration = Duration::from_millis(16);
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("probe") => return probe::run(&args[2..]),
+        Some("load") => return load::run(&args[2..]),
         Some("extract") => return extract::run(&args[2..]),
         Some("new") => return newworld::run(&args[2..]),
         Some("--version") => {
@@ -291,8 +300,15 @@ fn main() {
     let mut pending_drop: Vec<(u64, Instant)> = Vec::new();
     let mut next_client = 1u64;
     let mut next_save = Instant::now() + Duration::from_secs(autosave_minutes.max(1) * 60);
+    let (mut next_frame, mut movement_sent) = (Instant::now(), Instant::now());
     while !stop.load(Ordering::SeqCst) {
-        loops.0 += 1;
+        // A frame every 5 ms: the game tick and Steam. A direct-IP packet in between is handled
+        // at once, and what it brings goes out at once.
+        let frame = Instant::now() >= next_frame;
+        if frame {
+            next_frame = Instant::now() + FRAME;
+            loops.0 += 1;
+        }
         if loops.1.elapsed() >= Duration::from_secs(1) {
             loops = (0, Instant::now(), loops.0);
         }
@@ -301,7 +317,7 @@ fn main() {
         let mut joined: Vec<(u64, Link)> = Vec::new();
         let mut incoming: Vec<(u64, Vec<u8>)> = Vec::new();
         let mut gone: Vec<u64> = Vec::new();
-        if let Some((steam, listen)) = &steam {
+        if let Some((steam, listen)) = steam.as_ref().filter(|_| frame) {
             steam.run_callbacks();
             while let Some(event) = listen.try_receive_event() {
                 match event {
@@ -378,7 +394,7 @@ fn main() {
                 guarded(&mut game, client, &save_path, |game| game.receive(client, &batch));
             }
         }
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| game.tick())).is_err() {
+        if frame && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| game.tick())).is_err() {
             // The whole world may be half-updated: keep what there is and let systemd restart.
             eprintln!("the game tick panicked: saving and stopping");
             persist(&mut game, &save_path);
@@ -387,7 +403,12 @@ fn main() {
         if std::mem::take(&mut game.save_requested) {
             persist(&mut game, &save_path);
         }
-        deliver(&mut game, &links, &mut approved, utp.as_mut());
+        // Answers and events go out now; movement alone waits for MOVEMENT_EVERY.
+        let send_now = game.net.out.iter().any(|(_, kind, _)| *kind != protocol::NETWORK_TRANSFORM) || (frame && movement_sent.elapsed() >= MOVEMENT_EVERY);
+        if send_now {
+            deliver(&mut game, &links, &mut approved, utp.as_mut());
+            movement_sent = Instant::now();
+        }
         // Kicked or refused: the reason first, the disconnect a moment later.
         for (client, reason) in std::mem::take(&mut game.kicks) {
             if pending_drop.iter().any(|(c, _)| *c == client) {
@@ -439,14 +460,18 @@ fn main() {
                 }
             }
         }
-        if let Some(utp) = &mut utp {
+        if let Some(utp) = utp.as_mut().filter(|_| frame || send_now || !pending_drop.is_empty()) {
             utp.flush();
         }
         if autosave_minutes > 0 && Instant::now() >= next_save {
             next_save += Duration::from_secs(autosave_minutes * 60);
             persist(&mut game, &save_path);
         }
-        std::thread::sleep(Duration::from_millis(5));
+        let pause = next_frame.saturating_duration_since(Instant::now());
+        match &utp {
+            Some(utp) => utp.wait(pause),
+            None => std::thread::sleep(pause),
+        }
     }
     persist(&mut game, &save_path);
     if let Some(utp) = &mut utp {
@@ -622,28 +647,29 @@ fn persist(game: &mut Game, path: &str) {
 /// ConnectionApproved: everything before is in the world it was sent.
 fn deliver(game: &mut Game, links: &HashMap<u64, Link>, approved: &mut HashSet<u64>, mut utp: Option<&mut Utp>) {
     let out = std::mem::take(&mut game.net.out);
-    let mut per_client: HashMap<u64, Vec<(u32, Vec<u8>)>> = HashMap::new();
-    for (to, kind, body) in out {
-        if kind == protocol::CONNECTION_APPROVED {
+    // Each client's messages as indices into `out`, in queue order (no copies of the bodies).
+    let mut per_client: idmap::FxHashMap<u64, Vec<usize>> = Default::default();
+    for (i, (to, kind, _)) in out.iter().enumerate() {
+        if *kind == protocol::CONNECTION_APPROVED {
             if let Target::Only(c) = to {
-                approved.insert(c);
-                per_client.entry(c).or_default().push((kind, body));
+                approved.insert(*c);
+                per_client.entry(*c).or_default().push(i);
             }
             continue;
         }
         for c in approved.iter() {
-            let wanted = match to {
+            let wanted = match *to {
                 Target::All => true,
                 Target::Only(x) => x == *c,
                 Target::Except(x) => x != *c,
             };
             if wanted {
-                per_client.entry(*c).or_default().push((kind, body.clone()));
+                per_client.entry(*c).or_default().push(i);
             }
         }
     }
     for (client, messages) in per_client {
-        let batch = wire::batch(&messages);
+        let batch = wire::batch_of(messages.iter().map(|i| (out[*i].1, out[*i].2.as_slice())));
         match links.get(&client) {
             Some(Link::Steam { connection, .. }) => send(connection, &batch),
             Some(Link::Ip(token, _)) => {

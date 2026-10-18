@@ -171,33 +171,44 @@ fn pop_batches(buffer: &mut Vec<u8>, out: &mut Vec<Vec<u8>>) -> bool {
 
 pub struct Utp {
     socket: UdpSocket,
-    connections: HashMap<Token, Connection>,
+    connections: crate::idmap::FxHashMap<Token, Connection>,
     /// Dropped by send() (over MAX_QUEUED); the next poll reports them.
     dropped: Vec<Token>,
+    /// Datagrams to send, all in one system call at the end of flush.
+    outbox: Vec<(SocketAddr, Vec<u8>)>,
+    inbox: mmsg::Inbox,
 }
 
 impl Utp {
     pub fn bind(addr: SocketAddr) -> std::io::Result<Utp> {
         let socket = UdpSocket::bind(addr)?;
         socket.set_nonblocking(true)?;
-        Ok(Utp { socket, connections: HashMap::new(), dropped: Vec::new() })
+        Ok(Utp { socket, connections: Default::default(), dropped: Vec::new(), outbox: Vec::new(), inbox: mmsg::Inbox::new() })
+    }
+
+    /// Blocks until a datagram waits or `timeout` passes: the server's pause between loops, so
+    /// a packet is handled the moment it arrives instead of at the end of a fixed sleep.
+    pub fn wait(&self, timeout: Duration) {
+        use std::os::fd::AsRawFd;
+        let mut fd = libc::pollfd { fd: self.socket.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let ts = libc::timespec { tv_sec: timeout.as_secs() as libc::time_t, tv_nsec: timeout.subsec_nanos() as libc::c_long };
+        // SAFETY: one valid pollfd and a valid timespec for the call's duration; no signal mask.
+        unsafe { libc::ppoll(&mut fd, 1, &ts, std::ptr::null()) };
     }
 
     fn transmit(&mut self, token: &Token, kind: u8, body: &[u8]) {
         let Some(c) = self.connections.get_mut(token) else { return };
-        let mut datagram = Vec::with_capacity(9 + body.len());
-        datagram.push(kind);
-        datagram.extend_from_slice(token);
-        datagram.extend_from_slice(body);
-        let _ = self.socket.send_to(&datagram, c.addr);
+        self.outbox.push((c.addr, packet(token, kind, &[body])));
         c.last_send = Instant::now();
     }
 
-    /// Client side: connects to a server and returns once it accepted, with our token.
-    pub fn connect(server: SocketAddr, timeout: Duration) -> std::io::Result<(Utp, Token)> {
-        let mut utp = Utp::bind("0.0.0.0:0".parse().unwrap())?;
+    /// Client side: connects to a server from `local` and returns once it accepted, with our
+    /// token.
+    pub fn connect(local: SocketAddr, server: SocketAddr, timeout: Duration) -> std::io::Result<(Utp, Token)> {
+        let mut utp = Utp::bind(local)?;
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
-        let token: Token = (seed ^ (std::process::id() as u64).rotate_left(32)).to_le_bytes();
+        let port = utp.socket.local_addr().map(|a| a.port() as u64).unwrap_or(0);
+        let token: Token = (seed ^ (std::process::id() as u64).rotate_left(32) ^ port.rotate_left(16)).to_le_bytes();
         let mut request = SIGNATURE.to_vec();
         request.push(REQUEST);
         request.extend_from_slice(&token);
@@ -225,13 +236,22 @@ impl Utp {
     /// sent no data in time after their handshake, or that send() dropped.
     pub fn poll(&mut self) -> Vec<Event> {
         let mut events: Vec<Event> = self.dropped.drain(..).map(Event::Disconnected).collect();
-        let mut buffer = [0u8; 2048];
         let now = Instant::now();
-        for _ in 0..MAX_DATAGRAMS {
-            let Ok((n, from)) = self.socket.recv_from(&mut buffer) else { break };
-            self.datagram(&buffer[..n], from, now, &mut events);
+        let mut inbox = std::mem::take(&mut self.inbox);
+        let mut read = 0;
+        while read < MAX_DATAGRAMS {
+            let n = inbox.receive(&self.socket);
+            for (d, from) in (0..n).filter_map(|i| inbox.get(i)) {
+                self.datagram(d, from, now, &mut events);
+            }
+            read += n;
+            if n < inbox.capacity() {
+                break;
+            }
         }
-        let silent: Vec<Token> = self.connections.iter().filter(|(_, c)| now - c.last_receive > TIMEOUT || (!c.data_seen && now - c.opened > DATA_WITHIN)).map(|(t, _)| *t).collect();
+        self.inbox = inbox;
+        let silent = |c: &Connection| now - c.last_receive > TIMEOUT || (!c.data_seen && now - c.opened > DATA_WITHIN);
+        let silent: Vec<Token> = if self.connections.values().any(silent) { self.connections.iter().filter(|(_, c)| silent(c)).map(|(t, _)| *t).collect() } else { Vec::new() };
         for token in silent {
             self.connections.remove(&token);
             events.push(Event::Disconnected(token));
@@ -345,50 +365,183 @@ impl Utp {
     /// Sends what fits in the window, resends what was not acknowledged, acks, heartbeats.
     pub fn flush(&mut self) {
         let now = Instant::now();
-        let tokens: Vec<Token> = self.connections.keys().copied().collect();
-        for token in tokens {
-            let mut datagrams: Vec<(u8, Vec<u8>)> = Vec::new();
-            {
-                let c = self.connections.get_mut(&token).unwrap();
-                if !c.data_seen {
-                    continue;
-                }
-                for i in 0..c.in_flight.len() {
-                    if now - c.in_flight[i].2 >= RESEND {
-                        let (sequence, payload) = (c.in_flight[i].0, c.in_flight[i].1.clone());
-                        c.in_flight[i].2 = now;
-                        datagrams.push((DATA, [vec![RELIABLE], c.reliable_header(PAYLOAD, sequence), payload].concat()));
-                    }
-                }
-                while c.in_flight.len() < WINDOW && !c.queued.is_empty() {
-                    let payload: Vec<u8> = c.queued.drain(..CHUNK.min(c.queued.len())).collect();
-                    let sequence = c.sequence;
-                    c.sequence = c.sequence.wrapping_add(1);
-                    datagrams.push((DATA, [vec![RELIABLE], c.reliable_header(PAYLOAD, sequence), payload.clone()].concat()));
-                    c.in_flight.push_back((sequence, payload, now));
-                }
-                if c.ack_due && datagrams.is_empty() {
-                    datagrams.push((DATA, [vec![RELIABLE], c.reliable_header(ACK, 0), vec![0]].concat()));
-                }
-                c.ack_due = false;
-                if datagrams.is_empty() && now - c.last_send > HEARTBEAT_AFTER {
-                    datagrams.push((HEARTBEAT, Vec::new()));
+        for (token, c) in self.connections.iter_mut() {
+            if !c.data_seen {
+                continue;
+            }
+            let before = self.outbox.len();
+            for i in 0..c.in_flight.len() {
+                if now - c.in_flight[i].2 >= RESEND {
+                    c.in_flight[i].2 = now;
+                    let header = c.reliable_header(PAYLOAD, c.in_flight[i].0);
+                    self.outbox.push((c.addr, packet(token, DATA, &[&[RELIABLE], &header, &c.in_flight[i].1])));
                 }
             }
-            for (kind, body) in datagrams {
-                self.transmit(&token, kind, &body);
+            while c.in_flight.len() < WINDOW && !c.queued.is_empty() {
+                let payload: Vec<u8> = c.queued.drain(..CHUNK.min(c.queued.len())).collect();
+                let sequence = c.sequence;
+                c.sequence = c.sequence.wrapping_add(1);
+                let header = c.reliable_header(PAYLOAD, sequence);
+                self.outbox.push((c.addr, packet(token, DATA, &[&[RELIABLE], &header, &payload])));
+                c.in_flight.push_back((sequence, payload, now));
+            }
+            if c.ack_due && self.outbox.len() == before {
+                let header = c.reliable_header(ACK, 0);
+                self.outbox.push((c.addr, packet(token, DATA, &[&[RELIABLE], &header, &[0]])));
+            }
+            c.ack_due = false;
+            if self.outbox.len() == before && now - c.last_send > HEARTBEAT_AFTER {
+                self.outbox.push((c.addr, packet(token, HEARTBEAT, &[])));
+            }
+            if self.outbox.len() > before {
+                c.last_send = now;
             }
         }
+        mmsg::send(&self.socket, &self.outbox);
+        self.outbox.clear();
     }
 
     /// Tells the client it is disconnected and forgets it.
     pub fn disconnect(&mut self, token: &Token) {
         self.transmit(token, DISCONNECT, &[]);
         self.connections.remove(token);
+        mmsg::send(&self.socket, &self.outbox);
+        self.outbox.clear();
     }
 
     pub fn tokens(&self) -> Vec<Token> {
         self.connections.keys().copied().collect()
+    }
+}
+
+/// A datagram: its type, the connection's token, then the parts.
+fn packet(token: &Token, kind: u8, parts: &[&[u8]]) -> Vec<u8> {
+    let mut d = Vec::with_capacity(9 + parts.iter().map(|p| p.len()).sum::<usize>());
+    d.push(kind);
+    d.extend_from_slice(token);
+    parts.iter().for_each(|p| d.extend_from_slice(p));
+    d
+}
+
+/// Linux's batched UDP calls: sendmmsg and recvmmsg move many datagrams per system call.
+mod mmsg {
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket};
+    use std::os::fd::AsRawFd;
+
+    /// Datagrams per call.
+    pub const BATCH: usize = 32;
+
+    fn raw(addr: &SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
+        // SAFETY: sockaddr_storage is plain data; zero is a valid value of every field.
+        let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let len = match addr {
+            SocketAddr::V4(a) => {
+                let sin = libc::sockaddr_in { sin_family: libc::AF_INET as libc::sa_family_t, sin_port: a.port().to_be(), sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(a.ip().octets()) }, sin_zero: [0; 8] };
+                // SAFETY: sockaddr_storage is large and aligned enough for any socket address.
+                unsafe { std::ptr::write(&mut storage as *mut _ as *mut libc::sockaddr_in, sin) };
+                std::mem::size_of::<libc::sockaddr_in>()
+            }
+            SocketAddr::V6(a) => {
+                let sin6 = libc::sockaddr_in6 { sin6_family: libc::AF_INET6 as libc::sa_family_t, sin6_port: a.port().to_be(), sin6_flowinfo: a.flowinfo(), sin6_addr: libc::in6_addr { s6_addr: a.ip().octets() }, sin6_scope_id: a.scope_id() };
+                // SAFETY: as above.
+                unsafe { std::ptr::write(&mut storage as *mut _ as *mut libc::sockaddr_in6, sin6) };
+                std::mem::size_of::<libc::sockaddr_in6>()
+            }
+        };
+        (storage, len as libc::socklen_t)
+    }
+
+    fn address(storage: &libc::sockaddr_storage) -> Option<SocketAddr> {
+        // SAFETY: the family says which address type the kernel wrote.
+        match storage.ss_family as libc::c_int {
+            libc::AF_INET => {
+                let sin = unsafe { &*(storage as *const _ as *const libc::sockaddr_in) };
+                Some(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes()), u16::from_be(sin.sin_port))))
+            }
+            libc::AF_INET6 => {
+                let sin6 = unsafe { &*(storage as *const _ as *const libc::sockaddr_in6) };
+                Some(SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(sin6.sin6_addr.s6_addr), u16::from_be(sin6.sin6_port), sin6.sin6_flowinfo, sin6.sin6_scope_id)))
+            }
+            _ => None,
+        }
+    }
+
+    /// Sends every datagram; one the socket refuses is dropped, as a failed send_to drops it.
+    pub fn send(socket: &UdpSocket, datagrams: &[(SocketAddr, Vec<u8>)]) {
+        for chunk in datagrams.chunks(BATCH) {
+            let mut names: Vec<_> = chunk.iter().map(|(a, _)| raw(a)).collect();
+            let mut iovs: Vec<libc::iovec> = chunk.iter().map(|(_, d)| libc::iovec { iov_base: d.as_ptr() as *mut libc::c_void, iov_len: d.len() }).collect();
+            let mut messages: Vec<libc::mmsghdr> = names
+                .iter_mut()
+                .zip(iovs.iter_mut())
+                .map(|((name, len), iov)| {
+                    // SAFETY: mmsghdr is plain data; the pointers set below outlive the call.
+                    let mut m: libc::mmsghdr = unsafe { std::mem::zeroed() };
+                    m.msg_hdr.msg_name = name as *mut _ as *mut libc::c_void;
+                    m.msg_hdr.msg_namelen = *len;
+                    m.msg_hdr.msg_iov = iov;
+                    m.msg_hdr.msg_iovlen = 1;
+                    m
+                })
+                .collect();
+            let mut sent = 0;
+            while sent < messages.len() {
+                // SAFETY: messages[sent..] are valid mmsghdrs pointing at live names and buffers.
+                let n = unsafe { libc::sendmmsg(socket.as_raw_fd(), messages.as_mut_ptr().add(sent), (messages.len() - sent) as libc::c_uint, 0) };
+                if n > 0 {
+                    sent += n as usize;
+                } else if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                    sent += 1;
+                }
+            }
+        }
+    }
+
+    /// recvmmsg's buffers and headers, made once: each header points at its buffer and address.
+    #[derive(Default)]
+    pub struct Inbox {
+        buffers: Vec<[u8; 2048]>,
+        names: Vec<libc::sockaddr_storage>,
+        iovs: Vec<libc::iovec>,
+        headers: Vec<libc::mmsghdr>,
+    }
+
+    impl Inbox {
+        pub fn new() -> Inbox {
+            // SAFETY: plain data, filled by the kernel.
+            let mut b = Inbox { buffers: vec![[0; 2048]; BATCH], names: vec![unsafe { std::mem::zeroed() }; BATCH], iovs: Vec::with_capacity(BATCH), headers: Vec::with_capacity(BATCH) };
+            for buffer in &mut b.buffers {
+                b.iovs.push(libc::iovec { iov_base: buffer.as_mut_ptr() as *mut libc::c_void, iov_len: buffer.len() });
+            }
+            for (name, iov) in b.names.iter_mut().zip(b.iovs.iter_mut()) {
+                // SAFETY: as in send. The vectors never grow again, so the pointers stay valid.
+                let mut m: libc::mmsghdr = unsafe { std::mem::zeroed() };
+                m.msg_hdr.msg_name = name as *mut _ as *mut libc::c_void;
+                m.msg_hdr.msg_iov = iov;
+                m.msg_hdr.msg_iovlen = 1;
+                b.headers.push(m);
+            }
+            b
+        }
+
+        /// Reads up to BATCH waiting datagrams; returns how many (0: none waits).
+        pub fn receive(&mut self, socket: &UdpSocket) -> usize {
+            for m in &mut self.headers {
+                m.msg_hdr.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+            }
+            // SAFETY: valid headers over live buffers; the socket is non-blocking.
+            let n = unsafe { libc::recvmmsg(socket.as_raw_fd(), self.headers.as_mut_ptr(), self.headers.len() as libc::c_uint, 0, std::ptr::null_mut()) };
+            n.max(0) as usize
+        }
+
+        /// Datagram i of the last receive, with its sender.
+        pub fn get(&self, i: usize) -> Option<(&[u8], SocketAddr)> {
+            Some((&self.buffers[i][..(self.headers[i].msg_len as usize).min(2048)], address(&self.names[i])?))
+        }
+
+        pub fn capacity(&self) -> usize {
+            self.headers.len()
+        }
     }
 }
 

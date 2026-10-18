@@ -39,11 +39,20 @@ pub struct State {
 pub fn init(_game: &mut Game) {}
 
 pub fn tick(game: &mut Game) {
-    let now: HashSet<u64> = game.clients.values().filter(|c| c.approved).map(|c| c.id).collect();
-    let left: Vec<u64> = game.ext.animals.clients.difference(&now).copied().collect();
-    game.ext.animals.clients = now;
-    for client in left {
-        vehicles::client_left(game, client);
+    // Who left since the last tick (most ticks: nobody, and nothing is built for it).
+    let known = &game.ext.animals.clients;
+    let mut approved = 0;
+    let same = game.clients.values().filter(|c| c.approved).all(|c| {
+        approved += 1;
+        known.contains(&c.id)
+    }) && approved == known.len();
+    if !same {
+        let now: HashSet<u64> = game.clients.values().filter(|c| c.approved).map(|c| c.id).collect();
+        let left: Vec<u64> = game.ext.animals.clients.difference(&now).copied().collect();
+        game.ext.animals.clients = now;
+        for client in left {
+            vehicles::client_left(game, client);
+        }
     }
     vehicles::watch_owners(game);
     spawn::keep_sequences_unplaced(game);

@@ -226,13 +226,19 @@ pub fn messages(batch: &[u8]) -> Vec<(u32, &[u8])> {
 
 /// One batch holding the given messages.
 pub fn batch(messages: &[(u32, Vec<u8>)]) -> Vec<u8> {
-    let mut body = Writer::new();
+    batch_of(messages.iter().map(|(kind, data)| (*kind, data.as_slice())))
+}
+
+/// One batch of (message type, body) pairs.
+pub fn batch_of<'a>(messages: impl Iterator<Item = (u32, &'a [u8])>) -> Vec<u8> {
+    let (mut body, mut count) = (Writer::new(), 0u16);
     for (kind, data) in messages {
-        body.packed_u32(*kind).packed_u32(data.len() as u32).bytes(data);
+        body.packed_u32(kind).packed_u32(data.len() as u32).bytes(data);
+        count = count.wrapping_add(1);
     }
     let mut out = Writer::new();
     out.u16(BATCH_MAGIC)
-        .u16(messages.len() as u16)
+        .u16(count)
         .i32((16 + body.len()) as i32)
         .u64(xxhash_rust::xxh64::xxh64(&body.0, 0))
         .bytes(&body.0);
