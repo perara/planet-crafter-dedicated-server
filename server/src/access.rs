@@ -3,12 +3,14 @@
 //! only count for players who joined through Steam, where the id is verified. The lists live
 //! in a JSON file next to the world and change through the admin API.
 
+use std::net::IpAddr;
+
 use serde::{Deserialize, Serialize};
 
 pub const REFUSED: &str = "You are not allowed on this server";
 
 #[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Lists {
     #[serde(default, rename = "allowedIPs")]
     pub allowed_ips: Vec<String>,
@@ -26,9 +28,21 @@ pub struct Access {
     path: Option<String>,
 }
 
-fn ipv4(ip: &str) -> Option<u32> {
-    let addr: std::net::Ipv4Addr = ip.parse().ok()?;
-    Some(u32::from(addr))
+/// An address; an IPv4-mapped IPv6 one (a dual-stack socket's IPv4 client) as IPv4.
+fn addr(ip: &str) -> Option<IpAddr> {
+    ip.parse::<IpAddr>().ok().map(|a| a.to_canonical())
+}
+
+/// An IP rule: an address (all its bits) or an address/prefix range, IPv4 or IPv6.
+fn rule(rule: &str) -> Option<(IpAddr, u32)> {
+    let (network, bits) = match rule.split_once('/') {
+        Some((a, b)) => (a, Some(b.parse::<u32>().ok()?)),
+        None => (rule, None),
+    };
+    let network = addr(network)?;
+    let max = if network.is_ipv4() { 32 } else { 128 };
+    let bits = bits.unwrap_or(max);
+    (bits <= max).then_some((network, bits))
 }
 
 /// A list entry that is a SteamID64.
@@ -36,15 +50,33 @@ fn steam_id(entry: &str) -> Option<u64> {
     entry.parse().ok().filter(|id| *id >= crate::players::FIRST_STEAM_ID)
 }
 
-/// Exact IPv4 address or a.b.c.d/n range.
-pub fn ip_matches(ip: &str, rule: &str) -> bool {
-    let Some((network, bits)) = rule.split_once('/') else { return ip == rule };
-    let (Some(ip), Some(network), Ok(bits)) = (ipv4(ip), ipv4(network), bits.parse::<u32>()) else { return false };
-    if bits > 32 {
-        return false;
+/// Whether an address is in a rule: an exact address or a range (a.b.c.d/n, an IPv6 /n).
+pub fn ip_matches(ip: &str, r: &str) -> bool {
+    let (Some(ip), Some((network, bits))) = (addr(ip), rule(r)) else { return false };
+    match (ip, network) {
+        (IpAddr::V4(ip), IpAddr::V4(network)) => {
+            let mask = u32::MAX.checked_shl(32 - bits).unwrap_or(0);
+            u32::from(ip) & mask == u32::from(network) & mask
+        }
+        (IpAddr::V6(ip), IpAddr::V6(network)) => {
+            let mask = u128::MAX.checked_shl(128 - bits).unwrap_or(0);
+            u128::from(ip) & mask == u128::from(network) & mask
+        }
+        _ => false,
     }
-    let mask = if bits == 0 { 0 } else { u32::MAX << (32 - bits) };
-    ip & mask == network & mask
+}
+
+impl Lists {
+    /// Every IP entry is an address or a range: one that is not would match nobody (an
+    /// allowlist of them refuses everyone, a ban of one bans no one).
+    pub fn check(&self) -> Result<(), String> {
+        for (list, entries) in [("allowedIPs", &self.allowed_ips), ("bannedIPs", &self.banned_ips)] {
+            if let Some(bad) = entries.iter().find(|e| rule(e.trim()).is_none()) {
+                return Err(format!("{list}: {bad:?} is not an IP address or range (a.b.c.d, a.b.c.d/n, an IPv6 address or range)"));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn clean(values: Vec<String>) -> Vec<String> {
@@ -77,6 +109,7 @@ impl Access {
     }
 
     pub fn set(&mut self, lists: Lists) -> Result<(), String> {
+        lists.check()?;
         self.save(Lists { allowed_ips: clean(lists.allowed_ips), whitelist: clean(lists.whitelist), banned_names: clean(lists.banned_names), banned_ips: clean(lists.banned_ips) })
     }
 
@@ -133,6 +166,15 @@ mod tests {
         assert!(ip_matches("192.168.1.7", "192.168.1.0/24"));
         assert!(!ip_matches("192.168.2.7", "192.168.1.0/24"));
         assert!(ip_matches("10.0.0.1", "10.0.0.1"));
+        // A dual-stack socket's IPv4 client, IPv6 ranges, and every prefix length.
+        assert!(ip_matches("::ffff:192.168.1.7", "192.168.1.0/24") && ip_matches("192.168.1.7", "::ffff:192.168.1.7"));
+        assert!(ip_matches("2001:db8::1", "2001:db8::/32") && !ip_matches("2001:db9::1", "2001:db8::/32"));
+        assert!(ip_matches("8.8.8.8", "0.0.0.0/0") && ip_matches("1.2.3.4", "1.2.3.4/32") && !ip_matches("1.2.3.5", "1.2.3.4/32"));
+        for bad in ["192.168.1.0/33", "1.2.3.4/abc", "999.1.1.1/8", "10.0.0.*", "2001:db8::/129"] {
+            let lists = Lists { banned_ips: vec![bad.into()], ..Default::default() };
+            assert!(lists.check().unwrap_err().contains(bad), "{bad}");
+        }
+        assert!(serde_json::from_str::<Lists>(r#"{"bannedIps": ["1.2.3.4"]}"#).is_err(), "a misspelt list is refused");
         let mut a = Access { lists: Lists::default(), path: None };
         assert!(a.ip_allowed("1.2.3.4") && a.name_allowed("Anyone", None));
         a.set(Lists { allowed_ips: vec!["10.0.0.0/8".into()], whitelist: vec!["Alice".into(), "76561198000000042".into()], ..Default::default() }).unwrap();

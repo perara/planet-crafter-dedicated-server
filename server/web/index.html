@@ -298,6 +298,7 @@
     </nav>
     <div class="foot">
       <button class="small" id="themeBtn" title="Colour theme">Theme: auto</button>
+      <button class="small" id="signOut" title="Forget the admin token in this browser">Sign out</button>
       <span id="footVersion"></span>
     </div>
   </aside>
@@ -535,8 +536,8 @@ const $ = id => document.getElementById(id);
 const VIEWS = ['overview', 'players', 'map', 'chat', 'world', 'updates', 'config', 'tools'];
 let token = '';
 try {
-  const m = location.hash.match(/token=([0-9A-Za-z]+)/);
-  if (m) { localStorage.setItem('pcdsToken', m[1]); history.replaceState(null, '', location.pathname + '#/overview'); }
+  const m = location.hash.match(/token=([^&]+)/);
+  if (m) { localStorage.setItem('pcdsToken', decodeURIComponent(m[1])); history.replaceState(null, '', location.pathname + '#/overview'); }
   token = localStorage.getItem('pcdsToken') || '';
 } catch (e) {}
 const store = {
@@ -1408,7 +1409,7 @@ $('updRollback').onclick = async e => {
 };
 
 // ---- config: drawn from the schema GET /api/config serves; no setting is named here ----
-let edits = {}, inputs = new Map(), errors = new Map(), knobEls = [];
+let edits = {}, inputs = new Map(), errors = new Map(), knobEls = [], bad = new Set();
 function label(key) {
   const s = key.split('.').pop().replace(/([a-z])([A-Z])(?=[a-z])/g, (_, a, b) => a + ' ' + b.toLowerCase()).replace(/([a-z])([A-Z])/g, '$1 $2');
   return s[0].toUpperCase() + s.slice(1);
@@ -1428,6 +1429,8 @@ function read(el, k) {
   if (k.type === 'list') return s.split('\n').map(x => x.trim()).filter(Boolean);
   // A line that is not "name = number" goes as null: the server names the setting it refuses.
   if (k.type === 'map') return Object.fromEntries(s.split('\n').map(x => x.trim()).filter(Boolean).map(x => { const m = x.match(/^(\S+?)\s*[=:]\s*(\S+)$/); return m ? [m[1], Number(m[2])] : [x, null]; }));
+  // A number field the browser cannot read reports '' (as when empty): an error, never "default".
+  if (el.validity && el.validity.badInput) return undefined;
   if (s === '') return null;
   return k.type === 'int' || k.type === 'float' ? Number(s) : s;
 }
@@ -1443,7 +1446,13 @@ function control(k, card) {
   }
   el.id = 'knob-' + k.key;
   put(el, k, k.value);
-  el.addEventListener(k.type === 'bool' || k.type === 'enum' ? 'change' : 'input', () => { edits[k.key] = read(el, k); card.classList.add('dirty'); dirty(); });
+  el.addEventListener(k.type === 'bool' || k.type === 'enum' ? 'change' : 'input', () => {
+    const v = read(el, k);
+    const err = errors.get(k.key);
+    if (v === undefined) { delete edits[k.key]; bad.add(k.key); if (err) err.textContent = 'Not a number'; }
+    else { edits[k.key] = v; bad.delete(k.key); if (err) err.textContent = ''; }
+    card.classList.add('dirty'); dirty();
+  });
   return el;
 }
 function knobCard(k) {
@@ -1476,7 +1485,7 @@ function knobCard(k) {
   return card;
 }
 function renderConfig(list) {
-  edits = {}; inputs = new Map(); errors = new Map(); knobEls = [];
+  edits = {}; inputs = new Map(); errors = new Map(); knobEls = []; bad = new Set();
   const groups = new Map();
   for (const k of list) groups.set(k.group, [...(groups.get(k.group) || []), k]);
   $('knobs').replaceChildren(...[...groups].map(([g, ks], i) => h('section', { class: 'card', id: 'cfg-g' + i }, h('div', { class: 'head' }, h('h2', {}, g), h('span', { class: 'muted' }, `${ks.length}`)), h('div', { class: 'knobs' }, ks.map(knobCard)))));
@@ -1489,7 +1498,7 @@ function filterConfig() {
   for (const sec of $('knobs').children) sec.hidden = ![...sec.querySelectorAll('.knob')].some(k => !k.hidden);
 }
 $('cfgSearch').oninput = filterConfig; $('cfgChanged').onchange = filterConfig;
-function dirty() { const n = Object.keys(edits).length; $('saveConfig').disabled = !n; $('saveConfig').textContent = n ? `Save ${n} change${n > 1 ? 's' : ''}` : 'Save changes'; $('configMsg').textContent = n ? 'Unsaved changes' : ''; }
+function dirty() { const n = Object.keys(edits).length; $('saveConfig').disabled = !n || bad.size > 0; $('saveConfig').textContent = n ? `Save ${n} change${n > 1 ? 's' : ''}` : 'Save changes'; $('configMsg').textContent = n ? 'Unsaved changes' : ''; }
 async function loadConfig() {
   try { renderConfig((await api('GET', '/api/config')).knobs); } catch (e) { if (!e.auth) toast(e.message, 'err'); }
 }
@@ -1509,7 +1518,7 @@ window.addEventListener('beforeunload', e => { if (Object.keys(edits).length) { 
 
 // ---- tools ----
 function renderTools(s) {
-  const banned = [...s.access.bannedNames.map(b => [b, 'name']), ...s.access.bannedIPs.map(b => [b, 'IP or SteamID'])];
+  const banned = [...s.access.bannedNames.map(b => [b, /^\d{17}$/.test(b) ? 'SteamID' : 'name']), ...s.access.bannedIPs.map(b => [b, 'IP'])];
   const sig = JSON.stringify(banned);
   if ($('bans').dataset.sig === sig) return;
   $('bans').dataset.sig = sig;
@@ -1563,6 +1572,12 @@ function render(s) {
   if (current === 'tools') renderTools(s);
 }
 
+$('signOut').onclick = () => {
+  token = '';
+  try { localStorage.removeItem('pcdsToken'); } catch (e) {}
+  clearTimeout(pollTimer);
+  showLogin();
+};
 $('tokenForm').onsubmit = e => {
   e.preventDefault();
   token = $('tokenInput').value.trim();

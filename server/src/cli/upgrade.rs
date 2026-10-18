@@ -28,7 +28,7 @@ impl Ctx {
         }
         let banks = self.banks();
         if check {
-            let release = updater::lookup(&updater::releases_url(), version.as_deref())?;
+            let release = updater::lookup(&self.releases_url(), version.as_deref())?;
             println!("{}: {}", if version.is_some() { "found" } else { "latest release" }, release.tag);
             self.print_banks(None);
             return Ok(());
@@ -51,7 +51,7 @@ impl Ctx {
             updater::set_rolled_back(&banks, &active)?;
             say(format!("bank {target} ({}) is the active one now", describe(&info)));
         } else {
-            let release = updater::lookup(&updater::releases_url(), version.as_deref())?;
+            let release = updater::lookup(&self.releases_url(), version.as_deref())?;
             say(format!("downloading {} into bank {target}", release.tag));
             let info = updater::install(&release, &banks, &target, None)?;
             updater::set_active(&banks, &target)?;
@@ -64,6 +64,12 @@ impl Ctx {
         }
         say("the server runs it from its next start ('pcds start')");
         Ok(())
+    }
+
+    /// Where releases are looked up: PCDS_RELEASES from the environment, else from server.env
+    /// (what the running server uses), else GitHub's.
+    fn releases_url(&self) -> String {
+        crate::env("PCDS_RELEASES").or_else(|| self.env_get("PCDS_RELEASES")).unwrap_or_else(updater::releases_url)
     }
 
     /// The bank the running front runs the world in.

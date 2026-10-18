@@ -162,7 +162,7 @@ fn access_path(save_path: &str) -> String {
 fn load_access(path: &str) -> Result<access::Access, String> {
     match std::fs::read_to_string(path) {
         Ok(text) if !text.trim().is_empty() => {
-            serde_json::from_str::<access::Lists>(&text).map_err(|e| format!("{path}: {e}"))?;
+            serde_json::from_str::<access::Lists>(&text).map_err(|e| e.to_string()).and_then(|l| l.check()).map_err(|e| format!("{path}: {e}"))?;
         }
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -505,9 +505,21 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
             None => (400, "{\"error\":\"'value' is required\"}".into()),
         },
         ("POST", "/api/access") => {
-            let list = |k: &str, current: &Vec<String>| body[k].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_else(|| current.clone());
-            let l = &game.access.lists;
-            let lists = access::Lists { allowed_ips: list("allowedIPs", &l.allowed_ips), whitelist: list("whitelist", &l.whitelist), banned_names: list("bannedNames", &l.banned_names), banned_ips: list("bannedIPs", &l.banned_ips) };
+            // The lists given replace those; the others stay. A misspelt list or an entry that
+            // is not a string is refused, never dropped.
+            let mut lists = serde_json::to_value(&game.access.lists).unwrap_or_default();
+            match body.as_object() {
+                Some(given) => {
+                    for (k, v) in given {
+                        lists[k] = v.clone();
+                    }
+                }
+                None => return (400, "{\"error\":\"a JSON object of lists\"}".into()),
+            }
+            let lists = match serde_json::from_value::<access::Lists>(lists).map_err(|e| e.to_string()).and_then(|l| l.check().map(|_| l)) {
+                Ok(l) => l,
+                Err(e) => return (400, json!({"error": e}).to_string()),
+            };
             if let Err(e) = game.access.set(lists) {
                 return (500, json!({"error": e}).to_string());
             }

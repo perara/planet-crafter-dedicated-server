@@ -193,7 +193,7 @@ impl Knob {
             Type::Bool => v.is_boolean(),
             Type::Int => whole(v),
             // The rules are f32: compared as f32, so 0.01 is not below 0.01.
-            Type::Float => v.as_f64().is_some_and(|x| x.is_finite() && self.range.is_none_or(|(lo, hi)| (lo as f32..=hi as f32).contains(&(x as f32)))),
+            Type::Float => v.as_f64().is_some_and(|x| (x as f32).is_finite() && self.range.is_none_or(|(lo, hi)| (lo as f32..=hi as f32).contains(&(x as f32)))),
             Type::String => v.is_string(),
             Type::Enum => v.as_str().is_some_and(|s| self.values.contains(&s)),
             Type::List => v.as_array().is_some_and(|a| a.iter().all(Value::is_string)),

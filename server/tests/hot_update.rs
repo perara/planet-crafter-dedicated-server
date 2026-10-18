@@ -119,6 +119,7 @@ fn start(dir: &Path, data: &str, banks: &Path, releases: &str) -> Server {
         .env("PCDS_BANKS", banks)
         .env("PCDS_RELEASES", releases)
         .env("PCDS_FLIP_VERIFY", "1")
+        .env("PCDS_TEST_FAULTS", "1")
         .env("PCDS_ACCESS", dir.join("access.json"))
         .env("PCDS_RULES", dir.join("rules.json"))
         .stdout(out.try_clone().unwrap())

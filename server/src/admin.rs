@@ -19,9 +19,12 @@ use serde_json::Value;
 use crate::chathooks::Feed;
 
 /// Connections served at once (more are closed unanswered), the bytes of one request (line,
-/// headers and body), and how long it may take to arrive.
-const MAX_CONNECTIONS: usize = 16;
+/// headers and body), and how long it may take to arrive: the line and headers within HEAD (an
+/// idle connection gives its slot back soon), the whole request within DEADLINE. Chat long
+/// polls have a cap of their own (chathooks::MAX_POLLS), so they never take every slot.
+const MAX_CONNECTIONS: usize = 64;
 const MAX_REQUEST: u64 = 64 << 10;
+const HEAD: Duration = Duration::from_secs(3);
 const DEADLINE: Duration = Duration::from_secs(10);
 
 pub struct Request {
@@ -95,6 +98,7 @@ fn respond(mut stream: TcpStream, status: u16, content_type: &str, body: &str) -
         401 => "Unauthorized",
         404 => "Not Found",
         409 => "Conflict",
+        411 => "Length Required",
         413 => "Content Too Large",
         503 => "Service Unavailable",
         _ => "Error",
@@ -106,7 +110,8 @@ fn respond(mut stream: TcpStream, status: u16, content_type: &str, body: &str) -
 
 fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>, chat: &Feed) -> std::io::Result<()> {
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let mut reader = BufReader::new(Deadline(stream.try_clone()?, Instant::now() + DEADLINE)).take(MAX_REQUEST);
+    let started = Instant::now();
+    let mut reader = BufReader::new(Deadline(stream.try_clone()?, started + HEAD)).take(MAX_REQUEST);
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let mut parts = line.split_whitespace();
@@ -114,7 +119,7 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
     let target = parts.next().unwrap_or("");
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let (path, query) = (path.to_string(), query.to_string());
-    let (mut auth, mut length) = (String::new(), Some(0usize));
+    let (mut auth, mut length, mut chunked) = (String::new(), Some(0usize), false);
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header)? == 0 || header.trim().is_empty() {
@@ -124,9 +129,15 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
             match k.trim().to_ascii_lowercase().as_str() {
                 "authorization" => auth = v.trim().to_string(),
                 "content-length" => length = v.trim().parse().ok(),
+                "transfer-encoding" => chunked = true,
                 _ => {}
             }
         }
+    }
+    reader.get_mut().get_mut().1 = started + DEADLINE;
+    // A chunked body would read as empty, and {} answered as done: refused instead.
+    if chunked {
+        return respond(stream, 411, "application/json", "{\"error\":\"send the body with a Content-Length\"}");
     }
     let Some(length) = length else { return respond(stream, 400, "application/json", "{\"error\":\"bad Content-Length\"}") };
     if length as u64 > MAX_REQUEST {

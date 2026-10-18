@@ -37,7 +37,7 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
   pcds world use NAME | new NAME [NEW OPTIONS] | import SAVE.json [NAME] | remove NAME
   pcds new [--planet ID] [--start LOCATION] [--seed N] [--set KEY=VALUE]... [--force]
                          replace the current world with a new one (kept in backups/)
-  pcds start | stop | restart | status | logs
+  pcds start | stop | restart | status [--json] | logs
   pcds upgrade [VERSION] [--restart] | --rollback | --check
                          a new server release from GitHub (the latest, or VERSION) into the
                          standby bank, and the running world handed over to it with nobody
@@ -164,6 +164,7 @@ impl Ctx {
             }
             ["upgrade", ..] => self.upgrade(&args[1..])?,
             ["status"] => self.status()?,
+            ["status", "--json"] => self.status_json()?,
             ["logs"] => {
                 self.not_in_container("logs")?;
                 return passthrough(Command::new("journalctl").args(["--user", "-o", "cat", "-u", &self.unit(), "-n", "100", "-f"]));
