@@ -35,7 +35,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use steamworks::networking_sockets::{ListenSocket, NetConnection};
-use steamworks::networking_types::{AppNetConnectionEnd, ListenSocketEvent, NetConnectionEnd, SendFlags};
+use steamworks::networking_types::{AppNetConnectionEnd, ListenSocketEvent, NetConnectionEnd, NetworkingConfigEntry, NetworkingConfigValue, SendFlags};
 use steamworks::{Server, ServerMode, SteamServersConnected};
 
 use crate::admin;
@@ -48,6 +48,10 @@ use crate::utp::{self, Utp};
 const APP_ID: &str = "1284190";
 /// The game's Steam transport splits messages above this size (see GameServerSockets.cs).
 const CHUNK: usize = 524_288;
+/// The game's Steam transport's receive buffer (SteamNetworkingSocketsTransport: 2621440).
+const MAX_STEAM_MESSAGE: usize = 5 * CHUNK;
+/// Steam's send buffer per connection: several joins' worth.
+const SEND_BUFFER: i32 = 32 << 20;
 /// The most a client's "Split" message may add up to (two of the game's chunks).
 const MAX_SPLIT: usize = 1 << 20;
 /// A client's frames waiting for the bank (a stalled or flipping world) past this: the client
@@ -622,7 +626,12 @@ impl Front {
         BYTES_OUT.fetch_add(batch.len() as u64, Ordering::Relaxed);
         match self.conns.get(&client) {
             Some(Conn::Steam { connection, .. }) => {
-                send(connection, batch);
+                // A batch it got only part of would be garbage to it: the client goes, loudly.
+                if let Err(e) = send(connection, batch) {
+                    eprintln!("client {client}: {e}; dropped");
+                    self.kicked.insert(client);
+                    self.close(client);
+                }
                 false
             }
             Some(Conn::Ip(token)) => {
@@ -1448,24 +1457,59 @@ fn steam_login(version: &str, session_number: u32) -> Result<(Server, ListenSock
         std::thread::sleep(Duration::from_millis(50));
     }
     drop(client);
-    let listen = steam.networking_sockets().create_listen_socket_p2p(0, None).map_err(|_| "P2P listen socket failed")?;
+    // Room for the largest join queued at once (the default is 512 KiB); connections take it
+    // from the listen socket.
+    let buffer = NetworkingConfigEntry::new_int32(NetworkingConfigValue::SendBufferSize, SEND_BUFFER);
+    let listen = steam.networking_sockets().create_listen_socket_p2p(0, [buffer]).map_err(|_| "P2P listen socket failed")?;
     let steam_id = steam.steam_id().raw();
     let code = format!("{}{:04}", crate::protocol::invite_code(steam_id), session_number);
     println!("steam: game server {steam_id}, invite code {code}");
     Ok((steam, listen, code))
 }
 
-/// The game's Steam transport frames batches over 512 KiB as "Split<n>" plus n chunks.
-fn send(connection: &NetConnection, batch: &[u8]) {
-    if batch.len() <= CHUNK {
-        let _ = connection.send_message(batch, SendFlags::RELIABLE);
-        return;
+/// The game's Steam transport frames batches over 512 KiB as "Split<n>" plus n chunks. Its
+/// receive buffer holds MAX_STEAM_MESSAGE, and it reads n as one digit: bigger batches go as
+/// several, split between messages. Err when Steam refuses a send (the client then has part
+/// of a batch) or one message is too big for the game.
+fn send(connection: &NetConnection, batch: &[u8]) -> Result<(), String> {
+    for part in steam_parts(batch)? {
+        let refused = |e| format!("Steam refused a send of {} bytes ({e:?})", part.len());
+        if part.len() <= CHUNK {
+            connection.send_message(&part, SendFlags::RELIABLE).map_err(refused)?;
+            continue;
+        }
+        let chunks: Vec<&[u8]> = part.chunks(CHUNK).collect();
+        connection.send_message(format!("Split{}", chunks.len()).as_bytes(), SendFlags::RELIABLE).map_err(refused)?;
+        for c in chunks {
+            connection.send_message(c, SendFlags::RELIABLE).map_err(refused)?;
+        }
     }
-    let chunks: Vec<&[u8]> = batch.chunks(CHUNK).collect();
-    let _ = connection.send_message(format!("Split{}", chunks.len()).as_bytes(), SendFlags::RELIABLE);
-    chunks.iter().for_each(|c| {
-        let _ = connection.send_message(c, SendFlags::RELIABLE);
-    });
+    Ok(())
+}
+
+/// A batch as batches the game's Steam transport takes (each at most MAX_STEAM_MESSAGE).
+fn steam_parts(batch: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    if batch.len() <= MAX_STEAM_MESSAGE {
+        return Ok(vec![batch.to_vec()]);
+    }
+    let (mut parts, mut part, mut size) = (Vec::new(), crate::wire::Batch::default(), 16);
+    for (kind, body) in crate::wire::messages(batch) {
+        // The message's kind and length are at most 5 bytes each.
+        let n = body.len() + 10;
+        if 16 + n > MAX_STEAM_MESSAGE {
+            return Err(format!("a message of {} bytes (type {kind}), and the game's Steam transport takes at most {MAX_STEAM_MESSAGE} at once: this world can be joined over direct IP only", body.len()));
+        }
+        if size + n > MAX_STEAM_MESSAGE {
+            parts.push(std::mem::take(&mut part).finish());
+            size = 16;
+        }
+        part.push(kind, body);
+        size += n;
+    }
+    if !part.is_empty() {
+        parts.push(part.finish());
+    }
+    Ok(parts)
 }
 
 /// A client's messages back into batches. Err for a split the game never sends (a count other
@@ -1580,6 +1624,22 @@ mod tests {
         assert!(!trusted(local, false), "a relay's players all come from 127.0.0.1");
         assert!(trusted(local, true) && trusted("::ffff:127.0.0.1".parse().unwrap(), true));
         assert!(!trusted("10.0.0.2".parse().unwrap(), true));
+    }
+
+    /// Batches past the game's 2.5 MiB go as several, split between messages, so "Split" never
+    /// needs two digits; one message over it is an error, not garbage.
+    #[test]
+    fn steam_batches_fit_the_games_transport() {
+        let small = crate::wire::batch(&[(1, vec![7; 100])]);
+        assert_eq!(steam_parts(&small).unwrap(), [small.clone()]);
+        let big = crate::wire::batch(&[(1, vec![1; 1 << 20]), (2, vec![2; 1 << 20]), (3, vec![3; 1 << 20]), (4, vec![4; 10])]);
+        let parts = steam_parts(&big).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(parts.iter().all(|p| p.len() <= MAX_STEAM_MESSAGE && p.len().div_ceil(CHUNK) <= 9));
+        let back: Vec<(u32, Vec<u8>)> = parts.iter().flat_map(|p| crate::wire::messages(p).into_iter().map(|(k, b)| (k, b.to_vec())).collect::<Vec<_>>()).collect();
+        assert_eq!(back, crate::wire::messages(&big).into_iter().map(|(k, b)| (k, b.to_vec())).collect::<Vec<_>>());
+        let world = crate::wire::batch(&[(1, vec![0; 3 << 20])]);
+        assert!(steam_parts(&world).unwrap_err().contains("direct IP"));
     }
 
     #[test]
