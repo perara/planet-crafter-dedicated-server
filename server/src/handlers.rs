@@ -1,10 +1,116 @@
 //! The small server RPCs: the world-object proxies (text, color, setting, linked groups and
 //! planet, panels), chat, messages, tokens, and the player animations shared with others.
 
+use std::collections::{HashMap, HashSet, VecDeque};
+
 use serde_json::json;
 
 use crate::game::{Args, Game};
 use crate::net::{enc, ListEvent, Target, VarValue};
+
+/// Characters of a chat message passed on (the game's chat field sets no limit of its own:
+/// a line longer than this is cut). A client sends CHAT_BURST messages at once and one per
+/// CHAT_EVERY seconds after that; more are dropped.
+pub const MAX_CHAT: usize = 500;
+const CHAT_BURST: f32 = 10.0;
+const CHAT_EVERY: f32 = 1.0;
+/// RPC work per client per tick (most RPCs cost 1); the rest waits for the next ticks, in
+/// order, up to MAX_PENDING RPCs (more are dropped).
+const RPC_BUDGET: u32 = 32;
+const MAX_PENDING: usize = 8192;
+
+/// What one client may do how often: chat and RPC work.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub struct Limits {
+    /// Per client: the game time of its last chat message and the messages it may still send.
+    chat: HashMap<u64, (f32, f32)>,
+    /// RPC work done this tick per client, and its RPCs waiting for the next ticks.
+    #[serde(skip)]
+    used: HashMap<u64, u32>,
+    pending: HashMap<u64, VecDeque<Vec<u8>>>,
+    /// Clients already logged for going over a limit.
+    #[serde(skip)]
+    warned: HashSet<(u64, &'static str)>,
+}
+
+impl Limits {
+    fn warn(&mut self, client: u64, what: &'static str) {
+        if self.warned.insert((client, what)) {
+            eprintln!("client {client}: {what} (logged once)");
+        }
+    }
+
+    /// Whether a client's chat message goes out now (a client's, not the server's own).
+    pub fn chat(&mut self, client: u64, now: f32) -> bool {
+        let (last, left) = self.chat.entry(client).or_insert((now, CHAT_BURST));
+        *left = (*left + (now - *last).max(0.0) / CHAT_EVERY).min(CHAT_BURST);
+        *last = now;
+        if *left < 1.0 {
+            self.warn(client, "chat messages over the rate, dropped");
+            return false;
+        }
+        *left -= 1.0;
+        true
+    }
+
+    /// Whether an RPC of this cost runs now; false when it waits (queued) or is dropped. The
+    /// first of a tick always runs, whatever it costs.
+    pub fn spend(&mut self, client: u64, cost: u32, rpc: &[u8]) -> bool {
+        let used = self.used.entry(client).or_default();
+        let waiting = self.pending.get(&client).is_some_and(|p| !p.is_empty());
+        if !waiting && (*used == 0 || *used + cost <= RPC_BUDGET) {
+            *used += cost;
+            return true;
+        }
+        let queue = self.pending.entry(client).or_default();
+        if queue.len() >= MAX_PENDING {
+            self.warn(client, "RPCs over the budget and the queue, dropped");
+            return false;
+        }
+        queue.push_back(rpc.to_vec());
+        self.warn(client, "RPCs over the budget of a tick, queued");
+        false
+    }
+
+    pub fn forget(&mut self, client: u64) {
+        self.chat.remove(&client);
+        self.used.remove(&client);
+        self.pending.remove(&client);
+    }
+}
+
+/// The work an RPC makes: HasWorldObjectAtPosition looks at every world object, as the game's.
+pub fn rpc_cost(name: &str, world_objects: usize) -> u32 {
+    match name {
+        "WorldObjectsHandler.HasWorldObjectAtPositionServerRpc" => 1 + (world_objects / 1024) as u32,
+        _ => 1,
+    }
+}
+
+/// A new tick: each client's waiting RPCs, in order, within its budget.
+pub fn run_pending(game: &mut Game, cost: impl Fn(&Game, &[u8]) -> u32, run: impl Fn(&mut Game, u64, &[u8])) {
+    game.limits.used.clear();
+    let clients: Vec<u64> = game.limits.pending.keys().copied().collect();
+    for client in clients {
+        let mut due = Vec::new();
+        let mut used = 0;
+        while let Some(rpc) = game.limits.pending.get(&client).and_then(|p| p.front()) {
+            let c = cost(game, rpc);
+            if used > 0 && used + c > RPC_BUDGET {
+                break;
+            }
+            used += c;
+            due.extend(game.limits.pending.get_mut(&client).and_then(VecDeque::pop_front));
+        }
+        game.limits.used.insert(client, used);
+        if game.limits.pending.get(&client).is_some_and(VecDeque::is_empty) {
+            game.limits.pending.remove(&client);
+        }
+        for rpc in due {
+            run(game, client, &rpc);
+        }
+    }
+}
 
 /// Clients other than `client` whose player is within `range` of `client`'s player
 /// (NetworkUtils.GetAllButSenderClientParamsInRange), among PlayersManager.playersControllers
@@ -85,7 +191,7 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
         "PlayerStatus.HandleDyingConsequencesServerRpc" => crate::status::handle_dying_consequences(game, client),
         "GroupNetworkBase.DeconstructServerRpc" => crate::deconstruct::deconstruct(game, client, object, a.f(0)),
         "ChatHandler.SendChatMessageServerRpc" => {
-            let message = a.s(0).unwrap_or_default();
+            let message: String = a.s(0).unwrap_or_default().chars().take(MAX_CHAT).collect();
             game.net.rpc_scene(Target::All, "ChatHandler.ReceiveChatMessageClientRpc", &[json!(client), json!(message)]);
             crate::chathooks::chat(game, client, &message);
         }

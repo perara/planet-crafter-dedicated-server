@@ -212,6 +212,18 @@ pub struct Game {
     unhandled: std::collections::HashSet<String>,
     /// A subsystem asks for a save (SavedDataHandler.SaveWorldData); main writes it after the tick.
     pub save_requested: bool,
+    /// Chat rate and RPC work per client.
+    #[serde(default)]
+    pub limits: crate::handlers::Limits,
+}
+
+/// An RPC message's method hash (after sender, object and behaviour).
+fn rpc_method(body: &[u8]) -> Option<u32> {
+    let mut r = Reader::new(body);
+    r.packed_u64()?;
+    r.packed_u64()?;
+    r.packed_u16()?;
+    r.packed_u32()
 }
 
 /// ConnectionRequestMessage's connection data: after the message versions and the config hash.
@@ -290,6 +302,7 @@ impl Game {
             next_time_sync: 0.0,
             unhandled: Default::default(),
             save_requested: false,
+            limits: Default::default(),
         };
         game.change_generation_for_groups();
         game.crafted_total = game.save.stats["craftedObjects"].as_u64().unwrap_or(0);
@@ -384,6 +397,7 @@ impl Game {
     /// The client left or was dropped: everyone else sees the player go; the save keeps them.
     pub fn disconnect(&mut self, client: u64) {
         let Some(c) = self.clients.shift_remove(&client) else { return };
+        self.limits.forget(client);
         if !c.approved {
             return;
         }
@@ -548,8 +562,7 @@ impl Game {
     }
 
     fn incoming_rpc(&mut self, client: u64, body: &[u8]) {
-        let mut r = Reader::new(body);
-        let (Some(_sender), Some(object), Some(behaviour), Some(method)) = (r.packed_u64(), r.packed_u64(), r.packed_u16(), r.packed_u32()) else { return };
+        let Some(method) = rpc_method(body) else { return };
         // Until PlayerReady (the name and whitelist checks) only what a loading client asks.
         let loading = self.clients.get(&client).is_none_or(|c| c.ready.is_none());
         if let Some(name) = self.net.spec.get(method).map(|r| r.name.as_str()).filter(|n| loading && !LOADING_RPCS.contains(n)) {
@@ -558,6 +571,25 @@ impl Game {
             }
             return;
         }
+        if self.net.spec.get(method).is_some_and(|r| r.name == "ChatHandler.SendChatMessageServerRpc") && !self.limits.chat(client, self.time) {
+            return;
+        }
+        // A tick's work per client is bounded; the rest waits for the next ticks (tick()).
+        if !self.limits.spend(client, self.rpc_cost(body), body) {
+            return;
+        }
+        self.run_rpc(client, body);
+    }
+
+    /// The work of an RPC (handlers::rpc_cost).
+    fn rpc_cost(&self, body: &[u8]) -> u32 {
+        let name = rpc_method(body).and_then(|m| self.net.spec.get(m)).map(|r| r.name.as_str());
+        crate::handlers::rpc_cost(name.unwrap_or(""), self.wos.len())
+    }
+
+    fn run_rpc(&mut self, client: u64, body: &[u8]) {
+        let mut r = Reader::new(body);
+        let (Some(_sender), Some(object), Some(behaviour), Some(method)) = (r.packed_u64(), r.packed_u64(), r.packed_u16(), r.packed_u32()) else { return };
         if self.animator_relay(client, object, behaviour, method, r.rest()) {
             return;
         }
@@ -629,6 +661,7 @@ impl Game {
 
     /// One tick of the simulation, then the variable deltas.
     pub fn tick(&mut self) {
+        crate::handlers::run_pending(self, |g, rpc| g.rpc_cost(rpc), |g, client, rpc| g.run_rpc(client, rpc));
         let clock = self.clock();
         let last = std::mem::replace(&mut self.last_clock, clock);
         if self.rules.world.pause_when_empty && !self.clients.values().any(|c| c.ready.is_some()) {
@@ -963,6 +996,53 @@ pub mod tests {
         g.receive(2, &wire::batch(&both));
         assert!(g.kicks.iter().any(|(c, _)| *c == 2) && g.clients[&2].ready.is_none());
         assert_eq!(chats(&g), 0);
+    }
+
+    /// A chat line is cut at MAX_CHAT characters; past the burst, messages wait for the rate.
+    #[test]
+    fn chat_has_a_length_and_a_rate() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        let said = |g: &mut Game, text: &str| {
+            g.net.out.clear();
+            let b = rpc_batch(g, 1, 0, "ChatHandler.SendChatMessageServerRpc", &[json!(text)]);
+            g.receive(1, &b);
+            g.net.out.iter().find(|m| m.1 == protocol::CLIENT_RPC).map(|m| {
+                let mut r = Reader::new(&m.2);
+                let (_, _, method) = (r.packed_u64(), r.packed_u16(), r.packed_u32().unwrap());
+                g.net.spec.decode(method, r.rest()).unwrap()[1].as_str().unwrap().chars().count()
+            })
+        };
+        assert_eq!(said(&mut g, &"x".repeat(5000)), Some(crate::handlers::MAX_CHAT));
+        for _ in 0..9 {
+            assert_eq!(said(&mut g, "hi"), Some(2));
+        }
+        assert_eq!(said(&mut g, "hi"), None, "the 11th at once");
+        g.time += 1.0;
+        assert_eq!(said(&mut g, "hi"), Some(2), "one a second after that");
+    }
+
+    /// 100 RPCs in one batch: 32 now, the rest in the next ticks, in order. A lookup over the
+    /// whole world costs by its size.
+    #[test]
+    fn a_tick_does_a_bounded_share_of_one_clients_rpcs() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        let one = wire::messages(&rpc_batch(&g, 1, 0, "WorldObjectsHandler.IsWorldObjectFromSceneActiveServerRpc", &[json!(208217122)])).into_iter().map(|(k, b)| (k, b.to_vec())).next().unwrap();
+        let answers = |g: &mut Game| {
+            let n = g.net.out.iter().filter(|m| m.1 == protocol::CLIENT_RPC && m.0 == Target::Only(1)).count();
+            g.net.out.clear();
+            n
+        };
+        g.net.out.clear();
+        g.receive(1, &wire::batch(&vec![one; 100]));
+        assert_eq!(answers(&mut g), 32);
+        let run = |g: &mut Game| crate::handlers::run_pending(g, |g, rpc| g.rpc_cost(rpc), |g, client, rpc| g.run_rpc(client, rpc));
+        for n in [32, 32, 4, 0] {
+            run(&mut g);
+            assert_eq!(answers(&mut g), n);
+        }
+        assert_eq!(crate::handlers::rpc_cost("WorldObjectsHandler.HasWorldObjectAtPositionServerRpc", 50_000), 49);
     }
 
     /// A whitelist of SteamIDs only: who is not on it never gets the world.
