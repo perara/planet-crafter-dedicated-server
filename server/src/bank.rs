@@ -82,6 +82,10 @@ pub fn run(args: &[String]) {
                         verified = true.into();
                         verify_ms = t.elapsed().as_secs_f64() * 1000.0;
                     }
+                    if let Err(e) = reread(&mut g, &access_path(save_path), &rules_path(save_path)) {
+                        eprintln!("bank: restore failed: {e}");
+                        std::process::exit(3);
+                    }
                     if recover {
                         // After a crash: the clients in it are gone (the front dropped them).
                         let clients: Vec<u64> = g.clients.keys().copied().collect();
@@ -122,20 +126,63 @@ fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, data: crate:
         eprintln!("backup failed: {e}");
     }
     let session_number: u32 = crate::env("PCDS_SESSION").map(|s| s.parse().expect("PCDS_SESSION: a number")).unwrap_or(4242);
-    let beside_save = |name: &str| std::path::Path::new(save_path).with_file_name(name).to_string_lossy().to_string();
-    // A rules file that does not hold up stops the start, before the world loads.
-    let rules_path = crate::env("PCDS_RULES").unwrap_or_else(|| beside_save("rules.json"));
+    // A rules or access file that does not hold up stops the start, before the world loads.
+    let rules_path = rules_path(save_path);
     let loaded_rules = rules::Rules::load(&rules_path).and_then(|r| r.validate(&data).map(|_| r)).unwrap_or_else(|e| {
         eprintln!("rules: {e}");
+        std::process::exit(1)
+    });
+    let loaded_access = load_access(&access_path(save_path)).unwrap_or_else(|e| {
+        eprintln!("access: {e}");
         std::process::exit(1)
     });
     let version = net_data.game_version.clone();
     let mut game = Game::new(net_data, data, spec, save, scenes);
     rules::start(&mut game, loaded_rules, rules_path);
-    game.access = access::Access::load(Some(crate::env("PCDS_ACCESS").unwrap_or_else(|| beside_save("access.json"))));
+    game.access = loaded_access;
     game.session_number = session_number;
     println!("world: {} world objects, {} network objects, planet {}, game {version}", game.wos.len(), game.net.objects.len(), game.planet_id());
     game
+}
+
+fn beside_save(save_path: &str, name: &str) -> String {
+    std::path::Path::new(save_path).with_file_name(name).to_string_lossy().to_string()
+}
+
+fn rules_path(save_path: &str) -> String {
+    crate::env("PCDS_RULES").unwrap_or_else(|| beside_save(save_path, "rules.json"))
+}
+
+fn access_path(save_path: &str) -> String {
+    crate::env("PCDS_ACCESS").unwrap_or_else(|| beside_save(save_path, "access.json"))
+}
+
+/// The access lists from their file (none: empty lists). Err for a file that is there and does
+/// not read: empty lists in its place would let in everyone it bans.
+fn load_access(path: &str) -> Result<access::Access, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) if !text.trim().is_empty() => {
+            serde_json::from_str::<access::Lists>(&text).map_err(|e| format!("{path}: {e}"))?;
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{path}: {e}")),
+    }
+    Ok(access::Access::load(Some(path.to_string())))
+}
+
+/// A restored game's access lists and rules from their files, which every change is written to
+/// before it is made: the snapshot's may be older (a ban or a rules change after the last flip,
+/// then a crash and a restart from that flip's snapshot).
+fn reread(game: &mut Game, access_path: &str, rules_path: &str) -> Result<(), String> {
+    game.access = load_access(access_path)?;
+    let rules = rules::Rules::load(rules_path).and_then(|r| r.validate(&game.data).map(|_| r))?;
+    game.rules_path = Some(rules_path.to_string());
+    if rules != game.rules {
+        rules::set(game, rules)?;
+    }
+    enforce(game);
+    Ok(())
 }
 
 struct Bank {
@@ -578,6 +625,25 @@ mod tests {
         let ctx = Ctx { save_path: "", build_id: None, loop_rate: 0, busy: Default::default() };
         let (status, answer) = admin_request(game, method, path, &body, &ctx, autosave);
         (status, serde_json::from_str(&answer).unwrap())
+    }
+
+    /// A ban and a rules change written after a snapshot are in the game restored from it.
+    #[test]
+    fn a_restored_game_takes_access_and_rules_from_their_files() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let dir = std::env::temp_dir().join(format!("pcds-bank-reread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (access, rules) = (dir.join("access.json").to_string_lossy().to_string(), dir.join("rules.json").to_string_lossy().to_string());
+        std::fs::write(&access, r#"{"bannedNames": ["Mallory"]}"#).unwrap();
+        std::fs::write(&rules, r#"{"speed": {"growth": 2}}"#).unwrap();
+        reread(&mut game, &access, &rules).unwrap();
+        assert_eq!((game.access.lists.banned_names.clone(), game.rules.speed.growth), (vec!["Mallory".to_string()], 2.0));
+        assert!(!game.access.name_allowed("mallory", None));
+        // A file that does not read is an error, not empty lists.
+        std::fs::write(&access, r#"{"bannedNames": "#).unwrap();
+        assert!(reread(&mut game, &access, &rules).unwrap_err().contains("access.json"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

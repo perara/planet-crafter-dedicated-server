@@ -251,6 +251,8 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
     // save), its players told to join again; then players get in again.
     let players = load(&server, &data, 2, 6);
     std::thread::sleep(Duration::from_secs(3));
+    // A ban after the last flip: in access.json, not in that flip's snapshot.
+    assert_eq!(server.api("POST", "/api/ban", json!({"name": "Mallory"})).0, 200);
     let pid = server.live()["pid"].as_u64().unwrap();
     // SAFETY: the live bank of the front this test started, by the pid that front reports.
     assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGKILL) }, 0);
@@ -265,6 +267,8 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
     assert!(log.contains("ended (signal: 9") && log.contains("from the snapshot of the last flip") && log.contains("runs the world again"), "{log}");
     let (ok, said) = finish(load(&server, &data, 1, 3));
     assert!(ok, "a player gets in after the restart: {said}");
+    let (_, status) = server.api("GET", "/api/status", json!({}));
+    assert_eq!(status["access"]["bannedNames"], json!(["Mallory"]), "the ban outlived the restart from the snapshot");
 
     // Updates from the release server, into the bank that does not run.
     let standby = if server.live()["bank"] == "a" { "b" } else { "a" };
