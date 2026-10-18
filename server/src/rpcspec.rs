@@ -30,6 +30,7 @@ pub struct Arg {
     pub fields: Option<Vec<String>>,
 }
 
+#[derive(Default)]
 pub struct Spec {
     by_hash: HashMap<u32, Rpc>,
     by_name: HashMap<String, u32>,

@@ -9,7 +9,7 @@ use crate::game::Game;
 use crate::net::enc;
 
 /// _allUnits order: the order the game updates them in.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Oxygen,
     Heat,
@@ -70,7 +70,7 @@ impl Kind {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Unit {
     pub kind: Kind,
     pub total: f32,
@@ -131,6 +131,7 @@ impl Unit {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PlanetUnits {
     pub hash: i32,
     pub id: String,
@@ -144,7 +145,7 @@ impl PlanetUnits {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Units {
     pub planets: Vec<PlanetUnits>,
     /// WorldObjectsHandler._stateConstructedObjectsIndex: changes when buildings come or go.

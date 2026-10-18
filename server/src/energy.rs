@@ -6,7 +6,7 @@ use crate::units::Kind;
 
 const CHECK_EVERY: f32 = 2.0;
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Energy {
     next_check: f32,
 }

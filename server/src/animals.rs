@@ -25,7 +25,7 @@ const FRAME: f32 = 1.0 / 30.0;
 /// NetworkObject.DontDestroyWithOwner in SceneObject flags.
 const DONT_DESTROY_WITH_OWNER: u16 = 1 << 7;
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct State {
     pub spawn: spawn::State,
     pub vehicles: vehicles::State,

@@ -229,7 +229,7 @@ pub fn set_linked_groups(game: &mut Game, object: u64, hashes: &[i32]) {
 
 /// InventorySetFirstItemAsLinked (Container1-3): the server shows the first item's group on
 /// the container. inventory -> (container, previousGroupDefined).
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct FirstItemLinked(std::collections::HashMap<i32, (i32, Option<usize>)>);
 
 /// Start/RegisterToInventory, when the container gets its network object.
@@ -276,7 +276,7 @@ pub fn set_color(game: &mut Game, object: u64, mut color: [f32; 4]) {
 
 /// WorldObjectColor on buildings: 0.75 s after one spawns without a colour, the server gives
 /// it the default colour, or the last colour the server itself set (a static in the game).
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct DefaultColors {
     pending: Vec<(f32, i32)>,
     last: [f32; 4],

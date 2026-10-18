@@ -10,6 +10,7 @@ use crate::net::Target;
 
 const EPSILON: f32 = 1.1920929E-07;
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Interpolation {
     speed: f32,
     direction: i32,
@@ -17,7 +18,7 @@ struct Interpolation {
     start_time: f32,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct State {
     active: IndexMap<i32, Interpolation>,
 }

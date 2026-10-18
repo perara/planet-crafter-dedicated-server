@@ -11,7 +11,7 @@ use crate::net::{enc, ListEvent, Target};
 
 const HANDLER: &str = "StoryEventsHandler";
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Story {
     /// The planet InitStoryEvents last ran for.
     planet: Option<usize>,

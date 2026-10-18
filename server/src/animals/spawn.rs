@@ -64,7 +64,7 @@ const SIZE: i32 = 8;
 const TRAIT_TYPES: i32 = 9;
 
 /// InventorySpawnContent's serialized fields.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Params {
     distance: f32,
     hunger_rate: f32,
@@ -97,6 +97,7 @@ impl Params {
 }
 
 /// One InventorySpawnContent: an animal shelter, or a wild spawner instance.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Spawner {
     position: [f32; 3],
     /// Its planet: on another one the shelter's object is inactive (no animals).
@@ -111,6 +112,7 @@ struct Spawner {
     multiplier: Option<i32>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Animal {
     sequence: i32,
     /// GrowthProxy._currentGrowth on the server.
@@ -118,6 +120,7 @@ struct Animal {
 }
 
 /// SpawnAnimalsDelayed waiting for its next frame.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Pending {
     wo: i32,
     position: [f32; 3],
@@ -125,7 +128,7 @@ struct Pending {
     traits: Vec<Value>,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct State {
     /// InventorySpawnContent instances, by world object (shelter, or the wild spawner's id).
     spawners: IndexMap<i32, Spawner>,

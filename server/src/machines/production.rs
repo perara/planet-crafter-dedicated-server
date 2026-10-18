@@ -70,6 +70,7 @@ fn by_distance(game: &Game, wo: i32, mut list: Vec<i32>) -> Vec<i32> {
 
 // ---- MachineGenerator --------------------------------------------------------------------
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Generator {
     pub next: f32,
     spawn_every: f32,
@@ -135,6 +136,7 @@ impl Generator {
 
 const RAY_CHECK_EVERY: f32 = 5.0;
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Rays {
     next: f32,
     /// _miningRaysCasted.
@@ -259,6 +261,7 @@ fn reached_stage(game: &Game, wo: i32, field: &str) -> bool {
 
 // ---- MachineAutoCrafter -------------------------------------------------------------------
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AutoCrafter {
     pub next: f32,
     pub period: f32,
@@ -356,6 +359,7 @@ fn craft_if_possible(game: &mut Game, wo: i32, inventory: i32, target: usize, av
 
 // ---- MachineDisintegrator -----------------------------------------------------------------
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Disintegrator {
     pub next: f32,
     pub period: f32,
@@ -404,6 +408,7 @@ fn try_to_disintegrate(game: &mut Game, wo: i32) {
 
 // ---- MachineOptimizer ---------------------------------------------------------------------
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Optimizer {
     range: f32,
     max: usize,

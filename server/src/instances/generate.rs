@@ -111,7 +111,7 @@ struct Entry {
 }
 
 /// A box collider in world space.
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, serde::Serialize)]
 pub struct Shape {
     position: [f32; 3],
     rotation: [f32; 4],

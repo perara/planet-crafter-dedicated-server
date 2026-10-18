@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::game::Game;
 use crate::geometry::{conj, rotate, sub};
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Vein {
     id: i32,
     groups: Vec<usize>,
@@ -24,6 +24,7 @@ pub struct Vein {
 }
 
 /// The current planet's veins.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct State {
     planet: usize,
     /// None: the planet's scene dump has no veins (an older dump).

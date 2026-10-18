@@ -14,7 +14,7 @@ const DYING_TIME: f32 = 9.0;
 const LOSE_CHANCE: f32 = 50.0;
 
 /// When each dying player started dying.
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Status(pub HashMap<u64, f32>);
 
 fn var(game: &Game, object: u64, name: &str) -> bool {

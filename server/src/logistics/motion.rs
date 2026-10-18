@@ -142,7 +142,7 @@ const POSITION_THRESHOLD: f32 = 1.0;
 const ROTATION_THRESHOLD: f32 = 10.0;
 
 /// The authority's NetworkTransform state for one drone: what it last sent.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Transform {
     /// Position x, y, z and the Y angle.
     last: [f32; 4],

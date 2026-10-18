@@ -16,12 +16,13 @@ const DECELERATE: f32 = 25.0;
 /// MachineRocketBackAndForthInterplanetaryExchange.RelaunchRocket's wait.
 const RELAUNCH_AFTER: f32 = 5.0;
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Trade,
     Exchange,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Machine {
     kind: Kind,
     /// The network object (the component lives and dies with it).

@@ -29,6 +29,7 @@ const FIRST_CHECK: f32 = 1.0;
 const COOLDOWN_START: f32 = 5.0;
 const COOLDOWN: f32 = 600.0;
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Vehicle {
     /// The owner last seen, to apply the server's gain/loss of ownership whoever changed it.
     owner: u64,
@@ -41,6 +42,7 @@ struct Vehicle {
     disable_distance: f32,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Recall {
     vehicle: u64,
     position: [f32; 3],
@@ -49,12 +51,13 @@ struct Recall {
     kinematic: bool,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Garage {
     cooldown: f32,
     recall: Option<Recall>,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct State {
     vehicles: IndexMap<u64, Vehicle>,
     garages: IndexMap<u64, Garage>,

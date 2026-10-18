@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Ext {
     pub creative_mode: bool,
     pub gauges: crate::gauges::Gauges,

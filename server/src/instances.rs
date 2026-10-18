@@ -46,7 +46,7 @@ const DESPAWN_DELAY: f32 = 0.17;
 const PLAYER_HEIGHT: f32 = 2.0;
 
 /// One spawned generator (GenerateOnTrigger) of ProceduralInstancesHandler._instances.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Generator {
     pub net: u64,
     /// Index into GENERATORS.
@@ -64,7 +64,7 @@ pub struct Generator {
 }
 
 /// WorldInstanceData.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorldInstance {
     pub seed: i32,
     pub time_left: i32,
@@ -75,7 +75,7 @@ pub struct WorldInstance {
     pub loaded_from_db: bool,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct State {
     /// Owner (0: the planets' scenes, else the world instance's seed) -> its generators.
     pub instances: IndexMap<i32, Vec<Generator>>,
@@ -88,6 +88,7 @@ pub struct State {
     /// Generators to despawn: (game time, network object).
     despawns: Vec<(f32, u64)>,
     /// wrecks.json, once read.
+    #[serde(skip)]
     wrecks: Option<Option<Rc<generate::Wrecks>>>,
     /// RandomizePropData.ignore of the wreck props (the game keeps it on the prefabs).
     ignored: HashSet<(String, usize)>,

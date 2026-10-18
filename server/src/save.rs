@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SaveFile {
     pub world: Value,
     pub planets: Vec<Value>,
@@ -85,12 +86,15 @@ impl SaveFile {
     }
 
     pub fn load(path: &str) -> std::io::Result<SaveFile> {
-        let text = std::fs::read_to_string(path)?;
+        Ok(SaveFile::from_text(&std::fs::read_to_string(path)?))
+    }
+
+    pub fn from_text(text: &str) -> SaveFile {
         let text = text.trim_start_matches('\u{feff}');
         let sections = split_outside_strings(text, '@');
         let section = |i: usize| sections.get(i).copied().unwrap_or("");
         let first = |i: usize| entries(section(i)).into_iter().next().unwrap_or(Value::Null);
-        Ok(SaveFile {
+        SaveFile {
             world: first(0),
             planets: entries(section(1)),
             players: entries(section(2)),
@@ -101,7 +105,7 @@ impl SaveFile {
             story_events: entries(section(7)),
             settings: first(8),
             procedural: entries(section(9)),
-        })
+        }
     }
 
     pub fn to_text(&self) -> String {

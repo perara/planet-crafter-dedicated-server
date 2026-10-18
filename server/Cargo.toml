@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 ctrlc = { version = "3.5.2", features = ["termination"] }
-indexmap = "2"
+indexmap = { version = "2", features = ["serde"] }
 libc = "0.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }

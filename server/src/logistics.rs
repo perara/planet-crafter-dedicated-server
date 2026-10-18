@@ -34,6 +34,8 @@ const DESTROY_WITH_SCENE: u16 = 1 << 6;
 /// Dictionary / HashSet enumeration order in .NET: entries in slot order, and a removed entry's
 /// slot is taken by the next insertion (the most recently freed first). Which task a drone
 /// gets and which station answers first depend on it.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "K: serde::Deserialize<'de> + Eq + std::hash::Hash, V: serde::Deserialize<'de>"))]
 struct Slots<K, V> {
     slots: Vec<Option<(K, V)>>,
     free: Vec<usize>,
@@ -82,7 +84,7 @@ impl<K: Copy + Eq + Hash, V> Slots<K, V> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 enum State {
     NotAttributed,
     ToSupply,
@@ -93,7 +95,7 @@ enum State {
 }
 
 /// LogisticTask. Drones keep a task after the manager dropped it, so tasks live in an arena.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Task {
     wo: i32,
     group: usize,
@@ -106,7 +108,7 @@ struct Task {
 }
 
 /// LogisticEntity's server state (its groups and priority live on the inventory).
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct Entity {
     /// Set by Init, once found: the constructed world object holding the inventory.
     wo: Option<i32>,
@@ -114,6 +116,7 @@ struct Entity {
 }
 
 /// MachineDroneStation.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Station {
     inventory: i32,
     planet: i32,
@@ -123,6 +126,7 @@ struct Station {
 }
 
 /// A Drone component and its container's transform.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Drone {
     net: Option<u64>,
     /// The despawned network object while the drone waits in a station.
@@ -150,7 +154,7 @@ struct Drone {
 }
 
 /// LogisticManager.DroneAccessData.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct Access {
     target: V3,
     forward: f32,
@@ -158,7 +162,7 @@ struct Access {
     planet: i32,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Logistics {
     started: bool,
     paused: bool,

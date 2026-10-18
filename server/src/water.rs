@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::game::Game;
 use crate::geometry::{conj, mul, q, rotate, sub, v3};
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Volume {
     /// Box in the moving root's local space: center, half size, rotation, scale.
     local_center: [f32; 3],
@@ -25,7 +26,7 @@ struct Volume {
     ignored: bool,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Water {
     /// Planet id -> its water volumes (loaded from scenes/<planet>.json).
     planets: HashMap<String, Vec<Volume>>,

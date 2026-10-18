@@ -25,7 +25,7 @@ mod story;
 const HANDLER: &str = "MeteoHandler";
 const DAY_NIGHT: &str = "EnvironmentDayNightCycle";
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Meteo {
     /// The planet the event lists were built for (InitMeteoHandler runs on every planet load).
     planet: Option<usize>,
@@ -394,7 +394,7 @@ pub fn current_global_stage(game: &Game) -> Option<String> {
 
 /// The server's AsteroidsHandler: its Unity.Mathematics.Random state (MeteoHandler publishes it
 /// as _currentSeed while asteroid events run) and the asteroid events it spawns for.
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Asteroids {
     state: u32,
     events: Vec<AsteroidEvent>,
@@ -403,6 +403,7 @@ struct Asteroids {
 }
 
 /// An instance of AsteroidEventData with its counters.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct AsteroidEvent {
     id: u32,
     every: f32,
@@ -492,7 +493,7 @@ fn asteroids_tick(game: &mut Game) {
 
 // ---- EnvironmentDayNightCycle ----------------------------------------------------------------
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct DayNight {
     full_day_stay: f32,
     speed: f32,

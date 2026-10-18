@@ -8,6 +8,7 @@ use crate::data::stable_hash;
 use crate::game::Game;
 use crate::net::{enc, Target, VarValue};
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Timer {
     /// GroupNetworkContainer.DespawnAfterDelay: (world object, its network object). An Invoke on
     /// the GameObject: picking the item up despawns it, and the timer goes with it.
@@ -17,7 +18,7 @@ pub enum Timer {
 }
 
 /// Pending timers: (game time when due, what).
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Timers(pub Vec<(f32, Timer)>);
 
 /// Rules: a dropped world object's despawn moves to `delay` seconds from now (0: never).

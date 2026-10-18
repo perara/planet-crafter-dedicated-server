@@ -10,6 +10,7 @@
 //!        pcds-server probe HOST:PORT DATA_DIR SCRIPT.json   (a scripted test player)
 //!        pcds-server load HOST:PORT DATA_DIR [PLAYERS] [SECONDS]   (a load test, see load.rs)
 //!        pcds-server extract RAW.json OUT_DIR   (a new game version's tables, see extract.rs)
+//!        pcds-server split DATA_DIR SAVE.json   (hot-update spike: front and game processes, see split.rs)
 //! Environment:
 //!   PCDS_LISTEN       direct-IP address, default 0.0.0.0:7777; "off" disables
 //!   PCDS_STEAM        "off" disables invite codes (Steam game server)
@@ -44,6 +45,7 @@ mod genetics;
 mod geometry;
 mod handlers;
 mod idmap;
+mod handoff;
 mod hooks;
 mod instances;
 mod inventories;
@@ -65,6 +67,7 @@ mod rockets;
 mod rpcspec;
 mod save;
 mod scene;
+mod split;
 mod status;
 mod toxic;
 mod transform;
@@ -195,6 +198,8 @@ fn main() {
         Some("load") => return load::run(&args[2..]),
         Some("extract") => return extract::run(&args[2..]),
         Some("new") => return newworld::run(&args[2..]),
+        Some("split") => return split::front(&args[2..]),
+        Some("split-game") => return split::game(&args[2..]),
         Some("--version") => {
             println!("pcds-server {}", env!("CARGO_PKG_VERSION"));
             if let Some(dir) = args.get(2) {

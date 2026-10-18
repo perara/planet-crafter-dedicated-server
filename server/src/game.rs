@@ -58,6 +58,7 @@ impl Args {
 }
 
 /// A connected Netcode client and its player.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Client {
     pub id: u64,
     pub approved: bool,
@@ -70,10 +71,11 @@ pub struct Client {
     pub ready: Option<PlayerState>,
     /// Direct-IP clients' address (Steam players have none).
     pub ip: Option<String>,
+    #[serde(with = "crate::handoff::instant")]
     pub since: std::time::Instant,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PlayerState {
     pub id: u64,
     pub name: String,
@@ -90,6 +92,7 @@ pub struct PlayerState {
 }
 
 /// Small, fast pseudo-random numbers (xorshift64*), like UnityEngine.Random.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Rng(u64);
 
 impl Rng {
@@ -120,8 +123,11 @@ impl Rng {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Game {
+    #[serde(skip)]
     pub data: GameData,
+    #[serde(skip)]
     pub net_data: NetData,
     pub net: Net,
     /// The save's sections the handlers below keep as JSON (world state, planets, players...).
@@ -143,12 +149,15 @@ pub struct Game {
     pub planet: usize,
     /// Seconds since start (the game's Time.time).
     pub time: f32,
+    #[serde(with = "crate::handoff::instant")]
     pub started: std::time::Instant,
     /// A fixed clock (seconds since start) for benchmarks; None: the real one.
     pub sim_time: Option<f64>,
     pub rng: Rng,
+    #[serde(skip)]
     pub trace: bool,
     /// The per-version data directory (data/<version>/), for subsystems that load more of it.
+    #[serde(skip)]
     pub data_dir: String,
     pub timers: crate::scene::Timers,
     /// The server's own crafted-objects count (the save's stats).
@@ -164,6 +173,7 @@ pub struct Game {
     /// The invite code's last 4 digits (SavedDataHandler.sessionId).
     pub session_number: u32,
     next_time_sync: f32,
+    #[serde(skip)]
     unhandled: std::collections::HashSet<String>,
     /// A subsystem asks for a save (SavedDataHandler.SaveWorldData); main writes it after the tick.
     pub save_requested: bool,
@@ -520,7 +530,7 @@ impl Game {
 
     /// GameSettingsHandler.ChangeGenerationForGroups: the world's pace and power settings
     /// scale every building's generation.
-    fn change_generation_for_groups(&mut self) {
+    pub(crate) fn change_generation_for_groups(&mut self) {
         let setting = |k: &str| self.save.settings[k].as_f64().unwrap_or(1.0) as f32;
         let (power, pace) = (setting("modifierPowerConsumption"), setting("modifierTerraformationPace"));
         let energy = crate::model::unit_index("Energy").unwrap();
