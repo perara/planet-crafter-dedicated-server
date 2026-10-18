@@ -198,7 +198,10 @@ fn pop_batches(buffer: &mut Vec<u8>, out: &mut Vec<Vec<u8>>) -> bool {
         if buffer.len() - at - 4 < n {
             break;
         }
-        out.push(buffer[at + 4..at + 4 + n].to_vec());
+        // An empty (or negative) length carries nothing: no empty batch for each.
+        if n > 0 {
+            out.push(buffer[at + 4..at + 4 + n].to_vec());
+        }
         at += 4 + n;
     }
     buffer.drain(..at);
@@ -707,6 +710,17 @@ mod tests {
 
     fn reliable(token: &Token, sequence: u16, bytes: &[u8]) -> Vec<u8> {
         [[DATA].as_slice(), token, &[RELIABLE, PAYLOAD, 0, 0, 0], &sequence.to_le_bytes(), &u16::MAX.to_le_bytes(), &u64::MAX.to_le_bytes(), bytes].concat()
+    }
+
+    /// Lengths of 0 or below are skipped, not passed on as empty batches.
+    #[test]
+    fn empty_and_negative_lengths_make_no_batches() {
+        let mut stream = [0i32.to_le_bytes(), (-5i32).to_le_bytes(), 0i32.to_le_bytes()].concat();
+        stream.extend_from_slice(&2i32.to_le_bytes());
+        stream.extend_from_slice(b"ok");
+        let mut out = Vec::new();
+        assert!(pop_batches(&mut stream, &mut out));
+        assert_eq!((out, stream.len()), (vec![b"ok".to_vec()], 0));
     }
 
     /// One whole batch on unreliable pipeline 1.
