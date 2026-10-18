@@ -231,30 +231,48 @@ impl Ctx {
             if !poses.is_empty() {
                 c.insert("poses".into(), Value::Object(poses));
             }
+            // Below the root: where the component's own game object is, relative to the root.
+            if node != root {
+                c.insert("pose".into(), self.local_pose(root, node)?);
+            }
             out.push(Value::Object(c));
         }
         Ok(out)
     }
 
-    /// GameData.Poses: serialized Transform fields, relative to the root.
+    /// GameData.Poses: serialized Transform fields (and GameObject fields, by their transform),
+    /// relative to the root.
     fn poses(&mut self, root: Id, file: usize, fields: &[(String, Raw)]) -> Result<Map<String, Value>, String> {
-        let (rp, rr, rs) = self.graph.world(root)?;
-        let inverse = crate::geometry::conj(rr);
         let mut poses = Map::new();
         for (name, v) in fields {
             let Raw::Ref(p, t) = v else { continue };
-            if t.namespace != "UnityEngine" || t.name != "Transform" || poses.contains_key(name) {
+            if t.namespace != "UnityEngine" || !matches!(t.name.as_str(), "Transform" | "GameObject") || poses.contains_key(name) {
                 continue;
             }
             let Some(target) = self.data.resolve(file, *p)? else { continue };
-            let node = self.graph.node_of_transform(target).ok_or_else(|| format!("{name}: {target:?} is not a transform of a file read"))?;
-            let (tp, tr, _) = self.graph.world(node)?;
-            let d = crate::geometry::rotate(inverse, [tp[0] - rp[0], tp[1] - rp[1], tp[2] - rp[2]]);
-            let local = [d[0] / rs[0], d[1] / rs[1], d[2] / rs[2]];
-            let rotation = crate::geometry::mul(inverse, tr);
-            poses.insert(name.clone(), json!({"position": local.map(single).to_vec(), "rotation": rotation.map(single).to_vec()}));
+            let node = if t.name == "GameObject" {
+                // Only game objects of the prefab have a place relative to its root.
+                if !self.graph.nodes.contains_key(&target) {
+                    continue;
+                }
+                target
+            } else {
+                self.graph.node_of_transform(target).ok_or_else(|| format!("{name}: {target:?} is not a transform of a file read"))?
+            };
+            poses.insert(name.clone(), self.local_pose(root, node)?);
         }
         Ok(poses)
+    }
+
+    /// A game object's position and rotation in its root's space.
+    fn local_pose(&self, root: Id, node: Id) -> Result<Value, String> {
+        let (rp, rr, rs) = self.graph.world(root)?;
+        let inverse = crate::geometry::conj(rr);
+        let (tp, tr, _) = self.graph.world(node)?;
+        let d = crate::geometry::rotate(inverse, [tp[0] - rp[0], tp[1] - rp[1], tp[2] - rp[2]]);
+        let local = [d[0] / rs[0], d[1] / rs[1], d[2] / rs[2]];
+        let rotation = crate::geometry::mul(inverse, tr);
+        Ok(json!({"position": local.map(single).to_vec(), "rotation": rotation.map(single).to_vec()}))
     }
 
     /// GameData.GroupPrefabs: each group's prefab, whether it has a Rigidbody, its components.

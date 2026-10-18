@@ -185,6 +185,31 @@ fn rocket_sent_to_space_multiplies_oxygen() {
     assert!(matches!(g.net.out.last(), Some((crate::net::Target::Only(1), _, _))));
 }
 
+/// With the craft spawn's place in the tables, only the world object exactly on it goes (the
+/// real host refused a rocket 15 m off the spawn that we used to take as the nearest).
+#[test]
+fn only_the_rocket_exactly_on_the_craft_spawn_is_sent() {
+    let (platform, near, on) = (210_000_010, 210_000_011, 210_000_012);
+    let Some(mut g) = game(vec![placed(platform, "LaunchPlatform", "200,10,200", "Prime", json!({})), placed(near, "RocketOxygen1", "200,11.5,200.5", "Prime", json!({}))], vec![]) else { return };
+    let prefabs = std::sync::Arc::make_mut(&mut g.data.group_prefabs);
+    let send = prefabs["LaunchPlatform"]["components"].as_array_mut().unwrap().iter_mut().find(|c| c["type"] == "ActionSendInSpace").unwrap();
+    send["poses"] = json!({"locationGameObject": {"position": [-3.0, 5.556, -15.957706], "rotation": [0.0, 0.0, 0.0, 1.0]}});
+    send["pose"] = json!({"position": [7.229, 31.407, -15.701], "rotation": [0.0, 0.0, 0.0, 1.0]});
+    let before = g.net.out.len();
+    rpc(&mut g, platform, "ConstructibleProxy.SendInSpaceServerRpc");
+    assert!(g.wos[&near].is_placed(), "off the spawn: stays");
+    assert_eq!(g.net.out.len(), before + 1, "the error, to the sender");
+    let group = g.data.group("RocketOxygen1").unwrap();
+    g.create_world_object(group, on, true);
+    g.wos.get_mut(&on).unwrap().position = [197.0, 15.556, 184.04229];
+    g.instantiate(on, false, 0);
+    rpc(&mut g, platform, "ConstructibleProxy.SendInSpaceServerRpc");
+    assert!(!g.wos[&on].is_placed() && g.wos[&near].is_placed());
+    // The space event starts from the launch button, as the real host's did.
+    let at = g.ext.meteo.queue.last().and_then(|q| q.1).unwrap();
+    assert!(at.iter().zip([207.229, 41.407, 184.299]).all(|(a, b)| (a - b).abs() < 1e-3), "{at:?}");
+}
+
 #[test]
 fn exchange_rocket_delivers_and_fetches_from_its_planet() {
     let (exchange, depot, container) = (210_000_020, 210_000_021, 210_000_022);

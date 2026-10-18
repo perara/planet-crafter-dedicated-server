@@ -33,7 +33,7 @@ pub struct Meteo {
     /// random events pick from (_meteoEventsOriginalCount).
     events: Vec<String>,
     original_count: usize,
-    queue: Vec<(String, Option<[f32; 3]>)>,
+    pub queue: Vec<(String, Option<[f32; 3]>)>,
     /// Server-side copies of _selectedDataMeteoEventIndex, _timeNewMeteoSet and _currentSeed.
     selected: i32,
     time_set: f64,
