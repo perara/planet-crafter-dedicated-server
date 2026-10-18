@@ -459,14 +459,25 @@ platform, landing spots, seats, machine ranges), the code says so in a `ponytail
 
 ## Known limits
 
-- **Direct IP can be spoofed.** Unity Transport lets the client pick its connection token, so
-  someone who forges a player's address can start a session in their name without seeing the
-  answers. Invite codes (Steam networking) do not have this problem.
+- **Direct IP can be spoofed.** Unity Transport lets the client pick its connection token and
+  the server's packet numbers start at 0, so someone who forges a player's address can start a
+  session in their name without seeing the answers, and can acknowledge them blind. What that
+  reaches is bounded: a session that acknowledges nothing gets a few KB and ends after 15
+  seconds; one that acknowledges blind gets at most its world and 8 MiB more before PlayerReady;
+  at most 2 sessions per address may be joining at once and 4 new ones start per 10 seconds.
+  Invite codes (Steam networking) do not have this problem.
+- **Behind a UDP relay** (playit.gg, frp, `ssh -R`) every player comes from 127.0.0.1: the
+  per-address limits do not apply to loopback, and the SteamID a direct-IP client reports is
+  believed from 127.0.0.1 only with `PCDS_TRUST_LOOPBACK=1` (for tests and the load and probe
+  tools; never set it behind a relay).
 - **Connection slots can be flooded.** The server caps connections (128 in all, 8 per IP, 10
   seconds to send data) to protect its memory; a flood can still keep new players out while it
   lasts.
+- **Large worlds join over direct IP only.** The game's Steam transport takes at most 2.5 MiB
+  in one message; a world whose join message is larger is refused over Steam (logged).
 - **Clients are trusted with their own inventories**, as the game does: there are no ownership
-  checks on inventory changes, and no rate limits on game messages.
+  checks on inventory changes. Each client gets 32 units of RPC work per 5 ms tick (the rest
+  waits) and 10 chat lines at once, one a second after that, 500 characters each.
 
 ## How it works
 
