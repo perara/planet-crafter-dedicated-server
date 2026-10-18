@@ -299,7 +299,7 @@ impl Front {
     /// when the active one cannot start (a broken update), as a bootloader falls back.
     fn boot(&mut self) {
         let first = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
-        let kept = self.kept_snapshot().unwrap_or_else(|e| {
+        let mut kept = self.kept_snapshot().unwrap_or_else(|e| {
             eprintln!("{e}");
             std::process::exit(1)
         });
@@ -315,7 +315,7 @@ impl Front {
                     std::process::exit(1);
                 }
             };
-            match self.boot_bank(&bank, snapshot) {
+            match self.boot_bank(&bank, snapshot, &mut kept) {
                 Ok(b) => {
                     println!("bank {bank} (pid {}, pcds {}) running the world after {:?}", b.child.id(), b.hello["version"].as_str().unwrap_or("?"), b.started.elapsed());
                     if let Some((fd, at)) = kept {
@@ -382,7 +382,10 @@ impl Front {
         }
     }
 
-    fn boot_bank(&self, bank: &str, snapshot: Option<OwnedFd>) -> Result<Bank, String> {
+    /// A bank started on the world: the kept snapshot's, else the save's. A kept snapshot this
+    /// bank can never run (another game's tables, a format it does not read) is moved aside,
+    /// and `kept` emptied: the world starts from the save.
+    fn boot_bank(&self, bank: &str, mut snapshot: Option<OwnedFd>, kept: &mut Option<(OwnedFd, SystemTime)>) -> Result<Bank, String> {
         let mut b = self.spawn(bank, None)?;
         let deadline = Instant::now() + LOAD_DEADLINE;
         let hello = wait_frame(&mut b, deadline).ok_or("it ended before its hello (see above)")?;
@@ -390,6 +393,15 @@ impl Front {
             let _ = b.child.kill();
             let _ = b.child.wait();
         })?;
+        if let Some(why) = snapshot.as_ref().and_then(|fd| ipc::read_memfd(fd).ok()).and_then(|s| never_runs(&s, &b.hello)) {
+            let path = snapshot_path(&self.save);
+            let aside = format!("{path}.unusable-{}", crate::save::stamp(SystemTime::now()));
+            match std::fs::rename(&path, &aside) {
+                Ok(()) => eprintln!("{path} can never run ({why}): moved to {aside}; the world starts from the save, which is older"),
+                Err(e) => eprintln!("{path} can never run ({why}), and could not be moved aside ({e}); the world starts from the save, which is older"),
+            }
+            (snapshot, *kept) = (None, None);
+        }
         match snapshot {
             Some(fd) => b.link.queue(ipc::RESTORE, 0, b"{\"recover\":true}", Some(fd), 0),
             None => b.link.queue(ipc::START, 0, &[], None, 0),
@@ -1352,6 +1364,21 @@ fn chat_config(body: &[u8]) -> Result<crate::rules::Chat, String> {
     })
 }
 
+/// Why a snapshot can never run on the bank of this HELLO: it is on another game's tables, in
+/// a format the bank does not read, or no snapshot at all. None: it may (any other error is the
+/// bank's to tell).
+fn never_runs(snapshot: &[u8], hello: &Value) -> Option<String> {
+    let head = snapshot.split(|b| *b == b'\n').next().and_then(|h| serde_json::from_slice::<Value>(h).ok());
+    let Some(head) = head.filter(|h| h["format"].is_u64() && h["game_version"].is_string()) else { return Some("not a snapshot".into()) };
+    if head["game_version"] != hello["gameVersion"] {
+        return Some(format!("it is on game {}'s tables, the bank has {}'s", head["game_version"], hello["gameVersion"]));
+    }
+    if !hello["reads"].as_array().is_some_and(|r| r.contains(&head["format"])) {
+        return Some(format!("snapshot format {}, the bank reads {}", head["format"], hello["reads"]));
+    }
+    None
+}
+
 /// A bank's HELLO, refused unless it speaks this front's protocol (at the boot, a flip and a
 /// restart after a crash alike: a world never goes to a bank that reads the frames otherwise).
 fn hello_of(f: &Frame) -> Result<Value, String> {
@@ -1485,6 +1512,17 @@ mod tests {
 
     fn snapshot_fd(text: &str) -> OwnedFd {
         ipc::memfd("test", |w| std::io::Write::write_all(w, text.as_bytes()).map_err(|e| e.to_string())).unwrap()
+    }
+
+    /// A kept snapshot of other tables, of a format the bank does not read, or none at all can
+    /// never run; one the bank may run goes to it (its own errors stop the start).
+    #[test]
+    fn a_snapshot_that_can_never_run_is_told_apart() {
+        let hello = json!({"gameVersion": "2.103", "reads": [0, 1]});
+        assert_eq!(never_runs(b"{\"format\":1,\"game_version\":\"2.103\"}\n{\"broken", &hello), None);
+        for bad in [&b"{\"format\":1,\"game_version\":\"0.0.1\"}\n{}"[..], b"{\"format\":7,\"game_version\":\"2.103\"}\n{}", b"garbage"] {
+            assert!(never_runs(bad, &hello).is_some(), "{}", String::from_utf8_lossy(bad));
+        }
     }
 
     /// Flip 1 timed out and the old bank was told to go on; its late snapshot comes while

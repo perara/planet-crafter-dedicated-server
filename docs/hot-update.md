@@ -81,8 +81,10 @@ update falls back to the release that ran before). Every HELLO, at boot, flip or
 checked the same way; a recovering bank of another protocol stops the front (exit 1). When the
 front stops while no bank holds the world (a stop during a recovery, the crash limit), the last
 snapshot, if newer than the save, is written to `world.json.snapshot` and the next start
-restores from it; a start whose save is newer deletes it. If a start cannot restore it, move it
-away. A save that fails is never silent: `POST /api/save` answers 500 with the error, `GET
+restores from it; a start whose save is newer deletes it. One the bank can never run (another
+game's tables after a game update, a snapshot format it does not read, not a snapshot) is moved
+to `world.json.snapshot.unusable-<UTC time>` with a line in the log, and the world starts from
+the save. If a start cannot restore it for another reason, the start fails: move it away. A save that fails is never silent: `POST /api/save` answers 500 with the error, `GET
 /api/status` has `lastSave` (`ok`, `at` in Unix seconds, `error`), and a failed autosave is tried
 again at the next one. When the last save (at a stop, or when the front is gone) fails, the bank
 writes its snapshot to `world.json.snapshot` (else to the temporary folder, and says where) and
