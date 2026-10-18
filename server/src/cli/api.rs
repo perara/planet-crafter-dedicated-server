@@ -120,17 +120,22 @@ impl Ctx {
     pub fn status(&self) -> Result {
         if !self.active() {
             println!("state=stopped");
+            self.print_banks(None);
             return Ok(());
         }
         println!("state=running pid={}", self.server_pid().unwrap_or_default());
         match self.api_json("GET", "/api/status") {
             Ok(mut status) => {
+                self.print_banks(Some(&status["banks"]));
                 if let Some(o) = status.as_object_mut() {
                     o.shift_remove("units");
                 }
                 println!("{}", serde_json::to_string_pretty(&status).unwrap_or_default());
             }
-            Err(e) => println!("admin API: {e}"),
+            Err(e) => {
+                self.print_banks(None);
+                println!("admin API: {e}");
+            }
         }
         Ok(())
     }

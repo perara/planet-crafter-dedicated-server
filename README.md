@@ -113,14 +113,37 @@ Where the game keeps its saves:
 
 ### Upgrading
 
+A new server release takes over the running world without disconnecting anyone (a hot update):
+
+```bash
+./pcds upgrade                # the latest release from GitHub
+./pcds upgrade v0.6.0         # a given one
+./pcds upgrade --rollback     # back to the release that ran before
+./pcds upgrade --check        # the latest release, and what is installed
+```
+
+The server runs from one of two installed releases, the banks `run/bin/a` and `run/bin/b`
+(`run/bin/active` names the one it starts; `pcds status` lists both). An upgrade downloads the
+release and its published sha256 into the bank that is not running, checks it, and hands the
+world over: the old release stops for about 15 ms, the new one takes the world and players see a
+short pause. If the new release fails, the old one goes on. The release before stays installed,
+so `--rollback` needs no download. A release that changes how the server's two processes talk
+(its "front protocol") cannot take over a running world: `pcds upgrade` says so, and
+`pcds upgrade --restart VERSION` installs it with a restart, which disconnects every player
+(Steam players get a new invite code unless `PCDS_STEAM_TOKEN` is set). With the server stopped,
+`pcds upgrade` makes the release the one the next start runs. `PCDS_AUTO_UPDATE=on` in
+`server.env` does this by itself for each new release (off by default).
+
+Other ways:
 - Run the installer again, or `./pcds up` in a newer release folder (move the old folder's `run/`
   into it first).
 - From source: `git pull`, `make build`, then `pcds restart`.
 
-The systemd units run `run/bin/pcds`, a copy of the program with `libsteam_api.so` and
-`web/` beside it, so `make clean` or a removed release folder does not
-take the server down. `setup`, `up` and `install-service` install the program there, and `start`
-and `restart` install a newer build or release first.
+The systemd units run `run/bin/pcds`, a copy of the program with `libsteam_api.so` and `web/`
+beside it, so `make clean` or a removed release folder does not take the server down; it starts
+the active bank. `setup`, `up`, `install-service`, `start` and `restart` put a newer build or
+release into the standby bank and make it the active one, unless a bank holds that build already
+(so a rollback stays rolled back).
 
 From 0.5 or older (the bash `pcds`):
 - The units ran the bash `pcds`, which is gone: the server does not start until
@@ -194,6 +217,8 @@ example `--planet Aqualis`, chooses its options). [compose.yaml](compose.yaml) d
 | `PCDS_MAX_PLAYERS` | `16` | players at once; more are refused with the game's session-full message (the `limits.maxPlayers` rule overrides it) |
 | `PCDS_WORLD` | `world` | the world the server runs: `run/worlds/<name>.json` (`pcds world use NAME`) |
 | `PCDS_RULES` | `run/rules.json` | the server rules file (see [Server rules](#server-rules)) |
+| `PCDS_AUTO_UPDATE` | `off` | `on`: install each new server release and hand the world over to it (see [Upgrading](#upgrading)) |
+| `PCDS_UPDATE_CHECK_HOURS` | `24` | hours between those checks |
 
 `run/server.env` holds the admin token and is readable by your user only.
 
@@ -210,7 +235,8 @@ example `--planet Aqualis`, chooses its options). [compose.yaml](compose.yaml) d
 
 The admin web page has five tabs. **Overview**: players, uptime, loop rate and load, CPU,
 memory, network traffic, object counts, the server, game and table versions, the world, its
-seed and settings, and the terraformation units. **Players**: who is online (ID, how they
+seed and settings, the terraformation units, and the server banks (the two installed releases,
+which one runs, flips and updates). **Players**: who is online (ID, how they
 joined, state, gauges, position) with kick, ban and teleport, and a map of the players among the
 buildings. **World**: save now, save and stop, the worlds beside this one and this world's
 backups. **Config**: every setting (rules, access lists, autosave; the `server.env` settings
@@ -406,8 +432,12 @@ platform, landing spots, seats, machine ranges), the code says so in a `ponytail
   class by class.
 - `server/src/native/` reads the game's tables from its files (Unity serialized files, the
   game's .NET metadata and IL) into `run/data/<game version>/`: `pcds read-game GAME_DIR OUT`.
+- The server runs as two processes of the same program (docs/hot-update.md): the front (`pcds
+  serve DATA_DIR SAVE.json`: the sockets, Steam and the invite code, the admin page, the chat
+  hooks) and a bank (`pcds bank`: the world), started from the active release and replaced by a
+  new one with the world handed over, while the front keeps every player connected.
 - `server/src/cli/` is the command line that ties them together, in the same program: `pcds
-  serve DATA_DIR SAVE.json` is the server, the other commands set it up and run it. It needs no
+  serve` is the server, the other commands set it up and run it. It needs no
   Python; curl downloads and tar unpacks steamcmd, systemd runs the service.
 
 ## Development

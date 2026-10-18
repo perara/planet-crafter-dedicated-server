@@ -1,0 +1,141 @@
+//! `pcds upgrade`: a server release into the standby bank and the world handed over to it
+//! (through the running front: POST /api/update), or, with the server stopped, the release
+//! made the active bank for the next start. And the banks in `pcds status`.
+
+use std::time::{Duration, Instant};
+
+use serde_json::{json, Value};
+
+use super::{say, Ctx, Result};
+use crate::updater;
+
+const USAGE: &str = "pcds upgrade [VERSION] [--restart] | --rollback | --check";
+
+impl Ctx {
+    pub fn upgrade(&self, args: &[String]) -> Result {
+        let (mut version, mut restart, mut rollback, mut check) = (None, false, false, false);
+        for a in args {
+            match a.as_str() {
+                "--restart" => restart = true,
+                "--rollback" => rollback = true,
+                "--check" => check = true,
+                v if !v.starts_with('-') && version.is_none() => version = Some(v.to_string()),
+                _ => return Err(USAGE.into()),
+            }
+        }
+        if (rollback && (version.is_some() || check)) || (check && restart) {
+            return Err(USAGE.into());
+        }
+        let banks = self.banks();
+        if check {
+            let release = updater::lookup(&updater::releases_url(), version.as_deref())?;
+            println!("{}: {}", if version.is_some() { "found" } else { "latest release" }, release.tag);
+            self.print_banks(None);
+            return Ok(());
+        }
+        let running = self.active();
+        if running && !restart {
+            let body = if rollback { json!({"rollback": true}) } else { json!({"version": version}) };
+            let answer: Value = serde_json::from_str(&self.api("POST", "/api/update", Some(&body.to_string()))?).map_err(|e| e.to_string())?;
+            let seq = answer["seq"].as_u64().ok_or("the server gave the update no number")?;
+            say(if rollback { "handing the world back to the other bank".to_string() } else { format!("installing {} into the standby bank", version.as_deref().unwrap_or("the latest release")) });
+            return self.wait_for_update(seq);
+        }
+        // Stopped, or a restart: the release into the bank the server does not run from.
+        let live = if running { self.live_bank() } else { None };
+        let active = live.unwrap_or_else(|| updater::active(&banks));
+        let target = updater::other(&active).to_string();
+        if rollback {
+            let info = updater::info(&banks, &target).ok_or_else(|| format!("bank {target} holds no release to go back to"))?;
+            updater::set_active(&banks, &target)?;
+            say(format!("bank {target} ({}) is the active one now", describe(&info)));
+        } else {
+            let release = updater::lookup(&updater::releases_url(), version.as_deref())?;
+            say(format!("downloading {} into bank {target}", release.tag));
+            let info = updater::install(&release, &banks, &target, None)?;
+            updater::set_active(&banks, &target)?;
+            say(format!("{} installed in bank {target} (sha256 checked), the active one now: {}", release.tag, describe(&info)));
+        }
+        if running {
+            say("restarting the server: every player is disconnected and reconnects");
+            return self.restart_if_running();
+        }
+        say("the server runs it from its next start ('pcds start')");
+        Ok(())
+    }
+
+    /// The bank the running front runs the world in.
+    fn live_bank(&self) -> Option<String> {
+        let status: Value = serde_json::from_str(&self.api("GET", "/api/status", None).ok()?).ok()?;
+        status["banks"]["live"]["bank"].as_str().map(str::to_string)
+    }
+
+    /// Until the server has done update `seq` (a download takes a while; a flip a moment).
+    fn wait_for_update(&self, seq: u64) -> Result {
+        let deadline = Instant::now() + Duration::from_secs(1200);
+        let mut said = String::new();
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(500));
+            let Ok(text) = self.api("GET", "/api/update", None) else { continue };
+            let status: Value = serde_json::from_str(&text).unwrap_or_default();
+            if let Some(done) = status["history"].as_array().and_then(|h| h.iter().find(|e| e["seq"].as_u64() == Some(seq))) {
+                let message = done["message"].as_str().unwrap_or("").to_string();
+                return if done["ok"] == true {
+                    say(message);
+                    Ok(())
+                } else {
+                    Err(message)
+                };
+            }
+            if let Some(doing) = status["doing"].as_str().filter(|d| *d != said) {
+                say(doing);
+                said = doing.to_string();
+            }
+        }
+        Err("no answer from the server about the update within 20 minutes (see pcds logs)".into())
+    }
+
+    /// The banks' lines of `pcds status`; `live`: the running front's view of them.
+    pub fn print_banks(&self, live: Option<&Value>) {
+        let banks = self.banks();
+        let active = updater::active(&banks);
+        for bank in updater::BANKS {
+            let mut marks = Vec::new();
+            if bank == active {
+                marks.push("active".to_string());
+            }
+            if let Some(l) = live.filter(|l| l["live"]["bank"] == bank) {
+                marks.push(format!("running, pid {}", l["live"]["pid"]));
+            }
+            let marks = if marks.is_empty() { String::new() } else { format!("  [{}]", marks.join(", ")) };
+            match updater::info(&banks, bank) {
+                Some(info) => println!("bank {bank}: {}{marks}", describe(&info)),
+                None => println!("bank {bank}: empty{marks}"),
+            }
+        }
+    }
+}
+
+/// "pcds 0.6.0 (v0.6.0), front protocol 2, snapshot format 1, installed 2026-10-18 15:00".
+fn describe(info: &Value) -> String {
+    let tag = info["tag"].as_str().map(|t| format!(" ({t})")).unwrap_or_else(|| " (a local build)".into());
+    let when = info["installed"].as_u64().map(|t| format!(", installed {}", super::local_time(std::time::UNIX_EPOCH + Duration::from_secs(t)))).unwrap_or_default();
+    format!("pcds {}{tag}, front protocol {}, snapshot format {}{when}", info["version"].as_str().unwrap_or("?"), info["protocol"], info["format"])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn options() {
+        let dir = super::super::test_dir("upgrade-options");
+        let ctx = super::super::test_ctx(&dir);
+        for bad in [&["--rollback", "v1.0.0"][..], &["--check", "--restart"], &["--frobnicate"], &["v1", "v2"]] {
+            let args: Vec<String> = bad.iter().map(|s| s.to_string()).collect();
+            assert_eq!(ctx.upgrade(&args).unwrap_err(), USAGE, "{bad:?}");
+        }
+        assert!(describe(&json!({"version": "0.6.0", "tag": "v0.6.0", "protocol": 2, "format": 1})).starts_with("pcds 0.6.0 (v0.6.0), front protocol 2, snapshot format 1"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

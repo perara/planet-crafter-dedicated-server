@@ -1,0 +1,1293 @@
+//! The front: the server's long-lived process, the bootloader of docs/hot-update.md. It owns
+//! what a client notices and what must outlive a game process: the UDP socket and every Unity
+//! Transport session (utp.rs), the Steam game server login, its listen socket, every Steam
+//! connection and the invite code, the client ids, the delayed close of kicked clients, the
+//! admin HTTP listener and web page, the chat hooks (chathooks.rs) and the autosave timer.
+//! The world runs in a bank process (bank.rs) started from the active bank's binary; the front
+//! passes it each client's batches and the bank's batches to the clients, over a unix socket
+//! (ipc.rs), and never waits for it.
+//!
+//! A flip hands the running world to the other bank: the new process loads its tables and
+//! says HELLO; the front checks its protocol, game tables and snapshot formats; the old bank
+//! stops at a tick boundary and writes its snapshot into a memfd; the new one restores it and
+//! says READY (the health check); the front switches routing and the old bank ends. Until
+//! READY the old world stays in memory: a new bank that fails is killed and the old one goes
+//! on (RESUME). Clients' frames wait in the front meanwhile; it keeps acking, resending and
+//! heartbeating, so players see a pause, not a disconnect. A bank that dies outside a flip is
+//! started again from the last snapshot or the save, whichever is newer; its players are
+//! told to join again (they have seen newer state than either).
+//!
+//!   pcds serve DATA_DIR SAVE.json   (pcds run starts it from the active bank)
+//!     PCDS_BANKS        the banks' folder (run/bin: a/, b/, active); unset: both banks are
+//!                       this program (a checkout build), and there is nothing to update
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::{Ipv4Addr, SocketAddr};
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
+use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde_json::{json, Value};
+use steamworks::networking_sockets::{ListenSocket, NetConnection};
+use steamworks::networking_types::{ListenSocketEvent, SendFlags};
+use steamworks::{Server, ServerMode, SteamServersConnected};
+
+use crate::admin;
+use crate::chathooks::Hooks;
+use crate::dashboard::{BYTES_IN, BYTES_OUT};
+use crate::ipc::{self, Frame, Link};
+use crate::updater;
+use crate::utp::{self, Utp};
+
+const APP_ID: &str = "1284190";
+/// The game's Steam transport splits messages above this size (see GameServerSockets.cs).
+const CHUNK: usize = 524_288;
+/// The most a client's "Split" message may add up to (two of the game's chunks).
+const MAX_SPLIT: usize = 1 << 20;
+/// A client's frames waiting for the bank (a stalled or flipping world) past this: the client
+/// is dropped, not the world.
+const MAX_CLIENT_QUEUE: usize = 16 << 20;
+/// A new bank's tables and world load in seconds; the restore must be READY within this.
+const LOAD_DEADLINE: Duration = Duration::from_secs(120);
+const READY_DEADLINE: Duration = Duration::from_secs(5);
+/// Kicked: the reason first, the connection closed this much later.
+const KICK_DELAY: Duration = Duration::from_millis(300);
+/// More crashes than this within CRASH_WINDOW and the front gives up (systemd restarts it).
+const MAX_CRASHES: usize = 5;
+const CRASH_WINDOW: Duration = Duration::from_secs(600);
+const RESTARTED: &str = "The server restarted after an error: join again";
+
+enum Conn {
+    /// Steam networking: the connection carries the verified SteamID.
+    Steam { steam_id: u64, connection: NetConnection, split: Option<(Vec<u8>, usize)> },
+    Ip(utp::Token),
+}
+
+struct Bank {
+    /// "a" or "b".
+    name: String,
+    child: Child,
+    link: Link,
+    /// Its HELLO (Null until it came).
+    hello: Value,
+    started: Instant,
+}
+
+#[derive(PartialEq, Debug, Clone, Copy)]
+enum Phase {
+    Idle,
+    /// The next bank loads its tables; the live one runs on.
+    Starting,
+    /// HANDOFF sent: the live bank stops and snapshots; client frames wait.
+    Snapshotting,
+    /// The next bank has the snapshot.
+    Restoring,
+    /// The live bank died: the next one starts from the last snapshot or the save.
+    Recovering,
+}
+
+/// The flip under way.
+struct Flip {
+    seq: u64,
+    reason: String,
+    /// HANDOFF sent: the world stands from here.
+    stopped: Option<Instant>,
+    snapshot: Value,
+}
+
+enum UpdateDone {
+    Installed { seq: u64, bank: String, info: Value },
+    Failed { seq: u64, message: String },
+    UpToDate { seq: u64, tag: String },
+}
+
+struct Updates {
+    tx: Sender<UpdateDone>,
+    rx: Receiver<UpdateDone>,
+    /// The request being worked on (download or flip).
+    busy: Option<(u64, String)>,
+    seq: u64,
+    history: VecDeque<Value>,
+    auto: bool,
+    every: Duration,
+    next_check: Instant,
+    latest: Option<String>,
+    checked: Option<u64>,
+}
+
+struct Front {
+    dir: String,
+    save: String,
+    banks: Option<PathBuf>,
+    utp: Option<Utp>,
+    steam: Option<(Server, ListenSocket)>,
+    invite_code: Option<String>,
+    port: u16,
+    conns: HashMap<u64, Conn>,
+    ip_clients: HashMap<utp::Token, u64>,
+    next_client: u64,
+    pending_drop: Vec<(u64, Instant)>,
+    /// Kicked or dropped: nothing more from it reaches the bank.
+    kicked: HashSet<u64>,
+    live: Option<Bank>,
+    next: Option<Bank>,
+    phase: Phase,
+    flip: Option<Flip>,
+    /// Frames for the bank while the world stands (and their bytes per client).
+    held: Vec<(u8, u64, Vec<u8>, u64)>,
+    held_bytes: HashMap<u64, usize>,
+    /// The last snapshot a flip carried: a crashed bank starts from it when it is newer than
+    /// the save.
+    last_snapshot: Option<(OwnedFd, SystemTime)>,
+    /// What a recovering bank starts from: the snapshot (else the save).
+    recover_from: Option<OwnedFd>,
+    crashes: VecDeque<Instant>,
+    exiting: Vec<(Child, Instant)>,
+    admin: Option<Receiver<admin::Request>>,
+    answers: HashMap<u64, (Sender<(u16, String)>, String)>,
+    next_request: u64,
+    hooks: Hooks,
+    web: admin::Web,
+    autosave_minutes: u64,
+    next_save: Instant,
+    updates: Updates,
+    started: Instant,
+    stop: Arc<AtomicBool>,
+    game_version: String,
+    flips: u64,
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn ms(d: Duration) -> f64 {
+    (d.as_secs_f64() * 10_000.0).round() / 10.0
+}
+
+pub fn run(args: &[String]) {
+    let [dir, save] = args else {
+        eprintln!("usage: pcds serve DATA_DIR SAVE.json (settings: see the source header of main.rs)");
+        std::process::exit(2);
+    };
+    // SAFETY: set before any other thread exists; the Steam API reads it during init.
+    unsafe { std::env::set_var("SteamAppId", APP_ID) };
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst)).expect("signal handler");
+
+    let listen = crate::env("PCDS_LISTEN").unwrap_or_else(|| "0.0.0.0:7777".into());
+    let utp = match listen.as_str() {
+        "off" => None,
+        addr => {
+            let addr: SocketAddr = addr.parse().expect("PCDS_LISTEN: host:port");
+            let utp = Utp::bind(addr).unwrap_or_else(|e| panic!("UDP {addr}: {e}"));
+            println!("direct IP: listening on {addr}");
+            Some(utp)
+        }
+    };
+    let port = listen.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
+    let banks = crate::env("PCDS_BANKS").map(PathBuf::from);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let auto = crate::env("PCDS_AUTO_UPDATE").as_deref() == Some("on");
+    let every = Duration::from_secs(crate::env("PCDS_UPDATE_CHECK_HOURS").and_then(|h| h.parse::<u64>().ok()).unwrap_or(24).clamp(1, 8760) * 3600);
+    let autosave_minutes = crate::autosave_start();
+    let mut front = Front {
+        dir: dir.clone(),
+        save: save.clone(),
+        banks,
+        utp,
+        steam: None,
+        invite_code: None,
+        port,
+        conns: HashMap::new(),
+        ip_clients: HashMap::new(),
+        next_client: 1,
+        pending_drop: Vec::new(),
+        kicked: HashSet::new(),
+        live: None,
+        next: None,
+        phase: Phase::Idle,
+        flip: None,
+        held: Vec::new(),
+        held_bytes: HashMap::new(),
+        last_snapshot: None,
+        recover_from: None,
+        crashes: VecDeque::new(),
+        exiting: Vec::new(),
+        admin: None,
+        answers: HashMap::new(),
+        next_request: 1,
+        hooks: Hooks::default(),
+        web: Default::default(),
+        autosave_minutes,
+        next_save: Instant::now() + Duration::from_secs(autosave_minutes.max(1) * 60),
+        // The first check a while after the start: a crash loop must not ask GitHub each time.
+        updates: Updates { tx, rx, busy: None, seq: 0, history: VecDeque::new(), auto, every, next_check: Instant::now() + every.min(Duration::from_secs(600)), latest: None, checked: None },
+        started: Instant::now(),
+        stop,
+        game_version: String::new(),
+        flips: 0,
+    };
+    front.boot();
+    front.start_admin();
+    front.start_steam();
+    front.serve();
+}
+
+impl Front {
+    /// The program of a bank: its folder's pcds, or this program without banks.
+    fn exe(&self, bank: &str) -> PathBuf {
+        match &self.banks {
+            Some(dir) => dir.join(bank).join("pcds"),
+            None => std::env::current_exe().expect("this program"),
+        }
+    }
+
+    fn web_page(&self, bank: &str) -> Option<String> {
+        if let Some(web) = crate::env("PCDS_WEB") {
+            return Some(web);
+        }
+        let dir = self.exe(bank);
+        Some(dir.with_file_name("web").join("index.html").to_string_lossy().to_string())
+    }
+
+    /// A bank process on a socket of its own (its fd 3).
+    fn spawn(&self, bank: &str, fail: Option<&str>) -> Result<Bank, String> {
+        let (ours, theirs) = UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
+        ours.set_nonblocking(true).map_err(|e| e.to_string())?;
+        let exe = self.exe(bank);
+        let mut command = Command::new(&exe);
+        command.arg("bank").arg(&self.dir).arg(&self.save).env("PCDS_IPC_FD", "3").env("PCDS_BANK", bank);
+        if let Some(f) = fail {
+            command.env("PCDS_BANK_FAIL", f);
+        }
+        let fd = theirs.as_raw_fd();
+        // SAFETY: between fork and exec only async-signal-safe calls: dup2 and fcntl. fd 3 then
+        // is the socket, without close-on-exec.
+        unsafe {
+            command.pre_exec(move || {
+                if fd == 3 {
+                    libc::fcntl(3, libc::F_SETFD, 0);
+                } else if libc::dup2(fd, 3) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().map_err(|e| format!("{}: {e}", exe.display()))?;
+        Ok(Bank { name: bank.to_string(), child, link: Link::new(ours), hello: Value::Null, started: Instant::now() })
+    }
+
+    /// The first bank, waited for (nobody is connected yet): the active one, else the other one
+    /// when the active one cannot start (a broken update), as a bootloader falls back.
+    fn boot(&mut self) {
+        let first = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
+        let mut tried = Vec::new();
+        for bank in [first.clone(), updater::other(&first).to_string()] {
+            if self.banks.as_ref().is_some_and(|b| !b.join(&bank).join("pcds").is_file()) {
+                continue;
+            }
+            match self.boot_bank(&bank) {
+                Ok(b) => {
+                    println!("bank {bank} (pid {}, pcds {}) running the world after {:?}", b.child.id(), b.hello["version"].as_str().unwrap_or("?"), b.started.elapsed());
+                    if bank != first {
+                        eprintln!("bank {first} could not start the world ({}); running bank {bank}, which ran before", tried.join("; "));
+                    }
+                    self.game_version = b.hello["gameVersion"].as_str().unwrap_or("").to_string();
+                    *self.web.write().unwrap_or_else(|e| e.into_inner()) = self.web_page(&bank);
+                    if let Some(dir) = &self.banks
+                        && let Err(e) = updater::set_active(dir, &bank)
+                    {
+                        eprintln!("banks: {e}");
+                    }
+                    self.live = Some(b);
+                    return;
+                }
+                Err(e) => tried.push(format!("bank {bank}: {e}")),
+            }
+            if self.banks.is_none() {
+                break;
+            }
+        }
+        eprintln!("no bank could start the world: {}", tried.join("; "));
+        std::process::exit(1);
+    }
+
+    fn boot_bank(&self, bank: &str) -> Result<Bank, String> {
+        let mut b = self.spawn(bank, None)?;
+        let deadline = Instant::now() + LOAD_DEADLINE;
+        let hello = wait_frame(&mut b, deadline).ok_or("it ended before its hello (see above)")?;
+        if hello.kind != ipc::HELLO || hello.n != ipc::PROTOCOL {
+            let _ = b.child.kill();
+            let _ = b.child.wait();
+            return Err(format!("it speaks front protocol {}, this front {}: start the server from that bank's own program (pcds restart)", hello.n, ipc::PROTOCOL));
+        }
+        b.hello = serde_json::from_slice(&hello.body).unwrap_or_default();
+        b.link.queue(ipc::START, 0, &[], None, 0);
+        let ready = wait_frame(&mut b, deadline).ok_or("it ended while loading the world (see above)")?;
+        if ready.kind != ipc::READY {
+            return Err(format!("frame {} instead of READY", ready.kind));
+        }
+        Ok(b)
+    }
+
+    fn start_admin(&mut self) {
+        let addr = crate::env("PCDS_ADMIN").unwrap_or_else(|| "127.0.0.1:7782".into());
+        if addr == "off" {
+            return;
+        }
+        let Some(token) = crate::env("PCDS_ADMIN_TOKEN") else {
+            eprintln!("admin: PCDS_ADMIN_TOKEN is not set: the admin API and web page are off (pcds setup writes one)");
+            return;
+        };
+        match admin::start(&addr, token, self.web.clone(), self.hooks.feed.clone()) {
+            Ok(rx) => {
+                println!("admin: http://{addr}/");
+                self.admin = Some(rx);
+            }
+            Err(e) => eprintln!("admin: {addr}: {e}"),
+        }
+    }
+
+    /// Logs in as a Steam game server (anonymously, or with a login token for a fixed SteamID)
+    /// and opens the P2P socket invite codes point to.
+    fn start_steam(&mut self) {
+        if crate::env("PCDS_STEAM").as_deref() == Some("off") {
+            return;
+        }
+        let session: u32 = crate::env("PCDS_SESSION").and_then(|s| s.parse().ok()).unwrap_or(4242);
+        match steam_login(&self.game_version, session) {
+            Ok((steam, listen, code)) => {
+                self.invite_code = Some(code);
+                self.steam = Some((steam, listen));
+            }
+            Err(e) if self.utp.is_some() => eprintln!("steam: {e}; continuing with direct IP only"),
+            Err(e) => {
+                eprintln!("{e}");
+                self.shutdown(1);
+            }
+        }
+    }
+
+    fn network(&self) -> &'static str {
+        match (self.steam.is_some(), self.utp.is_some()) {
+            (true, true) => "both",
+            (true, false) => "steam",
+            _ => "ip",
+        }
+    }
+
+    fn serve(&mut self) {
+        let mut next_frame = Instant::now();
+        while !self.stop.load(Ordering::SeqCst) {
+            let frame = Instant::now() >= next_frame;
+            if frame {
+                next_frame = Instant::now() + crate::FRAME;
+                self.poll_steam();
+            }
+            let mut sent = self.poll_utp();
+            sent |= self.read_banks();
+            self.admin_requests();
+            for reply in self.hooks.replies() {
+                self.to_bank(ipc::SAY, 0, reply.as_bytes(), 0);
+            }
+            if self.autosave_minutes > 0 && Instant::now() >= self.next_save {
+                self.next_save += Duration::from_secs(self.autosave_minutes * 60);
+                self.to_bank(ipc::SAVE, 0, &[], 0);
+            }
+            self.updates();
+            self.supervise();
+            sent |= self.drops();
+            self.flush_banks();
+            if let Some(utp) = self.utp.as_mut().filter(|_| frame || sent) {
+                utp.flush();
+            }
+            let mut fds = Vec::new();
+            let mut out = Vec::new();
+            if let Some(u) = &self.utp {
+                fds.push(u.fd());
+                out.push(false);
+            }
+            for b in [&self.live, &self.next].into_iter().flatten() {
+                fds.push(b.link.fd());
+                out.push(b.link.pending());
+            }
+            ipc::wait(&fds, &out, next_frame.saturating_duration_since(Instant::now()));
+        }
+        self.shutdown(0);
+    }
+
+    // ---- clients ------------------------------------------------------------------------
+
+    fn poll_steam(&mut self) {
+        let Some((steam, listen)) = &self.steam else { return };
+        steam.run_callbacks();
+        let (mut joined, mut gone, mut incoming) = (Vec::new(), Vec::new(), Vec::new());
+        while let Some(event) = listen.try_receive_event() {
+            match event {
+                ListenSocketEvent::Connecting(request) => {
+                    let _ = request.accept();
+                }
+                ListenSocketEvent::Connected(event) => {
+                    let steam_id = event.remote().steam_id().map(|id| id.raw()).unwrap_or(0);
+                    joined.push((steam_id, event.take_connection()));
+                }
+                ListenSocketEvent::Disconnected(event) => {
+                    let peer = event.remote().steam_id().map(|id| id.raw()).unwrap_or(0);
+                    println!("{peer}: disconnected ({:?})", event.end_reason());
+                    gone.extend(self.conns.iter().filter(|(_, c)| matches!(c, Conn::Steam { steam_id, .. } if *steam_id == peer)).map(|(c, _)| *c));
+                }
+            }
+        }
+        for (steam_id, connection) in joined {
+            let client = self.next_client;
+            self.next_client += 1;
+            println!("client {client}: connected over Steam as {steam_id}");
+            self.conns.insert(client, Conn::Steam { steam_id, connection, split: None });
+            self.to_bank(ipc::CONNECTED, client, json!({"steamId": steam_id, "trusted": false}).to_string().as_bytes(), 0);
+        }
+        for (client, conn) in self.conns.iter_mut() {
+            if let Conn::Steam { connection, split, .. } = conn {
+                for message in connection.receive_messages(64).unwrap_or_default() {
+                    match reassemble(split, message.data()) {
+                        Ok(batch) => incoming.extend(batch.map(|b| (*client, b))),
+                        Err(e) => {
+                            println!("client {client}: dropped ({e})");
+                            gone.push(*client);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        for client in gone {
+            self.left(client);
+        }
+        for (client, batch) in incoming {
+            self.from_client(client, batch);
+        }
+    }
+
+    /// Whether anything went out to a client.
+    fn poll_utp(&mut self) -> bool {
+        let Some(utp) = self.utp.as_mut() else { return false };
+        let events = utp.poll();
+        // A handshake or a disconnect answers at the next flush.
+        let any = !events.is_empty();
+        for event in events {
+            match event {
+                utp::Event::Connected(token, addr) => {
+                    let client = self.next_client;
+                    self.next_client += 1;
+                    println!("client {client}: connected from {addr}");
+                    self.ip_clients.insert(token, client);
+                    self.conns.insert(client, Conn::Ip(token));
+                    // The SteamID a direct-IP client reports is only believed from this machine.
+                    let c = json!({"ip": addr.ip().to_string(), "trusted": addr.ip().is_loopback()});
+                    self.to_bank(ipc::CONNECTED, client, c.to_string().as_bytes(), 0);
+                }
+                utp::Event::Data(token, batch) => {
+                    if let Some(c) = self.ip_clients.get(&token).copied() {
+                        self.from_client(c, batch);
+                    }
+                }
+                utp::Event::Disconnected(token) => {
+                    if let Some(c) = self.ip_clients.remove(&token) {
+                        self.left(c);
+                    }
+                }
+            }
+        }
+        any
+    }
+
+    fn from_client(&mut self, client: u64, batch: Vec<u8>) {
+        // Gone or kicked: nothing more from it reaches the game (the reason still goes out).
+        if !self.conns.contains_key(&client) || self.kicked.contains(&client) {
+            return;
+        }
+        BYTES_IN.fetch_add(batch.len() as u64, Ordering::Relaxed);
+        self.to_bank(ipc::DATA, client, &batch, client);
+    }
+
+    /// The connection ended from the client's side (or was dropped).
+    fn left(&mut self, client: u64) {
+        if self.conns.remove(&client).is_some() {
+            println!("client {client}: left");
+            self.ip_clients.retain(|_, c| *c != client);
+            self.kicked.remove(&client);
+            self.pending_drop.retain(|(c, _)| *c != client);
+            self.to_bank(ipc::GONE, client, &[], 0);
+        }
+    }
+
+    /// Closes a connection from this side.
+    fn close(&mut self, client: u64) {
+        match self.conns.remove(&client) {
+            Some(Conn::Steam { connection, .. }) => drop(connection),
+            Some(Conn::Ip(token)) => {
+                self.ip_clients.remove(&token);
+                if let Some(utp) = self.utp.as_mut() {
+                    utp.flush();
+                    utp.disconnect(&token);
+                }
+            }
+            None => return,
+        }
+        self.kicked.remove(&client);
+        self.to_bank(ipc::GONE, client, &[], 0);
+    }
+
+    fn to_client(&mut self, client: u64, batch: &[u8]) -> bool {
+        BYTES_OUT.fetch_add(batch.len() as u64, Ordering::Relaxed);
+        match self.conns.get(&client) {
+            Some(Conn::Steam { connection, .. }) => {
+                send(connection, batch);
+                false
+            }
+            Some(Conn::Ip(token)) => {
+                if let Some(utp) = self.utp.as_mut() {
+                    utp.send(token, batch);
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Kicked clients whose reason has had its moment: closed. Whether any was.
+    fn drops(&mut self) -> bool {
+        let now = Instant::now();
+        let due: Vec<u64> = self.pending_drop.iter().filter(|(_, at)| *at <= now).map(|(c, _)| *c).collect();
+        self.pending_drop.retain(|(_, at)| *at > now);
+        for c in &due {
+            self.close(*c);
+        }
+        !due.is_empty() || !self.pending_drop.is_empty()
+    }
+
+    // ---- the banks ------------------------------------------------------------------------
+
+    /// A frame for the live bank, or held while the world stands. `client`: a client's own
+    /// frame, counted against its bound.
+    fn to_bank(&mut self, kind: u8, n: u64, body: &[u8], client: u64) {
+        let holding = matches!(self.phase, Phase::Snapshotting | Phase::Restoring | Phase::Recovering);
+        let queued = if client == 0 {
+            0
+        } else {
+            self.held_bytes.get(&client).copied().unwrap_or(0) + self.live.as_ref().and_then(|b| b.link.queued.get(&client).copied()).unwrap_or(0)
+        };
+        if client != 0 && queued + body.len() > MAX_CLIENT_QUEUE {
+            eprintln!("client {client}: over {} MiB waiting for the game; dropped", MAX_CLIENT_QUEUE >> 20);
+            self.kicked.insert(client);
+            self.close(client);
+            return;
+        }
+        match (&mut self.live, holding) {
+            (Some(b), false) => b.link.queue(kind, n, body, None, client),
+            _ => {
+                if client != 0 {
+                    *self.held_bytes.entry(client).or_default() += body.len() + 13;
+                }
+                self.held.push((kind, n, body.to_vec(), client));
+            }
+        }
+    }
+
+    /// The held frames to the live bank.
+    fn release_held(&mut self) -> usize {
+        let held = std::mem::take(&mut self.held);
+        self.held_bytes.clear();
+        let n = held.len();
+        if let Some(b) = self.live.as_mut() {
+            for (kind, num, body, client) in held {
+                b.link.queue(kind, num, &body, None, client);
+            }
+        }
+        n
+    }
+
+    /// What the banks' sockets take now (a bank that is gone shows at the next read).
+    fn flush_banks(&mut self) {
+        for b in [self.live.as_mut(), self.next.as_mut()].into_iter().flatten() {
+            let _ = b.link.flush();
+        }
+    }
+
+    /// Reads both banks. Whether anything went out to a client.
+    fn read_banks(&mut self) -> bool {
+        let mut sent = false;
+        // Up to 4 MiB a loop from each: the clients' sessions must not wait on a flood.
+        let live_alive = self.live.as_mut().is_none_or(|b| b.link.fill(4 << 20));
+        while let Some(f) = self.live.as_mut().and_then(|b| b.link.next()) {
+            sent |= self.on_live(f);
+        }
+        if !live_alive {
+            self.live_died();
+        }
+        let next_alive = self.next.as_mut().is_none_or(|b| b.link.fill(4 << 20));
+        while let Some(f) = self.next.as_mut().and_then(|b| b.link.next()) {
+            self.on_next(f);
+        }
+        // READY may have made it the live one, with frames after READY in its inbox.
+        while let Some(f) = self.live.as_mut().and_then(|b| b.link.next()) {
+            sent |= self.on_live(f);
+        }
+        if !next_alive && self.next.is_some() {
+            let status = self.next.as_mut().and_then(|b| b.child.wait().ok()).map(|s| s.to_string()).unwrap_or_default();
+            match self.phase {
+                Phase::Recovering => {
+                    let b = self.next.take().unwrap();
+                    eprintln!("bank {} ended while starting ({status})", b.name);
+                    self.recover(&b.name);
+                }
+                _ => self.fail_flip(&format!("the new bank ended ({status})")),
+            }
+        }
+        sent
+    }
+
+    fn on_live(&mut self, f: Frame) -> bool {
+        match f.kind {
+            ipc::DATA => return self.to_client(f.n, &f.body),
+            ipc::KICK => {
+                if self.conns.contains_key(&f.n) && self.kicked.insert(f.n) {
+                    self.pending_drop.push((f.n, Instant::now() + KICK_DELAY));
+                }
+            }
+            ipc::ANSWER => self.answer(f.n, &f.body),
+            ipc::CHAT => match serde_json::from_slice(&f.body) {
+                Ok(event) => self.hooks.feed.push(event),
+                Err(e) => eprintln!("chat: an event the front cannot read ({e})"),
+            },
+            ipc::CHATCFG => match serde_json::from_slice(&f.body) {
+                Ok(chat) => self.hooks.configure(chat),
+                Err(e) => eprintln!("chat: hook settings the front cannot read ({e})"),
+            },
+            ipc::SNAPSHOT if self.phase == Phase::Snapshotting => match f.fd {
+                Some(fd) => {
+                    if let Some(flip) = self.flip.as_mut() {
+                        flip.snapshot = serde_json::from_slice(&f.body).unwrap_or_default();
+                    }
+                    self.last_snapshot = fd.try_clone().ok().map(|d| (d, SystemTime::now()));
+                    if let Some(n) = self.next.as_mut() {
+                        n.link.queue(ipc::RESTORE, 0, b"{\"recover\":false}", Some(fd), 0);
+                    }
+                    self.phase = Phase::Restoring;
+                }
+                // It could not write one and went on.
+                None => self.fail_flip("the running bank could not write a snapshot"),
+            },
+            _ => {}
+        }
+        false
+    }
+
+    fn on_next(&mut self, f: Frame) {
+        match f.kind {
+            ipc::HELLO => {
+                let hello: Value = serde_json::from_slice(&f.body).unwrap_or_default();
+                if let Some(b) = self.next.as_mut() {
+                    b.hello = hello.clone();
+                }
+                if self.phase == Phase::Recovering {
+                    let start = if f.n == ipc::PROTOCOL {
+                        match self.recover_from.take() {
+                            Some(fd) => (ipc::RESTORE, Some(fd)),
+                            None => (ipc::START, None),
+                        }
+                    } else {
+                        (ipc::START, None)
+                    };
+                    let body: &[u8] = if start.0 == ipc::RESTORE { b"{\"recover\":true}" } else { b"" };
+                    if let Some(b) = self.next.as_mut() {
+                        b.link.queue(start.0, 0, body, start.1, 0);
+                    }
+                    return;
+                }
+                if self.phase != Phase::Starting {
+                    return;
+                }
+                let live = self.live.as_ref().map(|b| b.hello.clone()).unwrap_or_default();
+                let mut info = hello.clone();
+                info["protocol"] = f.n.into();
+                if let Err(e) = updater::compatible(&info, &live) {
+                    return self.fail_flip(&e);
+                }
+                if hello["gameVersion"] != live["gameVersion"] {
+                    return self.fail_flip(&format!("it has game {}'s tables, the world runs on {}'s", hello["gameVersion"], live["gameVersion"]));
+                }
+                // Quiesce: from here the world stands.
+                if let Some(flip) = self.flip.as_mut() {
+                    flip.stopped = Some(Instant::now());
+                }
+                if let Some(b) = self.live.as_mut() {
+                    b.link.queue(ipc::HANDOFF, 0, &[], None, 0);
+                    let _ = b.link.flush();
+                }
+                self.phase = Phase::Snapshotting;
+            }
+            ipc::READY if matches!(self.phase, Phase::Restoring | Phase::Recovering) => self.promote(&f.body),
+            _ => {}
+        }
+    }
+
+    /// The next bank runs: it becomes the live one, the old one ends.
+    fn promote(&mut self, ready: &[u8]) {
+        let Some(new) = self.next.take() else { return };
+        let ready: Value = serde_json::from_slice(ready).unwrap_or_default();
+        let old = self.live.take();
+        let recovered = self.phase == Phase::Recovering;
+        self.phase = Phase::Idle;
+        let (from, to) = (old.as_ref().map(|b| b.name.clone()).unwrap_or_else(|| "-".into()), new.name.clone());
+        if let Some(mut b) = old {
+            b.link.queue(ipc::EXIT, 0, &[], None, 0);
+            let _ = b.link.flush();
+            self.exiting.push((b.child, Instant::now()));
+        }
+        self.live = Some(new);
+        let held = self.release_held();
+        if let Some(dir) = &self.banks
+            && let Err(e) = updater::set_active(dir, &to)
+        {
+            eprintln!("banks: {e}");
+        }
+        *self.web.write().unwrap_or_else(|e| e.into_inner()) = self.web_page(&to);
+        if recovered {
+            println!("bank {to} (pid {}) runs the world again", self.live.as_ref().map_or(0, |b| b.child.id()));
+            return;
+        }
+        let Some(flip) = self.flip.take() else { return };
+        let stood = flip.stopped.map(|t| t.elapsed()).unwrap_or_default();
+        self.flips += 1;
+        let verified = match ready["verified"].as_bool() {
+            Some(true) => format!("; the restored state is the snapshot's, checked in {:.1} ms (in the stand)", ready["verifyMs"].as_f64().unwrap_or(0.0)),
+            _ => String::new(),
+        };
+        let message = format!(
+            "flip {from} -> {to} ({}): the world stood {:.1} ms (snapshot {} bytes written in {:.1} ms, restored in {:.1} ms; {held} client frames held){verified}",
+            flip.reason,
+            ms(stood),
+            flip.snapshot["bytes"],
+            flip.snapshot["ms"].as_f64().unwrap_or(0.0),
+            ready["restoreMs"].as_f64().unwrap_or(0.0)
+        );
+        println!("{message}");
+        let version = self.live.as_ref().map(|b| b.hello["version"].clone()).unwrap_or_default();
+        self.record(flip.seq, true, &message, json!({"from": from, "to": to, "stoodMs": ms(stood), "snapshotBytes": flip.snapshot["bytes"], "snapshotMs": flip.snapshot["ms"], "restoreMs": ready["restoreMs"], "held": held, "verified": ready["verified"], "version": version}));
+    }
+
+    /// A flip that did not work: the new bank is killed, the old one goes on with the frames
+    /// held for the new one.
+    fn fail_flip(&mut self, why: &str) {
+        if let Some(mut b) = self.next.take() {
+            let _ = b.child.kill();
+            self.exiting.push((b.child, Instant::now()));
+        }
+        let phase = std::mem::replace(&mut self.phase, Phase::Idle);
+        let flip = self.flip.take();
+        let stood = flip.as_ref().and_then(|f| f.stopped).map(|t| t.elapsed());
+        let message = match (&mut self.live, phase) {
+            (Some(b), Phase::Snapshotting | Phase::Restoring) => {
+                b.link.queue(ipc::RESUME, 0, &[], None, 0);
+                self.release_held();
+                format!("flip failed ({why}); the running bank went on, the world stood {:.1} ms", ms(stood.unwrap_or_default()))
+            }
+            (Some(_), _) => format!("flip refused ({why}); the running bank never stopped"),
+            (None, _) => format!("flip failed ({why})"),
+        };
+        eprintln!("{message}");
+        if let Some(f) = flip {
+            self.record(f.seq, false, &message, json!({}));
+        }
+        if self.live.is_none() {
+            let name = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
+            self.recover(&name);
+        }
+    }
+
+    /// Starts a flip to `bank`.
+    fn flip_to(&mut self, bank: &str, reason: &str, seq: u64, fail: Option<&str>) -> Result<(), String> {
+        if self.phase != Phase::Idle || self.live.is_none() {
+            return Err("a flip is under way".into());
+        }
+        let b = self.spawn(bank, fail)?;
+        println!("flip to bank {bank} ({reason}): pid {} loading", b.child.id());
+        self.next = Some(b);
+        self.phase = Phase::Starting;
+        self.flip = Some(Flip { seq, reason: reason.to_string(), stopped: None, snapshot: Value::Null });
+        self.updates.busy = Some((seq, format!("flipping to bank {bank}")));
+        Ok(())
+    }
+
+    /// The live bank ended.
+    fn live_died(&mut self) {
+        let Some(mut b) = self.live.take() else { return };
+        let status = b.child.wait().map(|s| s.to_string()).unwrap_or_default();
+        let name = b.name.clone();
+        eprintln!("bank {name} (pid {}) ended ({status})", b.child.id());
+        match self.phase {
+            // The snapshot is with the new bank already: it takes over as if nothing happened.
+            Phase::Restoring => eprintln!("the new bank has its snapshot: it takes over"),
+            Phase::Starting | Phase::Snapshotting => {
+                self.fail_flip("the running bank ended");
+            }
+            _ => self.recover(&name),
+        }
+    }
+
+    /// A bank died outside a flip: the world starts again in that bank, from the last snapshot
+    /// when it is newer than the save, else the save. Its players were ahead of both: they are
+    /// told to join again. The Steam login and the invite code stay.
+    fn recover(&mut self, bank: &str) {
+        let now = Instant::now();
+        self.crashes.push_back(now);
+        while self.crashes.front().is_some_and(|t| now - *t > CRASH_WINDOW) {
+            self.crashes.pop_front();
+        }
+        if self.crashes.len() > MAX_CRASHES {
+            eprintln!("the game ended {} times within {} minutes: stopping (systemd starts the server again)", self.crashes.len(), CRASH_WINDOW.as_secs() / 60);
+            self.shutdown(1);
+        }
+        let clients: Vec<u64> = self.conns.keys().copied().collect();
+        let reason = crate::bank::reason_batch(RESTARTED);
+        for c in &clients {
+            self.to_client(*c, &reason);
+            if self.kicked.insert(*c) {
+                self.pending_drop.push((*c, now + KICK_DELAY));
+            }
+        }
+        self.held.clear();
+        self.held_bytes.clear();
+        self.answers.clear();
+        let save_time = std::fs::metadata(&self.save).and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH);
+        let from = match self.last_snapshot.take() {
+            Some((fd, at)) if at > save_time => {
+                self.recover_from = Some(fd);
+                format!("the snapshot of the last flip ({} s old, newer than the save)", at.elapsed().map(|d| d.as_secs()).unwrap_or(0))
+            }
+            _ => {
+                self.recover_from = None;
+                "the save".to_string()
+            }
+        };
+        match self.spawn(bank, None) {
+            Ok(b) => {
+                eprintln!("restarting bank {bank} (pid {}) from {from}; {} players were told to join again", b.child.id(), clients.len());
+                self.next = Some(b);
+                self.phase = Phase::Recovering;
+            }
+            Err(e) => {
+                eprintln!("cannot restart bank {bank}: {e}");
+                self.shutdown(1);
+            }
+        }
+    }
+
+    /// Timeouts and the old banks' ends.
+    fn supervise(&mut self) {
+        if let Some(b) = &self.next {
+            let late = match self.phase {
+                Phase::Starting | Phase::Recovering => b.started.elapsed() > LOAD_DEADLINE,
+                Phase::Snapshotting | Phase::Restoring => self.flip.as_ref().and_then(|f| f.stopped).is_some_and(|t| t.elapsed() > READY_DEADLINE),
+                Phase::Idle => false,
+            };
+            if late {
+                match self.phase {
+                    Phase::Recovering => {
+                        let mut b = self.next.take().unwrap();
+                        let _ = b.child.kill();
+                        let _ = b.child.wait();
+                        self.recover(&b.name);
+                    }
+                    _ => self.fail_flip(&format!("not ready within {:?}", if self.phase == Phase::Starting { LOAD_DEADLINE } else { READY_DEADLINE })),
+                }
+            }
+        }
+        // The old banks: EXIT given; killed if they linger.
+        self.exiting.retain_mut(|(child, since)| match child.try_wait() {
+            Ok(Some(_)) => false,
+            _ if since.elapsed() > Duration::from_secs(10) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                false
+            }
+            _ => true,
+        });
+    }
+
+    // ---- the admin API --------------------------------------------------------------------
+
+    fn admin_requests(&mut self) {
+        let Some(rx) = &self.admin else { return };
+        let requests: Vec<admin::Request> = rx.try_iter().collect();
+        for r in requests {
+            match (r.method.as_str(), r.path.as_str()) {
+                ("POST", "/api/stop") => {
+                    let _ = r.reply.send((200, "{\"ok\":true}".into()));
+                    self.stop.store(true, Ordering::SeqCst);
+                }
+                ("GET", "/api/update") => {
+                    let _ = r.reply.send((200, self.update_status().to_string()));
+                }
+                ("POST", "/api/update") => {
+                    let answer = self.update_request(&r.body);
+                    let _ = r.reply.send(answer);
+                }
+                _ => {
+                    let id = self.next_request;
+                    self.next_request += 1;
+                    let body = json!({"method": r.method, "path": r.path, "body": r.body, "autosaveMinutes": self.autosave_minutes});
+                    self.answers.insert(id, (r.reply, r.path));
+                    self.to_bank(ipc::ADMIN, id, body.to_string().as_bytes(), 0);
+                }
+            }
+        }
+    }
+
+    fn answer(&mut self, id: u64, body: &[u8]) {
+        let Some((reply, path)) = self.answers.remove(&id) else { return };
+        let a: Value = serde_json::from_slice(body).unwrap_or_default();
+        if let Some(m) = a["autosaveMinutes"].as_u64()
+            && m != self.autosave_minutes
+        {
+            self.autosave_minutes = m;
+            self.next_save = Instant::now() + Duration::from_secs(m.max(1) * 60);
+        }
+        let status = a["status"].as_u64().unwrap_or(500) as u16;
+        let mut text = a["body"].as_str().unwrap_or("{}").to_string();
+        if path == "/api/status"
+            && let Ok(mut s) = serde_json::from_str::<Value>(&text)
+        {
+            self.overlay(&mut s);
+            text = s.to_string();
+        }
+        let _ = reply.send((status, text));
+    }
+
+    /// The front's part of GET /api/status.
+    fn overlay(&self, s: &mut Value) {
+        let steam: HashSet<u64> = self.conns.iter().filter(|(_, c)| matches!(c, Conn::Steam { .. })).map(|(c, _)| *c).collect();
+        for p in s["players"].as_array_mut().into_iter().flatten() {
+            if p["id"].as_u64().is_some_and(|id| steam.contains(&id)) {
+                p["ip"] = "steam".into();
+            }
+        }
+        let banks: Vec<u32> = [&self.live, &self.next].into_iter().flatten().map(|b| b.child.id()).collect();
+        let (mut cpu, mut memory) = (crate::dashboard::reaped_children_cpu(), 0);
+        let me = crate::dashboard::process();
+        cpu += me["cpuSeconds"].as_f64().unwrap_or(0.0);
+        memory += me["memoryBytes"].as_u64().unwrap_or(0);
+        for pid in banks {
+            let (c, m) = crate::dashboard::process_of(pid);
+            cpu += c;
+            memory += m;
+        }
+        s["network"] = self.network().into();
+        s["inviteCode"] = self.invite_code.clone().into();
+        s["steam"] = self.invite_code.is_some().into();
+        s["port"] = self.port.into();
+        s["uptimeSeconds"] = self.started.elapsed().as_secs().into();
+        s["autosaveMinutes"] = self.autosave_minutes.into();
+        s["process"] = json!({"cpuSeconds": cpu, "memoryBytes": memory});
+        s["traffic"] = crate::dashboard::traffic();
+        s["banks"] = self.banks_status();
+        s["update"] = self.update_status();
+    }
+
+    fn banks_status(&self) -> Value {
+        let bank = |b: &Bank| json!({"bank": b.name, "pid": b.child.id(), "version": b.hello["version"], "protocol": ipc::PROTOCOL, "format": b.hello["format"], "runningSeconds": b.started.elapsed().as_secs()});
+        let mut v = match &self.banks {
+            Some(dir) => updater::describe(dir),
+            None => json!({"dir": null, "active": null, "installed": []}),
+        };
+        v["live"] = self.live.as_ref().map(bank).unwrap_or(Value::Null);
+        v["next"] = self.next.as_ref().map(bank).unwrap_or(Value::Null);
+        v["phase"] = format!("{:?}", self.phase).to_lowercase().into();
+        v["flips"] = self.flips.into();
+        v["crashes"] = self.crashes.len().into();
+        v["frontProtocol"] = ipc::PROTOCOL.into();
+        v["frontVersion"] = env!("CARGO_PKG_VERSION").into();
+        v
+    }
+
+    // ---- updates --------------------------------------------------------------------------
+
+    fn update_status(&self) -> Value {
+        let u = &self.updates;
+        json!({
+            "state": if u.busy.is_some() { "busy" } else { "idle" },
+            "doing": u.busy.as_ref().map(|(_, what)| what.clone()),
+            "seq": u.seq,
+            "last": u.history.back(),
+            "history": u.history,
+            "auto": u.auto,
+            "checkHours": u.every.as_secs() / 3600,
+            "latest": u.latest,
+            "checkedAt": u.checked,
+            "releases": self.banks.as_ref().map(|_| updater::releases_url()),
+        })
+    }
+
+    fn record(&mut self, seq: u64, ok: bool, message: &str, mut extra: Value) {
+        extra["seq"] = seq.into();
+        extra["ok"] = ok.into();
+        extra["message"] = message.into();
+        extra["at"] = now_secs().into();
+        self.updates.history.push_back(extra);
+        while self.updates.history.len() > 20 {
+            self.updates.history.pop_front();
+        }
+        if self.updates.busy.as_ref().is_some_and(|(s, _)| *s == seq) {
+            self.updates.busy = None;
+        }
+    }
+
+    /// POST /api/update: {"version": "v0.6.0"} (null: the latest), or {"rollback": true}: back
+    /// to the other bank. The answer comes at once with the request's "seq"; GET /api/update
+    /// has its outcome in "history" when done.
+    fn update_request(&mut self, body: &Value) -> (u16, String) {
+        if self.updates.busy.is_some() || self.phase != Phase::Idle {
+            return (409, json!({"error": "an update or a flip is under way", "doing": self.updates.busy.as_ref().map(|b| b.1.clone())}).to_string());
+        }
+        let Some(live) = &self.live else { return (503, "{\"error\":\"the game is starting\"}".into()) };
+        let target = updater::other(&live.name).to_string();
+        let fail = body["failForTest"].as_str().map(str::to_string);
+        self.updates.seq += 1;
+        let seq = self.updates.seq;
+        if body["rollback"] == true {
+            if let Some(dir) = &self.banks {
+                let Some(info) = updater::info(dir, &target) else { return (400, json!({"error": format!("bank {target} holds no release to go back to")}).to_string()) };
+                if let Err(e) = updater::compatible(&info, &live.hello) {
+                    return (400, json!({"error": e}).to_string());
+                }
+            }
+            return match self.flip_to(&target, "rollback", seq, fail.as_deref()) {
+                Ok(()) => (200, json!({"ok": true, "seq": seq, "bank": target}).to_string()),
+                Err(e) => (500, json!({"error": e}).to_string()),
+            };
+        }
+        let Some(dir) = self.banks.clone() else {
+            return (400, "{\"error\":\"no banks: this server runs from a build, not from pcds run (PCDS_BANKS); rollback flips between two copies of it\"}".into());
+        };
+        let version = body["version"].as_str().filter(|v| *v != "latest").map(str::to_string);
+        self.download(seq, dir, target, version, false);
+        (200, json!({"ok": true, "seq": seq}).to_string())
+    }
+
+    /// A download into the standby bank, on a thread of its own (it takes seconds); the loop
+    /// flips when it is in. `only_newer`: the automatic check, which installs only a later
+    /// release than the live bank's.
+    fn download(&mut self, seq: u64, dir: PathBuf, bank: String, version: Option<String>, only_newer: bool) {
+        let live = self.live.as_ref().map(|b| b.hello.clone()).unwrap_or_default();
+        let tx = self.updates.tx.clone();
+        self.updates.busy = Some((seq, format!("downloading {} into bank {bank}", version.as_deref().unwrap_or("the latest release"))));
+        std::thread::spawn(move || {
+            let done = (|| {
+                let release = updater::lookup(&updater::releases_url(), version.as_deref())?;
+                if only_newer && !updater::newer(&release.tag, live["version"].as_str().unwrap_or("")) {
+                    return Ok(UpdateDone::UpToDate { seq, tag: release.tag });
+                }
+                let info = updater::install(&release, &dir, &bank, Some(&live))?;
+                Ok(UpdateDone::Installed { seq, bank, info })
+            })();
+            let _ = tx.send(done.unwrap_or_else(|message: String| UpdateDone::Failed { seq, message }));
+        });
+    }
+
+    fn updates(&mut self) {
+        while let Ok(done) = self.updates.rx.try_recv() {
+            self.updates.checked = Some(now_secs());
+            match done {
+                UpdateDone::Installed { seq, bank, info } => {
+                    let tag = info["tag"].as_str().unwrap_or("?").to_string();
+                    self.updates.latest = Some(tag.clone());
+                    println!("update: {tag} installed in bank {bank} (sha256 {} checked)", info["sha256"].as_str().unwrap_or(""));
+                    if let Err(e) = self.flip_to(&bank, &format!("update to {tag}"), seq, None) {
+                        self.record(seq, false, &format!("{tag} is in bank {bank}, but the flip did not start: {e}"), json!({}));
+                    }
+                }
+                UpdateDone::Failed { seq, message } => {
+                    eprintln!("update: {message}");
+                    self.record(seq, false, &message, json!({}));
+                }
+                UpdateDone::UpToDate { seq, tag } => {
+                    self.updates.latest = Some(tag.clone());
+                    self.record(seq, true, &format!("up to date ({tag} is the latest release)"), json!({}));
+                }
+            }
+        }
+        if self.updates.auto && Instant::now() >= self.updates.next_check {
+            self.updates.next_check = Instant::now() + self.updates.every;
+            if let (Some(dir), Some(live), None, Phase::Idle) = (self.banks.clone(), &self.live, &self.updates.busy, self.phase) {
+                let bank = updater::other(&live.name).to_string();
+                self.updates.seq += 1;
+                let seq = self.updates.seq;
+                println!("update: checking for a new release (PCDS_AUTO_UPDATE=on)");
+                self.download(seq, dir, bank, None, true);
+            }
+        }
+    }
+
+    // ---- the end --------------------------------------------------------------------------
+
+    /// Saves the world, ends the bank, disconnects everyone, exits.
+    fn shutdown(&mut self, code: i32) -> ! {
+        if matches!(self.phase, Phase::Snapshotting | Phase::Restoring | Phase::Starting) {
+            self.fail_flip("the server is stopping");
+        }
+        if let Some(mut b) = self.next.take() {
+            let _ = b.child.kill();
+            let _ = b.child.wait();
+        }
+        if let Some(mut b) = self.live.take() {
+            b.link.queue(ipc::STOP, 0, &[], None, 0);
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                if b.link.flush().is_err() || Instant::now() > deadline {
+                    break;
+                }
+                if let Ok(Some(_)) = b.child.try_wait() {
+                    break;
+                }
+                // Its last batches still drain, so its writes never block its save.
+                if ipc::wait(&[b.link.fd()], &[b.link.pending()], Duration::from_millis(50))[0] && !b.link.fill(usize::MAX) {
+                    break;
+                }
+                while b.link.next().is_some() {}
+            }
+            match b.child.try_wait() {
+                Ok(Some(_)) => {}
+                _ => {
+                    let deadline = Instant::now() + Duration::from_secs(60);
+                    while Instant::now() < deadline && matches!(b.child.try_wait(), Ok(None)) {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    let _ = b.child.kill();
+                }
+            }
+            let _ = b.child.wait();
+        }
+        for (mut child, _) in self.exiting.drain(..) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(utp) = &mut self.utp {
+            utp.tokens().iter().for_each(|t| utp.disconnect(t));
+        }
+        std::process::exit(code)
+    }
+}
+
+/// A bank's next frame, read until `deadline` or its end.
+fn wait_frame(b: &mut Bank, deadline: Instant) -> Option<Frame> {
+    loop {
+        let _ = b.link.flush();
+        if let Some(f) = b.link.next() {
+            return Some(f);
+        }
+        if Instant::now() > deadline {
+            let _ = b.child.kill();
+            let _ = b.child.wait();
+            return None;
+        }
+        ipc::wait(&[b.link.fd()], &[b.link.pending()], Duration::from_millis(100));
+        if !b.link.fill(usize::MAX) {
+            let _ = b.child.wait();
+            return None;
+        }
+    }
+}
+
+fn steam_login(version: &str, session_number: u32) -> Result<(Server, ListenSocket, String), String> {
+    let (steam, client) = Server::init(Ipv4Addr::UNSPECIFIED, 0, 0xFFFF, ServerMode::NoAuthentication, version)
+        .map_err(|e| format!("Steam game server init failed ({e}); is steamclient.so in ~/.steam/sdk64?"))?;
+    steam.set_product(APP_ID);
+    steam.set_mod_dir("Planet Crafter");
+    steam.set_game_description("Planet Crafter standalone server");
+    steam.set_dedicated_server(true);
+    let connected = Arc::new(AtomicBool::new(false));
+    let logon = connected.clone();
+    let _logon = steam.register_callback(move |_: SteamServersConnected| logon.store(true, Ordering::SeqCst));
+    match crate::env("PCDS_STEAM_TOKEN") {
+        Some(token) => steam.log_on(&token),
+        None => steam.log_on_anonymous(),
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !connected.load(Ordering::SeqCst) {
+        if Instant::now() > deadline {
+            return Err("Steam game server logon timed out".into());
+        }
+        steam.run_callbacks();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    drop(client);
+    let listen = steam.networking_sockets().create_listen_socket_p2p(0, None).map_err(|_| "P2P listen socket failed")?;
+    let steam_id = steam.steam_id().raw();
+    let code = format!("{}{:04}", crate::protocol::invite_code(steam_id), session_number);
+    println!("steam: game server {steam_id}, invite code {code}");
+    Ok((steam, listen, code))
+}
+
+/// The game's Steam transport frames batches over 512 KiB as "Split<n>" plus n chunks.
+fn send(connection: &NetConnection, batch: &[u8]) {
+    if batch.len() <= CHUNK {
+        let _ = connection.send_message(batch, SendFlags::RELIABLE);
+        return;
+    }
+    let chunks: Vec<&[u8]> = batch.chunks(CHUNK).collect();
+    let _ = connection.send_message(format!("Split{}", chunks.len()).as_bytes(), SendFlags::RELIABLE);
+    chunks.iter().for_each(|c| {
+        let _ = connection.send_message(c, SendFlags::RELIABLE);
+    });
+}
+
+/// A client's messages back into batches. Err for a split the game never sends (a count other
+/// than 1..=9, or over MAX_SPLIT in all): the caller drops the client.
+fn reassemble(split: &mut Option<(Vec<u8>, usize)>, data: &[u8]) -> Result<Option<Vec<u8>>, &'static str> {
+    if let Some((buffer, left)) = split {
+        if buffer.len() + data.len() > MAX_SPLIT {
+            return Err("split message over 1 MiB");
+        }
+        buffer.extend_from_slice(data);
+        *left -= 1;
+        if *left == 0 {
+            return Ok(split.take().map(|(buffer, _)| buffer));
+        }
+        return Ok(None);
+    }
+    if data.len() == 6 && &data[..5] == b"Split" {
+        let n = char::from(data[5]).to_digit(10).filter(|n| (1..=9).contains(n)).ok_or("bad split count")?;
+        *split = Some((Vec::new(), n as usize));
+        return Ok(None);
+    }
+    Ok(Some(data.to_vec()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn steam_splits_are_bounded() {
+        let mut split = None;
+        assert_eq!(reassemble(&mut split, b"batch"), Ok(Some(b"batch".to_vec())));
+        for bad in [b"Split0", b"Split/", b"Split:"] {
+            assert!(reassemble(&mut None, bad).is_err());
+        }
+        assert_eq!(reassemble(&mut split, b"Split2"), Ok(None));
+        assert_eq!(reassemble(&mut split, b"ab"), Ok(None));
+        assert_eq!(reassemble(&mut split, b"cd"), Ok(Some(b"abcd".to_vec())));
+        assert!(split.is_none());
+        reassemble(&mut split, b"Split3").unwrap();
+        reassemble(&mut split, &vec![0; MAX_SPLIT]).unwrap();
+        assert!(reassemble(&mut split, b"x").is_err());
+    }
+}

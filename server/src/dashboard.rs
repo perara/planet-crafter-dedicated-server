@@ -22,8 +22,10 @@ const MAP_POINTS: usize = 4000;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Teleport {
-    /// A name (any case) or client id.
-    pub player: String,
+    /// The client id; or the player's name (any case), as "name" or the plugin API's "player".
+    pub id: Option<u64>,
+    pub name: Option<String>,
+    pub player: Option<String>,
     pub position: [f32; 3],
 }
 
@@ -51,6 +53,29 @@ pub fn process() -> Value {
     let cpu = (unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } == 0).then(|| seconds(usage.ru_utime) + seconds(usage.ru_stime));
     let rss = std::fs::read_to_string("/proc/self/status").ok().and_then(|s| s.lines().find_map(|l| l.strip_prefix("VmRSS:")?.trim().strip_suffix("kB")?.trim().parse::<u64>().ok()));
     json!({ "cpuSeconds": cpu, "memoryBytes": rss.map(|kb| kb * 1024) })
+}
+
+/// The CPU time and memory of another process of this user (a bank), from /proc.
+pub fn process_of(pid: u32) -> (f64, u64) {
+    // SAFETY: sysconf only reads.
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    // After the command's closing parenthesis: state is field 3, utime and stime 14 and 15.
+    let fields: Vec<&str> = stat.rsplit_once(')').map(|(_, rest)| rest.split_whitespace().collect()).unwrap_or_default();
+    let cpu = [11, 12].iter().filter_map(|i| fields.get(*i)?.parse::<f64>().ok()).sum::<f64>() / ticks;
+    let rss = std::fs::read_to_string(format!("/proc/{pid}/status")).ok().and_then(|s| s.lines().find_map(|l| l.strip_prefix("VmRSS:")?.trim().strip_suffix("kB")?.trim().parse::<u64>().ok()));
+    (cpu, rss.unwrap_or(0) * 1024)
+}
+
+/// The CPU time of the children this process has reaped (banks that ended).
+pub fn reaped_children_cpu() -> f64 {
+    // SAFETY: getrusage only fills the struct it is given.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    let seconds = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
+    if unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) } != 0 {
+        return 0.0;
+    }
+    seconds(usage.ru_utime) + seconds(usage.ru_stime)
 }
 
 /// A connected client as the page lists it; `via` is its IP or "steam".
@@ -127,5 +152,7 @@ mod tests {
         assert_eq!(w["worlds"][0]["bytes"], 2);
         std::fs::remove_dir_all(dir).unwrap();
         assert!(process()["cpuSeconds"].as_f64().is_some() && process()["memoryBytes"].as_u64().unwrap() > 0);
+        let (cpu, memory) = process_of(std::process::id());
+        assert!(cpu >= 0.0 && memory > 0);
     }
 }
