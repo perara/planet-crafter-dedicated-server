@@ -7,38 +7,66 @@
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #677085; --line: #dfe3ea;
-    --accent: #2f7d5b; --danger: #b3412f; --chip: #eef1f5;
+    --accent: #2f7d5b; --danger: #b3412f; --chip: #eef1f5; --warn: #9a6a12;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #12151b; --panel: #1b2029; --text: #e6e9ef; --muted: #98a1b3; --line: #2b3240; --accent: #5cc595; --danger: #e5735f; --chip: #252b37; }
+    :root { --bg: #12151b; --panel: #1b2029; --text: #e6e9ef; --muted: #98a1b3; --line: #2b3240; --accent: #5cc595; --danger: #e5735f; --chip: #252b37; --warn: #e0b45a; }
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; }
-  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+  main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 48px; }
   h1 { font-size: 20px; margin: 0 0 4px; }
   h2 { font-size: 15px; margin: 0 0 12px; }
   .sub { color: var(--muted); margin: 0 0 20px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
-  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; overflow-x: auto; }
+  .grid .panel { margin: 0; }
   .stat .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
   .stat .v { font-size: 20px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .n { color: var(--muted); font-size: 12px; }
   table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { color: var(--muted); font-weight: 500; font-size: 13px; }
-  td.num { font-variant-numeric: tabular-nums; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; }
   button { font: inherit; border: 1px solid var(--line); background: var(--chip); color: var(--text); border-radius: 7px; padding: 6px 12px; cursor: pointer; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   button.danger { color: var(--danger); }
+  button.small { padding: 2px 8px; font-size: 13px; }
   button:disabled { opacity: .5; cursor: default; }
   label { display: block; color: var(--muted); font-size: 13px; margin-bottom: 4px; }
-  textarea, input { width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 8px; }
+  textarea, input, select { width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 8px; }
+  input[type=checkbox] { width: auto; transform: scale(1.3); margin: 6px 4px; }
   textarea { min-height: 72px; resize: vertical; }
-  .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 12px; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .row > input, .row > select { flex: 1 1 140px; width: auto; }
   .msg { color: var(--muted); min-height: 1.4em; margin-top: 8px; }
-  .msg.err { color: var(--danger); }
+  .msg.err, .err { color: var(--danger); }
   .empty { color: var(--muted); padding: 8px 6px; }
   #login { max-width: 420px; }
+  nav.tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 16px; border-bottom: 1px solid var(--line); }
+  nav.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted); padding: 8px 12px; }
+  nav.tabs button[aria-selected=true] { color: var(--text); border-bottom-color: var(--accent); }
+  .knobs { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .knob .head { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; margin-bottom: 4px; }
+  .knob .name { font-weight: 500; color: var(--text); font-size: 15px; margin: 0; }
+  .knob code { color: var(--muted); font-size: 12px; }
+  .knob .desc { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+  .knob .ro { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; padding: 8px 0; }
+  .knob .with-unit { display: flex; gap: 6px; align-items: center; }
+  .badge { font-size: 11px; border-radius: 99px; padding: 1px 7px; background: var(--chip); color: var(--muted); }
+  .badge.live { color: var(--accent); }
+  .badge.restart { color: var(--warn); }
+  .badge.changed { color: var(--text); }
+  .savebar { position: sticky; bottom: 0; background: var(--bg); padding: 12px 0; border-top: 1px solid var(--line); }
+  .savebar .msg { margin: 0; }
+  pre.log { margin: 0; max-height: 480px; overflow: auto; font-size: 12px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+  svg.map { width: 100%; height: 420px; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; }
+  svg.map .b { fill: var(--muted); opacity: .45; }
+  svg.map .p { fill: var(--accent); stroke: var(--panel); }
+  svg.map text { fill: var(--text); }
 </style>
 </head>
 <body>
@@ -48,71 +76,144 @@
 
   <section class="panel" id="login" hidden>
     <h2>Admin token</h2>
-    <p class="sub">Run <code>./pcds gui</code> to open this page with the token, or paste it from <code>pcds.dedicated.cfg</code>.</p>
+    <p class="sub">Run <code>./pcds gui</code> to open this page with the token, or paste the one <code>./pcds token</code> prints.</p>
     <div class="row"><input id="tokenInput" type="password" autocomplete="off" aria-label="Admin token"><button class="primary" id="tokenSave">Use token</button></div>
   </section>
 
   <div id="app" hidden>
-    <div class="grid">
-      <div class="panel stat"><div class="k">Players</div><div class="v" id="sPlayers">–</div></div>
-      <div class="panel stat"><div class="k">Uptime</div><div class="v" id="sUptime">–</div></div>
-      <div class="panel stat"><div class="k">FPS / cap</div><div class="v" id="sFps">–</div></div>
-      <div class="panel stat"><div class="k">Game version</div><div class="v" id="sVersion">–</div></div>
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="overview" aria-selected="true">Overview</button>
+      <button role="tab" data-tab="players" aria-selected="false">Players</button>
+      <button role="tab" data-tab="world" aria-selected="false">World</button>
+      <button role="tab" data-tab="config" aria-selected="false">Config</button>
+      <button role="tab" data-tab="tools" aria-selected="false">Tools</button>
+    </nav>
+
+    <div id="tab-overview">
+      <div class="grid" id="stats"></div>
+      <section class="panel" id="invitePanel" hidden>
+        <h2>Invite code</h2>
+        <p class="sub">Enter this in Planet Crafter under <b>Join with invitation code</b>; it works for you and your friends. Without a Steam login token it changes whenever the server restarts.</p>
+        <div class="row"><code class="v" id="inviteCode"></code><button id="copyCode">Copy</button></div>
+        <div class="msg" id="inviteMsg"></div>
+      </section>
+      <section class="panel"><h2>Server</h2><dl id="info"></dl></section>
+      <section class="panel"><h2>Terraformation</h2><div id="units"></div></section>
+      <section class="panel"><h2>World settings</h2><div id="worldSettings"></div></section>
     </div>
 
-    <section class="panel" id="invitePanel" hidden>
-      <h2>Invite code</h2>
-      <p class="sub">Enter this in Planet Crafter under <b>Join with invitation code</b>; it works for you and your friends. Without a Steam login token it changes whenever the server restarts.</p>
-      <div class="row"><code class="v" id="inviteCode"></code><button id="copyCode">Copy</button></div>
-    </section>
+    <div id="tab-players" hidden>
+      <section class="panel">
+        <h2>Players online</h2>
+        <div id="players"></div>
+        <div class="msg" id="playersMsg"></div>
+      </section>
+      <section class="panel">
+        <h2>Teleport</h2>
+        <p class="sub">Moves a player the way the game does when a world portal closes: their game respawns them at the position, with no dying consequences.</p>
+        <div class="row">
+          <select id="tpPlayer" aria-label="Player to move"></select>
+          <input id="tpX" type="number" step="any" placeholder="x" aria-label="x">
+          <input id="tpY" type="number" step="any" placeholder="y" aria-label="y">
+          <input id="tpZ" type="number" step="any" placeholder="z" aria-label="z">
+        </div>
+        <div class="row" style="margin-top: 8px">
+          <select id="tpTo" aria-label="Copy the position of"></select>
+          <button class="primary" id="tpGo">Teleport</button>
+        </div>
+        <div class="msg" id="tpMsg"></div>
+      </section>
+      <section class="panel">
+        <h2>Map</h2>
+        <p class="sub" id="mapNote">Seen from above: buildings in grey, players in green.</p>
+        <svg class="map" id="map" role="img" aria-label="Map of players and buildings"></svg>
+      </section>
+    </div>
 
-    <section class="panel">
-      <h2>Players online</h2>
-      <table>
-        <thead><tr><th>Name</th><th>Joined via</th><th>Online</th><th></th></tr></thead>
-        <tbody id="players"></tbody>
-      </table>
-    </section>
+    <div id="tab-world" hidden>
+      <section class="panel">
+        <h2>This world</h2>
+        <dl id="worldInfo"></dl>
+        <div class="row" style="margin-top: 12px">
+          <button class="primary" id="saveWorld">Save world now</button>
+          <button class="danger" id="stopServer">Save and stop server</button>
+        </div>
+        <div class="msg" id="worldMsg"></div>
+      </section>
+      <section class="panel">
+        <h2>Worlds</h2>
+        <p class="sub">The worlds beside this one. Switch with <code>./pcds world use NAME</code> and <code>./pcds restart</code>; <code>./pcds world new NAME</code> makes one.</p>
+        <div id="worlds"></div>
+      </section>
+      <section class="panel">
+        <h2>Backups of this world</h2>
+        <div id="backups"></div>
+      </section>
+    </div>
 
-    <section class="panel">
-      <h2>Access</h2>
-      <p class="sub">One entry per line. IPs accept CIDR ranges such as <code>192.168.1.0/24</code> and only apply to direct-IP players. Name lists also accept SteamIDs, which are verified for players who joined with the invite code. Empty allowlists let everyone in.</p>
-      <div class="fields">
-        <div><label for="allowedIPs">Allowed IPs</label><textarea id="allowedIPs"></textarea></div>
-        <div><label for="whitelist">Whitelisted names</label><textarea id="whitelist"></textarea></div>
-        <div><label for="bannedNames">Banned names</label><textarea id="bannedNames"></textarea></div>
-        <div><label for="bannedIPs">Banned IPs</label><textarea id="bannedIPs"></textarea></div>
+    <div id="tab-config" hidden>
+      <p class="sub">Every setting of this server. Live ones apply when saved; server.env ones show what this server started with and change with <code>./pcds config</code> and a restart. An empty field means the default.</p>
+      <div id="knobs"></div>
+      <div class="savebar row">
+        <button class="primary" id="saveConfig" disabled>Save changes</button>
+        <button id="discardConfig">Discard edits</button>
+        <span class="msg" id="configMsg"></span>
       </div>
-      <div class="row"><button class="primary" id="saveAccess">Save access lists</button><button id="reloadAccess">Discard edits</button></div>
-      <div class="msg" id="accessMsg"></div>
-    </section>
+    </div>
 
-    <section class="panel">
-      <h2>World</h2>
-      <div class="fields">
-        <div><label for="autosave">Autosave every (minutes, 0 = off)</label><input id="autosave" type="number" min="0"></div>
-        <div><label for="tick">Tick rate (frames per second)</label><input id="tick" type="number" min="5" max="120"></div>
-      </div>
-      <div class="row">
-        <button id="saveSettings">Apply settings</button>
-        <button class="primary" id="saveWorld">Save world now</button>
-        <button class="danger" id="stopServer">Save and stop server</button>
-      </div>
-      <div class="msg" id="worldMsg"></div>
-    </section>
+    <div id="tab-tools" hidden>
+      <section class="panel">
+        <h2>Message everyone</h2>
+        <div class="row"><input id="chatText" maxlength="500" placeholder="Shown in every player's chat" aria-label="Message"><button class="primary" id="chatSend">Send</button></div>
+        <div class="msg" id="chatMsg"></div>
+      </section>
+      <section class="panel">
+        <h2>Kick, ban, unban</h2>
+        <p class="sub">A name (any case) or client id. A ban also bans the SteamID (invite code) or IP (direct IP) of an online player; an offline name is banned as written. The access lists are under Config.</p>
+        <div class="row"><input id="modPlayer" placeholder="Player" aria-label="Player"><button id="modKick">Kick</button><button class="danger" id="modBan">Ban</button></div>
+        <div class="row" style="margin-top: 8px"><input id="modUnban" placeholder="Name, SteamID or IP" aria-label="Unban"><button id="modUnbanGo">Unban</button></div>
+        <div class="msg" id="modMsg"></div>
+        <h2 style="margin-top: 16px">Banned</h2>
+        <div id="bans"></div>
+      </section>
+      <section class="panel">
+        <div class="row" style="justify-content: space-between"><h2>Server log</h2><button class="small" id="logsRefresh">Refresh</button></div>
+        <p class="sub" id="logsNote"></p>
+        <pre class="log" id="logs"></pre>
+      </section>
+    </div>
   </div>
 </main>
 <script>
 const $ = id => document.getElementById(id);
 let token = '';
 try {
-  const m = location.hash.match(/token=([0-9a-f]+)/);
+  const m = location.hash.match(/token=([0-9A-Za-z]+)/);
   if (m) { localStorage.setItem('pcdsToken', m[1]); history.replaceState(null, '', location.pathname); }
   token = localStorage.getItem('pcdsToken') || '';
 } catch (e) {}
 
-let accessDirty = false;
-['allowedIPs', 'whitelist', 'bannedNames', 'bannedIPs'].forEach(id => $(id).addEventListener('input', () => accessDirty = true));
+// Elements from data: text always goes in as text, never as HTML (names and chat are players').
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === 'class') el.className = v; else if (k in el) el[k] = v; else el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) if (kid !== null && kid !== undefined && kid !== false) el.append(kid instanceof Node ? kid : String(kid));
+  return el;
+}
+function svg(tag, attrs, text) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+const cell = (text, cls) => h('td', { class: cls || '' }, text);
+function table(headers, rows, emptyText) {
+  if (!rows.length) return h('div', { class: 'empty' }, emptyText);
+  return h('table', {}, h('thead', {}, h('tr', {}, headers.map(x => h('th', {}, x)))),
+    h('tbody', {}, rows.map(r => h('tr', {}, r.map(c => c instanceof Node && c.tagName === 'TD' ? c : cell(c))))));
+}
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -122,94 +223,280 @@ async function api(method, path, body) {
   });
   const data = await res.json().catch(() => ({}));
   if (res.status === 401) { showLogin(); throw new Error('token rejected'); }
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) { const e = new Error(data.error || res.statusText); e.key = data.key; throw e; }
   return data;
 }
 
 function showLogin() { $('login').hidden = false; $('app').hidden = true; $('subtitle').textContent = 'Admin token needed'; }
-
-function duration(s) {
-  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
-  return h ? `${h}h ${m}m` : `${m}m ${s % 60}s`;
-}
-
-function lines(id) { return $(id).value.split(/[\n,]/).map(s => s.trim()).filter(Boolean); }
-
-function fillAccess(a) {
-  $('allowedIPs').value = a.allowedIPs.join('\n');
-  $('whitelist').value = a.whitelist.join('\n');
-  $('bannedNames').value = a.bannedNames.join('\n');
-  $('bannedIPs').value = a.bannedIPs.join('\n');
-  accessDirty = false;
-}
-
 function note(id, text, isError) { const el = $(id); el.textContent = text; el.className = 'msg' + (isError ? ' err' : ''); }
-
 async function act(msgId, label, fn) {
   try { await fn(); note(msgId, label); refresh(); } catch (e) { note(msgId, e.message, true); }
 }
 
-function renderPlayers(players) {
-  const body = $('players');
-  body.replaceChildren();
-  if (!players.length) {
-    const tr = document.createElement('tr'), td = document.createElement('td');
-    td.colSpan = 4; td.className = 'empty'; td.textContent = 'Nobody online';
-    tr.append(td); body.append(tr); return;
+function duration(s) {
+  const d = Math.floor(s / 86400), hr = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${d}d ${hr}h` : hr ? `${hr}h ${m}m` : `${m}m ${s % 60}s`;
+}
+function bytes(n) {
+  if (n === null || n === undefined || !isFinite(n)) return '–';
+  const u = ['B', 'KB', 'MB', 'GB']; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${n < 10 && i ? n.toFixed(1) : Math.round(n)} ${u[i]}`;
+}
+// The server's numbers are f32: seven digits say all they hold.
+function number(v) { return typeof v === 'number' ? String(+v.toPrecision(7)) : v; }
+function when(unix) { return new Date(unix * 1000).toLocaleString(); }
+function pos(p) { return p ? p.map(v => v.toFixed(1)).join(', ') : '–'; }
+const pairs = list => list.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]);
+
+// ---- tabs ----
+function show(name) {
+  for (const b of document.querySelectorAll('nav.tabs button')) b.setAttribute('aria-selected', String(b.dataset.tab === name));
+  for (const t of ['overview', 'players', 'world', 'config', 'tools']) $('tab-' + t).hidden = t !== name;
+  if (name === 'players') loadMap();
+  if (name === 'world') loadWorlds();
+  if (name === 'config' && !Object.keys(edits).length) loadConfig();
+  if (name === 'tools') loadLogs();
+}
+for (const b of document.querySelectorAll('nav.tabs button')) b.onclick = () => show(b.dataset.tab);
+
+// ---- overview and players, from GET /api/status every 2 s ----
+let status = null, last = null;
+const stat = (k, v, n) => h('div', { class: 'panel stat' }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v), n ? h('div', { class: 'n' }, n) : null);
+
+function renderOverview(s) {
+  const now = performance.now() / 1000, p = s.process || {}, t = s.traffic || {};
+  let cpu = '–', rateIn = '–', rateOut = '–';
+  if (last && now > last.t) {
+    const dt = now - last.t;
+    if (p.cpuSeconds != null && last.cpu != null) cpu = `${Math.round((p.cpuSeconds - last.cpu) / dt * 100)} %`;
+    rateIn = bytes((t.bytesIn - last.in) / dt) + '/s'; rateOut = bytes((t.bytesOut - last.out) / dt) + '/s';
   }
-  for (const p of players) {
-    const tr = document.createElement('tr');
-    const name = p.name || `(joining, client ${p.id})`;
-    const via = p.verified ? `Steam (${p.steamId})` : p.ip;
-    for (const [text, cls] of [[name], [via], [duration(p.connectedSeconds), 'num']]) {
-      const td = document.createElement('td'); td.textContent = text; if (cls) td.className = cls; tr.append(td);
-    }
-    const td = document.createElement('td'); td.className = 'row';
-    const kick = document.createElement('button'); kick.textContent = 'Kick';
-    kick.onclick = () => act('worldMsg', `Kicked ${name}`, () => api('POST', '/api/kick', { player: String(p.id) }));
-    const ban = document.createElement('button'); ban.textContent = 'Ban'; ban.className = 'danger';
-    ban.onclick = () => { if (confirm(`Ban ${name} (${via})?`)) act('worldMsg', `Banned ${name}`, () => api('POST', '/api/ban', { player: String(p.id) })); };
-    td.append(kick, ban); tr.append(td); body.append(tr);
-  }
+  last = { t: now, cpu: p.cpuSeconds, in: t.bytesIn, out: t.bytesOut };
+  const o = s.objects || {};
+  $('stats').replaceChildren(
+    stat('Players', s.players.length),
+    stat('Uptime', duration(s.uptimeSeconds)),
+    stat('Loops / s', s.fps, `game tick rate ${s.tickRate}`),
+    stat('Loop busy', `${s.busyPercent} %`, `longest ${(s.longestLoopMicros / 1000).toFixed(1)} ms`),
+    stat('CPU', cpu, p.cpuSeconds != null ? `${Math.round(p.cpuSeconds)} s in all` : null),
+    stat('Memory', bytes(p.memoryBytes)),
+    stat('Network in', rateIn, bytes(t.bytesIn) + ' in all'),
+    stat('Network out', rateOut, bytes(t.bytesOut) + ' in all'),
+    stat('World objects', o.world ?? '–', `${o.network ?? '–'} networked, ${o.inventories ?? '–'} inventories`)
+  );
+  const how = s.network === 'ip' ? `direct IP on UDP ${s.port}` : s.network === 'steam' ? 'Steam invite code' : `Steam invite code and direct IP on UDP ${s.port}`;
+  const tables = s.tables || {}, world = s.world || {};
+  const where = [['World', s.save], ['Planet', s.planet], ['World seed', world.seed ?? '–']];
+  $('info').replaceChildren(...pairs([
+    ['Server', `pcds-server ${s.serverVersion}`], ['Game version', s.gameVersion],
+    ['Game tables', `${tables.version}${tables.buildId ? `, game build ${tables.buildId}` : ''}`],
+    ...where, ['Network', how], ['Steam', s.steam ? 'on (DLC available)' : 'off'],
+    ['Autosave', s.autosaveMinutes ? `every ${s.autosaveMinutes} min` : 'off'],
+    ['Rules changed', s.rules.length ? s.rules.join(', ') : 'none: the game\'s own behaviour']
+  ]));
+  $('worldInfo').replaceChildren(...pairs(where));
+  $('units').replaceChildren(table(['Unit', 'Value', 'Per second'],
+    Object.entries(s.units || {}).map(([k, u]) => [k, cell(number(u.value), 'num'), cell(number(u.perSecond), 'num')]), 'No units'));
+  $('worldSettings').replaceChildren(table(['Setting', 'Value'],
+    Object.entries(world.settings || {}).map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v) : String(v)]), 'No settings'));
+  $('invitePanel').hidden = !s.inviteCode;
+  $('inviteCode').textContent = s.inviteCode || '';
 }
 
-let settingsLoaded = false;
+const playerName = p => p.name || `(joining, client ${p.id})`;
+function renderPlayers(s) {
+  const rows = s.players.map(p => {
+    const g = p.gauges ? p.gauges.slice(0, 3).map(v => Math.round(v)).join(' / ') : '–';
+    const kick = h('button', { class: 'small', onclick: () => act('playersMsg', `Kicked ${playerName(p)}`, () => api('POST', '/api/kick', { player: String(p.id) })) }, 'Kick');
+    const ban = h('button', { class: 'small danger', onclick: () => { if (confirm(`Ban ${playerName(p)}?`)) act('playersMsg', `Banned ${playerName(p)}`, () => api('POST', '/api/ban', { player: String(p.id) })); } }, 'Ban');
+    return [playerName(p), p.steamId ? `Steam ${p.steamId}` : `client ${p.id}`, p.verified ? 'Steam' : p.ip, p.status,
+      cell(g, 'num'), cell(pos(p.position), 'num'), cell(duration(p.connectedSeconds), 'num'), h('td', { class: 'row' }, kick, ban)];
+  });
+  $('players').replaceChildren(table(['Name', 'ID', 'Joined via', 'Status', 'O₂ / water / health', 'Position (x, y, z)', 'Online', ''], rows, 'Nobody online'));
+  const ready = s.players.filter(p => p.status !== 'joining');
+  for (const [id, first] of [['tpPlayer', 'Player…'], ['tpTo', 'Copy the position of…']]) {
+    const sel = $(id), keep = sel.value;
+    sel.replaceChildren(h('option', { value: '' }, first), ...ready.map(p => h('option', { value: String(p.id) }, playerName(p))));
+    sel.value = ready.some(p => String(p.id) === keep) ? keep : '';
+  }
+  drawMap(ready);
+  const banned = [...s.access.bannedNames, ...s.access.bannedIPs];
+  $('bans').replaceChildren(table(['Entry', ''], banned.map(b => [b,
+    h('td', {}, h('button', { class: 'small', onclick: () => act('modMsg', `Unbanned ${b}`, () => api('POST', '/api/unban', { value: b })) }, 'Unban'))]), 'Nobody banned'));
+}
+
 async function refresh() {
   if (!token) { showLogin(); return; }
   try {
     const s = await api('GET', '/api/status');
     $('login').hidden = true; $('app').hidden = false;
     if (s.state !== 'running') { $('subtitle').textContent = 'Server is starting…'; return; }
-    const how = s.network === 'ip' ? `direct IP on UDP ${s.port}` : s.network === 'steam' ? 'Steam invite code' : `Steam invite code and direct IP on UDP ${s.port}`;
-    $('subtitle').textContent = `World ${s.save} · ${how}${s.steam ? ' · Steam on (DLC available)' : ' · Steam off'}`;
-    $('invitePanel').hidden = !s.inviteCode;
-    $('inviteCode').textContent = s.inviteCode || '';
-    $('sPlayers').textContent = s.players.length;
-    $('sUptime').textContent = duration(s.uptimeSeconds);
-    $('sFps').textContent = `${s.fps} / ${s.tickRate}`;
-    $('sVersion').textContent = s.gameVersion;
-    renderPlayers(s.players);
-    if (!accessDirty) fillAccess(s.access);
-    if (!settingsLoaded) { $('autosave').value = s.autosaveMinutes; $('tick').value = s.tickRate; settingsLoaded = true; }
+    status = s;
+    $('subtitle').textContent = `World ${s.save} · planet ${s.planet} · ${s.players.length} online`;
+    renderOverview(s);
+    renderPlayers(s);
   } catch (e) {
     if (e.message !== 'token rejected') $('subtitle').textContent = 'Server not responding: ' + e.message;
   }
 }
 
-$('copyCode').onclick = () => navigator.clipboard.writeText($('inviteCode').textContent).then(() => note('worldMsg', 'Invite code copied'), () => note('worldMsg', 'Copy failed; select the code instead', true));
+// ---- map: buildings from GET /api/map when the tab opens, players at every refresh ----
+let buildings = [];
+function drawMap(ready) {
+  const map = $('map');
+  const players = ready.filter(p => p.position).map(p => [p.position[0], p.position[2], playerName(p)]);
+  const points = [...buildings, ...players];
+  if (!points.length) { map.removeAttribute('viewBox'); map.replaceChildren(svg('text', { x: 12, y: 28, 'font-size': 14 }, 'No buildings or players to show')); return; }
+  let [x0, z0, x1, z1] = [Infinity, Infinity, -Infinity, -Infinity];
+  for (const [x, z] of points) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); }
+  const pad = Math.max(20, (x1 - x0) * 0.05, (z1 - z0) * 0.05);
+  [x0, z0, x1, z1] = [x0 - pad, z0 - pad, x1 + pad, z1 + pad];
+  const r = Math.max(x1 - x0, z1 - z0) / 300;
+  // North (+z) up: the SVG's y is -z.
+  map.setAttribute('viewBox', `${x0} ${-z1} ${x1 - x0} ${z1 - z0}`);
+  map.replaceChildren(
+    ...buildings.map(([x, z]) => svg('circle', { class: 'b', cx: x, cy: -z, r })),
+    ...players.flatMap(([x, z, name]) => [svg('circle', { class: 'p', cx: x, cy: -z, r: r * 3, 'stroke-width': r }),
+      svg('text', { x: x + r * 4, y: -z + r * 1.5, 'font-size': r * 10 }, name)]));
+}
+async function loadMap() {
+  try {
+    const m = await api('GET', '/api/map');
+    buildings = m.buildings;
+    $('mapNote').textContent = `Planet ${m.planet} seen from above (x to the right, z up): ${m.buildings.length} buildings in grey, players in green.`;
+  } catch (e) { $('mapNote').textContent = e.message; }
+  if (status) drawMap(status.players.filter(p => p.status !== 'joining'));
+}
+$('tpTo').onchange = () => {
+  const p = status && status.players.find(p => String(p.id) === $('tpTo').value);
+  if (p && p.position) [$('tpX').value, $('tpY').value, $('tpZ').value] = p.position;
+};
+$('tpGo').onclick = () => {
+  const player = $('tpPlayer').value, ids = ['tpX', 'tpY', 'tpZ'];
+  if (!player) return note('tpMsg', 'Pick a player', true);
+  if (ids.some(id => $(id).value === '')) return note('tpMsg', 'Give x, y and z', true);
+  const position = ids.map(id => Number($(id).value)), name = $('tpPlayer').selectedOptions[0].textContent;
+  act('tpMsg', `${name} sent to ${pos(position)}`, () => api('POST', '/api/teleport', { player, position }));
+};
+
+// ---- world ----
+async function loadWorlds() {
+  try {
+    const w = await api('GET', '/api/worlds');
+    $('worlds').replaceChildren(table(['World', 'Size', 'Saved'], w.worlds.map(x => [x.name === w.current ? `${x.name} (running)` : x.name, cell(bytes(x.bytes), 'num'), when(x.modified)]), 'No worlds found'));
+    $('backups').replaceChildren(table(['Backup', 'Size', 'Made'], w.backups.slice().reverse().map(x => [x.name, cell(bytes(x.bytes), 'num'), when(x.modified)]), 'No backups yet'));
+  } catch (e) { note('worldMsg', e.message, true); }
+}
+$('saveWorld').onclick = () => act('worldMsg', 'Save started', () => api('POST', '/api/save'));
+$('stopServer').onclick = () => { if (confirm('Save the world and stop the server?')) act('worldMsg', 'Stopping: the server saves, then quits', () => api('POST', '/api/stop')); };
+
+// ---- config: drawn from the schema GET /api/config serves; no setting is named here ----
+let edits = {}, inputs = new Map(), errors = new Map();
+function label(key) {
+  const s = key.split('.').pop().replace(/([a-z])([A-Z])(?=[a-z])/g, (_, a, b) => a + ' ' + b.toLowerCase()).replace(/([a-z])([A-Z])/g, '$1 $2');
+  return s[0].toUpperCase() + s.slice(1);
+}
+function shown(k, v) {
+  if (v === null || v === undefined) return '';
+  if (k.type === 'float') return number(v);
+  if (k.type === 'list') return v.join('\n');
+  if (k.type === 'map') return Object.entries(v).map(([a, b]) => `${a} = ${b}`).join('\n');
+  return String(v);
+}
+function put(el, k, v) { if (k.type === 'bool') el.checked = !!v; else el.value = shown(k, v); }
+function read(el, k) {
+  if (k.type === 'bool') return el.checked;
+  const s = el.value.trim();
+  if (k.type === 'list') return s.split(/[\n,]/).map(x => x.trim()).filter(Boolean);
+  // A line that is not "name = number" goes as null: the server names the setting it refuses.
+  if (k.type === 'map') return Object.fromEntries(s.split('\n').map(x => x.trim()).filter(Boolean).map(x => { const m = x.match(/^(\S+?)\s*[=:]\s*(\S+)$/); return m ? [m[1], Number(m[2])] : [x, null]; }));
+  if (s === '') return null;
+  return k.type === 'int' || k.type === 'float' ? Number(s) : s;
+}
+function control(k) {
+  let el;
+  if (k.type === 'bool') el = h('input', { type: 'checkbox' });
+  else if (k.type === 'enum') el = h('select', {}, k.default === null ? h('option', { value: '' }, '(default)') : null, k.values.map(v => h('option', { value: v }, v)));
+  else if (k.type === 'list' || k.type === 'map') el = h('textarea', { placeholder: k.type === 'map' ? 'name = number, one per line' : 'one per line' });
+  else {
+    const numeric = k.type === 'int' || k.type === 'float';
+    el = h('input', { type: numeric ? 'number' : 'text', placeholder: k.default === null ? 'unset' : shown(k, k.default) });
+    if (numeric) { el.step = k.type === 'int' ? '1' : 'any'; if (k.min !== undefined) { el.min = k.min; el.max = k.max; } }
+  }
+  el.id = 'knob-' + k.key;
+  put(el, k, k.value);
+  el.addEventListener(k.type === 'bool' || k.type === 'enum' ? 'change' : 'input', () => { edits[k.key] = read(el, k); dirty(); });
+  return el;
+}
+function knobCard(k) {
+  // A secret is never shown: an empty field, whose value replaces it.
+  const secretSet = k.secret && k.value === '(set)';
+  if (k.secret && !k.readOnly) k = { ...k, value: null, description: k.description + (secretSet ? ' Set: type a new value to replace it, Reset to clear it.' : ' Not set.') };
+  // An unset value (null) is the default.
+  const same = k.value === null || JSON.stringify(k.value) === JSON.stringify(k.default);
+  const err = h('div', { class: 'err' });
+  errors.set(k.key, err);
+  let body;
+  if (k.readOnly) {
+    body = h('div', { class: 'ro' }, k.value === null ? '(not set)' : shown(k, k.value), k.unit ? ' ' + k.unit : '');
+  } else {
+    const el = control(k);
+    inputs.set(k.key, el);
+    const reset = h('button', { class: 'small', title: 'Back to the default (Save applies it)', disabled: same, onclick: () => { put(el, k, k.default); edits[k.key] = null; dirty(); } }, 'Reset');
+    for (const ev of ['input', 'change']) el.addEventListener(ev, () => { reset.disabled = false; });
+    body = h('div', { class: 'with-unit' }, el, k.unit ? h('span', { class: 'n' }, k.unit) : null, reset);
+  }
+  const range = k.min !== undefined && k.type !== 'map' ? `, ${number(k.min)} to ${number(k.max)}` : '';
+  const def = `Default ${k.default === null ? 'unset' : shown(k, k.default).replace(/\n/g, ', ') || 'empty'}${range}.`;
+  return h('div', { class: 'knob' },
+    h('div', { class: 'head' }, h('label', { class: 'name', htmlFor: 'knob-' + k.key }, label(k.key)), label(k.key) === k.key ? null : h('code', {}, k.key),
+      h('span', { class: 'badge ' + (k.live ? 'live' : 'restart') }, k.live ? 'live' : 'restart'), same ? null : h('span', { class: 'badge changed' }, 'changed')),
+    body, err, h('p', { class: 'desc' }, k.description), h('p', { class: 'desc' }, def, k.readOnly ? ' ' + k.readOnly : null));
+}
+function renderConfig(list) {
+  edits = {}; inputs = new Map(); errors = new Map();
+  const groups = new Map();
+  for (const k of list) groups.set(k.group, [...(groups.get(k.group) || []), k]);
+  $('knobs').replaceChildren(...[...groups].map(([g, ks]) => h('section', { class: 'panel' }, h('h2', {}, g), h('div', { class: 'knobs' }, ks.map(knobCard)))));
+  dirty();
+}
+function dirty() { const n = Object.keys(edits).length; $('saveConfig').disabled = !n; $('saveConfig').textContent = n ? `Save ${n} change${n > 1 ? 's' : ''}` : 'Save changes'; }
+async function loadConfig() {
+  try { renderConfig((await api('GET', '/api/config')).knobs); note('configMsg', ''); } catch (e) { note('configMsg', e.message, true); }
+}
+$('saveConfig').onclick = async () => {
+  for (const e of errors.values()) e.textContent = '';
+  try { renderConfig((await api('POST', '/api/config', edits)).knobs); note('configMsg', 'Saved'); refresh(); }
+  catch (e) {
+    note('configMsg', e.message, true);
+    if (errors.has(e.key)) { errors.get(e.key).textContent = e.message; inputs.get(e.key)?.focus(); }
+  }
+};
+$('discardConfig').onclick = loadConfig;
+
+// ---- tools ----
+async function loadLogs() {
+  try {
+    const l = await api('GET', '/api/logs'), pre = $('logs');
+    $('logsNote').textContent = l.note || `The last ${l.lines.length} lines (${l.source}).`;
+    pre.textContent = l.lines.join('\n');
+    pre.scrollTop = pre.scrollHeight;
+  } catch (e) { $('logsNote').textContent = e.message; }
+}
+$('logsRefresh').onclick = loadLogs;
+$('chatSend').onclick = () => act('chatMsg', 'Sent', async () => { await api('POST', '/api/chat', { text: $('chatText').value }); $('chatText').value = ''; });
+$('chatText').onkeydown = e => { if (e.key === 'Enter') $('chatSend').click(); };
+$('modKick').onclick = () => act('modMsg', `Kicked ${$('modPlayer').value}`, () => api('POST', '/api/kick', { player: $('modPlayer').value }));
+$('modBan').onclick = () => { if (confirm(`Ban ${$('modPlayer').value}?`)) act('modMsg', `Banned ${$('modPlayer').value}`, () => api('POST', '/api/ban', { player: $('modPlayer').value })); };
+$('modUnbanGo').onclick = () => act('modMsg', `Unbanned ${$('modUnban').value}`, () => api('POST', '/api/unban', { value: $('modUnban').value }));
+
+$('copyCode').onclick = () => navigator.clipboard.writeText($('inviteCode').textContent).then(() => note('inviteMsg', 'Invite code copied'), () => note('inviteMsg', 'Copy failed; select the code instead', true));
 $('tokenSave').onclick = () => {
   token = $('tokenInput').value.trim();
   try { localStorage.setItem('pcdsToken', token); } catch (e) {}
   refresh();
 };
-$('saveAccess').onclick = () => act('accessMsg', 'Access lists saved; players who no longer qualify were kicked', async () => {
-  await api('POST', '/api/access', { allowedIPs: lines('allowedIPs'), whitelist: lines('whitelist'), bannedNames: lines('bannedNames'), bannedIPs: lines('bannedIPs') });
-  accessDirty = false;
-});
-$('reloadAccess').onclick = () => { accessDirty = false; refresh(); };
-$('saveSettings').onclick = () => act('worldMsg', 'Settings applied', () => api('POST', '/api/settings', { autosaveMinutes: Number($('autosave').value), tickRate: Number($('tick').value) }));
-$('saveWorld').onclick = () => act('worldMsg', 'Save started', () => api('POST', '/api/save'));
-$('stopServer').onclick = () => { if (confirm('Save the world and stop the server?')) act('worldMsg', 'Stopping: the server saves, then quits', () => api('POST', '/api/stop')); };
 
 refresh();
 setInterval(refresh, 2000);

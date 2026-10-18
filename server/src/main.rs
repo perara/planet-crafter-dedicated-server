@@ -26,6 +26,7 @@
 //!   PCDS_RULES        server rules file, default rules.json next to the save (rules.rs)
 //!   PCDS_WEB          the web GUI page, default web/index.html next to the binary
 //!   PCDS_TRACE        log every incoming message and RPC
+//!   PCDS_UNIT         the systemd user unit pcds runs it as (the admin page's log)
 
 mod animals;
 #[cfg(test)]
@@ -34,6 +35,8 @@ mod access;
 mod admin;
 mod chathooks;
 mod cli;
+mod config;
+mod dashboard;
 mod data;
 mod deconstruct;
 mod energy;
@@ -115,6 +118,11 @@ enum Link {
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+/// The autosave interval a start begins with: PCDS_AUTOSAVE, else 5 minutes.
+fn autosave_start() -> u64 {
+    env("PCDS_AUTOSAVE").and_then(|s| s.parse().ok()).unwrap_or(5).min(MAX_AUTOSAVE)
 }
 
 /// The game's tables in DATA_DIR (data/<version>/); without them nothing runs.
@@ -268,6 +276,7 @@ fn main() {
 fn serve(dir: String, save_path: String) {
     let (net_data, data, spec) = tables(&dir);
     let scenes = scene_tables(&dir, &net_data, &data);
+    let build_id = std::fs::read_to_string(format!("{dir}/buildid")).ok().map(|b| b.trim().to_string());
     let save = SaveFile::load(&save_path).unwrap_or_else(|e| {
         match e.kind() {
             std::io::ErrorKind::NotFound => eprintln!("no save {save_path}: make a new world with `pcds new-save {save_path} {dir}`"),
@@ -296,7 +305,7 @@ fn serve(dir: String, save_path: String) {
     let mut game = Game::new(net_data, data, spec, save, scenes);
     rules::start(&mut game, loaded_rules, rules_path);
     game.access = access::Access::load(Some(env("PCDS_ACCESS").unwrap_or_else(|| beside_save("access.json"))));
-    let mut autosave_minutes: u64 = env("PCDS_AUTOSAVE").and_then(|s| s.parse().ok()).unwrap_or(5).min(MAX_AUTOSAVE);
+    let mut autosave_minutes = autosave_start();
     game.session_number = session_number;
     println!("world: {} world objects, {} network objects, planet {}, game {version}", game.wos.len(), game.net.objects.len(), game.planet_id());
 
@@ -460,6 +469,7 @@ fn serve(dir: String, save_path: String) {
             // Gone or kicked: nothing more from it reaches the game (the reason still goes out).
             let kicked = pending_drop.iter().any(|(c, _)| *c == client) || game.kicks.iter().any(|(c, _)| *c == client);
             if links.contains_key(&client) && !kicked {
+                dashboard::BYTES_IN.fetch_add(batch.len() as u64, Ordering::Relaxed);
                 let before = game.net.out.len();
                 guarded(&mut game, client, &save_path, |game| game.receive(client, &batch));
                 if game.net.out[before.min(game.net.out.len())..].iter().any(|(to, _, _)| to.reaches(client)) && !urgent.contains(&client) {
@@ -534,10 +544,10 @@ fn serve(dir: String, save_path: String) {
         pending_drop.retain(|(_, due)| *due > now);
         if let Some(rx) = &admin {
             while let Ok(request) = rx.try_recv() {
-                let ctx = Status { invite_code: invite_code.as_deref(), network, port, started, autosave_minutes, loop_rate: loops.2, busy: busy_last, save_path: &save_path };
+                let ctx = Status { invite_code: invite_code.as_deref(), network, port, started, autosave_minutes, loop_rate: loops.2, busy: busy_last, save_path: &save_path, build_id: build_id.as_deref() };
                 let (status, body) = admin_request(&mut game, &request, &ctx, &stop, &mut autosave_minutes, &links);
                 let _ = request.reply.send((status, body));
-                if request.path == "/api/settings" {
+                if autosave_minutes != ctx.autosave_minutes {
                     next_save = Instant::now() + Duration::from_secs(autosave_minutes.max(1) * 60);
                 }
             }
@@ -577,6 +587,8 @@ struct Status<'a> {
     /// The last second's work time and longest loop.
     busy: (Duration, Duration),
     save_path: &'a str,
+    /// The tables' build id (DATA_DIR/buildid).
+    build_id: Option<&'a str>,
 }
 
 /// A client named by the API: by name (any case) or by client id.
@@ -606,24 +618,18 @@ fn admin_request(game: &mut Game, r: &admin::Request, ctx: &Status, stop: &Atomi
     let field = |k: &str| r.body[k].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
     match (r.method.as_str(), r.path.as_str()) {
         ("GET", "/api/status") => {
-            let players: Vec<serde_json::Value> = game
+            let mut players: Vec<serde_json::Value> = game
                 .clients
                 .values()
                 .map(|c| {
-                    let ip = match links.get(&c.id) {
+                    let via = match links.get(&c.id) {
                         Some(Link::Steam { .. }) => "steam".to_string(),
                         _ => c.ip.clone().unwrap_or_default(),
                     };
-                    serde_json::json!({
-                        "id": c.id,
-                        "name": c.ready.as_ref().map(|s| s.name.clone()),
-                        "steamId": c.verified_steam_id.map(|i| i.to_string()),
-                        "verified": c.verified_steam_id.is_some(),
-                        "ip": ip,
-                        "connectedSeconds": c.since.elapsed().as_secs(),
-                    })
+                    dashboard::player(game, c, via)
                 })
                 .collect();
+            players.sort_by_key(|p| p["id"].as_u64());
             let terraformation = units::value(game, units::Kind::Terraformation, 0);
             let planet_units: serde_json::Map<String, serde_json::Value> = game.units.planet(game.planet_hash()).map(|p| p.units.iter().map(|u| (u.kind.unit_type().to_string(), serde_json::json!({"value": u.total, "perSecond": u.per_sec}))).collect()).unwrap_or_default();
             let body = serde_json::json!({
@@ -647,6 +653,12 @@ fn admin_request(game: &mut Game, r: &admin::Request, ctx: &Status, stop: &Atomi
                 "units": planet_units,
                 "players": players,
                 "access": game.access.lists,
+                "serverVersion": env!("CARGO_PKG_VERSION"),
+                "tables": {"version": game.net_data.game_version, "buildId": ctx.build_id},
+                "world": {"seed": game.save.settings["worldSeed"], "settings": game.save.settings},
+                "objects": {"world": game.wos.len(), "network": game.net.objects.len(), "inventories": game.inventories.len()},
+                "process": dashboard::process(),
+                "traffic": dashboard::traffic(),
             });
             (200, body.to_string())
         }
@@ -706,6 +718,25 @@ fn admin_request(game: &mut Game, r: &admin::Request, ctx: &Status, stop: &Atomi
             }
             ok()
         }
+        // Every setting with its schema entry and value; a change of any, {"speed.growth": 2}.
+        ("GET", "/api/config") => (200, config::get(game, *autosave).to_string()),
+        ("POST", "/api/config") => match config::set(game, autosave, &r.body) {
+            Ok(()) => (200, config::get(game, *autosave).to_string()),
+            Err(e) => (400, e.to_string()),
+        },
+        ("POST", "/api/teleport") => match dashboard::body::<dashboard::Teleport>(&r.body) {
+            Ok(t) if !t.position.iter().all(|v| v.is_finite()) => (400, "{\"error\":\"position: three finite numbers\"}".into()),
+            Ok(t) => match find_client(game, &t.player) {
+                Some(c) if status::teleport(game, c, t.position) => {
+                    println!("client {c}: teleported to {:?} (admin)", t.position);
+                    ok()
+                }
+                _ => (400, "{\"error\":\"player not online and ready\"}".into()),
+            },
+            Err(e) => e,
+        },
+        ("GET", "/api/worlds") => (200, dashboard::worlds(ctx.save_path).to_string()),
+        ("GET", "/api/map") => (200, dashboard::map(game).to_string()),
         _ => (404, "{\"error\":\"unknown endpoint\"}".into()),
     }
 }
@@ -758,6 +789,7 @@ fn send_mail(mail: &mut idmap::FxHashMap<u64, wire::Batch>, clients: &[u64], lin
     for client in clients {
         let Some(b) = mail.remove(client).filter(|b| !b.is_empty()) else { continue };
         let batch = b.finish();
+        dashboard::BYTES_OUT.fetch_add(batch.len() as u64, Ordering::Relaxed);
         match links.get(client) {
             Some(Link::Steam { connection, .. }) => send(connection, &batch),
             Some(Link::Ip(token, _)) => {
@@ -843,7 +875,7 @@ mod tests {
         let Some(mut game) = game::test_game(game::tests::save()) else { return };
         let post = |game: &mut Game, body: serde_json::Value| {
             let request = admin::Request { method: "POST".into(), path: "/api/rules".into(), body, reply: std::sync::mpsc::channel().0 };
-            let ctx = Status { invite_code: None, network: "ip", port: 0, started: Instant::now(), autosave_minutes: 5, loop_rate: 0, busy: Default::default(), save_path: "" };
+            let ctx = Status { invite_code: None, network: "ip", port: 0, started: Instant::now(), autosave_minutes: 5, loop_rate: 0, busy: Default::default(), save_path: "", build_id: None };
             admin_request(game, &request, &ctx, &AtomicBool::new(false), &mut 5, &HashMap::new()).0
         };
         assert_eq!(post(&mut game, serde_json::json!({"speed": {"growth": 2}})), 200);
@@ -857,11 +889,104 @@ mod tests {
     fn autosave_minutes_are_clamped() {
         let Some(mut game) = game::test_game(game::tests::save()) else { return };
         let request = admin::Request { method: "POST".into(), path: "/api/settings".into(), body: serde_json::json!({"autosaveMinutes": 160_000_000_000_000_000u64}), reply: std::sync::mpsc::channel().0 };
-        let ctx = Status { invite_code: None, network: "ip", port: 0, started: Instant::now(), autosave_minutes: 5, loop_rate: 0, busy: Default::default(), save_path: "" };
+        let ctx = Status { invite_code: None, network: "ip", port: 0, started: Instant::now(), autosave_minutes: 5, loop_rate: 0, busy: Default::default(), save_path: "", build_id: None };
         let mut autosave = 5;
         admin_request(&mut game, &request, &ctx, &AtomicBool::new(false), &mut autosave, &HashMap::new());
         assert_eq!(autosave, MAX_AUTOSAVE);
         let _ = Instant::now() + Duration::from_secs(autosave * 60);
+    }
+
+    /// An admin API call as the game loop answers it: (status, JSON answer).
+    fn call(game: &mut Game, method: &str, path: &str, body: serde_json::Value, autosave: &mut u64) -> (u16, serde_json::Value) {
+        let request = admin::Request { method: method.into(), path: path.into(), body, reply: std::sync::mpsc::channel().0 };
+        let ctx = Status { invite_code: None, network: "ip", port: 0, started: Instant::now(), autosave_minutes: *autosave, loop_rate: 0, busy: Default::default(), save_path: "", build_id: None };
+        let (status, answer) = admin_request(game, &request, &ctx, &AtomicBool::new(false), autosave, &HashMap::new());
+        (status, serde_json::from_str(&answer).unwrap())
+    }
+
+    #[test]
+    fn the_config_endpoint_round_trips() {
+        use serde_json::json;
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let mut autosave = 5;
+        let (status, config) = call(&mut game, "GET", "/api/config", json!({}), &mut autosave);
+        assert_eq!(status, 200);
+        let knobs = config["knobs"].as_array().unwrap();
+        let knob = |key: &str| knobs.iter().find(|k| k["key"] == key).unwrap_or_else(|| panic!("{key}")).clone();
+        assert_eq!((knob("speed.growth")["type"].as_str(), knob("speed.growth")["default"].as_f64(), knob("speed.growth")["live"].as_bool()), (Some("float"), Some(1.0), Some(true)));
+        assert_eq!(knob("PCDS_ADMIN_TOKEN")["live"], false);
+        assert!(knob("PCDS_LISTEN")["readOnly"].is_string());
+        // Every value the page can change, posted back as read: accepted, nothing changes.
+        let writable: serde_json::Map<String, serde_json::Value> = knobs.iter().filter(|k| k["readOnly"].is_null()).map(|k| (k["key"].as_str().unwrap().to_string(), k["value"].clone())).collect();
+        assert!(writable.contains_key("access.bannedNames") && writable.contains_key("server.autosaveMinutes"));
+        assert_eq!(call(&mut game, "POST", "/api/config", json!(writable), &mut autosave).1, config);
+        // A change of each kind of setting, read back.
+        let change = json!({"speed.growth": 2.0, "death.consequences": "DropAllItems", "limits.buildings": {"Drill1": 3}, "access.whitelist": ["Ann"], "server.autosaveMinutes": 10});
+        let (status, after) = call(&mut game, "POST", "/api/config", change.clone(), &mut autosave);
+        assert_eq!(status, 200, "{after}");
+        for (key, value) in change.as_object().unwrap() {
+            let got = after["knobs"].as_array().unwrap().iter().find(|k| k["key"] == key.as_str()).unwrap()["value"].clone();
+            assert_eq!(&got, value, "{key}");
+        }
+        assert_eq!((game.rules.speed.growth, game.access.lists.whitelist.clone(), autosave), (2.0, vec!["Ann".to_string()], 10));
+        assert_eq!(call(&mut game, "GET", "/api/config", json!({}), &mut autosave).1, after);
+        // A map is replaced, not merged; null puts back the default.
+        call(&mut game, "POST", "/api/config", json!({"limits.buildings": {"Vegetube1": 1}}), &mut autosave);
+        assert_eq!(game.rules.limits.buildings.keys().collect::<Vec<_>>(), ["Vegetube1"]);
+        let resets: serde_json::Map<String, serde_json::Value> = writable.keys().map(|k| (k.clone(), serde_json::Value::Null)).collect();
+        assert_eq!(call(&mut game, "POST", "/api/config", json!(resets), &mut autosave).0, 200);
+        assert_eq!((game.rules.clone(), game.access.lists.whitelist.len(), autosave), (rules::Rules::default(), 0, autosave_start()));
+        // Refused, with the setting named, and nothing of the change applied.
+        for (bad, key) in [
+            (json!({"speed.growth": 3, "gauges.foodDrain": -1}), "gauges.foodDrain"),
+            (json!({"speed.growth": 3, "limits.buildings": {"Iron": 1}}), "limits.buildings"),
+            (json!({"speed.growth": 3, "PCDS_LISTEN": "0.0.0.0:1"}), "PCDS_LISTEN"),
+            (json!({"speed.growth": 3, "speed.grwoth": 1}), "speed.grwoth"),
+            (json!({"speed.growth": 3, "access.whitelist": "Ann"}), "access.whitelist"),
+            (json!({"speed.growth": 3, "server.autosaveMinutes": 100000}), "server.autosaveMinutes"),
+        ] {
+            let (status, answer) = call(&mut game, "POST", "/api/config", bad.clone(), &mut autosave);
+            assert_eq!((status, answer["key"].as_str()), (400, Some(key)), "{bad}: {answer}");
+            assert_eq!(game.rules.speed.growth, 1.0, "{bad}");
+        }
+    }
+
+    #[test]
+    fn players_list_teleport_and_chat_through_the_api() {
+        use serde_json::json;
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let mut autosave = 5;
+        let object = game::tests::join(&mut game, 1, "Ann");
+        game.net.objects.get_mut(&object).unwrap().position = [560.0, 3.0, 500.0];
+        game.connect(2, None, false, Some("10.0.0.2".into()));
+        let (status, s) = call(&mut game, "GET", "/api/status", json!({}), &mut autosave);
+        assert_eq!(status, 200);
+        let players = s["players"].as_array().unwrap();
+        assert_eq!(players.iter().map(|p| (p["id"].as_u64().unwrap(), p["status"].as_str().unwrap())).collect::<Vec<_>>(), [(1, "ready"), (2, "joining")]);
+        assert_eq!((players[0]["name"].as_str(), players[0]["position"].clone(), players[0]["gauges"].as_array().map(Vec::len)), (Some("Ann"), json!([560.0, 3.0, 500.0]), Some(4)));
+        assert_eq!((players[1]["ip"].as_str(), players[1]["position"].is_null()), (Some("10.0.0.2"), true));
+        for key in ["serverVersion", "tables", "world", "objects", "process", "traffic", "units"] {
+            assert!(!s[key].is_null(), "{key}");
+        }
+        // Teleport: the game's respawn move, to that player only.
+        let before = game.net.out.len();
+        assert_eq!(call(&mut game, "POST", "/api/teleport", json!({"player": "ann", "position": [10.0, 20.5, -30.0]}), &mut autosave).0, 200);
+        let sent: Vec<_> = game.net.out[before..].iter().filter(|(_, kind, _)| *kind == protocol::CLIENT_RPC).collect();
+        assert_eq!(sent.len(), 1);
+        let (to, _, body) = sent[0];
+        assert!(to.reaches(1) && !to.reaches(2));
+        let mut r = wire::Reader::new(body);
+        assert_eq!(r.packed_u64(), Some(object));
+        r.packed_u16();
+        let method = r.packed_u32().unwrap();
+        assert_eq!(game.net.spec.get(method).unwrap().name, "PlayerStatus.DieAndRespawnClientRpc");
+        assert_eq!(game.net.spec.decode(method, r.rest()).unwrap(), vec![json!(false), json!(0), json!([10.0, 20.5, -30.0])]);
+        for bad in [json!({"player": "2", "position": [0, 0, 0]}), json!({"player": "Bob", "position": [0, 0, 0]}), json!({"player": "Ann"}), json!({"player": "Ann", "position": [0, 0]}), json!({"player": "Ann", "position": [0, 0, 0], "x": 1})] {
+            assert_eq!(call(&mut game, "POST", "/api/teleport", bad.clone(), &mut autosave).0, 400, "{bad}");
+        }
+        // The map: this planet's buildings.
+        let (status, map) = call(&mut game, "GET", "/api/map", json!({}), &mut autosave);
+        assert_eq!((status, map["planet"].as_str(), map["buildings"].is_array()), (200, Some("Prime"), true));
     }
 
     /// The startup copy is made even when a spaced backup was just taken.

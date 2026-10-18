@@ -4,9 +4,10 @@
 //! file changes nothing; a file with a typo or an out-of-range value stops the server at start
 //! (and is refused by the API) rather than being half applied.
 //!
-//! Adding a rule: a field below with its default, its range in `validate`, its use at the one
-//! place the game decides that value (read `game.rules` there), and a line in `changed` when a
-//! change must reach what already exists (not just the next use).
+//! Adding a rule: a field below with its default, its entry in config::KNOBS (type, range, unit,
+//! description: `validate` checks it, the admin page shows it), its use at the one place the
+//! game decides that value (read `game.rules` there), and a line in `changed` when a change
+//! must reach what already exists (not just the next use).
 
 use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
@@ -153,32 +154,11 @@ const HIDDEN: [&str; 3] = ["chat.webhooks", "chat.secret", "chat.exec"];
 pub const CONSEQUENCES: [&str; 4] = ["NoConsequences", "DropSomeItems", "DropAllItems", "DeleteSaveFile"];
 
 impl Rules {
+    /// Every rule as its entry in config::KNOBS says, and the building limits name buildings.
     pub fn validate(&self, data: &crate::gamedata::GameData) -> Result<(), String> {
-        let multiplier = |name: &str, v: f32| if v.is_finite() && (0.0..=100.0).contains(&v) { Ok(()) } else { Err(format!("{name}: {v} is not a multiplier from 0 to 100")) };
-        multiplier("meteo.eventChance", self.meteo.event_chance)?;
-        multiplier("gauges.oxygenDrain", self.gauges.oxygen_drain)?;
-        multiplier("gauges.thirstDrain", self.gauges.thirst_drain)?;
-        multiplier("gauges.foodDrain", self.gauges.food_drain)?;
-        multiplier("speed.terraformation", self.speed.terraformation)?;
-        multiplier("loot.amount", self.loot.amount)?;
-        // A machine or plant at speed 0 would never be due again: from 0.01.
-        for (name, v) in [("speed.machines", self.speed.machines), ("speed.growth", self.speed.growth)] {
-            multiplier(name, v)?;
-            if v < 0.01 {
-                return Err(format!("{name}: {v} is below 0.01"));
-            }
-        }
-        if let Some(s) = self.meteo.material_despawn_seconds.filter(|s| !(s.is_finite() && (0.0..=86_400.0).contains(s))) {
-            return Err(format!("meteo.materialDespawnSeconds: {s} is not 0 to 86400 seconds"));
-        }
-        if let Some(c) = self.death.consequences.as_deref().filter(|c| !CONSEQUENCES.contains(c)) {
-            return Err(format!("death.consequences: {c:?} is not one of {CONSEQUENCES:?}"));
-        }
-        if let Some(p) = self.death.drop_chance.filter(|p| !(p.is_finite() && (0.0..=100.0).contains(p))) {
-            return Err(format!("death.dropChance: {p} is not a percent"));
-        }
-        if self.limits.max_players.is_some_and(|n| !(1..=100).contains(&n)) {
-            return Err("limits.maxPlayers: from 1 to 100".into());
+        let rules = serde_json::to_value(self).map_err(|e| e.to_string())?;
+        for knob in crate::config::KNOBS.iter().filter(|k| k.source == crate::config::Source::Rules) {
+            knob.check(&crate::config::at(&rules, knob.key))?;
         }
         let chat = &self.chat;
         // Never the value in the message: it may hold a token.
@@ -196,12 +176,6 @@ impl Rules {
         }
         if chat.command_prefix.as_deref().is_some_and(|p| p.is_empty() || p.chars().count() > 8 || p.contains(char::is_whitespace)) {
             return Err("chat.commandPrefix: 1 to 8 characters, no spaces (null: no commands)".into());
-        }
-        if !(chat.timeout_seconds.is_finite() && (0.1..=60.0).contains(&chat.timeout_seconds)) {
-            return Err(format!("chat.timeoutSeconds: {} is not 0.1 to 60 seconds", chat.timeout_seconds));
-        }
-        if chat.retries > 10 {
-            return Err(format!("chat.retries: {} is more than 10", chat.retries));
         }
         for group in self.limits.buildings.keys() {
             if !data.group(group).is_some_and(|g| data.groups[g].constructible) {

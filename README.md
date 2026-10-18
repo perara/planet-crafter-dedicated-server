@@ -211,6 +211,19 @@ example `--planet Aqualis`, chooses its options). [compose.yaml](compose.yaml) d
 ./pcds gui                     # the admin web page's address, with its token
 ```
 
+The admin web page has five tabs. **Overview**: players, uptime, loop rate and load, CPU,
+memory, network traffic, object counts, the server, game and table versions, the world, its
+seed and settings, and the terraformation units. **Players**: who is online (ID, how they
+joined, state, gauges, position) with kick, ban and teleport, and a map of the players among the
+buildings. **World**: save now, save and stop, the worlds beside this one and this world's
+backups. **Config**: every setting (rules, access lists, autosave; the `server.env` settings
+read-only), drawn from the server's configuration schema. **Tools**: a chat message to everyone,
+kick, ban and unban by name, and the server log (from the journal when it runs as the `pcds`
+unit). The page uses the admin API: `GET /api/config` lists every setting with its type, range,
+unit, default, value and whether it applies live; `POST /api/config` with
+`{"speed.growth": 2, "access.whitelist": ["Ann"]}` changes any of them (`null`: back to the
+default), all or none.
+
 Access lists live in `run/access.json`: `allowedIPs` (addresses or CIDR ranges allowed to
 connect; empty means everyone), `whitelist` (names or SteamID64s; empty means everyone),
 `bannedNames` and `bannedIPs`. The server reads the file at start and writes it on every ban,
@@ -431,8 +444,10 @@ they walk, craft, drop and pick up items, build, eat, drink, mine, chat and sort
 round trip of every call the server answers. `GET /api/status` shows the server's
 `busyPercent` and `longestLoopMicros` over the last second.
 
-To add a server rule: a field in `src/rules.rs` with its default and range, read where the game
-decides that value, and a line in `rules::changed` when a change must reach what already exists.
+To add a server rule: a field in `src/rules.rs` with its default, its entry in `config::KNOBS`
+(`src/config.rs`: type, range, unit, description; the rules are checked against it and the admin
+page shows it with no page code), read where the game decides that value, and a line in
+`rules::changed` when a change must reach what already exists.
 
 ## License
 

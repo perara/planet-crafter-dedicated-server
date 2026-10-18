@@ -1,8 +1,10 @@
 //! Admin API and web GUI over HTTP on 127.0.0.1, the same endpoints as the plugin server's
 //! (so its web GUI works unchanged): GET /api/status, POST /api/save, /api/stop, /api/kick,
-//! /api/ban, /api/unban, /api/access, /api/settings. Every /api call needs
-//! "Authorization: Bearer <token>". A thread serves HTTP; the game loop answers requests,
-//! but for /api/chat (chathooks.rs), answered here: its long poll must not hold the game loop.
+//! /api/ban, /api/unban, /api/access, /api/settings; and this server's own: GET and POST
+//! /api/rules and /api/config, POST /api/chat and /api/teleport, GET /api/chat/events,
+//! /api/worlds, /api/map and /api/logs (see admin_request in main.rs). Every /api call needs
+//! "Authorization: Bearer <token>". A thread serves HTTP; the game loop answers requests, but
+//! for the logs and the chat (chathooks.rs): a long poll must not hold the game loop.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -129,6 +131,9 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
     if !same(&auth, &format!("Bearer {token}")) {
         return respond(stream, 401, "application/json", "{\"error\":\"missing or wrong token\"}");
     }
+    if method == "GET" && path == "/api/logs" {
+        return respond(stream, 200, "application/json", &logs().to_string());
+    }
     let body: Value = if body.iter().all(u8::is_ascii_whitespace) { Value::Object(Default::default()) } else {
         match serde_json::from_slice(&body) {
             Ok(v) => v,
@@ -146,6 +151,20 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
     match answer.recv_timeout(Duration::from_secs(10)) {
         Ok((status, json)) => respond(stream, status, "application/json", &json),
         Err(_) => respond(stream, 500, "application/json", "{\"error\":\"the game loop did not answer\"}"),
+    }
+}
+
+/// The server's recent output, from the journal of the systemd user unit pcds runs it as
+/// (PCDS_UNIT). Read on the HTTP thread: journalctl takes longer than a game tick.
+fn logs() -> Value {
+    let Some(unit) = std::env::var("PCDS_UNIT").ok().filter(|u| !u.is_empty()) else {
+        return serde_json::json!({ "lines": [], "note": "Not running as a pcds systemd unit: the log is the server's own output (docker logs, the terminal)." });
+    };
+    let unit = format!("{unit}.service");
+    match std::process::Command::new("journalctl").args(["--user", "-u", &unit, "-n", "300", "-o", "short-iso", "--no-pager"]).output() {
+        Ok(out) if out.status.success() => serde_json::json!({ "lines": String::from_utf8_lossy(&out.stdout).lines().collect::<Vec<_>>(), "source": format!("journalctl --user -u {unit}") }),
+        Ok(out) => serde_json::json!({ "lines": [], "note": String::from_utf8_lossy(&out.stderr).trim() }),
+        Err(e) => serde_json::json!({ "lines": [], "note": format!("journalctl: {e}") }),
     }
 }
 
@@ -174,6 +193,13 @@ mod tests {
         assert_eq!((request.method.as_str(), request.path.as_str()), ("GET", "/api/status"));
         request.reply.send((200, "{}".into())).unwrap();
         assert!(client.join().unwrap().starts_with("HTTP/1.1 200"));
+
+        // The logs are answered here, never by the game loop (nothing answers it in this test).
+        let logs = ask(addr, b"GET /api/logs HTTP/1.1\r\nAuthorization: Bearer secret\r\n\r\n");
+        let body: Value = serde_json::from_str(logs.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert!(logs.starts_with("HTTP/1.1 200") && body["lines"].is_array(), "{logs}");
+        assert!(ask(addr, b"GET /api/logs HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 401"));
+        assert!(rx.try_recv().is_err());
 
         // A body past the request limit: closed unanswered, never reaches the game loop.
         let big = [b"POST /api/save HTTP/1.1\r\nAuthorization: Bearer secret\r\nContent-Length: 100000\r\n\r\n".as_slice(), &[b' '; 100_000]].concat();

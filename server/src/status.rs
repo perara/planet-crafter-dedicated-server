@@ -21,6 +21,21 @@ fn var(game: &Game, object: u64, name: &str) -> bool {
     matches!(game.net.get(object, CLASS, name), Some(VarValue::Plain(b)) if b.first() == Some(&1))
 }
 
+pub fn is_dying(game: &Game, object: u64) -> bool {
+    var(game, object, "_isDying")
+}
+
+/// Moves a ready player the one way the game moves a player from the server, as a closing
+/// world-instance portal does (instances.rs): DieAndRespawn without the dying consequences, to
+/// the position. False when the client has no ready player.
+pub fn teleport(game: &mut Game, client: u64, position: [f32; 3]) -> bool {
+    let Some(object) = game.clients.get(&client).filter(|c| c.ready.is_some()).and_then(|c| c.player) else { return false };
+    // DyingConsequencesHandler.Status: what handle_dying_consequences reports when nothing is lost.
+    const NOTHING_LOST: i32 = 0;
+    game.net.rpc(Target::Only(client), object, "PlayerStatus.DieAndRespawnClientRpc", &[json!(false), json!(NOTHING_LOST), json!(position)]);
+    true
+}
+
 /// PlayerStatus.Update for one player (run with the gauges).
 pub fn check_dying(game: &mut Game, _client: u64, object: u64) {
     let g = crate::gauges::values(game, object);
