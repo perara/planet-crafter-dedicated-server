@@ -748,6 +748,25 @@ mod tests {
         assert!(is_inside_an_instance(&g, [1143.0, 268.0, 4400.0]));
     }
 
+    /// The portal opens an instance by RPC: everyone's variable holds it, the save too, and a
+    /// reloaded world has it open still.
+    #[test]
+    fn portals_open_world_instances_by_rpc_and_the_save_keeps_them() {
+        use crate::testkit::*;
+        let Some(mut g) = crate::planets::tests::game() else { return };
+        join(&mut g, 1, "Ann");
+        let a = prime_instance(400_000_032).unwrap();
+        let data = json!([a.seed, a.time_left, a.scene, a.loot_rarity, a.difficulty, a.recipe]);
+        send_scene(&mut g, 1, "WorldInstanceHandler.SetAndOpenWorldInstanceSceneServerRpc", &[data]);
+        let opened = g.ext.planets.instances.opened.clone().expect("opened");
+        assert_eq!((opened.seed, opened.time_left, opened.scene.as_str()), (a.seed, a.time_left - 1, a.scene.as_str()));
+        let (handler, _) = g.net.find_class(HANDLER).unwrap();
+        assert_eq!(var(&g, handler, HANDLER, "_openedWorldInstanceData"), encode_instance(Some(&opened)));
+        assert_eq!(g.save.world["openedInstanceSeed"], json!(a.seed));
+        let g = reload(&mut g);
+        assert_eq!(g.ext.planets.instances.opened.as_ref().map(|o| o.seed), Some(a.seed));
+    }
+
     #[test]
     fn world_instances_open_once_count_down_and_close() {
         let Some(mut g) = crate::planets::tests::game() else { return };

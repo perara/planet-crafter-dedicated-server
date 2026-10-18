@@ -298,6 +298,7 @@
     </nav>
     <div class="foot">
       <button class="small" id="themeBtn" title="Colour theme">Theme: auto</button>
+      <button class="small" id="signOut" title="Forget the admin token in this browser">Sign out</button>
       <span id="footVersion"></span>
     </div>
   </aside>
@@ -336,7 +337,7 @@
               <div class="units" id="units"></div>
             </div>
             <div class="card">
-              <div class="head"><h2>Server</h2><div class="right"><button class="small" id="ovSave">Save world now</button></div></div>
+              <div class="head"><h2>Server</h2><div class="right"><button class="small" id="ovPause">Pause world</button><button class="small" id="ovSave">Save world now</button></div></div>
               <dl class="info" id="info"></dl>
             </div>
           </div>
@@ -428,26 +429,38 @@
       <section class="view" id="view-world" hidden>
         <div class="grid cols2">
           <div class="card">
-            <div class="head"><h2>This world</h2></div>
+            <div class="head"><h2>This world</h2><div class="right"><span id="worldState"></span></div></div>
             <dl class="info" id="worldInfo"></dl>
             <div class="row" style="margin-top:14px">
-              <button class="primary" id="saveWorld">Save world now</button>
-              <button class="danger" id="stopServer">Save and stop server</button>
+              <button class="primary" id="pauseWorld">Pause world</button>
+              <button id="saveWorld">Save now</button>
+              <button id="backupNow">Back up now</button>
+              <button class="danger" id="stopWorld">Stop world</button>
+              <button class="danger ghost" id="stopServer">Shut down server</button>
+            </div>
+            <p class="sub" style="margin:10px 0 0">Pause stops the world's clock: machines, growth, terraformation, day and night, meteo and the players' gauges hold. Players stay in and can still move, build and chat.</p>
+          </div>
+          <div class="card">
+            <div class="head"><h2>Off-site backups (S3)</h2><div class="right"><span id="s3Chip"></span></div></div>
+            <div id="s3Body"></div>
+            <div class="row" style="margin-top:12px">
+              <button id="s3Now">Copy newest backup now</button>
+              <button class="ghost" data-go="config" id="s3Config">Settings under Config › Backup</button>
             </div>
           </div>
-          <div class="card">
-            <div class="head"><h2>World settings</h2></div>
-            <div class="tw" id="worldSettings" style="max-height:420px;overflow:auto"></div>
-          </div>
-          <div class="card">
-            <div class="head"><h2>Worlds</h2><div class="right"><button class="small" id="worldsRefresh">Refresh</button></div></div>
-            <p class="sub">The worlds beside this one. Switch with <code>pcds world use NAME</code> and <code>pcds restart</code>; <code>pcds world new NAME</code> makes one.</p>
-            <div class="tw" id="worlds"></div>
-          </div>
-          <div class="card">
-            <div class="head"><h2>Backups of this world</h2></div>
-            <div class="tw" id="backups" style="max-height:420px;overflow:auto"></div>
-          </div>
+        </div>
+        <div class="card">
+          <div class="head"><h2>Worlds</h2><div class="right"><button class="primary small" id="newWorld">New world</button><button class="small" id="worldsRefresh">Refresh</button></div></div>
+          <p class="sub" id="worldsNote">Every world beside this one: one save file each in worlds/.</p>
+          <div class="tw" id="worlds"></div>
+        </div>
+        <div class="card">
+          <div class="head"><h2>Backups of this world</h2><div class="right"><span class="muted" id="backupsNote"></span></div></div>
+          <div class="tw" id="backups" style="max-height:460px;overflow:auto"></div>
+        </div>
+        <div class="card">
+          <div class="head"><h2>World settings</h2></div>
+          <div class="tw" id="worldSettings" style="max-height:420px;overflow:auto"></div>
         </div>
       </section>
 
@@ -535,8 +548,8 @@ const $ = id => document.getElementById(id);
 const VIEWS = ['overview', 'players', 'map', 'chat', 'world', 'updates', 'config', 'tools'];
 let token = '';
 try {
-  const m = location.hash.match(/token=([0-9A-Za-z]+)/);
-  if (m) { localStorage.setItem('pcdsToken', m[1]); history.replaceState(null, '', location.pathname + '#/overview'); }
+  const m = location.hash.match(/token=([^&]+)/);
+  if (m) { localStorage.setItem('pcdsToken', decodeURIComponent(m[1])); history.replaceState(null, '', location.pathname + '#/overview'); }
   token = localStorage.getItem('pcdsToken') || '';
 } catch (e) {}
 const store = {
@@ -655,6 +668,8 @@ function ask({ title, body, ok, danger }) {
   $('dlgOk').className = danger ? 'danger solid' : 'primary';
   return new Promise(resolve => {
     dlg.onclose = () => resolve(dlg.returnValue === 'ok');
+    // Enter in a field means OK (the form's first button is Cancel).
+    $('dlgBody').onkeydown = e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); dlg.close('ok'); } };
     dlg.returnValue = 'cancel';
     dlg.showModal();
     const first = $('dlgBody').querySelector('input, select');
@@ -677,7 +692,17 @@ function show(name, replace) {
 }
 for (const b of document.querySelectorAll('#nav button')) b.onclick = () => show(b.dataset.view);
 document.addEventListener('click', e => { const go = e.target.closest('[data-go]'); if (go) show(go.dataset.go); });
-window.addEventListener('popstate', () => show(location.hash.replace(/^#\/?/, ''), true));
+window.addEventListener('popstate', () => {
+  // A pcds gui link opened on a page already open: its token is taken, as at a load.
+  const m = location.hash.match(/token=([^&]+)/);
+  if (m) {
+    try { localStorage.setItem('pcdsToken', decodeURIComponent(m[1])); } catch (e) {}
+    location.replace(location.pathname + '#/overview');
+    location.reload();
+    return;
+  }
+  show(location.hash.replace(/^#\/?/, ''), true);
+});
 document.addEventListener('keydown', e => {
   if (e.target.closest('input, textarea, select, dialog') || e.ctrlKey || e.metaKey || e.altKey) return;
   const n = Number(e.key);
@@ -706,7 +731,8 @@ async function refresh() {
     const s = await api('GET', '/api/status');
     failures = 0;
     $('login').hidden = true; $('app').hidden = false;
-    if (s.state !== 'running') { banner('The server is starting: the world is loading…', 'warn'); setPill('warn', 'Starting'); }
+    if (s.state === 'stopped') { status = s; renderStopped(s); }
+    else if (s.state !== 'running') { banner('The server is starting: the world is loading…', 'warn'); setPill('warn', 'Starting'); }
     else { banner(null); status = s; sample(s); render(s); }
   } catch (e) {
     if (!e.auth) { failures++; banner(`Connection lost: ${e.message}. Retrying…`, 'down'); setPill('down', 'Offline'); }
@@ -784,6 +810,7 @@ function renderHeader(s) {
   const flipping = b.phase && b.phase !== 'idle';
   if (flipping) setPill('warn', `Handing over (${b.phase})`);
   else if (u.state === 'busy') setPill('warn', 'Updating');
+  else if (s.held) setPill('warn', 'Paused');
   else setPill('', s.players.length ? `Online · ${s.players.length} playing` : 'Online · idle');
   $('qPlayers').textContent = s.players.length;
   $('qLoop').textContent = `${s.fps}/s · ${s.busyPercent}%`;
@@ -1301,8 +1328,15 @@ $('chatForm').onsubmit = e => {
 };
 
 // ---- world ----
+function renderPauseButtons(s) {
+  for (const id of ['pauseWorld', 'ovPause']) $(id).textContent = s.held ? 'Resume world' : 'Pause world';
+  $('stopWorld').textContent = 'Stop world'; $('stopWorld').className = 'danger';
+  for (const id of ['pauseWorld', 'saveWorld', 'ovPause', 'ovSave', 'newWorld']) $(id).disabled = false;
+}
 function renderWorld(s) {
   const world = s.world || {};
+  $('worldState').replaceChildren(s.held ? h('span', { class: 'chip warn' }, 'paused') : h('span', { class: 'chip ok' }, 'running'));
+  if (s.s3) renderS3(s.s3);
   $('worldInfo').replaceChildren(...pairs([['World', s.save], ['Planet', s.planet], ['World seed', String(world.seed ?? '–')],
     ['Game time', duration(s.gameTime || 0)], ['Autosave', s.autosaveMinutes ? `every ${s.autosaveMinutes} min` : 'off'],
     ['World objects', (s.objects?.world ?? 0).toLocaleString()]]));
@@ -1313,20 +1347,137 @@ function renderWorld(s) {
     $('worldSettings').replaceChildren(table(['Setting', 'Value'], settings.map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v) : String(v)]), 'No settings'));
   }
 }
+let worldsData = null;
 async function loadWorlds() {
   try {
-    const w = await api('GET', '/api/worlds');
-    $('worlds').replaceChildren(table(['World', 'Size', 'Saved'], w.worlds.map(x => [x.name === w.current ? h('td', {}, x.name, ' ', h('span', { class: 'chip ok' }, 'running')) : x.name, cell(bytes(x.bytes), 'num'), ago(x.modified)]), 'No worlds found'));
-    $('backups').replaceChildren(table(['Backup', 'Size', 'Made'], w.backups.slice().reverse().map(x => [h('td', { class: 'mono' }, x.name), cell(bytes(x.bytes), 'num'), ago(x.modified)]), 'No backups yet'));
+    worldsData = await api('GET', '/api/worlds');
+    renderWorlds();
   } catch (e) { if (!e.auth) toast(e.message, 'err'); }
 }
-onShow.world = loadWorlds;
+let worldsSig = '';
+function renderWorlds() {
+  const w = worldsData;
+  if (!w) return;
+  worldsSig = [status && status.worldControl, status && status.state, w.current].join('|');
+  {
+    const switching = !!(status && status.worldControl);
+    $('worldsNote').textContent = switching ? 'Every world beside this one: one save file each in worlds/. Run another one here; players are moved to it.' : 'Every world beside this one: one save file each in worlds/. To run another one: pcds world use NAME, then pcds restart.';
+    $('worlds').replaceChildren(table(['World', 'Size', 'Saved', ''], w.worlds.map(x => {
+      const isRunning = x.name === w.current;
+      const stopped = status && status.state === 'stopped';
+      return [isRunning ? h('td', {}, h('b', {}, x.name), ' ', stopped ? h('span', { class: 'chip bad' }, 'stopped') : h('span', { class: 'chip ok' }, 'running')) : h('td', {}, x.name), cell(bytes(x.bytes), 'num'), ago(x.modified),
+        h('td', { class: 'row', style: 'justify-content:flex-end' },
+          switching && (!isRunning || (status && status.state === 'stopped')) ? h('button', { class: 'small primary', onclick: e => isRunning ? startWorld(null, e.currentTarget) : runWorld(x.name, e.currentTarget) }, isRunning ? 'Start' : 'Run this world') : null,
+          h('button', { class: 'small', onclick: e => download(x.name, false, e.currentTarget) }, 'Download'),
+          isRunning ? null : h('button', { class: 'small danger', onclick: () => removeWorld(x.name) }, 'Remove'))];
+    }), 'No worlds found'));
+    const kept = w.backupsKept;
+    $('backupsNote').textContent = kept === undefined ? '' : kept ? `The newest ${kept} are kept (PCDS_BACKUPS)` : 'Backups are off (PCDS_BACKUPS=0)';
+    $('backupNow').disabled = !kept;
+    $('backups').replaceChildren(table(['Backup', 'Size', 'Made', ''], w.backups.slice().reverse().map(x => [h('td', { class: 'mono' }, x.name), cell(bytes(x.bytes), 'num'), ago(x.modified),
+      h('td', { class: 'row', style: 'justify-content:flex-end' },
+        h('button', { class: 'small', onclick: e => download(x.name, true, e.currentTarget) }, 'Download'),
+        h('button', { class: 'small', onclick: () => restoreBackup(x.name) }, 'Restore as a world'))]), 'No backups yet'));
+    renderS3(w.s3);
+  }
+}
+function renderS3(s3) {
+  if (!s3) return;
+  const last = s3.last;
+  const chip = !s3.enabled ? h('span', { class: 'chip' }, 'off') : s3.missing && s3.missing.length ? h('span', { class: 'chip bad' }, 'incomplete') : s3.uploading ? h('span', { class: 'chip warn' }, 'copying…') : last && !last.ok ? h('span', { class: 'chip bad' }, 'failing') : h('span', { class: 'chip ok' }, 'on');
+  $('s3Chip').replaceChildren(chip);
+  const body = !s3.enabled
+    ? [h('p', { class: 'sub', style: 'margin:0' }, 'Off. Every backup can also be copied to an S3-compatible bucket (AWS S3, Cloudflare R2, Backblaze B2, MinIO…): set backup.s3Endpoint, s3Bucket, s3Region and the keys under Config › Backup.')]
+    : [h('dl', { class: 'info' }, ...pairs([
+        ['Bucket', `${s3.bucket}/${s3.prefix}`],
+        s3.missing && s3.missing.length ? ['Still to set', s3.missing.map(m => 'backup.' + m).join(', ')] : null,
+        ['Last copy', last ? `${last.file || '–'}, ${last.ok ? 'done' : 'failed'} ${ago(last.at)}` : 'none since the server started'],
+        last && !last.ok ? ['Error', h('span', { class: 'err' }, last.error)] : null]))];
+  $('s3Body').replaceChildren(...body);
+  $('s3Now').disabled = !s3.enabled || !!s3.uploading;
+}
+async function download(name, backup, btn) {
+  const r = await act(null, () => api('POST', '/api/worlds/file', { name, backup }, 60000), btn);
+  if (!r) return;
+  const url = URL.createObjectURL(new Blob([r.text], { type: 'application/json' }));
+  const a = h('a', { href: url, download: r.name });
+  document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+async function removeWorld(name) {
+  if (await ask({ title: `Remove world ${name}?`, body: 'It leaves the list of worlds. The file is kept in backups/ as ' + name + '-removed-<time>.json, so it can be restored.', ok: 'Remove', danger: true }))
+    act(`World ${name} removed (kept in backups/)`, () => api('POST', '/api/worlds/remove', { name })).then(loadWorlds);
+}
+async function restoreBackup(backup) {
+  const input = h('input', { value: backup.replace(/-\d{8}-\d{6}$/, '') + '-restored', 'aria-label': 'New world name' });
+  if (!await ask({ title: 'Restore as a world', body: [h('p', { style: 'margin:0' }, `A copy of ${backup} becomes a world of its own; the running world is not touched.`), h('label', { class: 'l' }, 'World name'), input], ok: 'Restore' })) return;
+  act(`World ${input.value.trim()} made from ${backup}`, () => api('POST', '/api/worlds/restore', { backup, name: input.value.trim() })).then(loadWorlds);
+}
+$('newWorld').onclick = async () => {
+  const c = (worldsData && worldsData.choices) || { planets: [], modes: [], dying: [] };
+  const name = h('input', { placeholder: 'e.g. second', 'aria-label': 'World name' });
+  const planet = h('select', { 'aria-label': 'Planet' }, c.planets.map(p => h('option', { value: p.id }, p.id)));
+  const start = h('select', { 'aria-label': 'Start' });
+  const fillStarts = () => { const p = c.planets.find(p => p.id === planet.value); start.replaceChildren(...(p ? p.starts : []).map(s => h('option', { value: s, selected: s === 'Standard' }, s))); };
+  planet.onchange = fillStarts; fillStarts();
+  const mode = h('select', { 'aria-label': 'Mode' }, c.modes.map(m => h('option', { value: m, selected: m === 'Standard' }, m)));
+  const dying = h('select', { 'aria-label': 'When a player dies' }, c.dying.map(d => h('option', { value: d, selected: d === 'DropSomeItems' }, d)));
+  const seed = h('input', { type: 'number', min: '0', step: '1', placeholder: 'random', 'aria-label': 'World seed' });
+  const field = (label, el) => h('div', {}, h('label', { class: 'l' }, label), el);
+  if (!await ask({ title: 'New world', body: [field('Name', name), field('Planet', planet), field('Start', start), field('Mode', mode), field('When a player dies', dying), field('World seed', seed)], ok: 'Create' })) return;
+  const body = { name: name.value.trim(), planet: planet.value, start: start.value, mode: mode.value, dying: dying.value };
+  if (seed.value !== '') body.seed = Number(seed.value);
+  act(r => `World ${r.name} created on ${r.planet}`, () => api('POST', '/api/worlds/new', body)).then(loadWorlds);
+};
 $('worldsRefresh').onclick = loadWorlds;
+onShow.world = loadWorlds;
 const save = btn => act('World saved', () => api('POST', '/api/save'), btn).then(() => current === 'world' && loadWorlds());
 $('saveWorld').onclick = e => save(e.currentTarget);
 $('ovSave').onclick = e => save(e.currentTarget);
+$('backupNow').onclick = e => act(r => r.s3 ? `Backup ${r.backup} made; copying it to S3` : r.s3Error ? `Backup ${r.backup} made; S3: ${r.s3Error}` : `Backup ${r.backup} made`, () => api('POST', '/api/backup'), e.currentTarget).then(loadWorlds);
+$('s3Now').onclick = e => act(r => `Copying ${r.key} to S3`, () => api('POST', '/api/backup/s3'), e.currentTarget).then(() => setTimeout(loadWorlds, 1500));
+// ---- the world: stop, start, another one (the front does it; the page stays) ----
+function renderStopped(s) {
+  setPill('down', 'World stopped');
+  $('hdrTitle').textContent = s.save || 'Planet Crafter Server';
+  $('hdrSub').textContent = `The world is stopped · pcds ${s.serverVersion}`;
+  $('qPlayers').textContent = '0'; $('qLoop').textContent = '–';
+  $('navPlayers').hidden = true;
+  document.title = `${s.save} (stopped) · Planet Crafter Server`;
+  const b = $('banner');
+  b.hidden = false; b.className = 'banner down';
+  b.replaceChildren(h('span', {}, `World ${s.save} is stopped: players cannot join.`),
+    h('button', { class: 'small primary', onclick: e => startWorld(null, e.currentTarget) }, `Start ${s.save}`),
+    h('button', { class: 'small', onclick: () => show('world') }, 'Run another world…'));
+  $('stopWorld').textContent = `Start ${s.save}`; $('stopWorld').className = 'primary';
+  for (const id of ['pauseWorld', 'saveWorld', 'backupNow', 'ovPause', 'ovSave', 'newWorld', 's3Now']) $(id).disabled = true;
+  $('worldState').replaceChildren(h('span', { class: 'chip bad' }, 'stopped'));
+  if (current === 'world' && worldsSig !== [s.worldControl, s.state, worldsData && worldsData.current].join('|')) loadWorlds();
+}
+async function startWorld(name, btn) {
+  const r = await act(r => `World ${r.world} is running`, () => api('POST', '/api/world/start', name ? { world: name } : {}, 150000), btn);
+  if (r) { banner(null); worldsData = null; refreshSoon(); if (current === 'world') loadWorlds(); }
+}
+async function runWorld(name, btn) {
+  const stopped = status && status.state === 'stopped';
+  if (!stopped && !await ask({ title: `Run world ${name}?`, body: `This world is saved and stopped, and ${name} starts. Players online are told and disconnected; they join again into ${name}. The server runs ${name} from now on, also after a restart.`, ok: `Run ${name}`, danger: true })) return;
+  const r = await act(r => `World ${r.world} is running`, () => api('POST', stopped ? '/api/world/start' : '/api/world/switch', { world: name }, 150000), btn);
+  if (r) { banner(null); refreshSoon(); loadWorlds(); }
+}
+$('stopWorld').onclick = async e => {
+  const btn = e.currentTarget;
+  if (status && status.state === 'stopped') return startWorld(null, btn);
+  if (!await ask({ title: 'Stop the world?', body: 'It is saved and players are disconnected. The server and this page stay up: start it, or another world, from here.', ok: 'Stop world', danger: true })) return;
+  const r = await act('World stopped', () => api('POST', '/api/world/stop', {}, 150000), btn);
+  if (r) refreshSoon();
+};
+async function setPaused(paused, btn) {
+  if (paused && !await ask({ title: 'Pause the world?', body: 'Its clock stops until you resume it: machines, growth, terraformation, day and night, meteo and gauges hold. Players stay in and are told in the chat.', ok: 'Pause' })) return;
+  act(paused ? 'World paused' : 'World resumed', () => api('POST', '/api/pause', { paused }), btn);
+}
+$('pauseWorld').onclick = e => setPaused(!(status && status.held), e.currentTarget);
+$('ovPause').onclick = e => setPaused(!(status && status.held), e.currentTarget);
 $('stopServer').onclick = async () => {
-  if (await ask({ title: 'Stop the server?', body: 'The world is saved, then the server quits and every player is disconnected. Start it again with pcds start (or systemd restarts it if set to).', ok: 'Save and stop', danger: true }))
+  if (await ask({ title: 'Shut down the server?', body: 'The world is saved, then the whole server quits, this page with it. Start it again with pcds start on the host. To stop only the world and keep this page, use Stop world.', ok: 'Shut down', danger: true }))
     act('Stopping: the server saves, then quits', () => api('POST', '/api/stop'));
 };
 
@@ -1408,7 +1559,7 @@ $('updRollback').onclick = async e => {
 };
 
 // ---- config: drawn from the schema GET /api/config serves; no setting is named here ----
-let edits = {}, inputs = new Map(), errors = new Map(), knobEls = [];
+let edits = {}, inputs = new Map(), errors = new Map(), knobEls = [], bad = new Set();
 function label(key) {
   const s = key.split('.').pop().replace(/([a-z])([A-Z])(?=[a-z])/g, (_, a, b) => a + ' ' + b.toLowerCase()).replace(/([a-z])([A-Z])/g, '$1 $2');
   return s[0].toUpperCase() + s.slice(1);
@@ -1428,6 +1579,8 @@ function read(el, k) {
   if (k.type === 'list') return s.split('\n').map(x => x.trim()).filter(Boolean);
   // A line that is not "name = number" goes as null: the server names the setting it refuses.
   if (k.type === 'map') return Object.fromEntries(s.split('\n').map(x => x.trim()).filter(Boolean).map(x => { const m = x.match(/^(\S+?)\s*[=:]\s*(\S+)$/); return m ? [m[1], Number(m[2])] : [x, null]; }));
+  // A number field the browser cannot read reports '' (as when empty): an error, never "default".
+  if (el.validity && el.validity.badInput) return undefined;
   if (s === '') return null;
   return k.type === 'int' || k.type === 'float' ? Number(s) : s;
 }
@@ -1443,7 +1596,13 @@ function control(k, card) {
   }
   el.id = 'knob-' + k.key;
   put(el, k, k.value);
-  el.addEventListener(k.type === 'bool' || k.type === 'enum' ? 'change' : 'input', () => { edits[k.key] = read(el, k); card.classList.add('dirty'); dirty(); });
+  el.addEventListener(k.type === 'bool' || k.type === 'enum' ? 'change' : 'input', () => {
+    const v = read(el, k);
+    const err = errors.get(k.key);
+    if (v === undefined) { delete edits[k.key]; bad.add(k.key); if (err) err.textContent = 'Not a number'; }
+    else { edits[k.key] = v; bad.delete(k.key); if (err) err.textContent = ''; }
+    card.classList.add('dirty'); dirty();
+  });
   return el;
 }
 function knobCard(k) {
@@ -1476,7 +1635,7 @@ function knobCard(k) {
   return card;
 }
 function renderConfig(list) {
-  edits = {}; inputs = new Map(); errors = new Map(); knobEls = [];
+  edits = {}; inputs = new Map(); errors = new Map(); knobEls = []; bad = new Set();
   const groups = new Map();
   for (const k of list) groups.set(k.group, [...(groups.get(k.group) || []), k]);
   $('knobs').replaceChildren(...[...groups].map(([g, ks], i) => h('section', { class: 'card', id: 'cfg-g' + i }, h('div', { class: 'head' }, h('h2', {}, g), h('span', { class: 'muted' }, `${ks.length}`)), h('div', { class: 'knobs' }, ks.map(knobCard)))));
@@ -1489,7 +1648,7 @@ function filterConfig() {
   for (const sec of $('knobs').children) sec.hidden = ![...sec.querySelectorAll('.knob')].some(k => !k.hidden);
 }
 $('cfgSearch').oninput = filterConfig; $('cfgChanged').onchange = filterConfig;
-function dirty() { const n = Object.keys(edits).length; $('saveConfig').disabled = !n; $('saveConfig').textContent = n ? `Save ${n} change${n > 1 ? 's' : ''}` : 'Save changes'; $('configMsg').textContent = n ? 'Unsaved changes' : ''; }
+function dirty() { const n = Object.keys(edits).length; $('saveConfig').disabled = !n || bad.size > 0; $('saveConfig').textContent = n ? `Save ${n} change${n > 1 ? 's' : ''}` : 'Save changes'; $('configMsg').textContent = n ? 'Unsaved changes' : ''; }
 async function loadConfig() {
   try { renderConfig((await api('GET', '/api/config')).knobs); } catch (e) { if (!e.auth) toast(e.message, 'err'); }
 }
@@ -1509,7 +1668,7 @@ window.addEventListener('beforeunload', e => { if (Object.keys(edits).length) { 
 
 // ---- tools ----
 function renderTools(s) {
-  const banned = [...s.access.bannedNames.map(b => [b, 'name']), ...s.access.bannedIPs.map(b => [b, 'IP or SteamID'])];
+  const banned = [...s.access.bannedNames.map(b => [b, /^\d{17}$/.test(b) ? 'SteamID' : 'name']), ...s.access.bannedIPs.map(b => [b, 'IP'])];
   const sig = JSON.stringify(banned);
   if ($('bans').dataset.sig === sig) return;
   $('bans').dataset.sig = sig;
@@ -1554,6 +1713,8 @@ $('unbanForm').onsubmit = e => { e.preventDefault(); const v = $('modUnban').val
 // ---- everything from one status ----
 function render(s) {
   renderHeader(s);
+  renderPauseButtons(s);
+  if (current === 'world' && worldsData && worldsSig !== [s.worldControl, s.state, worldsData.current].join('|')) loadWorlds();
   updateMapPlayers(s);
   if (current === 'overview') renderOverview(s);
   if (current === 'players') renderPlayers(s);
@@ -1563,6 +1724,12 @@ function render(s) {
   if (current === 'tools') renderTools(s);
 }
 
+$('signOut').onclick = () => {
+  token = '';
+  try { localStorage.removeItem('pcdsToken'); } catch (e) {}
+  clearTimeout(pollTimer);
+  showLogin();
+};
 $('tokenForm').onsubmit = e => {
   e.preventDefault();
   token = $('tokenInput').value.trim();

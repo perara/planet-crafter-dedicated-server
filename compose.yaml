@@ -17,4 +17,4 @@ services:
     environment:
       PUID: "1000"   # the owner of ./data on the host (id -u)
       PGID: "1000"
-    stop_grace_period: 60s
+    stop_grace_period: 90s

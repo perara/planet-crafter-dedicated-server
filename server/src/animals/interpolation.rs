@@ -102,3 +102,84 @@ pub fn frame(game: &mut Game) {
         game.ext.animals.interpolation.active.shift_remove(&wo);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::testkit::*;
+
+    const ELEVATOR: i32 = 101_700_000;
+
+    fn step(g: &mut Game, seconds: f32) {
+        g.time += seconds;
+        frame(g);
+    }
+
+    /// An elevator (a scene interpolator) started by a client moves for everyone from the same
+    /// start time; a client arriving mid-way hears the running move, one arriving later the end
+    /// position; the save keeps the progress.
+    #[test]
+    fn scene_interpolators_move_for_everyone_and_late_joiners_catch_up() {
+        let Some((mut g, _)) = world() else { return };
+        g.time = 10.0;
+        send_scene(&mut g, 1, "SceneInterpolationHandler.StartInterpolationServerRpc", &[json!(ELEVATOR), json!(0.25), json!(0)]);
+        let start = sent(&g, "SceneInterpolationHandler.StartInterpolationClientRpc");
+        assert_eq!(start.into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(Target::All, vec![json!(ELEVATOR), json!(0.0), json!(0.25), json!(1), json!(10.0)])], "at 0: up");
+        // Faster asked while running: the speed goes up, nothing else.
+        send_scene(&mut g, 1, "SceneInterpolationHandler.StartInterpolationServerRpc", &[json!(ELEVATOR), json!(0.5), json!(1)]);
+        send_scene(&mut g, 1, "SceneInterpolationHandler.StartInterpolationServerRpc", &[json!(ELEVATOR), json!(0.1), json!(1)]);
+        assert_eq!(g.ext.animals.interpolation.active[&ELEVATOR].speed, 0.5);
+        step(&mut g, 1.0);
+        assert_eq!(g.wos[&ELEVATOR].growth, 50.0);
+        join(&mut g, 2, "Bob");
+        g.net.out.clear();
+        send_scene(&mut g, 2, "SceneInterpolationHandler.RegisterInterpolatorServerRpc", &[json!(ELEVATOR), json!(0.5)]);
+        assert_eq!(sent(&g, "SceneInterpolationHandler.StartInterpolationClientRpc").into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(Target::Only(2), vec![json!(ELEVATOR), json!(0.0), json!(0.5), json!(1), json!(10.0)])]);
+        step(&mut g, 1.5);
+        assert_eq!((g.wos[&ELEVATOR].growth, g.wos[&ELEVATOR].setting), (100.0, 0), "arrived: no direction");
+        assert!(g.ext.animals.interpolation.active.is_empty());
+        let saved = saved_object(&mut g, ELEVATOR).unwrap();
+        assert_eq!(saved["grwth"], json!(100));
+        let mut g = reload(&mut g);
+        join(&mut g, 3, "Carl");
+        g.net.out.clear();
+        send_scene(&mut g, 3, "SceneInterpolationHandler.RegisterInterpolatorServerRpc", &[json!(ELEVATOR), json!(0.5)]);
+        assert_eq!(one(&g, "SceneInterpolationHandler.SetInitialPositionToEndClientRpc"), vec![json!(ELEVATOR)]);
+        // Up again from the top: no move; down (direction 0 above 0) it goes.
+        send_scene(&mut g, 3, "SceneInterpolationHandler.StartInterpolationServerRpc", &[json!(ELEVATOR), json!(0.5), json!(1)]);
+        assert!(g.ext.animals.interpolation.active.is_empty());
+        send_scene(&mut g, 3, "SceneInterpolationHandler.StartInterpolationServerRpc", &[json!(ELEVATOR), json!(0.5), json!(0)]);
+        assert_eq!(g.ext.animals.interpolation.active[&ELEVATOR].direction, -1);
+    }
+
+    /// A move the save left running (its setting) starts again when a client checks it, as in
+    /// the game only where the rule lets a move start: down from above 0 (an interrupted move
+    /// up stays, as the game's does).
+    #[test]
+    fn interrupted_moves_go_on_when_a_client_checks_them() {
+        let Some((mut g, _)) = world() else { return };
+        g.create_world_object(g.data.singletons["SceneInterpolationHandler"]["_interpolationGroup"].as_str().and_then(|r| g.data.group_of_ref(r)).unwrap(), ELEVATOR, true);
+        g.wos.get_mut(&ELEVATOR).unwrap().growth = 100.0;
+        send_scene(&mut g, 1, "SceneInterpolationHandler.StartInterpolationServerRpc", &[json!(ELEVATOR), json!(0.25), json!(-1)]);
+        step(&mut g, 2.0);
+        let mut g = reload(&mut g);
+        join(&mut g, 1, "Ann");
+        assert_eq!((g.wos[&ELEVATOR].setting, g.wos[&ELEVATOR].growth), (-1, 50.0));
+        assert!(g.ext.animals.interpolation.active.is_empty());
+        g.net.out.clear();
+        send_scene(&mut g, 1, "SceneInterpolationHandler.CheckInterpolatorActiveServerRpc", &[json!(ELEVATOR), json!(0.25)]);
+        assert_eq!(one(&g, "SceneInterpolationHandler.StartInterpolationClientRpc")[1..4], [json!(0.5), json!(0.25), json!(-1)], "on down from where it stopped");
+        // Up from half-way: the game's rule refuses it.
+        g.ext.animals.interpolation.active.clear();
+        g.wos.get_mut(&ELEVATOR).unwrap().setting = 1;
+        g.net.out.clear();
+        send_scene(&mut g, 1, "SceneInterpolationHandler.CheckInterpolatorActiveServerRpc", &[json!(ELEVATOR), json!(0.25)]);
+        send_scene(&mut g, 1, "SceneInterpolationHandler.RegisterInterpolatorServerRpc", &[json!(ELEVATOR), json!(0.25)]);
+        // Nothing to check, or no world object id: nothing.
+        send_scene(&mut g, 1, "SceneInterpolationHandler.CheckInterpolatorActiveServerRpc", &[json!(ELEVATOR + 1), json!(0.25)]);
+        send_scene(&mut g, 1, "SceneInterpolationHandler.StartInterpolationServerRpc", &[json!(0), json!(0.25), json!(1)]);
+        assert!(g.net.out.is_empty());
+    }
+}

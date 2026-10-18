@@ -1,11 +1,11 @@
 //! Static per-game-version tables (data/<version>/netdata.json, read from the game's files by
-//! `pcds-server read-game`) and the game's string hash.
+//! `pcds read-game`) and the game's string hash.
 
 use std::collections::HashMap;
 
 use serde::Deserialize;
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct NetData {
     pub game_version: String,
@@ -68,7 +68,7 @@ pub struct VarDef {
     pub bytes: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanetDef {
     pub id: String,

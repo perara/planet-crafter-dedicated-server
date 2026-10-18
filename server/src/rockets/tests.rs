@@ -226,3 +226,82 @@ fn exchange_rocket_delivers_and_fetches_from_its_planet() {
     let food_entry = [food.to_le_bytes(), humble.to_le_bytes(), 1i32.to_le_bytes()].concat();
     assert_eq!(counts(&g), vec![entry(1), food_entry]);
 }
+
+/// A platform's speed multiplier goes to the client that asks (on the asking object); other
+/// objects have none to tell.
+#[test]
+fn platforms_tell_their_speed_multiplier() {
+    let platform = 210_000_060;
+    let Some(mut g) = game(vec![placed(platform, "TradePlatform1", "100,10,100", "Prime", json!({"liId": 52})), placed(210_000_061, "Container1", "110,10,100", "Prime", json!({}))], vec![json!({"id": 52, "woIds": "", "size": 25})]) else { return };
+    super::add_speed_multiplier(&mut g, platform, 3.0);
+    let net = g.wos[&platform].net.unwrap();
+    g.net.out.clear();
+    assert!(rpc(&mut g, platform, "ConstructibleProxy.RetrieveRocketBackAndForthSpeedMultiplierServerRpc"));
+    let multiplier = 4.0;
+    let answers = crate::testkit::sent(&g, "ConstructibleProxy.SetRocketBackAndForthSpeedMultiplierClientRpc");
+    assert_eq!(answers.into_iter().map(|s| (s.to, s.object, s.args)).collect::<Vec<_>>(), vec![(crate::net::Target::Only(1), net, vec![json!(multiplier)])]);
+    g.net.out.clear();
+    rpc(&mut g, 210_000_061, "ConstructibleProxy.RetrieveRocketBackAndForthSpeedMultiplierServerRpc");
+    assert!(g.net.out.is_empty());
+}
+
+/// TransferGroupsServerRpc takes a number of a group's items from the watched inventories of a
+/// planet into a destination inventory; an unknown group or destination moves nothing.
+#[test]
+fn interplanetary_transfers_take_items_from_the_planets_inventories() {
+    let humble = stable_hash("Humble");
+    let Some(mut g) = game(
+        vec![
+            placed(210_000_070, "Container1", "60,10,60", "Humble", json!({"liId": 72})),
+            placed(210_000_071, "Container1", "60,10,60", "Prime", json!({"liId": 73})),
+            json!({"id": 210_000_072, "gId": "Iron"}),
+            json!({"id": 210_000_073, "gId": "Iron"}),
+            json!({"id": 210_000_074, "gId": "Iron"}),
+            json!({"id": 210_000_075, "gId": "ice"}),
+        ],
+        vec![json!({"id": 72, "woIds": "210000072,210000073,210000074,210000075", "size": 15}), json!({"id": 73, "woIds": "", "size": 15})],
+    ) else { return };
+    let iron = g.data.groups[g.data.group("Iron").unwrap()].hash;
+    let transfer = |g: &mut Game, args: Vec<Value>| super::rpc(g, 1, 0, 0, "LogisticInterplanetaryManager.TransferGroupsServerRpc", &Args(args));
+    assert!(transfer(&mut g, vec![json!(iron), json!(2), json!(humble), json!(73)]));
+    assert_eq!(groups_in(&g, 73), vec!["Iron", "Iron"]);
+    assert_eq!(groups_in(&g, 72), vec!["Iron", "ice"]);
+    transfer(&mut g, vec![json!(12345), json!(2), json!(humble), json!(73)]);
+    transfer(&mut g, vec![json!(iron), json!(2), json!(humble), json!(9999)]);
+    transfer(&mut g, vec![json!(iron), json!(2), json!(stable_hash("Prime")), json!(73)]);
+    assert_eq!(groups_in(&g, 72), vec!["Iron", "ice"], "nothing more moved");
+}
+
+/// A platform's growth proxy is the rocket's flight: asked, the asker hears it; reset, everyone.
+#[test]
+fn a_platforms_growth_is_its_rockets_flight() {
+    let platform = 210_000_080;
+    let Some(mut g) = game(vec![placed(platform, "TradePlatform1", "100,10,100", "Prime", json!({"liId": 53, "grwth": 40}))], vec![json!({"id": 53, "woIds": "", "size": 25})]) else { return };
+    g.net.out.clear();
+    assert!(rpc(&mut g, platform, "GrowthProxy.GetCurrentGrowthServerRpc"));
+    let to = |g: &Game| crate::testkit::sent(g, "GrowthProxy.SetCurrentGrowthClientRpc").into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>();
+    assert_eq!(to(&g), vec![(crate::net::Target::Only(1), vec![json!(40.0)])]);
+    g.net.out.clear();
+    let net = g.wos[&platform].net.unwrap();
+    assert!(super::rpc(&mut g, 1, net, 0, "GrowthProxy.ResetCurrentGrowthServerRpc", &Args(vec![json!(12.0)])));
+    assert_eq!((g.wos[&platform].growth, to(&g)), (12.0, vec![(crate::net::Target::All, vec![json!(12.0)])]));
+}
+
+/// An exchange rocket set to automatic (setting 1) that lands full goes again 5 s later.
+#[test]
+fn automatic_exchange_rockets_go_again_when_they_land_full() {
+    let (exchange, depot) = (210_000_090, 210_000_091);
+    let humble = stable_hash("Humble");
+    let Some(mut g) = game(
+        vec![
+            placed(exchange, "InterplanetaryExchangePlatform1", "100,10,100", "Prime", json!({"liId": 80, "liPlanet": humble, "set": 1})),
+            placed(depot, "PlanetaryDeliveryDepot1", "50,10,50", "Humble", json!({"liId": 81})),
+            json!({"id": 210_000_092, "gId": "Iron"}),
+        ],
+        vec![json!({"id": 80, "woIds": "210000092", "size": 1}), json!({"id": 81, "woIds": "", "size": 40})],
+    ) else { return };
+    super::add_speed_multiplier(&mut g, exchange, 9.0);
+    assert!(rpc(&mut g, exchange, "ConstructibleProxy.SendInSpaceRocketBackAndForthServerRpc"));
+    run_until(&mut g, 120.0, |g| g.wos[&exchange].growth == 0.0).expect("the rocket comes back");
+    assert!(run_until(&mut g, 6.0, |g| g.wos[&exchange].growth > 0.0).is_some_and(|t| t >= 4.9), "launched again after 5 s");
+}

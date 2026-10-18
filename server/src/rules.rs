@@ -26,6 +26,28 @@ pub struct Rules {
     pub limits: Limits,
     pub world: World,
     pub chat: Chat,
+    pub backup: Backup,
+}
+
+/// Off-site copies of the save backups: each new backup is uploaded to an S3-compatible bucket
+/// (AWS S3, Cloudflare R2, Backblaze B2, MinIO...) as <prefix><backup file name>. Off while
+/// s3Bucket is unset; the keys are never shown or logged.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct Backup {
+    /// https://s3.<region>.amazonaws.com, https://<account>.r2.cloudflarestorage.com, ...
+    pub s3_endpoint: Option<String>,
+    pub s3_bucket: Option<String>,
+    pub s3_region: String,
+    pub s3_prefix: String,
+    pub s3_access_key: Option<String>,
+    pub s3_secret_key: Option<String>,
+}
+
+impl Default for Backup {
+    fn default() -> Self {
+        Backup { s3_endpoint: None, s3_bucket: None, s3_region: "us-east-1".into(), s3_prefix: "pcds/".into(), s3_access_key: None, s3_secret_key: None }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -149,7 +171,7 @@ impl Default for Chat {
 }
 
 /// Rules shown only as set, never with their value (URLs and arguments may hold tokens).
-const HIDDEN: [&str; 3] = ["chat.webhooks", "chat.secret", "chat.exec"];
+const HIDDEN: [&str; 5] = ["chat.webhooks", "chat.secret", "chat.exec", "backup.s3AccessKey", "backup.s3SecretKey"];
 
 /// The rules as the admin API shows them: the HIDDEN ones as "(set)" when set.
 pub fn shown(rules: &Rules) -> Value {
@@ -200,6 +222,27 @@ impl Rules {
                 return Err(format!("chat.webhooks: entry {} is not an http:// or https:// URL", i + 1));
             }
         }
+        let b = &self.backup;
+        if let Some(url) = &b.s3_endpoint {
+            let uri = url.parse::<ureq::http::Uri>().ok();
+            if !uri.is_some_and(|u| matches!(u.scheme_str(), Some("http" | "https")) && u.host().is_some() && u.path().trim_matches('/').is_empty()) {
+                return Err("backup.s3Endpoint: an http:// or https:// address without a path (the bucket is s3Bucket)".into());
+            }
+        }
+        if let Some(bucket) = &b.s3_bucket
+            && (!(3..=63).contains(&bucket.len()) || !bucket.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'.' || c == b'-'))
+        {
+            return Err("backup.s3Bucket: 3 to 63 lower-case letters, digits, '.' and '-'".into());
+        }
+        if b.s3_region.is_empty() || !b.s3_region.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
+            return Err("backup.s3Region: letters, digits and '-' (us-east-1, auto, ...)".into());
+        }
+        if b.s3_prefix.contains("..") || b.s3_prefix.starts_with('/') || !b.s3_prefix.bytes().all(|c| c.is_ascii_alphanumeric() || b"/._-".contains(&c)) {
+            return Err("backup.s3Prefix: letters, digits, '/', '.', '_' and '-', not starting with '/'".into());
+        }
+        if b.s3_access_key.as_deref() == Some("") || b.s3_secret_key.as_deref() == Some("") {
+            return Err("backup.s3AccessKey / s3SecretKey: empty (null: unset)".into());
+        }
         if chat.secret.as_deref() == Some("") {
             return Err("chat.secret: empty (null: unsigned)".into());
         }
@@ -218,9 +261,14 @@ impl Rules {
     }
 
     /// The rules after a JSON merge patch (RFC 7386: objects merge, null resets a value).
+    /// Each value is checked as JSON first: a number past f32 would become infinity, which
+    /// serializes as null and leaves a rules.json the server cannot load.
     pub fn patched(&self, patch: &Value) -> Result<Rules, String> {
         let mut v = serde_json::to_value(self).map_err(|e| e.to_string())?;
         merge(&mut v, patch);
+        for knob in crate::config::KNOBS.iter().filter(|k| k.source == crate::config::Source::Rules) {
+            knob.check(&crate::config::at(&v, knob.key))?;
+        }
         serde_json::from_value(v).map_err(|e| e.to_string())
     }
 
@@ -240,7 +288,7 @@ impl Rules {
 
     /// limits.maxPlayers, else PCDS_MAX_PLAYERS, else 16.
     pub fn max_players(&self) -> usize {
-        self.limits.max_players.or_else(|| std::env::var("PCDS_MAX_PLAYERS").ok().and_then(|v| v.parse().ok())).unwrap_or(16)
+        self.limits.max_players.unwrap_or_else(|| crate::config::env_number("PCDS_MAX_PLAYERS") as usize)
     }
 }
 
@@ -331,6 +379,30 @@ mod tests {
         let back = r.patched(&serde_json::json!({"gauges": {"thirstDrain": null}})).unwrap();
         assert_eq!(back.gauges.thirst_drain, 1.0, "null resets to the default");
         assert!(Rules::default().patched(&serde_json::json!({"gauges": {"thirstDrian": 2}})).is_err(), "typos are refused");
+        // Past f32 it would be infinity, saved as null: refused before it gets there.
+        for big in [serde_json::json!({"speed": {"growth": 1e39}}), serde_json::json!({"chat": {"timeoutSeconds": 1e39}}), serde_json::json!({"death": {"dropChance": 1e39}})] {
+            assert!(Rules::default().patched(&big).is_err(), "{big}");
+        }
+    }
+
+    /// No rules file, or an empty one: the game's behaviour; a saved one reads back the same; an
+    /// unreadable path is an error.
+    #[test]
+    fn rules_files_load_save_and_default() {
+        let dir = std::env::temp_dir().join(format!("pcds-rules-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rules.json").to_string_lossy().into_owned();
+        assert!(Rules::load(&path).unwrap() == Rules::default(), "missing");
+        std::fs::write(&path, "  \n").unwrap();
+        assert!(Rules::load(&path).unwrap() == Rules::default(), "empty");
+        let mut r = Rules::default();
+        r.limits.max_players = Some(3);
+        r.save(&path).unwrap();
+        let back = Rules::load(&path).unwrap();
+        assert!(back == r);
+        assert_eq!(back.max_players(), 3);
+        assert!(Rules::load(dir.to_str().unwrap()).is_err(), "a directory");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -351,7 +423,7 @@ mod tests {
             serde_json::json!({"chat": {"timeoutSeconds": 0}}),
             serde_json::json!({"chat": {"retries": 11}}),
         ] {
-            assert!(Rules::default().patched(&patch).unwrap().validate(&data).is_err(), "{patch}");
+            assert!(Rules::default().patched(&patch).and_then(|r| r.validate(&data)).is_err(), "{patch}");
         }
         assert!(Rules::default().patched(&serde_json::json!({"limits": {"buildings": {"Drill1": 2}}})).unwrap().validate(&data).is_ok());
         let hooks = serde_json::json!({"chat": {"webhooks": ["https://example.com/hook", "http://127.0.0.1:8080/"], "secret": "s", "exec": ["/usr/local/bin/on-chat"], "commandPrefix": "!"}});

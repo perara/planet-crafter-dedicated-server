@@ -1,5 +1,5 @@
-//! The admin API client (and the extractor's, which answers the same way): HTTP/1.1 to
-//! 127.0.0.1 with a bearer token. And the commands that go through the admin API.
+//! The admin API client: HTTP/1.1 to 127.0.0.1 with a bearer token. And the commands that go
+//! through the admin API.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -9,13 +9,12 @@ use serde_json::{Map, Value};
 
 use super::{Ctx, Result};
 
-/// The longest the admin API may take to answer (its own deadline is 10 s). The extractor gets
-/// no limit, as curl gave it none: laying out the wrecks takes it minutes.
+/// The longest the admin API may take to answer (its own deadline is 10 s).
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// An HTTP/1.1 answer: its status and its body (Content-Length long, else to the end). Both
-/// servers send a Content-Length (admin.rs; the extractor's HttpListener has ContentLength64
-/// set): a chunked answer is refused rather than read as its body.
+/// An HTTP/1.1 answer: its status and its body (Content-Length long, else to the end). The
+/// admin API sends a Content-Length (admin.rs): a chunked answer is refused rather than read as
+/// its body.
 pub fn read_response(r: &mut impl BufRead) -> Result<(u16, String)> {
     let mut line = String::new();
     r.read_line(&mut line).map_err(|e| e.to_string())?;
@@ -48,11 +47,11 @@ pub fn read_response(r: &mut impl BufRead) -> Result<(u16, String)> {
 }
 
 /// One request to a server on 127.0.0.1: the body of a 2xx answer, else Err with what it said.
-pub fn request(port: u16, token: &str, method: &str, path: &str, body: &str, timeout: Option<Duration>) -> Result<String> {
+pub fn request(port: u16, token: &str, method: &str, path: &str, body: &str, timeout: Duration) -> Result<String> {
     let url = format!("http://127.0.0.1:{port}{path}");
     let fail = |e: String| format!("{method} {url}: {e}");
     let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| fail(e.to_string()))?;
-    stream.set_read_timeout(timeout).and_then(|_| stream.set_write_timeout(timeout)).map_err(|e| fail(e.to_string()))?;
+    stream.set_read_timeout(Some(timeout)).and_then(|_| stream.set_write_timeout(Some(timeout))).map_err(|e| fail(e.to_string()))?;
     let head = format!(
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -109,7 +108,7 @@ impl Ctx {
             .and_then(|(_, port)| port.parse().ok())
             .ok_or_else(|| format!("PCDS_ADMIN={addr}: pcds reaches the admin API on 127.0.0.1 only (bind it to 127.0.0.1 or 0.0.0.0)"))?;
         let body = body.filter(|b| !b.is_empty()).unwrap_or(if method == "GET" { "" } else { "{}" });
-        request(port, &token, method, path, body, Some(ADMIN_TIMEOUT))
+        request(port, &token, method, path, body, ADMIN_TIMEOUT)
     }
 
     fn api_json(&self, method: &str, path: &str) -> Result<Value> {
@@ -117,26 +116,40 @@ impl Ctx {
         serde_json::from_str(&text).map_err(|e| format!("{method} {path}: {e}"))
     }
 
+    /// Err (exit 1) when systemctl fails, or when the server runs and its admin API does not
+    /// answer (the Docker image's health check).
     pub fn status(&self) -> Result {
-        if !self.active() {
+        let game = self.game_line();
+        if !self.active()? {
             println!("state=stopped");
             self.print_banks(None);
+            game.iter().for_each(|l| println!("{l}"));
             return Ok(());
         }
         println!("state=running pid={}", self.server_pid().unwrap_or_default());
+        game.iter().for_each(|l| println!("{l}"));
         match self.api_json("GET", "/api/status") {
             Ok(status) => {
                 self.print_banks(Some(&status["banks"]));
                 for line in status_lines(&status) {
                     println!("{line}");
                 }
+                Ok(())
             }
             Err(e) => {
                 self.print_banks(None);
-                println!("admin API: {e}");
+                Err(format!("admin API: {e}"))
             }
         }
-        Ok(())
+    }
+
+    /// A line for `pcds status` when the installed game has no tables for the server (a game
+    /// update that pcds update has not read yet), or cannot be found.
+    fn game_line(&self) -> Option<String> {
+        match self.game_dir(None).and_then(|game| super::build_id(&game)) {
+            Err(e) => Some(format!("game: {e}")),
+            Ok(build) => self.tables(&build).err().map(|e| format!("game build {build} has no tables: {e}")),
+        }
     }
 
     /// GET /api/status as JSON, for scripts.
@@ -235,8 +248,8 @@ mod tests {
             }
             answers
         });
-        assert_eq!(request(port, "secret", "POST", "/api/save", "{}", Some(ADMIN_TIMEOUT)).unwrap(), "pong");
-        assert!(request(port, "secret", "POST", "/api/save", "{}", Some(ADMIN_TIMEOUT)).unwrap_err().contains("HTTP 401: no, no."));
+        assert_eq!(request(port, "secret", "POST", "/api/save", "{}", ADMIN_TIMEOUT).unwrap(), "pong");
+        assert!(request(port, "secret", "POST", "/api/save", "{}", ADMIN_TIMEOUT).unwrap_err().contains("HTTP 401: no, no."));
         let seen = server.join().unwrap();
         assert!(seen[0].starts_with("POST /api/save HTTP/1.1\r\n") && seen[0].contains("Authorization: Bearer secret\r\n") && seen[0].ends_with("Content-Length: 2\r\nConnection: close\r\n\r\n{}"));
     }

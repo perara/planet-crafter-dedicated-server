@@ -62,6 +62,21 @@ pub fn run(args: &[String]) {
     println!("new world {path}: planet {}, start {}, world seed {}", s("planetId"), s("gameStartLocation"), s("worldSeed"));
 }
 
+/// What a new world can be: the free starting planets with their start locations, the game
+/// modes and the dying consequences (the admin page's form).
+pub fn choices(net_data: &NetData, data: &GameData) -> Value {
+    let planets: Vec<Value> = net_data
+        .planets
+        .iter()
+        .filter(|p| p.starting_planet && p.steam_app_id == 0)
+        .map(|p| {
+            let spawns = data.asset(&format!("PlanetData:PlanetData-{}", p.id)).and_then(|d| d["spawnPositions"].as_array()).cloned().unwrap_or_default();
+            json!({"id": p.id, "starts": spawns.iter().filter(|s| s["positions"].as_array().is_some_and(|a| !a.is_empty())).filter_map(|s| s["id"].as_str()).collect::<Vec<_>>()})
+        })
+        .collect();
+    json!({"planets": planets, "modes": MODES, "dying": DYING})
+}
+
 /// JSONExport.CreateNewSaveFile: world state, player stats and the planet's state at their
 /// defaults, no players, inventories 1 and 2 for the first one, the starting pod at a random
 /// spawn position of the start location (SpawnLocationHandler.GetPositionDependingOnSpawnSetting)

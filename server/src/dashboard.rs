@@ -128,6 +128,110 @@ pub fn worlds(save_path: &str) -> Value {
     json!({ "current": current, "worlds": worlds, "backups": backups })
 }
 
+/// A world's name: letters, digits, '.', '_' and '-', up to 64, starting with a letter or digit
+/// (worlds/<name>.json); the access and rules files are not worlds.
+pub fn world_name(name: &str) -> Result<String, String> {
+    let ok = name.len() <= 64 && name.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+    if !ok || matches!(name, "access" | "rules") {
+        return Err(format!("world names are letters, digits, '.', '_' and '-' (up to 64), not access or rules: {name:?}"));
+    }
+    Ok(name.to_string())
+}
+
+fn worlds_dir(save_path: &str) -> &Path {
+    Path::new(save_path).parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."))
+}
+
+fn running(save_path: &str) -> String {
+    Path::new(save_path).file_stem().unwrap_or_default().to_string_lossy().to_string()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewWorld {
+    pub name: String,
+    pub planet: Option<String>,
+    pub start: Option<String>,
+    pub seed: Option<u32>,
+    pub mode: Option<String>,
+    pub dying: Option<String>,
+}
+
+/// POST /api/worlds/new: a new world file beside the running one (never over an existing one).
+pub fn world_new(game: &Game, save_path: &str, w: NewWorld) -> Result<Value, String> {
+    let name = world_name(&w.name)?;
+    let path = worlds_dir(save_path).join(format!("{name}.json"));
+    if path.exists() {
+        return Err(format!("world {name} exists: pick another name"));
+    }
+    let mut set = Vec::new();
+    if let Some(m) = w.mode {
+        set.push(("mode".to_string(), m));
+    }
+    if let Some(d) = w.dying {
+        set.push(("dyingConsequencesLabel".to_string(), d));
+    }
+    let o = crate::newworld::Options { planet: w.planet, start: w.start.unwrap_or_else(|| "Standard".into()), seed: w.seed, set };
+    let save = crate::newworld::new_save(&game.net_data, &game.data, &name, &o, &mut crate::game::Rng::seeded())?;
+    save.write(&path.to_string_lossy()).map_err(|e| format!("{}: {e}", path.display()))?;
+    println!("world {name} created (admin)");
+    Ok(json!({"name": name, "planet": save.settings["planetId"], "seed": save.settings["worldSeed"]}))
+}
+
+/// POST /api/worlds/remove: moved into backups/ as <name>-removed-<time>.json, never deleted;
+/// the running world is refused.
+pub fn world_remove(save_path: &str, name: &str) -> Result<Value, String> {
+    let name = world_name(name)?;
+    if name == running(save_path) {
+        return Err(format!("the server runs {name}: switch to another world first"));
+    }
+    let dir = worlds_dir(save_path);
+    let from = dir.join(format!("{name}.json"));
+    if !from.is_file() {
+        return Err(format!("no world {name}"));
+    }
+    std::fs::create_dir_all(dir.join("backups")).map_err(|e| e.to_string())?;
+    let to = dir.join("backups").join(format!("{name}-removed-{}.json", crate::save::stamp(std::time::SystemTime::now())));
+    if to.exists() {
+        return Err("removed a moment ago: try again in a second".into());
+    }
+    std::fs::rename(&from, &to).map_err(|e| format!("{}: {e}", to.display()))?;
+    println!("world {name} removed (admin): kept as {}", to.display());
+    Ok(json!({"kept": to.file_name().map(|f| f.to_string_lossy().to_string())}))
+}
+
+/// A world's or a backup's file, by name: worlds/<name>.json or backups/<name>.json.
+fn file_of(save_path: &str, name: &str, backup: bool) -> Result<std::path::PathBuf, String> {
+    let name = world_name(name)?;
+    let dir = worlds_dir(save_path);
+    let path = if backup { dir.join("backups").join(format!("{name}.json")) } else { dir.join(format!("{name}.json")) };
+    if !path.is_file() {
+        return Err(format!("no {} {name}", if backup { "backup" } else { "world" }));
+    }
+    Ok(path)
+}
+
+/// GET /api/worlds/file?name=N[&backup=1]: the file's text, for the page to save.
+pub fn world_file(save_path: &str, name: &str, backup: bool) -> Result<Value, String> {
+    let path = file_of(save_path, name, backup)?;
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(json!({"name": format!("{name}.json"), "text": text}))
+}
+
+/// POST /api/worlds/restore {"backup": B, "name": N}: a backup as a new world N.
+pub fn world_restore(save_path: &str, backup: &str, name: &str) -> Result<Value, String> {
+    let from = file_of(save_path, backup, true)?;
+    let name = world_name(name)?;
+    let to = worlds_dir(save_path).join(format!("{name}.json"));
+    if to.exists() {
+        return Err(format!("world {name} exists: pick another name"));
+    }
+    let text = std::fs::read(&from).map_err(|e| format!("{}: {e}", from.display()))?;
+    crate::save::write_atomic(&to.to_string_lossy(), &text).map_err(|e| format!("{}: {e}", to.display()))?;
+    println!("backup {backup} restored as world {name} (admin)");
+    Ok(json!({"name": name}))
+}
+
 /// The buildings on this planet as [x, y, z], for the players' map (y: where a teleport by the
 /// map lands near them).
 pub fn map(game: &Game) -> Value {

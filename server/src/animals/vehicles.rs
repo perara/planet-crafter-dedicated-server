@@ -439,6 +439,7 @@ fn euler_angles(q: [f32; 4]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit::{client_rpcs, send_rpc};
 
     #[test]
     fn euler_angles_like_unity() {
@@ -459,24 +460,6 @@ mod tests {
         assert_eq!((object, p), (52, [553.0, 4.0, 491.0]));
         assert!((crate::geometry::euler_y(r.unwrap()) - 90.0).abs() < 1e-3);
         assert_eq!(m.len(), 2 + 1 + 3 + 3 + 24);
-    }
-
-    /// An RPC as a client sends it.
-    fn send_rpc(g: &mut Game, client: u64, object: u64, behaviour: u16, name: &str, args: &[Value]) {
-        let (method, body) = g.net.spec.encode(name, args);
-        let mut w = Writer::new();
-        w.packed_u64(client).packed_u64(object).packed_u16(behaviour).packed_u32(method).bytes(&body);
-        g.receive(client, &crate::wire::batch(&[(crate::protocol::RPC, w.0)]));
-    }
-
-    /// The queued ClientRpcs called `name`: (behaviour, arguments).
-    fn client_rpcs(g: &Game, name: &str) -> Vec<(u16, Vec<Value>)> {
-        let decode = |body: &[u8]| {
-            let mut r = Reader::new(body);
-            let (_, behaviour, method) = (r.packed_u64()?, r.packed_u16()?, r.packed_u32()?);
-            (g.net.spec.get(method)?.name == name).then(|| Some((behaviour, g.net.spec.decode(method, r.rest())?)))?
-        };
-        g.net.out.iter().filter(|(_, kind, _)| *kind == crate::protocol::CLIENT_RPC).filter_map(|(_, _, body)| decode(body)).collect()
     }
 
     /// Driving the rover as ActionTakeControl does. Its ownership callback first reads the
@@ -520,6 +503,103 @@ mod tests {
         send_rpc(&mut g, 1, net, pilot, "LockNetworkPlayerPosition.SetPlayerLockedServerRpc", &[json!(false), json!(0)]);
         send_rpc(&mut g, 1, net, switcher, "OwnershipSwitcher.ResetOwnershipServerRpc", &[]);
         assert_eq!((seat(&g, net, pilot), bool_var(&g, net, "OwnershipSwitcher", "_locked")), (None, false));
+    }
+
+    /// Recalling a vehicle to its garage: refused while someone drives it; else the server takes
+    /// it, teleports it to the spot, and the garage cools down for ten minutes.
+    #[test]
+    fn vehicles_recalled_to_their_garage_are_taken_and_teleported() {
+        use crate::testkit::*;
+        let Some((mut g, _)) = world() else { return };
+        let (_, garage) = place(&mut g, "VehicleCrafter1", [570.0, 3.0, 500.0]);
+        let (_, truck) = place(&mut g, "VehicleTruck", [600.0, 3.0, 494.0]);
+        assert_eq!(g.net.objects[&truck].owner, 1, "parked: the nearest player simulates it");
+        let target = [572.0, 3.0, 506.0];
+        let rotation = crate::geometry::from_euler_y(90.0);
+        send_on(&mut g, 1, truck, "OwnershipSwitcher.AskForOwnershipServerRpc", &[]);
+        send_on(&mut g, 1, garage, "VehicleBackToGarage.MoveVehicleToPositionServerRpc", &[json!(truck), json!(target), json!(rotation)]);
+        assert_eq!(var(&g, garage, "VehicleBackToGarage", "_cooldown"), enc::float(COOLDOWN_START), "driven: no recall");
+        send_on(&mut g, 1, truck, "OwnershipSwitcher.ResetOwnershipServerRpc", &[]);
+        send_on(&mut g, 1, garage, "VehicleBackToGarage.MoveVehicleToPositionServerRpc", &[json!(truck), json!(target), json!(rotation)]);
+        assert_eq!(var(&g, garage, "VehicleBackToGarage", "_cooldown"), enc::float(COOLDOWN));
+        assert_eq!(g.net.objects[&truck].owner, 0, "the server takes it");
+        for _ in 0..3 {
+            g.time += 0.05;
+            crate::animals::tick(&mut g);
+        }
+        assert_eq!(g.net.objects[&truck].position, target);
+        assert!(g.ext.animals.vehicles.garages[&garage].recall.is_none(), "done");
+        let cooldown = f32::from_le_bytes(var(&g, garage, "VehicleBackToGarage", "_cooldown")[..4].try_into().unwrap());
+        assert!(cooldown < COOLDOWN && cooldown > COOLDOWN - 1.0, "{cooldown}");
+        // Not a vehicle: nothing.
+        send_on(&mut g, 1, garage, "VehicleBackToGarage.MoveVehicleToPositionServerRpc", &[json!(garage), json!(target), json!(rotation)]);
+        assert!(g.ext.animals.vehicles.garages[&garage].recall.is_none());
+    }
+
+    /// Modules in a vehicle's equipment resize it as the game's VehicleEquipment does: storage
+    /// modules the storage, equipment modules the equipment; taking out the logistics chip
+    /// clears the vehicle's logistics. Shrunk below what it holds, the rest drops beside it.
+    #[test]
+    fn vehicle_modules_resize_its_inventories() {
+        use crate::testkit::*;
+        let Some((mut g, _)) = world() else { return };
+        let (truck, _) = place(&mut g, "VehicleTruck", [600.0, 3.0, 494.0]);
+        let (storage, equipment) = (g.wos[&truck].linked_inventory, g.wos[&truck].secondary_inventories[0]);
+        let size = |g: &Game, i: i32| g.inventories[&i].size;
+        let (storage_size, equipment_size) = (size(&g, storage), size(&g, equipment));
+        let crate_module = give(&mut g, "VehicleInventorySize1", equipment);
+        g.propagate(equipment, crate_module, true);
+        assert_eq!(size(&g, storage), storage_size + 18);
+        let slot = give(&mut g, "VehicleEquipmentSize1", equipment);
+        g.propagate(equipment, slot, true);
+        assert_eq!(size(&g, equipment), equipment_size + 3);
+        // The storage filled past its old size, then the module out: the rest drops.
+        let fill: Vec<i32> = (0..storage_size + 2).map(|_| give(&mut g, "Iron", storage)).collect();
+        g.inventory_remove(equipment, crate_module);
+        g.propagate(equipment, crate_module, false);
+        assert_eq!(size(&g, storage), storage_size);
+        assert_eq!(g.inventories[&storage].items.len() as i32, storage_size);
+        assert!(fill.iter().rev().take(2).all(|i| g.wos[i].is_placed()), "the two over dropped");
+        // The logistics chip out: the storage's logistics are cleared.
+        let iron = g.data.group("Iron").unwrap();
+        g.inventories.get_mut(&storage).unwrap().logistic.supply = vec![iron];
+        let chip = give(&mut g, "VehicleLogistic1", equipment);
+        g.inventory_remove(equipment, chip);
+        g.propagate(equipment, chip, false);
+        assert!(g.inventories[&storage].logistic.supply.is_empty());
+    }
+
+    /// A parked vehicle goes to a player near it when its owner is far; physics are on only
+    /// with a player near, and the owner hears each change.
+    #[test]
+    fn parked_vehicles_go_to_a_near_player_and_sleep_with_nobody_near() {
+        use crate::testkit::*;
+        let Some((mut g, ann)) = world() else { return };
+        let bob = join(&mut g, 2, "Bob");
+        let (_, truck) = place(&mut g, "VehicleTruck", [600.0, 3.0, 494.0]);
+        assert_eq!(g.net.objects[&truck].owner, 1);
+        let frames = |g: &mut Game, seconds: f32| {
+            let end = g.time + seconds;
+            while g.time < end {
+                g.time += 0.05;
+                crate::animals::tick(g);
+            }
+        };
+        // Ann goes far away, Bob stands by the truck.
+        g.net.move_object(ann, [5000.0, 3.0, 5000.0], None);
+        g.net.move_object(bob, [605.0, 3.0, 494.0], None);
+        frames(&mut g, 2.0);
+        assert_eq!(g.net.objects[&truck].owner, 2, "the near player simulates it");
+        // Nobody near: its physics go off.
+        g.net.out.clear();
+        g.net.move_object(bob, [5000.0, 3.0, 4000.0], None);
+        frames(&mut g, 2.0);
+        let off = sent(&g, "UpdateNetworkRigidBodyState.SetRigidBodyEnabledClientRpc");
+        assert_eq!(off.into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(Target::Only(2), vec![json!(false)])]);
+        g.net.out.clear();
+        g.net.move_object(bob, [601.0, 3.0, 494.0], None);
+        frames(&mut g, 2.0);
+        assert_eq!(sent(&g, "UpdateNetworkRigidBodyState.SetRigidBodyEnabledClientRpc").last().map(|s| s.args.clone()), Some(vec![json!(true)]));
     }
 
     #[test]

@@ -140,3 +140,81 @@ fn drop_some(game: &mut Game, state: &crate::game::PlayerState, position: [f32; 
     }
     1
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::testkit::*;
+
+    fn dying_world(consequence: &str) -> Option<(Game, u64)> {
+        let mut save = save();
+        save.settings["dyingConsequencesLabel"] = json!(consequence);
+        let mut g = crate::game::test_game(save)?;
+        let player = join(&mut g, 1, "Ann");
+        g.net.out.clear();
+        Some((g, player))
+    }
+
+    fn notification(g: &Game) -> Vec<serde_json::Value> {
+        sent(g, "PlayerStatus.HandleDyingConsequencesNotificationClientRpc").into_iter().flat_map(|s| s.args).collect()
+    }
+
+    /// A gauge at zero makes the player dying (set ready by the client) for 9 s, or until the
+    /// gauge is above zero again.
+    #[test]
+    fn players_die_when_a_gauge_runs_out_and_stop_dying_after_the_dying_time() {
+        let Some((mut g, ann)) = dying_world("DropSomeItems") else { return };
+        g.net.set(ann, CLASS, "_ready", enc::bool(true));
+        g.net.set(ann, "PlayerGaugesHandler", "_healthValue", enc::float(0.0));
+        check_dying(&mut g, 1, ann);
+        assert!(is_dying(&g, ann));
+        g.time += 5.0;
+        check_dying(&mut g, 1, ann);
+        assert!(is_dying(&g, ann));
+        g.time += 4.0;
+        check_dying(&mut g, 1, ann);
+        assert!(!is_dying(&g, ann));
+        // Saved in time: health back, dying stops at once.
+        g.net.set(ann, "PlayerGaugesHandler", "_healthValue", enc::float(0.0));
+        check_dying(&mut g, 1, ann);
+        g.net.set(ann, "PlayerGaugesHandler", "_healthValue", enc::float(10.0));
+        check_dying(&mut g, 1, ann);
+        assert!(!is_dying(&g, ann) && g.ext.status.0.is_empty());
+    }
+
+    /// DropSomeItems: a small backpack goes whole into a canister where the player died; the
+    /// canister goes once emptied. DropAllItems: all is lost but what cannot be destroyed.
+    /// NoConsequences: nothing.
+    #[test]
+    fn dying_consequences_follow_the_world_setting() {
+        let Some((mut g, ann)) = dying_world("DropSomeItems") else { return };
+        let (bag, _) = backpack(&g, 1);
+        let items: Vec<i32> = g.inventories[&bag].items.clone();
+        g.destroy_world_objects(&items, false);
+        let carried: Vec<i32> = ["Iron", "ice", "Iron"].iter().map(|n| give(&mut g, n, bag)).collect();
+        g.net.move_object(ann, [580.0, 4.0, 500.0], None);
+        send_on(&mut g, 1, ann, "PlayerStatus.HandleDyingConsequencesServerRpc", &[]);
+        assert_eq!(notification(&g), vec![json!(1)]);
+        assert!(g.inventories[&bag].items.is_empty());
+        let canister = g.inventories.values().find(|i| carried.iter().all(|c| i.items.contains(c))).map(|i| i.id).expect("a canister with the items");
+        let wo = g.ext.destroy_when_empty[&canister];
+        assert_eq!(g.wos[&wo].position, [580.0, 3.9, 500.0]);
+        assert_eq!(g.inventories[&canister].size, g.data.groups[g.wos[&wo].group].inventory_size + 15);
+
+        let Some((mut g, ann)) = dying_world("DropAllItems") else { return };
+        let (bag, _) = backpack(&g, 1);
+        let key = give(&mut g, "WardenKey", bag);
+        send_on(&mut g, 1, ann, "PlayerStatus.HandleDyingConsequencesServerRpc", &[]);
+        assert_eq!(notification(&g), vec![json!(2)]);
+        assert_eq!(g.inventories[&bag].items, vec![key]);
+
+        let Some((mut g, ann)) = dying_world("NoConsequences") else { return };
+        let (bag, _) = backpack(&g, 1);
+        let before = g.inventories[&bag].items.clone();
+        send_on(&mut g, 1, ann, "PlayerStatus.HandleDyingConsequencesServerRpc", &[]);
+        assert!(notification(&g).is_empty());
+        assert_eq!(g.inventories[&bag].items, before);
+    }
+}

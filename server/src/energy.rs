@@ -79,3 +79,38 @@ pub fn energy_group_data(game: &Game) -> Vec<serde_json::Value> {
     }
     out.into_iter().map(|(h, g, n)| serde_json::json!([h, g, n])).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::*;
+
+    /// A machine runs while the planet makes more energy than it uses: checked when buildings
+    /// with energy come and go, and every 2 s.
+    #[test]
+    fn machines_run_while_the_planet_has_energy() {
+        let Some((mut g, _)) = world() else { return };
+        let (heater, _) = place(&mut g, "Heater1", [570.0, 3.0, 500.0]);
+        let powered = |g: &Game| g.ext.machines.energy.get(&heater).copied();
+        assert!(!has_enough(&g, 0));
+        assert_eq!(powered(&g), Some(false));
+        let (generator, _) = place(&mut g, "EnergyGenerator1", [575.0, 3.0, 500.0]);
+        assert!(has_enough(&g, 0));
+        assert_eq!(powered(&g), Some(true));
+        g.destroy_world_object(generator, true);
+        assert_eq!(powered(&g), Some(false), "the generator gone");
+        // The periodic check: a generator that appeared without an energy change is seen in 2 s.
+        g.ext.machines.energy.insert(heater, true);
+        g.time += 0.1;
+        tick(&mut g);
+        assert_eq!(powered(&g), Some(false));
+        g.ext.machines.energy.insert(heater, true);
+        g.time += 1.0;
+        tick(&mut g);
+        assert_eq!(powered(&g), Some(true), "not due yet");
+        g.time += 1.5;
+        tick(&mut g);
+        assert_eq!(powered(&g), Some(false));
+        assert!(!has_enough(&g, 12345), "a planet without units has none");
+    }
+}

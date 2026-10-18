@@ -11,7 +11,7 @@
 //! near anything).
 
 mod interpolation;
-mod spawn;
+pub mod spawn;
 mod vehicles;
 
 use std::collections::HashSet;
@@ -128,6 +128,26 @@ fn player_distance2(game: &Game, client: u64, position: [f32; 3]) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use crate::testkit::*;
+
+    /// An item a client dropped and simulates goes back to the server, which stops syncing its
+    /// transform (GroupNetworkContainer.RemoveOwnershipServerRpc), and stays when its old
+    /// owner leaves.
+    #[test]
+    fn dropped_items_go_back_to_the_server() {
+        let Some((mut g, _)) = world() else { return };
+        let iron = g.create_world_object(g.data.group("Iron").unwrap(), 0, true);
+        g.drop_on_floor(iron, [561.0, 3.0, 497.0], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 0.0, false, 1);
+        let net = g.wos[&iron].net.unwrap();
+        assert_eq!(g.net.objects[&net].owner, 1);
+        send_on(&mut g, 1, net, "GroupNetworkContainer.RemoveOwnershipServerRpc", &[]);
+        assert_eq!(g.net.objects[&net].owner, 0);
+        assert_eq!(g.net.objects[&net].flags & super::DONT_DESTROY_WITH_OWNER, 0);
+        assert_eq!(var(&g, net, "GroupNetworkContainer", "_transformSync"), crate::net::enc::bool(false));
+        g.disconnect(1);
+        assert!(g.net.objects.contains_key(&net));
+    }
+
     #[test]
     fn loading_players_do_not_count() {
         let Some(mut g) = crate::game::test_game(crate::game::tests::save()) else { return };

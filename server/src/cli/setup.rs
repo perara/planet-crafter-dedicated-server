@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, Write};
 use std::os::unix::process::CommandExt;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -23,6 +23,18 @@ impl Ctx {
     /// is bank_for()'s rule; the running server moves to it at its next start, or at once with
     /// `pcds upgrade --restart`.
     pub fn install_server(&self) -> Result {
+        let running = self.active()?;
+        let live = if running { self.live_bank() } else { None };
+        if running && live.is_none() {
+            say(format!("pcds {} is not put into a bank now: the server runs and its admin API does not say which bank runs the world (stop it, then 'pcds start')", env!("CARGO_PKG_VERSION")));
+            return Ok(());
+        }
+        self.install_beside(live.as_deref())
+    }
+
+    /// install_server() beside the bank `live` runs the world in (None: no server runs, or
+    /// `pcds run`, which starts one); never into that bank.
+    fn install_beside(&self, live: Option<&str>) -> Result {
         let lib = self.exe.with_file_name("libsteam_api.so");
         if !lib.is_file() {
             return Err(format!("no libsteam_api.so next to {} (make build puts it there)", self.exe.display()));
@@ -37,7 +49,7 @@ impl Ctx {
             super::install_file(&self.web, &bin.join("web/index.html"))?;
         }
         let banks = self.banks();
-        let target = match self.bank_for(&banks)? {
+        let target = match self.bank_for(&banks, live)? {
             Ok(target) => target,
             Err(Some(why)) => {
                 say(why);
@@ -55,15 +67,18 @@ impl Ctx {
     /// start all ask), or Err with why not (None: nothing to say). The rule:
     /// - a bank that holds this very program (the same bytes) is enough: nothing;
     /// - both banks are empty: the active one (the first install);
-    /// - else the standby bank (the active one while it is empty), and only when this program
-    ///   is newer than what each bank holds: a later version, or the same version built later (the program file's time; a
-    ///   bank's copy keeps the time of what it was copied from). So an older launcher never
-    ///   replaces or downgrades a release `pcds upgrade` installed, and a bank that holds a
+    /// - else the standby bank (the one beside the bank that runs the world, `live`, else
+    ///   beside the active one; the active one while it is empty), and only when this program
+    ///   is newer than what each bank holds: a later version, or the same version built later
+    ///   (the program file's time; a bank's copy keeps the time of what it was copied from).
+    ///   So an older launcher never replaces or downgrades a release `pcds upgrade` installed
+    ///   (it says so: a downgrade is `pcds upgrade VERSION --restart`), and a bank that holds a
     ///   rollback target keeps it;
     /// - never the bank the owner rolled back from (updater::rolled_back): an explicit
-    ///   `pcds upgrade` or the next rollback lifts that.
-    fn bank_for(&self, banks: &Path) -> Result<std::result::Result<String, Option<String>>> {
-        let active = updater::active(banks);
+    ///   `pcds upgrade` or the next rollback lifts that;
+    /// - never the bank that runs the world.
+    fn bank_for(&self, banks: &Path, live: Option<&str>) -> Result<std::result::Result<String, Option<String>>> {
+        let active = live.map_or_else(|| updater::active(banks), str::to_string);
         let program = |b: &str| banks.join(b).join("pcds");
         for b in updater::BANKS {
             if program(b).is_file() && program_equal(&self.exe, &program(b))? {
@@ -82,10 +97,14 @@ impl Ctx {
             }
         };
         if !updater::BANKS.iter().all(|b| newer_than(b)) {
-            return Ok(Err(None));
+            let newer = updater::BANKS.iter().find_map(|b| updater::info(banks, b).and_then(|i| i["version"].as_str().filter(|held| updater::newer(held, version)).map(|held| (*b, held.to_string()))));
+            return Ok(Err(newer.map(|(b, held)| {
+                format!("pcds {version} is not installed: bank {b} holds pcds {held}, which is newer, and the server goes on with what the banks hold. To go back to {version}: pcds upgrade v{version} --restart")
+            })));
         }
-        // The standby bank, or the active one while it is empty.
-        let target = if updater::info(banks, &active).is_none() { active } else { updater::other(&active).to_string() };
+        // The standby bank, or the active one while it is empty (never the live one, which
+        // holds the world and so is not empty).
+        let target = if updater::info(banks, &active).is_none() && live.is_none() { active } else { updater::other(&active).to_string() };
         if updater::rolled_back(banks).is_some_and(|r| r["bank"] == target.as_str()) {
             return Ok(Err(Some(format!("pcds {version} is newer than both banks, but bank {target} is the one the server was rolled back from: it is kept ('pcds upgrade' installs a release there)"))));
         }
@@ -117,6 +136,35 @@ impl Ctx {
         result
     }
 
+    /// What pcds 0.5 (the bash pcds and its Wine extractor) left behind and nothing reads any
+    /// more, removed (each said; setup, up, update and the container's start ask): run/extractor
+    /// (a Wine prefix, BepInEx, copies of the game's exe and dlls; /data/extractor in Docker),
+    /// run/bin/pcds-server, a 0.5 release folder's bin/pcds-server and bin/PcdsExtractor.dll,
+    /// and unfinished extractions run/data/.<version>.new.
+    pub fn remove_leftovers(&self) {
+        let release_bin = self.exe.parent().map(|d| d.join("bin"));
+        let mut paths = vec![self.run.join("extractor"), self.run.join("bin/pcds-server")];
+        paths.extend(release_bin.iter().flat_map(|bin| [bin.join("pcds-server"), bin.join("PcdsExtractor.dll")]));
+        for e in fs::read_dir(self.run.join("data")).into_iter().flatten().flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') && name.ends_with(".new") && name.len() > ".new".len() {
+                paths.push(e.path());
+            }
+        }
+        for path in paths {
+            let Ok(meta) = path.symlink_metadata() else { continue };
+            let removed = if meta.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+            match removed {
+                Ok(()) => say(format!("removed {}: left over from pcds 0.5, nothing uses it", path.display())),
+                Err(e) => eprintln!("pcds: {} (left over from pcds 0.5) could not be removed: {e}", path.display()),
+            }
+        }
+        // The 0.5 release folder's bin/, once empty.
+        if let Some(bin) = release_bin {
+            let _ = fs::remove_dir(bin);
+        }
+    }
+
     /// After an upgrade (a new build or release), the newer program into run/bin.
     pub fn install_newer(&self) -> Result {
         self.install_server()
@@ -127,27 +175,76 @@ impl Ctx {
     /// front's code once the front and its banks have ended (supervise). Returns only when it
     /// cannot start.
     pub fn run_server(&self) -> Result {
-        let data = self.data_dir()?;
-        let world = self.world_file();
-        if !world.is_file() {
-            return Err(format!("no world at {}: 'pcds worlds', 'pcds world use NAME' or 'pcds world new NAME'", world.display()));
+        // By hand while the service runs it (under the unit, this process is its main one).
+        if !self.container && self.active()? {
+            let pid = self.server_pid().unwrap_or_default();
+            if pid != std::process::id().to_string() {
+                return Err(format!("the service {} runs this installation's server (pid {pid}): 'pcds stop' first, or 'pcds logs' to watch it", self.unit()));
+            }
         }
-        self.install_newer()?;
-        let banks = self.banks();
-        let front = banks.join(updater::active(&banks)).join("pcds");
-        let mut server = Command::new(&front);
-        server.arg("serve").arg(&data).arg(&world).env("PCDS_BANKS", &banks);
         // Started by hand: the settings file (the unit has systemd read it).
         let mut settings = HashMap::new();
         if crate::env("PCDS_ADMIN_TOKEN").is_none() && self.env_file.is_file() {
             settings.extend(parse_env(&fs::read_to_string(&self.env_file).map_err(|e| format!("{}: {e}", self.env_file.display()))?));
         }
-        server.envs(&settings);
         let get = |key: &str| settings.get(key).filter(|v| !v.is_empty()).cloned().or_else(|| crate::env(key));
-        // Access lists and rules are the installation's, whichever world runs.
-        server.env("PCDS_ACCESS", get("PCDS_ACCESS").unwrap_or_else(|| self.run.join("access.json").display().to_string()));
-        server.env("PCDS_RULES", get("PCDS_RULES").unwrap_or_else(|| self.run.join("rules.json").display().to_string()));
-        let code = supervise(server).map_err(|e| format!("{}: {e}", front.display()))?;
+        crate::config::check_env(get)?;
+        let world = self.world_file();
+        if !world.is_file() {
+            return Err(format!("no world at {}: 'pcds worlds', 'pcds world use NAME' or 'pcds world new NAME'", world.display()));
+        }
+        // Units an older pcds wrote (a 0.5 release folder's: no KillMode=mixed, a shorter
+        // stop timeout) are written again; systemd takes the new text at the next start.
+        if !self.container
+            && self.unit_dir.join(self.unit()).is_file()
+            && let Err(e) = self.refresh_unit()
+        {
+            eprintln!("pcds: the systemd units could not be written again ({e}); 'pcds install-service' writes them");
+        }
+        // A newer build into a bank is not what the start needs: when it fails (a full disk),
+        // the server starts from the banks as they are.
+        if let Err(e) = self.install_beside(None) {
+            eprintln!("pcds: {} was not put into a bank ({e}); starting the server from bank {}", self.exe.display(), updater::active(&self.banks()));
+        }
+        // The tables of the bank that runs (installing may have changed which one).
+        let game = self.game_dir(None)?;
+        let data = self.tables(&build_id(&game)?)?;
+        let banks = self.banks();
+        let front = |bank: &str| {
+            let mut server = Command::new(banks.join(bank).join("pcds"));
+            server.arg("serve").arg(&data).arg(&world).env("PCDS_BANKS", &banks).envs(&settings);
+            // Access lists and rules are the installation's, whichever world runs.
+            server.env("PCDS_ACCESS", get("PCDS_ACCESS").unwrap_or_else(|| self.run.join("access.json").display().to_string()));
+            server.env("PCDS_RULES", get("PCDS_RULES").unwrap_or_else(|| self.run.join("rules.json").display().to_string()));
+            // The front remembers there which world it runs (the dashboard can run another).
+            server.env("PCDS_ENV_FILE", &self.env_file);
+            // The game the tables are for: /api/status says when it has changed (bank.rs).
+            server.env("PCDS_GAME_DIR", &game);
+            server
+        };
+        let first = updater::active(&banks);
+        let mut code = supervise(front(&first)).map_err(|e| format!("{}: {e}", banks.join(&first).display()))?;
+        // The release of the active bank cannot run the world (its front tried both banks, and
+        // the other is of another front protocol, or it fell over): the other bank's own front,
+        // which ran before, unless the owner rolled back from it. Said loudly and noted
+        // (pcds status, /api/status); a second failure puts everything back as it was.
+        if code == crate::front::BOOT_FAILED && !STOP_ASKED.load(Ordering::SeqCst) {
+            match fallback_bank(&banks, &first) {
+                Ok(other) => {
+                    let reason = format!("could not start the world: its front (pcds {}) ended without running it (exit {code}; see pcds logs)", updater::info(&banks, &first).map_or("?".into(), |i| i["version"].as_str().unwrap_or("?").to_string()));
+                    eprintln!("pcds: bank {first} {reason}. Starting bank {other}, which ran before");
+                    updater::note_fallback(&banks, &first, &other, &reason)?;
+                    updater::set_active(&banks, &other)?;
+                    code = supervise(front(&other)).map_err(|e| format!("{}: {e}", banks.join(&other).display()))?;
+                    if code == crate::front::BOOT_FAILED && !STOP_ASKED.load(Ordering::SeqCst) {
+                        eprintln!("pcds: bank {other} could not start the world either; bank {first} is the active one again");
+                        updater::set_active(&banks, &first)?;
+                        updater::clear_fallback(&banks)?;
+                    }
+                }
+                Err(why) => eprintln!("pcds: bank {first} could not start the world, and bank {}: {why}", updater::other(&first)),
+            }
+        }
         std::process::exit(code)
     }
 
@@ -172,16 +269,14 @@ impl Ctx {
             need("systemctl", "pcds runs the server as a systemd user service (or use the Docker image)")?;
         }
         super::mkdir(&self.run)?;
+        self.remove_leftovers();
         self.write_env()?;
         self.install_server()?;
         if let Some(user) = steam_user {
             self.download_game(&user)?;
             game = Some(self.run.join("game"));
         }
-        let game = self.game_dir(game.as_deref())?;
-        if self.tables(&build_id(&game)?).is_err() {
-            self.extract(Some(&game))?;
-        }
+        self.ensure_tables(game.as_deref())?;
         if world.is_some() && new {
             return Err("--world SAVE.json and --new: one or the other".into());
         }
@@ -219,7 +314,7 @@ impl Ctx {
         if super::same_file(save, &current) {
             return Err(format!("{} is the world {name} already: leave out --world", save.display()));
         }
-        if self.active() {
+        if self.active()? {
             return Err("stop the server first (pcds stop): it would save over the imported world".into());
         }
         if current.is_file() {
@@ -307,7 +402,7 @@ impl Ctx {
     /// A scripted player joins over direct IP and gets the world, without becoming a player
     /// (nothing is saved for it).
     pub fn selftest(&self) -> Result {
-        if !self.active() {
+        if !self.active()? {
             return Err("start the server first (pcds start)".into());
         }
         let data = self.data_dir()?;
@@ -322,12 +417,12 @@ impl Ctx {
         super::write(&script, r#"{"name":"PcdsSelftest","ready":false,"steps":[{"wait":2000}]}"#)?;
         let out = fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
         let err = out.try_clone().map_err(|e| e.to_string())?;
-        let probe = Command::new(&self.exe).arg("probe").arg(&address).arg(&data).arg(&script).stdin(Stdio::null()).stdout(out).stderr(err).spawn();
+        let probe = Command::new(self.program()).arg("probe").arg(&address).arg(&data).arg(&script).stdin(Stdio::null()).stdout(out).stderr(err).spawn();
         match probe {
             Ok(mut probe) => {
                 wait_for(&mut probe, Duration::from_secs(60));
             }
-            Err(e) => say(format!("the scripted player did not start: {}: {e}", self.exe.display())),
+            Err(e) => say(format!("the scripted player did not start: {}: {e}", self.program().display())),
         }
         let said = fs::read_to_string(&log).unwrap_or_default();
         let _ = fs::remove_file(&script);
@@ -345,6 +440,7 @@ impl Ctx {
     /// with STEAM_USER), a world, steamclient for invite codes, then the server as this process.
     pub fn container(&self) -> Result {
         super::mkdir(&self.worlds)?;
+        self.remove_leftovers();
         self.write_env()?;
         self.install_server()?;
         let downloaded = self.run.join("game");
@@ -357,16 +453,18 @@ impl Ctx {
             }
             self.download_game(user)?;
         }
-        self.update_downloaded_game();
+        // A game update that fails is said, and the server starts on the game as it is (a
+        // Steam outage must not keep the container down; pcds update tries again).
+        if let Err(e) = self.update_downloaded_game() {
+            eprintln!("pcds: {e}; starting on the game as it is");
+        }
         // The game steamcmd downloaded, else the one mounted at /game.
         let game = if steam_user.is_some() || self.run.join("steam-user").is_file() { downloaded } else { PathBuf::from("/game") };
         let game = self.game_dir(Some(&game)).map_err(|e| {
             format!("{e}: mount your game folder at /game (-v '/path/to/The Planet Crafter:/game:ro'), or start once with 'docker run -it -e STEAM_USER=yourname ...' to download the game")
         })?;
-        // The first start, or a game update: this game build's tables.
-        if self.tables(&build_id(&game)?).is_err() {
-            self.extract(Some(&game))?;
-        }
+        // The first start, a game update or a release that reads another tables format.
+        self.ensure_tables(Some(&game))?;
         if !self.world_file().is_file() {
             let newest = fs::read_dir(&self.worlds).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "json")).max_by_key(|p| super::modified(p));
             match newest {
@@ -387,8 +485,27 @@ impl Ctx {
     }
 }
 
-/// How long the banks of a front that ended get to save and end before they are killed.
-const BANKS_GRACE: Duration = Duration::from_secs(60);
+/// How long the banks of a front that ended get to save and end before they are killed. A
+/// stop gives the front 60 s (front.rs STOP_GRACE twice), then this: 80 s, under the unit's
+/// TimeoutStopSec=90.
+const BANKS_GRACE: Duration = Duration::from_secs(20);
+
+/// A stop (SIGTERM, SIGINT, SIGHUP) came to supervise(): a front that then ends is no failure
+/// to fall back from.
+static STOP_ASKED: AtomicBool = AtomicBool::new(false);
+
+/// The bank `pcds run` falls back to when the active one's front cannot start the world: the
+/// other one, when it holds a release and is not the one the owner rolled back from.
+fn fallback_bank(banks: &Path, failed: &str) -> std::result::Result<String, String> {
+    let other = updater::other(failed);
+    if updater::info(banks, other).is_none() {
+        return Err("holds no release to fall back to".into());
+    }
+    if updater::rolled_back(banks).is_some_and(|r| r["bank"] == other) {
+        return Err("is the one the server was rolled back from: it is not started (pcds upgrade --rollback goes back to it)".into());
+    }
+    Ok(other.to_string())
+}
 
 /// The front, run as a child of this process, which ends only after every process the front
 /// left behind. A front that crashes leaves its banks running; they save the world when they
@@ -411,6 +528,7 @@ fn supervise(mut front: Command) -> Result<i32> {
         }
     }
     extern "C" fn pass_on(signal: libc::c_int) {
+        STOP_ASKED.store(true, Ordering::SeqCst);
         PENDING.store(signal, Ordering::SeqCst);
         pass(FRONT.load(Ordering::SeqCst));
     }
@@ -552,6 +670,58 @@ mod tests {
         }
     }
 
+    /// A stop: the front's grace for its bank, then the supervisor's for orphans, all before
+    /// systemd's kill.
+    #[test]
+    fn systemd_kills_last_at_a_stop() {
+        let dir = super::super::test_dir("stop-timeouts");
+        let units = super::super::test_ctx(&dir).unit_files().unwrap();
+        let timeout: u64 = units[0].1.lines().find_map(|l| l.strip_prefix("TimeoutStopSec=")).unwrap().parse().unwrap();
+        assert!(crate::front::STOP_GRACE * 2 + BANKS_GRACE + Duration::from_secs(5) <= Duration::from_secs(timeout));
+        let compose = include_str!("../../../compose.yaml");
+        assert!(compose.contains(&format!("stop_grace_period: {timeout}s")), "compose.yaml stops as late as the unit");
+        assert!(include_str!("../../../README.md").contains(&format!("--stop-timeout {timeout}")), "so does the README's docker run");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// pcds 0.5's leftovers go, and nothing else.
+    #[test]
+    fn what_pcds_0_5_left_is_removed() {
+        let dir = super::super::test_dir("leftovers");
+        let ctx = super::super::test_ctx(&dir);
+        let gone = ["run/extractor/game/Planet Crafter.exe", "run/extractor/prefix/drive_c/x", "run/bin/pcds-server", "build/bin/pcds-server", "build/bin/PcdsExtractor.dll", "run/data/.2.103.new/netdata.json"];
+        let kept = ["run/bin/pcds", "run/data/2.103/netdata.json", "run/data/.new-7/netdata.json", "run/.new/world.json", "build/pcds"];
+        for f in gone.iter().chain(&kept) {
+            fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
+            fs::write(dir.join(f), "").unwrap();
+        }
+        ctx.remove_leftovers();
+        for f in gone {
+            assert!(!dir.join(f).exists(), "{f}");
+        }
+        assert!(!dir.join("run/extractor").exists() && !dir.join("run/data/.2.103.new").exists() && !dir.join("build/bin").exists());
+        for f in kept {
+            assert!(dir.join(f).is_file(), "{f}");
+        }
+        ctx.remove_leftovers();
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The other bank, unless it is empty or the one rolled back from.
+    #[test]
+    fn a_start_falls_back_to_the_bank_that_ran_before() {
+        let dir = super::super::test_dir("fallback-bank");
+        let banks = dir.join("bin");
+        assert!(fallback_bank(&banks, "a").unwrap_err().contains("no release"));
+        fs::create_dir_all(banks.join("b")).unwrap();
+        fs::write(banks.join("b/pcds"), "").unwrap();
+        updater::write_info(&banks.join("b"), &serde_json::json!({"version": "0.6.0"})).unwrap();
+        assert_eq!(fallback_bank(&banks, "a").unwrap(), "b");
+        updater::set_rolled_back(&banks, "b").unwrap();
+        assert!(fallback_bank(&banks, "a").unwrap_err().contains("rolled back from"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// The rule of bank_for(): a build into a bank once (the first into the active bank, a
     /// later one into the standby bank, which becomes the active one); the launcher, which is
     /// that build, adds nothing; nothing over a newer release, nor over the bank rolled back
@@ -570,39 +740,47 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
             fs::write(dir.join("build/pcds"), text).unwrap();
         };
-        ctx.install_server().unwrap();
+        ctx.install_beside(None).unwrap();
         assert_eq!((updater::active(&banks), program("a"), program("b")), ("a".into(), Some("build 1".into()), None));
         assert_eq!(updater::info(&banks, "a").unwrap()["protocol"], crate::ipc::PROTOCOL);
         assert!(banks.join("a/libsteam_api.so").is_file() && banks.join("a/web/index.html").is_file() && ctx.installed().is_file());
-        ctx.install_server().unwrap();
+        ctx.install_beside(None).unwrap();
         assert!(!banks.join("b").exists(), "the same build again: nothing");
         // pcds run is the launcher, run/bin/pcds: a copy of build 1, in bank a already.
         let launcher = Ctx { exe: ctx.installed(), ..ctx.clone() };
-        launcher.install_server().unwrap();
+        launcher.install_beside(None).unwrap();
         assert!(!banks.join("b").exists(), "the launcher's own build: nothing");
         // A later build.
         build("build 2");
-        ctx.install_server().unwrap();
+        ctx.install_beside(None).unwrap();
         assert_eq!((updater::active(&banks), program("a"), program("b")), ("b".into(), Some("build 1".into()), Some("build 2".into())));
         // Rolled back to a: neither the build in b nor the launcher go over a or b again.
         updater::set_active(&banks, "a").unwrap();
         updater::set_rolled_back(&banks, "b").unwrap();
-        ctx.install_server().unwrap();
-        launcher.install_server().unwrap();
+        ctx.install_beside(None).unwrap();
+        launcher.install_beside(None).unwrap();
         assert_eq!((updater::active(&banks), program("a"), program("b")), ("a".into(), Some("build 1".into()), Some("build 2".into())));
         // A later build still leaves alone the bank rolled back from.
         build("build 3");
-        ctx.install_server().unwrap();
+        ctx.install_beside(None).unwrap();
         assert_eq!((updater::active(&banks), program("b")), ("a".into(), Some("build 2".into())));
         updater::clear_rolled_back(&banks).unwrap();
-        ctx.install_server().unwrap();
+        ctx.install_beside(None).unwrap();
         assert_eq!((updater::active(&banks), program("b")), ("b".into(), Some("build 3".into())));
         // A release of a later version in the standby bank (pcds upgrade): an older build never
         // goes over it, however new its file.
         updater::write_info(&banks.join("a"), &serde_json::json!({"version": "99.0.0", "tag": "v99.0.0", "protocol": crate::ipc::PROTOCOL})).unwrap();
         build("build 4");
-        ctx.install_server().unwrap();
+        ctx.install_beside(None).unwrap();
         assert_eq!((updater::active(&banks), program("a"), program("b")), ("b".into(), Some("build 1".into()), Some("build 3".into())));
+        // That downgrade is said, with how to make it.
+        let why = ctx.bank_for(&banks, None).unwrap().unwrap_err().unwrap();
+        assert!(why.contains("bank a holds pcds 99.0.0, which is newer") && why.contains(&format!("pcds upgrade v{} --restart", env!("CARGO_PKG_VERSION"))), "{why}");
+        // A later build while bank a runs the world (the active file says b): into b, never a.
+        updater::write_info(&banks.join("a"), &serde_json::json!({"version": "0.0.1", "protocol": crate::ipc::PROTOCOL})).unwrap();
+        build("build 5");
+        assert_eq!(ctx.bank_for(&banks, Some("a")).unwrap(), Ok("b".to_string()));
+        assert_eq!(ctx.bank_for(&banks, Some("b")).unwrap(), Ok("a".to_string()));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

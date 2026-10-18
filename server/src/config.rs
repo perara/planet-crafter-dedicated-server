@@ -113,6 +113,12 @@ pub static KNOBS: &[Knob] = &[
     rule("chat.commandPrefix", Type::String, "", "Chat messages starting with this (1 to 8 characters, no spaces) are commands too: \"!tp home\" gives command tp, args [home]. Unset: none."),
     rule("chat.timeoutSeconds", Type::Float, "s", "The longest a webhook call or the exec program may take.").range(0.1, 60.0),
     rule("chat.retries", Type::Int, "", "More tries after a webhook fails (no answer, 429, 5xx), 1 s, 2 s... apart.").range(0.0, 10.0),
+    rule("backup.s3Endpoint", Type::String, "", "An S3-compatible service to copy every save backup to: https://s3.<region>.amazonaws.com, https://<account>.r2.cloudflarestorage.com, a MinIO address... Unset: no off-site copies."),
+    rule("backup.s3Bucket", Type::String, "", "The bucket the backups go to. Unset: off."),
+    rule("backup.s3Region", Type::String, "", "The bucket's region (auto for Cloudflare R2)."),
+    rule("backup.s3Prefix", Type::String, "", "Put before each backup's file name in the bucket."),
+    rule("backup.s3AccessKey", Type::String, "", "The access key id of a key that may write to the bucket.").secret(),
+    rule("backup.s3SecretKey", Type::String, "", "Its secret access key.").secret(),
     rule("limits.buildings", Type::Map, "", "Building group id to how many the world may have (Drill1 = 3). One more is taken down at once and its materials go back to the builder.").range(0.0, u32::MAX as f64),
     list("access.allowedIPs", "Addresses or CIDR ranges (192.168.1.0/24) that may connect over direct IP; empty: everyone. Players who no longer qualify are kicked."),
     list("access.whitelist", "Names or SteamID64s that may play; empty: everyone. SteamIDs count only for invite-code players, where they are verified."),
@@ -122,16 +128,16 @@ pub static KNOBS: &[Knob] = &[
     env("PCDS_LISTEN", Type::String, "", "0.0.0.0:7777", "Direct-IP address (UDP) players join; off disables it."),
     env("PCDS_STEAM", Type::Enum, "", "on", "Invite codes through Steam; off disables them.").values(&["on", "off"]),
     Knob { source: Source::Secret, ..env("PCDS_STEAM_TOKEN", Type::String, "", "", "A Steam game server login token (app 1284190): keeps the invite code the same across restarts.") },
-    env("PCDS_SESSION", Type::Int, "", "4242", "The last four digits of the invite code."),
-    env("PCDS_AUTOSAVE", Type::Int, "min", "5", "Minutes between saves at start (server.autosaveMinutes changes it until the next restart)."),
-    env("PCDS_BACKUPS", Type::Int, "", "24", "Save backups kept in backups/ next to the world; 0 keeps none."),
-    env("PCDS_BACKUP_MINUTES", Type::Int, "min", "60", "Minutes between those backups."),
+    env("PCDS_SESSION", Type::Int, "", "4242", "The last four digits of the invite code.").range(0.0, 9999.0),
+    env("PCDS_AUTOSAVE", Type::Int, "min", "5", "Minutes between saves at start (server.autosaveMinutes changes it until the next restart).").range(0.0, crate::MAX_AUTOSAVE as f64),
+    env("PCDS_BACKUPS", Type::Int, "", "24", "Save backups kept in backups/ next to the world; 0 keeps none.").range(0.0, 10_000.0),
+    env("PCDS_BACKUP_MINUTES", Type::Int, "min", "60", "Minutes between those backups.").range(0.0, 525_600.0),
     env("PCDS_ADMIN", Type::String, "", "127.0.0.1:7782", "The admin API and web page's address; off disables them."),
     Knob { source: Source::Secret, ..env("PCDS_ADMIN_TOKEN", Type::String, "", "", "The admin API's bearer token (pcds token).") },
-    env("PCDS_MAX_PLAYERS", Type::Int, "players", "16", "Players at once while the limits.maxPlayers rule is unset."),
+    env("PCDS_MAX_PLAYERS", Type::Int, "players", "16", "Players at once while the limits.maxPlayers rule is unset.").range(1.0, 100.0),
     env("PCDS_WORLD", Type::String, "", "world", "The world pcds starts: worlds/<name>.json (pcds world use NAME)."),
-    env("PCDS_ACCESS", Type::String, "", "", "The access lists file; unset: access.json next to the world."),
-    env("PCDS_RULES", Type::String, "", "", "The rules file; unset: rules.json next to the world."),
+    env("PCDS_ACCESS", Type::String, "", "", "The access lists file; unset: run/access.json, the installation's (pcds run; a pcds serve started by hand: access.json next to the world)."),
+    env("PCDS_RULES", Type::String, "", "", "The rules file; unset: run/rules.json, the installation's (pcds run; a pcds serve started by hand: rules.json next to the world)."),
     env("PCDS_WEB", Type::String, "", "", "This web page's file; unset: web/index.html next to the server binary."),
     env("PCDS_TRACE", Type::String, "", "", "Set: log every incoming message and RPC."),
     env("PCDS_AUTO_UPDATE", Type::Enum, "", "off", "on: install each new server release from GitHub as it comes out, into the standby bank, and hand the running world over to it (a hot update: players stay connected). A release that needs a front restart is not installed.").values(&["off", "on"]),
@@ -193,7 +199,7 @@ impl Knob {
             Type::Bool => v.is_boolean(),
             Type::Int => whole(v),
             // The rules are f32: compared as f32, so 0.01 is not below 0.01.
-            Type::Float => v.as_f64().is_some_and(|x| x.is_finite() && self.range.is_none_or(|(lo, hi)| (lo as f32..=hi as f32).contains(&(x as f32)))),
+            Type::Float => v.as_f64().is_some_and(|x| (x as f32).is_finite() && self.range.is_none_or(|(lo, hi)| (lo as f32..=hi as f32).contains(&(x as f32)))),
             Type::String => v.is_string(),
             Type::Enum => v.as_str().is_some_and(|s| self.values.contains(&s)),
             Type::List => v.as_array().is_some_and(|a| a.iter().all(Value::is_string)),
@@ -242,6 +248,31 @@ fn env_value(kind: Type, text: &str) -> Value {
         (Type::Int, Ok(n)) => n.into(),
         _ => text.into(),
     }
+}
+
+/// Every server.env setting the server reads (config::KNOBS' Env and Secret entries), checked
+/// once at start, as `get` (the environment, or the settings file) has them: Err naming each
+/// setting that is not what its entry takes (a secret's value never shown). The server refuses
+/// to start on it: a mistyped value is never read as the default.
+pub fn check_env(get: impl Fn(&str) -> Option<String>) -> Result<(), String> {
+    let mut bad = Vec::new();
+    for k in KNOBS.iter().filter(|k| k.read_only()) {
+        let Some(text) = get(k.key).filter(|t| !t.is_empty()) else { continue };
+        let checked = match k.key {
+            // Addresses: host:port, or off.
+            "PCDS_LISTEN" | "PCDS_ADMIN" if text != "off" && text.parse::<std::net::SocketAddr>().is_err() => Err(format!("{}: {text:?} is not an address (HOST:PORT) or off", k.key)),
+            _ => k.check(&env_value(k.kind, &text)),
+        };
+        bad.extend(checked.err());
+    }
+    if bad.is_empty() { Ok(()) } else { Err(format!("server.env: {} (pcds config edits it)", bad.join("; "))) }
+}
+
+/// A whole-number server.env setting, or its default: what check_env() let through at start.
+pub fn env_number(key: &str) -> u64 {
+    let k = knob_for(key).filter(|k| k.kind == Type::Int).unwrap_or_else(|| panic!("{key}: not a whole-number setting in config::KNOBS"));
+    let text = crate::env(key).unwrap_or_else(|| k.default.to_string());
+    text.parse().unwrap_or_else(|_| panic!("{key}={text:?}: check_env() refuses that at start"))
 }
 
 /// Every knob with its default and value: {"knobs": [...]}.
@@ -356,6 +387,40 @@ pub fn set(game: &mut Game, autosave: &mut u64, body: &Value) -> Result<(), Valu
 mod tests {
     use super::*;
 
+    #[test]
+    fn server_env_settings_are_checked_at_start() {
+        let with = |pairs: &[(&str, &str)]| {
+            let pairs: Vec<(String, String)> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            check_env(move |key| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()))
+        };
+        // Every default, and nothing set, starts.
+        let defaults: Vec<(&str, &str)> = KNOBS.iter().filter(|k| k.read_only() && !k.default.is_empty()).map(|k| (k.key, k.default)).collect();
+        with(&defaults).unwrap();
+        with(&[]).unwrap();
+        with(&[("PCDS_LISTEN", "off"), ("PCDS_ADMIN", "[::1]:7782"), ("PCDS_AUTOSAVE", "0"), ("PCDS_SESSION", "0042")]).unwrap();
+        for (key, value, says) in [
+            ("PCDS_AUTOSAVE", "five", "PCDS_AUTOSAVE: \"five\" is not a whole number from 0 to 1440"),
+            ("PCDS_AUTOSAVE", "100000", "from 0 to 1440"),
+            ("PCDS_BACKUPS", "-1", "PCDS_BACKUPS: -1 is not"),
+            ("PCDS_BACKUP_MINUTES", "1h", "PCDS_BACKUP_MINUTES"),
+            ("PCDS_SESSION", "12345", "PCDS_SESSION: 12345 is not a whole number from 0 to 9999"),
+            ("PCDS_MAX_PLAYERS", "0", "PCDS_MAX_PLAYERS"),
+            ("PCDS_AUTO_UPDATE", "yes", "PCDS_AUTO_UPDATE: \"yes\" is not one of"),
+            ("PCDS_UPDATE_CHECK_HOURS", "0", "PCDS_UPDATE_CHECK_HOURS"),
+            ("PCDS_STEAM", "true", "PCDS_STEAM"),
+            ("PCDS_LISTEN", "7777", "PCDS_LISTEN: \"7777\" is not an address"),
+            ("PCDS_ADMIN", "localhost:7782", "PCDS_ADMIN"),
+        ] {
+            let e = with(&[(key, value)]).unwrap_err();
+            assert!(e.contains(says) && e.starts_with("server.env: "), "{key}={value}: {e}");
+        }
+        // Two at once are both named.
+        let e = with(&[("PCDS_AUTOSAVE", "x"), ("PCDS_BACKUPS", "y")]).unwrap_err();
+        assert!(e.contains("PCDS_AUTOSAVE") && e.contains("PCDS_BACKUPS"), "{e}");
+        // The number readers take the default when unset.
+        assert_eq!((env_number("PCDS_SESSION"), env_number("PCDS_UPDATE_CHECK_HOURS")), (4242, 24));
+    }
+
     fn rule_knobs() -> impl Iterator<Item = &'static Knob> {
         KNOBS.iter().filter(|k| k.source == Source::Rules)
     }
@@ -400,6 +465,11 @@ mod tests {
                 (Type::List, None) if k.key == "chat.webhooks" => (vec![json!([]), json!(["https://example.com/hook"])], vec![json!(["example.com"]), json!([1]), json!("https://example.com")]),
                 (Type::List, None) if k.key == "chat.exec" => (vec![json!([]), json!(["/bin/true", "-x"])], vec![json!([""]), json!([1]), json!("/bin/true")]),
                 (Type::String, None) if k.key == "chat.secret" => (vec![json!("s3cret")], vec![json!(""), json!(1)]),
+                (Type::String, None) if k.key == "backup.s3Endpoint" => (vec![json!("https://s3.eu-north-1.amazonaws.com"), json!("http://127.0.0.1:9000")], vec![json!("ftp://x"), json!("https://s3.example.com/bucket"), json!(1)]),
+                (Type::String, None) if k.key == "backup.s3Bucket" => (vec![json!("my-saves.pcds")], vec![json!("No_Upper"), json!("ab"), json!(1)]),
+                (Type::String, None) if k.key == "backup.s3Region" => (vec![json!("eu-north-1"), json!("auto")], vec![json!(""), json!("eu north"), json!(1)]),
+                (Type::String, None) if k.key == "backup.s3Prefix" => (vec![json!(""), json!("servers/prime/")], vec![json!("/abs"), json!("a/../b"), json!(1)]),
+                (Type::String, None) if k.key == "backup.s3AccessKey" || k.key == "backup.s3SecretKey" => (vec![json!("AKIAEXAMPLE")], vec![json!(""), json!(1)]),
                 (Type::String, None) if k.key == "chat.commandPrefix" => (vec![json!("!"), json!("pcds/")], vec![json!(""), json!("toolong!!"), json!("a b"), json!(1)]),
                 (kind, range) => panic!("{}: {kind:?} with {range:?}: add its cases here", k.key),
             };
