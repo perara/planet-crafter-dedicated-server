@@ -120,6 +120,9 @@ fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, data: crate:
         eprintln!("{save_path}: {e}");
         std::process::exit(1);
     }
+    let folder = std::path::Path::new(save_path).parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    save::sweep(folder);
+    save::sweep(&folder.join("backups"));
     // The save as it was before this server touched it (as every backup: none with PCDS_BACKUPS=0).
     // At most one per 10 minutes: a crash loop must not push the hourly backups out.
     if let Err(e) = save::backup(save_path, Duration::from_secs(600), backups_kept()) {

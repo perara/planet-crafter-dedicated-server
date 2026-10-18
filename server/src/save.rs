@@ -157,14 +157,19 @@ impl SaveFile {
     }
 }
 
-/// Writes a file atomically: a crash mid-write leaves the previous one. The file beside it is
-/// this write's own (two banks may write at once, as when the front ends during a flip): each
-/// rename moves one whole file over the path.
+/// Writes a file atomically: a crash mid-write leaves the previous one, and the rename is on
+/// disk when this returns (the folder fsynced). The file beside it is this write's own (two
+/// banks may write at once, as when the front ends during a flip): each rename moves one whole
+/// file over the path. The file keeps its mode (a chmod 600 holds); a new one is 0600
+/// (rules.json and access.json hold the chat secret and webhook URLs).
 pub fn write_atomic(path: &str, bytes: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = format!("{path}.{}-{n}.tmp", std::process::id());
+    let mode = std::fs::metadata(path).map(|m| m.permissions().mode() & 0o7777).unwrap_or(0o600);
     let written = std::fs::File::create_new(&tmp).and_then(|mut file| {
+        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
         file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(&tmp, path)
@@ -172,7 +177,23 @@ pub fn write_atomic(path: &str, bytes: &[u8]) -> std::io::Result<()> {
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
-    written
+    written?;
+    let dir = Path::new(path).parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::File::open(dir)?.sync_all()
+}
+
+/// Removes what write_atomic left in `dir` when its process died mid-write: <name>.<pid>-<n>.tmp
+/// of a pid that no longer runs.
+pub fn sweep(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for name in entries.flatten().map(|e| e.file_name().to_string_lossy().to_string()) {
+        let Some(pid) = name.strip_suffix(".tmp").and_then(|n| n.rsplit_once('.')).and_then(|(_, t)| t.split_once('-')).filter(|(_, n)| n.parse::<u64>().is_ok()).and_then(|(p, _)| p.parse::<i32>().ok()) else { continue };
+        // SAFETY: signal 0 only asks whether the process is there.
+        let gone = pid > 0 && unsafe { libc::kill(pid, 0) } < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if gone && std::fs::remove_file(dir.join(&name)).is_ok() {
+            println!("removed {}: a write cut short by a process that ended", dir.join(&name).display());
+        }
+    }
 }
 
 /// UTC "YYYYMMDD-HHMMSS" (days to civil date: Howard Hinnant's algorithm).
@@ -248,6 +269,36 @@ mod tests {
         assert!(world["who"] == "a".repeat(20_000) || world["who"] == "b".repeat(20_000));
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A file keeps its mode across writes, a new one is 0600, and the sweep removes only what
+    /// writers that ended left.
+    #[test]
+    fn writes_keep_the_mode_and_dead_writers_leftovers_are_swept() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pcds-write-mode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rules.json");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        write_atomic(path.to_str().unwrap(), b"{}").unwrap();
+        assert_eq!(mode(&path), 0o600);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        write_atomic(path.to_str().unwrap(), b"{}").unwrap();
+        assert_eq!(mode(&path), 0o640);
+        // A pid that ran and ended, and this one.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead = child.id();
+        child.wait().unwrap();
+        let (stale, live) = (format!("world.json.{dead}-3.tmp"), format!("world.json.{}-0.tmp", std::process::id()));
+        for name in [&stale, &live, &"notes.tmp".to_string()] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        sweep(&dir);
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+        left.sort();
+        assert_eq!(left, ["notes.tmp".to_string(), "rules.json".into(), live]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
