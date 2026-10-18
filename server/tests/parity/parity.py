@@ -365,6 +365,21 @@ class Transcript:
                     ev = list_events(v['type'], r)
                     changed[key] = ['events', ev]
                     self.state[(label, key)] = apply_events(self.state.get((label, key)), ev)
+                elif v['type'].startswith('NetworkVariable<FixedString'):
+                    # FixedStringSerializer.WriteDelta: 1 = whole string; 0 = length, changed-bit
+                    # vector, changed bytes.
+                    if r.u8() == 1:
+                        val = value(v['type'], r)
+                    else:
+                        n = r.pi32()
+                        bits = r.take(r.i32())
+                        old = bytearray((self.state.get((label, key)) or '').encode())[:n].ljust(n, b'\0')
+                        for i in range(n):
+                            if i // 8 < len(bits) and bits[i // 8] >> (i % 8) & 1:
+                                old[i] = r.u8()
+                        val = old.decode('utf-8', 'replace')
+                    changed[key] = val
+                    self.state[(label, key)] = val
                 else:
                     val = value(v['type'], r)
                     changed[key] = val
@@ -451,9 +466,8 @@ def diff_approved(ref, ours):
                     print(f'~ object {k} {f}: ref {ra[k][f]} ours {oa[k][f]}'); n += 1
             rv, ov = ra[k]['vars'], oa[k]['vars']
             for v in sorted(set(rv) | set(ov)):
-                if v.startswith('WorldUnitsPlanet._unit') and isinstance(rv.get(v), list) and isinstance(ov.get(v), list):
-                    if close(rv[v][1:], ov[v][1:]):
-                        continue  # the total depends on how long each server ran
+                if v.startswith('WorldUnitsPlanet._unit'):
+                    continue  # ours stands still until the first player; compared in the state
                 if not close(rv.get(v), ov.get(v)):
                     print(f'~ object {k} {v}: ref {dumps(rv.get(v))[:400]} ours {dumps(ov.get(v))[:400]}'); n += 1
     return n
