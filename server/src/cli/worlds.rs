@@ -18,9 +18,10 @@ impl Ctx {
     pub fn keep_copy(&self, name: &str, why: &str) -> Result {
         let backups = self.worlds.join("backups");
         super::mkdir(&backups)?;
-        let to = backups.join(format!("{name}-{why}-{}.json", crate::save::stamp(std::time::SystemTime::now())));
+        let to = super::free_path(&backups, &format!("{name}-{why}-{}", crate::save::stamp(std::time::SystemTime::now())));
         let from = self.worlds.join(format!("{name}.json"));
-        fs::copy(&from, &to).map_err(|e| format!("{} -> {}: {e}", from.display(), to.display()))?;
+        let bytes = fs::read(&from).map_err(|e| format!("{}: {e}", from.display()))?;
+        super::replace_file(&to, &bytes, 0o644)?;
         let modified = fs::metadata(&from).and_then(|m| m.modified()).map_err(|e| e.to_string())?;
         fs::File::options().write(true).open(&to).and_then(|f| f.set_modified(modified)).map_err(|e| format!("{}: {e}", to.display()))
     }
@@ -132,7 +133,7 @@ impl Ctx {
                 // Moved into backups/ rather than deleted.
                 let backups = self.worlds.join("backups");
                 super::mkdir(&backups)?;
-                let to = backups.join(format!("{name}-removed-{}.json", crate::save::stamp(std::time::SystemTime::now())));
+                let to = super::free_path(&backups, &format!("{name}-removed-{}", crate::save::stamp(std::time::SystemTime::now())));
                 fs::rename(file(&name), &to).map_err(|e| format!("{}: {e}", to.display()))?;
                 say(format!("world {name} removed (it is kept in {})", backups.display()));
                 Ok(())

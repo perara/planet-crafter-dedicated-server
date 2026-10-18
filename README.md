@@ -63,11 +63,12 @@ See [Docker](#docker) for the data folder, managing worlds and Compose.
   server offers direct IP only.
 - To build from source: [Rust](https://rustup.rs) and make. To rebuild the extractor: Docker.
 
-**Why Wine?** The server is native Linux code and never runs under Wine. The game has no Linux
-version, so once per game version `pcds` runs the Windows game headless under Wine for a few
-minutes. It reads the tables the server needs: network registrations, items, buildings, every
-planet's scene and the procedural wrecks. After that Wine is not used until the next game
-update. The Docker image carries its own Wine.
+**Why Wine?** The server is native Linux code and never runs under Wine. Once per game
+version `pcds` reads the tables the server needs (network registrations, items, buildings,
+every planet's scene) straight from the game's files, in seconds. Only the procedural wreck
+interiors are laid out by the game itself, so for those `pcds` runs the Windows game headless
+under Wine once, for a few minutes. After that Wine is not used until the next game update.
+The Docker image carries its own Wine.
 
 Tested with game version 2.103.
 
@@ -407,10 +408,11 @@ platform, landing spots, seats, machine ranges), the code says so in a `ponytail
   Transport (direct IP, UDP) and Steam networking sockets (invite codes: the code encodes the
   SteamID of an anonymous Steam game server). The game logic ports the game's host-side code,
   class by class.
+- `server/src/native/` reads the game's tables from its files (Unity serialized files, the
+  game's .NET metadata and IL) into `run/data/<game version>/`: `pcds read-game GAME_DIR OUT`.
 - `extractor/` is a BepInEx plugin that `pcds extract` runs in the game, under Wine, on a world
-  of its own on 127.0.0.1. It dumps the network tables, the game data, every free planet's
-  scene with its world instance scenes, and the procedural wrecks' layouts to
-  `run/data/<game version>/`. A prebuilt DLL is in `extractor/prebuilt/`.
+  of its own on 127.0.0.1, for the one table the game must compute itself: the procedural
+  wrecks' layouts (wrecks.json). A prebuilt DLL is in `extractor/prebuilt/`.
 - `server/src/cli/` is the command line that ties them together, in the same program: `pcds
   serve DATA_DIR SAVE.json` is the server, the other commands set it up and run it. It needs no
   Python; curl only downloads, unzip and tar unpack BepInEx and steamcmd, systemd runs the

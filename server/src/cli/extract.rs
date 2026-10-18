@@ -32,13 +32,26 @@ impl Drop for Extractor<'_> {
 
 /// One extraction at a time (the hourly update and a manual one would share the game).
 fn lock(path: &Path) -> Result<fs::File> {
+    use std::io::Write;
     use std::os::fd::AsRawFd;
-    let file = fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     // SAFETY: flock on a descriptor this function owns; the lock lasts as long as the file.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err("another extraction is running".into());
+        let holder = fs::read_to_string(path).unwrap_or_default();
+        return Err(format!("another extraction is running (process {}); stop it or wait for it", holder.trim()));
     }
+    // The holder, for the message above.
+    let _ = file.set_len(0).and_then(|_| write!(file, "{}", std::process::id()));
     Ok(file)
+}
+
+/// The tables being made: removed unless they were finished (moved into place).
+struct Unfinished(PathBuf);
+
+impl Drop for Unfinished {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 impl Ctx {
@@ -105,7 +118,9 @@ impl Ctx {
         let config = self.ext_game.join("BepInEx/config/pcds.extractor.cfg");
         let text = fs::read_to_string(&config).map_err(|e| format!("{}: {e}", config.display()))?;
         let token = text.lines().find_map(|l| l.strip_prefix("ApiToken = ")).unwrap_or_default().trim();
-        super::api::request(EXT_API, token, method, path, if method == "GET" { "" } else { "{}" }, None)
+        // Laying out every wreck takes the game minutes; stopping it, seconds.
+        let timeout = if path == "/api/wreckdata" { 30 * 60 } else { 30 };
+        super::api::request(EXT_API, token, method, path, if method == "GET" { "" } else { "{}" }, Some(std::time::Duration::from_secs(timeout)))
     }
 
     fn log_says(&self, what: &str) -> bool {
@@ -146,12 +161,16 @@ impl Ctx {
                 Ok(())
             });
         }
-        game.spawn().map_err(|e| format!("wine: {e}"))?;
+        let mut child = game.spawn().map_err(|e| format!("wine: {e}"))?;
         RUNNING.store(true, Ordering::SeqCst);
         let running = Extractor(self);
         for _ in 0..600 {
             if self.log_says("PCDS READY") {
                 return Ok(running);
+            }
+            if let Ok(Some(status)) = child.try_wait() {
+                drop(running);
+                return Err(format!("the game exited ({status}) before it was ready; see {} and {}", self.ext_log.display(), self.ext.join("wine.log").display()));
             }
             sleep(1);
         }
@@ -181,15 +200,20 @@ impl Ctx {
         let game = self.game_dir(game)?;
         super::mkdir(&self.run.join("data"))?;
         let _lock = lock(&self.run.join(".extract.lock"))?;
+        // Earlier extractions that failed (none runs: the lock is ours).
+        for e in fs::read_dir(self.run.join("data")).into_iter().flatten().flatten() {
+            if e.file_name().to_string_lossy().starts_with(".new-") {
+                let _ = fs::remove_dir_all(e.path());
+            }
+        }
         // Hidden until complete: tables() only picks finished versions.
-        let out = self.run.join(format!("data/.new-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&out);
+        let out = Unfinished(self.run.join(format!("data/.new-{}", std::process::id())));
         say(format!("reading the game tables from {}", game.display()));
-        let version = crate::native::tables::read_game(&game, &out)?;
-        super::write(&out.join("wrecks.json"), self.wreck_layouts(&game)?)?;
+        let version = crate::native::tables::read_game(&game, &out.0)?;
+        super::write(&out.0.join("wrecks.json"), self.wreck_layouts(&game)?)?;
         let tables = self.run.join(format!("data/{version}"));
         let _ = fs::remove_dir_all(&tables);
-        fs::rename(&out, &tables).map_err(|e| format!("{}: {e}", tables.display()))?;
+        fs::rename(&out.0, &tables).map_err(|e| format!("{}: {e}", tables.display()))?;
         say(format!("game tables for {version} in {}", tables.display()));
         Ok(())
     }
@@ -199,8 +223,10 @@ impl Ctx {
         say("laying out the wreck interiors: the game runs once under Wine");
         self.prepare_extractor(game)?;
         let ctx = self.clone();
+        let out = self.run.join(format!("data/.new-{}", std::process::id()));
         let _ = ctrlc::set_handler(move || {
             ctx.stop_extractor();
+            let _ = fs::remove_dir_all(&out);
             std::process::exit(130);
         });
         let running = self.start_extractor()?;
