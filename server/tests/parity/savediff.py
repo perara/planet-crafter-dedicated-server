@@ -2,11 +2,13 @@
 
     python3 savediff.py START.json REF.json OURS.json
 
-A save is sections joined by "@", each a "|"-joined list of JSON records. Records are matched
-in order inside each section; world object ids the servers allocated (not in START.json) are
-paired by group and position, then by order. The reference's host player (the hidden avatar
+A save is sections joined by "@", each a "|"-joined list of JSON records. Records with ids are
+compared by id, and the order of the ids on its own; others in order. World object ids the
+servers allocated (not in START.json) are paired: the same id, else group and position, else
+group in order. The reference's host player (the hidden avatar
 the plugin hosts with) and the game's per-run counters are left out.
 """
+import difflib
 import json
 import re
 import sys
@@ -40,11 +42,21 @@ def main():
         return [o for o in save[3] if o.get('id') not in known]
     pairs = {}
     rn, on = new_objects(ref), new_objects(ours)
+    for r in rn:  # the same id on both (a scene object first saved here)
+        if any(o['id'] == r['id'] for o in on):
+            pairs[r['id']] = r['id']
     for r in rn:
+        if r['id'] in pairs:
+            continue
         m = next((o for o in on if o['gId'] == r['gId'] and close(o.get('pos'), r.get('pos')) and o['id'] not in pairs.values()), None)
         if m:
             pairs[r['id']] = m['id']
     rest = [o['id'] for o in on if o['id'] not in pairs.values()]
+    for r in rn:  # then by group, in order
+        m = next((i for i in rest if any(o['id'] == i and o['gId'] == r['gId'] for o in on)), None) if r['id'] not in pairs else None
+        if m is not None:
+            pairs[r['id']] = m
+            rest.remove(m)
     for r in rn:
         if r['id'] not in pairs and rest:
             pairs[r['id']] = rest.pop(0)
@@ -70,7 +82,18 @@ def main():
         if len(a) != len(b):
             print(f'{name}: {len(a)} records in ref, {len(b)} in ours')
             n += 1
+        if a and all('id' in x for x in a + b):
+            # Records with ids: the order of ids, then each record against the same id's.
+            ia, ib = [str(norm(x['id'])) for x in a], [str(norm(x['id'])) for x in b]
+            for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ia, ib, autojunk=False).get_opcodes():
+                if op != 'equal':
+                    print(f'{name} order at ref {i1} / ours {j1}: ref {ia[i1:i2][:8]} ours {ib[j1:j2][:8]}')
+                    n += 1
+            by_id = {str(norm(y['id'])): y for y in b}
+            b = [by_id.get(str(norm(x['id'])), {}) for x in a]
         for j, (x, y) in enumerate(zip(a, b)):
+            if not y:
+                continue
             x, y = {k: norm(v) for k, v in x.items()}, {k: norm(v) for k, v in y.items()}
             if list(x) != list(y):
                 print(f'{name}[{j}] field order: ref {list(x)} ours {list(y)}')
@@ -79,11 +102,7 @@ def main():
                 if k in y and not close(x[k], y[k]):
                     print(f'{name}[{j}] ({x.get("gId") or x.get("name") or x.get("id")}).{k}: ref {json.dumps(x[k])[:300]} ours {json.dumps(y[k])[:300]}')
                     n += 1
-        # Records only one side has (past the common length).
-        for x in a[len(b):]:
-            print(f'{name}: ref only {json.dumps(x)[:300]}')
-        for y in b[len(a):]:
-            print(f'{name}: ours only {json.dumps(y)[:300]}')
+
     if len(ref) != len(ours):
         print(f'sections: ref {len(ref)}, ours {len(ours)}')
         n += 1

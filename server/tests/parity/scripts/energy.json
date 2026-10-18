@@ -1,0 +1,261 @@
+{
+"name": "ParityA",
+"id": 76561197999999901,
+"steps": [
+{
+"wait": 20000
+},
+{
+"rpc": "WorldObjectsHandler.GetEnergyGroupDataServerRpc",
+"on": "WorldObjectsHandler",
+"args": []
+},
+{
+"rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc",
+"on": "WorldObjectsHandler",
+"args": [
+"#EnergyGenerator1",
+[
+540.0,
+20.0,
+640.0
+],
+[
+0,
+0,
+0,
+1
+],
+false,
+false,
+true,
+false
+],
+"after": 800,
+"capture": {
+"var": "gen1",
+"rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectClientRpc",
+"arg": 0
+}
+},
+{
+"rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc",
+"on": "WorldObjectsHandler",
+"args": [
+"#EnergyGenerator1",
+[
+544.0,
+20.0,
+640.0
+],
+[
+0,
+0,
+0,
+1
+],
+false,
+false,
+true,
+false
+],
+"after": 800
+},
+{
+"rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc",
+"on": "WorldObjectsHandler",
+"args": [
+"#EnergyGenerator2",
+[
+548.0,
+20.0,
+640.0
+],
+[
+0,
+0,
+0,
+1
+],
+false,
+false,
+true,
+false
+],
+"after": 800
+},
+{
+"rpc": "WorldObjectsHandler.GetEnergyGroupDataServerRpc",
+"on": "WorldObjectsHandler",
+"args": []
+},
+{
+"wait": 10000
+},
+{
+"rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc",
+"on": "WorldObjectsHandler",
+"args": [
+"#Heater1",
+[
+552.0,
+20.0,
+640.0
+],
+[
+0,
+0,
+0,
+1
+],
+false,
+false,
+true,
+false
+],
+"after": 800
+},
+{
+"rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc",
+"on": "WorldObjectsHandler",
+"args": [
+"#Drill1",
+[
+556.0,
+20.0,
+640.0
+],
+[
+0,
+0,
+0,
+1
+],
+false,
+false,
+true,
+false
+],
+"after": 800
+},
+{
+"rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc",
+"on": "WorldObjectsHandler",
+"args": [
+"#Heater2",
+[
+560.0,
+20.0,
+640.0
+],
+[
+0,
+0,
+0,
+1
+],
+false,
+false,
+true,
+false
+],
+"after": 800
+},
+{
+"rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc",
+"on": "WorldObjectsHandler",
+"args": [
+"#Vegetube1",
+[
+564.0,
+20.0,
+640.0
+],
+[
+0,
+0,
+0,
+1
+],
+false,
+false,
+true,
+false
+],
+"after": 800,
+"capture": {
+"var": "tube",
+"rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectClientRpc",
+"arg": 0
+}
+},
+{
+"rpc": "InventoryAssociatedProxy.GetInventoryIdServerRpc",
+"on": [
+"$tube",
+1
+],
+"args": [],
+"capture": {
+"var": "tubeinv",
+"rpc": "InventoryAssociatedProxy.GetInventoryIdClientRpc",
+"arg": 2
+}
+},
+{
+"rpc": "InventoriesHandler.AddNewItemToInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+"#Seed0",
+"$tubeinv"
+]
+},
+{
+"rpc": "WorldObjectsHandler.GetEnergyGroupDataServerRpc",
+"on": "WorldObjectsHandler",
+"args": []
+},
+{
+"wait": 40000
+},
+{
+"rpc": "WorldObjectsHandler.GetEnergyGroupDataServerRpc",
+"on": "WorldObjectsHandler",
+"args": []
+},
+{
+"rpc": "WorldObjectAssociatedProxy.GetWorldObjectIdServerRpc",
+"on": [
+"$gen1",
+1
+],
+"args": [],
+"capture": {
+"var": "gen1wo",
+"rpc": "WorldObjectAssociatedProxy.GetWorldObjectIdClientRpc",
+"arg": 0
+}
+},
+{
+"rpc": "WorldObjectsHandler.DestroyWorldObjectServerRpc",
+"on": "WorldObjectsHandler",
+"args": [
+"$gen1wo",
+true
+]
+},
+{
+"rpc": "WorldObjectsHandler.GetEnergyGroupDataServerRpc",
+"on": "WorldObjectsHandler",
+"args": []
+},
+{
+"wait": 30000
+},
+{
+"rpc": "WorldObjectsHandler.GetEnergyGroupDataServerRpc",
+"on": "WorldObjectsHandler",
+"args": []
+}
+]
+}

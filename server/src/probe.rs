@@ -93,7 +93,7 @@ impl Session {
                             print(self.started, object_line(o, "approved object"));
                         }
                     }
-                    json!({"msg": "approved", "client": owner, "objects": objects.len(), "hashes": by_hash})
+                    json!({"msg": "approved", "client": owner, "objects": objects.len(), "hashes": by_hash, "header": approved_header(body)})
                 }
                 None => json!({"msg": "approved", "error": "unreadable"}),
             },
@@ -132,6 +132,20 @@ impl Session {
         };
         print(self.started, line);
     }
+}
+
+/// ConnectionApprovedMessage before its objects: message versions, the client's id, the
+/// server tick (time: left out) and the connected clients.
+fn approved_header(body: &[u8]) -> Value {
+    let mut r = Reader::new(body);
+    let mut versions = Vec::new();
+    for _ in 0..r.packed_i32().unwrap_or(0) {
+        versions.push(json!([r.u32(), r.packed_i32()]));
+    }
+    let owner = r.packed_u64();
+    r.packed_i32();
+    let clients: Vec<Option<u64>> = (0..r.i32().unwrap_or(0)).map(|_| r.u64()).collect();
+    json!({"versions": versions, "owner": owner, "clients": clients})
 }
 
 fn object_line(o: &protocol::SceneObjectInfo, msg: &str) -> Value {

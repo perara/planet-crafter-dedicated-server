@@ -511,6 +511,40 @@ that prints everything a server sends; `tools/probe_diff.py` compares two such r
 real game host and this server, for instance). `pcds tables-diff EXPECTED ACTUAL` compares two
 table folders section by section.
 
+### Parity with the game
+
+`server/tests/parity/` checks the game logic against the real game host: the same probe script
+(`scripts/*.json`, one per mechanic family) runs against both, from the same save, and what
+each sends back is compared.
+
+1. **The reference host** is the game itself, headless under Wine and Xvfb, with BepInEx and
+   the extractor plugin that once read the tables (`extractor/` at commit 4992b39; its
+   GhostHost.cs hides the host's own player). Build it with the .NET 8 SDK as that commit's
+   `pcds build` did, after adding a save endpoint to `Api.cs`:
+   `case "POST /api/save": Extractor.OnMain(() => { Managers.GetManager<SavedDataHandler>().SaveWorldData(); return true; });`
+   In `BepInEx/config/pcds.extractor.cfg` set `SaveName = Parity-1`, a free `Port` (UDP, the
+   probe joins there) and `ApiPort`; put the start save in the Wine prefix as
+   `AppData/LocalLow/MijuGames/Planet Crafter/Parity-1.json`; start the game as 4992b39's
+   `pcds extract` did (`WINEDLLOVERRIDES="winhttp=n,b" xvfb-run -a -s "-screen 0 1280x720x24"
+   wine "Planet Crafter.exe" -batchmode -nographics`) and wait for `PCDS READY` in BepInEx's
+   log, then until `GET /api/status` shows the world units' rates standing still. Give the
+   save a host record of its own (id 0, name Extractor, `"host": true`, at the escape pod), or
+   the hidden host takes the saved host player's place. Without Steam the game owns no DLC.
+2. **This server** on a copy of the same save: `PCDS_LISTEN=127.0.0.1:PORT PCDS_STEAM=off
+   PCDS_ADMIN=off PCDS_AUTOSAVE=0 PCDS_TRUST_LOOPBACK=1 pcds serve DATA_DIR world.json`.
+3. **Run a script** against both: `server/tests/parity/run.sh REF_ADDR OURS_ADDR DATA_DIR
+   START_SAVE server/tests/parity/scripts/NAME.json OUT_DIR`. `parity.py` decodes every
+   network variable with the tables and prints what differs: the approval (objects and their
+   variables), the RPCs and spawns of each script step, and the variables' final values (those
+   that drift with time, by their rate).
+4. **The saves**: `POST /api/save` on the reference, stop ours (it saves), then
+   `server/tests/parity/savediff.py START_SAVE REF_SAVE OURS_SAVE`: field by field, order
+   included.
+
+Start both again from the start save for every script. `server/tests/parity/EXPECTED.md` lists
+what still differs on purpose (the reference's host player, time, the game's randomness, the
+safety rules); anything else is a bug.
+
 `src/bench.rs` times the server's tick on a real save with a fixed clock and seed, and prints a
 fingerprint of everything the server sends and saves. A change that should not alter the game
 must leave the fingerprint as it was:

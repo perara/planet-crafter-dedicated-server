@@ -453,6 +453,10 @@ def diff_events(ref, ours):
 
 def diff_approved(ref, ours):
     n = 0
+    header = lambda t: next((l.get('header') for l in t.lines if l['msg'] == 'approved'), None)
+    if not close(header(ref), header(ours)):
+        print(f'~ approval header: ref {dumps(header(ref))} ours {dumps(header(ours))}')
+        n += 1
     ra = {k: v for k, v in ref.objects.items() if not k.startswith('new:')}
     oa = {k: v for k, v in ours.objects.items() if not k.startswith('new:')}
     for k in sorted(set(ra) | set(oa)):
@@ -492,6 +496,8 @@ def diff_state(ref, ours):
     for k in keys:
         a, b = ref.norm(ref.state.get(k)), ours.norm(ours.state.get(k))
         sa, sb = ref.series.get(k), ours.series.get(k)
+        if isinstance(a, list) and isinstance(b, list) and len(a) == 5 and k[1].startswith('WorldUnitsPlanet.') and close(a[1:], b[1:]):
+            continue  # a unit's rates are what the servers compute; its float32 total is coarse
         if sa and sb and slope(sa) is not None and slope(sb) is not None:
             ra, rb = slope(sa), slope(sb)
             rates_equal = isinstance(a, list) and close(rnd(a[1:]), rnd(b[1:])) or not isinstance(a, list)
