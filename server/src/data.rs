@@ -35,6 +35,10 @@ pub struct ObjectDef {
     /// Its NetworkTransforms' spawn states (NetworkTransform.OnSynchronize).
     pub transforms: Vec<TransformDef>,
     pub scale: Option<[f32; 3]>,
+    /// Whether a world object of this prefab keeps its group hash at spawn (the root carries
+    /// a GroupNetworkBase and has children); tables read before it was recorded: unknown.
+    #[serde(default)]
+    pub group_hash_on_spawn: Option<bool>,
 }
 
 #[derive(Deserialize, Clone)]

@@ -283,6 +283,11 @@ impl Ctx {
         out.insert("behaviours".into(), Value::Array(behaviours));
         out.insert("transforms".into(), Value::Array(transforms));
         out.insert("scale".into(), json!(scale.map(super::tables::single)));
+        // WorldObjectsHandler.InstantiateWorldObject gives the group to the root's own
+        // GroupNetworkBase, and GroupNetworkBase.OnNetworkSpawn keeps it only on a root with
+        // children: whether a world object spawned from this prefab shows its group hash.
+        let root_base = self.graph.nodes.get(&root).map(|x| x.components.clone()).unwrap_or_default().into_iter().filter(|(_, class)| *class == unity::MONO_BEHAVIOUR).any(|(c, _)| self.script_type(c).is_ok_and(|ty| self.layouts.asm.derives_from(&ty, "SpaceCraft.GroupNetworkBase")));
+        out.insert("groupHashOnSpawn".into(), json!(root_base && !self.graph.children(root).is_empty()));
         Ok(out)
     }
 

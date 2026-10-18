@@ -158,6 +158,7 @@ impl Game {
             return None;
         };
         let mut o = NetObj::from_layout(&def.layout(self.tick_number()));
+        let no_group_hash = def.group_hash_on_spawn == Some(false);
         let (inventory_size, secondary, hash) = (g.inventory_size, g.secondary_inventories.clone(), g.hash);
         let constructible = g.constructible;
         let energy = g.unit("Energy");
@@ -175,8 +176,13 @@ impl Game {
         o.rotation = wo.rotation;
         o.wo = Some(id);
         let active = wo.planet_hash() == self.planet_hash();
+        // InstantiateWorldObject and GroupNetworkBase.OnNetworkSpawn: an own prefab whose root
+        // has no GroupNetworkBase, or no children, keeps group hash 0 (the escape pod).
+        let keeps_zero = own_prefab && no_group_hash;
         for class in ["GroupNetworkContainer", "ConstructibleProxy"] {
-            o.init(class, "_groupHash", enc::int(hash));
+            if !keeps_zero {
+                o.init(class, "_groupHash", enc::int(hash));
+            }
             o.init(class, "_active", enc::bool(active));
         }
         // ColorProxy.OnNetworkSpawn: no colour stays (0,0,0,0) until WorldObjectColor sets one.
@@ -603,6 +609,19 @@ mod tests {
     const POD: i32 = 208217122;
     /// A scene object's id (below the player-made ids) that the save does not hold.
     const SCENE: i32 = 101_234_567;
+
+    /// The escape pod's prefab gives its group to no GroupNetworkBase on its root: the real
+    /// host spawns it with group hash 0, other buildings with theirs.
+    #[test]
+    fn prefabs_without_a_root_group_base_keep_group_hash_zero() {
+        let Some((mut g, _)) = world() else { return };
+        std::sync::Arc::make_mut(&mut g.data.layouts).get_mut("EscapePod").unwrap().group_hash_on_spawn = Some(false);
+        let (_, pod) = place(&mut g, "EscapePod", [570.0, 3.0, 500.0]);
+        let (_, chest) = place(&mut g, "Container1", [575.0, 3.0, 500.0]);
+        let hash = |g: &crate::game::Game, net| var(g, net, "ConstructibleProxy", "_groupHash");
+        assert_eq!(hash(&g, pod), crate::net::enc::int(0));
+        assert_eq!(hash(&g, chest), crate::net::enc::int(g.data.groups[g.data.group("Container1").unwrap()].hash));
+    }
 
     #[test]
     fn world_object_queries_answer_the_asking_client() {
