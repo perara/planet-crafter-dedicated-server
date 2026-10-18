@@ -35,7 +35,7 @@ fn pcds(dir: &Path, path: &Path, args: &[&str]) -> Output {
 fn pcds_at(program: &Path, dir: &Path, path: &Path, args: &[&str]) -> Output {
     let search = format!("{}:{}", path.display(), std::env::var("PATH").unwrap_or_default());
     let mut cmd = Command::new(program);
-    cmd.args(args).env("PCDS_HOME", dir.join("run")).env("PCDS_UNIT", "pcds-cli-itest").env("PATH", search).env("HOME", dir.join("home")).env_remove("PCDS_CONTAINER").env_remove("PCDS_GAME_DIR");
+    cmd.args(args).env("PCDS_HOME", dir.join("run")).env("PCDS_UNIT", "pcds-cli-itest").env("PATH", search).env("HOME", dir.join("home")).env_remove("XDG_CONFIG_HOME").env_remove("PCDS_CONTAINER").env_remove("PCDS_GAME_DIR");
     // A program just written may still be open in a child another test forks at that moment.
     for _ in 0..100 {
         match cmd.output() {
@@ -184,9 +184,16 @@ fn a_start_falls_back_to_the_other_bank() {
     for f in ["format", "build"] {
         std::fs::copy(dir.join("run/bin/a").join(f), dir.join("run/bin/b").join(f)).unwrap();
     }
+    // The unit a 0.5 release folder wrote: pcds run writes this version's in its place.
+    let units = dir.join("home/.config/systemd/user");
+    std::fs::create_dir_all(&units).unwrap();
+    let old = format!("[Service]\nEnvironmentFile={}\nExecStart=\"{}/pcds\" run\nTimeoutStopSec=60\n", dir.join("run/server.env").display(), dir.display());
+    std::fs::write(units.join("pcds-cli-itest.service"), old).unwrap();
     let out = pcds(&dir, &fake, &["run"]);
     let said = text(&out);
     assert_eq!(out.status.code(), Some(0), "{said}");
+    let unit = std::fs::read_to_string(units.join("pcds-cli-itest.service")).unwrap();
+    assert!(unit.contains("KillMode=mixed") && unit.contains("TimeoutStopSec=90") && said.contains("written again"), "{unit}\n{said}");
     assert!(said.contains("bank a could not start the world: its front (pcds 9.0.0) ended without running it (exit 75") && said.contains("Starting bank b"), "{said}");
     assert!(said.contains(&format!("bank b runs {}", dir.join("run/worlds/world.json").display())), "{said}");
     assert_eq!(std::fs::read_to_string(dir.join("run/bin/active")).unwrap().trim(), "b");

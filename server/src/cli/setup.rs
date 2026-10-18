@@ -157,6 +157,14 @@ impl Ctx {
         if !world.is_file() {
             return Err(format!("no world at {}: 'pcds worlds', 'pcds world use NAME' or 'pcds world new NAME'", world.display()));
         }
+        // Units an older pcds wrote (a 0.5 release folder's: no KillMode=mixed, a shorter
+        // stop timeout) are written again; systemd takes the new text at the next start.
+        if !self.container
+            && self.unit_dir.join(self.unit()).is_file()
+            && let Err(e) = self.refresh_unit()
+        {
+            eprintln!("pcds: the systemd units could not be written again ({e}); 'pcds install-service' writes them");
+        }
         // A newer build into a bank is not what the start needs: when it fails (a full disk),
         // the server starts from the banks as they are.
         if let Err(e) = self.install_beside(None) {

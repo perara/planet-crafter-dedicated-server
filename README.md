@@ -146,7 +146,11 @@ release into the standby bank and make it the active one, unless a bank holds th
 (so a rollback stays rolled back).
 
 From 0.5 or older (the bash `pcds`):
-- The units ran the bash `pcds`, which is gone: the server does not start until
+- A release folder (the installer's): its `pcds` is the new program now, so the old units still
+  start the server. `pcds run` writes this version's units in their place (the stop handling
+  changed: `KillMode=mixed`, `TimeoutStopSec=90`); systemd uses them from the next start, so
+  run `pcds restart` once.
+- A checkout: the units ran the bash `pcds`, which is gone, so the server does not start until
   `pcds install-service` (or `pcds up`) has written the units again.
 - A game build is recognised by a hash of its code now: the server stops with "the game changed"
   until `pcds update` has extracted the game tables once more.
