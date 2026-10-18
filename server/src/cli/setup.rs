@@ -219,7 +219,7 @@ impl Ctx {
         if super::same_file(save, &current) {
             return Err(format!("{} is the world {name} already: leave out --world", save.display()));
         }
-        if self.active() {
+        if self.active()? {
             return Err("stop the server first (pcds stop): it would save over the imported world".into());
         }
         if current.is_file() {
@@ -307,7 +307,7 @@ impl Ctx {
     /// A scripted player joins over direct IP and gets the world, without becoming a player
     /// (nothing is saved for it).
     pub fn selftest(&self) -> Result {
-        if !self.active() {
+        if !self.active()? {
             return Err("start the server first (pcds start)".into());
         }
         let data = self.data_dir()?;

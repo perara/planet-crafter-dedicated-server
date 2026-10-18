@@ -116,8 +116,10 @@ impl Ctx {
         serde_json::from_str(&text).map_err(|e| format!("{method} {path}: {e}"))
     }
 
+    /// Err (exit 1) when systemctl fails, or when the server runs and its admin API does not
+    /// answer (the Docker image's health check).
     pub fn status(&self) -> Result {
-        if !self.active() {
+        if !self.active()? {
             println!("state=stopped");
             self.print_banks(None);
             return Ok(());
@@ -129,13 +131,13 @@ impl Ctx {
                 for line in status_lines(&status) {
                     println!("{line}");
                 }
+                Ok(())
             }
             Err(e) => {
                 self.print_banks(None);
-                println!("admin API: {e}");
+                Err(format!("admin API: {e}"))
             }
         }
-        Ok(())
     }
 
     /// GET /api/status as JSON, for scripts.

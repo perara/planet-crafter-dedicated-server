@@ -33,7 +33,7 @@ impl Ctx {
             self.print_banks(None);
             return Ok(());
         }
-        let running = self.active();
+        let running = self.active()?;
         if running && !restart {
             let body = if rollback { json!({"rollback": true}) } else { json!({"version": version}) };
             let answer: Value = serde_json::from_str(&self.api("POST", "/api/update", Some(&body.to_string()))?).map_err(|e| e.to_string())?;
