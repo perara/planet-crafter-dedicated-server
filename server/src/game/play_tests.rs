@@ -380,3 +380,30 @@ fn the_constructed_index_never_stops() {
     crate::units::constructed_changed(&mut g);
     assert_eq!(g.units.constructed_index, (1 << 24) + 1);
 }
+
+/// L5: ids and hashes a client makes up keep nothing in memory: watches of missing
+/// inventories, logistics of missing inventories, unlocks of missing groups.
+#[test]
+fn made_up_ids_keep_nothing() {
+    let Some(mut g) = test_game(save()) else { return };
+    join(&mut g, 1, "Ann");
+    let (watchers, entities) = (g.watchers.len(), serde_json::to_value(&g.ext.logistics).unwrap()["entities"].as_object().map(|o| o.len()));
+    let unlocked = |g: &Game| match g.net.find_class("UnlockedGroupsHandler").and_then(|(o, _)| g.net.get(o, "UnlockedGroupsHandler", "_unlockedGroups")) {
+        Some(crate::net::VarValue::List(items)) => items.len(),
+        _ => 0,
+    };
+    let before = unlocked(&g);
+    for i in 0..100 {
+        rpc(&mut g, 1, 0, "InventoriesHandler.BeginInventoryWatchServerRpc", vec![json!(5_000_000 + i)]);
+        rpc(&mut g, 1, 0, "InventoriesHandler.CheckInventoryWatchAndDirtyServerRpc", vec![json!(6_000_000 + i)]);
+        rpc(&mut g, 1, 0, "InventoriesHandler.DirtyInventoryLogisticsServerRpc", vec![json!(7_000_000 + i), json!([]), json!([]), json!(0)]);
+        rpc(&mut g, 1, 0, "UnlockedGroupsHandler.UnlockGroupGloballyServerRpc", vec![json!(123_456 + i), json!(false), json!(false)]);
+    }
+    assert_eq!(g.watchers.len(), watchers);
+    assert_eq!(serde_json::to_value(&g.ext.logistics).unwrap()["entities"].as_object().map(|o| o.len()), entities);
+    assert_eq!(unlocked(&g), before);
+    // A real group still unlocks.
+    let iron = g.data.groups[g.data.group("Iron").unwrap()].hash;
+    rpc(&mut g, 1, 0, "UnlockedGroupsHandler.UnlockGroupGloballyServerRpc", vec![json!(iron), json!(false), json!(false)]);
+    assert_eq!(unlocked(&g), before + 1);
+}

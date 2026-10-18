@@ -579,6 +579,7 @@ impl Game {
                 let (demand, supply, priority) = self.logistic_serialized(inv);
                 self.net.rpc_scene(Target::Only(client), "InventoriesHandler.DirtyInventoryLogisticsClientRpc", &[json!(inv), json!(demand), json!(supply), json!(priority)]);
             }
+            "InventoriesHandler.DirtyInventoryLogisticsServerRpc" if !self.inventories.contains_key(&a.i(0)) => {}
             "InventoriesHandler.DirtyInventoryLogisticsServerRpc" => {
                 let inv = a.i(0);
                 let groups = |v: Option<Vec<i32>>| v.unwrap_or_default().iter().filter_map(|h| self.data.group_by_hash(*h)).collect::<Vec<_>>();
@@ -630,10 +631,14 @@ impl Game {
                     None => self.retrieve_inventory(Target::Only(client), None),
                 }
             }
+            // Watches, logistics settings: of inventories that exist only (the game keeps an
+            // entry for any id a client sends, so the server's memory grew without bound).
+            "InventoriesHandler.BeginInventoryWatchServerRpc" if !self.inventories.contains_key(&a.i(0)) => {}
             "InventoriesHandler.BeginInventoryWatchServerRpc" => {
                 *self.watchers.entry(a.i(0)).or_default().entry(client).or_insert(0) += 1;
             }
             "InventoriesHandler.StopInventoryWatchServerRpc" => self.stop_inventory_watch(a.i(0), client),
+            "InventoriesHandler.CheckInventoryWatchAndDirtyServerRpc" if !self.inventories.contains_key(&a.i(0)) => {}
             "InventoriesHandler.CheckInventoryWatchAndDirtyServerRpc" => {
                 let inv = a.i(0);
                 let w = self.watchers.entry(inv).or_default();

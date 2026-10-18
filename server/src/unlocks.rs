@@ -75,6 +75,9 @@ fn unlockable_group(game: &mut Game) -> Option<usize> {
 
 pub fn rpc(game: &mut Game, client: u64, name: &str, a: &Args) -> bool {
     match name {
+        // A group's hash only: the game adds any number to _unlockedGroups, which every client
+        // then gets and the save keeps.
+        "UnlockedGroupsHandler.UnlockGroupGloballyServerRpc" if game.data.group_by_hash(a.i(0)).is_none() => {}
         "UnlockedGroupsHandler.UnlockGroupGloballyServerRpc" => unlock_globally(game, a.i(0), a.b(1), a.b(2)),
         "UnlockedGroupsHandler.DecodeBlueprintServerRpc" => {
             let Some(chip) = game.wos.get(&a.i(0)).cloned() else { return true };
