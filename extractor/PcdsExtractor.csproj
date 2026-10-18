@@ -4,7 +4,7 @@
     <TargetFramework>net472</TargetFramework>
     <AssemblyName>PcdsExtractor</AssemblyName>
     <LangVersion>latest</LangVersion>
-    <!-- The game folder with BepInEx installed (pcds build passes it). -->
+    <!-- The game folder with BepInEx installed (make extractor passes it). -->
     <GameDir Condition="'$(GameDir)' == ''">$(MSBuildThisFileDirectory)../run/extractor/game</GameDir>
     <Managed>$(GameDir)/Planet Crafter_Data/Managed</Managed>
   </PropertyGroup>

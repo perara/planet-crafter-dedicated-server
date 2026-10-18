@@ -14,7 +14,7 @@ namespace PcdsExtractor
     // The network tables the standalone server needs, read from the running game: every
     // spawned object as Netcode serializes it, the message version table, the connection
     // request's config hash and data, and every RPC with its argument encoding.
-    // GET /api/netdata; `pcds-server extract` turns it into data/<version>/.
+    // GET /api/netdata; `pcds extract-raw` turns it into data/<version>/.
     internal static class NetData
     {
         static readonly MethodInfo GetSceneObject = AccessTools.Method(typeof(NetworkObject), "GetMessageSceneObject");
