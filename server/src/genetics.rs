@@ -58,3 +58,27 @@ pub fn set_trait_serialized(wo: &mut WorldObject, data: &Value) {
     wo.color = [0, 1, 2, 3].map(|i| data[1][i].as_f64().unwrap_or(0.0) as f32);
     wo.trait_value = data[2].as_i64().unwrap_or(0) as i32;
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::testkit::*;
+
+    /// New trait objects get a random lootable trait; colour traits show their colour as RGBA
+    /// bytes, the others their value; traits set from data and from RPC arguments alike.
+    #[test]
+    fn traits_are_random_when_new_and_show_colours_as_bytes() {
+        let Some((mut g, _)) = world() else { return };
+        let group = g.data.group(TRAIT_GROUP).unwrap();
+        let id = g.create_world_object(group, 0, true);
+        assert_ne!(g.wos[&id].trait_type, 0, "a fresh trait is a random lootable one");
+        let mut w = g.wos[&id].clone();
+        set_trait_serialized(&mut w, &json!([trait_type("ColorA"), [1.0, 0.5, 0.0, 1.0], 9]));
+        assert_eq!(trait_value(&g, &w), i32::from_le_bytes([255, 128, 0, 255]));
+        set_trait(&mut w, &json!({"traitType": "Size", "traitColor": [0, 0, 0, 0], "traitValue": 4}));
+        assert_eq!((w.trait_type, trait_value(&g, &w)), (trait_type("Size"), 4));
+        assert_eq!(trait_type("NoSuchTrait"), 0);
+    }
+}
