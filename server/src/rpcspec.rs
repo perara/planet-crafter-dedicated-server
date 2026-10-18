@@ -1,5 +1,5 @@
-//! Every game RPC with its argument encoding (data/<version>/rpcs.json, generated from the game by
-//! tools/rpc_signatures.py), so RPCs are read and written by name. Arguments are JSON values
+//! Every game RPC with its argument encoding (data/<version>/rpcs.json, which `pcds read-game`
+//! reads from the game's code), so RPCs are read and written by name. Arguments are JSON values
 //! in signature order: numbers, bools, strings, arrays for vectors ([x, y, z]), colors and
 //! structs (fields in order), arrays of those, and null for an absent optional argument.
 
@@ -14,10 +14,14 @@ use crate::wire::{Reader, Writer};
 pub struct Rpc {
     pub name: String,
     pub args: Vec<Arg>,
+    /// No INetworkSerializable argument (its NetworkSerialize is not ported): decode gives None.
+    #[serde(skip)]
+    decodable: bool,
 }
 
 #[derive(Deserialize)]
 pub struct Arg {
+    pub name: String,
     #[serde(rename = "type")]
     pub ty: String,
     pub enc: String,
@@ -28,6 +32,9 @@ pub struct Arg {
     /// Field types of a memcpy struct (or of an array's struct items), in layout order.
     #[serde(default)]
     pub fields: Option<Vec<String>>,
+    /// An enum's underlying type (its size on the wire).
+    #[serde(default)]
+    pub base: Option<String>,
 }
 
 #[derive(Default)]
@@ -36,23 +43,25 @@ pub struct Spec {
     by_name: HashMap<String, u32>,
 }
 
-/// Fields of a memcpy struct an RPC carries: from rpcs.json when the game exported them, else
-/// the layouts known for 2.103; names starting with "pad" are alignment padding.
-fn struct_fields(ty: &str, given: Option<&[String]>) -> Vec<String> {
-    if let Some(f) = given {
-        return f.to_vec();
-    }
-    let known: &[&str] = match ty {
-        "Message" => &["bool", "pad3", "int"],
-        "GeneticTraitData.SerializedData" => &["int", "Color", "int"],
-        "Group.GroupCountData" => &["int", "int"],
-        "Group.EnergyGroupData" => &["int", "float", "int"],
-        _ => {
-            eprintln!("unknown RPC struct {ty}");
-            &[]
-        }
+/// Types write_raw and read_raw know ("pad1": a byte of struct padding).
+const RAW: &[&str] = &["bool", "float", "int", "uint", "short", "ushort", "byte", "long", "double", "ulong", "pad1", "Vector2Int", "Vector2", "Vector3", "Quaternion", "Color"];
+const PACKED: &[&str] = &["int", "short", "uint", "ushort", "ulong", "long"];
+
+/// Every encoding of `a` is one this module reads and writes (Ok(false): an INetworkSerializable).
+fn check(a: &Arg) -> Result<bool, String> {
+    let element = if a.enc == "array" { a.item.as_deref().ok_or("an array without its item encoding")? } else { a.enc.as_str() };
+    let ty = if a.enc == "array" { a.ty.strip_suffix("[]").ok_or("an array type without []")? } else { a.ty.as_str() };
+    let ok = match (a.enc.as_str(), element) {
+        (_, "raw") => RAW.contains(&ty) && ty != "pad1",
+        ("packed", _) => PACKED.contains(&ty),
+        (_, "enum") => a.base.as_deref().is_some_and(|b| PACKED.contains(&b) || b == "byte"),
+        (_, "struct") => a.fields.as_ref().is_some_and(|f| !f.is_empty() && f.iter().all(|f| RAW.contains(&f.as_str()))),
+        ("string", _) => true,
+        ("extension", _) => ty == "WorldInstanceData",
+        (_, "serializable") => return Ok(false),
+        _ => false,
     };
-    known.iter().map(|s| s.to_string()).collect()
+    if ok { Ok(true) } else { Err(format!("encoding {} (item {:?}, base {:?}, fields {:?}) of {} is not supported", a.enc, a.item, a.base, a.fields, a.ty)) }
 }
 
 fn floats(v: &Value, n: usize) -> Vec<f32> {
@@ -67,7 +76,7 @@ fn write_raw(w: &mut Writer, ty: &str, v: &Value) {
         "float" => {
             w.f32(v.as_f64().unwrap_or(0.0) as f32);
         }
-        "int" | "enum" => {
+        "int" => {
             w.i32(v.as_i64().unwrap_or(0) as i32);
         }
         "uint" => {
@@ -94,9 +103,6 @@ fn write_raw(w: &mut Writer, ty: &str, v: &Value) {
         "ulong" => {
             w.u64(v.as_u64().unwrap_or(0));
         }
-        "pad3" => {
-            w.bytes(&[0, 0, 0]);
-        }
         "Vector2Int" => {
             w.i32(v[0].as_i64().unwrap_or(0) as i32).i32(v[1].as_i64().unwrap_or(0) as i32);
         }
@@ -110,7 +116,7 @@ fn write_raw(w: &mut Writer, ty: &str, v: &Value) {
                 w.f32(*f);
             });
         }
-        _ => eprintln!("unknown raw RPC type {ty}"),
+        _ => unreachable!("raw RPC type {ty} passed Spec::load"),
     }
 }
 
@@ -118,7 +124,7 @@ fn read_raw(r: &mut Reader, ty: &str) -> Option<Value> {
     Some(match ty {
         "bool" => json!(r.bool()?),
         "float" => json!(r.f32()?),
-        "int" | "enum" => json!(r.i32()?),
+        "int" => json!(r.i32()?),
         "uint" => json!(r.u32()?),
         "short" => json!(r.i16()?),
         "ushort" => json!(r.u16_raw()?),
@@ -130,19 +136,24 @@ fn read_raw(r: &mut Reader, ty: &str) -> Option<Value> {
             Value::Null
         }
         "ulong" => json!(r.u64()?),
-        "pad3" => {
-            r.skip(3)?;
-            Value::Null
-        }
         "Vector2Int" => json!([r.i32()?, r.i32()?]),
         "Vector2" => json!([r.f32()?, r.f32()?]),
         "Vector3" => json!([r.f32()?, r.f32()?, r.f32()?]),
         "Quaternion" | "Color" => json!([r.f32()?, r.f32()?, r.f32()?, r.f32()?]),
-        _ => return None,
+        _ => unreachable!("raw RPC type {ty} passed Spec::load"),
     })
 }
 
-fn write_value(w: &mut Writer, enc: &str, ty: &str, item: Option<&str>, fields: Option<&[String]>, v: &Value) {
+fn write_string(w: &mut Writer, s: &str) {
+    let units: Vec<u16> = s.encode_utf16().collect();
+    w.u32(units.len() as u32);
+    units.iter().for_each(|u| {
+        w.u16(*u);
+    });
+}
+
+/// One value of `a` with encoding `enc` and type `ty` (an array's: its item's).
+fn write_value(w: &mut Writer, a: &Arg, enc: &str, ty: &str, v: &Value) {
     match enc {
         "packed" => {
             match ty {
@@ -155,54 +166,49 @@ fn write_value(w: &mut Writer, enc: &str, ty: &str, item: Option<&str>, fields: 
                     let i = v.as_i64().unwrap_or(0);
                     w.packed_u64(((i << 1) ^ (i >> 63)) as u64)
                 }
-                _ => {
-                    eprintln!("unknown packed RPC type {ty}");
-                    w
-                }
+                _ => unreachable!("packed RPC type {ty} passed Spec::load"),
             };
         }
         "raw" => write_raw(w, ty, v),
-        "enum" => write_raw(w, "enum", v),
+        "enum" => write_raw(w, a.base.as_deref().unwrap_or_default(), v),
         "struct" => {
             let mut values = v.as_array().into_iter().flatten();
-            for field in struct_fields(ty, fields) {
+            for field in a.fields.iter().flatten() {
                 let value = if field.starts_with("pad") { &Value::Null } else { values.next().unwrap_or(&Value::Null) };
-                write_raw(w, &field, value);
+                write_raw(w, field, value);
             }
         }
-        "string" => {
-            let units: Vec<u16> = v.as_str().unwrap_or("").encode_utf16().collect();
-            w.u32(units.len() as u32);
-            units.iter().for_each(|u| {
-                w.u16(*u);
-            });
-        }
+        "string" => write_string(w, v.as_str().unwrap_or("")),
         "array" => {
             let items = v.as_array().cloned().unwrap_or_default();
             let item_ty = ty.trim_end_matches("[]");
             w.i32(items.len() as i32);
             for i in &items {
-                write_value(w, item.unwrap_or("raw"), item_ty, None, fields, i);
+                write_value(w, a, a.item.as_deref().unwrap_or_default(), item_ty, i);
             }
         }
-        // WorldInstanceDataSerializationExtensions: [seed, time left, scene, loot rarity,
-        // difficulty, recipe group hashes]; a seed of 0 is no instance.
-        "serializable" if ty == "WorldInstanceData" => {
+        // WorldInstanceDataSerializationExtensions.WriteValueSafe: [seed, time left, scene, loot
+        // rarity, difficulty, recipe group hashes]; a seed of 0 is no instance.
+        "extension" => {
             let a = v.as_array().cloned().unwrap_or_default();
             let int = |i: usize| a.get(i).and_then(|x| x.as_i64()).unwrap_or(0) as i32;
             w.i32(int(0));
             if int(0) != 0 {
                 w.i32(int(1));
-                write_value(w, "string", "string", None, None, a.get(2).unwrap_or(&Value::Null));
+                write_string(w, a.get(2).and_then(Value::as_str).unwrap_or(""));
                 w.i32(int(3)).i32(int(4));
-                write_value(w, "array", "int[]", Some("raw"), None, a.get(5).unwrap_or(&Value::Null));
+                let recipe = a.get(5).and_then(Value::as_array).cloned().unwrap_or_default();
+                w.i32(recipe.len() as i32);
+                recipe.iter().for_each(|h| {
+                    w.i32(h.as_i64().unwrap_or(0) as i32);
+                });
             }
         }
-        _ => eprintln!("RPC encoding {enc} {ty} is not supported"),
+        _ => unreachable!("RPC encoding {enc} {ty} passed Spec::load"),
     }
 }
 
-fn read_value(r: &mut Reader, enc: &str, ty: &str, item: Option<&str>, fields: Option<&[String]>) -> Option<Value> {
+fn read_value(r: &mut Reader, a: &Arg, enc: &str, ty: &str) -> Option<Value> {
     Some(match enc {
         "packed" => match ty {
             "int" => json!(r.packed_i32()?),
@@ -214,14 +220,14 @@ fn read_value(r: &mut Reader, enc: &str, ty: &str, item: Option<&str>, fields: O
                 let u = r.packed_u64()?;
                 json!(((u >> 1) as i64) ^ -((u & 1) as i64))
             }
-            _ => return None,
+            _ => unreachable!("packed RPC type {ty} passed Spec::load"),
         },
         "raw" => read_raw(r, ty)?,
-        "enum" => read_raw(r, "enum")?,
+        "enum" => read_raw(r, a.base.as_deref().unwrap_or_default())?,
         "struct" => {
             let mut out = Vec::new();
-            for field in struct_fields(ty, fields) {
-                let v = read_raw(r, &field)?;
+            for field in a.fields.iter().flatten() {
+                let v = read_raw(r, field)?;
                 if !field.starts_with("pad") {
                     out.push(v);
                 }
@@ -234,11 +240,11 @@ fn read_value(r: &mut Reader, enc: &str, ty: &str, item: Option<&str>, fields: O
             let item_ty = ty.trim_end_matches("[]");
             let mut items = Vec::new();
             for _ in 0..n.max(0) {
-                items.push(read_value(r, item.unwrap_or("raw"), item_ty, None, fields)?);
+                items.push(read_value(r, a, a.item.as_deref().unwrap_or_default(), item_ty)?);
             }
             Value::Array(items)
         }
-        "serializable" if ty == "WorldInstanceData" => {
+        "extension" => {
             let seed = r.i32()?;
             if seed == 0 {
                 return Some(Value::Null);
@@ -246,19 +252,39 @@ fn read_value(r: &mut Reader, enc: &str, ty: &str, item: Option<&str>, fields: O
             let time_left = r.i32()?;
             let scene = r.string()?;
             let (loot, difficulty) = (r.i32()?, r.i32()?);
-            json!([seed, time_left, scene, loot, difficulty, read_value(r, "array", "int[]", Some("raw"), None)?])
+            let n = r.i32()?;
+            let recipe = (0..n.max(0)).map(|_| r.i32()).collect::<Option<Vec<i32>>>()?;
+            json!([seed, time_left, scene, loot, difficulty, recipe])
         }
-        _ => return None,
+        _ => unreachable!("RPC encoding {enc} {ty} passed Spec::load"),
     })
 }
 
 impl Spec {
     pub fn load(path: &str) -> Result<Spec, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-        let raw: HashMap<String, Rpc> = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
-        let by_hash: HashMap<u32, Rpc> = raw.into_iter().filter_map(|(h, r)| Some((h.parse().ok()?, r))).collect();
-        let by_name = by_hash.iter().map(|(h, r)| (r.name.clone(), *h)).collect();
-        Ok(Spec { by_hash, by_name })
+        Spec::parse(&text).map_err(|e| format!("{path}: {e}"))
+    }
+
+    /// rpcs.json's text; an encoding this module does not read and write is an error.
+    fn parse(text: &str) -> Result<Spec, String> {
+        let raw: HashMap<String, Rpc> = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        let mut spec = Spec::default();
+        for (h, mut rpc) in raw {
+            let hash: u32 = h.parse().map_err(|_| format!("RPC hash {h:?}"))?;
+            rpc.decodable = true;
+            for a in &rpc.args {
+                rpc.decodable &= check(a).map_err(|e| format!("{}({}): {e}", rpc.name, a.name))?;
+            }
+            if spec.by_name.insert(rpc.name.clone(), hash).is_some() {
+                return Err(format!("two RPCs named {}", rpc.name));
+            }
+            spec.by_hash.insert(hash, rpc);
+        }
+        if spec.by_hash.is_empty() {
+            return Err("no RPCs".into());
+        }
+        Ok(spec)
     }
 
     pub fn get(&self, hash: u32) -> Option<&Rpc> {
@@ -276,6 +302,10 @@ impl Spec {
             return (0, Vec::new());
         };
         let rpc = &self.by_hash[&hash];
+        if !rpc.decodable {
+            eprintln!("RPC {name} has an INetworkSerializable argument, which is not supported");
+            return (0, Vec::new());
+        }
         let mut w = Writer::new();
         for (i, arg) in rpc.args.iter().enumerate() {
             let v = args.get(i).unwrap_or(&Value::Null);
@@ -285,13 +315,14 @@ impl Spec {
                     continue;
                 }
             }
-            write_value(&mut w, &arg.enc, &arg.ty, arg.item.as_deref(), arg.fields.as_deref(), v);
+            write_value(&mut w, arg, &arg.enc, &arg.ty, v);
         }
         (hash, w.0)
     }
 
+    /// The arguments of an RPC; None for an unknown or undecodable one or a short body.
     pub fn decode(&self, hash: u32, body: &[u8]) -> Option<Vec<Value>> {
-        let rpc = self.by_hash.get(&hash)?;
+        let rpc = self.by_hash.get(&hash).filter(|r| r.decodable)?;
         let mut r = Reader::new(body);
         let mut out = Vec::new();
         for arg in &rpc.args {
@@ -299,7 +330,7 @@ impl Spec {
                 out.push(Value::Null);
                 continue;
             }
-            out.push(read_value(&mut r, &arg.enc, &arg.ty, arg.item.as_deref(), arg.fields.as_deref())?);
+            out.push(read_value(&mut r, arg, &arg.enc, &arg.ty)?);
         }
         Some(out)
     }
@@ -311,6 +342,33 @@ mod tests {
 
     fn spec() -> Option<Spec> {
         Some(Spec::load(&format!("{}/rpcs.json", crate::test_data()?)).unwrap())
+    }
+
+    #[test]
+    fn refuses_what_it_cannot_read() {
+        let one = |arg: &str| Spec::parse(&format!(r#"{{"1": {{"name": "A.BRpc", "to": "server", "args": [{arg}]}}}}"#));
+        let arg = |rest: &str| format!(r#"{{"name": "x", "optional": false, {rest}}}"#);
+        assert!(one(&arg(r#""type": "Message", "enc": "struct", "fields": ["bool", "pad1", "pad1", "pad1", "int"]"#)).is_ok());
+        // No fallback layouts: a struct without its fields, an enum without its size.
+        assert!(one(&arg(r#""type": "Message", "enc": "struct""#)).err().unwrap().contains("Message"));
+        assert!(one(&arg(r#""type": "E", "enc": "enum""#)).is_err());
+        assert!(one(&arg(r#""type": "E", "enc": "enum", "base": "byte""#)).is_ok());
+        assert!(one(&arg(r#""type": "Char", "enc": "raw""#)).is_err());
+        assert!(one(&arg(r#""type": "Other", "enc": "extension""#)).is_err());
+        assert!(Spec::parse("{}").is_err());
+        assert!(Spec::parse(r#"{"x": {"name": "A.B", "args": []}}"#).is_err());
+        // An INetworkSerializable loads but does not decode.
+        let s = one(&arg(r#""type": "M", "enc": "serializable""#)).unwrap();
+        assert!(s.decode(1, &[1, 2, 3]).is_none());
+        assert_eq!(s.encode("A.BRpc", &[json!(1)]), (0, Vec::new()));
+    }
+
+    #[test]
+    fn enums_take_their_underlying_size() {
+        let s = Spec::parse(r#"{"1": {"name": "A.BRpc", "args": [{"name": "e", "type": "E", "enc": "enum", "base": "byte", "optional": false}, {"name": "f", "type": "F[]", "enc": "array", "item": "enum", "base": "short", "optional": true}]}}"#).unwrap();
+        let (hash, bytes) = s.encode("A.BRpc", &[json!(200), json!([-2, 3])]);
+        assert_eq!(bytes, [200, 1, 2, 0, 0, 0, 0xfe, 0xff, 3, 0]);
+        assert_eq!(s.decode(hash, &bytes).unwrap(), vec![json!(200), json!([-2, 3])]);
     }
 
     #[test]

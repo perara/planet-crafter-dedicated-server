@@ -324,7 +324,7 @@ pub fn read_game(game: &Path, out: &Path) -> Result<String, String> {
     };
     let units = ctx.prefab(units.ok_or("no WorldUnitsHandler._planetUnitsNetworkObject")?, false).map_err(|e| format!("planet units prefab: {e}"))?;
     let netdata = json!({"gameVersion": version, "tickRate": tick_rate, "playerPrefab": player_hash, "messageVersions": versions, "sceneObjects": scene, "prefabs": {"Player": player, "WorldUnitsPlanet": units}, "planets": planets, "groups": groups});
-    let rpcs = super::rpcs::rpcs(&ctx.layouts.asm);
+    let rpcs = super::rpcs::rpcs(&ctx.layouts.asm).map_err(|e| format!("rpcs.json: {e}"))?;
     // ConnectionRequestMessage as a client sends it (for the scripted test players): the
     // message versions, the config hash, the connection data "version|0".
     let config_hash = ctx.config_hash(config_file, &config).map_err(|e| format!("config hash: {e}"))?;
