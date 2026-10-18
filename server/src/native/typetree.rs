@@ -102,14 +102,23 @@ fn locate(nodes: &[Node], r: &mut Reader, path: &[&str]) -> Option<Range<usize>>
 }
 
 /// PackedBitVector.UnpackFloats: each item `bits` wide, start + range * q / (2^bits - 1).
-fn unpack_floats(r: &mut Reader) -> Option<Vec<f32>> {
-    let (count, range, start) = (r.u32()? as usize, r.f32()?, r.f32()?);
-    let n = r.count()?;
-    let data = r.bytes(n)?;
+/// The item count must fit the data: an error for a bit size over 32, for items without a bit
+/// size, or for more items than the data holds.
+fn unpack_floats(r: &mut Reader) -> Result<Vec<f32>, String> {
+    let unreadable = || "an unreadable PackedBitVector".to_string();
+    let (count, range, start) = (r.u32().ok_or_else(unreadable)? as usize, r.f32().ok_or_else(unreadable)?, r.f32().ok_or_else(unreadable)?);
+    let n = r.count().ok_or_else(unreadable)?;
+    let data = r.bytes(n).ok_or_else(unreadable)?;
     r.align();
-    let bits = r.u8()? as u32;
-    if count == 0 || bits == 0 || bits > 32 {
-        return Some(vec![start; count]);
+    let bits = r.u8().ok_or_else(unreadable)? as u32;
+    if bits > 32 {
+        return Err(format!("a PackedBitVector of {bits}-bit items"));
+    }
+    if (count > 0 && bits == 0) || (count as u64) * bits as u64 > n as u64 * 8 {
+        return Err(format!("a PackedBitVector of {count} {bits}-bit items in {n} bytes"));
+    }
+    if count == 0 {
+        return Ok(Vec::new());
     }
     let max = ((1u64 << bits) - 1) as f32;
     let scale = 1.0 / range;
@@ -118,7 +127,7 @@ fn unpack_floats(r: &mut Reader) -> Option<Vec<f32>> {
     for _ in 0..count {
         let (mut x, mut have) = (0u64, 0u32);
         while have < bits {
-            x |= ((*data.get(at)? as u64) >> bit) << have;
+            x |= ((data[at] as u64) >> bit) << have;
             let take = (bits - have).min(8 - bit);
             bit += take;
             have += take;
@@ -130,7 +139,7 @@ fn unpack_floats(r: &mut Reader) -> Option<Vec<f32>> {
         x &= (1u64 << bits) - 1;
         out.push(x as f32 / (scale * max) + start);
     }
-    Some(out)
+    Ok(out)
 }
 
 /// Bytes per component of a VertexFormat (Float32, Float16, UNorm8, SNorm8, UNorm16, SNorm16,
@@ -150,13 +159,16 @@ fn half(bits: u16) -> f32 {
 /// Mesh.bounds: center and extent, the box around its vertex positions (float or half-float
 /// channels, or a compressed mesh's), else the stored m_LocalAABB.
 /// `stream`: the bytes of an external vertex stream (path, offset, size).
-pub fn mesh_bounds(unity_version: &str, data: &[u8], stream: &dyn Fn(&str, u64, usize) -> Option<Vec<u8>>) -> Result<([f32; 3], [f32; 3]), String> {
+pub fn mesh_bounds(unity_version: &str, data: &[u8], stream: &dyn Fn(&str, u64, usize) -> Result<Vec<u8>, String>) -> Result<([f32; 3], [f32; 3]), String> {
     let rows = layout_for(unity_version, &[("6000.3", MESH_6000_3)], "Mesh")?;
     fields(rows, data, true).map_err(|e| format!("a Mesh is not Unity {unity_version}'s: {e}"))?;
     let nodes = build(rows, &mut 0, 1);
     let at = |path: &[&str]| locate(&nodes, &mut Reader::new(data), path).ok_or_else(|| format!("Mesh has no {}", path.join(".")));
-    let compressed = unpack_floats(&mut Reader::new(&data[at(&["m_CompressedMesh", "m_Vertices"])?])).ok_or("unreadable compressed vertices")?;
-    let positions: Vec<[f32; 3]> = if compressed.len() >= 3 {
+    let compressed = unpack_floats(&mut Reader::new(&data[at(&["m_CompressedMesh", "m_Vertices"])?])).map_err(|e| format!("compressed vertices: {e}"))?;
+    if compressed.len() % 3 != 0 {
+        return Err(format!("{} compressed vertex coordinates", compressed.len()));
+    }
+    let positions: Vec<[f32; 3]> = if !compressed.is_empty() {
         compressed.chunks_exact(3).map(|v| [v[0], v[1], v[2]]).collect()
     } else {
         let count = Reader::new(&data[at(&["m_VertexData", "m_VertexCount"])?]).u32().ok_or("m_VertexCount")? as usize;
@@ -169,7 +181,7 @@ pub fn mesh_bounds(unity_version: &str, data: &[u8], stream: &dyn Fn(&str, u64, 
             let mut r = Reader::new(&data[at(&["m_StreamData"])?]);
             let (offset, size) = (r.u64().ok_or("m_StreamData")?, r.u32().ok_or("m_StreamData")? as usize);
             let path = r.string().ok_or("m_StreamData")?;
-            bytes = stream(&path, offset, size).ok_or_else(|| format!("vertex stream {path} unreadable"))?;
+            bytes = stream(&path, offset, size)?;
         }
         // Streams follow each other, each padded to 16 bytes; a vertex's channels in a stream
         // follow each other.
@@ -689,3 +701,33 @@ pub const MESH_6000_3: &[(u8, &str, &str, i32, bool)] = &[
     (8, "unsigned int", "m_IndexStart", 4, false),
     (8, "unsigned int", "m_IndexCount", 4, true),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn packed(count: u32, bits: u8, data: &[u8]) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend(count.to_le_bytes());
+        b.extend(1f32.to_le_bytes());
+        b.extend(0f32.to_le_bytes());
+        b.extend((data.len() as i32).to_le_bytes());
+        b.extend(data);
+        while b.len() % 4 != 0 {
+            b.push(0);
+        }
+        b.push(bits);
+        b
+    }
+
+    #[test]
+    fn packed_floats_must_fit_their_data() {
+        let unpack = |b: Vec<u8>| unpack_floats(&mut Reader::new(&b));
+        assert_eq!(unpack(packed(2, 8, &[0, 255])).unwrap(), [0.0, 1.0]);
+        assert_eq!(unpack(packed(0, 0, &[])).unwrap(), Vec::<f32>::new());
+        // A corrupt count must not allocate for it.
+        assert!(unpack(packed(u32::MAX, 32, &[0; 4])).is_err());
+        assert!(unpack(packed(3, 0, &[])).is_err());
+        assert!(unpack(packed(1, 33, &[0; 8])).is_err());
+    }
+}

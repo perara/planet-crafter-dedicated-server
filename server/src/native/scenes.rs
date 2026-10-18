@@ -24,36 +24,36 @@ fn vector<const N: usize>(v: [f32; N]) -> Value {
 const COLLIDERS: [i32; 7] = [unity::MESH_COLLIDER, unity::BOX_COLLIDER, unity::SPHERE_COLLIDER, unity::CAPSULE_COLLIDER, 143, 146, 154];
 
 impl Ctx {
-    /// A behaviour whose field layout fits its data exactly.
-    fn read(&mut self, id: Id) -> Result<Behaviour, String> {
-        let before: usize = self.misread.values().sum();
-        let b = self.behaviour(id).ok_or_else(|| format!("{id:?}: unreadable MonoBehaviour"))?;
-        if self.misread.values().sum::<usize>() != before {
-            return Err(format!("{}.{} ({id:?}): its field layout does not fit its data", b.namespace, b.class));
-        }
-        Ok(b)
-    }
-
     /// GameData.Fields of a behaviour.
     fn written(&mut self, id: Id) -> Result<Value, String> {
-        let b = self.read(id)?;
-        Ok(Value::Object(self.fields(id.0, &b.fields, 0)))
+        let b = self.behaviour(id)?;
+        Ok(Value::Object(self.fields(id.0, &b.fields, 0).map_err(|e| format!("{}: {e}", b.class))?))
     }
 
     /// The SpaceCraft MonoBehaviours of a class on one game object (GetComponents order).
-    fn on(&mut self, node: Id, class: &str) -> Vec<Id> {
-        let components = self.graph.nodes.get(&node).map(|n| n.components.clone()).unwrap_or_default();
-        components.into_iter().filter(|(c, k)| *k == unity::MONO_BEHAVIOUR && self.graph.script(&mut self.data, *c).is_some_and(|s| s.0 == "SpaceCraft" && s.1 == class)).map(|(c, _)| c).collect()
+    fn on(&mut self, node: Id, class: &str) -> Result<Vec<Id>, String> {
+        let components = self.graph.nodes.get(&node).ok_or_else(|| format!("{node:?}: not a game object of a file read"))?.components.clone();
+        self.of_class(components.into_iter().filter(|(_, k)| *k == unity::MONO_BEHAVIOUR).map(|(c, _)| c).collect(), class)
     }
 
     /// The SpaceCraft MonoBehaviours of a class in a file, in file order.
-    fn all_of(&mut self, file: usize, class: &str) -> Vec<Id> {
+    fn all_of(&mut self, file: usize, class: &str) -> Result<Vec<Id>, String> {
         let behaviours: Vec<Id> = self.data.files[file].objects.iter().filter(|o| o.class_id == unity::MONO_BEHAVIOUR).map(|o| Id(file, o.path)).collect();
-        behaviours.into_iter().filter(|b| self.graph.script(&mut self.data, *b).is_some_and(|s| s.0 == "SpaceCraft" && s.1 == class)).collect()
+        self.of_class(behaviours, class)
+    }
+
+    fn of_class(&mut self, behaviours: Vec<Id>, class: &str) -> Result<Vec<Id>, String> {
+        let mut out = Vec::new();
+        for b in behaviours {
+            if self.graph.script(&mut self.data, b)?.is_some_and(|s| s.0 == "SpaceCraft" && s.1 == class) {
+                out.push(b);
+            }
+        }
+        Ok(out)
     }
 
     fn name(&self, node: Id) -> String {
-        self.graph.nodes.get(&node).map(|n| n.name.clone()).unwrap_or_default()
+        self.graph.nodes.get(&node).map(|n| n.name.clone()).unwrap_or_else(|| format!("{node:?}"))
     }
 
     /// The scene files a server on the planet has loaded or can load: BootScene, GameMainScene,
@@ -71,11 +71,11 @@ impl Ctx {
                 continue;
             }
             files.push(f);
-            self.graph_file(f);
-            for enter in self.all_of(f, "SectorEnter") {
-                let b = self.read(enter)?;
+            self.graph_file(f)?;
+            for enter in self.all_of(f, "SectorEnter")? {
+                let b = self.behaviour(enter)?;
                 let sector = reference(self, f, &b.fields, "sector")?.ok_or_else(|| format!("{}: a SectorEnter without a sector", self.data.files[f].name))?;
-                let node = self.read(sector)?.game_object.ok_or("a Sector without a game object")?;
+                let node = self.behaviour(sector)?.game_object.ok_or("a Sector without a game object")?;
                 let name = self.name(node);
                 if !queue.contains(&name) {
                     queue.push(name);
@@ -92,7 +92,7 @@ impl Ctx {
         let mut n = Some(node);
         while let Some(id) = n {
             for class in ["HideDependingOnTerraStage", "WorldUnitPositioning"] {
-                for c in self.on(id, class) {
+                for c in self.on(id, class)? {
                     list.push(json!({"type": class, "fields": self.written(c)?}));
                 }
             }
@@ -111,18 +111,18 @@ impl Ctx {
         Ok((class, c))
     }
 
-    fn pose(&self, node: Id) -> Map<String, Value> {
-        let (p, r, s) = self.graph.world(node);
+    fn pose(&self, node: Id) -> Result<Map<String, Value>, String> {
+        let (p, r, s) = self.graph.world(node)?;
         let mut m = Map::new();
         m.insert("position".into(), vector(p));
         m.insert("rotation".into(), vector(r));
         m.insert("scale".into(), vector(s));
-        m
+        Ok(m)
     }
 
     /// GameData.WaterVolumes, one volume.
     fn water_volume(&mut self, id: Id) -> Result<Value, String> {
-        let b = self.read(id)?;
+        let b = self.behaviour(id)?;
         let node = attached(&b)?;
         let ignore = match field(&b.fields, "ignoreForEnergyDetection") {
             Some(Raw::Bool(v)) => *v,
@@ -145,18 +145,18 @@ impl Ctx {
                 let mut m = Map::new();
                 m.insert("center".into(), vector(center));
                 m.insert("size".into(), vector(size));
-                m.extend(self.pose(n));
+                m.extend(self.pose(n)?);
                 Value::Object(m)
             }
         };
-        let positioning = match self.on(node, "WorldUnitPositioning").first() {
+        let positioning = match self.on(node, "WorldUnitPositioning")?.first() {
             Some(p) => self.written(*p)?,
             None => Value::Null,
         };
         Ok(json!({
             "ignoreForEnergyDetection": ignore,
             "active": self.graph.active_in_hierarchy(node),
-            "root": self.pose(node),
+            "root": self.pose(node)?,
             "box": shape,
             "positioning": positioning,
             "activators": self.activators(node)?,
@@ -171,15 +171,15 @@ impl Ctx {
     fn story_interpolation(&mut self, node: Id) -> Result<Value, String> {
         let mut at = Some(node);
         while let Some(n) = at {
-            if let Some(s) = self.on(n, "SceneInterpolationFromStoryEvent").first().copied() {
-                let b = self.read(s)?;
+            if let Some(s) = self.on(n, "SceneInterpolationFromStoryEvent")?.first().copied() {
+                let b = self.behaviour(s)?;
                 let offset = match field(&b.fields, "_startingOffset") {
                     Some(Raw::Json(v)) => v.clone(),
                     other => return Err(format!("SceneInterpolationFromStoryEvent._startingOffset: {other:?}")),
                 };
                 let ease = matches!(field(&b.fields, "_ease"), Some(Raw::Bool(true)));
-                let id = self.on(n, "WorldUniqueId").first().copied().ok_or("a SceneInterpolationFromStoryEvent without a WorldUniqueId")?;
-                let unique = match field(&self.read(id)?.fields, "worldUniqueId") {
+                let id = self.on(n, "WorldUniqueId")?.first().copied().ok_or("a SceneInterpolationFromStoryEvent without a WorldUniqueId")?;
+                let unique = match field(&self.behaviour(id)?.fields, "worldUniqueId") {
                     Some(Raw::Int(v)) => *v,
                     other => return Err(format!("WorldUniqueId.worldUniqueId: {other:?}")),
                 };
@@ -192,11 +192,11 @@ impl Ctx {
 
     /// GameData.OreVeins, one vein.
     fn ore_vein(&mut self, id: Id) -> Result<Value, String> {
-        let b = self.read(id)?;
+        let b = self.behaviour(id)?;
         let node = attached(&b)?;
-        let unique = match self.on(node, "WorldUniqueId").first() {
+        let unique = match self.on(node, "WorldUniqueId")?.first() {
             // WorldUniqueId.GetWorldUniqueId returns the field.
-            Some(u) => match field(&self.read(*u)?.fields, "worldUniqueId") {
+            Some(u) => match field(&self.behaviour(*u)?.fields, "worldUniqueId") {
                 Some(Raw::Int(v)) => *v,
                 other => return Err(format!("WorldUniqueId.worldUniqueId: {other:?}")),
             },
@@ -210,7 +210,7 @@ impl Ctx {
                 continue;
             }
             let (_, col) = self.collider(c)?;
-            let (p, r, s) = self.graph.world(node);
+            let (p, r, s) = self.graph.world(node)?;
             let unity::Shape::Box { center, size } = col.shape else { return Err(format!("{}: ore vein collider class {class}: only boxes are read", self.name(node))) };
             // Collider.bounds: the world AABB; a collider not in the physics scene (disabled or
             // inactive) has none: zero size at its transform.
@@ -226,14 +226,14 @@ impl Ctx {
             let mut shape = Map::new();
             shape.insert("center".into(), vector(center));
             shape.insert("size".into(), vector(size));
-            shape.extend(self.pose(node));
+            shape.extend(self.pose(node)?);
             colliders.push(json!({"enabled": col.enabled, "boundsCenter": vector(bounds_center), "boundsSize": vector(bounds_size), "box": shape}));
         }
         Ok(json!({
             "id": unique,
             "active": active,
             "activators": self.activators(node)?,
-            "fields": Value::Object(self.fields(id.0, &b.fields, 0)),
+            "fields": Value::Object(self.fields(id.0, &b.fields, 0).map_err(|e| format!("{}: {e}", b.class))?),
             "colliders": colliders,
         }))
     }
@@ -246,7 +246,7 @@ fn attached(b: &Behaviour) -> Result<Id, String> {
 /// A reference field of a read object, resolved (None for null).
 fn reference(ctx: &mut Ctx, file: usize, fields: &[(String, Raw)], name: &str) -> Result<Option<Id>, String> {
     match field(fields, name) {
-        Some(Raw::Ref(p, _)) => Ok(ctx.data.resolve(file, *p)),
+        Some(Raw::Ref(p, _)) => ctx.data.resolve(file, *p),
         other => Err(format!("{name}: {other:?}")),
     }
 }
@@ -269,20 +269,20 @@ struct Nodes {
 }
 
 impl Nodes {
-    fn node(&mut self, ctx: &Ctx, go: Option<Id>) -> i64 {
-        let Some(go) = go else { return -1 };
+    fn node(&mut self, ctx: &Ctx, go: Option<Id>) -> Result<i64, String> {
+        let Some(go) = go else { return Ok(-1) };
         if let Some(id) = self.ids.get(&go) {
-            return *id as i64;
+            return Ok(*id as i64);
         }
-        let parent = self.node(ctx, ctx.graph.parent(go));
+        let active = *self.active.get(&go).ok_or_else(|| format!("{} ({go:?}) is not an object of the instance scene", ctx.name(go)))?;
+        let parent = self.node(ctx, ctx.graph.parent(go))?;
         let id = self.rows.len();
         self.ids.insert(go, id);
-        let active = *self.active.get(&go).unwrap_or_else(|| panic!("{go:?} is not an object of the instance scene"));
-        self.rows.push(json!([parent, active, ctx.graph.nodes[&go].name]));
-        id as i64
+        self.rows.push(json!([parent, active, ctx.name(go)]));
+        Ok(id as i64)
     }
 
-    fn in_hierarchy(&self, ctx: &Ctx, node: Option<Id>) -> bool {
+    fn in_hierarchy(&self, ctx: &Ctx, node: Option<Id>) -> Result<bool, String> {
         shown(&ctx.graph, &self.active, node)
     }
 }
@@ -290,23 +290,23 @@ impl Nodes {
 /// Transform.position and .rotation once the hierarchy's root is at `root` (HandleDataAfterLoad
 /// moves an instance scene's roots), composed as Unity does: from the object up, each parent's
 /// local scale, rotation (Quaternion * Vector3) and position in turn; mostly bit for bit.
-fn placed(graph: &super::graph::Graph, node: Id, root: [f32; 3]) -> ([f32; 3], [f32; 4]) {
-    let local = |n: Id| graph.nodes[&n].transform.and_then(|t| graph.xforms.get(&t)).expect("a game object without a transform");
-    let x = local(node);
+fn placed(graph: &super::graph::Graph, node: Id, root: [f32; 3]) -> Result<([f32; 3], [f32; 4]), String> {
+    let local = |n: Id| graph.xform(n).ok_or_else(|| format!("{n:?}: not a game object of a file read"));
+    let x = local(node)?;
     let (mut p, mut q) = (x.position, x.rotation);
     let mut parent = graph.parent(node);
     if parent.is_none() {
         p = root;
     }
     while let Some(n) = parent {
-        let t = local(n);
+        let t = local(n)?;
         let r = mul_vector(t.rotation, [0, 1, 2].map(|i| p[i] * t.scale[i]));
         parent = graph.parent(n);
         let base = if parent.is_some() { t.position } else { root };
         p = [0, 1, 2].map(|i| r[i] + base[i]);
         q = mul_quaternion(t.rotation, q);
     }
-    (p, q)
+    Ok((p, q))
 }
 
 /// UnityEngine.Quaternion * Quaternion.
@@ -329,14 +329,14 @@ fn mul_vector(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
 }
 
 /// activeInHierarchy with these activeSelf values.
-fn shown(graph: &super::graph::Graph, active: &HashMap<Id, bool>, mut node: Option<Id>) -> bool {
+fn shown(graph: &super::graph::Graph, active: &HashMap<Id, bool>, mut node: Option<Id>) -> Result<bool, String> {
     while let Some(n) = node {
-        if !*active.get(&n).unwrap_or_else(|| panic!("{n:?} is not an object of the scene")) {
-            return false;
+        if !*active.get(&n).ok_or_else(|| format!("{n:?} is not an object of the scene"))? {
+            return Ok(false);
         }
         node = graph.parent(n);
     }
-    true
+    Ok(true)
 }
 
 impl Ctx {
@@ -354,11 +354,11 @@ impl Ctx {
         };
         // (object, what its Awake hides, what it shows); hiding its own object is self-contained.
         let mut wakers: Vec<(Id, Vec<Id>, Vec<Id>)> = Vec::new();
-        let mut ids = self.all_of(file, "WorldVariationObject");
-        ids.extend(self.all_of(file, "HideDependingOnTerraStage"));
+        let mut ids = self.all_of(file, "WorldVariationObject")?;
+        ids.extend(self.all_of(file, "HideDependingOnTerraStage")?);
         ids.sort();
         for c in ids {
-            let b = self.read(c)?;
+            let b = self.behaviour(c)?;
             let node = attached(&b)?;
             if b.class == "HideDependingOnTerraStage" {
                 if bool_field(&b, "hideIfGreater")? {
@@ -376,16 +376,26 @@ impl Ctx {
         }
         // Unity does not order these Awakes: settled in file order, and in reverse to find what
         // depends on the order (an error if the dump uses it).
-        let settle = |order: Vec<usize>| {
+        for (_, hide, show) in &wakers {
+            if let Some(n) = hide.iter().chain(show).find(|n| !nodes.active.contains_key(n)) {
+                return Err(format!("{}: an Awake shows or hides {} ({n:?}), outside the scene", self.data.files[file].name, self.name(*n)));
+            }
+        }
+        let settle = |order: Vec<usize>| -> Result<HashMap<Id, bool>, String> {
             let mut active = nodes.active.clone();
             let mut woke = vec![false; wakers.len()];
-            while let Some(&i) = order.iter().find(|&&i| !woke[i] && shown(&self.graph, &active, Some(wakers[i].0))) {
-                woke[i] = true;
-                active.extend(wakers[i].1.iter().map(|n| (*n, false)).chain(wakers[i].2.iter().map(|n| (*n, true))));
+            'wake: loop {
+                for &i in &order {
+                    if !woke[i] && shown(&self.graph, &active, Some(wakers[i].0))? {
+                        woke[i] = true;
+                        active.extend(wakers[i].1.iter().map(|n| (*n, false)).chain(wakers[i].2.iter().map(|n| (*n, true))));
+                        continue 'wake;
+                    }
+                }
+                return Ok(active);
             }
-            active
         };
-        let (forward, reverse) = (settle((0..wakers.len()).collect()), settle((0..wakers.len()).rev().collect()));
+        let (forward, reverse) = (settle((0..wakers.len()).collect())?, settle((0..wakers.len()).rev().collect())?);
         nodes.unsure = forward.iter().filter(|(n, v)| reverse[*n] != **v).map(|(n, _)| *n).collect();
         nodes.active = forward;
         Ok(nodes)
@@ -399,12 +409,12 @@ impl Ctx {
         let name = self.data.files[file].name.clone();
         let mut nodes = self.loaded(file)?;
         // roots.Select(GetComponentInChildren<WorldInstanceScene>).First: active objects only.
-        let scenes: Vec<Id> = self.all_of(file, "WorldInstanceScene");
+        let scenes: Vec<Id> = self.all_of(file, "WorldInstanceScene")?;
         let mut active = Vec::new();
         for s in scenes {
-            let b = self.read(s)?;
+            let b = self.behaviour(s)?;
             let node = attached(&b)?;
-            if nodes.in_hierarchy(self, Some(node)) {
+            if nodes.in_hierarchy(self, Some(node))? {
                 active.push((s, node, b));
             }
         }
@@ -416,33 +426,33 @@ impl Ctx {
         let mut objects: Vec<Value> = Vec::new();
         let mut toggle = |ctx: &mut Ctx, nodes: &mut Nodes, item: &Raw| -> Result<usize, String> {
             let Raw::Ref(p, _) = item else { return Err(format!("{name}: a world variation object is {item:?}")) };
-            let o = ctx.data.resolve(scene.0, *p).ok_or_else(|| format!("{name}: a null world variation object"))?;
+            let o = ctx.data.resolve(scene.0, *p)?.ok_or_else(|| format!("{name}: a null world variation object"))?;
             if let Some(id) = object_ids.get(&o) {
                 return Ok(*id);
             }
             let id = objects.len();
             object_ids.insert(o, id);
-            let v = ctx.read(o)?;
+            let v = ctx.behaviour(o)?;
             let go = attached(&v)?;
             let whole = match field(&v.fields, "wholeGameObject") {
                 Some(Raw::Bool(w)) => *w,
                 other => return Err(format!("WorldVariationObject.wholeGameObject: {other:?}")),
             };
-            let node = nodes.node(ctx, Some(go));
+            let node = nodes.node(ctx, Some(go))?;
             let enabled = reference(ctx, o.0, &v.fields, "whenEnabled")?;
-            let enabled = nodes.node(ctx, enabled);
+            let enabled = nodes.node(ctx, enabled)?;
             let disabled = reference(ctx, o.0, &v.fields, "whenDisabled")?;
-            let disabled = nodes.node(ctx, disabled);
+            let disabled = nodes.node(ctx, disabled)?;
             objects.push(json!({"node": node, "whole": whole, "whenEnabled": enabled, "whenDisabled": disabled}));
             Ok(id)
         };
         let mut variations = Vec::new();
         for v in list(&b.fields, "worldVariations")?.to_vec() {
             let variation = match v {
-                Raw::Ref(p, _) => self.data.resolve(scene.0, p).ok_or_else(|| format!("{name}: a null world variation"))?,
+                Raw::Ref(p, _) => self.data.resolve(scene.0, p)?.ok_or_else(|| format!("{name}: a null world variation"))?,
                 other => return Err(format!("{name}: a world variation is {other:?}")),
             };
-            let f = &self.read(variation)?.fields;
+            let f = &self.behaviour(variation)?.fields;
             let mut every = Vec::new();
             for o in list(f, "objectsToEnableEveryTime")? {
                 every.push(toggle(self, &mut nodes, o)?);
@@ -450,7 +460,7 @@ impl Ctx {
             let mut random = Vec::new();
             for i in 1..=6 {
                 let range = match field(f, &format!("numberOfThoseObjects{i}")) {
-                    Some(Raw::Json(Value::Array(a))) if a.len() == 2 => [0, 1].map(|j| a[j].as_f64().unwrap_or(f64::NAN)),
+                    Some(Raw::Json(Value::Array(a))) if a.len() == 2 && a.iter().all(Value::is_number) => [0, 1].map(|j| a[j].as_f64().expect("a number")),
                     other => return Err(format!("WorldVariation.numberOfThoseObjects{i}: {other:?}")),
                 };
                 let mut ids = Vec::new();
@@ -465,17 +475,17 @@ impl Ctx {
         // Every RandomizePropData under the scene component, active or not, in walk order.
         let mut props: Vec<(Id, Id)> = Vec::new();
         for n in self.graph.descendants(root) {
-            if let Some(p) = self.on(n, "RandomizePropData").first() {
+            if let Some(p) = self.on(n, "RandomizePropData")?.first() {
                 props.push((*p, n));
             }
         }
-        let root_id = nodes.node(self, Some(root));
+        let root_id = nodes.node(self, Some(root))?;
         let mut wrecks = Vec::new();
         for e in list(&b.fields, "wreckEntries")?.to_vec() {
             let Raw::Ref(p, _) = e else { return Err(format!("{name}: a wreck entry is {e:?}")) };
-            let go = self.data.resolve(scene.0, p).ok_or_else(|| format!("{name}: a null wreck entry"))?;
-            let id = nodes.node(self, Some(go));
-            let (p, r) = placed(&self.graph, go, target);
+            let go = self.data.resolve(scene.0, p)?.ok_or_else(|| format!("{name}: a null wreck entry"))?;
+            let id = nodes.node(self, Some(go))?;
+            let (p, r) = placed(&self.graph, go, target)?;
             wrecks.push(json!({"node": id, "position": vector(p), "rotation": vector(r)}));
         }
         let mut by_prefab: HashMap<Id, Vec<String>> = HashMap::new();
@@ -487,7 +497,7 @@ impl Ctx {
         let prop_ids: Vec<Id> = props.iter().map(|p| p.0).collect();
         let mut rows = Vec::new();
         for (p, n) in props {
-            let r = self.read(p)?;
+            let r = self.behaviour(p)?;
             let mut chances = Vec::new();
             for d in list(&r.fields, "props")? {
                 let Raw::Fields(_, f) = d else { return Err(format!("RandomizePropData.props: {d:?}")) };
@@ -509,12 +519,12 @@ impl Ctx {
             let mut ignore = Vec::new();
             for x in list(&r.fields, "ignoreIfGenerated")? {
                 let Raw::Ref(q, _) = x else { return Err(format!("RandomizePropData.ignoreIfGenerated: {x:?}")) };
-                if let Some(i) = self.data.resolve(p.0, *q).and_then(|q| prop_ids.iter().position(|a| *a == q)) {
+                if let Some(i) = self.data.resolve(p.0, *q)?.and_then(|q| prop_ids.iter().position(|a| *a == q)) {
                     ignore.push(i);
                 }
             }
-            let id = nodes.node(self, Some(n));
-            let (p, r) = placed(&self.graph, n, target);
+            let id = nodes.node(self, Some(n))?;
+            let (p, r) = placed(&self.graph, n, target)?;
             rows.push(json!([id, vector(p), vector(r), chances, ignore]));
         }
         // GameObjects.FindRecursively(instance.transform.root, "PreventBuilding"), its first Collider.
@@ -525,12 +535,13 @@ impl Ctx {
         let prevent = match self.find_recursively(top, "PreventBuilding") {
             None => Value::Null,
             Some(n) => {
-                let components = self.graph.nodes[&n].components.clone();
+                let components = self.graph.nodes.get(&n).map(|x| x.components.clone()).unwrap_or_default();
                 match components.into_iter().find(|(_, k)| COLLIDERS.contains(k)) {
                     None => Value::Null,
                     Some((c, _)) => {
-                        let active = nodes.in_hierarchy(self, Some(n));
-                        self.shape(c, n, placed(&self.graph, n, target), active)?
+                        let active = nodes.in_hierarchy(self, Some(n))?;
+                        let pose = placed(&self.graph, n, target)?;
+                        self.prevent_building(c, n, pose, active).map_err(|e| format!("{name}: PreventBuilding: {e}"))?
                     }
                 }
             }
@@ -553,36 +564,26 @@ impl Ctx {
     /// below each child in turn.
     fn find_recursively(&self, node: Id, name: &str) -> Option<Id> {
         let children = self.graph.children(node);
-        children.iter().find(|c| self.graph.nodes[*c].name == name).copied().or_else(|| children.iter().find_map(|c| self.find_recursively(*c, name)))
+        children.iter().find(|c| self.graph.nodes.get(*c).is_some_and(|n| n.name == name)).copied().or_else(|| children.iter().find_map(|c| self.find_recursively(*c, name)))
     }
 
-    /// Generation.Shape: a collider in world space.
-    fn shape(&mut self, id: Id, node: Id, (position, rotation): ([f32; 3], [f32; 4]), active: bool) -> Result<Value, String> {
+    /// Generation.Shape of the PreventBuilding collider, in world space: an enabled, active box
+    /// (the only kind the server tests points against; 2.103 has no other).
+    fn prevent_building(&mut self, id: Id, node: Id, (position, rotation): ([f32; 3], [f32; 4]), active: bool) -> Result<Value, String> {
         let (class, c) = self.collider(id)?;
-        let (_, _, s) = self.graph.world(node);
+        let unity::Shape::Box { center, size } = c.shape else { return Err(format!("a {} (only a BoxCollider is read)", unity::class_name(class).unwrap_or("collider"))) };
+        if !(c.enabled && active) {
+            return Err("an inactive or disabled collider (not read)".into());
+        }
+        let (_, _, s) = self.graph.world(node)?;
         let mut m = Map::new();
         m.insert("type".into(), json!(unity::class_name(class)));
-        m.insert("active".into(), json!(c.enabled && active));
+        m.insert("active".into(), json!(true));
         m.insert("position".into(), vector(position));
         m.insert("rotation".into(), vector(rotation));
         m.insert("scale".into(), vector(s));
-        match c.shape {
-            unity::Shape::Box { center, size } => {
-                m.insert("center".into(), vector(center));
-                m.insert("size".into(), vector(size));
-            }
-            unity::Shape::Sphere { center, radius } => {
-                m.insert("center".into(), vector(center));
-                m.insert("radius".into(), single(radius));
-            }
-            unity::Shape::Capsule { center, radius, height, direction } => {
-                m.insert("center".into(), vector(center));
-                m.insert("radius".into(), single(radius));
-                m.insert("height".into(), single(height));
-                m.insert("direction".into(), json!(direction));
-            }
-            unity::Shape::Mesh => {}
-        }
+        m.insert("center".into(), vector(center));
+        m.insert("size".into(), vector(size));
         Ok(Value::Object(m))
     }
 
@@ -593,15 +594,15 @@ impl Ctx {
         let named: Vec<Id> = self.graph.nodes.iter().filter(|(id, n)| files.contains(&id.0) && n.name == "WorldInstancePositionToInstantiate").map(|(id, _)| *id).collect();
         let named: Vec<Id> = named.into_iter().filter(|n| self.graph.active_in_hierarchy(*n)).collect();
         if let [n] = named[..] {
-            return Ok(self.graph.world(n).0);
+            return Ok(self.graph.world(n)?.0);
         }
         if named.len() > 1 {
             return Err(format!("{} active WorldInstancePositionToInstantiate objects", named.len()));
         }
         let mut handlers = Vec::new();
         for f in files {
-            for h in self.all_of(*f, "WorldInstanceHandler") {
-                let b = self.read(h)?;
+            for h in self.all_of(*f, "WorldInstanceHandler")? {
+                let b = self.behaviour(h)?;
                 let node = attached(&b)?;
                 if self.graph.active_in_hierarchy(node) {
                     handlers.push((h, b));
@@ -610,8 +611,8 @@ impl Ctx {
         }
         let [(h, b)] = &handlers[..] else { return Err(format!("{} active WorldInstanceHandler components (one is read)", handlers.len())) };
         let target = reference(self, h.0, &b.fields, "positionToInstantiate")?.ok_or("WorldInstanceHandler.positionToInstantiate is null")?;
-        self.graph_file(target.0);
-        Ok(self.graph.world(target).0)
+        self.graph_file(target.0)?;
+        Ok(self.graph.world(target)?.0)
     }
 
     /// scenes/<planet>.json for a planet (its PlanetData asset).
@@ -621,10 +622,10 @@ impl Ctx {
         let mut water = Vec::new();
         let mut veins = Vec::new();
         for f in &files {
-            for v in self.all_of(*f, "WaterVolume") {
+            for v in self.all_of(*f, "WaterVolume")? {
                 water.push(self.water_volume(v)?);
             }
-            for v in self.all_of(*f, "MachineGenerationGroupVein") {
+            for v in self.all_of(*f, "MachineGenerationGroupVein")? {
                 veins.push(self.ore_vein(v)?);
             }
         }
@@ -636,7 +637,7 @@ impl Ctx {
                 let n = n.as_str().ok_or("an instance scene name")?;
                 if !instances.contains_key(n) {
                     let file = self.scene_file(n)?;
-                    self.graph_file(file);
+                    self.graph_file(file)?;
                     let target = self.instance_target(&[&files[..], &[file]].concat())?;
                     let dump = self.instance_scene(file, target).map_err(|e| format!("instance scene {n}: {e}"))?;
                     instances.insert(n.to_string(), dump);
@@ -660,10 +661,10 @@ mod tests {
     fn instance_scenes_are_placed_and_woken_as_in_the_game() {
         let Some(dir) = super::super::unity::tests::game_data() else { return };
         let mut ctx = Ctx::open(dir.parent().unwrap()).unwrap();
-        ctx.assets();
+        ctx.assets().unwrap();
         let (main, file) = (ctx.scene_file("GameMainScene").unwrap(), ctx.scene_file("Instance-HugeTrees").unwrap());
-        ctx.graph_file(main);
-        ctx.graph_file(file);
+        ctx.graph_file(main).unwrap();
+        ctx.graph_file(file).unwrap();
         let target = ctx.instance_target(&[main, file]).unwrap();
         let scene = ctx.instance_scene(file, target).unwrap();
         assert_eq!(scene["wreckEntries"][0]["position"], json!([1239.3069, 67.828445, 4634.242]));

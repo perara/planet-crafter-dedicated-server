@@ -19,22 +19,22 @@ use crate::geometry::{from_euler_y, matrix_mul, trs, MathRandom, Matrix};
 impl Ctx {
     /// ProceduralInstancesHandler._generators: each entry's generator prefab root.
     pub fn wreck_generators(&mut self) -> Result<Vec<Id>, String> {
-        let scenes = self.data.build_scenes();
+        let scenes = self.data.build_scenes()?;
         let mut handler = None;
         for i in 0..scenes.len() {
-            if let Some(h) = self.find_behaviour(&[&format!("level{i}")], "SpaceCraft", "ProceduralInstancesHandler") {
+            if let Some(h) = self.find_behaviour(&[&format!("level{i}")], "SpaceCraft", "ProceduralInstancesHandler")? {
                 handler = Some(h);
                 break;
             }
         }
         let handler = handler.ok_or("no ProceduralInstancesHandler in the build's scenes")?;
-        let b = self.behaviour(handler).ok_or("ProceduralInstancesHandler: unreadable")?;
+        let b = self.behaviour(handler).map_err(|e| format!("ProceduralInstancesHandler: unreadable: {e}"))?;
         let Some(Raw::List(entries)) = field(&b.fields, "_generators") else { return Err("ProceduralInstancesHandler._generators: missing".into()) };
         let mut out = Vec::new();
         for e in entries {
             let Raw::Fields(_, f) = e else { return Err("_generators: not a struct".into()) };
             let Some(Raw::Ref(p, _)) = field(f, "generator") else { return Err("_generators: no generator".into()) };
-            out.push(self.data.resolve(handler.0, *p).ok_or("_generators: null generator")?);
+            out.push(self.data.resolve(handler.0, *p)?.ok_or("_generators: null generator")?);
         }
         Ok(out)
     }
@@ -93,29 +93,35 @@ impl Ctx {
     /// Where a reference field of an object in `file` points (None for null).
     fn target(&mut self, file: usize, v: &Raw) -> Result<Option<Id>, String> {
         match v {
-            Raw::Ref(p, _) => Ok(self.data.resolve(file, *p)),
+            Raw::Ref(p, _) => self.data.resolve(file, *p),
             v => Err(format!("not a reference: {v:?}")),
         }
     }
 
     /// The MonoBehaviours of a script class on one game object.
-    pub fn components_of(&mut self, node: Id, class: &str) -> Vec<Id> {
-        self.graph_file(node.0);
+    pub fn components_of(&mut self, node: Id, class: &str) -> Result<Vec<Id>, String> {
+        self.graph_file(node.0)?;
         let components = self.graph.nodes.get(&node).map(|n| n.components.clone()).unwrap_or_default();
-        components.into_iter().filter(|(c, k)| *k == super::unity::MONO_BEHAVIOUR && self.graph.script(&mut self.data, *c).is_some_and(|s| s.1 == class)).map(|(c, _)| c).collect()
+        let mut out = Vec::new();
+        for (c, k) in components {
+            if k == super::unity::MONO_BEHAVIOUR && self.graph.script(&mut self.data, c)?.is_some_and(|s| s.1 == class) {
+                out.push(c);
+            }
+        }
+        Ok(out)
     }
 
     /// A TesseraTile as Tessera uses it: TesseraTileBase.OnAfterDeserialize turns its
     /// faceDetails and offsets into sylvesFaceDetails and sylvesOffsets (for cubes: the same
     /// values, every face a Square).
     pub fn tessera_tile(&mut self, component: Id) -> Result<tessera::TileDef, String> {
-        let b = self.behaviour(component).ok_or("TesseraTile: unreadable")?;
+        let b = self.behaviour(component).map_err(|e| format!("TesseraTile: unreadable: {e}"))?;
         if b.class != "TesseraTile" {
             return Err(format!("{}: a {} (only cube tiles are ported)", b.name, b.class));
         }
         let f = &b.fields;
         let go = b.game_object.ok_or("TesseraTile without a game object")?;
-        self.graph_file(go.0);
+        self.graph_file(go.0)?;
         let name = self.graph.nodes.get(&go).map(|n| n.name.clone()).unwrap_or_default();
         let mut faces = Vec::new();
         for face in list(f, "faceDetails")? {
@@ -158,7 +164,7 @@ impl Ctx {
     /// A wreck's TesseraGenerator: its settings, tiles and constraints. Settings the port
     /// does not cover fail.
     pub fn tessera_generator(&mut self, component: Id) -> Result<tessera::Generator, String> {
-        let b = self.behaviour(component).ok_or("TesseraGenerator: unreadable")?;
+        let b = self.behaviour(component).map_err(|e| format!("TesseraGenerator: unreadable: {e}"))?;
         let f = b.fields.clone();
         let file = component.0;
         let go = b.game_object.ok_or("TesseraGenerator without a game object")?;
@@ -182,16 +188,16 @@ impl Ctx {
             None => None,
         };
         let mut constraints = Vec::new();
-        self.graph_file(go.0);
+        self.graph_file(go.0)?;
         for (c, class_id) in self.graph.nodes.get(&go).map(|n| n.components.clone()).unwrap_or_default() {
             if class_id != super::unity::MONO_BEHAVIOUR {
                 continue;
             }
-            let Some((ns, class, _)) = self.graph.script(&mut self.data, c).cloned() else { continue };
+            let Some((ns, class, _)) = self.graph.script(&mut self.data, c)?.cloned() else { continue };
             if ns != "Tessera" || class == "TesseraGenerator" {
                 continue;
             }
-            let cb = self.behaviour(c).ok_or("constraint: unreadable")?;
+            let cb = self.behaviour(c).map_err(|e| format!("constraint: unreadable: {e}"))?;
             if !cb.enabled {
                 continue;
             }
@@ -224,7 +230,7 @@ impl Ctx {
         // matchOverrides from the list, ToDictionary failing on a repeated pair).
         let mut palette = tessera::Palette::default();
         if let Some(p) = tiles.first().and_then(|t| t.0.palette) {
-            let pb = self.behaviour(p).ok_or("TesseraPalette: unreadable")?;
+            let pb = self.behaviour(p).map_err(|e| format!("TesseraPalette: unreadable: {e}"))?;
             for o in list(&pb.fields, "matchOverridesList")? {
                 let o = fields(o)?;
                 let key = (int(o, "color1")? as i32, int(o, "color2")? as i32);
@@ -285,8 +291,8 @@ struct Props {
 impl Ctx {
     /// The game object's transform: local position, rotation, scale.
     fn local(&mut self, node: Id) -> Result<([f32; 3], [f32; 4], [f32; 3]), String> {
-        self.graph_file(node.0);
-        let t = self.graph.nodes.get(&node).and_then(|n| n.transform).and_then(|t| self.graph.xforms.get(&t)).ok_or(format!("{node:?}: no transform"))?;
+        self.graph_file(node.0)?;
+        let t = self.graph.nodes.get(&node).and_then(|n| self.graph.xforms.get(&n.transform)).ok_or(format!("{node:?}: no transform"))?;
         Ok((t.position, t.rotation, t.scale))
     }
 
@@ -300,29 +306,30 @@ impl Ctx {
         })
     }
 
-    fn node_name(&mut self, node: Id) -> String {
-        self.graph_file(node.0);
-        self.graph.nodes.get(&node).map(|n| n.name.clone()).unwrap_or_default()
+    fn node_name(&mut self, node: Id) -> Result<String, String> {
+        self.graph_file(node.0)?;
+        self.graph.nodes.get(&node).map(|n| n.name.clone()).ok_or(format!("{node:?}: no game object"))
     }
 
     /// The first MonoBehaviour of a class on a game object (GetComponent).
-    fn component(&mut self, node: Id, class: &str) -> Option<Id> {
-        self.components_of(node, class).into_iter().next()
+    fn component(&mut self, node: Id, class: &str) -> Result<Option<Id>, String> {
+        Ok(self.components_of(node, class)?.into_iter().next())
     }
 
     /// GenerateOnTrigger.GetComponentsInChildrenOrdered: the RandomizePropData of active
     /// objects, depth first.
-    fn ordered(&mut self, node: Id, out: &mut Vec<Id>) {
-        self.graph_file(node.0);
+    fn ordered(&mut self, node: Id, out: &mut Vec<Id>) -> Result<(), String> {
+        self.graph_file(node.0)?;
         if !self.graph.nodes.get(&node).is_some_and(|n| n.active) {
-            return;
+            return Ok(());
         }
-        if let Some(c) = self.component(node, "RandomizePropData") {
+        if let Some(c) = self.component(node, "RandomizePropData")? {
             out.push(c);
         }
         for child in self.graph.children(node) {
-            self.ordered(child, out);
+            self.ordered(child, out)?;
         }
+        Ok(())
     }
 
     /// GroupsHandler.GetGroupsViaGameObject(prefab)?.GetId(): the last group with that prefab.
@@ -336,10 +343,13 @@ impl Ctx {
             return Ok(k.clone());
         }
         let mut found = Vec::new();
-        self.ordered(root, &mut found);
+        self.ordered(root, &mut found)?;
         let mut key = None;
         if !found.is_empty() {
-            let base = name.unwrap_or_else(|| self.node_name(root));
+            let base = match name {
+                Some(n) => n,
+                None => self.node_name(root)?,
+            };
             let mut k = base.clone();
             let mut n = 2;
             while props.lists.contains_key(&k) {
@@ -356,7 +366,7 @@ impl Ctx {
             props.ids.insert(*c, (key.clone().unwrap_or_default(), i));
         }
         for c in found {
-            let b = self.behaviour(c).ok_or("RandomizePropData: unreadable")?;
+            let b = self.behaviour(c).map_err(|e| format!("RandomizePropData: unreadable: {e}"))?;
             let node = b.game_object.ok_or("RandomizePropData without a game object")?;
             let network = boolean(&b.fields, "networkObjects")?;
             let mut randoms = Vec::new();
@@ -441,7 +451,7 @@ impl Ctx {
     /// The scene tiles (TesseraTileBase) of active objects at and under a node, with the
     /// node's matrix given: their TesseraTile and matrix. Pins and volumes are not ported.
     fn scene_tiles(&mut self, node: Id, ltw: &Matrix, out: &mut Vec<(Id, Matrix)>) -> Result<(), String> {
-        self.graph_file(node.0);
+        self.graph_file(node.0)?;
         if !self.graph.nodes.get(&node).is_some_and(|n| n.active) {
             return Ok(());
         }
@@ -449,13 +459,13 @@ impl Ctx {
             if class_id != unity::MONO_BEHAVIOUR {
                 continue;
             }
-            let Some((ns, class, _)) = self.graph.script(&mut self.data, c).cloned() else { continue };
+            let Some((ns, class, _)) = self.graph.script(&mut self.data, c)?.cloned() else { continue };
             if ns != "Tessera" {
                 continue;
             }
             match class.as_str() {
                 "TesseraTile" => out.push((c, *ltw)),
-                "TesseraPinned" | "TesseraVolume" | "TesseraTileBase" | "TesseraHexTile" | "TesseraTrianglePrismTile" | "TesseraSquareTile" => return Err(format!("{} {class} in a wreck: not ported", self.node_name(node))),
+                "TesseraPinned" | "TesseraVolume" | "TesseraTileBase" | "TesseraHexTile" | "TesseraTrianglePrismTile" | "TesseraSquareTile" => return Err(format!("{} {class} in a wreck: not ported", self.node_name(node)?)),
                 _ => {}
             }
         }
@@ -521,11 +531,11 @@ impl Ctx {
         // RandomizePropData.ignore on prefabs stays set from one generation to the next.
         let mut ignored: HashSet<Id> = HashSet::new();
         for root in self.wreck_generators()? {
-            let prefab = self.node_name(root);
-            let wreck = self.component(root, "GenerateOnTrigger").ok_or(format!("{prefab}: no GenerateOnTrigger"))?;
-            let b = self.behaviour(wreck).ok_or("GenerateOnTrigger: unreadable")?;
+            let prefab = self.node_name(root)?;
+            let wreck = self.component(root, "GenerateOnTrigger")?.ok_or(format!("{prefab}: no GenerateOnTrigger"))?;
+            let b = self.behaviour(wreck).map_err(|e| format!("GenerateOnTrigger: unreadable: {e}"))?;
             let tessera = self.target(wreck.0, get(&b.fields, "_generator")?)?.ok_or(format!("{prefab}: no generator"))?;
-            let tessera_node = self.behaviour(tessera).and_then(|t| t.game_object).ok_or("TesseraGenerator without a game object")?;
+            let tessera_node = self.behaviour(tessera)?.game_object.ok_or("TesseraGenerator without a game object")?;
             let container = self.target(wreck.0, get(&b.fields, "_randomGeneratedPropsContainer")?)?.ok_or(format!("{prefab}: no props container"))?;
             let root_inverse = tessera::inverse(&self.ltw(root)?);
             let mut children = Vec::new();
@@ -534,7 +544,7 @@ impl Ctx {
                 if child == tessera_node || child == container {
                     continue;
                 }
-                let name = format!("{prefab}/{}", self.node_name(child));
+                let name = format!("{prefab}/{}", self.node_name(child)?);
                 if let Some(key) = self.props_key(&mut props, child, Some(name))? {
                     let (p, q, s) = self.local(child)?;
                     children.push(json!({"props": key, "ltw": affine(&trs(p, q, s))}));
@@ -545,10 +555,10 @@ impl Ctx {
             for l in list(&b.fields, "_limitedGroups")? {
                 let l = fields(l)?;
                 let id = match self.target(wreck.0, get(l, "groupData")?)? {
-                    Some(g) => self.behaviour(g).and_then(|g| match field(&g.fields, "id") {
+                    Some(g) => match field(&self.behaviour(g)?.fields, "id") {
                         Some(Raw::Str(s)) => Some(s.clone()),
-                        _ => None,
-                    }),
+                        other => return Err(format!("_limitedGroups.groupData.id: {other:?}")),
+                    },
                     None => None,
                 };
                 limited.push(json!([id, int(l, "maxQuantity")?]));
@@ -621,7 +631,7 @@ impl Ctx {
                 let mut out = Vec::new();
                 for t in layout? {
                     let tile = &model.tiles[t.tile];
-                    let node = self.behaviour(tile.id).and_then(|b| b.game_object).ok_or("TesseraTile without a game object")?;
+                    let node = self.behaviour(tile.id)?.game_object.ok_or("TesseraTile without a game object")?;
                     if let Some(key) = self.props_key(&mut props, node, None)? {
                         out.push(json!([key, v3(t.position), Value::Array(t.rotation.iter().map(|x| num(*x)).collect())]));
                     }
@@ -670,7 +680,10 @@ pub fn debug(args: &[String]) {
         std::process::exit(2);
     };
     let mut ctx = Ctx::open(Path::new(game)).expect("open game");
-    ctx.assets();
+    if let Err(e) = ctx.assets() {
+        eprintln!("native-wrecks: {e}");
+        std::process::exit(1);
+    }
     let started = std::time::Instant::now();
     match ctx.wrecks() {
         Ok(w) => {

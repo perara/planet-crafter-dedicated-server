@@ -9,14 +9,15 @@ use serde_json::{json, Value};
 use super::dotnet::{Assemblies, Assembly, Member, TypeName, TypeSig};
 use super::serial::Raw;
 
-/// One IL instruction: its opcode (0xFExx for two-byte ones) and operand.
+/// One IL instruction: its opcode (0xFExx for two-byte ones), operand, the offset of the next
+/// instruction and the offsets it can branch to.
+#[derive(Debug)]
 struct Op {
     code: u16,
     arg: i64,
     /// Byte offset of the instruction, and of the next one (branch targets count from it).
     at: usize,
     end: usize,
-    /// switch: its targets' offsets.
     targets: Vec<usize>,
 }
 
@@ -58,17 +59,67 @@ fn decode(il: &[u8]) -> Result<Vec<Op>, String> {
             4 => i32::from_le_bytes(b[..4].try_into().unwrap()) as i64,
             _ => i64::from_le_bytes(b),
         };
-        let mut raw = Vec::new();
+        let mut targets = Vec::new();
         if code == 0x45 {
-            // switch: the count, then that many 4-byte targets.
-            for _ in 0..arg as u32 {
-                raw.push(i32::from_le_bytes(il.get(at..at + 4).ok_or("truncated IL")?.try_into().unwrap()));
-                at += 4;
-            }
+            // switch: the count, then that many 4-byte targets, relative to the instruction's end.
+            let table = il.get(at..at.checked_add(4 * arg as u32 as usize).ok_or("truncated IL")?).ok_or("truncated IL: a switch table runs past the end")?;
+            at += table.len();
+            targets = table.chunks(4).map(|t| at as i64 + i32::from_le_bytes(t.try_into().unwrap()) as i64).map(|t| t as usize).collect();
+        } else if matches!(code, 0x2B..=0x44 | 0xDD | 0xDE) {
+            targets.push((at as i64 + arg) as usize);
         }
-        out.push(Op { code, arg, at: start, end: at, targets: raw.iter().map(|t| (at as i64 + *t as i64) as usize).collect() });
+        out.push(Op { code, arg, at: start, end: at, targets });
     }
     Ok(out)
+}
+
+/// No fall-through to the next instruction: br, leave, ret, throw, rethrow, endfinally, jmp.
+fn ends_flow(code: u16) -> bool {
+    matches!(code, 0x2A | 0x2B | 0x38 | 0x27 | 0x7A | 0xDC | 0xDD | 0xDE | 0xFE1A)
+}
+
+/// A method's control flow: per instruction, the instructions it can go to next. Exception
+/// handlers are not entered, so their code never counts as run on every path.
+struct Flow {
+    next: Vec<Vec<usize>>,
+    branch_target: Vec<bool>,
+}
+
+impl Flow {
+    fn new(ops: &[Op]) -> Result<Flow, String> {
+        let index: std::collections::HashMap<usize, usize> = ops.iter().enumerate().map(|(i, op)| (op.end, i + 1)).chain([(0, 0)]).collect();
+        let mut branch_target = vec![false; ops.len() + 1];
+        let mut next = Vec::new();
+        for (i, op) in ops.iter().enumerate() {
+            let mut n = Vec::new();
+            if !ends_flow(op.code) {
+                n.push(i + 1);
+            }
+            for t in &op.targets {
+                let j = *index.get(t).filter(|j| **j < ops.len()).ok_or_else(|| format!("IL branch to {t:#x}, not an instruction"))?;
+                branch_target[j] = true;
+                n.push(j);
+            }
+            next.push(n);
+        }
+        Ok(Flow { next, branch_target })
+    }
+
+    /// Whether every path from the start to a `ret` runs instruction `i`.
+    fn always(&self, ops: &[Op], i: usize) -> bool {
+        let mut seen = vec![false; ops.len() + 1];
+        let mut todo = vec![0];
+        while let Some(j) = todo.pop() {
+            if j == i || j >= ops.len() || std::mem::replace(&mut seen[j], true) {
+                continue;
+            }
+            if ops[j].code == 0x2A {
+                return false;
+            }
+            todo.extend(&self.next[j]);
+        }
+        true
+    }
 }
 
 /// A value on the evaluation stack of a constructor's field initializers.
@@ -90,15 +141,24 @@ enum Val {
     Unknown,
 }
 
-/// What a constructor stores in each of `this`'s fields, last store winning. Instructions this
-/// does not model leave the stack unknown until the statement ends.
-fn initializers(asm: &Assembly, il: &[u8]) -> Result<Vec<(String, Val)>, String> {
+/// What a method of `class` stores in each of `this`'s fields, last store winning, over the
+/// whole body. Instructions this does not model leave the stack unknown until the statement
+/// ends; a store not run on every path to a `ret`, or into one of the class's fields on an
+/// object it cannot tell is `this`, leaves the field Unknown.
+fn initializers(asm: &Assembly, class: &TypeName, il: &[u8]) -> Result<Vec<(String, Val)>, String> {
     let mut stack: Vec<Val> = Vec::new();
     let mut locals: std::collections::HashMap<i64, Val> = Default::default();
     let mut out: Vec<(String, Val)> = Vec::new();
     let pop = |s: &mut Vec<Val>| s.pop().unwrap_or(Val::Unknown);
-    for op in decode(il)? {
+    let ops = decode(il)?;
+    let flow = Flow::new(&ops)?;
+    for (i, op) in ops.iter().enumerate() {
         let token = op.arg as u32;
+        // Where branches meet, the stack is whatever path came there.
+        if flow.branch_target[i] {
+            stack.clear();
+        }
+        let sure = |v: Val| if flow.always(&ops, i) { v } else { Val::Unknown };
         match op.code {
             0x00 => {}
             0x02 => stack.push(Val::This),
@@ -106,16 +166,16 @@ fn initializers(asm: &Assembly, il: &[u8]) -> Result<Vec<(String, Val)>, String>
             0x11 | 0xFE0C => stack.push(locals.get(&op.arg).cloned().unwrap_or(Val::Unknown)),
             0x0A..=0x0D => {
                 let v = pop(&mut stack);
-                locals.insert(op.code as i64 - 0x0A, v);
+                locals.insert(op.code as i64 - 0x0A, sure(v));
             }
             0x13 | 0xFE0E => {
                 let v = pop(&mut stack);
-                locals.insert(op.arg, v);
+                locals.insert(op.arg, sure(v));
             }
             0x12 | 0xFE0D => stack.push(Val::Local(op.arg)),
             0xFE15 => {
                 if let Val::Local(n) = pop(&mut stack) {
-                    locals.insert(n, Val::Zero);
+                    locals.insert(n, sure(Val::Zero));
                 }
             }
             0x14 => stack.push(Val::Null),
@@ -138,8 +198,8 @@ fn initializers(asm: &Assembly, il: &[u8]) -> Result<Vec<(String, Val)>, String>
             }
             0x73 => match asm.member(token) {
                 Some(Member::Method { owner, params, .. }) => {
-                    let at = stack.len().saturating_sub(params.len());
-                    let args = stack.split_off(at);
+                    let mut args: Vec<Val> = params.iter().map(|_| pop(&mut stack)).collect();
+                    args.reverse();
                     stack.push(Val::New(owner, args));
                 }
                 _ => stack.clear(),
@@ -169,12 +229,18 @@ fn initializers(asm: &Assembly, il: &[u8]) -> Result<Vec<(String, Val)>, String>
             },
             0x7D => {
                 let v = pop(&mut stack);
-                if let (Val::This, Some(Member::Field { name, .. })) = (pop(&mut stack), asm.member(token)) {
+                let target = pop(&mut stack);
+                if let Some(Member::Field { owner, name }) = asm.member(token) {
+                    let own = matches!(&owner, TypeSig::Class(t) | TypeSig::GenericInst { ty: t, .. } if t.full() == class.full());
+                    let v = match target {
+                        Val::This => sure(v),
+                        Val::Unknown if own => Val::Unknown,
+                        _ => continue,
+                    };
                     out.retain(|(n, _)| *n != name);
                     out.push((name, v));
                 }
             }
-            0x2A => break,
             _ => stack.clear(),
         }
     }
@@ -263,20 +329,58 @@ pub fn calls(asm: &Assembly, il: &[u8]) -> Vec<(u16, Member)> {
 }
 
 /// The fields a class's constructor or Awake sets to a new, empty collection (List, Dictionary,
-/// HashSet, ...): what they hold when nothing has been added yet.
+/// HashSet, ...): what they hold when nothing has been added yet. Panics when the IL does not
+/// tell: the layout reader that asks has no error path.
+// ponytail: panic, not Result; return the error once serial::Layouts::class_fields can.
 pub fn created_collections(asm: &Assemblies, class: &TypeName) -> Vec<String> {
-    let (Some(def), Some(a)) = (asm.def(class), asm.assembly_of(class)) else { return Vec::new() };
+    collections(asm, class).unwrap_or_else(|e| panic!("{}: {e}", class.full()))
+}
+
+fn collections(asm: &Assemblies, class: &TypeName) -> Result<Vec<String>, String> {
+    let def = asm.def(class).ok_or("not in the game's assemblies")?;
+    let values = field_values(asm, class)?;
     let mut out = Vec::new();
-    for m in def.methods.iter().filter(|m| (m.name == ".ctor" || m.name == "Awake") && m.params.is_empty()) {
-        for (name, v) in initializers(a, a.il(m).unwrap_or_default()).unwrap_or_default() {
-            if let Val::New(TypeSig::GenericInst { ty, .. }, args) = v {
-                if ty.namespace == "System.Collections.Generic" && args.iter().all(|a| matches!(a, Val::Int(_))) && !out.contains(&name) {
-                    out.push(name);
-                }
+    for f in &def.fields {
+        let collection = |t: &TypeName| t.namespace == "System.Collections.Generic";
+        let value = values.iter().find(|(n, _)| *n == f.name).map(|(_, v)| v);
+        let collection_field = matches!(&f.sig, TypeSig::GenericInst { ty, .. } if collection(ty));
+        let created = match value {
+            None | Some(Val::Null) => false,
+            // new List<T>() or new List<T>(capacity): empty.
+            Some(Val::New(TypeSig::GenericInst { ty, .. }, args)) if collection(ty) && args.iter().all(|a| matches!(a, Val::Int(_))) => true,
+            Some(v @ Val::New(TypeSig::GenericInst { ty, .. }, _)) if collection(ty) => return Err(format!("{}: created as {v:?}, maybe not empty", f.name)),
+            Some(v) if collection_field => return Err(format!("{}: .ctor/Awake set it to {v:?}, not a new collection or null", f.name)),
+            Some(_) => false,
+        };
+        if created {
+            out.push(f.name.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// What a class's own .ctor leaves in its fields, then its Awake for the fields the .ctor
+/// leaves unset; a field both set is Unknown.
+fn field_values(asm: &Assemblies, class: &TypeName) -> Result<Vec<(String, Val)>, String> {
+    const STATIC: u16 = 0x10;
+    const ABSTRACT: u16 = 0x400;
+    let def = asm.def(class).ok_or_else(|| format!("{} is not in the game's assemblies", class.full()))?;
+    let a = asm.assembly_of(class).unwrap();
+    let mut out: Vec<(String, Val)> = Vec::new();
+    for method in [".ctor", "Awake"] {
+        let Some(m) = def.methods.iter().find(|m| m.name == method && m.params.is_empty() && m.flags & STATIC == 0) else { continue };
+        if m.flags & ABSTRACT != 0 {
+            continue; // no code to run
+        }
+        let il = a.il(m).ok_or_else(|| format!("{}.{method}: its IL body cannot be read", class.full()))?;
+        for (name, v) in initializers(a, class, il).map_err(|e| format!("{}.{method}: {e}", class.full()))? {
+            match out.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, old)) => *old = Val::Unknown,
+                None => out.push((name, v)),
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// The bool constant passed to the first call of `method` in an IL body (ldc.i4.0/1 right
@@ -289,11 +393,6 @@ pub fn bool_argument(asm: &Assembly, il: &[u8], method: &str) -> Option<bool> {
         0x17 => Some(true),
         _ => None,
     }
-}
-
-/// The first string literal an IL body loads (ldstr).
-pub fn first_string(asm: &Assembly, il: &[u8]) -> Option<String> {
-    decode(il).ok()?.iter().find(|op| op.code == 0x72).and_then(|op| asm.user_string(op.arg as u32))
 }
 
 /// The first int32 constant an IL body loads (ldc.i4.*).
@@ -409,10 +508,42 @@ fn encode(asm: &Assemblies, ty: &TypeSig, v: &Val) -> Result<Option<Vec<u8>>, St
                 };
                 i.to_le_bytes()[..size].to_vec()
             }
-            None => return Ok(None),
+            None if serializes_itself(asm, t)? => return Ok(None),
+            None => return Err(format!("{}: no encoding for this type", t.full())),
         },
-        _ => return Ok(None),
+        Class(t) | GenericInst { ty: t, .. } if serializes_itself(asm, t)? => return Ok(None),
+        other => return Err(format!("{other:?}: no encoding for this type")),
     }))
+}
+
+/// A type with a serializer of its own: it (or a base) implements INetworkSerializable, or the
+/// game registers UserNetworkVariableSerialization<T>.WriteValue for it (Netcode's serializer
+/// for managed types that are neither).
+fn serializes_itself(asm: &Assemblies, t: &TypeName) -> Result<bool, String> {
+    let mut cur = Some(t.clone());
+    for _ in 0..32 {
+        let Some(d) = cur.as_ref().and_then(|c| asm.def(c)) else { break };
+        if d.interfaces.iter().any(|i| matches!(i, TypeSig::Class(n) | TypeSig::GenericInst { ty: n, .. } if n.full() == "Unity.Netcode.INetworkSerializable")) {
+            return Ok(true);
+        }
+        cur = asm.base(cur.as_ref().unwrap());
+    }
+    let a = asm.assembly_of(t).ok_or_else(|| format!("{} is not in the game's assemblies", t.full()))?;
+    for d in a.types() {
+        for m in d.methods.iter().filter(|m| m.rva != 0) {
+            let il = a.il(m).ok_or_else(|| format!("{}.{}: its IL body cannot be read", d.name, m.name))?;
+            for op in decode(il).map_err(|e| format!("{}.{}: {e}", d.name, m.name))? {
+                // stsfld UserNetworkVariableSerialization<T>.WriteValue
+                if op.code == 0x80 && matches!(a.member(op.arg as u32), Some(Member::Field { owner: TypeSig::GenericInst { ty, args, .. }, name })
+                    if name == "WriteValue" && ty.full() == "Unity.Netcode.UserNetworkVariableSerialization`1"
+                        && matches!(args.as_slice(), [TypeSig::Class(n) | TypeSig::ValueType(n)] if n.full() == t.full()))
+                {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// The class's Netcode variables: [{name, type, bytes}] with bytes null when the server sets
@@ -437,7 +568,10 @@ fn serialized(fields: &[(String, Raw)], name: &str) -> Result<Val, String> {
 }
 
 fn collect(asm: &Assemblies, class: &TypeName, fields: &[(String, Raw)], out: &mut Vec<Value>, depth: usize) -> Result<(), String> {
-    if depth > 16 || class.full() == "Unity.Netcode.NetworkBehaviour" {
+    if depth > 16 {
+        return Err(format!("{}: more than 16 base classes with Netcode variables", class.full()));
+    }
+    if class.full() == "Unity.Netcode.NetworkBehaviour" {
         return Ok(());
     }
     let def = asm.def(class).ok_or_else(|| format!("{} is not in the game's assemblies", class.full()))?;
@@ -451,22 +585,16 @@ fn collect(asm: &Assemblies, class: &TypeName, fields: &[(String, Raw)], out: &m
     };
     // Field initializers run in the constructor; a variable it leaves out is created in Awake
     // (before Netcode registers it at spawn).
-    let mut ctor_values = Vec::new();
-    for m in def.methods.iter().filter(|m| (m.name == ".ctor" || m.name == "Awake") && m.params.is_empty()) {
-        for (name, v) in initializers(a, a.il(m).unwrap_or_default())? {
-            if !ctor_values.iter().any(|(n, _)| *n == name) {
-                ctor_values.push((name, v));
-            }
-        }
-    }
+    let ctor_values = field_values(asm, class)?;
     // __initializeVariables: for each variable, ldfld it ... NetworkVariableFields.Add; the
     // base's call where it registers the base's variables.
     let mut last_field = None;
-    for op in decode(a.il(init).unwrap_or_default())? {
+    let il = a.il(init).ok_or_else(|| format!("{}.__initializeVariables: its IL body cannot be read", class.full()))?;
+    for op in decode(il)? {
         match (op.code, a.member(op.arg as u32)) {
             (0x7B, Some(Member::Field { name, .. })) => last_field = Some(name),
             (0x6F, Some(Member::Method { name, .. })) if name == "Add" => {
-                let Some(name) = last_field.take() else { continue };
+                let name = last_field.take().ok_or_else(|| format!("{}.__initializeVariables: an Add without the field it adds", class.full()))?;
                 let field = def.fields.iter().find(|f| f.name == name).ok_or_else(|| format!("{}.{name}: not a field", class.name))?;
                 let value = ctor_values.iter().find(|(n, _)| *n == name).map(|(_, v)| v);
                 out.push(variable(asm, class, &name, &field.sig, value, fields)?);
@@ -488,7 +616,7 @@ fn variable(asm: &Assemblies, class: &TypeName, name: &str, sig: &TypeSig, value
         TypeSig::GenericInst { ty, args, .. } if ty.full() == "Unity.Netcode.NetworkVariable`1" && args.len() == 1 => {
             let initial = match value {
                 Some(Val::New(_, args)) => args.first().cloned().unwrap_or(Val::Zero),
-                other => return Err(format!("{}: the constructor does not create it ({other:?})", at())),
+                other => return Err(format!("{}: .ctor/Awake do not create it, or not readably ({other:?})", at())),
             };
             let initial = match initial {
                 Val::Field(f) => serialized(fields, &f).map_err(|e| format!("{}: {e}", at()))?,
@@ -508,4 +636,62 @@ fn variable(asm: &Assemblies, class: &TypeName, name: &str, sig: &TypeSig, value
     };
     let hex = bytes.map(|b| b.iter().map(|x| format!("{x:02x}")).collect::<String>());
     Ok(json!({"name": name, "type": ty, "bytes": hex}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_switch_table_past_the_end_is_truncated_il() {
+        // switch with 2 targets but only one 4-byte target present.
+        let il = [0x45, 2, 0, 0, 0, 0, 0, 0, 0];
+        assert!(decode(&il).unwrap_err().contains("switch"));
+        let il = [0x45, 1, 0, 0, 0, 0, 0, 0, 0, 0x2A];
+        assert_eq!(decode(&il).unwrap()[0].targets, vec![9]);
+    }
+
+    #[test]
+    fn a_store_past_an_early_return_is_not_on_every_path() {
+        // 0: ldarg.0  1: brtrue.s +1 (-> 4)  3: ret  4: nop  5: ret
+        let ops = decode(&[0x02, 0x2D, 0x01, 0x2A, 0x00, 0x2A]).unwrap();
+        let flow = Flow::new(&ops).unwrap();
+        assert!(flow.always(&ops, 0) && flow.always(&ops, 1));
+        assert!(!flow.always(&ops, 3), "the nop after the early ret runs only on one path");
+        assert!(flow.branch_target[3]);
+        // A loop body: 0: br.s +1 (-> 3)  2: nop  3: ldarg.0  4: brtrue.s -4 (-> 2)  6: ret
+        let ops = decode(&[0x2B, 0x01, 0x00, 0x02, 0x2D, 0xFC, 0x2A]).unwrap();
+        let flow = Flow::new(&ops).unwrap();
+        assert!(!flow.always(&ops, 1) && flow.always(&ops, 2));
+        // A branch into the middle of an instruction.
+        assert!(Flow::new(&decode(&[0x2B, 0x01, 0x20, 0, 0, 0, 0, 0x2A]).unwrap()).is_err());
+    }
+
+    /// The game's assemblies (PCDS_GAME_DIR, else the default Steam library); None skips.
+    fn game() -> Option<Assemblies> {
+        let home = std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".local/share/Steam/steamapps/common/The Planet Crafter"));
+        let dir = std::env::var_os("PCDS_GAME_DIR").map(std::path::PathBuf::from).or(home)?.join("Planet Crafter_Data/Managed");
+        if !dir.is_dir() {
+            eprintln!("skipped: no game in {}", dir.display());
+            return None;
+        }
+        Some(Assemblies::load_dir(&dir).unwrap())
+    }
+
+    #[test]
+    fn a_value_type_without_an_encoding_is_an_error() {
+        let Some(asm) = game() else { return };
+        let named = |namespace: &str, name: &str| TypeName { scope: None, namespace: namespace.into(), name: name.into() };
+        let err = encode(&asm, &TypeSig::ValueType(named("UnityEngine", "Vector3Int")), &Val::Zero).unwrap_err();
+        assert!(err.contains("UnityEngine.Vector3Int"), "{err}");
+        // INetworkSerializable: its own serializer, so no bytes and no error.
+        assert_eq!(encode(&asm, &TypeSig::ValueType(named("SpaceCraft", "WorldInstanceHandler/InstanceChoices")), &Val::Zero).unwrap(), None);
+        // A class the game registers UserNetworkVariableSerialization<T>.WriteValue for.
+        assert_eq!(encode(&asm, &TypeSig::Class(named("SpaceCraft", "WorldInstanceData")), &Val::Null).unwrap(), None);
+    }
+}
+
+/// An IL body's instructions as (opcode, operand), 0xFExx for two-byte opcodes.
+pub fn instructions(il: &[u8]) -> Result<Vec<(u16, i64)>, String> {
+    Ok(decode(il)?.into_iter().map(|op| (op.code, op.arg)).collect())
 }

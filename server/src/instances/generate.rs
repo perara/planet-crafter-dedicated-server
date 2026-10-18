@@ -112,14 +112,43 @@ struct Entry {
 
 /// A box collider in world space.
 #[derive(Deserialize, Clone, Debug, serde::Serialize)]
+#[serde(try_from = "ShapeRow", into = "ShapeRow")]
 pub struct Shape {
     position: [f32; 3],
     rotation: [f32; 4],
     scale: [f32; 3],
-    #[serde(default)]
     center: [f32; 3],
-    #[serde(default)]
     size: [f32; 3],
+}
+
+/// Generation.Shape as the scene table writes it: only an active BoxCollider is a Shape.
+#[derive(Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct ShapeRow {
+    #[serde(rename = "type")]
+    kind: String,
+    active: bool,
+    position: [f32; 3],
+    rotation: [f32; 4],
+    scale: [f32; 3],
+    center: [f32; 3],
+    size: [f32; 3],
+}
+
+impl TryFrom<ShapeRow> for Shape {
+    type Error = String;
+    fn try_from(r: ShapeRow) -> Result<Shape, String> {
+        if r.kind != "BoxCollider" || !r.active {
+            return Err(format!("a {} collider, active {}: only an active BoxCollider is read", r.kind, r.active));
+        }
+        Ok(Shape { position: r.position, rotation: r.rotation, scale: r.scale, center: r.center, size: r.size })
+    }
+}
+
+impl From<Shape> for ShapeRow {
+    fn from(s: Shape) -> ShapeRow {
+        ShapeRow { kind: "BoxCollider".into(), active: true, position: s.position, rotation: s.rotation, scale: s.scale, center: s.center, size: s.size }
+    }
 }
 
 impl Shape {
@@ -377,4 +406,23 @@ pub fn init_scene_variables(game: &mut Game, seed: i32, difficulty: i32, scene: 
         }
     }
     super::add_generated(game, seed, made);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Shape;
+
+    #[test]
+    fn only_an_active_box_is_a_shape() {
+        let row = |kind: &str, active: bool| serde_json::json!({"type": kind, "active": active, "position": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1], "center": [0, 0, 0], "size": [2, 2, 2]});
+        let shape: Shape = serde_json::from_value(row("BoxCollider", true)).unwrap();
+        assert!(shape.contains([0.5, 0.5, 0.5]) && !shape.contains([1.5, 0.0, 0.0]));
+        // The state handoff writes it back the same way.
+        let _: Shape = serde_json::from_value(serde_json::to_value(&shape).unwrap()).unwrap();
+        assert!(serde_json::from_value::<Shape>(row("SphereCollider", true)).is_err());
+        assert!(serde_json::from_value::<Shape>(row("BoxCollider", false)).is_err());
+        let mut no_size = row("BoxCollider", true);
+        no_size.as_object_mut().unwrap().remove("size");
+        assert!(serde_json::from_value::<Shape>(no_size).is_err());
+    }
 }
