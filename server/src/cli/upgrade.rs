@@ -48,12 +48,14 @@ impl Ctx {
         if rollback {
             let info = updater::info(&banks, &target).ok_or_else(|| format!("bank {target} holds no release to go back to"))?;
             updater::set_active(&banks, &target)?;
+            updater::set_rolled_back(&banks, &active)?;
             say(format!("bank {target} ({}) is the active one now", describe(&info)));
         } else {
             let release = updater::lookup(&updater::releases_url(), version.as_deref())?;
             say(format!("downloading {} into bank {target}", release.tag));
             let info = updater::install(&release, &banks, &target, None)?;
             updater::set_active(&banks, &target)?;
+            updater::clear_rolled_back(&banks)?;
             say(format!("{} installed in bank {target} (sha256 checked), the active one now: {}", release.tag, describe(&info)));
         }
         if running {

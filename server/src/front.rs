@@ -105,6 +105,8 @@ enum UpdateDone {
     Installed { seq: u64, bank: String, info: Value },
     Failed { seq: u64, message: String },
     UpToDate { seq: u64, tag: String },
+    /// The automatic check left the latest release out (the one rolled back from).
+    Skipped { seq: u64, message: String },
     /// A check only (POST /api/update {"check": true}): the latest release, and whether it is
     /// newer than the live bank's.
     Checked { seq: u64, tag: String, newer: bool },
@@ -860,6 +862,13 @@ impl Front {
             ready["restoreMs"].as_f64().unwrap_or(0.0)
         );
         println!("{message}");
+        // Rolled back: the automatic update must not bring back what the owner left.
+        if flip.reason == "rollback"
+            && let Some(dir) = &self.banks
+            && let Err(e) = updater::set_rolled_back(dir, &from)
+        {
+            eprintln!("banks: the rollback from bank {from} could not be noted ({e}): the automatic update may install its release again");
+        }
         let version = self.live.as_ref().map(|b| b.hello["version"].clone()).unwrap_or_default();
         self.record(flip.seq, true, &message, json!({"from": from, "to": to, "stoodMs": ms(stood), "snapshotBytes": flip.snapshot["bytes"], "snapshotMs": flip.snapshot["ms"], "restoreMs": ready["restoreMs"], "held": held, "verified": ready["verified"], "version": version}));
     }
@@ -1167,14 +1176,15 @@ impl Front {
             return (200, json!({"ok": true, "seq": seq}).to_string());
         }
         let version = body["version"].as_str().filter(|v| *v != "latest").map(str::to_string);
-        self.download(seq, dir, target, version, body["onlyNewer"] == true);
+        self.download(seq, dir, target, version, body["onlyNewer"] == true, false);
         (200, json!({"ok": true, "seq": seq}).to_string())
     }
 
     /// A download into the standby bank, on a thread of its own (it takes seconds); the loop
-    /// flips when it is in. `only_newer`: the automatic check, which installs only a later
-    /// release than the live bank's.
-    fn download(&mut self, seq: u64, dir: PathBuf, bank: String, version: Option<String>, only_newer: bool) {
+    /// flips when it is in. `only_newer`: install only a later release than the live bank's.
+    /// `auto`: the automatic check, which also leaves out the release rolled back from; an
+    /// update asked for clears that note.
+    fn download(&mut self, seq: u64, dir: PathBuf, bank: String, version: Option<String>, only_newer: bool, auto: bool) {
         let live = self.live.as_ref().map(|b| b.hello.clone()).unwrap_or_default();
         let tx = self.updates.tx.clone();
         self.updates.busy = Some((seq, format!("downloading {} into bank {bank}", version.as_deref().unwrap_or("the latest release"))));
@@ -1184,7 +1194,13 @@ impl Front {
                 if only_newer && !updater::newer(&release.tag, live["version"].as_str().unwrap_or("")) {
                     return Ok(UpdateDone::UpToDate { seq, tag: release.tag });
                 }
+                if auto && let Some(why) = updater::auto_skips(&dir, &release.tag)? {
+                    return Ok(UpdateDone::Skipped { seq, message: why });
+                }
                 let info = updater::install(&release, &dir, &bank, Some(&live))?;
+                if !auto {
+                    updater::clear_rolled_back(&dir)?;
+                }
                 Ok(UpdateDone::Installed { seq, bank, info })
             })();
             let _ = tx.send(done.unwrap_or_else(|message: String| UpdateDone::Failed { seq, message }));
@@ -1227,6 +1243,10 @@ impl Front {
                     self.updates.newer = false;
                     self.record(seq, true, &format!("up to date ({tag} is the latest release)"), json!({}));
                 }
+                UpdateDone::Skipped { seq, message } => {
+                    println!("update: {message}");
+                    self.record(seq, true, &message, json!({}));
+                }
                 UpdateDone::Checked { seq, tag, newer } => {
                     self.updates.latest = Some(tag.clone());
                     self.updates.newer = newer;
@@ -1242,7 +1262,7 @@ impl Front {
                 self.updates.seq += 1;
                 let seq = self.updates.seq;
                 println!("update: checking for a new release (PCDS_AUTO_UPDATE=on)");
-                self.download(seq, dir, bank, None, true);
+                self.download(seq, dir, bank, None, true, true);
             }
         }
     }

@@ -291,6 +291,9 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
     let back = server.update(json!({"rollback": true}));
     assert_eq!(back["ok"], true, "{back}");
     assert_ne!(server.live()["bank"], standby);
+    // Noted: the automatic update does not bring v9.9.9 back.
+    let noted: Value = serde_json::from_str(&std::fs::read_to_string(banks.join("rolled-back")).unwrap()).unwrap();
+    assert_eq!(noted, json!({"bank": standby, "tag": "v9.9.9"}));
     let (ok, said) = finish(players);
     assert!(ok, "players stayed through the update and the rollback:\n{said}");
     // A check looks the latest release up and installs nothing.
@@ -362,6 +365,7 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
     };
     let (ok, said) = pcds(&["upgrade", "v9.9.9"]);
     assert!(ok && said.contains("v9.9.9 installed in bank b (sha256 checked)"), "{said}");
+    assert!(!home.join("bin/rolled-back").exists(), "an update asked for clears the rollback note");
     assert_eq!(std::fs::read_to_string(home.join("bin/active")).unwrap().trim(), "b");
     let (ok, said) = pcds(&["status"]);
     assert!(ok && said.contains("state=stopped") && said.contains("bank b: pcds") && said.contains("(v9.9.9)") && said.contains("[active]"), "{said}");
@@ -370,5 +374,7 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
     let (ok, said) = pcds(&["upgrade", "--rollback"]);
     assert!(ok && said.contains("bank a"), "{said}");
     assert_eq!(std::fs::read_to_string(home.join("bin/active")).unwrap().trim(), "a");
+    let noted: Value = serde_json::from_str(&std::fs::read_to_string(home.join("bin/rolled-back")).unwrap()).unwrap();
+    assert_eq!(noted, json!({"bank": "b", "tag": "v9.9.9"}));
     std::fs::remove_dir_all(&dir).unwrap();
 }

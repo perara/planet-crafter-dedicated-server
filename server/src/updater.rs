@@ -309,6 +309,45 @@ pub fn set_active(banks: &Path, bank: &str) -> Result<(), String> {
     crate::cli::replace_file(&banks.join("active"), format!("{bank}\n").as_bytes(), 0o644)
 }
 
+/// The bank the owner rolled back from, and its release (banks/rolled-back: {"bank", "tag"}).
+/// The automatic update does not install that tag again, and `pcds run` installs nothing over
+/// that bank; a later release, an explicit update (`pcds upgrade`, POST /api/update with a
+/// version or the latest) or the next rollback replaces or clears it.
+pub fn rolled_back(banks: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(banks.join("rolled-back")).ok()?;
+    serde_json::from_str(&text).ok().filter(|v: &Value| v["bank"].is_string())
+}
+
+/// A rollback away from `bank`: it is noted with the release it holds.
+pub fn set_rolled_back(banks: &Path, bank: &str) -> Result<(), String> {
+    let held = info(banks, bank).unwrap_or_default();
+    let tag = held["tag"].as_str().map(str::to_string).or_else(|| held["version"].as_str().map(tag));
+    let _lock = lock(banks)?;
+    crate::cli::replace_file(&banks.join("rolled-back"), (json!({"bank": bank, "tag": tag}).to_string() + "\n").as_bytes(), 0o644)
+}
+
+pub fn clear_rolled_back(banks: &Path) -> Result<(), String> {
+    let path = banks.join("rolled-back");
+    let _lock = lock(banks)?;
+    match std::fs::remove_file(&path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{}: {e}", path.display())),
+        _ => Ok(()),
+    }
+}
+
+/// What the automatic update does with the latest release `tag` after a rollback: skip it
+/// (Some: why) when it is the release rolled back from; a later one clears the note.
+pub fn auto_skips(banks: &Path, tag: &str) -> Result<Option<String>, String> {
+    let Some(from) = rolled_back(banks).and_then(|r| r["tag"].as_str().map(str::to_string)) else { return Ok(None) };
+    if from == tag {
+        return Ok(Some(format!("{tag} is the release the server was rolled back from: the automatic update leaves it out (pcds upgrade {tag} installs it)")));
+    }
+    if newer(tag, &from) {
+        clear_rolled_back(banks)?;
+    }
+    Ok(None)
+}
+
 pub fn other(bank: &str) -> &'static str {
     if bank == "a" { "b" } else { "a" }
 }
@@ -549,6 +588,31 @@ pub mod tests {
         let seen: Vec<&str> = info["env"].as_str().unwrap().split_whitespace().collect();
         // What the shell sets itself (PWD, SHLVL, _) aside.
         assert!(seen.contains(&"PATH") && seen.iter().all(|k| ["PATH", "HOME", "LANG", "PWD", "OLDPWD", "SHLVL", "_"].contains(k)), "{seen:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_automatic_update_leaves_out_the_release_rolled_back_from() {
+        let dir = test_dir("rolled-back");
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        std::fs::write(dir.join("b/pcds"), "").unwrap();
+        write_info(&dir.join("b"), &json!({"version": "0.7.0", "tag": "v0.7.0"})).unwrap();
+        assert_eq!(auto_skips(&dir, "v0.7.0").unwrap(), None, "no rollback: nothing left out");
+        set_rolled_back(&dir, "b").unwrap();
+        assert_eq!(rolled_back(&dir).unwrap(), json!({"bank": "b", "tag": "v0.7.0"}));
+        assert!(auto_skips(&dir, "v0.7.0").unwrap().unwrap().contains("rolled back from"));
+        assert!(rolled_back(&dir).is_some(), "an older or the same release keeps the note");
+        assert_eq!(auto_skips(&dir, "v0.6.5").unwrap(), None);
+        assert!(rolled_back(&dir).is_some());
+        // A later release: installed, and the note is gone.
+        assert_eq!(auto_skips(&dir, "v0.8.0").unwrap(), None);
+        assert!(rolled_back(&dir).is_none());
+        // A bank of a local build is noted by its version.
+        write_info(&dir.join("b"), &json!({"version": "0.7.1"})).unwrap();
+        set_rolled_back(&dir, "b").unwrap();
+        assert_eq!(rolled_back(&dir).unwrap()["tag"], "v0.7.1");
+        clear_rolled_back(&dir).unwrap();
+        clear_rolled_back(&dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
