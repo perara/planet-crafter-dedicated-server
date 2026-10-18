@@ -133,7 +133,7 @@ enum Val {
     /// default(T) of a struct (initobj).
     Zero,
     /// A static property or method's result (Vector3.zero, ...).
-    Call(TypeSig, String),
+    Call(String),
     New(TypeSig, Vec<Val>),
     /// One of `this`'s own fields (its serialized value).
     Field(String),
@@ -214,11 +214,11 @@ fn initializers(asm: &Assembly, class: &TypeName, il: &[u8]) -> Result<Vec<(Stri
                 stack.push(if matches!(v, Val::Str(_) | Val::Int(_) | Val::Float(_)) { v } else { Val::Unknown });
             }
             0x28 | 0x6F => match asm.member(token) {
-                Some(Member::Method { owner, name, params, instance, ret, .. }) => {
+                Some(Member::Method { name, params, instance, ret, .. }) => {
                     let at = stack.len().saturating_sub(params.len() + instance as usize);
                     stack.truncate(at);
                     if ret != TypeSig::Void {
-                        stack.push(if instance { Val::Unknown } else { Val::Call(owner, name) });
+                        stack.push(if instance { Val::Unknown } else { Val::Call(name) });
                     }
                 }
                 _ => stack.clear(),
@@ -472,9 +472,9 @@ fn encode(asm: &Assemblies, ty: &TypeSig, v: &Val) -> Result<Option<Vec<u8>>, St
             };
             let values: Vec<f64> = match v {
                 Val::Zero => vec![0.0; n],
-                Val::Call(_, m) if m == "get_zero" => vec![0.0; n],
-                Val::Call(_, m) if m == "get_one" => vec![1.0; n],
-                Val::Call(_, m) if m == "get_identity" => vec![0.0, 0.0, 0.0, 1.0],
+                Val::Call(m) if m == "get_zero" => vec![0.0; n],
+                Val::Call(m) if m == "get_one" => vec![1.0; n],
+                Val::Call(m) if m == "get_identity" => vec![0.0, 0.0, 0.0, 1.0],
                 Val::New(_, args) if args.len() == n => args.iter().map(|a| match a {
                     Val::Float(f) => Ok(*f),
                     Val::Int(i) => Ok(*i as f64),

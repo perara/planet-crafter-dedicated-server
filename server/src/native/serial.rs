@@ -276,7 +276,6 @@ fn substitute(sig: &TypeSig, args: &[TypeSig]) -> TypeSig {
 /// A value read from data, before references are named.
 #[derive(Debug, Clone)]
 pub enum Raw {
-    Null,
     Bool(bool),
     Int(i64),
     UInt(u64),

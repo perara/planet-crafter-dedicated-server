@@ -1285,8 +1285,8 @@ mod tests {
 
     /// rpcs.json (hash → "Class.Method"): each hash has its __rpc_handler_<hash>, the RPC
     /// method's IL loads the hash (ldc.i4) to send it, and it has a Netcode attribute:
-    /// [ServerRpc] or [ClientRpc] as rpcs.json's "to" says, or [Rpc(SendTo.X)] (for which the
-    /// extractor finds no SendTo and always writes "server").
+    /// [ServerRpc] or [ClientRpc], or [Rpc(SendTo.X)], as rpcs.json's "to" says ("x" in lower
+    /// case for SendTo.X).
     #[test]
     fn finds_every_rpc_hash_in_il() {
         let (Some(game), Some(data)) = (game(), crate::test_data()) else { return };
@@ -1316,7 +1316,7 @@ mod tests {
             let sender = t.methods.iter().find(|m| m.name == method && m.flags & 0x10 == 0 && asm.il(m).is_some_and(|il| il.windows(5).any(|w| w == ldc)));
             let Some(m) = sender else { panic!("{full}: no {method} loading {hash}") };
             let Some(to) = target(m) else { panic!("{full}: no RPC attribute: {:?}", m.attributes) };
-            assert!(to.starts_with("SendTo.") || rpc["to"] == to.as_str(), "{full}: {to}, rpcs.json says {}", rpc["to"]);
+            assert_eq!(rpc["to"].as_str(), Some(to.strip_prefix("SendTo.").map_or(to.clone(), str::to_lowercase).as_str()), "{full}: {to}");
             if hash == "384825098" {
                 assert_eq!((t.namespace.as_str(), t.name.as_str(), to.as_str()), ("SpaceCraft", "ActionnableInteractiveProxy", "SendTo.Server"));
                 println!("{full}: {:?}", m.attributes);

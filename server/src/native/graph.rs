@@ -9,7 +9,6 @@ use super::unity::{self, Data, Id};
 pub struct Node {
     pub name: String,
     pub active: bool,
-    pub layer: u32,
     /// Components in the game object's order, the Transform first.
     pub components: Vec<(Id, i32)>,
     pub transform: Id,
@@ -53,7 +52,7 @@ impl Graph {
                         components.push((c, data.class_of(c).expect("resolve finds the object")));
                     }
                     let transform = components.iter().find(|(_, c)| *c == unity::TRANSFORM || *c == unity::RECT_TRANSFORM).map(|(c, _)| *c).ok_or_else(|| format!("{name}: GameObject {} without a Transform", g.name))?;
-                    nodes.insert(id, Node { name: g.name, active: g.active, layer: g.layer, components, transform });
+                    nodes.insert(id, Node { name: g.name, active: g.active, components, transform });
                 }
                 unity::TRANSFORM | unity::RECT_TRANSFORM => {
                     let t = data.reader(id).and_then(|mut r| unity::transform(&mut r)).ok_or_else(|| format!("{name}: unreadable Transform {path}"))?;
@@ -191,10 +190,4 @@ impl Graph {
         Ok(out)
     }
 
-    /// Roots of a file's hierarchy (scene roots, prefab roots): transforms without a father.
-    pub fn roots(&self, file: usize) -> Vec<Id> {
-        let mut roots: Vec<Id> = self.xforms.iter().filter(|(id, x)| id.0 == file && x.father.is_none()).filter_map(|(_, x)| x.game_object).collect();
-        roots.sort();
-        roots
-    }
 }

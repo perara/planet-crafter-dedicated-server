@@ -347,23 +347,22 @@ const BUILTIN: [&str; 2] = ["unity default resources", "unity_builtin_extra"];
 pub const GAME_OBJECT: i32 = 1;
 pub const TRANSFORM: i32 = 4;
 pub const MESH_FILTER: i32 = 33;
+#[cfg(test)]
 pub const MESH: i32 = 43;
 pub const RIGIDBODY: i32 = 54;
 pub const MESH_COLLIDER: i32 = 64;
 pub const BOX_COLLIDER: i32 = 65;
 pub const MONO_BEHAVIOUR: i32 = 114;
+#[cfg(test)]
 pub const MONO_SCRIPT: i32 = 115;
 pub const SPHERE_COLLIDER: i32 = 135;
 pub const CAPSULE_COLLIDER: i32 = 136;
 pub const BUILD_SETTINGS: i32 = 141;
-pub const RESOURCE_MANAGER: i32 = 147;
 pub const RECT_TRANSFORM: i32 = 224;
 
 pub struct GameObject {
     pub components: Vec<PPtr>,
-    pub layer: u32,
     pub name: String,
-    pub tag: u16,
     pub active: bool,
 }
 
@@ -372,7 +371,10 @@ pub fn game_object(r: &mut Reader) -> Option<GameObject> {
     for _ in 0..r.count()? {
         components.push(r.pptr()?);
     }
-    Some(GameObject { components, layer: r.u32()?, name: r.string()?, tag: r.u16()?, active: r.bool()? })
+    r.u32()?;
+    let name = r.string()?;
+    r.u16()?;
+    Some(GameObject { components, name, active: r.bool()? })
 }
 
 /// Transform and RectTransform (which starts the same way).
@@ -411,17 +413,16 @@ pub fn behaviour(r: &mut Reader) -> Option<Behaviour> {
 }
 
 pub struct Script {
-    pub name: String,
     pub class: String,
     pub namespace: String,
     pub assembly: String,
 }
 
 pub fn mono_script(r: &mut Reader) -> Option<Script> {
-    let name = r.string()?;
+    r.string()?;
     r.i32()?;
     r.bytes(16)?;
-    Some(Script { name, class: r.string()?, namespace: r.string()?, assembly: r.string()? })
+    Some(Script { class: r.string()?, namespace: r.string()?, assembly: r.string()? })
 }
 
 /// What colliders start with: (game object, isTrigger, enabled); the shape follows.
@@ -447,14 +448,13 @@ pub enum Shape {
 }
 
 pub struct Collider {
-    pub game_object: PPtr,
     pub trigger: bool,
     pub enabled: bool,
     pub shape: Shape,
 }
 
 pub fn read_collider(class_id: i32, r: &mut Reader) -> Option<Collider> {
-    let (game_object, trigger, enabled) = collider(r)?;
+    let (_, trigger, enabled) = collider(r)?;
     let shape = match class_id {
         BOX_COLLIDER => {
             let size = r.vec3()?;
@@ -470,7 +470,7 @@ pub fn read_collider(class_id: i32, r: &mut Reader) -> Option<Collider> {
         }
         _ => Shape::Mesh,
     };
-    Some(Collider { game_object, trigger, enabled, shape })
+    Some(Collider { trigger, enabled, shape })
 }
 
 /// BuildSettings: the scenes in build order (level<i> is scene i).
@@ -480,15 +480,6 @@ pub fn build_scenes(r: &mut Reader) -> Option<Vec<String>> {
         scenes.push(r.string()?);
     }
     Some(scenes)
-}
-
-/// ResourceManager: Resources.Load paths -> objects.
-pub fn resources(r: &mut Reader) -> Option<Vec<(String, PPtr)>> {
-    let mut out = Vec::new();
-    for _ in 0..r.count()? {
-        out.push((r.string()?, r.pptr()?));
-    }
-    Some(out)
 }
 
 /// Unity's built-in class names by class id (what Object.GetType().Name gives for them).
@@ -872,32 +863,5 @@ pub mod tests {
         let assets = data.file("globalgamemanagers.assets").unwrap();
         let scripts: Vec<Script> = data.files[assets].objects.iter().filter(|o| o.class_id == MONO_SCRIPT).filter_map(|o| mono_script(&mut Reader::new(data.files[assets].data(o)))).collect();
         assert!(scripts.iter().any(|s| s.namespace == "SpaceCraft" && s.class == "GroupDataItem" && s.assembly == "Assembly-CSharp"));
-    }
-}
-
-/// Debug: SpaceCraft MonoBehaviours per file, by class (pcds-server native-scan DATA_DIR).
-pub fn scan(args: &[String]) {
-    let dir = Path::new(&args[0]);
-    let mut data = Data::open(dir).expect("open data");
-    let mut names: Vec<String> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| (n.starts_with("level") && !n.contains('.')) || n.ends_with(".assets")).collect();
-    names.sort_by_key(|n| (n.len(), n.clone()));
-    let mut scripts: HashMap<Id, String> = HashMap::new();
-    for name in names {
-        let Ok(f) = data.file(&name) else { continue };
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        let behaviours: Vec<i64> = data.files[f].objects.iter().filter(|o| o.class_id == MONO_BEHAVIOUR).map(|o| o.path).collect();
-        for path in behaviours {
-            let Some(b) = data.reader(Id(f, path)).and_then(|mut r| behaviour(&mut r)) else { continue };
-            let Some(sid) = data.resolve(f, b.script).expect("resolve") else { continue };
-            let class = scripts.entry(sid).or_insert_with(|| data.reader(sid).and_then(|mut r| mono_script(&mut r)).map(|s| format!("{}.{}", s.namespace, s.class)).unwrap_or_default()).clone();
-            if class.starts_with("SpaceCraft.") {
-                *counts.entry(class).or_default() += 1;
-            }
-        }
-        if !counts.is_empty() {
-            let mut c: Vec<_> = counts.into_iter().collect();
-            c.sort_by(|a, b| b.1.cmp(&a.1));
-            for (class, n) in &c { println!("{name}\t{class}\t{n}"); }
-        }
     }
 }

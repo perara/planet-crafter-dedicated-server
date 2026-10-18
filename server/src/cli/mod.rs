@@ -7,7 +7,6 @@ mod env;
 pub use env::build_id;
 mod extract;
 mod setup;
-mod sha256;
 mod steam;
 mod systemd;
 mod upgrade;

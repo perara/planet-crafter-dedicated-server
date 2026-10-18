@@ -17,7 +17,6 @@ const MAX_DEPTH: usize = 6;
 
 /// A MonoBehaviour (or ScriptableObject) as read: its script, game object, name and fields.
 pub struct Behaviour {
-    pub namespace: String,
     pub class: String,
     pub game_object: Option<Id>,
     pub enabled: bool,
@@ -60,7 +59,7 @@ impl Ctx {
         let fits = values.is_some() && r.pos == r.b.len();
         let values = values.filter(|_| fits).ok_or_else(|| format!("{namespace}.{class} ({file} object {}): its field layout does not fit its data", id.1))?;
         let game_object = self.data.resolve(id.0, head.game_object)?;
-        Ok(Behaviour { namespace, class, game_object, enabled: head.enabled, name: head.name, fields: values })
+        Ok(Behaviour { class, game_object, enabled: head.enabled, name: head.name, fields: values })
     }
 
     fn game_object_name(&mut self, id: Id) -> Result<String, String> {
@@ -100,7 +99,6 @@ impl Ctx {
     /// GameData.Value: the value as JSON, None when the extractor leaves the field out.
     pub fn value(&mut self, file: usize, v: &Raw, depth: usize) -> Result<Option<Value>, String> {
         Ok(Some(match v {
-            Raw::Null => Value::Null,
             Raw::Bool(b) => json!(b),
             Raw::Int(i) => json!(i),
             Raw::UInt(u) => json!(u),
