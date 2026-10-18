@@ -226,3 +226,48 @@ fn exchange_rocket_delivers_and_fetches_from_its_planet() {
     let food_entry = [food.to_le_bytes(), humble.to_le_bytes(), 1i32.to_le_bytes()].concat();
     assert_eq!(counts(&g), vec![entry(1), food_entry]);
 }
+
+/// A platform's speed multiplier goes to the client that asks (on the asking object); other
+/// objects have none to tell.
+#[test]
+fn platforms_tell_their_speed_multiplier() {
+    let platform = 210_000_060;
+    let Some(mut g) = game(vec![placed(platform, "TradePlatform1", "100,10,100", "Prime", json!({"liId": 52})), placed(210_000_061, "Container1", "110,10,100", "Prime", json!({}))], vec![json!({"id": 52, "woIds": "", "size": 25})]) else { return };
+    super::add_speed_multiplier(&mut g, platform, 3.0);
+    let net = g.wos[&platform].net.unwrap();
+    g.net.out.clear();
+    assert!(rpc(&mut g, platform, "ConstructibleProxy.RetrieveRocketBackAndForthSpeedMultiplierServerRpc"));
+    let multiplier = 4.0;
+    let answers = crate::testkit::sent(&g, "ConstructibleProxy.SetRocketBackAndForthSpeedMultiplierClientRpc");
+    assert_eq!(answers.into_iter().map(|s| (s.to, s.object, s.args)).collect::<Vec<_>>(), vec![(crate::net::Target::Only(1), net, vec![json!(multiplier)])]);
+    g.net.out.clear();
+    rpc(&mut g, 210_000_061, "ConstructibleProxy.RetrieveRocketBackAndForthSpeedMultiplierServerRpc");
+    assert!(g.net.out.is_empty());
+}
+
+/// TransferGroupsServerRpc takes a number of a group's items from the watched inventories of a
+/// planet into a destination inventory; an unknown group or destination moves nothing.
+#[test]
+fn interplanetary_transfers_take_items_from_the_planets_inventories() {
+    let humble = stable_hash("Humble");
+    let Some(mut g) = game(
+        vec![
+            placed(210_000_070, "Container1", "60,10,60", "Humble", json!({"liId": 72})),
+            placed(210_000_071, "Container1", "60,10,60", "Prime", json!({"liId": 73})),
+            json!({"id": 210_000_072, "gId": "Iron"}),
+            json!({"id": 210_000_073, "gId": "Iron"}),
+            json!({"id": 210_000_074, "gId": "Iron"}),
+            json!({"id": 210_000_075, "gId": "ice"}),
+        ],
+        vec![json!({"id": 72, "woIds": "210000072,210000073,210000074,210000075", "size": 15}), json!({"id": 73, "woIds": "", "size": 15})],
+    ) else { return };
+    let iron = g.data.groups[g.data.group("Iron").unwrap()].hash;
+    let transfer = |g: &mut Game, args: Vec<Value>| super::rpc(g, 1, 0, 0, "LogisticInterplanetaryManager.TransferGroupsServerRpc", &Args(args));
+    assert!(transfer(&mut g, vec![json!(iron), json!(2), json!(humble), json!(73)]));
+    assert_eq!(groups_in(&g, 73), vec!["Iron", "Iron"]);
+    assert_eq!(groups_in(&g, 72), vec!["Iron", "ice"]);
+    transfer(&mut g, vec![json!(12345), json!(2), json!(humble), json!(73)]);
+    transfer(&mut g, vec![json!(iron), json!(2), json!(humble), json!(9999)]);
+    transfer(&mut g, vec![json!(iron), json!(2), json!(stable_hash("Prime")), json!(73)]);
+    assert_eq!(groups_in(&g, 72), vec!["Iron", "ice"], "nothing more moved");
+}

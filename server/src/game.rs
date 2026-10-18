@@ -534,7 +534,7 @@ impl Game {
         true
     }
 
-    /// Hands an RPC to the ported handler that owns it; false when none does.
+    /// Hands an RPC to the ported handler that owns it.
     pub(crate) fn rpc(&mut self, client: u64, object: u64, behaviour: u16, name: &str, a: Args) -> bool {
         let handled = self.world_objects_rpc(client, name, &a)
             || self.inventories_rpc(client, name, &a)
@@ -719,6 +719,22 @@ pub mod tests {
         game.players_rpc(client, "PlayerMainController.PlayerReadyServerRpc", &Args(vec![json!(0), json!(name)]));
         assert!(game.clients[&client].ready.is_some());
         object
+    }
+
+    /// Every animator ServerRpc an owner sends goes out as its ClientRpc.
+    #[test]
+    fn every_animator_server_rpc_is_relayed() {
+        let Some(mut g) = test_game(save()) else { return };
+        let ann = join(&mut g, 1, "Ann");
+        for (server, client) in [("NetworkAnimator.SendAnimStateServerRpc", "NetworkAnimator.SendAnimStateClientRpc"), ("NetworkAnimator.SendParametersUpdateServerRpc", "NetworkAnimator.SendParametersUpdateClientRpc"), ("NetworkAnimator.SendAnimTriggerServerRpc", "NetworkAnimator.SendAnimTriggerClientRpc")] {
+            let mut w = Writer::new();
+            w.packed_u64(1).packed_u64(ann).packed_u16(7).packed_u32(g.net.spec.hash(server).unwrap()).bytes(&[9, 9]);
+            g.net.out.clear();
+            g.receive(1, &wire::batch(&[(protocol::RPC, w.0)]));
+            let mut want = Writer::new();
+            want.packed_u64(ann).packed_u16(7).packed_u32(g.net.spec.hash(client).unwrap()).bytes(&[9, 9]);
+            assert_eq!(g.net.out.iter().filter(|m| m.1 == protocol::CLIENT_RPC).map(|m| (m.0, m.2.clone())).collect::<Vec<_>>(), vec![(Target::Except(1), want.0)], "{server}");
+        }
     }
 
     /// An animal's owner animates it for everyone else; nobody else can.

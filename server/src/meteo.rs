@@ -562,6 +562,33 @@ pub(crate) mod tests {
         }
     }
 
+    /// Clients launch a meteo event by its index in the planet's list (an index outside it is
+    /// ignored, where the game would stop its meteo) and a story event by its id's hash.
+    #[test]
+    fn clients_launch_meteo_and_story_events() {
+        use crate::testkit::*;
+        let mut save = crate::game::tests::save();
+        save.settings["modifierMeteoOccurence"] = serde_json::json!(1.0);
+        let Some(mut g) = crate::game::test_game(save) else { return };
+        join(&mut g, 1, "Ann");
+        let selected = |g: &Game| tests::var(g, HANDLER, "_selectedDataMeteoEventIndex");
+        let events = g.ext.meteo.events.len() as i32;
+        let index = (0..events).find(|i| !g.ext.meteo.events[*i as usize].is_empty()).expect("a meteo event");
+        for bad in [-1, events, i32::MAX] {
+            send_scene(&mut g, 1, "MeteoHandler.LaunchSpecificMeteoEventServerRpc", &[serde_json::json!(bad)]);
+            assert_eq!(g.ext.meteo.selected, -1, "{bad}");
+        }
+        send_scene(&mut g, 1, "MeteoHandler.LaunchSpecificMeteoEventServerRpc", &[serde_json::json!(index)]);
+        assert_eq!((g.ext.meteo.selected, selected(&g)), (index, enc::int(index)));
+
+        let hash = crate::data::stable_hash("StoryEvent-Mont-Open");
+        g.net.out.clear();
+        send_scene(&mut g, 1, "StoryEventsHandler.LaunchSpecificStoryEventEventServerRpc", &[serde_json::json!(hash)]);
+        send_scene(&mut g, 1, "StoryEventsHandler.LaunchSpecificStoryEventEventServerRpc", &[serde_json::json!(12345)]);
+        assert_eq!(sent(&g, "StoryEventsHandler.AnEventHasBeenTriggeredClientRpc").into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(crate::net::Target::All, vec![serde_json::json!(hash)])]);
+        assert!(g.snapshot().story_events.contains(&serde_json::json!({"stringId": "StoryEvent-Mont-Open"})));
+    }
+
     #[test]
     fn day_night_matches_the_real_server() {
         // _dayNightLerpValue as the real server sent it, night step 1 and the 0.35 steps after.

@@ -313,6 +313,22 @@ pub mod tests {
         assert!((yaw_degrees(r) - 180.0).abs() < 0.01, "{r:?}");
     }
 
+    /// The travel RPC (a departure platform's SwitchPlanet) moves the world to the planet; a
+    /// planet the server does not offer is refused.
+    #[test]
+    fn players_travel_by_rpc() {
+        use crate::testkit::*;
+        let Some(mut g) = game() else { return };
+        join(&mut g, 1, "Ann");
+        send_scene(&mut g, 1, "PlanetNetworkLoader.SwitchToPlanetServerRpc", &[json!(stable_hash("Humble")), json!(0), json!(0)]);
+        assert_eq!(g.planet_id(), "Prime");
+        send_scene(&mut g, 1, "PlanetNetworkLoader.SwitchToPlanetServerRpc", &[json!(stable_hash("Selenea")), json!(0), json!(0)]);
+        assert_eq!(g.planet_id(), "Selenea");
+        assert_eq!(sent(&g, "PlanetNetworkLoader.SwitchToPlanetClientRpc").len(), 1);
+        let g = reload(&mut g);
+        assert_eq!(g.planet_id(), "Selenea", "the save keeps where the world is");
+    }
+
     #[test]
     fn dlc_planets_cannot_be_reached() {
         let Some(mut g) = game() else { return };

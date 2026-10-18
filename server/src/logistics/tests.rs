@@ -149,3 +149,40 @@ fn the_higher_priority_demand_is_served_first() {
     let iron_hash = game.data.groups[iron].hash;
     assert_eq!(game.ext.logistics.priorities[&game.planet_hash()].get(&iron_hash), Some(&2));
 }
+
+/// The logistics window's numbers: drones in stations and flying, tasks to supply and to
+/// demand, and per group how many inventories offer and ask for it (set by DirtyInventoryLogistics).
+#[test]
+fn the_logistics_window_counts_drones_tasks_and_groups() {
+    use crate::testkit::{join, one, save, send_scene};
+    // The test world (a pod to spawn at), with logistics on.
+    let mut save = save();
+    save.world["logisticsPaused"] = json!(false);
+    let Some(mut game) = crate::game::test_game(save) else { return };
+    build(&mut game, "EnergyGenerator6", [40.0, 2.0, 0.0]);
+    let station = build(&mut game, "DroneStation1", [10.0, 2.0, 10.0]);
+    let supply = build(&mut game, "Container1", [25.0, 2.0, 10.0]);
+    let demand = build(&mut game, "Container1", [25.0, 2.0, 30.0]);
+    let (station_inv, supply_inv, demand_inv) = (game.wos[&station].linked_inventory, game.wos[&supply].linked_inventory, game.wos[&demand].linked_inventory);
+    join(&mut game, 1, "Ann");
+    let iron = game.data.groups[game.data.group("Iron").unwrap()].hash;
+    add(&mut game, "Iron", supply_inv);
+    send_scene(&mut game, 1, "InventoriesHandler.DirtyInventoryLogisticsServerRpc", &[json!(supply_inv), json!([]), json!([iron]), json!(0)]);
+    send_scene(&mut game, 1, "InventoriesHandler.DirtyInventoryLogisticsServerRpc", &[json!(demand_inv), json!([iron]), json!([]), json!(0)]);
+    add(&mut game, "Drone1", station_inv);
+    add(&mut game, "Drone1", station_inv);
+    game.net.out.clear();
+    send_scene(&mut game, 1, "LogisticManager.RetrieveSupplyAndDemandGroupsServerRpc", &[]);
+    assert_eq!(one(&game, "LogisticManager.RetrieveSupplyAndDemandGroupsClientRpc"), vec![json!([[iron, 1]]), json!([[iron, 1]])]);
+    game.net.out.clear();
+    send_scene(&mut game, 1, "LogisticManager.RetrieveDronesCountServerRpc", &[]);
+    assert_eq!(one(&game, "LogisticManager.RetrieveDronesCountClientRpc"), vec![json!(2), json!(0), json!(0)], "two drones, no task yet");
+    // Once the tasks are set (after a second) and a drone flies to the supply.
+    let start = game.ext.logistics.last_tick;
+    for t in 1..=40 {
+        frame(&mut game, start + t);
+    }
+    game.net.out.clear();
+    send_scene(&mut game, 1, "LogisticManager.RetrieveDronesCountServerRpc", &[]);
+    assert_eq!(one(&game, "LogisticManager.RetrieveDronesCountClientRpc"), vec![json!(2), json!(0), json!(1)], "one task on its way to supply");
+}
