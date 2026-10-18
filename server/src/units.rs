@@ -376,7 +376,9 @@ pub fn tick(game: &mut Game) {
     }
 }
 
-/// WorldUnitSystemTerraformation: the planets' terraformation multiplied together.
+/// WorldUnitSystemTerraformation as the game writes it: GetValue multiplies the planets'
+/// terraformation together but never stores it, so only the label index (SetCurrentLabelIndex,
+/// which marks it dirty when it changes) travels; the value and rates stay 0.
 pub fn system_terraformation(game: &Game) -> Vec<u8> {
     let mut total = 0.0f64;
     for p in &game.units.planets {
@@ -384,7 +386,7 @@ pub fn system_terraformation(game: &Game) -> Vec<u8> {
         total = if total < f64::EPSILON { v } else { total * v.max(1.0) };
     }
     let label = if total > 0.0 { (total.log(1000.0).floor() as i32).clamp(0, 36) } else { 0 };
-    [(total as f32).to_le_bytes(), 0f32.to_le_bytes(), 0f32.to_le_bytes(), 0f32.to_le_bytes(), label.to_le_bytes()].concat()
+    [0f32.to_le_bytes(), 0f32.to_le_bytes(), 0f32.to_le_bytes(), 0f32.to_le_bytes(), label.to_le_bytes()].concat()
 }
 
 /// A unit's value on a planet (0 = current planet).
@@ -470,6 +472,8 @@ mod tests {
         assert!((level as f32 - unit(&g, Kind::Heat).total).abs() < 1e-3);
         let (handler, _) = g.net.find_class("WorldUnitsHandler").unwrap();
         assert_eq!(var(&g, handler, "WorldUnitsHandler", "_unitSysTerraformation"), system_terraformation(&g));
+        // As the real host sends it: no value, only the label of the product.
+        assert_eq!(system_terraformation(&g)[..16], [0; 16]);
     }
 
     /// Unpowered, oxygen, heat and pressure stop; a planet's levels load from the save, with
