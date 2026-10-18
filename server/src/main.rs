@@ -46,6 +46,8 @@ mod bank;
 mod chathooks;
 mod cli;
 #[cfg(test)]
+mod scenario;
+#[cfg(test)]
 mod testkit;
 mod config;
 mod dashboard;
