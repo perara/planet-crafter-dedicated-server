@@ -268,6 +268,9 @@ mod tests {
 /// `pcds status`: the running server in a few lines (`pcds status --json` has all of it).
 fn status_lines(s: &Value) -> Vec<String> {
     let text = |v: &Value| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
+    if s["state"] == "stopped" {
+        return vec![format!("world {} is stopped: players cannot join (start it from the admin page, or POST /api/world/start)", text(&s["save"]))];
+    }
     let players = s["players"].as_array().map_or(0, Vec::len);
     let up = s["uptimeSeconds"].as_u64().unwrap_or(0);
     let stage = s["stages"]["current"].as_str().map(|k| k.rsplit(['-', ':']).next().unwrap_or(k).to_string());
@@ -309,5 +312,6 @@ mod status_tests {
             "network ip, port 7777, autosave every 5 min",
             "release v0.6.1 available: pcds upgrade",
         ]);
+        assert_eq!(status_lines(&json!({"state": "stopped", "save": "world"}))[0], "world world is stopped: players cannot join (start it from the admin page, or POST /api/world/start)");
     }
 }

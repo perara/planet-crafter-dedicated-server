@@ -58,6 +58,10 @@ impl Ctx {
             Err(None) => return Ok(()),
         };
         self.install_bank(&target, &lib)?;
+        // A later version than the one rolled back from: the rollback note is done with.
+        if updater::rolled_back(&banks).is_some_and(|r| r["bank"] == target.as_str()) {
+            updater::clear_rolled_back(&banks)?;
+        }
         updater::set_active(&banks, &target)?;
         say(format!("pcds {} installed in bank {target} ({}): the server runs it from its next start", env!("CARGO_PKG_VERSION"), banks.join(&target).display()));
         Ok(())
@@ -74,8 +78,9 @@ impl Ctx {
     ///   So an older launcher never replaces or downgrades a release `pcds upgrade` installed
     ///   (it says so: a downgrade is `pcds upgrade VERSION --restart`), and a bank that holds a
     ///   rollback target keeps it;
-    /// - never the bank the owner rolled back from (updater::rolled_back): an explicit
-    ///   `pcds upgrade` or the next rollback lifts that;
+    /// - not the bank the owner rolled back from (updater::rolled_back) with that same release
+    ///   or a build of it: only a later version than the one rolled back from goes there (and
+    ///   lifts the note), as an explicit `pcds upgrade` or the next rollback do;
     /// - never the bank that runs the world.
     fn bank_for(&self, banks: &Path, live: Option<&str>) -> Result<std::result::Result<String, Option<String>>> {
         let active = live.map_or_else(|| updater::active(banks), str::to_string);
@@ -105,8 +110,9 @@ impl Ctx {
         // The standby bank, or the active one while it is empty (never the live one, which
         // holds the world and so is not empty).
         let target = if updater::info(banks, &active).is_none() && live.is_none() { active } else { updater::other(&active).to_string() };
-        if updater::rolled_back(banks).is_some_and(|r| r["bank"] == target.as_str()) {
-            return Ok(Err(Some(format!("pcds {version} is newer than both banks, but bank {target} is the one the server was rolled back from: it is kept ('pcds upgrade' installs a release there)"))));
+        let rolled_from = updater::rolled_back(banks).filter(|r| r["bank"] == target.as_str()).and_then(|_| updater::info(banks, &target)).and_then(|i| i["version"].as_str().map(str::to_string));
+        if let Some(held) = rolled_from.filter(|held| !updater::newer(version, held)) {
+            return Ok(Err(Some(format!("pcds {version} is not installed: bank {target} holds pcds {held}, the release the server was rolled back from, and is kept ('pcds upgrade' installs a release there)"))));
         }
         Ok(Ok(target))
     }
@@ -764,6 +770,12 @@ mod tests {
         build("build 3");
         ctx.install_beside(None).unwrap();
         assert_eq!((updater::active(&banks), program("b")), ("a".into(), Some("build 2".into())));
+        // A later version than the release rolled back from does go there, and ends the note
+        // (a newer release folder's pcds start, as an upgrade from it).
+        updater::write_info(&banks.join("b"), &serde_json::json!({"version": "0.0.1", "protocol": crate::ipc::PROTOCOL})).unwrap();
+        ctx.install_beside(None).unwrap();
+        assert_eq!((updater::active(&banks), program("b")), ("b".into(), Some("build 3".into())));
+        assert!(updater::rolled_back(&banks).is_none());
         updater::clear_rolled_back(&banks).unwrap();
         ctx.install_beside(None).unwrap();
         assert_eq!((updater::active(&banks), program("b")), ("b".into(), Some("build 3".into())));
