@@ -479,7 +479,16 @@ impl Game {
         if self.net.objects.get(&object).is_none_or(|o| o.owner != client) {
             return;
         }
-        if let Some(u) = crate::transform::update(body) {
+        let update = crate::transform::update(body);
+        // NaN or infinity: neither kept (the snapshot and save could not be read back) nor
+        // passed on; the next state moves the object on.
+        if update.as_ref().is_some_and(|u| !u.finite()) {
+            if self.unhandled.insert(format!("non-finite transform {client}")) {
+                eprintln!("client {client}: a transform that is not a number (NaN or infinity), dropped (logged once)");
+            }
+            return;
+        }
+        if let Some(u) = update.filter(|u| !u.local) {
             if let Some(o) = self.net.objects.get_mut(&u.object) {
                 u.apply(&mut o.position, &mut o.rotation);
                 let (position, rotation) = (o.position, o.rotation);
@@ -796,6 +805,77 @@ pub mod tests {
         let r = request(&g);
         g.approve(8, &r);
         assert!(g.clients[&8].approved, "Ann is in: one joining from her address");
+    }
+
+    /// A dropped item's owner sends NaN: nothing changes, nothing is passed on, and the
+    /// snapshot still reads back.
+    #[test]
+    fn non_finite_transforms_are_dropped() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        join(&mut g, 2, "Bob");
+        let iron = g.create_world_object(g.data.group("Iron").unwrap(), 0, true);
+        g.drop_on_floor(iron, [560.0, 3.0, 500.0], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 0.0, false, 1);
+        let net = g.wos[&iron].net.unwrap();
+        g.net.out.clear();
+        for bad in [f32::NAN, f32::INFINITY] {
+            g.transform(1, &transform_message(net, 2 | 4 | 8, &[bad, 1.0, 2.0]));
+            g.transform(1, &transform_message(net, 32, &[bad]));
+        }
+        assert!(g.net.out.is_empty(), "not passed on");
+        assert_eq!((g.wos[&iron].position, g.net.objects[&net].position), ([560.0, 3.0, 500.0], [560.0, 3.0, 500.0]));
+        assert!(crate::handoff::snapshot(&g).is_ok());
+        g.transform(1, &transform_message(net, 2, &[561.0]));
+        assert_eq!(g.wos[&iron].position[0], 561.0);
+        assert_eq!(g.net.out.len(), 1);
+    }
+
+    /// A NetworkVariableDelta for `object`'s behaviour of `class`: `var` set to `bytes`.
+    pub fn delta(g: &Game, object: u64, class: &str, var: &str, bytes: &[u8]) -> Vec<u8> {
+        let b = g.net.objects[&object].behaviour(class).unwrap();
+        let mut w = Writer::new();
+        w.packed_u64(object).packed_u16(b.index).i32(4);
+        for v in &b.vars {
+            w.bool(v.name == var);
+            if v.name == var {
+                w.bytes(bytes);
+            }
+        }
+        w.0
+    }
+
+    /// A float variable the owner writes, as NaN or infinity: neither kept nor passed on.
+    #[test]
+    fn non_finite_owner_variables_are_dropped() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        let iron = g.create_world_object(g.data.group("Iron").unwrap(), 0, true);
+        g.drop_on_floor(iron, [560.0, 3.0, 500.0], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 0.0, false, 1);
+        let net = g.wos[&iron].net.unwrap();
+        let scale = |g: &Game| g.net.get(net, "GroupNetworkContainer", "_scale").cloned();
+        let before = scale(&g);
+        g.net.out.clear();
+        for bad in [f32::NAN, f32::NEG_INFINITY] {
+            let d = delta(&g, net, "GroupNetworkContainer", "_scale", &bad.to_le_bytes());
+            g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, d)]));
+        }
+        assert!(g.net.out.is_empty());
+        assert_eq!(format!("{:?}", scale(&g)), format!("{before:?}"));
+        let d = delta(&g, net, "GroupNetworkContainer", "_scale", &0.5f32.to_le_bytes());
+        g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, d)]));
+        assert!(matches!(scale(&g), Some(crate::net::VarValue::Plain(b)) if b == 0.5f32.to_le_bytes()));
+        assert_eq!(g.net.out.len(), 1, "passed on");
+    }
+
+    /// RPC floats come through JSON, which has no NaN or infinity: they read as 0.
+    #[test]
+    fn non_finite_rpc_floats_read_as_zero() {
+        let Some(g) = test_game(save()) else { return };
+        let name = "WorldObjectsHandler.HasWorldObjectAtPositionServerRpc";
+        let (method, mut body) = g.net.spec.encode(name, &[json!([1.0, 2.0, 3.0])]);
+        let at = body.len() - 12;
+        body.splice(at.., [f32::NAN, f32::INFINITY, 1.0].iter().flat_map(|f| f.to_le_bytes()));
+        assert_eq!(Args(g.net.spec.decode(method, &body).unwrap()).v3(0), [0.0, 0.0, 1.0]);
     }
 
     #[test]

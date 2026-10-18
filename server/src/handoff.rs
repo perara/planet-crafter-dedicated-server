@@ -61,6 +61,15 @@ struct Head {
 /// The game's state at a tick boundary (the bank sent everything queued: net.out is empty),
 /// written to `w`. An error leaves the game as it was: it goes on, and the flip is off.
 pub fn snapshot_to(g: &Game, w: &mut impl std::io::Write) -> Result<(), String> {
+    // JSON has no NaN or infinity (serde_json writes null, which does not read back as a
+    // float): a position or rotation that is not a number stops the snapshot here, by name.
+    let finite = |v: &[f32]| v.iter().all(|x| x.is_finite());
+    if let Some(o) = g.net.objects.values().find(|o| !finite(&o.position) || !finite(&o.rotation)) {
+        return Err(format!("network object {} is at {:?} {:?}, not a number: no snapshot", o.id, o.position, o.rotation));
+    }
+    if let Some(w) = g.wos.values().find(|w| !finite(&w.position) || !finite(&w.rotation)) {
+        return Err(format!("world object {} is at {:?} {:?}, not a number: no snapshot", w.id, w.position, w.rotation));
+    }
     let head = Head { format: FORMAT, game_version: g.net_data.game_version.clone() };
     serde_json::to_writer(&mut *w, &head).map_err(|e| e.to_string())?;
     w.write_all(b"\n").map_err(|e| e.to_string())?;
@@ -184,5 +193,19 @@ mod tests {
             let (n, d, s, scenes) = tables();
             assert!(super::restore(n, d, s, &text.replacen(from, to, 1), scenes).is_err(), "{to} is refused");
         }
+    }
+
+    /// A position that is not a number would be written as null and never read back: the
+    /// snapshot refuses, naming the object.
+    #[test]
+    fn a_snapshot_never_writes_a_position_it_cannot_read_back() {
+        let Some(mut g) = test_game(save()) else { return };
+        let player = join(&mut g, 1, "Ann");
+        g.net.objects.get_mut(&player).unwrap().position[1] = f32::NAN;
+        assert!(super::snapshot(&g).unwrap_err().contains(&format!("network object {player}")));
+        g.net.objects.get_mut(&player).unwrap().position[1] = 3.0;
+        let pod = *g.wos.keys().next().unwrap();
+        g.wos.get_mut(&pod).unwrap().rotation[0] = f32::INFINITY;
+        assert!(super::snapshot(&g).unwrap_err().contains(&format!("world object {pod}")));
     }
 }

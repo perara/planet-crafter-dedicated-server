@@ -238,18 +238,37 @@ pub fn apply_delta(net: &mut Net, client: u64, body: &[u8]) -> bool {
         return false;
     }
     let Some(b) = o.behaviours.iter_mut().find(|b| b.index == behaviour) else { return false };
-    for v in &mut b.vars {
-        let Some(dirty) = r.bool() else { return true };
+    // Read first, applied only when every value is good: a NaN or infinity is neither kept nor
+    // passed on (a float the server keeps could make the snapshot unreadable).
+    let mut writes = Vec::new();
+    for (i, v) in b.vars.iter().enumerate() {
+        let Some(dirty) = r.bool() else { break };
         if !dirty {
             continue;
         }
         if v.ty.starts_with("NetworkList") {
-            return true;
+            break;
         }
-        let Some(bytes) = read_value(&v.ty, &mut r) else { return true };
-        v.value = VarValue::Plain(bytes);
+        let Some(bytes) = read_value(&v.ty, &mut r) else { break };
+        if !finite(&v.ty, &bytes) {
+            return false;
+        }
+        writes.push((i, bytes));
+    }
+    for (i, bytes) in writes {
+        b.vars[i].value = VarValue::Plain(bytes);
     }
     true
+}
+
+/// Whether a value of a floating-point type (float, double, vectors, quaternion, color) is all
+/// numbers; values of other types are.
+fn finite(ty: &str, bytes: &[u8]) -> bool {
+    match ty.strip_prefix("NetworkVariable<").and_then(|t| t.strip_suffix('>')) {
+        Some("Double") => bytes.chunks_exact(8).all(|c| f64::from_le_bytes(c.try_into().unwrap()).is_finite()),
+        Some("Single" | "Vector2" | "Vector3" | "Vector4" | "Quaternion" | "Color") => bytes.chunks_exact(4).all(|c| f32::from_le_bytes(c.try_into().unwrap()).is_finite()),
+        _ => true,
+    }
 }
 
 impl NetObj {

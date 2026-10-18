@@ -99,6 +99,8 @@ struct Flip {
     /// HANDOFF sent: the world stands from here.
     stopped: Option<Instant>,
     snapshot: Value,
+    /// Its snapshot: the last one (last_snapshot) once the new bank restored it and said READY.
+    kept: Option<(OwnedFd, SystemTime)>,
 }
 
 enum UpdateDone {
@@ -749,8 +751,8 @@ impl Front {
                 Some(fd) => {
                     if let Some(flip) = self.flip.as_mut() {
                         flip.snapshot = serde_json::from_slice(&f.body).unwrap_or_default();
+                        flip.kept = fd.try_clone().ok().map(|d| (d, SystemTime::now()));
                     }
-                    self.last_snapshot = fd.try_clone().ok().map(|d| (d, SystemTime::now()));
                     if let Some(n) = self.next.as_mut() {
                         n.link.queue(ipc::RESTORE, 0, b"{\"recover\":false}", Some(fd), 0);
                     }
@@ -846,7 +848,11 @@ impl Front {
             println!("bank {to} (pid {}) runs the world again", self.live.as_ref().map_or(0, |b| b.child.id()));
             return;
         }
-        let Some(flip) = self.flip.take() else { return };
+        let Some(mut flip) = self.flip.take() else { return };
+        // Restored, so a crash restarts from it (one that failed to restore must not be).
+        if let Some(kept) = flip.kept.take() {
+            self.last_snapshot = Some(kept);
+        }
         let stood = flip.stopped.map(|t| t.elapsed()).unwrap_or_default();
         self.flips += 1;
         let verified = match ready["verified"].as_bool() {
@@ -911,7 +917,7 @@ impl Front {
         println!("flip to bank {bank} ({reason}): pid {} loading", b.child.id());
         self.next = Some(b);
         self.phase = Phase::Starting;
-        self.flip = Some(Flip { seq, reason: reason.to_string(), stopped: None, snapshot: Value::Null });
+        self.flip = Some(Flip { seq, reason: reason.to_string(), stopped: None, snapshot: Value::Null, kept: None });
         self.updates.busy = Some((seq, format!("flipping to bank {bank}")));
         Ok(())
     }
@@ -1491,7 +1497,7 @@ mod tests {
         front.live = Some(live);
         front.next = Some(next);
         front.phase = Phase::Starting;
-        front.flip = Some(Flip { seq: 2, reason: "test".into(), stopped: None, snapshot: Value::Null });
+        front.flip = Some(Flip { seq: 2, reason: "test".into(), stopped: None, snapshot: Value::Null, kept: None });
         front.on_next(Frame { kind: ipc::HELLO, n: ipc::PROTOCOL, body: br#"{"format":1,"reads":[0,1]}"#.to_vec(), fd: None });
         assert_eq!(front.phase, Phase::Snapshotting);
         let handoff = old.recv().unwrap();
@@ -1507,8 +1513,12 @@ mod tests {
         front.flush_banks();
         let restore = new.recv().unwrap();
         assert_eq!((restore.kind, ipc::read_memfd(restore.fd.as_ref().unwrap()).unwrap()), (ipc::RESTORE, b"flip 2".to_vec()));
-        for b in [front.live.take(), front.next.take()].into_iter().flatten() {
-            let mut child = b.child;
+        // A crash restarts from it only once the new bank restored it.
+        assert!(front.last_snapshot.is_none());
+        front.on_next(Frame { kind: ipc::READY, n: 0, body: b"{}".to_vec(), fd: None });
+        assert_eq!(front.last_snapshot.as_ref().map(|(fd, _)| ipc::read_memfd(fd).unwrap()), Some(b"flip 2".to_vec()));
+        let exiting = front.exiting.drain(..).map(|(c, _)| c);
+        for mut child in [front.live.take(), front.next.take()].into_iter().flatten().map(|b| b.child).chain(exiting) {
             let _ = child.kill();
             let _ = child.wait();
         }
