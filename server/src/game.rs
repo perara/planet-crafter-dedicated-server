@@ -25,6 +25,31 @@ pub const START_INVENTORY_SIZE: i32 = 12;
 pub const START_EQUIPMENT_SIZE: i32 = 4;
 /// Approved clients from one address that are not players yet (see approve).
 const MAX_JOINING_PER_IP: usize = 2;
+/// The RPCs a game client sends while it loads, before its PlayerReady (the name and whitelist
+/// checks): what the objects of the world it was sent and the planet scene ask for as they
+/// spawn and start (GrowthProxy.InitGrowth, ConstructibleProxy.OnNetworkSpawn and
+/// MachineRocketBackAndForth.Awake, the inventory displays' Start, WorldObjectFromScene,
+/// MachineGenerationGroupVein, SceneInterpolationBase and GameEventActivateInterpolators,
+/// ToxicAreaVolumes and ToxicAreaDecal, WorldAnimalSpawnerData, ProceduralSceneInstance).
+/// Every other RPC before PlayerReady is dropped.
+const LOADING_RPCS: &[&str] = &[
+    "PlayerMainController.PlayerReadyServerRpc",
+    "GrowthProxy.GetCurrentGrowthServerRpc",
+    "ConstructibleProxy.MachineOutsideGrowerUpdateStartServerRpc",
+    "ConstructibleProxy.RetrieveRocketBackAndForthSpeedMultiplierServerRpc",
+    "InventoryAssociatedProxy.GetInventoryIdServerRpc",
+    "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+    "InventoriesHandler.BeginInventoryWatchServerRpc",
+    "WorldObjectAssociatedProxy.GetWorldObjectIdServerRpc",
+    "WorldObjectsHandler.IsWorldObjectFromSceneActiveServerRpc",
+    "WorldObjectsHandler.RefreshSceneWorldObjectGrowthServerRpc",
+    "SceneInterpolationHandler.RegisterInterpolatorServerRpc",
+    "SceneInterpolationHandler.CheckInterpolatorActiveServerRpc",
+    "ToxicAreaHandler.RegisterToAreaToxicFinishedServerRpc",
+    "ToxicAreaHandler.RegisterToAreaToxicProgressServerRpc",
+    "WorldAnimalSpawnerHandler.SpawnerRegisteredServerRpc",
+    "ProceduralInstancesHandler.LoadInstanceFromSceneServerRpc",
+];
 
 /// RPC arguments in signature order, with typed accessors.
 pub struct Args(pub Vec<Value>);
@@ -394,8 +419,18 @@ impl Game {
             }
         }
         // A banned SteamID never gets the world (names are only known at PlayerReady).
-        if let Some(id) = self.clients.get(&client).and_then(|c| c.verified_steam_id).filter(|id| self.access.steam_id_banned(*id)) {
+        let steam_id = self.clients.get(&client).and_then(|c| c.verified_steam_id);
+        if let Some(id) = steam_id.filter(|id| self.access.steam_id_banned(*id)) {
             println!("client {client}: refused (SteamID {id} is banned)");
+            self.kick(client, crate::access::REFUSED);
+            return;
+        }
+        // Nor does one the whitelist can no longer let in: it lists SteamIDs only, not this
+        // client's (a name entry may still match at PlayerReady).
+        let whitelist = &self.access.lists.whitelist;
+        let steam_entry = |v: &String| v.parse::<u64>().ok().filter(|id| *id >= crate::players::FIRST_STEAM_ID);
+        if !whitelist.is_empty() && whitelist.iter().all(|v| steam_entry(v).is_some_and(|id| Some(id) != steam_id)) {
+            println!("client {client}: refused (not on the whitelist)");
             self.kick(client, crate::access::REFUSED);
             return;
         }
@@ -454,6 +489,10 @@ impl Game {
     /// One batch from a client.
     pub fn receive(&mut self, client: u64, batch: &[u8]) {
         for (kind, body) in wire::messages(batch) {
+            // Kicked (refused at its request or PlayerReady, banned): nothing more counts.
+            if self.kicks.iter().any(|(c, _)| *c == client) {
+                return;
+            }
             if self.trace {
                 println!("trace client {client} -> {kind} {}", body.iter().map(|b| format!("{b:02x}")).collect::<String>());
             }
@@ -511,6 +550,14 @@ impl Game {
     fn incoming_rpc(&mut self, client: u64, body: &[u8]) {
         let mut r = Reader::new(body);
         let (Some(_sender), Some(object), Some(behaviour), Some(method)) = (r.packed_u64(), r.packed_u64(), r.packed_u16(), r.packed_u32()) else { return };
+        // Until PlayerReady (the name and whitelist checks) only what a loading client asks.
+        let loading = self.clients.get(&client).is_none_or(|c| c.ready.is_none());
+        if let Some(name) = self.net.spec.get(method).map(|r| r.name.as_str()).filter(|n| loading && !LOADING_RPCS.contains(n)) {
+            if self.unhandled.insert(format!("{name} before PlayerReady")) {
+                eprintln!("client {client}: {name} before PlayerReady, dropped (logged once)");
+            }
+            return;
+        }
         if self.animator_relay(client, object, behaviour, method, r.rest()) {
             return;
         }
@@ -876,6 +923,73 @@ pub mod tests {
         let at = body.len() - 12;
         body.splice(at.., [f32::NAN, f32::INFINITY, 1.0].iter().flat_map(|f| f.to_le_bytes()));
         assert_eq!(Args(g.net.spec.decode(method, &body).unwrap()).v3(0), [0.0, 0.0, 1.0]);
+    }
+
+    fn rpc_batch(g: &Game, client: u64, object: u64, name: &str, args: &[Value]) -> Vec<u8> {
+        let (method, body) = g.net.spec.encode(name, args);
+        let mut w = Writer::new();
+        w.packed_u64(client).packed_u64(object).packed_u16(0).packed_u32(method).bytes(&body);
+        wire::batch(&[(protocol::RPC, w.0)])
+    }
+
+    /// Before PlayerReady only what a loading client asks is answered; after it, everything.
+    /// A client refused at PlayerReady gets nothing more done, even in the same batch.
+    #[test]
+    fn rpcs_wait_for_player_ready_and_stop_at_a_kick() {
+        let Some(mut g) = test_game(save()) else { return };
+        let player = approve(&mut g, 1);
+        let chat = |g: &Game| rpc_batch(g, 1, 0, "ChatHandler.SendChatMessageServerRpc", &[json!("hi")]);
+        let chats = |g: &Game| g.net.out.iter().filter(|m| m.1 == protocol::CLIENT_RPC).count();
+        g.net.out.clear();
+        let b = chat(&g);
+        g.receive(1, &b);
+        assert_eq!(chats(&g), 0, "chat before PlayerReady is dropped");
+        let b = rpc_batch(&g, 1, 0, "WorldObjectsHandler.IsWorldObjectFromSceneActiveServerRpc", &[json!(208217122)]);
+        g.receive(1, &b);
+        assert_eq!(chats(&g), 1, "a loading query is answered");
+        g.net.out.clear();
+        let b = rpc_batch(&g, 1, player, "PlayerMainController.PlayerReadyServerRpc", &[json!(0), json!("Ann")]);
+        g.receive(1, &b);
+        g.net.out.clear();
+        let b = chat(&g);
+        g.receive(1, &b);
+        assert_eq!(chats(&g), 1, "a player chats");
+        // Mallory is banned by name: refused at PlayerReady, her chat in the same batch is not sent.
+        g.access.lists.banned_names = vec!["Mallory".into()];
+        let player = approve(&mut g, 2);
+        let mut both = wire::messages(&rpc_batch(&g, 2, player, "PlayerMainController.PlayerReadyServerRpc", &[json!(0), json!("Mallory")])).into_iter().map(|(k, b)| (k, b.to_vec())).collect::<Vec<_>>();
+        both.extend(wire::messages(&rpc_batch(&g, 2, 0, "ChatHandler.SendChatMessageServerRpc", &[json!("spam")])).into_iter().map(|(k, b)| (k, b.to_vec())));
+        g.net.out.clear();
+        g.receive(2, &wire::batch(&both));
+        assert!(g.kicks.iter().any(|(c, _)| *c == 2) && g.clients[&2].ready.is_none());
+        assert_eq!(chats(&g), 0);
+    }
+
+    /// A whitelist of SteamIDs only: who is not on it never gets the world.
+    #[test]
+    fn a_steam_id_whitelist_is_checked_before_the_world_goes_out() {
+        let Some(mut g) = test_game(save()) else { return };
+        let listed = crate::players::FIRST_STEAM_ID + 42;
+        g.access.lists.whitelist = vec![listed.to_string()];
+        let request = |g: &Game| {
+            let data = format!("{}|0", g.net_data.game_version);
+            let mut w = Writer::new();
+            w.packed_i32(0).u64(0).i32(data.len() as i32).bytes(data.as_bytes());
+            w.0
+        };
+        for (client, steam) in [(1, Some(listed)), (2, Some(listed + 1)), (3, None)] {
+            g.connect(client, steam, false, None);
+            let r = request(&g);
+            g.approve(client, &r);
+        }
+        assert_eq!(g.kicks.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [2, 3]);
+        assert!(g.clients[&1].approved && !g.clients[&2].approved);
+        // With a name on it, everyone gets in to be checked at PlayerReady.
+        g.access.lists.whitelist.push("Ann".into());
+        g.connect(4, None, false, None);
+        let r = request(&g);
+        g.approve(4, &r);
+        assert!(g.clients[&4].approved);
     }
 
     #[test]

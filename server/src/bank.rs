@@ -239,7 +239,8 @@ impl Bank {
                         let c: Value = serde_json::from_slice(&f.body).unwrap_or_default();
                         game.connect(f.n, c["steamId"].as_u64(), c["trusted"] == true, c["ip"].as_str().map(str::to_string));
                     }
-                    ipc::DATA if !kicked.contains(&f.n) && game.clients.contains_key(&f.n) => {
+                    // Kicked this loop too (game.kicks goes out after it): nothing more counts.
+                    ipc::DATA if !kicked.contains(&f.n) && !game.kicks.iter().any(|(c, _)| *c == f.n) && game.clients.contains_key(&f.n) => {
                         let before = game.net.out.len();
                         guarded(game, f.n, &self.save_path, |game| game.receive(f.n, &f.body));
                         if game.net.out[before.min(game.net.out.len())..].iter().any(|(to, _, _)| to.reaches(f.n)) && !urgent.contains(&f.n) {
