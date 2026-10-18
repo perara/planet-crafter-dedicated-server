@@ -1,18 +1,16 @@
-//! Extracting the game tables: the game runs once under Wine with BepInEx and the extractor
-//! plugin (extractor/), on a world of its own on 127.0.0.1, and its API hands over the tables,
-//! which go to run/data/<game version>/.
+//! Extracting the game tables into run/data/<game version>/: read from the game's files
+//! (native/); only the wreck layouts come from the game running once under Wine with BepInEx
+//! and the extractor plugin (extractor/), on 127.0.0.1.
 
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
-use serde_json::Value;
 
 use super::env::build_id;
-use super::{check, need, quiet, say, sleep, wait_for, Ctx, Result, APP_ID};
+use super::{check, need, quiet, say, sleep, Ctx, Result, APP_ID};
 
 const BEPINEX_VERSION: &str = "5.4.23.5";
 const BEPINEX_SHA256: &str = "82f9878551030f54657792c0740d9d51a09500eeae1fba21106b0c441e6732c4";
@@ -41,25 +39,6 @@ fn lock(path: &Path) -> Result<fs::File> {
         return Err("another extraction is running".into());
     }
     Ok(file)
-}
-
-/// A planet's travel request through a scripted player (PlanetData's stable hash of its id).
-fn travel_script(planet: &str) -> String {
-    format!(
-        r#"{{"name":"Traveller","steps":[{{"rpc":"PlanetNetworkLoader.SwitchToPlanetServerRpc","on":"PlanetNetworkLoader","args":[{},0,0],"after":2000}},{{"wait":5000}}]}}"#,
-        crate::data::stable_hash(planet)
-    )
-}
-
-/// The free planets in the game data, in its order (the ones the server can run).
-fn free_planets(gamedata: &Value) -> Vec<String> {
-    let assets = gamedata["assets"].as_object().into_iter().flatten();
-    assets.filter(|(k, v)| k.starts_with("PlanetData:") && v["steamAppId"] == 0 && v["showInBuild"].as_bool() == Some(true)).filter_map(|(_, v)| v["id"].as_str().map(str::to_string)).collect()
-}
-
-/// Someone joined the extractor's game from outside: a player object with an owner.
-fn someone_joined(netdata: &Value) -> bool {
-    netdata["objects"].as_array().into_iter().flatten().any(|o| o["player"].as_bool() == Some(true) && o["owner"].as_u64().is_some_and(|owner| owner != 0))
 }
 
 impl Ctx {
@@ -129,12 +108,6 @@ impl Ctx {
         super::api::request(EXT_API, token, method, path, if method == "GET" { "" } else { "{}" }, None)
     }
 
-    /// The planet the extractor's game is on.
-    fn ext_planet(&self) -> Result<String> {
-        let status: Value = serde_json::from_str(&self.ext_api("GET", "/api/status")?).map_err(|e| format!("extractor status: {e}"))?;
-        Ok(status["planet"].as_str().unwrap_or_default().to_string())
-    }
-
     fn log_says(&self, what: &str) -> bool {
         fs::read(&self.ext_log).is_ok_and(|b| b.windows(what.len()).any(|w| w == what.as_bytes()))
     }
@@ -201,114 +174,39 @@ impl Ctx {
         quiet(self.wine("wineserver").arg("-k"));
     }
 
-    /// The scripted player (pcds probe) against the extractor's game, its output to `log`.
-    fn probe(&self, tables: &Path, script: &Path, log: Option<&Path>) -> Result<std::process::Child> {
-        let mut c = Command::new(&self.exe);
-        c.arg("probe").arg(format!("127.0.0.1:{EXT_PORT}")).arg(tables).arg(script).stdin(Stdio::null());
-        match log {
-            Some(log) => {
-                let out = fs::File::create(log).map_err(|e| format!("{}: {e}", log.display()))?;
-                c.stderr(out.try_clone().map_err(|e| e.to_string())?).stdout(out);
-            }
-            None => {
-                c.stdout(Stdio::null()).stderr(Stdio::null());
-            }
-        }
-        c.spawn().map_err(|e| format!("{}: {e}", self.exe.display()))
-    }
-
-    /// Runs the game once with the extractor and writes run/data/<game version>/.
+    /// The game's tables into run/data/<game version>/: read from its files (native/), all but
+    /// the wreck interiors, which the game lays out itself (Tessera) when it runs: for those it
+    /// runs once under Wine with the extractor plugin.
     pub fn extract(&self, game: Option<&Path>) -> Result {
         let game = self.game_dir(game)?;
-        super::mkdir(&self.run)?;
-        say(format!("extracting the game tables from {}", game.display()));
+        super::mkdir(&self.run.join("data"))?;
         let _lock = lock(&self.run.join(".extract.lock"))?;
-        self.prepare_extractor(&game)?;
+        // Hidden until complete: tables() only picks finished versions.
+        let out = self.run.join(format!("data/.new-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&out);
+        say(format!("reading the game tables from {}", game.display()));
+        let version = crate::native::tables::read_game(&game, &out)?;
+        super::write(&out.join("wrecks.json"), self.wreck_layouts(&game)?)?;
+        let tables = self.run.join(format!("data/{version}"));
+        let _ = fs::remove_dir_all(&tables);
+        fs::rename(&out, &tables).map_err(|e| format!("{}: {e}", tables.display()))?;
+        say(format!("game tables for {version} in {}", tables.display()));
+        Ok(())
+    }
+
+    /// wrecks.json: the game's own wreck layouts (GET /api/wreckdata), from one run under Wine.
+    fn wreck_layouts(&self, game: &Path) -> Result<String> {
+        say("laying out the wreck interiors: the game runs once under Wine");
+        self.prepare_extractor(game)?;
         let ctx = self.clone();
         let _ = ctrlc::set_handler(move || {
             ctx.stop_extractor();
             std::process::exit(130);
         });
         let running = self.start_extractor()?;
-        let status: Value = serde_json::from_str(&self.ext_api("GET", "/api/status")?).map_err(|e| format!("extractor status: {e}"))?;
-        let version = status["gameVersion"].as_str().ok_or("the extractor reports no game version")?.to_string();
-        // Hidden until complete: tables() only picks finished versions.
-        let out = self.run.join(format!("data/.{version}.new"));
-        let _ = fs::remove_dir_all(&out);
-        super::mkdir(&out.join("scenes"))?;
-        let (raw, script) = (self.ext.join("netdata-raw.json"), self.ext.join("probe-script.json"));
-        let extract_raw = |quiet: bool| {
-            let mut c = Command::new(&self.exe);
-            c.arg("extract-raw").arg(&raw).arg(&out);
-            if quiet {
-                c.stdout(Stdio::null());
-            }
-            check(&mut c)
-        };
-        let netdata = || -> Result<String> {
-            let text = self.ext_api("GET", "/api/netdata")?;
-            super::write(&raw, &text)?;
-            Ok(text)
-        };
-        netdata()?;
-        extract_raw(true)?;
-        // Again with a scripted player joined (with the tables just written), for the layout a
-        // joining player gets.
-        super::write(&script, r#"{"name":"Extractor","ready":false,"steps":[{"wait":90000}]}"#)?;
-        let probe_log = self.ext.join("probe.log");
-        let mut joiner = self.probe(&out, &script, Some(&probe_log))?;
-        let mut joined = false;
-        for _ in 0..40 {
-            sleep(2);
-            if serde_json::from_str::<Value>(&netdata()?).is_ok_and(|n| someone_joined(&n)) {
-                joined = true;
-                break;
-            }
-        }
-        let _ = joiner.kill();
-        let _ = joiner.wait();
-        if !joined {
-            return Err(format!("the scripted player did not join the game; see {}", probe_log.display()));
-        }
-        extract_raw(false)?;
-        let gamedata = self.ext_api("GET", "/api/gamedata")?;
-        super::write(&out.join("gamedata.json"), &gamedata)?;
-        super::write(&out.join("wrecks.json"), self.ext_api("GET", "/api/wreckdata")?)?;
-        let planets = free_planets(&serde_json::from_str(&gamedata).map_err(|e| format!("gamedata.json: {e}"))?);
-        drop(gamedata);
-        for planet in &planets {
-            let mut current = self.ext_planet()?;
-            if current != *planet {
-                say(format!("travelling to {planet}"));
-                super::write(&script, travel_script(planet))?;
-                // The game refuses players for a while after the game data dump (it is still
-                // removing what it spawned), so travel is retried until the planet changes.
-                'travel: for _ in 0..5 {
-                    wait_for(&mut self.probe(&out, &script, None)?, Duration::from_secs(60));
-                    for _ in 0..12 {
-                        sleep(5);
-                        current = self.ext_planet().unwrap_or_default();
-                        if current == *planet {
-                            break 'travel;
-                        }
-                    }
-                }
-                if current != *planet {
-                    return Err(format!("the game did not reach {planet}"));
-                }
-                sleep(15);
-            }
-            super::write(&out.join(format!("scenes/{planet}.json")), self.ext_api("GET", "/api/scenedata")?)?;
-        }
-        let _ = fs::remove_file(&raw);
-        let _ = fs::remove_file(&script);
+        let wrecks = self.ext_api("GET", "/api/wreckdata")?;
         drop(running);
-        super::write(&out.join("buildid"), format!("{}\n", build_id(&game)?))?;
-        let tables = self.run.join(format!("data/{version}"));
-        let _ = fs::remove_dir_all(&tables);
-        fs::rename(&out, &tables).map_err(|e| format!("{}: {e}", tables.display()))?;
-        say(format!("game tables for {version} in {} (planets: {})", tables.display(), planets.join(" ")));
-        Ok(())
+        Ok(wrecks)
     }
 
     /// After a game update: the new build's tables, and the server restarted on them.
@@ -323,26 +221,5 @@ impl Ctx {
         say(format!("game build {build} has no tables yet"));
         self.extract(Some(&game))?;
         self.restart_after_update()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn travel_targets_and_joins() {
-        assert_eq!(travel_script("Prime"), r#"{"name":"Traveller","steps":[{"rpc":"PlanetNetworkLoader.SwitchToPlanetServerRpc","on":"PlanetNetworkLoader","args":[-1140328421,0,0],"after":2000},{"wait":5000}]}"#);
-        let gamedata = json!({"assets": {
-            "PlanetData:PlanetData-Prime": {"id": "Prime", "steamAppId": 0, "showInBuild": true},
-            "PlanetData:PlanetData-Humble": {"id": "Humble", "steamAppId": 3142540, "showInBuild": true},
-            "PlanetData:PlanetData-Test": {"id": "Test", "steamAppId": 0, "showInBuild": false},
-            "GroupDataItem:Iron": {"id": "Iron"},
-            "PlanetData:PlanetData-Aqualis": {"id": "Aqualis", "steamAppId": 0, "showInBuild": true},
-        }});
-        assert_eq!(free_planets(&gamedata), ["Prime", "Aqualis"]);
-        assert!(!someone_joined(&json!({"objects": [{"player": true, "owner": 0}, {"player": false, "owner": 3}]})));
-        assert!(someone_joined(&json!({"objects": [{"player": true, "owner": 1}]})));
     }
 }
