@@ -156,6 +156,10 @@ pub struct Game {
     /// Seconds the clock stood still while nobody was in the game (rules: world.pauseWhenEmpty),
     /// and the clock at the last tick.
     paused: f64,
+    /// The admin paused the world (POST /api/pause): it stands still as with nobody in it,
+    /// players in it or not, until resumed.
+    #[serde(default)]
+    pub held: bool,
     last_clock: f64,
     /// The clock moved since main last took this: an autosave of a world that stood still since
     /// the last one would write that one again.
@@ -246,6 +250,7 @@ impl Game {
             started: std::time::Instant::now(),
             sim_time: None,
             paused: 0.0,
+            held: false,
             last_clock: 0.0,
             advanced: false,
             rng: Rng::seeded(),
@@ -562,11 +567,17 @@ impl Game {
     pub fn tick(&mut self) {
         let clock = self.clock();
         let last = std::mem::replace(&mut self.last_clock, clock);
-        if self.rules.world.pause_when_empty && !self.clients.values().any(|c| c.ready.is_some()) {
-            // Nobody in the game: the clock (game time and network ticks) holds, and every timer
-            // with it; it goes on from here when a player is in. Clients still hear it each second.
+        let empty = self.rules.world.pause_when_empty && !self.clients.values().any(|c| c.ready.is_some());
+        if empty || self.held {
+            // Nobody in the game, or paused by the admin: the clock (game time and network ticks)
+            // holds, and every timer with it; it goes on from here. Clients still hear it each
+            // second; players in a paused world still get the chat.
             self.paused += clock - last;
-            crate::chathooks::drop_replies(self);
+            if empty {
+                crate::chathooks::drop_replies(self);
+            } else {
+                crate::chathooks::tick(self);
+            }
             if clock.floor() > last.floor() {
                 self.every_second();
             }

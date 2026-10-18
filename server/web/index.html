@@ -337,7 +337,7 @@
               <div class="units" id="units"></div>
             </div>
             <div class="card">
-              <div class="head"><h2>Server</h2><div class="right"><button class="small" id="ovSave">Save world now</button></div></div>
+              <div class="head"><h2>Server</h2><div class="right"><button class="small" id="ovPause">Pause world</button><button class="small" id="ovSave">Save world now</button></div></div>
               <dl class="info" id="info"></dl>
             </div>
           </div>
@@ -429,26 +429,37 @@
       <section class="view" id="view-world" hidden>
         <div class="grid cols2">
           <div class="card">
-            <div class="head"><h2>This world</h2></div>
+            <div class="head"><h2>This world</h2><div class="right"><span id="worldState"></span></div></div>
             <dl class="info" id="worldInfo"></dl>
             <div class="row" style="margin-top:14px">
-              <button class="primary" id="saveWorld">Save world now</button>
+              <button class="primary" id="pauseWorld">Pause world</button>
+              <button id="saveWorld">Save now</button>
+              <button id="backupNow">Back up now</button>
               <button class="danger" id="stopServer">Save and stop server</button>
             </div>
+            <p class="sub" style="margin:10px 0 0">Pause stops the world's clock: machines, growth, terraformation, day and night, meteo and the players' gauges hold. Players stay in and can still move, build and chat.</p>
           </div>
           <div class="card">
-            <div class="head"><h2>World settings</h2></div>
-            <div class="tw" id="worldSettings" style="max-height:420px;overflow:auto"></div>
+            <div class="head"><h2>Off-site backups (S3)</h2><div class="right"><span id="s3Chip"></span></div></div>
+            <div id="s3Body"></div>
+            <div class="row" style="margin-top:12px">
+              <button id="s3Now">Copy newest backup now</button>
+              <button class="ghost" data-go="config" id="s3Config">Settings under Config › Backup</button>
+            </div>
           </div>
-          <div class="card">
-            <div class="head"><h2>Worlds</h2><div class="right"><button class="small" id="worldsRefresh">Refresh</button></div></div>
-            <p class="sub">The worlds beside this one. Switch with <code>pcds world use NAME</code> and <code>pcds restart</code>; <code>pcds world new NAME</code> makes one.</p>
-            <div class="tw" id="worlds"></div>
-          </div>
-          <div class="card">
-            <div class="head"><h2>Backups of this world</h2></div>
-            <div class="tw" id="backups" style="max-height:420px;overflow:auto"></div>
-          </div>
+        </div>
+        <div class="card">
+          <div class="head"><h2>Worlds</h2><div class="right"><button class="primary small" id="newWorld">New world</button><button class="small" id="worldsRefresh">Refresh</button></div></div>
+          <p class="sub" id="worldsNote">Every world beside this one: one save file each in worlds/.</p>
+          <div class="tw" id="worlds"></div>
+        </div>
+        <div class="card">
+          <div class="head"><h2>Backups of this world</h2><div class="right"><span class="muted" id="backupsNote"></span></div></div>
+          <div class="tw" id="backups" style="max-height:460px;overflow:auto"></div>
+        </div>
+        <div class="card">
+          <div class="head"><h2>World settings</h2></div>
+          <div class="tw" id="worldSettings" style="max-height:420px;overflow:auto"></div>
         </div>
       </section>
 
@@ -656,6 +667,8 @@ function ask({ title, body, ok, danger }) {
   $('dlgOk').className = danger ? 'danger solid' : 'primary';
   return new Promise(resolve => {
     dlg.onclose = () => resolve(dlg.returnValue === 'ok');
+    // Enter in a field means OK (the form's first button is Cancel).
+    $('dlgBody').onkeydown = e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); dlg.close('ok'); } };
     dlg.returnValue = 'cancel';
     dlg.showModal();
     const first = $('dlgBody').querySelector('input, select');
@@ -785,6 +798,7 @@ function renderHeader(s) {
   const flipping = b.phase && b.phase !== 'idle';
   if (flipping) setPill('warn', `Handing over (${b.phase})`);
   else if (u.state === 'busy') setPill('warn', 'Updating');
+  else if (s.held) setPill('warn', 'Paused');
   else setPill('', s.players.length ? `Online · ${s.players.length} playing` : 'Online · idle');
   $('qPlayers').textContent = s.players.length;
   $('qLoop').textContent = `${s.fps}/s · ${s.busyPercent}%`;
@@ -1302,8 +1316,13 @@ $('chatForm').onsubmit = e => {
 };
 
 // ---- world ----
+function renderPauseButtons(s) {
+  for (const id of ['pauseWorld', 'ovPause']) $(id).textContent = s.held ? 'Resume world' : 'Pause world';
+}
 function renderWorld(s) {
   const world = s.world || {};
+  $('worldState').replaceChildren(s.held ? h('span', { class: 'chip warn' }, 'paused') : h('span', { class: 'chip ok' }, 'running'));
+  if (s.s3) renderS3(s.s3);
   $('worldInfo').replaceChildren(...pairs([['World', s.save], ['Planet', s.planet], ['World seed', String(world.seed ?? '–')],
     ['Game time', duration(s.gameTime || 0)], ['Autosave', s.autosaveMinutes ? `every ${s.autosaveMinutes} min` : 'off'],
     ['World objects', (s.objects?.world ?? 0).toLocaleString()]]));
@@ -1314,18 +1333,90 @@ function renderWorld(s) {
     $('worldSettings').replaceChildren(table(['Setting', 'Value'], settings.map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v) : String(v)]), 'No settings'));
   }
 }
+let worldsData = null;
 async function loadWorlds() {
   try {
-    const w = await api('GET', '/api/worlds');
-    $('worlds').replaceChildren(table(['World', 'Size', 'Saved'], w.worlds.map(x => [x.name === w.current ? h('td', {}, x.name, ' ', h('span', { class: 'chip ok' }, 'running')) : x.name, cell(bytes(x.bytes), 'num'), ago(x.modified)]), 'No worlds found'));
-    $('backups').replaceChildren(table(['Backup', 'Size', 'Made'], w.backups.slice().reverse().map(x => [h('td', { class: 'mono' }, x.name), cell(bytes(x.bytes), 'num'), ago(x.modified)]), 'No backups yet'));
+    const w = worldsData = await api('GET', '/api/worlds');
+    const switching = !!(status && status.worldSwitch);
+    $('worldsNote').textContent = switching ? 'Every world beside this one: one save file each in worlds/. Run another one here; players are moved to it.' : 'Every world beside this one: one save file each in worlds/. To run another one: pcds world use NAME, then pcds restart.';
+    $('worlds').replaceChildren(table(['World', 'Size', 'Saved', ''], w.worlds.map(x => {
+      const isRunning = x.name === w.current;
+      return [isRunning ? h('td', {}, h('b', {}, x.name), ' ', h('span', { class: 'chip ok' }, 'running')) : h('td', {}, x.name), cell(bytes(x.bytes), 'num'), ago(x.modified),
+        h('td', { class: 'row', style: 'justify-content:flex-end' },
+          !isRunning && switching ? h('button', { class: 'small primary', onclick: e => runWorld(x.name, e.currentTarget) }, 'Run this world') : null,
+          h('button', { class: 'small', onclick: e => download(x.name, false, e.currentTarget) }, 'Download'),
+          isRunning ? null : h('button', { class: 'small danger', onclick: () => removeWorld(x.name) }, 'Remove'))];
+    }), 'No worlds found'));
+    const kept = w.backupsKept;
+    $('backupsNote').textContent = kept ? `The newest ${kept} are kept (PCDS_BACKUPS)` : 'Backups are off (PCDS_BACKUPS=0)';
+    $('backupNow').disabled = !kept;
+    $('backups').replaceChildren(table(['Backup', 'Size', 'Made', ''], w.backups.slice().reverse().map(x => [h('td', { class: 'mono' }, x.name), cell(bytes(x.bytes), 'num'), ago(x.modified),
+      h('td', { class: 'row', style: 'justify-content:flex-end' },
+        h('button', { class: 'small', onclick: e => download(x.name, true, e.currentTarget) }, 'Download'),
+        h('button', { class: 'small', onclick: () => restoreBackup(x.name) }, 'Restore as a world'))]), 'No backups yet'));
+    renderS3(w.s3);
   } catch (e) { if (!e.auth) toast(e.message, 'err'); }
 }
-onShow.world = loadWorlds;
+function renderS3(s3) {
+  if (!s3) return;
+  const last = s3.last;
+  const chip = !s3.enabled ? h('span', { class: 'chip' }, 'off') : s3.missing && s3.missing.length ? h('span', { class: 'chip bad' }, 'incomplete') : s3.uploading ? h('span', { class: 'chip warn' }, 'copying…') : last && !last.ok ? h('span', { class: 'chip bad' }, 'failing') : h('span', { class: 'chip ok' }, 'on');
+  $('s3Chip').replaceChildren(chip);
+  const body = !s3.enabled
+    ? [h('p', { class: 'sub', style: 'margin:0' }, 'Off. Every backup can also be copied to an S3-compatible bucket (AWS S3, Cloudflare R2, Backblaze B2, MinIO…): set backup.s3Endpoint, s3Bucket, s3Region and the keys under Config › Backup.')]
+    : [h('dl', { class: 'info' }, ...pairs([
+        ['Bucket', `${s3.bucket}/${s3.prefix}`],
+        s3.missing && s3.missing.length ? ['Still to set', s3.missing.map(m => 'backup.' + m).join(', ')] : null,
+        ['Last copy', last ? `${last.file || '–'}, ${last.ok ? 'done' : 'failed'} ${ago(last.at)}` : 'none since the server started'],
+        last && !last.ok ? ['Error', h('span', { class: 'err' }, last.error)] : null]))];
+  $('s3Body').replaceChildren(...body);
+  $('s3Now').disabled = !s3.enabled || !!s3.uploading;
+}
+async function download(name, backup, btn) {
+  const r = await act(null, () => api('POST', '/api/worlds/file', { name, backup }, 60000), btn);
+  if (!r) return;
+  const url = URL.createObjectURL(new Blob([r.text], { type: 'application/json' }));
+  const a = h('a', { href: url, download: r.name });
+  document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+async function removeWorld(name) {
+  if (await ask({ title: `Remove world ${name}?`, body: 'It leaves the list of worlds. The file is kept in backups/ as ' + name + '-removed-<time>.json, so it can be restored.', ok: 'Remove', danger: true }))
+    act(`World ${name} removed (kept in backups/)`, () => api('POST', '/api/worlds/remove', { name })).then(loadWorlds);
+}
+async function restoreBackup(backup) {
+  const input = h('input', { value: backup.replace(/-\d{8}-\d{6}$/, '') + '-restored', 'aria-label': 'New world name' });
+  if (!await ask({ title: 'Restore as a world', body: [h('p', { style: 'margin:0' }, `A copy of ${backup} becomes a world of its own; the running world is not touched.`), h('label', { class: 'l' }, 'World name'), input], ok: 'Restore' })) return;
+  act(`World ${input.value.trim()} made from ${backup}`, () => api('POST', '/api/worlds/restore', { backup, name: input.value.trim() })).then(loadWorlds);
+}
+$('newWorld').onclick = async () => {
+  const c = (worldsData && worldsData.choices) || { planets: [], modes: [], dying: [] };
+  const name = h('input', { placeholder: 'e.g. second', 'aria-label': 'World name' });
+  const planet = h('select', { 'aria-label': 'Planet' }, c.planets.map(p => h('option', { value: p.id }, p.id)));
+  const start = h('select', { 'aria-label': 'Start' });
+  const fillStarts = () => { const p = c.planets.find(p => p.id === planet.value); start.replaceChildren(...(p ? p.starts : []).map(s => h('option', { value: s, selected: s === 'Standard' }, s))); };
+  planet.onchange = fillStarts; fillStarts();
+  const mode = h('select', { 'aria-label': 'Mode' }, c.modes.map(m => h('option', { value: m, selected: m === 'Standard' }, m)));
+  const dying = h('select', { 'aria-label': 'When a player dies' }, c.dying.map(d => h('option', { value: d, selected: d === 'DropSomeItems' }, d)));
+  const seed = h('input', { type: 'number', min: '0', step: '1', placeholder: 'random', 'aria-label': 'World seed' });
+  const field = (label, el) => h('div', {}, h('label', { class: 'l' }, label), el);
+  if (!await ask({ title: 'New world', body: [field('Name', name), field('Planet', planet), field('Start', start), field('Mode', mode), field('When a player dies', dying), field('World seed', seed)], ok: 'Create' })) return;
+  const body = { name: name.value.trim(), planet: planet.value, start: start.value, mode: mode.value, dying: dying.value };
+  if (seed.value !== '') body.seed = Number(seed.value);
+  act(r => `World ${r.name} created on ${r.planet}`, () => api('POST', '/api/worlds/new', body)).then(loadWorlds);
+};
 $('worldsRefresh').onclick = loadWorlds;
+onShow.world = loadWorlds;
 const save = btn => act('World saved', () => api('POST', '/api/save'), btn).then(() => current === 'world' && loadWorlds());
 $('saveWorld').onclick = e => save(e.currentTarget);
 $('ovSave').onclick = e => save(e.currentTarget);
+$('backupNow').onclick = e => act(r => r.s3 ? `Backup ${r.backup} made; copying it to S3` : r.s3Error ? `Backup ${r.backup} made; S3: ${r.s3Error}` : `Backup ${r.backup} made`, () => api('POST', '/api/backup'), e.currentTarget).then(loadWorlds);
+$('s3Now').onclick = e => act(r => `Copying ${r.key} to S3`, () => api('POST', '/api/backup/s3'), e.currentTarget).then(() => setTimeout(loadWorlds, 1500));
+async function setPaused(paused, btn) {
+  if (paused && !await ask({ title: 'Pause the world?', body: 'Its clock stops until you resume it: machines, growth, terraformation, day and night, meteo and gauges hold. Players stay in and are told in the chat.', ok: 'Pause' })) return;
+  act(paused ? 'World paused' : 'World resumed', () => api('POST', '/api/pause', { paused }), btn);
+}
+$('pauseWorld').onclick = e => setPaused(!(status && status.held), e.currentTarget);
+$('ovPause').onclick = e => setPaused(!(status && status.held), e.currentTarget);
 $('stopServer').onclick = async () => {
   if (await ask({ title: 'Stop the server?', body: 'The world is saved, then the server quits and every player is disconnected. Start it again with pcds start (or systemd restarts it if set to).', ok: 'Save and stop', danger: true }))
     act('Stopping: the server saves, then quits', () => api('POST', '/api/stop'));
@@ -1563,6 +1654,7 @@ $('unbanForm').onsubmit = e => { e.preventDefault(); const v = $('modUnban').val
 // ---- everything from one status ----
 function render(s) {
   renderHeader(s);
+  renderPauseButtons(s);
   updateMapPlayers(s);
   if (current === 'overview') renderOverview(s);
   if (current === 'players') renderPlayers(s);

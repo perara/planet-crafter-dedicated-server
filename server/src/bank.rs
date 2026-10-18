@@ -428,6 +428,11 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
         Err(e) => (500, json!({"error": e}).to_string()),
     };
     let field = |k: &str| body[k].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    // A request's outcome: its JSON, or 400 with what is wrong.
+    let answer = |r: Result<Value, String>| match r {
+        Ok(v) => (200, v.to_string()),
+        Err(e) => (400, json!({"error": e}).to_string()),
+    };
     match (method, path) {
         // The bank's part; the front adds its own (invite code, network, banks, traffic).
         ("GET", "/api/status") => {
@@ -457,6 +462,8 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
                 "tables": {"version": game.net_data.game_version, "buildId": ctx.build_id},
                 "world": {"seed": game.save.settings["worldSeed"], "settings": game.save.settings},
                 "objects": {"world": game.wos.len(), "network": game.net.objects.len(), "inventories": game.inventories.len()},
+                "held": game.held,
+                "s3": crate::s3::status(&game.rules.backup),
             });
             (200, body.to_string())
         }
@@ -566,7 +573,57 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
             }
             Err(e) => e,
         },
-        ("GET", "/api/worlds") => (200, dashboard::worlds(ctx.save_path).to_string()),
+        ("GET", "/api/worlds") => {
+            let mut w = dashboard::worlds(ctx.save_path);
+            w["choices"] = crate::newworld::choices(&game.net_data, &game.data);
+            w["backupsKept"] = backups_kept().into();
+            w["s3"] = crate::s3::status(&game.rules.backup);
+            (200, w.to_string())
+        }
+        ("POST", "/api/worlds/new") => match dashboard::body::<dashboard::NewWorld>(body) {
+            Ok(w) => answer(dashboard::world_new(game, ctx.save_path, w)),
+            Err(e) => e,
+        },
+        ("POST", "/api/worlds/remove") => match field("name") {
+            Some(n) => answer(dashboard::world_remove(ctx.save_path, &n)),
+            None => (400, "{\"error\":\"'name' is required\"}".into()),
+        },
+        ("POST", "/api/worlds/file") => match field("name") {
+            Some(n) => answer(dashboard::world_file(ctx.save_path, &n, body["backup"] == true)),
+            None => (400, "{\"error\":\"'name' is required\"}".into()),
+        },
+        ("POST", "/api/worlds/restore") => match (field("backup"), field("name")) {
+            (Some(b), Some(n)) => answer(dashboard::world_restore(ctx.save_path, &b, &n)),
+            _ => (400, "{\"error\":\"'backup' and 'name' are required\"}".into()),
+        },
+        // A backup now (after a save), copied to S3 when that is set.
+        ("POST", "/api/backup") => {
+            if backups_kept() == 0 {
+                return (400, "{\"error\":\"backups are off (PCDS_BACKUPS=0)\"}".into());
+            }
+            if let Err(e) = game.snapshot().write(ctx.save_path) {
+                return (500, json!({"error": format!("save failed: {e}")}).to_string());
+            }
+            if let Err(e) = save::backup(ctx.save_path, Duration::ZERO, backups_kept()) {
+                return (500, json!({"error": format!("backup failed: {e}")}).to_string());
+            }
+            let made = crate::s3::newest_backup(ctx.save_path).and_then(|p| p.file_stem().map(|f| f.to_string_lossy().to_string()));
+            let s3 = crate::s3::after_backup(&game.rules.backup, ctx.save_path, false);
+            (200, json!({"backup": made, "s3": s3.as_ref().ok().cloned().flatten(), "s3Error": s3.err()}).to_string())
+        }
+        ("POST", "/api/backup/s3") => answer(crate::s3::after_backup(&game.rules.backup, ctx.save_path, true).map(|k| json!({"key": k}))),
+        // The admin's pause: the world stands still (clock, machines, growth, gauges) until resumed.
+        ("POST", "/api/pause") => match body["paused"].as_bool() {
+            Some(p) => {
+                if game.held != p {
+                    game.held = p;
+                    println!("world {} by the admin", if p { "paused" } else { "resumed" });
+                    game.ext.chat.replies.push_back(if p { "The world is paused by the server admin." } else { "The world goes on." }.to_string());
+                }
+                (200, json!({"paused": p}).to_string())
+            }
+            None => (400, "{\"error\":\"'paused': true or false\"}".into()),
+        },
         ("GET", "/api/map") => (200, dashboard::map(game).to_string()),
         _ => (404, "{\"error\":\"unknown endpoint\"}".into()),
     }
@@ -594,6 +651,10 @@ fn persist(game: &mut Game, path: &str) {
     match game.snapshot().write(path) {
         Ok(()) => println!("saved {path}"),
         Err(e) => eprintln!("save failed: {e}"),
+    }
+    // The newest backup off-site (on a thread), when S3 is set and it is not there yet.
+    if let Err(e) = crate::s3::after_backup(&game.rules.backup, path, false) {
+        eprintln!("backup: {e}");
     }
 }
 
@@ -637,6 +698,60 @@ mod tests {
         let ctx = Ctx { save_path: "", build_id: None, loop_rate: 0, busy: Default::default() };
         let (status, answer) = admin_request(game, method, path, &body, &ctx, autosave);
         (status, serde_json::from_str(&answer).unwrap())
+    }
+
+    /// Worlds made, read, restored and removed through the API, a backup on demand, and the
+    /// admin's pause holding the clock.
+    #[test]
+    fn worlds_backups_and_the_pause_through_the_api() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let dir = std::env::temp_dir().join(format!("pcds-bank-worlds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let save_path = dir.join("world.json").to_string_lossy().to_string();
+        game.snapshot().write(&save_path).unwrap();
+        let mut autosave = 5;
+        let ctx = Ctx { save_path: &save_path, build_id: None, loop_rate: 0, busy: Default::default() };
+        let mut call = |game: &mut Game, method: &str, path: &str, body: Value| {
+            let (status, answer) = admin_request(game, method, path, &body, &ctx, &mut autosave);
+            (status, serde_json::from_str::<Value>(&answer).unwrap())
+        };
+        let (status, w) = call(&mut game, "GET", "/api/worlds", json!({}));
+        assert_eq!((status, w["current"].as_str()), (200, Some("world")));
+        let planet = w["choices"]["planets"][0]["id"].as_str().unwrap().to_string();
+        let (status, made) = call(&mut game, "POST", "/api/worlds/new", json!({"name": "second", "planet": planet, "seed": 7, "mode": "Chill"}));
+        assert_eq!((status, made["seed"].as_u64()), (200, Some(7)), "{made}");
+        let made = crate::save::SaveFile::load(&dir.join("second.json").to_string_lossy()).unwrap();
+        assert_eq!((made.settings["planetId"].as_str(), made.settings["mode"].as_str()), (Some(planet.as_str()), Some("Chill")));
+        for bad in [json!({"name": "second"}), json!({"name": "../x"}), json!({"name": "rules"}), json!({"name": "x", "mode": "Easy"}), json!({"name": "x", "planet": "Nowhere"})] {
+            assert_eq!(call(&mut game, "POST", "/api/worlds/new", bad.clone()).0, 400, "{bad}");
+        }
+        let (status, file) = call(&mut game, "POST", "/api/worlds/file", json!({"name": "second"}));
+        assert_eq!((status, file["text"].as_str().map(|t| t.contains("planetId"))), (200, Some(true)));
+        // A backup now, then that backup as a new world.
+        let (status, b) = call(&mut game, "POST", "/api/backup", json!({}));
+        let backup = b["backup"].as_str().unwrap_or_else(|| panic!("{status} {b}")).to_string();
+        assert!(backup.starts_with("world-") && b["s3"].is_null() && b["s3Error"].is_null(), "S3 off: {b}");
+        assert_eq!(call(&mut game, "POST", "/api/worlds/restore", json!({"backup": backup, "name": "third"})).0, 200);
+        assert!(dir.join("third.json").is_file());
+        assert_eq!(call(&mut game, "POST", "/api/backup/s3", json!({})).0, 400, "S3 off");
+        // Removed into backups/, never the running world.
+        assert_eq!(call(&mut game, "POST", "/api/worlds/remove", json!({"name": "world"})).0, 400);
+        assert_eq!(call(&mut game, "POST", "/api/worlds/remove", json!({"name": "second"})).0, 200);
+        assert!(!dir.join("second.json").exists() && std::fs::read_dir(dir.join("backups")).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("second-removed-")));
+        // Paused: the clock holds with a player in; resumed: it goes on.
+        game::tests::join(&mut game, 1, "Ann");
+        assert_eq!(call(&mut game, "POST", "/api/pause", json!({"paused": true})).0, 200);
+        let before = game.time;
+        game.sim_time = Some(game.sim_time.unwrap_or(0.0) + 5.0);
+        game.tick();
+        assert_eq!(game.time, before, "paused");
+        assert_eq!(call(&mut game, "GET", "/api/status", json!({})).1["held"], true);
+        assert_eq!(call(&mut game, "POST", "/api/pause", json!({"paused": false})).0, 200);
+        game.sim_time = Some(game.sim_time.unwrap() + 5.0);
+        game.tick();
+        assert!(game.time > before, "resumed");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A ban and a rules change written after a snapshot are in the game restored from it.

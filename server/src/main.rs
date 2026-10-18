@@ -79,6 +79,7 @@ mod planets;
 mod players;
 mod probe;
 mod rules;
+mod s3;
 mod protocol;
 mod rockets;
 mod rpcspec;
