@@ -24,6 +24,7 @@ pub struct Rules {
     pub loot: Loot,
     pub limits: Limits,
     pub world: World,
+    pub chat: Chat,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -121,6 +122,34 @@ pub struct World {
     pub pause_when_empty: bool,
 }
 
+/// Chat hooks (chathooks.rs): every chat message as a JSON event, sent off the game thread.
+/// Only admins set these (rules.json, the admin API); webhooks, secret and exec are never logged.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct Chat {
+    /// http:// or https:// URLs each event is POSTed to.
+    pub webhooks: Vec<String>,
+    /// Signs every POST: X-PCDS-Signature: sha256=<HMAC-SHA256 of the body, hex>. None: unsigned.
+    pub secret: Option<String>,
+    /// A program and its arguments (no shell), run for each event with its JSON on stdin.
+    pub exec: Vec<String>,
+    /// Messages starting with this are commands too: "!tp home" -> "tp", ["home"]. None: none.
+    pub command_prefix: Option<String>,
+    /// The longest a webhook or the exec program may take, in seconds.
+    pub timeout_seconds: f32,
+    /// More tries after a webhook fails (no answer, 429, 5xx), 1 s, 2 s... apart.
+    pub retries: u32,
+}
+
+impl Default for Chat {
+    fn default() -> Self {
+        Chat { webhooks: Vec::new(), secret: None, exec: Vec::new(), command_prefix: None, timeout_seconds: 5.0, retries: 2 }
+    }
+}
+
+/// Rules shown only as set, never with their value (URLs and arguments may hold tokens).
+const HIDDEN: [&str; 3] = ["chat.webhooks", "chat.secret", "chat.exec"];
+
 pub const CONSEQUENCES: [&str; 4] = ["NoConsequences", "DropSomeItems", "DropAllItems", "DeleteSaveFile"];
 
 impl Rules {
@@ -150,6 +179,29 @@ impl Rules {
         }
         if self.limits.max_players.is_some_and(|n| !(1..=100).contains(&n)) {
             return Err("limits.maxPlayers: from 1 to 100".into());
+        }
+        let chat = &self.chat;
+        // Never the value in the message: it may hold a token.
+        for (i, url) in chat.webhooks.iter().enumerate() {
+            let uri = url.parse::<ureq::http::Uri>().ok();
+            if !uri.is_some_and(|u| matches!(u.scheme_str(), Some("http" | "https")) && u.host().is_some()) {
+                return Err(format!("chat.webhooks: entry {} is not an http:// or https:// URL", i + 1));
+            }
+        }
+        if chat.secret.as_deref() == Some("") {
+            return Err("chat.secret: empty (null: unsigned)".into());
+        }
+        if chat.exec.first().is_some_and(|p| p.is_empty()) {
+            return Err("chat.exec: the first entry is the program to run".into());
+        }
+        if chat.command_prefix.as_deref().is_some_and(|p| p.is_empty() || p.chars().count() > 8 || p.contains(char::is_whitespace)) {
+            return Err("chat.commandPrefix: 1 to 8 characters, no spaces (null: no commands)".into());
+        }
+        if !(chat.timeout_seconds.is_finite() && (0.1..=60.0).contains(&chat.timeout_seconds)) {
+            return Err(format!("chat.timeoutSeconds: {} is not 0.1 to 60 seconds", chat.timeout_seconds));
+        }
+        if chat.retries > 10 {
+            return Err(format!("chat.retries: {} is more than 10", chat.retries));
         }
         for group in self.limits.buildings.keys() {
             if !data.group(group).is_some_and(|g| data.groups[g].constructible) {
@@ -228,6 +280,7 @@ pub fn changes(rules: &Rules) -> Vec<String> {
                     walk(&p, x, defaults.get(k).unwrap_or(&Value::Null), out);
                 }
             }
+            _ if v != d && HIDDEN.contains(&path) => out.push(format!("{path}=(set)")),
             _ if v != d => out.push(format!("{path}={v}")),
             _ => {}
         }
@@ -257,6 +310,9 @@ fn changed(game: &mut Game, old: &Rules) {
     if game.rules.speed.growth != old.speed.growth {
         crate::machines::add_growth_speed_to_all(game, game.rules.speed.growth - old.speed.growth);
     }
+    if game.rules.chat != old.chat {
+        crate::chathooks::configure(game);
+    }
 }
 
 #[cfg(test)]
@@ -284,10 +340,25 @@ mod tests {
             serde_json::json!({"death": {"consequences": "Explode"}}),
             serde_json::json!({"limits": {"buildings": {"Iron": 1}}}),
             serde_json::json!({"meteo": {"materialDespawnSeconds": 1e9}}),
+            serde_json::json!({"chat": {"webhooks": ["ftp://example.com/"]}}),
+            serde_json::json!({"chat": {"webhooks": ["not a url"]}}),
+            serde_json::json!({"chat": {"exec": [""]}}),
+            serde_json::json!({"chat": {"commandPrefix": "a b"}}),
+            serde_json::json!({"chat": {"timeoutSeconds": 0}}),
+            serde_json::json!({"chat": {"retries": 11}}),
         ] {
             assert!(Rules::default().patched(&patch).unwrap().validate(&data).is_err(), "{patch}");
         }
         assert!(Rules::default().patched(&serde_json::json!({"limits": {"buildings": {"Drill1": 2}}})).unwrap().validate(&data).is_ok());
+        let hooks = serde_json::json!({"chat": {"webhooks": ["https://example.com/hook", "http://127.0.0.1:8080/"], "secret": "s", "exec": ["/usr/local/bin/on-chat"], "commandPrefix": "!"}});
+        assert!(Rules::default().patched(&hooks).unwrap().validate(&data).is_ok());
+    }
+
+    #[test]
+    fn chat_hook_targets_and_secrets_are_never_shown() {
+        let r = Rules::default().patched(&serde_json::json!({"chat": {"webhooks": ["https://example.com/hook/t0ken"], "secret": "s3cret", "exec": ["on-chat", "--key=k3y"], "commandPrefix": "!"}})).unwrap();
+        let shown = changes(&r).join(" ");
+        assert_eq!(shown, "chat.webhooks=(set) chat.secret=(set) chat.exec=(set) chat.commandPrefix=\"!\"");
     }
 
     use crate::game::tests::{join, save};

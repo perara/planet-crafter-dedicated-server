@@ -270,6 +270,59 @@ reason in `./pcds logs`.
 | `limits.buildings` | none | building group id to how many the world may have; one more is taken down at once and its materials go back to the builder |
 | `world.pauseWhenEmpty` | `false` | with no player in the game the world stands still (time, day and night, growth, production, terraformation, meteo, timers and despawns, drones and vehicles) and goes on from there, with no catching up, when one is. A player counts once loaded in, as the game counts its players; one still loading sees the world as it stopped. An autosave of a world that stood still since the last one is skipped (no write, no backup) |
 
+## Chat hooks
+
+Chat messages can go to tools outside the game (a bot, a Discord bridge, a log). The server
+turns each message players send into an event and sends it from a thread of its own, so a slow
+or broken hook never holds up the game. Hooks are server rules in the `chat` section, set like
+any other rule, so only admins set them:
+
+```bash
+./pcds rules set 'chat.webhooks=["https://example.com/pcds-chat"]' chat.secret=CHANGE-ME
+./pcds rules set chat.commandPrefix=!            # "!tp home" also comes as command "tp", args ["home"]
+./pcds rules set 'chat.exec=["/usr/local/bin/on-chat", "--verbose"]'
+./pcds rules set chat.webhooks=null chat.exec=null   # off again
+```
+
+| Rule | Default | |
+|---|---|---|
+| `chat.webhooks` | none | `http://` or `https://` URLs each event is POSTed to as JSON |
+| `chat.secret` | none | signs every POST: `X-PCDS-Signature: sha256=<HMAC-SHA256 of the body, hex>` |
+| `chat.exec` | none | a program and its arguments, run for each event with the event's JSON on stdin. No shell: chat text is never part of a command line |
+| `chat.commandPrefix` | none | messages that start with it also carry `command` and `args` |
+| `chat.timeoutSeconds` | `5` | the longest a webhook or the program may take (0.1 to 60) |
+| `chat.retries` | `2` | more tries when a webhook gives no answer, 429 or 5xx, 1 s, 2 s... apart (0 to 10) |
+
+An event:
+
+```json
+{"id": 12, "time": 1760781234567, "client": 3, "name": "Ann", "steamId": "76561198000000000",
+ "planet": "Prime", "text": "!tp home", "command": "tp", "args": ["home"]}
+```
+
+`id` counts up from 1 at each start, `time` is Unix time in milliseconds, `client` the
+connection, `steamId` the verified SteamID (invite-code players; `null` over direct IP),
+`command` `null` and `args` empty when the message is not a command. To check a signature, in
+Python: `hmac.compare_digest(header, "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest())`.
+
+A webhook that answers with a 2xx and `{"reply": "text"}`, or a program that prints text, puts
+that text into the chat for everyone, from the server (500 characters at most). Tools can also
+read events and write to the chat through the admin API:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:7782/api/chat/events?after=0&wait=30'
+curl -H "Authorization: Bearer $TOKEN" -d '{"text": "Restart in 5 minutes"}' http://127.0.0.1:7782/api/chat
+```
+
+`GET /api/chat/events?after=ID&wait=SECONDS` answers `{"events": [...], "last": ID, "dropped": N}`
+with the events after `ID`, waiting up to `wait` seconds (60 at most) when there are none yet.
+Pass `last` as the next `after`. The server keeps the last 256 events. A gap in the ids means
+you missed some. A waiting request holds one of the admin API's 16 connections. One thread sends each event to every webhook and then to the program, in
+order. When they fall more than 256 events behind, the oldest are dropped, counted in `dropped`
+and logged. Webhook URLs, the secret and the program's arguments are never logged (the log and
+`/api/status` show them as `(set)`). Webhooks get no redirects and no proxy, so events go only
+to the URLs you set. Messages the server sends itself are not events.
+
 ## Game updates
 
 Players and the server must run the same game version; players with another version are

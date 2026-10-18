@@ -32,6 +32,7 @@ mod animals;
 mod bench;
 mod access;
 mod admin;
+mod chathooks;
 mod cli;
 mod data;
 mod deconstruct;
@@ -332,7 +333,7 @@ fn serve(dir: String, save_path: String) {
     let admin = match (env("PCDS_ADMIN").unwrap_or_else(|| "127.0.0.1:7782".into()), env("PCDS_ADMIN_TOKEN")) {
         (addr, Some(token)) if addr != "off" => {
             let web = env("PCDS_WEB").or_else(|| std::env::current_exe().ok().map(|e| e.with_file_name("web").join("index.html").to_string_lossy().to_string()));
-            match admin::start(&addr, token, web) {
+            match admin::start(&addr, token, web, game.ext.chat.feed.clone()) {
                 Ok(rx) => {
                     println!("admin: http://{addr}/");
                     Some(rx)

@@ -21,4 +21,5 @@ pub struct Ext {
     pub animals: crate::animals::State,
     pub first_item_linked: crate::handlers::FirstItemLinked,
     pub default_colors: crate::handlers::DefaultColors,
+    pub chat: crate::chathooks::State,
 }

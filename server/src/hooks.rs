@@ -22,6 +22,7 @@ pub fn init(game: &mut Game) {
 
 pub fn tick(game: &mut Game) {
     crate::handlers::default_colors_tick(game);
+    crate::chathooks::tick(game);
     crate::machines::tick(game);
     crate::meteo::tick(game);
     crate::logistics::tick(game);

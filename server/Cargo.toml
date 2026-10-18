@@ -16,7 +16,11 @@ path = "src/main.rs"
 ctrlc = { version = "3.5.2", features = ["termination"] }
 indexmap = "2"
 libc = "0.2"
+# ring is rustls' own crypto (no new crate): HMAC-SHA256 for signed chat webhooks.
+ring = "0.17"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 steamworks = "0.13.1"
+# Chat webhooks over HTTP and HTTPS (rustls with ring, Mozilla's roots; no OpenSSL).
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 xxhash-rust = { version = "0.8.19", features = ["xxh32", "xxh64"] }

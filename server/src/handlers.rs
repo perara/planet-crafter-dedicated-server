@@ -87,6 +87,7 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
         "ChatHandler.SendChatMessageServerRpc" => {
             let message = a.s(0).unwrap_or_default();
             game.net.rpc_scene(Target::All, "ChatHandler.ReceiveChatMessageClientRpc", &[json!(client), json!(message)]);
+            crate::chathooks::chat(game, client, &message);
         }
         "MessagesHandler.AddNewReceivedMessageServerRpc" => crate::handlers::add_message(game, a.i(0), a.b(1)),
         "MessagesHandler.MarkAsReadServerRpc" => {
