@@ -52,6 +52,7 @@ mod logistics;
 mod machines;
 mod meteo;
 mod model;
+mod native;
 mod net;
 mod newworld;
 mod objects;
