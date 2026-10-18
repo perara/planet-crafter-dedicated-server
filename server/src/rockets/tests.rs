@@ -201,7 +201,7 @@ fn only_the_rocket_exactly_on_the_craft_spawn_is_sent() {
     assert_eq!(g.net.out.len(), before + 1, "the error, to the sender");
     let group = g.data.group("RocketOxygen1").unwrap();
     g.create_world_object(group, on, true);
-    g.wos.get_mut(&on).unwrap().position = [197.0, 15.556, 184.04229];
+    g.wos.get_mut(&on).unwrap().position = [197.0, 15.556, 184.0423];
     g.instantiate(on, false, 0);
     rpc(&mut g, platform, "ConstructibleProxy.SendInSpaceServerRpc");
     assert!(!g.wos[&on].is_placed() && g.wos[&near].is_placed());

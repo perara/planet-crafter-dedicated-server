@@ -23,6 +23,13 @@ the escape pod) so it does not take over a saved player.
 - **The probe player is saved at 0,0,0** by the reference (it never sent a transform); here at
   its spawn position. Death canisters land below it accordingly.
 - **The save's `modded` is true** on the reference (BepInEx).
+- **What the owner of an object writes**: a vehicle's default colour (WorldObjectColor on its
+  owner), its VehicleShareData, a dropped item's `_scale` and `_transformSync`: the host owns
+  them on the reference, a player here.
+- **Network visibility by distance** (animals, drones, players): the reference hides them from
+  the probe, whose player it sees at 0,0,0, so it sends spawns followed by despawns. This
+  server shows every animal to everyone (README "Differences").
+- **A space event's reference client** is the player nearest the launch: the host there.
 
 ## Time
 
@@ -31,12 +38,26 @@ the escape pod) so it does not take over a saved player.
   (gauges, units) by their rate over the second half of the run.
 - **Network ticks** in transform states are server time.
 - **Which periodic update comes first** inside one script step (sorted per step).
+- **Frame timing**: the reference runs at 30 frames a second (the plugin sets it), so a
+  coroutine's WaitForSeconds ends up to a frame late each round; a trade rocket's growth at
+  one poll can be a step behind ours (4 against 5 after 24 s; equal again later).
 
 ## Randomness in the game (Random.Range, Random.state)
 
 - MachineOutsideGrowerUpdateStartClientRpc's random state.
 - DropSomeItems on death (50 % per item).
-- Unlinked blueprint chips, meteor events, recycler drop spots.
+- Unlinked blueprint chips, meteor events and their seeds, recycler drop spots, genetic
+  traits of spawned animals, portal choices (UpdateChoices).
+
+Shown by running the reference twice (players: the items kept after dying; machines and
+energy: the grower's random state).
+
+## Approximations the README names
+
+- **Procedural wrecks come in 64 layouts per size** (README "Differences"): a wreck generated
+  here, outside or inside a world instance, holds the layout of its pool seed, not of the
+  game's seed. Two reference runs of `instances.json` generate the same objects; ours differ.
+  Opening the instance itself (seed 400000032) matches.
 
 ## Safety rules (deliberate)
 
