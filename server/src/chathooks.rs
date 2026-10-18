@@ -33,7 +33,20 @@ const REPLIES: usize = 64;
 const MAX_REPLY: usize = 500;
 const MAX_ANSWER: u64 = 64 << 10;
 /// The longest a GET /api/chat/events may wait.
-const MAX_WAIT: u64 = 60;
+const MAX_WAIT: u64 = 30;
+/// GET /api/chat/events long polls waiting at once; more are answered 503 at once, so polls
+/// never hold every admin connection.
+pub const MAX_POLLS: usize = 8;
+static POLLS: AtomicU64 = AtomicU64::new(0);
+
+/// One waiting long poll; freed when the request ends.
+struct Poll;
+
+impl Drop for Poll {
+    fn drop(&mut self) {
+        POLLS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 /// The webhook POST's signature header: "sha256=" and the body's HMAC-SHA256, hex.
 const SIGNATURE: &str = "X-PCDS-Signature";
 
@@ -231,7 +244,17 @@ pub fn api(feed: &Feed, method: &str, path: &str, query: &str, body: &Value) -> 
     match (method, path) {
         ("GET", "/api/chat/events") => {
             let q = |k: &str| query.split('&').find_map(|kv| kv.strip_prefix(k)?.strip_prefix('=')?.parse::<u64>().ok());
-            let (events, last) = feed.after(q("after").unwrap_or(0), Duration::from_secs(q("wait").unwrap_or(0).min(MAX_WAIT)));
+            let wait = q("wait").unwrap_or(0).min(MAX_WAIT);
+            let _poll = if wait > 0 {
+                if POLLS.fetch_add(1, Ordering::SeqCst) >= MAX_POLLS as u64 {
+                    POLLS.fetch_sub(1, Ordering::SeqCst);
+                    return (503, json!({"error": format!("{MAX_POLLS} chat polls are already waiting: try again, or poll without wait")}).to_string());
+                }
+                Some(Poll)
+            } else {
+                None
+            };
+            let (events, last) = feed.after(q("after").unwrap_or(0), Duration::from_secs(wait));
             (200, json!({"events": events, "last": last, "dropped": feed.dropped.load(Ordering::Relaxed)}).to_string())
         }
         ("POST", "/api/chat") => match body["text"].as_str().filter(|t| !t.trim().is_empty()) {
@@ -254,9 +277,15 @@ fn next_for_hooks(feed: &Feed, last: u64, wait: Duration) -> Vec<Event> {
     events
 }
 
+/// How long a webhook that failed (after its retries) is left out: one dead URL must not hold
+/// the healthy hooks back event after event.
+const COOL_DOWN: Duration = Duration::from_secs(60);
+
 /// The worker: every event to every webhook, then the exec program, one after the other.
 fn deliver(feed: &Feed, mut last: u64) {
     let mut agent: Option<(f32, ureq::Agent)> = None;
+    // Per webhook URL: left out until then, and the events skipped meanwhile.
+    let mut resting: std::collections::HashMap<String, (Instant, u64)> = Default::default();
     loop {
         for event in next_for_hooks(feed, last, Duration::from_secs(3600)) {
             last = event.id;
@@ -268,11 +297,24 @@ fn deliver(feed: &Feed, mut last: u64) {
             }
             let http = &agent.as_ref().unwrap().1;
             for (i, url) in chat.webhooks.iter().enumerate() {
+                if let Some((until, skipped)) = resting.get_mut(url) {
+                    if Instant::now() < *until {
+                        *skipped += 1;
+                        continue;
+                    }
+                    if *skipped > 0 {
+                        eprintln!("chat hooks: webhook {} gets events again ({skipped} skipped while it failed)", i + 1);
+                    }
+                    resting.remove(url);
+                }
                 // Never the URL in the log: it may hold a token (as Discord's do).
                 match post(http, url, &body, chat.secret.as_deref(), chat.retries) {
                     Ok(Some(reply)) => reply_or_log(feed, &reply),
                     Ok(None) => {}
-                    Err(e) => eprintln!("chat hooks: webhook {} failed: {e}", i + 1),
+                    Err(e) => {
+                        eprintln!("chat hooks: webhook {} failed: {e}; left out for {}s", i + 1, COOL_DOWN.as_secs());
+                        resting.insert(url.clone(), (Instant::now() + COOL_DOWN, 0));
+                    }
                 }
             }
             if !chat.exec.is_empty() {
@@ -383,8 +425,13 @@ fn exec(argv: &[String], body: &str, timeout: Duration) -> Result<String, String
             Err(e) => return Err(e.to_string()),
         }
     };
-    // A program that exited but left a child holding its output: no answer.
-    let out = output.recv_timeout(deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(100))).map_err(|_| "exited, but its output stayed open (a child of it holds it)".to_string())?;
+    // A program that exited but left a child holding its output: no answer, and the group is
+    // ended. Its id cannot belong to anyone else yet: a group keeps it while a member lives.
+    let Ok(out) = output.recv_timeout(deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(100))) else {
+        // SAFETY: a plain signal to the process group our child led.
+        unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) };
+        return Err("exited, but its output stayed open (a child of it holds it): its process group was killed".into());
+    };
     if !status.success() {
         return Err(status.to_string());
     }
@@ -614,6 +661,12 @@ pub mod tests {
         assert!(start.elapsed() < Duration::from_secs(1), "the timeout holds: {:?}", start.elapsed());
         std::thread::sleep(Duration::from_millis(1500));
         assert!(!marker.exists(), "the program's own child was killed too");
+        // A program that exits at once but leaves a child holding its output: the child dies too.
+        let marker = std::env::temp_dir().join(format!("pcds-exec-left-{}", std::process::id()));
+        let script = format!("(sleep 1; touch {}) & echo hi", marker.display());
+        assert!(exec(&["sh".into(), "-c".into(), script], "{}", Duration::from_millis(300)).unwrap_err().contains("killed"));
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(!marker.exists(), "the child left behind was killed");
     }
 
     /// While nobody is in the game (world.pauseWhenEmpty), replies are dropped, not kept for

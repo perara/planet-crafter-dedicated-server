@@ -415,6 +415,13 @@ impl Front {
         match admin::start(&addr, token, self.web.clone(), self.hooks.feed.clone()) {
             Ok(rx) => {
                 println!("admin: http://{addr}/");
+                // Plain HTTP: off this machine the token and every action travel in the clear.
+                // The container binds 0.0.0.0 inside its own network; its port is published on
+                // 127.0.0.1.
+                let loopback = addr.rsplit_once(':').and_then(|(h, _)| h.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok()).is_some_and(|ip| ip.is_loopback());
+                if !loopback && crate::env("PCDS_CONTAINER").is_none() {
+                    eprintln!("admin: WARNING: {addr} is reachable from other machines over plain HTTP; bind 127.0.0.1 and use an SSH tunnel or an HTTPS proxy");
+                }
                 self.admin = Some(rx);
             }
             Err(e) => eprintln!("admin: {addr}: {e}"),
@@ -1153,7 +1160,8 @@ impl Front {
         }
         let Some(live) = &self.live else { return (503, "{\"error\":\"the game is starting\"}".into()) };
         let target = updater::other(&live.name).to_string();
-        let fail = body["failForTest"].as_str().map(str::to_string);
+        // The e2e tests' fault injection; off unless the front was started with PCDS_TEST_FAULTS=1.
+        let fail = body["failForTest"].as_str().filter(|_| crate::env("PCDS_TEST_FAULTS").as_deref() == Some("1")).map(str::to_string);
         self.updates.seq += 1;
         let seq = self.updates.seq;
         if body["rollback"] == true {

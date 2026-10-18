@@ -212,7 +212,7 @@ example `--planet Aqualis`, chooses its options). [compose.yaml](compose.yaml) d
 | `PCDS_AUTOSAVE` | `5` | minutes between saves; `0` saves only on stop |
 | `PCDS_BACKUPS` | `24` | save backups kept in `run/worlds/backups/`; `0` keeps none |
 | `PCDS_BACKUP_MINUTES` | `60` | minutes between backups |
-| `PCDS_ADMIN` | `127.0.0.1:7782` | admin API and web page; `off` disables them. `pcds` reaches it on 127.0.0.1, so bind it to 127.0.0.1 or 0.0.0.0 |
+| `PCDS_ADMIN` | `127.0.0.1:7782` | admin API and web page; `off` disables them. Plain HTTP: keep it on 127.0.0.1 and reach it from elsewhere through an SSH tunnel (`ssh -L 7782:127.0.0.1:7782 HOST`) or an HTTPS proxy; another address logs a warning |
 | `PCDS_ADMIN_TOKEN` | generated | the admin API's bearer token |
 | `PCDS_MAX_PLAYERS` | `16` | players at once; more are refused with the game's session-full message (the `limits.maxPlayers` rule overrides it) |
 | `PCDS_WORLD` | `world` | the world the server runs: `run/worlds/<name>.json` (`pcds world use NAME`) |
@@ -359,9 +359,9 @@ curl -H "Authorization: Bearer $TOKEN" -d '{"text": "Restart in 5 minutes"}' htt
 ```
 
 `GET /api/chat/events?after=ID&wait=SECONDS` answers `{"events": [...], "last": ID, "dropped": N}`
-with the events after `ID`, waiting up to `wait` seconds (60 at most) when there are none yet.
+with the events after `ID`, waiting up to `wait` seconds (30 at most) when there are none yet.
 Pass `last` as the next `after`. The server keeps the last 256 events. A gap in the ids means
-you missed some. A waiting request holds one of the admin API's 16 connections. One thread sends each event to every webhook and then to the program, in
+you missed some. At most 8 requests wait at once (more get 503); a request without `wait` always answers. A webhook that fails (after its retries) is left out for 60 s, so it does not hold the other hooks back. One thread sends each event to every webhook and then to the program, in
 order. When they fall more than 256 events behind, the oldest are dropped, counted in `dropped`
 and logged. Webhook URLs, the secret and the program's arguments are never logged (the log and
 `/api/status` show them as `(set)`). Webhooks get no redirects and no proxy, so events go only

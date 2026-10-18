@@ -218,9 +218,14 @@ impl Rules {
     }
 
     /// The rules after a JSON merge patch (RFC 7386: objects merge, null resets a value).
+    /// Each value is checked as JSON first: a number past f32 would become infinity, which
+    /// serializes as null and leaves a rules.json the server cannot load.
     pub fn patched(&self, patch: &Value) -> Result<Rules, String> {
         let mut v = serde_json::to_value(self).map_err(|e| e.to_string())?;
         merge(&mut v, patch);
+        for knob in crate::config::KNOBS.iter().filter(|k| k.source == crate::config::Source::Rules) {
+            knob.check(&crate::config::at(&v, knob.key))?;
+        }
         serde_json::from_value(v).map_err(|e| e.to_string())
     }
 
@@ -331,6 +336,10 @@ mod tests {
         let back = r.patched(&serde_json::json!({"gauges": {"thirstDrain": null}})).unwrap();
         assert_eq!(back.gauges.thirst_drain, 1.0, "null resets to the default");
         assert!(Rules::default().patched(&serde_json::json!({"gauges": {"thirstDrian": 2}})).is_err(), "typos are refused");
+        // Past f32 it would be infinity, saved as null: refused before it gets there.
+        for big in [serde_json::json!({"speed": {"growth": 1e39}}), serde_json::json!({"chat": {"timeoutSeconds": 1e39}}), serde_json::json!({"death": {"dropChance": 1e39}})] {
+            assert!(Rules::default().patched(&big).is_err(), "{big}");
+        }
     }
 
     #[test]
@@ -351,7 +360,7 @@ mod tests {
             serde_json::json!({"chat": {"timeoutSeconds": 0}}),
             serde_json::json!({"chat": {"retries": 11}}),
         ] {
-            assert!(Rules::default().patched(&patch).unwrap().validate(&data).is_err(), "{patch}");
+            assert!(Rules::default().patched(&patch).and_then(|r| r.validate(&data)).is_err(), "{patch}");
         }
         assert!(Rules::default().patched(&serde_json::json!({"limits": {"buildings": {"Drill1": 2}}})).unwrap().validate(&data).is_ok());
         let hooks = serde_json::json!({"chat": {"webhooks": ["https://example.com/hook", "http://127.0.0.1:8080/"], "secret": "s", "exec": ["/usr/local/bin/on-chat"], "commandPrefix": "!"}});
