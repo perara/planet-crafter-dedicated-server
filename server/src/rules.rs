@@ -235,9 +235,7 @@ impl Rules {
     }
 
     pub fn save(&self, path: &str) -> std::io::Result<()> {
-        let tmp = format!("{path}.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(self).unwrap_or_default() + "\n")?;
-        std::fs::rename(&tmp, path)
+        crate::save::write_atomic(path, (serde_json::to_string_pretty(self).unwrap_or_default() + "\n").as_bytes())
     }
 
     /// limits.maxPlayers, else PCDS_MAX_PLAYERS, else 16.

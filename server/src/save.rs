@@ -151,23 +151,28 @@ impl SaveFile {
         text
     }
 
-    /// Writes atomically: a crash mid-write leaves the previous save. The file beside it is this
-    /// write's own (two banks may save at once, as when the front ends during a flip): each
-    /// rename moves one whole save over the path.
+    /// Writes atomically (write_atomic).
     pub fn write(&self, path: &str) -> std::io::Result<()> {
-        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp = format!("{path}.{}-{n}.tmp", std::process::id());
-        let written = std::fs::File::create_new(&tmp).and_then(|mut file| {
-            file.write_all(self.to_text().as_bytes())?;
-            file.sync_all()?;
-            std::fs::rename(&tmp, path)
-        });
-        if written.is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-        written
+        write_atomic(path, self.to_text().as_bytes())
     }
+}
+
+/// Writes a file atomically: a crash mid-write leaves the previous one. The file beside it is
+/// this write's own (two banks may write at once, as when the front ends during a flip): each
+/// rename moves one whole file over the path.
+pub fn write_atomic(path: &str, bytes: &[u8]) -> std::io::Result<()> {
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = format!("{path}.{}-{n}.tmp", std::process::id());
+    let written = std::fs::File::create_new(&tmp).and_then(|mut file| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 /// UTC "YYYYMMDD-HHMMSS" (days to civil date: Howard Hinnant's algorithm).

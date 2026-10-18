@@ -256,7 +256,9 @@ default), all or none.
 Access lists live in `run/access.json`: `allowedIPs` (addresses or CIDR ranges allowed to
 connect; empty means everyone), `whitelist` (names or SteamID64s; empty means everyone),
 `bannedNames` and `bannedIPs`. The server reads the file at start and writes it on every ban,
-unban or change from the web page: edit it by hand only while the server is stopped.
+unban or change from the web page: edit it by hand only while the server is stopped. A file
+that exists but does not parse stops the start (it is never read as empty lists, which would
+unban everyone): fix it or move it away.
 
 - **SteamIDs are verified for invite-code players only.** A SteamID64 entry matches only that
   verified SteamID, never a player name. A banned SteamID is refused as soon as it connects.
