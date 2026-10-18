@@ -65,7 +65,7 @@ const RESTARTED: &str = "The server restarted after an error: join again";
 
 enum Conn {
     /// Steam networking: the connection carries the verified SteamID.
-    Steam { steam_id: u64, connection: NetConnection, split: Option<(Vec<u8>, usize)> },
+    Steam { connection: NetConnection, split: Option<(Vec<u8>, usize)> },
     Ip(utp::Token),
 }
 
@@ -504,20 +504,25 @@ impl Front {
                 }
                 ListenSocketEvent::Connected(event) => {
                     let steam_id = event.remote().steam_id().map(|id| id.raw()).unwrap_or(0);
-                    joined.push((steam_id, event.take_connection()));
+                    let client = self.next_client;
+                    self.next_client += 1;
+                    // Its disconnect names the connection by this (not by SteamID: the same
+                    // player may have an old connection still closing).
+                    let connection = event.take_connection();
+                    let _ = connection.set_connection_user_data(client as i64);
+                    joined.push((client, steam_id, connection));
                 }
                 ListenSocketEvent::Disconnected(event) => {
                     let peer = event.remote().steam_id().map(|id| id.raw()).unwrap_or(0);
                     println!("{peer}: disconnected ({:?})", event.end_reason());
-                    gone.extend(self.conns.iter().filter(|(_, c)| matches!(c, Conn::Steam { steam_id, .. } if *steam_id == peer)).map(|(c, _)| *c));
+                    let fresh: Vec<(u64, u64)> = joined.iter().map(|(c, s, _)| (*c, *s)).collect();
+                    gone.extend(disconnected(event.user_data(), peer, &fresh));
                 }
             }
         }
-        for (steam_id, connection) in joined {
-            let client = self.next_client;
-            self.next_client += 1;
+        for (client, steam_id, connection) in joined {
             println!("client {client}: connected over Steam as {steam_id}");
-            self.conns.insert(client, Conn::Steam { steam_id, connection, split: None });
+            self.conns.insert(client, Conn::Steam { connection, split: None });
             self.to_bank(ipc::CONNECTED, client, json!({"steamId": steam_id, "trusted": false}).to_string().as_bytes(), 0);
         }
         for (client, conn) in self.conns.iter_mut() {
@@ -1329,6 +1334,16 @@ impl Front {
     }
 }
 
+/// The client a Steam disconnect is about: the one whose connection carries its id; one that
+/// closed before its id was set (connected and gone within one poll) is the one of that
+/// SteamID that connected in this poll.
+fn disconnected(user_data: i64, peer: u64, joined_now: &[(u64, u64)]) -> Vec<u64> {
+    match u64::try_from(user_data).ok().filter(|c| *c > 0) {
+        Some(client) => vec![client],
+        None => joined_now.iter().filter(|(_, s)| *s == peer).map(|(c, _)| *c).collect(),
+    }
+}
+
 /// Whether the SteamID a direct-IP client reports is believed: only from this machine, and
 /// only when asked (PCDS_TRUST_LOOPBACK=1: tests, the load and probe tools). Behind a UDP
 /// relay (playit.gg, frp, ssh -R) every player comes from 127.0.0.1.
@@ -1547,6 +1562,14 @@ mod tests {
             assert_eq!(e, format!("chat config unreadable at {field}"));
         }
         assert_eq!(chat_config(b"{\"secret\": \"t0psecret").unwrap_err(), "chat config unreadable (not JSON)");
+    }
+
+    #[test]
+    fn a_steam_disconnect_names_its_connection_not_the_steam_id() {
+        // Client 3 is the same player's new connection: the old one's close is client 2's.
+        assert_eq!(disconnected(2, 76561198000000042, &[(3, 76561198000000042)]), [2]);
+        assert_eq!(disconnected(-1, 76561198000000042, &[(3, 76561198000000042), (4, 1)]), [3]);
+        assert!(disconnected(-1, 5, &[]).is_empty());
     }
 
     #[test]
