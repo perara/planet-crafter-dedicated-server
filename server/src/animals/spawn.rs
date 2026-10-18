@@ -850,6 +850,36 @@ mod tests {
         assert!(!game.net.objects.contains_key(&net) && game.ext.animals.spawn.animals.is_empty());
     }
 
+    /// A wild spawner the clients register (the first one hears its data), its animals asked
+    /// for, spawned near a player, and gone with their DNA once the last client unregisters.
+    #[test]
+    fn wild_spawners_register_spawn_and_go_with_their_last_client() {
+        use crate::testkit::*;
+        let Some((mut g, _)) = world() else { return };
+        join(&mut g, 2, "Bob");
+        let spawner = 101_500_000;
+        g.net.out.clear();
+        send_scene(&mut g, 1, "WorldAnimalSpawnerHandler.SpawnerRegisteredServerRpc", &[json!(spawner)]);
+        send_scene(&mut g, 2, "WorldAnimalSpawnerHandler.SpawnerRegisteredServerRpc", &[json!(spawner)]);
+        assert_eq!(sent(&g, "WorldAnimalSpawnerHandler.SendSpawnerDataClientRpc").into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(Target::Only(1), vec![json!(spawner)])]);
+        send_scene(&mut g, 1, "WorldAnimalSpawnerHandler.SpawnAnimalsServerRpc", &[json!(spawner), json!([565.0, 3.0, 494.0]), json!([2, 2]), json!(aqualis())]);
+        g.time += 1.0;
+        frame(&mut g);
+        let inventory = g.wos[&spawner].linked_inventory;
+        assert_eq!(g.inventories[&inventory].items.len(), 2, "two DNA sequences");
+        frame(&mut g);
+        assert_eq!(g.ext.animals.spawn.animals.len(), 2, "Ann stands near: they spawn");
+        let animals: Vec<u64> = g.ext.animals.spawn.animals.keys().copied().collect();
+        assert!(animals.iter().all(|a| g.net.objects.contains_key(a)));
+        send_scene(&mut g, 1, "WorldAnimalSpawnerHandler.SpawnerUnregisteredServerRpc", &[json!(spawner)]);
+        assert_eq!(g.ext.animals.spawn.animals.len(), 2, "Bob still has it");
+        send_scene(&mut g, 2, "WorldAnimalSpawnerHandler.SpawnerUnregisteredServerRpc", &[json!(spawner)]);
+        assert!(g.ext.animals.spawn.animals.is_empty() && animals.iter().all(|a| !g.net.objects.contains_key(a)));
+        assert!(g.inventories.get(&inventory).is_none_or(|i| i.items.is_empty()));
+        // Never registered: the game's dictionary would throw; nothing happens.
+        send_scene(&mut g, 2, "WorldAnimalSpawnerHandler.SpawnerUnregisteredServerRpc", &[json!(spawner + 1)]);
+    }
+
     /// Petting a shelter animal gives a genetic trait (into the backpack) once per 30 s; its
     /// growth proxy answers and resets.
     #[test]
