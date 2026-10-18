@@ -407,3 +407,12 @@ fn made_up_ids_keep_nothing() {
     rpc(&mut g, 1, 0, "UnlockedGroupsHandler.UnlockGroupGloballyServerRpc", vec![json!(iron), json!(false), json!(false)]);
     assert_eq!(unlocked(&g), before + 1);
 }
+
+/// L7: a panic in the admin's or a chat hook's work is caught and logged, and the bank goes on
+/// (it ended the bank, and every player's session, until the front started it from the save).
+#[test]
+fn a_panic_in_admin_work_does_not_end_the_bank() {
+    let Some(mut g) = test_game(save()) else { return };
+    assert_eq!(crate::bank::contained("a test request", || -> u16 { panic!("test panic") }), None);
+    assert_eq!(crate::bank::contained("a test request", || { crate::chathooks::say(&mut g, "hello"); 200 }), Some(200));
+}

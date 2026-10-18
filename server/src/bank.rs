@@ -236,7 +236,7 @@ impl Bank {
                 match f.kind {
                     ipc::CONNECTED => {
                         let c: Value = serde_json::from_slice(&f.body).unwrap_or_default();
-                        game.connect(f.n, c["steamId"].as_u64(), c["trusted"] == true, c["ip"].as_str().map(str::to_string));
+                        guarded(game, f.n, &self.save_path, |game| game.connect(f.n, c["steamId"].as_u64(), c["trusted"] == true, c["ip"].as_str().map(str::to_string)));
                     }
                     ipc::DATA if !kicked.contains(&f.n) && game.clients.contains_key(&f.n) => {
                         let before = game.net.out.len();
@@ -257,13 +257,16 @@ impl Bank {
                         let r: Value = serde_json::from_slice(&f.body).unwrap_or_default();
                         let mut autosave = r["autosaveMinutes"].as_u64().unwrap_or_else(crate::autosave_start);
                         let ctx = Ctx { save_path: &self.save_path, build_id: self.build_id.as_deref(), data_dir: &self.data_dir, loop_rate: loops.2, busy: busy_last };
-                        let (status, body) = admin_request(game, r["method"].as_str().unwrap_or(""), r["path"].as_str().unwrap_or(""), &r["body"], &ctx, &mut autosave);
+                        let request = || admin_request(game, r["method"].as_str().unwrap_or(""), r["path"].as_str().unwrap_or(""), &r["body"], &ctx, &mut autosave);
+                        let (status, body) = contained("an admin request", request).unwrap_or_else(|| (500, "{\"error\":\"the server failed on this request\"}".to_string()));
                         let answer = json!({"status": status, "body": body, "autosaveMinutes": autosave});
                         self.link.send(ipc::ANSWER, f.n, answer.to_string().as_bytes());
                     }
                     ipc::SAVE => autosave(game, &self.save_path),
                     ipc::STOP => std::process::exit(final_save(game, &self.save_path)),
-                    ipc::SAY => chathooks::say(game, &String::from_utf8_lossy(&f.body)),
+                    ipc::SAY => {
+                        contained("a chat hook's reply", || chathooks::say(game, &String::from_utf8_lossy(&f.body)));
+                    }
                     ipc::HANDOFF => {
                         // A tick boundary with nothing queued: what is waiting goes out first.
                         post(game, &mut approved, &mut mail);
@@ -682,6 +685,17 @@ fn guarded(game: &mut Game, client: u64, save_path: &str, work: impl FnOnce(&mut
         game.kick(client, "Server error");
         let _ = persist(game, save_path);
     }
+}
+
+/// The admin's or a chat hook's work: a panic there (the hook printed it) is logged and the bank
+/// goes on (there is no client to kick, and the world is the one the clients have). Some(what
+/// the work returned) when it finished.
+pub(crate) fn contained<T>(what: &str, work: impl FnOnce() -> T) -> Option<T> {
+    let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+    if done.is_err() {
+        eprintln!("{what}: the server panicked on it; going on");
+    }
+    done.ok()
 }
 
 thread_local! {
