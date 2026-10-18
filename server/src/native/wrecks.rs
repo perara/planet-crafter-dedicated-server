@@ -1,7 +1,7 @@
-//! wrecks.json from the game files (extractor/Generation.cs Wrecks), with no game running: the
-//! generators' prefabs, the RandomizePropData lists their walks take, and each seed's layout
-//! from the Tessera port (tessera.rs) as the extractor gets it from the game. `native-reach`
-//! (reach below) measures how much of the game's IL a port like that has to cover.
+//! wrecks.json from the game files, with no game running (what the Wine-era extractor got
+//! from the running game): the generators' prefabs, the RandomizePropData lists their walks
+//! take, and each seed's layout from the Tessera port (tessera.rs), as the game lays it out.
+//! `native-reach` (reach below) measures how much of the game's IL a port like that has to cover.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -673,10 +673,10 @@ fn layout(model: &tessera::Model, scene: &[tessera::SceneTile], seed: u32, prefa
     Err(format!("{prefab} seed {seed}: Tessera failed on seeds {seed} to {}", seed + 49))
 }
 
-/// `pcds-server native-wrecks GAME_DIR OUT_FILE`: wrecks.json alone (read-game writes it too).
+/// `pcds native-wrecks GAME_DIR OUT_FILE`: wrecks.json alone (read-game writes it too).
 pub fn debug(args: &[String]) {
     let (Some(game), Some(out)) = (args.first(), args.get(1)) else {
-        eprintln!("usage: pcds-server native-wrecks GAME_DIR OUT_FILE");
+        eprintln!("usage: pcds native-wrecks GAME_DIR OUT_FILE");
         std::process::exit(2);
     };
     let mut ctx = Ctx::open(Path::new(game)).expect("open game");
@@ -720,7 +720,7 @@ fn sig_debug(sig: &super::dotnet::TypeSig) -> String {
 /// sizes. Virtual calls reach the overrides of the types created on the way (newobj) and of the
 /// `+NS.CLASS` ones given (components Unity creates): rapid type analysis. `-TEXT` leaves out the
 /// types whose name holds TEXT (branches a configuration never takes)
-/// (pcds-server native-reach GAME_DIR NS.CLASS METHOD ASSEMBLY... [+NS.CLASS...] [-TEXT...]).
+/// (pcds native-reach GAME_DIR NS.CLASS METHOD ASSEMBLY... [+NS.CLASS...] [-TEXT...]).
 pub fn reach(args: &[String]) {
     use super::dotnet::{Member, TypeName, TypeSig};
     use std::collections::{BTreeMap, HashSet, VecDeque};

@@ -64,7 +64,7 @@ The server and its tools:
 
 Everything the server keeps lives in run/ of the release or checkout folder (PCDS_HOME
 overrides it): worlds/ (one save per world, with their backups/), server.env, access.json,
-rules.json, data/<game version>/, the extractor, and bin/ (the program the units run, and the
+rules.json, data/<game version>/ (the game tables), and bin/ (the program the units run, and the
 two banks a/ and b/ the server runs from, with bin/active). The game folder is --game DIR,
 PCDS_GAME_DIR, the one used last (run/game-dir), else the Steam library that lists the game.
 ";
@@ -347,7 +347,7 @@ fn is_tty() -> bool {
     unsafe { libc::isatty(0) == 1 }
 }
 
-/// A random token (the admin API's, the extractor API's).
+/// A random token (the admin API's).
 fn token() -> Result<String> {
     let mut bytes = [0u8; 16];
     fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)).map_err(|e| format!("/dev/urandom: {e}"))?;

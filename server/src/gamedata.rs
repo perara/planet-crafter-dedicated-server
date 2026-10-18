@@ -1,5 +1,5 @@
 //! The game's static data for one version (data/<version>/gamedata.json, read from the game's
-//! files by `pcds-server read-game`): groups (items and buildings) with their parameters, every
+//! files by `pcds read-game`): groups (items and buildings) with their parameters, every
 //! other game asset, and the network layout of each world object the server can spawn.
 
 use std::collections::HashMap;

@@ -242,7 +242,7 @@ unpacks it there, and asks the front to flip (`POST /api/update {"bank": "b"}`).
 new bank has confirmed does the front point `run/bin/active` at it (a new symlink renamed over
 the old one), so a restart of the whole unit starts the bank that last ran well. The old bank
 stays installed: flipping back needs no download. The release stays one tarball with one
-binary (`pcds-server front`, `pcds-server game`, the tools).
+binary (`pcds serve`, the front; `pcds bank`, the game process; the tools).
 
 **Supervisor.** The front, the systemd unit's process; the game process is its child (same
 cgroup, so stopping the unit stops both). A game process that dies outside a flip cannot be
@@ -548,8 +548,8 @@ Logic (the game process, `gameproc.rs`, new, from `main.rs` and `split.rs`):
 Tools, unchanged, in the same binary: `load.rs`, `probe.rs` (both use `utp.rs` as a client),
 `extract.rs`, `newworld.rs`, `bench.rs` (the acceptance test).
 
-`main.rs` keeps only the subcommand dispatch. The `pcds` script's `run` starts `pcds-server
-front`, which starts the active bank's `pcds-server game`.
+`main.rs` keeps only the subcommand dispatch. `pcds run` starts the active bank's `pcds serve`
+(the front), which starts `pcds bank`.
 
 ## Not proven by the spike (at the time; see "As built")
 
