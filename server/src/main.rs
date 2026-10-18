@@ -292,11 +292,16 @@ fn main() {
     let port = listen.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
     let started = Instant::now();
     let mut loops = (0u32, Instant::now(), 0u32);
+    // Time spent working (not waiting) in the current second, its longest loop; and the last
+    // second's, for the status.
+    let (mut busy, mut busy_last) = ((Duration::ZERO, Duration::ZERO), (Duration::ZERO, Duration::ZERO));
 
     let mut links: HashMap<u64, Link> = HashMap::new();
     // The client behind each direct-IP connection, from its Connected event to its end.
     let mut ip_clients: HashMap<utp::Token, u64> = HashMap::new();
     let mut approved: HashSet<u64> = HashSet::new();
+    // Each client's batch, and the clients whose own packets brought them something this loop.
+    let (mut mail, mut urgent): (idmap::FxHashMap<u64, wire::Batch>, Vec<u64>) = Default::default();
     let mut pending_drop: Vec<(u64, Instant)> = Vec::new();
     let mut next_client = 1u64;
     let mut next_save = Instant::now() + Duration::from_secs(autosave_minutes.max(1) * 60);
@@ -304,13 +309,15 @@ fn main() {
     while !stop.load(Ordering::SeqCst) {
         // A frame every 5 ms: the game tick and Steam. A direct-IP packet in between is handled
         // at once, and what it brings goes out at once.
-        let frame = Instant::now() >= next_frame;
+        let woke = Instant::now();
+        let frame = woke >= next_frame;
         if frame {
             next_frame = Instant::now() + FRAME;
             loops.0 += 1;
         }
         if loops.1.elapsed() >= Duration::from_secs(1) {
             loops = (0, Instant::now(), loops.0);
+            busy_last = std::mem::take(&mut busy);
         }
         // Client ids are given as connections appear, so a connection that also sends or ends
         // within this loop is found.
@@ -391,7 +398,11 @@ fn main() {
             // Gone or kicked: nothing more from it reaches the game (the reason still goes out).
             let kicked = pending_drop.iter().any(|(c, _)| *c == client) || game.kicks.iter().any(|(c, _)| *c == client);
             if links.contains_key(&client) && !kicked {
+                let before = game.net.out.len();
                 guarded(&mut game, client, &save_path, |game| game.receive(client, &batch));
+                if game.net.out[before.min(game.net.out.len())..].iter().any(|(to, _, _)| to.reaches(client)) && !urgent.contains(&client) {
+                    urgent.push(client);
+                }
             }
         }
         if frame && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| game.tick())).is_err() {
@@ -403,18 +414,27 @@ fn main() {
         if std::mem::take(&mut game.save_requested) {
             persist(&mut game, &save_path);
         }
-        // Answers and events go out now; movement alone waits for MOVEMENT_EVERY.
-        let send_now = game.net.out.iter().any(|(_, kind, _)| *kind != protocol::NETWORK_TRANSFORM) || (frame && movement_sent.elapsed() >= MOVEMENT_EVERY);
-        if send_now {
-            deliver(&mut game, &links, &mut approved, utp.as_mut());
+        // What a client's own packets brought it goes out now; the rest (other players'
+        // movement and doings, the world's changes) every MOVEMENT_EVERY.
+        post(&mut game, &mut approved, &mut mail);
+        let everyone = frame && movement_sent.elapsed() >= MOVEMENT_EVERY;
+        let send_now = everyone || !urgent.is_empty();
+        if everyone {
             movement_sent = Instant::now();
+            let all: Vec<u64> = mail.keys().copied().collect();
+            send_mail(&mut mail, &all, &links, utp.as_mut());
+        } else if !urgent.is_empty() {
+            send_mail(&mut mail, &urgent, &links, utp.as_mut());
         }
+        urgent.clear();
         // Kicked or refused: the reason first, the disconnect a moment later.
         for (client, reason) in std::mem::take(&mut game.kicks) {
             if pending_drop.iter().any(|(c, _)| *c == client) {
                 continue;
             }
             println!("client {client}: kicked ({reason})");
+            // What it was sent before goes first.
+            send_mail(&mut mail, &[client], &links, utp.as_mut());
             let units: Vec<u16> = reason.encode_utf16().collect();
             let mut w = wire::Writer::new();
             w.packed_i32(0).u32(units.len() as u32);
@@ -452,7 +472,7 @@ fn main() {
         pending_drop.retain(|(_, due)| *due > now);
         if let Some(rx) = &admin {
             while let Ok(request) = rx.try_recv() {
-                let ctx = Status { invite_code: invite_code.as_deref(), network, port, started, autosave_minutes, loop_rate: loops.2, save_path: &save_path };
+                let ctx = Status { invite_code: invite_code.as_deref(), network, port, started, autosave_minutes, loop_rate: loops.2, busy: busy_last, save_path: &save_path };
                 let (status, body) = admin_request(&mut game, &request, &ctx, &stop, &mut autosave_minutes, &links);
                 let _ = request.reply.send((status, body));
                 if request.path == "/api/settings" {
@@ -467,6 +487,8 @@ fn main() {
             next_save += Duration::from_secs(autosave_minutes * 60);
             persist(&mut game, &save_path);
         }
+        let work = woke.elapsed();
+        busy = (busy.0 + work, busy.1.max(work));
         let pause = next_frame.saturating_duration_since(Instant::now());
         match &utp {
             Some(utp) => utp.wait(pause),
@@ -486,6 +508,8 @@ struct Status<'a> {
     started: Instant,
     autosave_minutes: u64,
     loop_rate: u32,
+    /// The last second's work time and longest loop.
+    busy: (Duration, Duration),
     save_path: &'a str,
 }
 
@@ -550,6 +574,8 @@ fn admin_request(game: &mut Game, r: &admin::Request, ctx: &Status, stop: &Atomi
                 "tickRate": game.net_data.tick_rate,
                 "rules": rules::changes(&game.rules),
                 "fps": ctx.loop_rate,
+                "busyPercent": (ctx.busy.0.as_secs_f64() * 1000.0).round() / 10.0,
+                "longestLoopMicros": ctx.busy.1.as_micros() as u64,
                 "planet": game.planet_id(),
                 "terraformation": terraformation,
                 "units": planet_units,
@@ -645,32 +671,28 @@ fn persist(game: &mut Game, path: &str) {
 
 /// One batch per client per tick, in queue order. A client gets messages queued after its
 /// ConnectionApproved: everything before is in the world it was sent.
-fn deliver(game: &mut Game, links: &HashMap<u64, Link>, approved: &mut HashSet<u64>, mut utp: Option<&mut Utp>) {
-    let out = std::mem::take(&mut game.net.out);
-    // Each client's messages as indices into `out`, in queue order (no copies of the bodies).
-    let mut per_client: idmap::FxHashMap<u64, Vec<usize>> = Default::default();
-    for (i, (to, kind, _)) in out.iter().enumerate() {
-        if *kind == protocol::CONNECTION_APPROVED {
+/// Sorts the queued messages into each approved client's batch, in queue order.
+fn post(game: &mut Game, approved: &mut HashSet<u64>, mail: &mut idmap::FxHashMap<u64, wire::Batch>) {
+    for (to, kind, body) in game.net.out.drain(..) {
+        if kind == protocol::CONNECTION_APPROVED {
             if let Target::Only(c) = to {
-                approved.insert(*c);
-                per_client.entry(*c).or_default().push(i);
+                approved.insert(c);
+                mail.entry(c).or_default().push(kind, &body);
             }
             continue;
         }
-        for c in approved.iter() {
-            let wanted = match *to {
-                Target::All => true,
-                Target::Only(x) => x == *c,
-                Target::Except(x) => x != *c,
-            };
-            if wanted {
-                per_client.entry(*c).or_default().push(i);
-            }
+        for c in approved.iter().filter(|c| to.reaches(**c)) {
+            mail.entry(*c).or_default().push(kind, &body);
         }
     }
-    for (client, messages) in per_client {
-        let batch = wire::batch_of(messages.iter().map(|i| (out[*i].1, out[*i].2.as_slice())));
-        match links.get(&client) {
+}
+
+/// Sends these clients their batches.
+fn send_mail(mail: &mut idmap::FxHashMap<u64, wire::Batch>, clients: &[u64], links: &HashMap<u64, Link>, mut utp: Option<&mut Utp>) {
+    for client in clients {
+        let Some(b) = mail.remove(client).filter(|b| !b.is_empty()) else { continue };
+        let batch = b.finish();
+        match links.get(client) {
             Some(Link::Steam { connection, .. }) => send(connection, &batch),
             Some(Link::Ip(token, _)) => {
                 if let Some(utp) = utp.as_deref_mut() {
@@ -755,7 +777,7 @@ mod tests {
         let Some(mut game) = game::test_game(game::tests::save()) else { return };
         let post = |game: &mut Game, body: serde_json::Value| {
             let request = admin::Request { method: "POST".into(), path: "/api/rules".into(), body, reply: std::sync::mpsc::channel().0 };
-            let ctx = Status { invite_code: None, network: "ip", port: 0, started: Instant::now(), autosave_minutes: 5, loop_rate: 0, save_path: "" };
+            let ctx = Status { invite_code: None, network: "ip", port: 0, started: Instant::now(), autosave_minutes: 5, loop_rate: 0, busy: Default::default(), save_path: "" };
             admin_request(game, &request, &ctx, &AtomicBool::new(false), &mut 5, &HashMap::new()).0
         };
         assert_eq!(post(&mut game, serde_json::json!({"speed": {"growth": 2}})), 200);
@@ -769,7 +791,7 @@ mod tests {
     fn autosave_minutes_are_clamped() {
         let Some(mut game) = game::test_game(game::tests::save()) else { return };
         let request = admin::Request { method: "POST".into(), path: "/api/settings".into(), body: serde_json::json!({"autosaveMinutes": 160_000_000_000_000_000u64}), reply: std::sync::mpsc::channel().0 };
-        let ctx = Status { invite_code: None, network: "ip", port: 0, started: Instant::now(), autosave_minutes: 5, loop_rate: 0, save_path: "" };
+        let ctx = Status { invite_code: None, network: "ip", port: 0, started: Instant::now(), autosave_minutes: 5, loop_rate: 0, busy: Default::default(), save_path: "" };
         let mut autosave = 5;
         admin_request(&mut game, &request, &ctx, &AtomicBool::new(false), &mut autosave, &HashMap::new());
         assert_eq!(autosave, MAX_AUTOSAVE);

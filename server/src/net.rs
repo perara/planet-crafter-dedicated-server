@@ -19,6 +19,16 @@ pub enum Target {
     Except(u64),
 }
 
+impl Target {
+    pub fn reaches(self, client: u64) -> bool {
+        match self {
+            Target::All => true,
+            Target::Only(c) => c == client,
+            Target::Except(c) => c != client,
+        }
+    }
+}
+
 /// Encoded variable values: Netcode's NetworkVariable serialization per type.
 pub mod enc {
     use crate::wire::Writer;

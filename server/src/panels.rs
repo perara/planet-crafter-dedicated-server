@@ -156,6 +156,10 @@ fn contiguous(game: &Game, panels: &[WorldPanel], i: usize) -> Option<usize> {
 /// message already shows them open.
 pub fn change_contiguous_panels(game: &mut Game, o: &mut NetObj) {
     let Some(planet) = o.wo.and_then(|w| game.wos.get(&w)).map(|w| w.planet_hash()) else { return };
+    // Only walls join their neighbours: without one there is nothing to look for.
+    if !panels_of(game, o).iter().any(|p| p.data["panelType"] == "Wall") {
+        return;
+    }
     let (mut own, mut neighbours) = (Vec::new(), Vec::new());
     {
         let mut panels = placed_panels(game, planet);
@@ -197,6 +201,10 @@ pub fn change_contiguous_panels(game: &mut Game, o: &mut NetObj) {
 /// meets goes back to plain.
 pub fn reset_contiguous_panels(game: &mut Game, object: u64) {
     let Some(planet) = game.net.objects.get(&object).and_then(|o| o.wo).and_then(|w| game.wos.get(&w)).map(|w| w.planet_hash()) else { return };
+    // A building without panels has none to reset.
+    if game.net.objects.get(&object).is_none_or(|o| panels_of(game, o).is_empty()) {
+        return;
+    }
     let resets: Vec<(u64, u16, i32)> = {
         let panels = placed_panels(game, planet);
         (0..panels.len())

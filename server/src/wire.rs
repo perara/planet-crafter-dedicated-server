@@ -231,18 +231,45 @@ pub fn batch(messages: &[(u32, Vec<u8>)]) -> Vec<u8> {
 
 /// One batch of (message type, body) pairs.
 pub fn batch_of<'a>(messages: impl Iterator<Item = (u32, &'a [u8])>) -> Vec<u8> {
-    let (mut body, mut count) = (Writer::new(), 0u16);
-    for (kind, data) in messages {
-        body.packed_u32(kind).packed_u32(data.len() as u32).bytes(data);
-        count = count.wrapping_add(1);
+    let mut b = Batch::default();
+    messages.for_each(|(kind, data)| b.push(kind, data));
+    b.finish()
+}
+
+/// A batch being filled: the 16-byte header goes in front once the body (and so its length
+/// and hash) is known.
+#[derive(Default)]
+pub struct Batch {
+    out: Writer,
+    count: u16,
+}
+
+impl Batch {
+    pub fn push(&mut self, kind: u32, data: &[u8]) {
+        if self.out.0.is_empty() {
+            self.out.0.resize(16, 0);
+        }
+        self.out.packed_u32(kind).packed_u32(data.len() as u32).bytes(data);
+        self.count = self.count.wrapping_add(1);
     }
-    let mut out = Writer::new();
-    out.u16(BATCH_MAGIC)
-        .u16(count)
-        .i32((16 + body.len()) as i32)
-        .u64(xxhash_rust::xxh64::xxh64(&body.0, 0))
-        .bytes(&body.0);
-    out.0
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn finish(mut self) -> Vec<u8> {
+        if self.out.0.is_empty() {
+            self.out.0.resize(16, 0);
+        }
+        let hash = xxhash_rust::xxh64::xxh64(&self.out.0[16..], 0);
+        let length = self.out.0.len() as i32;
+        let out = &mut self.out.0;
+        out[0..2].copy_from_slice(&BATCH_MAGIC.to_le_bytes());
+        out[2..4].copy_from_slice(&self.count.to_le_bytes());
+        out[4..8].copy_from_slice(&length.to_le_bytes());
+        out[8..16].copy_from_slice(&hash.to_le_bytes());
+        self.out.0
+    }
 }
 
 #[cfg(test)]
