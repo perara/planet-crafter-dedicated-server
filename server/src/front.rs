@@ -556,8 +556,7 @@ impl Front {
                     println!("client {client}: connected from {addr}");
                     self.ip_clients.insert(token, client);
                     self.conns.insert(client, Conn::Ip(token));
-                    // The SteamID a direct-IP client reports is only believed from this machine.
-                    let c = json!({"ip": addr.ip().to_string(), "trusted": addr.ip().is_loopback()});
+                    let c = json!({"ip": addr.ip().to_string(), "trusted": trusted(addr.ip(), crate::env("PCDS_TRUST_LOOPBACK").as_deref() == Some("1"))});
                     self.to_bank(ipc::CONNECTED, client, c.to_string().as_bytes(), 0);
                 }
                 utp::Event::Data(token, batch) => {
@@ -1330,6 +1329,13 @@ impl Front {
     }
 }
 
+/// Whether the SteamID a direct-IP client reports is believed: only from this machine, and
+/// only when asked (PCDS_TRUST_LOOPBACK=1: tests, the load and probe tools). Behind a UDP
+/// relay (playit.gg, frp, ssh -R) every player comes from 127.0.0.1.
+fn trusted(ip: std::net::IpAddr, opted_in: bool) -> bool {
+    opted_in && utp::is_loopback(ip)
+}
+
 /// Where the front keeps the last flip's snapshot when it stops with the world in no bank.
 fn snapshot_path(save: &str) -> String {
     format!("{save}.snapshot")
@@ -1541,6 +1547,14 @@ mod tests {
             assert_eq!(e, format!("chat config unreadable at {field}"));
         }
         assert_eq!(chat_config(b"{\"secret\": \"t0psecret").unwrap_err(), "chat config unreadable (not JSON)");
+    }
+
+    #[test]
+    fn loopback_is_trusted_only_when_asked() {
+        let local = "127.0.0.1".parse().unwrap();
+        assert!(!trusted(local, false), "a relay's players all come from 127.0.0.1");
+        assert!(trusted(local, true) && trusted("::ffff:127.0.0.1".parse().unwrap(), true));
+        assert!(!trusted("10.0.0.2".parse().unwrap(), true));
     }
 
     #[test]
