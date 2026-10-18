@@ -112,7 +112,8 @@ The server installs the newer binary into `run/bin/` by itself when it starts.
 | `PCDS_BACKUP_MINUTES` | `60` | minutes between backups |
 | `PCDS_ADMIN` | `127.0.0.1:7782` | admin API and web page; `off` disables them |
 | `PCDS_ADMIN_TOKEN` | generated | the admin API's bearer token |
-| `PCDS_MAX_PLAYERS` | `16` | players at once; more are refused with the game's session-full message |
+| `PCDS_MAX_PLAYERS` | `16` | players at once; more are refused with the game's session-full message (the `limits.maxPlayers` rule overrides it) |
+| `PCDS_RULES` | `run/rules.json` | the server rules file (see [Server rules](#server-rules)) |
 
 `run/server.env` holds the admin token and is readable by your user only.
 
@@ -148,6 +149,42 @@ tunnel (`ssh -L 7782:127.0.0.1:7782 server`) rather than exposing it.
 To run a second server on the same machine, give it its own folder and unit names:
 `PCDS_HOME=/srv/world2 PCDS_UNIT=pcds-world2 ./pcds setup ...` (and the same two variables for
 every later `pcds` command), with other ports in its `server.env`.
+
+## Server rules
+
+Rules change how the world plays, on top of the world's own game settings. They live in
+`run/rules.json` and change while the server runs:
+
+```bash
+./pcds rules                                     # every rule, with the defaults
+./pcds rules set speed.growth=2 gauges.thirstDrain=0.5
+./pcds rules set limits.buildings.Drill4=10      # at most 10 of that building in the world
+./pcds rules set death.consequences=null         # null: back to the default
+./pcds rules reset                               # all back to the game's behaviour
+```
+
+Every default is the game's own behaviour, so without a `rules.json` nothing changes. A change
+through `pcds rules` (or `POST /api/rules`, a JSON merge patch such as
+`{"speed": {"growth": 2}}`) is checked first; a value out of range or a misspelled name is
+refused. A `rules.json` edited by hand with such a mistake stops the server at start, with the
+reason in `./pcds logs`.
+
+| Rule | Default | |
+|---|---|---|
+| `meteo.eventChance` | `1` | chance of a random weather or meteor event at each try, times this; `0` stops them (events players cause still come) |
+| `meteo.materialDespawnSeconds` | game's | seconds before the materials a meteor drops disappear; `0`: they stay. The rocks of an impact are drawn by each game itself and keep their time |
+| `gauges.oxygenDrain` | `1` | oxygen use, times this (on top of the world's gauge drain setting) |
+| `gauges.thirstDrain` | `1` | water use, times this |
+| `gauges.foodDrain` | `1` | food (health) use, times this |
+| `gauges.noDeath` | `false` | oxygen, water and health never go below 1 |
+| `speed.terraformation` | `1` | what buildings add to every unit but energy, times this |
+| `speed.machines` | `1` | extractors, collectors, auto-crafters and recyclers work this many times faster |
+| `speed.growth` | `1` | plants in vegetubes, spreaders, farms and vegetable growers grow this many times faster (clients see the same growth). Incubators keep their time |
+| `death.consequences` | world's | `NoConsequences`, `DropSomeItems`, `DropAllItems` or `DeleteSaveFile` |
+| `death.dropChance` | `50` | with `DropSomeItems`: the percent chance each item drops (with 4 items or fewer, all drop) |
+| `loot.amount` | `1` | items in generated containers (wreck safes, crates), times this, up to the container's size |
+| `limits.maxPlayers` | `PCDS_MAX_PLAYERS` | players at once |
+| `limits.buildings` | none | building group id to how many the world may have; one more is taken down at once and its materials go back to the builder |
 
 ## Game updates
 
@@ -227,6 +264,18 @@ without them, as in CI. `pcds-server probe HOST:PORT DATA_DIR SCRIPT.json` is a 
 that prints everything a server sends. Run the same script against the extractor's game (a real
 host, `127.0.0.1:7791` while `pcds extract` runs) and against this server, then compare the two
 with `tools/probe_diff.py`. `./pcds build` rebuilds the server and the extractor.
+
+`src/bench.rs` times the server's tick on a real save with a fixed clock and seed, and prints a
+fingerprint of everything the server sends and saves. A change that should not alter the game
+must leave the fingerprint as it was:
+
+```bash
+PCDS_BENCH_SAVE=../run/world.json PCDS_RNG_SEED=1 PCDS_BENCH_PLAYERS=4 \
+  cargo test --release bench -- --ignored --nocapture
+```
+
+To add a server rule: a field in `src/rules.rs` with its default and range, read where the game
+decides that value, and a line in `rules::changed` when a change must reach what already exists.
 
 ## License
 
