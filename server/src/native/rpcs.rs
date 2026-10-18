@@ -9,11 +9,7 @@ use super::dotnet::{Assemblies, AttrArg, TypeDef, TypeName, TypeSig};
 const STATIC: u16 = 0x10;
 
 fn full(t: &TypeName) -> String {
-    if t.namespace.is_empty() {
-        t.name.clone()
-    } else {
-        format!("{}.{}", t.namespace, t.name)
-    }
+    t.full()
 }
 
 struct Code<'a> {
@@ -22,27 +18,15 @@ struct Code<'a> {
 
 impl Code<'_> {
     fn def(&self, t: &TypeName) -> Option<&TypeDef> {
-        let (a, i) = self.asm.resolve(t)?;
-        self.asm.0[a].types().get(i)
+        self.asm.def(t)
     }
 
     fn base(&self, t: &TypeName) -> Option<TypeName> {
-        match self.def(t)?.extends.as_ref()? {
-            TypeSig::Class(b) | TypeSig::ValueType(b) | TypeSig::GenericInst { ty: b, .. } => Some(b.clone()),
-            _ => None,
-        }
+        self.asm.base(t)
     }
 
     fn derives_from(&self, t: &TypeName, ancestor: &str) -> bool {
-        let mut cur = Some(t.clone());
-        for _ in 0..32 {
-            let Some(c) = cur else { return false };
-            if full(&c) == ancestor {
-                return true;
-            }
-            cur = self.base(&c);
-        }
-        false
+        self.asm.derives_from(t, ancestor)
     }
 
     fn is_enum(&self, t: &TypeName) -> bool {

@@ -272,11 +272,62 @@ pub fn run(args: &[String]) {
     if !misread.is_empty() {
         eprintln!("read-game: layouts that did not fit their data: {misread:?}");
     }
+    let planets = ctx.planets(&assets);
+    let groups = ctx.group_table();
+    let versions = ctx.message_versions();
+    let config = ctx.network_config();
+    let (tick_rate, player_prefab) = match &config {
+        Some((file, f)) => {
+            let tick = super::netdata::field(f, "TickRate").cloned();
+            let player = match super::netdata::field(f, "PlayerPrefab") {
+                Some(Raw::Ref(p, _)) => ctx.data.resolve(*file, *p).and_then(|root| ctx.prefab_hash(root)),
+                _ => None,
+            };
+            (tick.map(|t| ctx.value(*file, &t, 1)).unwrap_or(None), player)
+        }
+        None => (None, None),
+    };
+    let ggm = ctx.data.file("globalgamemanagers").expect("globalgamemanagers");
+    let settings = ctx.data.files[ggm].objects.iter().find(|o| o.class_id == 129).map(|o| o.path);
+    let version = settings
+        .ok_or_else(|| "no PlayerSettings".to_string())
+        .and_then(|p| super::typetree::bundle_version(&ctx.data.files[ggm].unity_version.clone(), ctx.data.files[ggm].data(ctx.data.files[ggm].object(p).unwrap())))
+        .unwrap_or_else(|e| {
+            eprintln!("read-game: {e}");
+            std::process::exit(1)
+        });
+    eprintln!("read-game: game {version}");
+    let fail = |e: String| -> ! {
+        eprintln!("read-game: {e}");
+        std::process::exit(1)
+    };
+    let scene = ctx.scene_objects().unwrap_or_else(|e| fail(e));
+    let player = match config.as_ref().and_then(|(file, f)| match super::netdata::field(f, "PlayerPrefab") {
+        Some(Raw::Ref(p, _)) => ctx.data.resolve(*file, *p),
+        _ => None,
+    }) {
+        Some(root) => ctx.prefab(root, true).unwrap_or_else(|e| fail(format!("player prefab: {e}"))),
+        None => fail("no player prefab".into()),
+    };
+    let handler = ctx.find_behaviour(&["level4"], "SpaceCraft", "WorldUnitsHandler");
+    let units = handler.and_then(|h| Some((h, ctx.behaviour(h)?))).and_then(|(h, b)| match super::netdata::field(&b.fields, "_planetUnitsNetworkObject") {
+        Some(Raw::Ref(p, _)) => ctx.data.resolve(h.0, *p),
+        _ => None,
+    });
+    let units = match units {
+        Some(root) => ctx.prefab(root, false).unwrap_or_else(|e| fail(format!("planet units prefab: {e}"))),
+        None => fail("no WorldUnitsHandler._planetUnitsNetworkObject".into()),
+    };
+    eprintln!("read-game: {} scene objects", scene.len());
+    let netdata = json!({"gameVersion": version, "tickRate": tick_rate, "playerPrefab": player_prefab, "messageVersions": versions, "sceneObjects": scene, "prefabs": {"Player": player, "WorldUnitsPlanet": units}, "planets": planets, "groups": groups});
     let rpcs = super::rpcs::rpcs(&ctx.layouts.asm);
     eprintln!("read-game: {} RPCs", rpcs.len());
     std::fs::create_dir_all(out).expect("create OUT_DIR");
     std::fs::write(Path::new(out).join("rpcs.json"), serde_json::to_string_pretty(&rpcs).unwrap()).expect("write rpcs.json");
-    let gamedata = json!({"assets": assets, "groupPrefabs": group_prefabs});
+    std::fs::write(Path::new(out).join("netdata.json"), serde_json::to_string_pretty(&netdata).unwrap()).expect("write netdata.json");
+    let layouts = ctx.world_object_layouts(&assets, &group_prefabs).unwrap_or_else(|e| fail(format!("layouts: {e}")));
+    eprintln!("read-game: {} layouts", layouts.len());
+    let gamedata = json!({"assets": assets, "groupPrefabs": group_prefabs, "layouts": layouts});
     std::fs::write(Path::new(out).join("gamedata.json"), serde_json::to_string_pretty(&gamedata).unwrap()).expect("write gamedata.json");
 }
 
@@ -292,6 +343,21 @@ pub fn layout(args: &[String]) {
     if let Some((a, i)) = ctx.layouts.asm.resolve(&TypeName { scope: None, namespace: ns.into(), name: class.into() }) {
         for f in &ctx.layouts.asm.0[a].types()[i].fields {
             println!("  declared: {} flags={:#x} {:?} attrs={:?}", f.name, f.flags, f.sig, f.attributes.iter().map(|x| format!("{}.{}", x.ty.namespace, x.ty.name)).collect::<Vec<_>>());
+        }
+    }
+}
+
+/// Debug: a method's IL (pcds-server native-il GAME_DIR NS.CLASS METHOD).
+pub fn il(args: &[String]) {
+    let ctx = Ctx::open(Path::new(&args[0])).expect("open game");
+    let (ns, class) = args[1].rsplit_once('.').unwrap_or(("", &args[1]));
+    let t = TypeName { scope: None, namespace: ns.into(), name: class.into() };
+    let asm = &ctx.layouts.asm;
+    let a = asm.assembly_of(&t).expect("no such type");
+    for m in asm.def(&t).unwrap().methods.iter().filter(|m| m.name == args[2]) {
+        println!("{}({:?})", m.name, m.params);
+        for line in super::netvars::disassemble(a, a.il(m).unwrap_or_default()) {
+            println!("  {line}");
         }
     }
 }

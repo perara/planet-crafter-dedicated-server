@@ -242,6 +242,13 @@ pub struct Data {
 }
 
 impl Data {
+    /// The build's scene paths by build index (scene N is the file levelN).
+    pub fn build_scenes(&mut self) -> Vec<String> {
+        let Ok(ggm) = self.file("globalgamemanagers") else { return Vec::new() };
+        let settings = self.files[ggm].objects.iter().find(|o| o.class_id == BUILD_SETTINGS).map(|o| o.path);
+        settings.and_then(|p| build_scenes(&mut self.reader(Id(ggm, p))?)).unwrap_or_default()
+    }
+
     pub fn open(dir: &Path) -> std::io::Result<Data> {
         let mut data = Data { dir: dir.to_path_buf(), files: Vec::new(), by_name: HashMap::new() };
         data.file("globalgamemanagers")?;

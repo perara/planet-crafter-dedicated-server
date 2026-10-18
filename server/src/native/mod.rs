@@ -1,7 +1,10 @@
 pub mod diff;
 pub mod dotnet;
 pub mod graph;
+pub mod netdata;
+pub mod netvars;
 pub mod rpcs;
 pub mod serial;
 pub mod tables;
+pub mod typetree;
 pub mod unity;

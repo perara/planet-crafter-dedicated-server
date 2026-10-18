@@ -67,6 +67,14 @@ pub struct MethodDef {
     pub attributes: Vec<Attr>,
 }
 
+/// What an IL metadata token names.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Member {
+    Field { owner: TypeSig, name: String },
+    /// `instance`: takes `this` (HASTHIS); `ret`: its return type.
+    Method { owner: TypeSig, name: String, params: Vec<TypeSig>, instance: bool, ret: TypeSig },
+}
+
 /// A custom attribute: its type and decoded constructor and named arguments.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attr {
@@ -168,6 +176,44 @@ impl Assembly {
             _ => return None,
         };
         d.get(code..code.checked_add(len)?)
+    }
+
+    /// The field or method an IL operand token (FieldDef, MethodDef, MemberRef, MethodSpec) names.
+    pub fn member(&self, token: u32) -> Option<Member> {
+        let (table, row) = ((token >> 24) as usize, token & 0xFF_FFFF);
+        let img = &self.img;
+        let type_of = |t: usize| self.types.get(t).map(|d| TypeSig::Class(TypeName { scope: Some(self.name.clone()), namespace: d.namespace.clone(), name: d.name.clone() }));
+        match table {
+            FIELD => {
+                let (t, i) = (*self.field_at.get((row as usize).checked_sub(1)?)?)?;
+                Some(Member::Field { owner: type_of(t)?, name: self.types[t].fields[i].name.clone() })
+            }
+            METHOD => {
+                let (t, i) = (*self.method_at.get((row as usize).checked_sub(1)?)?)?;
+                let m = &self.types[t].methods[i];
+                Some(Member::Method { owner: type_of(t)?, name: m.name.clone(), params: m.params.iter().map(|p| p.1.clone()).collect(), instance: m.flags & 0x10 == 0, ret: m.ret.clone() })
+            }
+            MEMBER_REF => {
+                let owner = self.type_sig(img.refer(MEMBER_REF, row, 0))?;
+                let name = img.string(img.cell(MEMBER_REF, row, 1));
+                let sig = img.blob(img.cell(MEMBER_REF, row, 2));
+                if sig.first() == Some(&0x06) {
+                    return Some(Member::Field { owner, name });
+                }
+                let (ret, params) = self.method_sig(&mut Reader::new(sig))?;
+                Some(Member::Method { owner, name, params, instance: sig.first()? & 0x20 != 0, ret })
+            }
+            METHOD_SPEC => {
+                let (t, r) = img.refer(METHOD_SPEC, row, 0);
+                self.member(((t as u32) << 24) | r)
+            }
+            _ => None,
+        }
+    }
+
+    /// An ldstr operand's literal.
+    pub fn user_string(&self, token: u32) -> Option<String> {
+        (token >> 24 == 0x70).then(|| self.img.user_string(token & 0xFF_FFFF)).flatten()
     }
 
     /// `foreign`: the underlying type of an enum another assembly defines, if known.
@@ -505,9 +551,48 @@ impl Assemblies {
         scoped.and_then(find).or_else(|| (0..self.0.len()).find_map(find))
     }
 
-    fn enum_base(&self, name: &TypeName) -> Option<TypeSig> {
+    /// An enum's underlying type; None for other types.
+    pub fn enum_base(&self, name: &TypeName) -> Option<TypeSig> {
         let (a, t) = self.resolve(name)?;
         enum_base(&self.0[a].types[t])
+    }
+
+    pub fn def(&self, name: &TypeName) -> Option<&TypeDef> {
+        let (a, t) = self.resolve(name)?;
+        self.0[a].types.get(t)
+    }
+
+    /// The assembly that defines a type.
+    pub fn assembly_of(&self, name: &TypeName) -> Option<&Assembly> {
+        self.resolve(name).map(|(a, _)| &self.0[a])
+    }
+
+    /// The class a type extends, by name.
+    pub fn base(&self, name: &TypeName) -> Option<TypeName> {
+        match self.def(name)?.extends.as_ref()? {
+            TypeSig::Class(b) | TypeSig::ValueType(b) | TypeSig::GenericInst { ty: b, .. } => Some(b.clone()),
+            _ => None,
+        }
+    }
+
+    /// The type or one of its bases is `ancestor` ("Namespace.Name").
+    pub fn derives_from(&self, name: &TypeName, ancestor: &str) -> bool {
+        let mut cur = Some(name.clone());
+        for _ in 0..32 {
+            let Some(c) = cur else { return false };
+            if c.full() == ancestor {
+                return true;
+            }
+            cur = self.base(&c);
+        }
+        false
+    }
+}
+
+impl TypeName {
+    /// "Namespace.Name" ("Outer/Inner" for nested types).
+    pub fn full(&self) -> String {
+        if self.namespace.is_empty() { self.name.clone() } else { format!("{}.{}", self.namespace, self.name) }
     }
 }
 
@@ -789,6 +874,7 @@ struct Image {
     sections: Vec<[u32; 4]>,
     strings: Range<usize>,
     blob: Range<usize>,
+    us: Range<usize>,
     tables: Vec<Table>,
 }
 
@@ -822,7 +908,7 @@ impl Image {
                 Some([r.u32()?, r.u32()?, r.u32()?, r.u32()?])
             })
             .collect::<Option<_>>()?;
-        let mut img = Image { data, sections, strings: 0..0, blob: 0..0, tables: Vec::new() };
+        let mut img = Image { data, sections, strings: 0..0, blob: 0..0, us: 0..0, tables: Vec::new() };
         img.metadata(cli)?;
         Some(img)
     }
@@ -847,7 +933,8 @@ impl Image {
                 b"#~" | b"#-" => tables = Some(at..at + size),
                 b"#Strings" => self.strings = at..at + size,
                 b"#Blob" => self.blob = at..at + size,
-                _ => {} // #US, #GUID: nothing reads them
+                b"#US" => self.us = at..at + size,
+                _ => {} // #GUID: nothing reads it
             }
         }
         let stream = tables?;
@@ -951,6 +1038,14 @@ impl Image {
     fn blob(&self, index: u32) -> &[u8] {
         let mut r = Reader::at(self.data.get(self.blob.clone()).unwrap_or_default(), index as usize);
         r.compressed().and_then(|n| r.bytes(n as usize)).unwrap_or_default()
+    }
+
+    /// A #US entry (an ldstr literal): a compressed length, UTF-16 units, a final flag byte.
+    fn user_string(&self, index: u32) -> Option<String> {
+        let mut r = Reader::at(self.data.get(self.us.clone())?, index as usize);
+        let n = r.compressed()? as usize;
+        let b = r.bytes(n.checked_sub(1)?)?;
+        String::from_utf16(&b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>()).ok()
     }
 }
 
