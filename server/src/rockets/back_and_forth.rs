@@ -351,7 +351,9 @@ fn remove_items_of_groups(game: &mut Game, inventory: i32, groups: &[usize]) {
     for g in groups {
         let Some(inv) = game.inventories.get(&inventory) else { return };
         if let Some(at) = inv.items.iter().rposition(|i| game.wos.get(i).is_some_and(|w| w.group == *g)) {
-            removed.push(game.inventories.get_mut(&inventory).unwrap().items.remove(at));
+            let item = game.inventories.get_mut(&inventory).unwrap().items.remove(at);
+            game.release(item);
+            removed.push(item);
         }
     }
     game.destroy_world_objects(&removed, false);

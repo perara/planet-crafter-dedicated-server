@@ -122,3 +122,68 @@ fn a_refused_new_item_is_not_kept() {
     assert_eq!((g.wos.len(), g.snapshot().objects.len()), (before, saved));
     assert_eq!(g.group_count(false, g.data.group("Iron").unwrap()), 0, "the group count is back");
 }
+
+/// The holder index against the inventories themselves: what is wrong, if anything.
+fn holders_mismatch(g: &Game) -> Option<String> {
+    let mut want: HashMap<i32, (Vec<i32>, u32)> = HashMap::new();
+    for inv in g.inventories.values() {
+        for wo in &inv.items {
+            let e = want.entry(*wo).or_default();
+            e.0.push(inv.id);
+            e.1 += 1;
+        }
+    }
+    if want.len() != g.holders.len() {
+        return Some(format!("{} held world objects, the index has {}", want.len(), g.holders.len()));
+    }
+    for (wo, (invs, n)) in want {
+        match g.holders.get(&wo) {
+            Some(&(inv, count)) if count == n && (n > 1 || inv == invs[0]) => {}
+            other => return Some(format!("wo {wo} in {invs:?}, the index says {other:?}")),
+        }
+    }
+    None
+}
+
+/// H2: the index follows every way items come and go, a save's double holders included.
+#[test]
+fn the_holder_index_follows_the_inventories() {
+    let Some(mut g) = test_game(save()) else { return };
+    join(&mut g, 1, "Ann");
+    let inv = g.clients[&1].ready.as_ref().unwrap().inventory;
+    assert_eq!(holders_mismatch(&g), None);
+    let iron = g.data.groups[g.data.group("Iron").unwrap()].hash;
+    let chest = g.create_inventory(10, 0, 0, &[], &[]);
+    for _ in 0..4 {
+        rpc(&mut g, 1, 0, "InventoriesHandler.AddNewItemToInventoryServerRpc", vec![json!(iron), json!(chest)]);
+    }
+    let items = g.inventories[&chest].items.clone();
+    assert_eq!(g.holder(items[0]), Some(chest));
+    rpc(&mut g, 1, 0, "InventoriesHandler.TransferItemServerRpc", vec![json!(chest), json!(inv), json!(items[0])]);
+    assert_eq!(g.holder(items[0]), Some(inv));
+    rpc(&mut g, 1, 0, "InventoriesHandler.RemoveItemFromInventoryServerRpc", vec![json!(items[1]), json!(chest), json!(false)]);
+    assert!(!g.is_held(items[1]));
+    rpc(&mut g, 1, 0, "InventoriesHandler.RemoveItemsFromInventoryServerRpc", vec![json!([iron]), json!(chest), json!(true)]);
+    rpc(&mut g, 1, 0, "InventoriesHandler.RemoveWorldObjectsFromInventoryServerRpc", vec![json!([items[2]]), json!(chest), json!(false)]);
+    rpc(&mut g, 1, 0, "InventoriesHandler.RemoveAndDestroyAllItemsFromInventoryServerRpc", vec![json!(inv)]);
+    assert_eq!(holders_mismatch(&g), None);
+    // A saved world object in two inventories: held twice, and still held once one lets go.
+    let wo = items[2];
+    g.inventory_add(chest, wo, true);
+    g.inventories.get_mut(&inv).unwrap().items.push(wo);
+    g.rebuild_holders();
+    assert_eq!(g.holders[&wo].1, 2);
+    assert_eq!(g.holder(wo), g.inventories.values().find(|i| i.items.contains(&wo)).map(|i| i.id), "the first, as the game finds it");
+    g.inventory_remove(chest, wo);
+    assert_eq!(g.holder(wo), Some(inv));
+    g.destroy_inventory(chest, true);
+    g.destroy_world_object(wo, true);
+    assert_eq!(holders_mismatch(&g), None);
+    // A handoff restores it.
+    let text = crate::handoff::snapshot(&g).unwrap();
+    let dir = crate::test_data().unwrap();
+    let (net_data, data, spec) = crate::tables(dir);
+    let scenes = crate::scene_tables(dir, &net_data, &data);
+    let restored = crate::handoff::restore(net_data, data, spec, &text, scenes).unwrap();
+    assert_eq!(restored.holders, g.holders);
+}

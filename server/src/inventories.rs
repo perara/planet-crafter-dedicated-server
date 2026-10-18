@@ -47,6 +47,7 @@ impl Game {
         let inv = self.inventories.get_mut(&inventory).unwrap();
         if !inv.items.contains(&wo) {
             inv.items.push(wo);
+            self.hold(wo, inventory);
         }
         if let Some(w) = self.wos.get_mut(&wo) {
             if reset_position {
@@ -62,6 +63,7 @@ impl Game {
         match inv.items.iter().position(|i| *i == wo) {
             Some(at) => {
                 inv.items.remove(at);
+                self.release(wo);
                 true
             }
             None => false,
@@ -74,7 +76,9 @@ impl Game {
         for g in groups {
             let Some(inv) = self.inventories.get(&inventory) else { break };
             if let Some(at) = inv.items.iter().rposition(|i| self.wos.get(i).is_some_and(|w| w.group == *g)) {
-                removed.push(self.inventories.get_mut(&inventory).unwrap().items.remove(at));
+                let wo = self.inventories.get_mut(&inventory).unwrap().items.remove(at);
+                self.release(wo);
+                removed.push(wo);
             }
         }
         removed
@@ -86,7 +90,9 @@ impl Game {
         if !ids.iter().all(|i| inv.items.contains(i)) {
             return false;
         }
+        let removed: Vec<i32> = inv.items.iter().copied().filter(|i| ids.contains(i)).collect();
         inv.items.retain(|i| !ids.contains(i));
+        removed.into_iter().for_each(|wo| self.release(wo));
         true
     }
 
@@ -99,6 +105,7 @@ impl Game {
             let keep = self.wos.get(&wo).is_some_and(|w| !self.data.groups[w.group].constructible && self.data.groups[w.group].bool("cantBeDestroyed"));
             if !keep {
                 self.inventories.get_mut(&inventory).unwrap().items.remove(i);
+                self.release(wo);
                 if destroy {
                     self.destroy_world_object(wo, false);
                 }
@@ -125,6 +132,55 @@ impl Game {
             x.trait_type.cmp(&y.trait_type).then(x.trait_value.cmp(&y.trait_value)).then_with(|| format!("{:?}", x.color).cmp(&format!("{:?}", y.color)))
         });
         self.inventories.get_mut(&inventory).unwrap().items = items;
+    }
+
+    // ---- which inventory holds a world object ---------------------------------------------
+
+    /// After `wo` went into `inventory`'s items.
+    fn hold(&mut self, wo: i32, inventory: i32) {
+        self.holders.entry(wo).and_modify(|h| h.1 += 1).or_insert((inventory, 1));
+    }
+
+    /// After one of `wo`'s places in an inventory's items went.
+    pub(crate) fn release(&mut self, wo: i32) {
+        let Some(h) = self.holders.get_mut(&wo) else { return };
+        h.1 -= 1;
+        match h.1 {
+            0 => {
+                self.holders.remove(&wo);
+            }
+            // Held twice (a save can say so), now once: by which one is looked up (rare).
+            1 => {
+                let left = self.inventories.values().find(|i| i.items.contains(&wo)).map(|i| i.id);
+                match left {
+                    Some(inv) => self.holders.insert(wo, (inv, 1)),
+                    None => self.holders.remove(&wo),
+                };
+            }
+            _ => {}
+        }
+    }
+
+    /// The inventory holding a world object; the first of them, as the game looks it up, when
+    /// several do.
+    pub fn holder(&self, wo: i32) -> Option<i32> {
+        match self.holders.get(&wo)? {
+            (inv, 1) => Some(*inv),
+            _ => self.inventories.values().find(|i| i.items.contains(&wo)).map(|i| i.id),
+        }
+    }
+
+    pub fn is_held(&self, wo: i32) -> bool {
+        self.holders.contains_key(&wo)
+    }
+
+    /// The index from the inventories (after a load or a restore).
+    pub fn rebuild_holders(&mut self) {
+        self.holders.clear();
+        let all: Vec<(i32, i32)> = self.inventories.values().flat_map(|i| i.items.iter().map(move |wo| (*wo, i.id))).collect();
+        for (wo, inv) in all {
+            self.hold(wo, inv);
+        }
     }
 
     // ---- InventoriesHandler ---------------------------------------------------------------
@@ -214,6 +270,7 @@ impl Game {
 
     pub fn destroy_inventory(&mut self, id: i32, destroy_go: bool) {
         let Some(inv) = self.inventories.shift_remove(&id) else { return };
+        inv.items.iter().for_each(|wo| self.release(*wo));
         self.destroy_world_objects(&inv.items, destroy_go);
         crate::logistics::remove_inventory(self, id);
         self.close_inventory_on_watchers(id);
@@ -221,7 +278,7 @@ impl Game {
 
     /// RemoveFromInventoryWhenDeleted: a destroyed world object leaves the inventory holding it.
     pub fn remove_from_inventory_when_deleted(&mut self, wo: i32) {
-        if let Some(inv) = self.inventories.values().find(|i| i.items.contains(&wo)).map(|i| i.id) {
+        if let Some(inv) = self.holder(wo) {
             self.inventory_remove(inv, wo);
             self.propagate(inv, wo, false);
             self.dirty_inventory(inv, 0, false);

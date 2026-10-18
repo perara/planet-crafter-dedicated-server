@@ -110,6 +110,7 @@ pub fn restore_bytes(net_data: NetData, data: GameData, spec: Spec, snapshot: &[
     g.data = data;
     g.net.spec = spec;
     g.scenes = scenes;
+    g.rebuild_holders();
     g.trace = std::env::var_os("PCDS_TRACE").is_some();
     // The tables are not quite static: Game::new scales the groups' generation by the
     // world's settings.

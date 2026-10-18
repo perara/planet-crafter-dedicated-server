@@ -137,6 +137,10 @@ pub struct Game {
     /// WorldObjectsHandler._constructedWorldObjects / _itemsPickablesWorldObjects.
     pub constructed: IdSet<i32>,
     pub pickables: IndexSet<i32>,
+    /// World object -> (the inventory holding it, in how many inventories it is): the
+    /// inventories' content indexed (inventories.rs hold/release), rebuilt from them on load.
+    #[serde(skip)]
+    pub holders: crate::idmap::FxHashMap<i32, (i32, u32)>,
     /// InventoriesHandler._clientInventoryWatchers: inventory -> client -> count.
     pub watchers: HashMap<i32, IndexMap<u64, u32>>,
     pub tmp_inventory_id: i32,
@@ -242,6 +246,7 @@ impl Game {
             inventories: IdMap::default(),
             constructed: IdSet::default(),
             pickables: IndexSet::new(),
+            holders: Default::default(),
             watchers: HashMap::new(),
             tmp_inventory_id: -2,
             clients: IndexMap::new(),
@@ -309,6 +314,7 @@ impl Game {
                 self.inventories.insert(inv.id, inv);
             }
         }
+        self.rebuild_holders();
         self.saved_players = self.save.players.clone();
         let crafted = self.save.stats["craftedObjects"].as_u64().unwrap_or(0);
         let all_time = self.save.world["allTimeTerraTokens"].as_u64().unwrap_or(0);

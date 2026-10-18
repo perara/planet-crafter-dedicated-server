@@ -614,8 +614,7 @@ fn create_task(game: &mut Game, supply: Option<i32>, demand: i32, wo: i32, spawn
 /// ActionGrabable.GetCanGrab: MachineGrowerVegetationHarvestable lets its growables (placed,
 /// in its inventory) be taken once grown; anything else on the ground can be.
 fn can_grab(game: &Game, w: &WorldObject) -> bool {
-    // ponytail: scans every inventory, for each candidate of a demanded group only.
-    w.growth >= 100.0 || !game.inventories.values().any(|i| i.items.contains(&w.id))
+    w.growth >= 100.0 || !game.is_held(w.id)
 }
 
 /// SetLogisticTasks, first frame: tasks for every demand that supplies or the ground can
@@ -666,6 +665,10 @@ fn set_logistic_tasks(game: &mut Game) {
                 continue;
             }
             for &wo in &pickables {
+                // A task for it already: create_task refuses it, so its checks can wait.
+                if game.ext.logistics.all_tasks.contains_key(&wo) {
+                    continue;
+                }
                 let ok = game.wos.get(&wo).is_some_and(|w| w.group == g && w.net.is_some() && motion::length_sq(w.position) >= 1e-10 && can_grab(game, w) && w.planet_hash() == planet);
                 if ok && create_task(game, None, d, wo, true).is_some() {
                     available -= 1;
