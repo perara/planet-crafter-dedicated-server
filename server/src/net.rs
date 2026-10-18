@@ -606,6 +606,10 @@ impl Net {
                         Some(events) => {
                             w.bool(true);
                             match &v.value {
+                                // FixedStringSerializer.WriteDelta: a flag byte first, 1 = the
+                                // whole string follows. ponytail: always whole; the game sends
+                                // only the changed bytes (flag 0) when that is shorter.
+                                VarValue::Plain(bytes) if v.ty.starts_with("NetworkVariable<FixedString") => w.u8(1).bytes(bytes),
                                 VarValue::Plain(bytes) => w.bytes(bytes),
                                 VarValue::List(_) => w.bytes(&encode_events(&events)),
                             };
@@ -659,6 +663,28 @@ mod tests {
             }
         }
         assert!(seen.contains_key("PlayerShareState") && seen.contains_key("GroupNetworkContainer"));
+    }
+
+    /// A FixedString variable's delta starts with FixedStringSerializer.WriteDelta's flag, 1:
+    /// the whole string follows (the real host's text deltas read 01 0b000000 "Parity sign").
+    #[test]
+    fn fixed_string_deltas_carry_the_whole_string_flag() {
+        let Some(mut g) = crate::game::test_game(crate::game::tests::save()) else { return };
+        let (object, class, var) = g
+            .net
+            .objects
+            .values()
+            .flat_map(|o| o.behaviours.iter().flat_map(move |b| b.vars.iter().map(move |v| (o.id, b, v))))
+            .find(|(_, _, v)| v.ty.starts_with("NetworkVariable<FixedString"))
+            .map(|(o, b, v)| (o, b.class.clone(), v.name.clone()))
+            .expect("a FixedString variable");
+        g.net.flush();
+        g.net.out.clear();
+        g.net.set(object, &class, &var, enc::fixed_string("hi", 128));
+        g.net.flush();
+        let (_, kind, body) = g.net.out.last().unwrap();
+        assert_eq!(*kind, NETWORK_VARIABLE_DELTA);
+        assert!(body.windows(8).any(|w| w == [1, 1, 2, 0, 0, 0, b'h', b'i']), "dirty, flag, string: {body:?}");
     }
 
     #[test]
