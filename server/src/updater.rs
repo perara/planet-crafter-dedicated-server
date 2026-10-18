@@ -352,10 +352,30 @@ pub fn other(bank: &str) -> &'static str {
     if bank == "a" { "b" } else { "a" }
 }
 
-/// Whether the tag is a later release than the version ("v0.6.0" after "0.5.0").
+/// Whether the tag is a later release than the version ("v0.6.0" after "0.5.0"), as semantic
+/// versions order them: a pre-release comes before its release ("1.0.0-rc.1" < "1.0.0").
 pub fn newer(tag: &str, version: &str) -> bool {
-    let numbers = |v: &str| v.trim_start_matches('v').split(['.', '-']).map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
-    numbers(tag) > numbers(version)
+    version_key(tag) > version_key(version)
+}
+
+/// A pre-release's part: numbers by value, and below words (semver 11.4).
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum Part<'a> {
+    Number(u64),
+    Word(&'a str),
+}
+
+/// What versions are ordered by: MAJOR.MINOR.PATCH, then whether it is a release (above its
+/// pre-releases), then the pre-release's parts in turn (fewer parts first when the rest are
+/// equal). Build metadata (+...) does not count.
+fn version_key(v: &str) -> (Vec<u64>, bool, Vec<Part<'_>>) {
+    let v = v.trim_start_matches('v');
+    let v = v.split_once('+').map_or(v, |(v, _)| v);
+    let (core, pre) = v.split_once('-').map_or((v, None), |(c, p)| (c, Some(p)));
+    let mut numbers: Vec<u64> = core.split('.').map(|p| p.parse().unwrap_or(0)).collect();
+    numbers.resize(numbers.len().max(3), 0);
+    let parts = pre.map(|p| p.split('.').map(|x| x.parse().map_or(Part::Word(x), Part::Number)).collect()).unwrap_or_default();
+    (numbers, pre.is_none(), parts)
 }
 
 /// The admin API's view of the banks.
@@ -623,6 +643,14 @@ pub mod tests {
         set_active(&dir, "b").unwrap();
         assert_eq!((active(&dir), other("b"), other("a")), ("b".to_string(), "a", "b"));
         assert!(newer("v0.6.0", "0.5.0") && newer("v0.10.0", "0.9.9") && !newer("v0.5.0", "0.5.0") && !newer("v0.4.9", "0.5.0"));
+        // Semantic version order: a pre-release before its release, its parts one by one.
+        let order = ["0.9.9", "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0", "v1.0.1", "1.1"];
+        for (i, a) in order.iter().enumerate() {
+            for (j, b) in order.iter().enumerate() {
+                assert_eq!(newer(b, a), j > i, "{b} after {a}");
+            }
+        }
+        assert!(!newer("1.0.0+build.2", "1.0.0") && !newer("v1.0", "1.0.0"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
