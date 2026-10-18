@@ -2,7 +2,10 @@
 //! the server sends and saves (an optimization must leave the fingerprint unchanged):
 //!
 //!   PCDS_BENCH_SAVE=world.json PCDS_RNG_SEED=1 [PCDS_BENCH_SECONDS=300] [PCDS_BENCH_PLAYERS=4] \
-//!     [PCDS_BENCH_ACTION_MS=200] cargo test --release bench -- --ignored --nocapture
+//!     [PCDS_BENCH_ACTION_MS=200] [PCDS_BENCH_DUMP=messages.txt] cargo test --release bench -- --ignored --nocapture
+//!
+//! PCDS_BENCH_DUMP writes every message (per tick, sorted) and the final save, to compare two
+//! runs (two builds, two table sets) line by line.
 //!
 //! The loop steps like the server's (a tick every 5 ms); players walk in circles, sending a
 //! transform every network tick. With PCDS_BENCH_ACTION_MS they also act that often, as the
@@ -42,6 +45,8 @@ struct Env {
     seconds: f64,
     players: u64,
     action_ms: u64,
+    /// `bench` only: where every tick's messages and the final save go.
+    dump: Option<String>,
 }
 
 fn env() -> Option<Env> {
@@ -51,7 +56,7 @@ fn env() -> Option<Env> {
     };
     let dir = crate::test_data()?;
     let var = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok());
-    Some(Env { path, dir, seconds: var("PCDS_BENCH_SECONDS").unwrap_or(300.0), players: var("PCDS_BENCH_PLAYERS").unwrap_or(0.0) as u64, action_ms: var("PCDS_BENCH_ACTION_MS").unwrap_or(0.0) as u64 })
+    Some(Env { path, dir, seconds: var("PCDS_BENCH_SECONDS").unwrap_or(300.0), players: var("PCDS_BENCH_PLAYERS").unwrap_or(0.0) as u64, action_ms: var("PCDS_BENCH_ACTION_MS").unwrap_or(0.0) as u64, dump: std::env::var("PCDS_BENCH_DUMP").ok() })
 }
 
 fn load(e: &Env) -> Game {
@@ -141,6 +146,7 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
     let (step, net_tick, act_every) = (0.005, 1.0 / g.net_data.tick_rate as f64, e.action_ms as f64 / 1000.0);
     let (mut t, mut next_move, mut next_act, mut next_swap, mut busy, mut seq) = (0.0, 0.0, act_every, swap_every, Duration::ZERO, 0);
     let (mut ticks, mut dumped) = (Vec::new(), Vec::new());
+    let mut file = e.dump.as_ref().map(|p| std::io::BufWriter::new(std::fs::File::create(p).unwrap()));
     while t < e.seconds {
         t += step;
         g.sim_time = Some(t);
@@ -169,6 +175,10 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
         busy += started.elapsed();
         let (n, own, tick) = fingerprint(&mut h, &mut g.net.out);
         messages += n;
+        if let Some(f) = &mut file {
+            use std::io::Write;
+            tick.iter().for_each(|line| writeln!(f, "{line}").unwrap());
+        }
         if dump == Some(ticks.len()) {
             dumped = tick;
         }
@@ -182,6 +192,10 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
     }
     let save = g.snapshot().to_text();
     save.hash(&mut h);
+    if let Some(f) = &mut file {
+        use std::io::Write;
+        writeln!(f, "save {save}").unwrap();
+    }
     Run { fingerprint: h.finish(), ticks, messages, busy, save: save.len(), dumped }
 }
 
@@ -268,7 +282,8 @@ fn short(v: &Value) -> String {
 #[test]
 #[ignore]
 fn handoff() {
-    let Some(e) = env() else { return };
+    let Some(mut e) = env() else { return };
+    e.dump = None;
     let every: f64 = std::env::var("PCDS_BENCH_HANDOFF").ok().and_then(|v| v.parse().ok()).unwrap_or(e.seconds / 2.0);
     let tables = || crate::tables(e.dir);
     let straight = |dump| run(load(&e), &e, f64::INFINITY, |g| g, dump);
