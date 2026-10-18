@@ -239,6 +239,7 @@ example `--planet Aqualis`, chooses its options). [compose.yaml](compose.yaml) d
 | `PCDS_ACCESS` | `run/access.json` | the access lists file (see [Administration](#administration)) |
 | `PCDS_WEB` | the bank's `web/index.html` | the admin web page's file (for a page of your own) |
 | `PCDS_TRACE` | empty | set: log every incoming message and RPC (debugging; a lot of output) |
+| `PCDS_TRUST_LOOPBACK` | `0` | `1`: believe the SteamID a direct-IP client from 127.0.0.1 claims (tests, load and probe tools); never behind a UDP relay (see Known limits) |
 | `PCDS_RELEASES` | GitHub's API for this project | where `pcds upgrade` and `PCDS_AUTO_UPDATE` look up releases (a mirror) |
 
 A value that is not what the setting takes (`PCDS_AUTOSAVE=five`, a port out of range) stops

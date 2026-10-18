@@ -140,6 +140,7 @@ pub static KNOBS: &[Knob] = &[
     env("PCDS_RULES", Type::String, "", "", "The rules file; unset: run/rules.json, the installation's (pcds run; a pcds serve started by hand: rules.json next to the world)."),
     env("PCDS_WEB", Type::String, "", "", "This web page's file; unset: web/index.html next to the server binary."),
     env("PCDS_TRACE", Type::String, "", "", "Set: log every incoming message and RPC."),
+    env("PCDS_TRUST_LOOPBACK", Type::Enum, "", "0", "1: believe the SteamID a direct-IP client from 127.0.0.1 claims (tests, the load and probe tools). Never behind a UDP relay, where every player comes from 127.0.0.1.").values(&["0", "1"]),
     env("PCDS_AUTO_UPDATE", Type::Enum, "", "off", "on: install each new server release from GitHub as it comes out, into the standby bank, and hand the running world over to it (a hot update: players stay connected). A release that needs a front restart is not installed.").values(&["off", "on"]),
     env("PCDS_UPDATE_CHECK_HOURS", Type::Int, "h", "24", "With PCDS_AUTO_UPDATE=on: hours between checks for a new release.").range(1.0, 8760.0),
 ];
