@@ -13,7 +13,8 @@
 //! "arg": 0} (an RPC argument) or {"var": "crate", "create": true} (the id of the first object
 //! spawned). Targets may then be ["$box", BEHAVIOUR_INDEX]. "$hash:398a5515" is the first object
 //! of that prefab hash the server spawned for us. "ready": false skips the
-//! PlayerReady the game sends first, so the player stays as it spawned.
+//! PlayerReady the game sends first, so the player stays as it spawned; "id": N makes the player
+//! claim Steam id N there.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -85,6 +86,12 @@ impl Session {
                         *by_hash.entry(format!("{:08x}", o.hash)).or_default() += 1;
                         self.vars.entry(format!("hash:{:08x}", o.hash)).or_insert(json!(o.id));
                     }
+                    // Every object the approval carries, as a spawn would show it (PROBE_OBJECTS=0: counts only).
+                    if std::env::var("PROBE_OBJECTS").as_deref() != Ok("0") {
+                        for o in &objects {
+                            print(self.started, object_line(o, "approved object"));
+                        }
+                    }
                     json!({"msg": "approved", "client": owner, "objects": objects.len(), "hashes": by_hash})
                 }
                 None => json!({"msg": "approved", "error": "unreadable"}),
@@ -109,8 +116,7 @@ impl Session {
                 match protocol::read_scene_object(&mut r) {
                     Some(o) => {
                         self.vars.entry(format!("hash:{:08x}", o.hash)).or_insert(json!(o.id));
-                        json!({"msg": "create", "id": o.id, "hash": format!("{:08x}", o.hash), "owner": o.owner, "flags": o.flags,
-                                      "position": o.position, "rotation": o.rotation, "sync": hex_of(&o.sync)})
+                        object_line(&o, "create")
                     }
                     None => json!({"msg": "create", "hex": hex_of(body)}),
                 }
@@ -125,6 +131,11 @@ impl Session {
         };
         print(self.started, line);
     }
+}
+
+fn object_line(o: &protocol::SceneObjectInfo, msg: &str) -> Value {
+    json!({"msg": msg, "id": o.id, "hash": format!("{:08x}", o.hash), "owner": o.owner, "flags": o.flags,
+           "position": o.position, "rotation": o.rotation, "sync": hex_of(&o.sync)})
 }
 
 fn hex_of(b: &[u8]) -> String {
@@ -191,7 +202,9 @@ pub fn run(args: &[String]) {
     let name = std::env::var("PROBE_NAME").unwrap_or_else(|_| script["name"].as_str().unwrap_or("Probe").to_string());
     let mut steps = Vec::new();
     if script["ready"].as_bool() != Some(false) {
-        steps = vec![json!({"rpc": "PlayerMainController.PlayerReadyServerRpc", "on": "player:PlayerMainController", "args": [0, name]}), json!({"wait": 3000})];
+        // "id": the Steam id the player claims (0, the default, is what a direct-IP game sends).
+        let id = script["id"].as_u64().unwrap_or(0);
+        steps = vec![json!({"rpc": "PlayerMainController.PlayerReadyServerRpc", "on": "player:PlayerMainController", "args": [id, name]}), json!({"wait": 3000})];
     }
     steps.extend(script["steps"].as_array().cloned().unwrap_or_default());
     for step in steps {
