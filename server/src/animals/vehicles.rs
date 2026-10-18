@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn euler_angles_like_unity() {
-        let e = euler_angles([0.0, 0.7071068, 0.0, 0.7071068]);
+        let e = euler_angles([0.0, std::f32::consts::FRAC_1_SQRT_2, 0.0, std::f32::consts::FRAC_1_SQRT_2]);
         assert!((e[0]).abs() < 1e-3 && (e[1] - 90.0).abs() < 1e-3 && e[2].abs() < 1e-3, "{e:?}");
         let e = euler_angles(crate::geometry::from_euler_y(-30.0));
         assert!((e[1] - 330.0).abs() < 1e-3, "{e:?}");
