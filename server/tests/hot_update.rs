@@ -210,6 +210,9 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
     let mut routes = release(&dir, "v9.9.9", Path::new(PCDS), false);
     routes.extend(release(&dir, "v9.9.8", Path::new(PCDS), true));
     routes.extend(release(&dir, "v9.9.7", &fake, false));
+    // The latest is the good one.
+    let latest = routes.iter().find(|r| r.0 == "/releases/tags/v9.9.9").unwrap().1.clone();
+    routes.push(("/releases/latest".into(), latest));
     let releases = release_server(routes);
     let server = start(&dir, &data, &banks, &releases);
     let first = server.live()["bank"].as_str().unwrap().to_string();
@@ -286,6 +289,13 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
     assert_ne!(server.live()["bank"], standby);
     let (ok, said) = finish(players);
     assert!(ok, "players stayed through the update and the rollback:\n{said}");
+    // A check looks the latest release up and installs nothing.
+    let live = server.live();
+    let checked = server.update(json!({"check": true}));
+    assert!(checked["ok"] == true && checked["check"] == true && checked["message"].as_str().unwrap().ends_with("is available"), "{checked}");
+    let (_, u) = server.api("GET", "/api/update", json!({}));
+    assert!(u["available"] == true && u["latest"].as_str().is_some_and(|t| t.starts_with("v9.9.")), "{u}");
+    assert_eq!((server.live()["bank"].clone(), server.live()["pid"].clone()), (live["bank"].clone(), live["pid"].clone()), "no flip");
 
     // The status shows the banks and the update knobs.
     let (_, status) = server.api("GET", "/api/status", json!({}));

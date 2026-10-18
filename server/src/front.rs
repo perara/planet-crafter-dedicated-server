@@ -105,6 +105,9 @@ enum UpdateDone {
     Installed { seq: u64, bank: String, info: Value },
     Failed { seq: u64, message: String },
     UpToDate { seq: u64, tag: String },
+    /// A check only (POST /api/update {"check": true}): the latest release, and whether it is
+    /// newer than the live bank's.
+    Checked { seq: u64, tag: String, newer: bool },
 }
 
 struct Updates {
@@ -118,6 +121,8 @@ struct Updates {
     every: Duration,
     next_check: Instant,
     latest: Option<String>,
+    /// The latest release is later than the live bank's (as the last check found).
+    newer: bool,
     checked: Option<u64>,
 }
 
@@ -229,7 +234,7 @@ pub fn run(args: &[String]) {
         autosave_minutes,
         next_save: Instant::now() + Duration::from_secs(autosave_minutes.max(1) * 60),
         // The first check a while after the start: a crash loop must not ask GitHub each time.
-        updates: Updates { tx, rx, busy: None, seq: 0, history: VecDeque::new(), auto, every, next_check: Instant::now() + every.min(Duration::from_secs(600)), latest: None, checked: None },
+        updates: Updates { tx, rx, busy: None, seq: 0, history: VecDeque::new(), auto, every, next_check: Instant::now() + every.min(Duration::from_secs(600)), latest: None, newer: false, checked: None },
         started: Instant::now(),
         stop,
         game_version: String::new(),
@@ -1031,6 +1036,7 @@ impl Front {
             "auto": u.auto,
             "checkHours": u.every.as_secs() / 3600,
             "latest": u.latest,
+            "available": u.newer,
             "checkedAt": u.checked,
             "releases": self.banks.as_ref().map(|_| updater::releases_url()),
         })
@@ -1050,9 +1056,10 @@ impl Front {
         }
     }
 
-    /// POST /api/update: {"version": "v0.6.0"} (null: the latest), or {"rollback": true}: back
-    /// to the other bank. The answer comes at once with the request's "seq"; GET /api/update
-    /// has its outcome in "history" when done.
+    /// POST /api/update: {"version": "v0.6.0"} (null: the latest; "onlyNewer": true installs
+    /// it only if it is later than the live bank's), {"check": true}: only look up the latest,
+    /// or {"rollback": true}: back to the other bank. The answer comes at once with the
+    /// request's "seq"; GET /api/update has its outcome in "history" when done.
     fn update_request(&mut self, body: &Value) -> (u16, String) {
         if self.updates.busy.is_some() || self.phase != Phase::Idle {
             return (409, json!({"error": "an update or a flip is under way", "doing": self.updates.busy.as_ref().map(|b| b.1.clone())}).to_string());
@@ -1077,8 +1084,12 @@ impl Front {
         let Some(dir) = self.banks.clone() else {
             return (400, "{\"error\":\"no banks: this server runs from a build, not from pcds run (PCDS_BANKS); rollback flips between two copies of it\"}".into());
         };
+        if body["check"] == true {
+            self.check(seq);
+            return (200, json!({"ok": true, "seq": seq}).to_string());
+        }
         let version = body["version"].as_str().filter(|v| *v != "latest").map(str::to_string);
-        self.download(seq, dir, target, version, false);
+        self.download(seq, dir, target, version, body["onlyNewer"] == true);
         (200, json!({"ok": true, "seq": seq}).to_string())
     }
 
@@ -1102,6 +1113,20 @@ impl Front {
         });
     }
 
+    /// The latest release looked up on a thread of its own; nothing is installed.
+    fn check(&mut self, seq: u64) {
+        let live = self.live.as_ref().map(|b| b.hello["version"].as_str().unwrap_or("").to_string()).unwrap_or_default();
+        let tx = self.updates.tx.clone();
+        self.updates.busy = Some((seq, "checking for a new release".into()));
+        std::thread::spawn(move || {
+            let done = match updater::lookup(&updater::releases_url(), None) {
+                Ok(release) => UpdateDone::Checked { seq, newer: updater::newer(&release.tag, &live), tag: release.tag },
+                Err(message) => UpdateDone::Failed { seq, message },
+            };
+            let _ = tx.send(done);
+        });
+    }
+
     fn updates(&mut self) {
         while let Ok(done) = self.updates.rx.try_recv() {
             self.updates.checked = Some(now_secs());
@@ -1109,6 +1134,7 @@ impl Front {
                 UpdateDone::Installed { seq, bank, info } => {
                     let tag = info["tag"].as_str().unwrap_or("?").to_string();
                     self.updates.latest = Some(tag.clone());
+                    self.updates.newer = false;
                     println!("update: {tag} installed in bank {bank} (sha256 {} checked)", info["sha256"].as_str().unwrap_or(""));
                     if let Err(e) = self.flip_to(&bank, &format!("update to {tag}"), seq, None) {
                         self.record(seq, false, &format!("{tag} is in bank {bank}, but the flip did not start: {e}"), json!({}));
@@ -1120,7 +1146,14 @@ impl Front {
                 }
                 UpdateDone::UpToDate { seq, tag } => {
                     self.updates.latest = Some(tag.clone());
+                    self.updates.newer = false;
                     self.record(seq, true, &format!("up to date ({tag} is the latest release)"), json!({}));
+                }
+                UpdateDone::Checked { seq, tag, newer } => {
+                    self.updates.latest = Some(tag.clone());
+                    self.updates.newer = newer;
+                    let message = if newer { format!("{tag} is available") } else { format!("up to date ({tag} is the latest release)") };
+                    self.record(seq, true, &message, json!({"check": true}));
                 }
             }
         }

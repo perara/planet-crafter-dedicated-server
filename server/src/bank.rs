@@ -401,6 +401,8 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
                 "longestLoopMicros": ctx.busy.1.as_micros() as u64,
                 "planet": game.planet_id(),
                 "terraformation": terraformation,
+                "stages": crate::meteo::stages(game),
+                "gameTime": game.time,
                 "units": planet_units,
                 "players": players,
                 "access": game.access.lists,
@@ -674,7 +676,10 @@ mod tests {
         assert_eq!(players.iter().map(|p| (p["id"].as_u64().unwrap(), p["status"].as_str().unwrap())).collect::<Vec<_>>(), [(1, "ready"), (2, "joining")]);
         assert_eq!((players[0]["name"].as_str(), players[0]["position"].clone(), players[0]["gauges"].as_array().map(Vec::len)), (Some("Ann"), json!([560.0, 3.0, 500.0]), Some(4)));
         assert_eq!((players[1]["ip"].as_str(), players[1]["position"].is_null()), (Some("10.0.0.2"), true));
-        for key in ["serverVersion", "tables", "world", "objects", "units"] {
+        let stages = s["stages"]["list"].as_array().unwrap();
+        assert!(stages.len() > 3 && stages.windows(2).all(|w| w[0]["start"].as_f64() <= w[1]["start"].as_f64()), "stages in order: {stages:?}");
+        assert!(stages.iter().any(|st| st["key"] == s["stages"]["current"]), "the current stage is one of them");
+        for key in ["serverVersion", "tables", "world", "objects", "units", "gameTime"] {
             assert!(!s[key].is_null(), "{key}");
         }
         // Teleport: the game's respawn move, to that player only.
@@ -697,6 +702,7 @@ mod tests {
         // The map: this planet's buildings.
         let (status, map) = call(&mut game, "GET", "/api/map", json!({}), &mut autosave);
         assert_eq!((status, map["planet"].as_str(), map["buildings"].is_array()), (200, Some("Prime"), true));
+        assert!(map["buildings"].as_array().unwrap().iter().all(|b| b.as_array().is_some_and(|p| p.len() == 3)), "x, y, z");
     }
 
     /// An id names that client only, never a player whose name is the same digits; a name two

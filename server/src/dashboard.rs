@@ -127,10 +127,11 @@ pub fn worlds(save_path: &str) -> Value {
     json!({ "current": current, "worlds": worlds, "backups": backups })
 }
 
-/// The buildings on this planet as [x, z], for the players' map.
+/// The buildings on this planet as [x, y, z], for the players' map (y: where a teleport by the
+/// map lands near them).
 pub fn map(game: &Game) -> Value {
     let planet = game.planet_hash();
-    let points: Vec<[f64; 2]> = game.wos.values().filter(|w| w.planet_hash() == planet && game.data.groups[w.group].constructible).map(|w| [tenth(w.position[0]), tenth(w.position[2])]).collect();
+    let points: Vec<[f64; 3]> = game.wos.values().filter(|w| w.planet_hash() == planet && game.data.groups[w.group].constructible).map(|w| w.position.map(tenth)).collect();
     let step = points.len().div_ceil(MAP_POINTS).max(1);
     json!({ "planet": game.planet_id(), "buildings": points.into_iter().step_by(step).collect::<Vec<_>>() })
 }
