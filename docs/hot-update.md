@@ -18,8 +18,12 @@ data sector on boot.
 ## As built
 
 ```
- run/bin/pcds      what the systemd unit runs (`pcds run`): it execs the active bank's
-                   `pcds serve`, the front, with PCDS_BANKS=run/bin
+ run/bin/pcds      what the systemd units run: it hands every command to the active bank's
+                   program (exec), so `pcds run` is the active bank's: it starts that
+                   bank's `pcds serve`, the front, with PCDS_BANKS=run/bin, as a child, and
+                   supervises it (signals passed on, orphaned banks waited for, the
+                   other bank's front when this one cannot start the world)
+ run/bin/fallback  the last start that fell back to the other bank, and why (pcds status)
  run/bin/a/, b/    the banks: pcds, libsteam_api.so, web/, and bank.json (version, front
                    protocol, snapshot formats, the release tag and its sha256)
  run/bin/active    "a" or "b": the bank the front starts (written beside, renamed over)
@@ -66,7 +70,9 @@ a refusal names `pcds upgrade --restart VERSION` and says a restart disconnects 
 Steam players with a new invite code unless PCDS_STEAM_TOKEN is set); HANDOFF; the old bank
 sends what is queued, snapshots and waits; RESTORE; the new bank restores and says READY within
 5 s (the health check); the front sends EXIT, gives the new bank the held frames and writes
-`run/bin/active`. Any failure before READY kills the new bank and sends RESUME. With
+`run/bin/active`. A refusal at the HELLO (protocol, tables, snapshot format) kills the new
+bank and sends nothing: the old bank never stopped. Any failure after HANDOFF and before
+READY kills the new bank and sends RESUME to the old one. With
 `PCDS_FLIP_VERIFY` the new bank also checks that its restored state, written and read back, is
 the snapshot (without the two clocks and the order of sets); the tests run with it.
 
@@ -77,8 +83,12 @@ restarted after an error: join again" and closes their connections; the Steam lo
 invite code stay. A snapshot restored this way drops every client in it. More than 5 crashes in
 10 minutes and the front exits (systemd's restart and start limit take over). At the first
 start, a bank that cannot load the world makes the front try the other bank once (a broken
-update falls back to the release that ran before). Every HELLO, at boot, flip or recovery, is
-checked the same way; a recovering bank of another protocol stops the front (exit 1). When the
+update falls back to the release that ran before), and writes `run/bin/fallback`. Every HELLO,
+at boot, flip or recovery, is checked the same way; a recovering bank of another protocol stops
+the front (exit 1). When no bank can start the world (the other one is of another protocol,
+after `pcds upgrade --restart`), the front exits 75; `pcds run` then starts the other bank's own
+front, makes it the active one and writes `run/bin/fallback`, unless that bank is empty or the
+one the owner rolled back from. When the
 front stops while no bank holds the world (a stop during a recovery, the crash limit), the last
 snapshot, if newer than the save, is written to `world.json.snapshot` and the next start
 restores from it; a start whose save is newer deletes it. If a start cannot restore it, move it
@@ -88,8 +98,8 @@ away.
 stopped): the release from `PCDS_RELEASES` (default GitHub's API for
 perara/planet-crafter-dedicated-server), `pcds-<tag>-linux-x86_64.tar.gz` and its `.sha256` as
 the release workflow publishes them; the tarball's SHA-256 (ring) against the published one;
-`tar -xzf --strip-components=1` into `run/bin/.<bank>.new`; `pcds bank-info` of the unpacked
-program (front protocol and snapshot formats; a release from before hot updates has none and is
+`tar -xzf --strip-components=1` into `run/bin/.<bank>.new.<pid>`; `pcds bank-info` of the
+unpacked program (front protocol, snapshot formats and tables format; a release from before hot updates has none and is
 refused); the compatibility check; `bank.json`; then the folder is renamed over the bank. Any
 failure leaves the bank as it was (a failed rename puts the old bank back). Downloads are https
 only (http only for a `PCDS_RELEASES` on 127.0.0.1, which the tests use); versions and tags
@@ -467,8 +477,8 @@ the save of the same world is 165 KB.
 
 Measured live under the load test, 8 players: the world stood 10.5 to 28.9 ms per flip (19
 flips in four runs), 0 to 9 client frames were held each time, and the four forced failures
-(`PCDS_SPLIT_FAIL`) resumed the old bank after 8 to 14 ms. No player was dropped. Of the live
-pause, about 12 ms is the snapshot crossing the socket twice (4 MiB there and back measured
+(`PCDS_SPLIT_FAIL` then, `PCDS_BANK_FAIL` now) resumed the old bank after 8 to 14 ms. No player
+was dropped. Of the live pause, about 12 ms is the snapshot crossing the socket twice (4 MiB there and back measured
 11.6 to 12.1 ms); passing it in a memfd, or straight from the old process to the new one,
 brings the stand close to the snapshot-plus-restore time above.
 
@@ -577,7 +587,9 @@ Tools, unchanged, in the same binary: `load.rs`, `probe.rs` (both use `utp.rs` a
 ## Running it
 
 ```
-cd server && cargo test --release --no-run     # then, with LD_LIBRARY_PATH set as in the README:
+cd server && cargo test --release --no-run
+# the test binaries find libsteam_api.so in the steamworks crate's build output:
+export LD_LIBRARY_PATH=$(dirname "$(ls -t target/release/build/steamworks-sys-*/out/libsteam_api.so | head -1)")
 PCDS_BENCH_SAVE=<copy of world.json> PCDS_RNG_SEED=1 PCDS_BENCH_SECONDS=300 PCDS_BENCH_PLAYERS=4 \
   [PCDS_BENCH_ACTION_MS=200] [PCDS_BENCH_HANDOFF=<seconds between handoffs>] \
   target/release/deps/pcds-* bench::handoff --ignored --nocapture
