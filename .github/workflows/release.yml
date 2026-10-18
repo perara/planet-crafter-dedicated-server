@@ -13,6 +13,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # The updater compares release tags with the running program's version: a tag that is not
+      # server/Cargo.toml's version would look newer forever (automatic updates would reinstall it).
+      - name: The tag is the server's version
+        run: test "${GITHUB_REF_NAME#v}" = "$(sed -n 's/^version = "\(.*\)"/\1/p' server/Cargo.toml | head -1)"
       - run: cargo build --release --locked
         working-directory: server
       - run: cargo test --release --locked

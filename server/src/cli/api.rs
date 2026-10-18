@@ -125,18 +125,23 @@ impl Ctx {
         }
         println!("state=running pid={}", self.server_pid().unwrap_or_default());
         match self.api_json("GET", "/api/status") {
-            Ok(mut status) => {
+            Ok(status) => {
                 self.print_banks(Some(&status["banks"]));
-                if let Some(o) = status.as_object_mut() {
-                    o.shift_remove("units");
+                for line in status_lines(&status) {
+                    println!("{line}");
                 }
-                println!("{}", serde_json::to_string_pretty(&status).unwrap_or_default());
             }
             Err(e) => {
                 self.print_banks(None);
                 println!("admin API: {e}");
             }
         }
+        Ok(())
+    }
+
+    /// GET /api/status as JSON, for scripts.
+    pub fn status_json(&self) -> Result {
+        println!("{}", serde_json::to_string_pretty(&self.api_json("GET", "/api/status")?).unwrap_or_default());
         Ok(())
     }
 
@@ -244,5 +249,52 @@ mod tests {
         assert!(rules_patch(&args(&["speed=2"])).is_err());
         assert!(rules_patch(&args(&["speed.growth"])).is_err());
         assert!(rules_patch(&args(&["speed.growth=2", "speed.growth.x=1"])).is_err());
+    }
+}
+
+/// `pcds status`: the running server in a few lines (`pcds status --json` has all of it).
+fn status_lines(s: &Value) -> Vec<String> {
+    let text = |v: &Value| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
+    let players = s["players"].as_array().map_or(0, Vec::len);
+    let up = s["uptimeSeconds"].as_u64().unwrap_or(0);
+    let stage = s["stages"]["current"].as_str().map(|k| k.rsplit(['-', ':']).next().unwrap_or(k).to_string());
+    let u = &s["update"];
+    let mut lines = vec![
+        format!("world {} on {}, game {}, pcds {}", text(&s["save"]), text(&s["planet"]), text(&s["gameVersion"]), text(&s["serverVersion"])),
+        format!("{players} online, up {}h {}m, loop {}/s ({}% busy)", up / 3600, up % 3600 / 60, s["fps"], s["busyPercent"]),
+        format!("terraformation {:.0} Ti{}", s["terraformation"].as_f64().unwrap_or(0.0), stage.map(|n| format!(", stage {n}")).unwrap_or_default()),
+        format!("network {}, port {}, autosave every {} min", text(&s["network"]), s["port"], s["autosaveMinutes"]),
+    ];
+    if let Some(code) = s["inviteCode"].as_str() {
+        lines.push(format!("invite code {code}"));
+    }
+    match (u["latest"].as_str(), u["available"].as_bool()) {
+        (Some(tag), Some(true)) => lines.push(format!("release {tag} available: pcds upgrade")),
+        (Some(tag), _) => lines.push(format!("latest release {tag}: up to date")),
+        _ => {}
+    }
+    if let Some(doing) = u["doing"].as_str() {
+        lines.push(format!("update under way: {doing}"));
+    }
+    lines
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn status_reads_as_a_few_lines() {
+        let s = json!({"save": "world", "planet": "Prime", "gameVersion": "2.103", "serverVersion": "0.6.0", "players": [{}, {}], "uptimeSeconds": 3725,
+            "fps": 197, "busyPercent": 0.6, "terraformation": 16271011.0, "stages": {"current": "TerraformStage:TerraformStage4-Water"},
+            "network": "ip", "port": 7777, "autosaveMinutes": 5, "inviteCode": null, "update": {"latest": "v0.6.1", "available": true}});
+        assert_eq!(status_lines(&s), [
+            "world world on Prime, game 2.103, pcds 0.6.0",
+            "2 online, up 1h 2m, loop 197/s (0.6% busy)",
+            "terraformation 16271011 Ti, stage Water",
+            "network ip, port 7777, autosave every 5 min",
+            "release v0.6.1 available: pcds upgrade",
+        ]);
     }
 }
