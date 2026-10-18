@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # pcds: install and run a Planet Crafter dedicated server on Linux.
 #
-#   pcds setup [--game DIR] [--world SAVE.json | --new [NEW OPTIONS]]
-#                          build or install the server, extract the game tables from your game,
-#                          put a world in place and write the settings and the systemd unit
+#   pcds up [--game DIR] [--world SAVE.json | --new [NEW OPTIONS]] [--steam-user NAME]
+#                          everything at once: setup, the service, a selftest, how to join
+#   pcds setup [--game DIR] [--world SAVE.json | --new [NEW OPTIONS]] [--steam-user NAME]
+#                          build or install the server, extract the game tables from your game
+#                          (--steam-user: download the game with steamcmd first), put a world
+#                          in place and write the settings and the systemd unit
+#   pcds worlds                 the worlds in run/worlds/ (* = the one the server runs)
+#   pcds world use NAME | new NAME [NEW OPTIONS] | import SAVE.json [NAME] | remove NAME
 #   pcds new [--planet ID] [--start LOCATION] [--seed N] [--set KEY=VALUE]... [--force]
-#                          create a new world (the current one is kept in backups/)
+#                          replace the current world with a new one (kept in backups/)
 #   pcds start | stop | restart | status | logs
 #   pcds install-service | uninstall-service    start at login, check for game updates hourly
 #   pcds code | players | save | kick PLAYER | ban PLAYER | unban NAME_OR_IP
@@ -15,19 +20,21 @@
 #   pcds extract [--game DIR]   extract the game tables again (needs Wine)
 #   pcds update [--game DIR]    after a game update: extract and restart when the game changed
 #   pcds selftest               a scripted player joins over direct IP and checks the answers
-#   pcds run                    run the server in the foreground (containers, debugging)
+#   pcds run                    run the server in the foreground (debugging)
+#   pcds container              the Docker image's start (tables, world, then run)
 #   pcds build                  build the server (cargo) and the extractor (Docker, .NET SDK)
 #
 # Everything the server keeps lives in run/ next to this script (PCDS_HOME overrides it):
-# world.json, server.env, access.json, rules.json, backups/, data/<game version>/ and the
-# extractor.
+# worlds/ (one save per world, with their backups/), server.env, access.json, rules.json,
+# data/<game version>/ and the extractor.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 SRC="$ROOT/server"
 RUN="${PCDS_HOME:-$ROOT/run}"
 ENV_FILE="$RUN/server.env"
-WORLD="$RUN/world.json"
+WORLDS="$RUN/worlds"
+STEAMCMD="$RUN/steamcmd"
 EXT="$RUN/extractor"
 EXT_GAME="$EXT/game"
 EXT_LOG="$EXT_GAME/BepInEx/LogOutput.log"
@@ -43,6 +50,10 @@ EXT_PORT=7791
 EXT_API=7781
 
 die() { echo "pcds: $*" >&2; exit 1; }
+# In the container, a command run as root (docker exec) goes on as the owner of /data.
+if [[ $EUID -eq 0 && -n "${PCDS_CONTAINER:-}" && "$(stat -c %u "$RUN" 2> /dev/null || echo 0)" != 0 ]]; then
+  exec setpriv --reuid="$(stat -c %u "$RUN")" --regid="$(stat -c %g "$RUN")" --clear-groups "$0" "$@"
+fi
 [[ $EUID -ne 0 ]] || die "run pcds as the user the server runs as, not as root"
 # --fail-with-body (curl 7.76+) shows the API's error message; older curl gets --fail.
 CURL_FAIL=--fail
@@ -56,10 +67,60 @@ env_get() {
 }
 port() { local listen; listen="$(env_get PCDS_LISTEN)"; echo "${listen##*:}"; }
 json_str() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; }
-# The unit is this installation's when it reads this settings file.
+# The unit is this installation's when it reads this settings file. In the container there is
+# no systemd: the server is the container's own process.
 active() {
+  if [[ -n "${PCDS_CONTAINER:-}" ]]; then
+    pgrep -u "$(id -u)" -x pcds-server > /dev/null
+    return
+  fi
   systemctl --user is-active --quiet "$UNIT" 2> /dev/null &&
     systemctl --user show -p EnvironmentFiles --value "$UNIT" 2> /dev/null | grep -qF "$ENV_FILE"
+}
+
+set_env() {
+  if grep -q "^$1=" "$ENV_FILE"; then
+    sed -i "s|^$1=.*|$1=$2|" "$ENV_FILE"
+  else
+    echo "$1=$2" >> "$ENV_FILE"
+  fi
+}
+
+# ---- worlds --------------------------------------------------------------------------------
+
+# The world the server runs: worlds/<PCDS_WORLD>.json.
+world_name() {
+  local name="${PCDS_WORLD:-$(env_get PCDS_WORLD)}"
+  echo "${name:-world}"
+}
+world_file() { echo "$WORLDS/$(world_name).json"; }
+
+# A world name from an argument (a file name works too).
+world_arg() {
+  local name="${1%.json}"
+  name="${name##*/}"
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "world names are letters, digits, '.', '_' and '-' (up to 64): '${1:-}'"
+  echo "$name"
+}
+
+# Until 0.5 there was one world, run/world.json. Moved while the server is stopped ("force":
+# the server is the one starting).
+migrate_layout() {
+  [[ -f "$RUN/world.json" && ! -e "$WORLDS" ]] || return 0
+  [[ "${1:-}" == force ]] || ! active || return 0
+  mkdir -p "$WORLDS"
+  mv "$RUN/world.json" "$WORLDS/world.json"
+  [[ -d "$RUN/backups" ]] && mv "$RUN/backups" "$WORLDS/backups"
+  say "worlds now live in $WORLDS (world.json and its backups moved there)"
+}
+
+restart_if_running() {
+  if [[ -n "${PCDS_CONTAINER:-}" ]]; then
+    say "restart the container for it to take effect (docker restart CONTAINER)"
+  elif active; then
+    systemctl --user restart "$UNIT"
+    say "server restarted"
+  fi
 }
 
 # ---- the server binary ---------------------------------------------------------------------
@@ -132,7 +193,7 @@ write_env() {
   cat > "$ENV_FILE" << EOF
 # Planet Crafter dedicated server settings. Apply with: pcds restart
 # Direct IP (UDP): players join with HOST:PORT; "off" disables.
-PCDS_LISTEN=0.0.0.0:7777
+PCDS_LISTEN=0.0.0.0:${PCDS_PORT:-7777}
 # Invite codes through Steam (an anonymous Steam game server; needs steamclient.so,
 # see README); "off" disables.
 PCDS_STEAM=on
@@ -141,13 +202,15 @@ PCDS_STEAM=on
 PCDS_STEAM_TOKEN=
 # Last four digits of the invite code.
 PCDS_SESSION=4242
-# Minutes between saves (0: only on stop), and the save backups kept in backups/.
+# Minutes between saves (0: only on stop), and the save backups kept in worlds/backups/.
 PCDS_AUTOSAVE=5
 PCDS_BACKUPS=24
 PCDS_BACKUP_MINUTES=60
 # Admin API and web page (pcds gui); keep it on 127.0.0.1 or behind a proxy. "off" disables.
-PCDS_ADMIN=127.0.0.1:7782
+PCDS_ADMIN=${PCDS_ADMIN_BIND:-127.0.0.1:7782}
 PCDS_ADMIN_TOKEN=$(head -c 18 /dev/urandom | base64 | tr -d '/+=')
+# The world the server runs: worlds/<name>.json (pcds worlds, pcds world use NAME).
+PCDS_WORLD=world
 EOF
   say "settings written to $ENV_FILE"
 }
@@ -242,7 +305,7 @@ EOF
 }
 
 cmd_install_service() {
-  [[ -f "$WORLD" ]] || die "run 'pcds setup' first"
+  [[ -f "$(world_file)" ]] || die "run 'pcds setup' first"
   write_unit
   systemctl --user enable --now "$UNIT" "$UNIT_NAME-update.timer"
   say "the server now starts at login and checks for game updates hourly"
@@ -258,10 +321,12 @@ cmd_uninstall_service() {
 
 # Foreground run, as the unit does: the newest tables, the world, the settings.
 cmd_run() {
-  local data
+  local data world
+  migrate_layout force
   data="$(data_dir)"
   [[ -n "$data" ]] || die "no game tables in $RUN/data: run 'pcds extract' (see README)"
-  [[ -f "$WORLD" ]] || die "no world at $WORLD: run 'pcds new' or 'pcds setup --world SAVE.json'"
+  world="$(world_file)"
+  [[ -f "$world" ]] || die "no world at $world: 'pcds worlds', 'pcds world use NAME' or 'pcds world new NAME'"
   # After an upgrade (a new build or release), the newer binary.
   if [[ ! -x "$RUN/bin/pcds-server" || "$(server_bin)" -nt "$RUN/bin/pcds-server" ]]; then
     install_server
@@ -272,13 +337,32 @@ cmd_run() {
     source "$ENV_FILE"
     set +a
   fi
-  exec "$RUN/bin/pcds-server" "$data" "$WORLD"
+  # Access lists and rules are the installation's, whichever world runs.
+  export PCDS_ACCESS="${PCDS_ACCESS:-$RUN/access.json}" PCDS_RULES="${PCDS_RULES:-$RUN/rules.json}"
+  exec "$RUN/bin/pcds-server" "$data" "$world"
 }
 
-# ---- worlds --------------------------------------------------------------------------------
+# A new world at a path: made beside, then moved over, so a failed creation leaves what was
+# there as it was.
+new_world() {
+  local path=$1 data
+  shift
+  data="$(data_dir)"
+  [[ -n "$data" ]] || die "no game tables yet: run 'pcds extract' first"
+  mkdir -p "$WORLDS" "$RUN/.new"
+  "$(server_bin)" new "$RUN/.new/world.json" "$data" "$@"
+  mv -f "$RUN/.new/world.json" "$path"
+  rmdir "$RUN/.new"
+}
+
+# A world's file goes to worlds/backups/ before something replaces or removes it.
+keep_copy() {
+  mkdir -p "$WORLDS/backups"
+  cp -p "$WORLDS/$1.json" "$WORLDS/backups/$1-$2-$(date -u +%Y%m%d-%H%M%S).json"
+}
 
 cmd_new() {
-  local force=0 args=()
+  local force=0 args=() world
   while (($#)); do
     case "$1" in
       --force) force=1 ;;
@@ -286,21 +370,87 @@ cmd_new() {
     esac
     shift
   done
-  local data
-  data="$(data_dir)"
-  [[ -n "$data" ]] || die "no game tables yet: run 'pcds extract' first"
-  if [[ -f "$WORLD" ]]; then
-    ((force)) || die "a world exists at $WORLD; pass --force to replace it (it is kept in backups/)"
+  migrate_layout
+  world="$(world_file)"
+  if [[ -f "$world" ]]; then
+    ((force)) || die "a world exists at $world; pass --force to replace it (it is kept in backups/), or make another: pcds world new NAME"
     active && die "stop the server first (pcds stop)"
-    mkdir -p "$RUN/backups"
-    cp -p "$WORLD" "$RUN/backups/world-replaced-$(date -u +%Y%m%d-%H%M%S).json"
+    keep_copy "$(world_name)" replaced
   fi
-  # Made beside, then moved over: a failed creation leaves the current world as it was.
-  rm -rf "$RUN/.new"
-  mkdir -p "$RUN/.new"
-  "$(server_bin)" new "$RUN/.new/world.json" "$data" "${args[@]}"
-  mv -f "$RUN/.new/world.json" "$WORLD"
-  rmdir "$RUN/.new"
+  new_world "$world" "${args[@]}"
+}
+
+cmd_worlds() {
+  migrate_layout
+  local current f n files=()
+  current="$(world_name)"
+  for f in "$WORLDS"/*.json; do
+    [[ -f "$f" ]] && files+=("$f")
+  done
+  if ((${#files[@]} == 0)); then
+    say "no worlds in $WORLDS yet: 'pcds world new NAME', 'pcds world import SAVE.json', or copy a save there"
+    return 0
+  fi
+  for f in "${files[@]}"; do
+    n="$(basename "$f" .json)"
+    printf '%s %-28s %7s  %s\n' "$([[ "$n" == "$current" ]] && echo '*' || echo ' ')" "$n" "$(du -h "$f" | cut -f1)" "$(date -r "$f" '+%Y-%m-%d %H:%M')"
+  done
+  echo "(* the server runs it; add a world by copying a save into $WORLDS)"
+}
+
+cmd_world() {
+  local sub=${1:-} name force=0 args=()
+  (($#)) && shift
+  migrate_layout
+  case "$sub" in
+    use)
+      name="$(world_arg "${1:-}")"
+      [[ -f "$WORLDS/$name.json" ]] || die "no world $name in $WORLDS ('pcds worlds' lists them)"
+      write_env
+      set_env PCDS_WORLD "$name"
+      say "the server runs $name from now on"
+      restart_if_running
+      ;;
+    new)
+      name="$(world_arg "${1:-}")"
+      shift
+      while (($#)); do
+        case "$1" in
+          --force) force=1 ;;
+          *) args+=("$1") ;;
+        esac
+        shift
+      done
+      if [[ -f "$WORLDS/$name.json" ]]; then
+        ((force)) || die "world $name exists (--force replaces it; the old one is kept in backups/)"
+        [[ "$name" == "$(world_name)" ]] && active && die "stop the server first: it runs $name"
+        keep_copy "$name" replaced
+      fi
+      new_world "$WORLDS/$name.json" "${args[@]}"
+      say "world $name created; 'pcds world use $name' plays it"
+      ;;
+    import)
+      local save=${1:-}
+      [[ -f "$save" ]] || die "pcds world import SAVE.json [NAME]: no save at '$save'"
+      grep -q 'saveDisplayName' "$save" || die "$save is not a Planet Crafter save"
+      name="$(world_arg "${2:-$save}")"
+      [[ -f "$WORLDS/$name.json" ]] && die "world $name exists: pass another NAME"
+      mkdir -p "$WORLDS"
+      cp "$save" "$WORLDS/$name.json.part"
+      mv "$WORLDS/$name.json.part" "$WORLDS/$name.json"
+      say "world $name imported; 'pcds world use $name' plays it"
+      ;;
+    remove)
+      name="$(world_arg "${1:-}")"
+      [[ -f "$WORLDS/$name.json" ]] || die "no world $name in $WORLDS"
+      [[ "$name" == "$(world_name)" ]] && die "the server runs $name: 'pcds world use' another one first"
+      # Moved into backups/ rather than deleted.
+      mkdir -p "$WORLDS/backups"
+      mv "$WORLDS/$name.json" "$WORLDS/backups/$name-removed-$(date -u +%Y%m%d-%H%M%S).json"
+      say "world $name removed (it is kept in $WORLDS/backups/)"
+      ;;
+    *) die "pcds world use NAME | new NAME [OPTIONS] | import SAVE.json [NAME] | remove NAME" ;;
+  esac
 }
 
 # ---- extracting the game tables ------------------------------------------------------------
@@ -318,13 +468,23 @@ buildid_of() {
   return 0
 }
 
-# The game folder: --game, PCDS_GAME_DIR, the one used last, or a Steam library.
+# Steam's folders and every library listed in them (other drives too).
+steam_libraries() {
+  local root
+  for root in "$HOME/.local/share/Steam" "$HOME/.steam/steam" "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"; do
+    echo "$root"
+    [[ -f "$root/steamapps/libraryfolders.vdf" ]] && sed -n 's/^[[:space:]]*"path"[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$root/steamapps/libraryfolders.vdf"
+  done
+  return 0
+}
+
+# The game folder: --game, PCDS_GAME_DIR, the one used last, a steamcmd download, or a Steam
+# library.
 game_dir() {
-  local d
-  for d in "${1:-}" "${PCDS_GAME_DIR:-}" "$(cat "$RUN/game-dir" 2> /dev/null || true)" \
-    "$HOME/.local/share/Steam/steamapps/common/The Planet Crafter" \
-    "$HOME/.steam/steam/steamapps/common/The Planet Crafter" \
-    "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/The Planet Crafter"; do
+  local d libraries=()
+  mapfile -t libraries < <(steam_libraries)
+  for d in "${1:-}" "${PCDS_GAME_DIR:-}" "$(cat "$RUN/game-dir" 2> /dev/null || true)" "$RUN/game" \
+    "${libraries[@]/%//steamapps/common/The Planet Crafter}"; do
     if [[ -n "$d" && -f "$d/Planet Crafter.exe" && -d "$d/Planet Crafter_Data" ]]; then
       echo "$d"
       return
@@ -421,10 +581,15 @@ start_extractor() {
   fi
   # No sound device: the game would otherwise play its music on this machine.
   wine reg add 'HKCU\Software\Wine\Drivers' /v Audio /d '' /f > /dev/null 2>&1 || true
+  # Those started Wine's session without a display: the game would join it and could not make
+  # its window under Xvfb. It starts its own.
+  wineserver -k 2> /dev/null || true
+  wineserver -w 2> /dev/null || true
   local runner=()
   if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
     command -v xvfb-run > /dev/null || die "no display: install Xvfb (xvfb-run; package xvfb or xorg-x11-server-Xvfb) for the extraction"
-    runner=(xvfb-run -a)
+    # A 24-bit screen: Unity cannot make its window on xvfb-run's default 8-bit one.
+    runner=(xvfb-run -a -s "-screen 0 1280x720x24")
   fi
   rm -f "$EXT_LOG"
   (cd "$EXT_GAME" && setsid "${runner[@]}" wine "Planet Crafter.exe" -batchmode -nographics -logFile "Z:${EXT//\//\\}\\player.log" > "$EXT/wine.log" 2>&1 < /dev/null &)
@@ -553,6 +718,7 @@ cmd_update() {
     esac
     shift
   done
+  update_downloaded_game
   game="$(game_dir "$game_arg")"
   data="$(data_dir)"
   current="$(buildid_of "$game")"
@@ -571,54 +737,230 @@ cmd_update() {
 
 # ---- setup and checks ----------------------------------------------------------------------
 
-steamclient_check() {
-  [[ "$(env_get PCDS_STEAM)" == off ]] && return 0
+have_steamclient() {
   local f
   for f in "$HOME/.steam/sdk64/steamclient.so" "$HOME/.local/share/Steam/linux64/steamclient.so" "$HOME/.steam/steam/linux64/steamclient.so"; do
     [[ -f "$f" ]] && return 0
   done
-  echo "pcds: invite codes need Valve's steamclient.so: install steamcmd and run 'steamcmd +quit' once" \
-    "(it creates ~/.steam/sdk64), or set PCDS_STEAM=off in $ENV_FILE for direct IP only" >&2
+  return 1
+}
+
+# Valve's command-line Steam client, in run/steamcmd.
+fetch_steamcmd() {
+  [[ -x "$STEAMCMD/steamcmd.sh" ]] && return 0
+  say "downloading steamcmd (Valve's command-line Steam client)"
+  mkdir -p "$STEAMCMD"
+  curl -fsSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz | tar -xz -C "$STEAMCMD"
+}
+
+# Invite codes need Valve's steamclient.so: from Steam if it is installed, else from steamcmd.
+ensure_steamclient() {
+  [[ "$(env_get PCDS_STEAM)" == off ]] && return 0
+  have_steamclient && return 0
+  say "getting steamclient.so for invite codes (steamcmd's first run updates itself; a minute or two)"
+  { fetch_steamcmd && "$STEAMCMD/steamcmd.sh" +quit > "$STEAMCMD/first-run.log" 2>&1; } || true
+  if [[ -f "$STEAMCMD/linux64/steamclient.so" && ! -f "$HOME/.steam/sdk64/steamclient.so" ]]; then
+    mkdir -p "$HOME/.steam/sdk64"
+    ln -sf "$STEAMCMD/linux64/steamclient.so" "$HOME/.steam/sdk64/steamclient.so"
+  fi
+  have_steamclient || echo "pcds: no steamclient.so: steamcmd did not run (see $STEAMCMD/first-run.log; it needs" \
+    "32-bit libraries such as lib32gcc-s1). Direct IP works; invite codes come once steamcmd runs" >&2
+}
+
+# The game (Windows build) with the owner's Steam account; steamcmd asks for the password and
+# the Steam Guard code once and remembers the login for updates.
+download_game() {
+  fetch_steamcmd
+  say "downloading The Planet Crafter as Steam user $1 (steamcmd asks for your password and Steam Guard code)"
+  "$STEAMCMD/steamcmd.sh" +@sSteamCmdForcePlatformType windows +force_install_dir "$RUN/game" +login "$1" +app_update "$APP_ID" validate +quit
+  [[ -f "$RUN/game/Planet Crafter.exe" ]] || die "the game download did not finish (see above)"
+  echo "$1" > "$RUN/steam-user"
+  echo "$RUN/game" > "$RUN/game-dir"
+}
+
+# A downloaded game follows updates with the remembered login (no prompt; skipped when Steam
+# wants the password again).
+update_downloaded_game() {
+  [[ -f "$RUN/steam-user" && -x "$STEAMCMD/steamcmd.sh" ]] || return 0
+  "$STEAMCMD/steamcmd.sh" +@sSteamCmdForcePlatformType windows +@NoPromptForPassword 1 +force_install_dir "$RUN/game" \
+    +login "$(cat "$RUN/steam-user")" +app_update "$APP_ID" +quit < /dev/null > "$STEAMCMD/update.log" 2>&1 ||
+    say "the game update through steamcmd did not run (see $STEAMCMD/update.log)"
 }
 
 cmd_setup() {
-  local game_arg="" world="" new=0 new_args=()
+  local game_arg="" world="" new=0 new_args=() steam_user=""
   while (($#)); do
     case "$1" in
       --game) game_arg="${2:?--game DIR}"; shift ;;
       --world) world="${2:?--world SAVE.json}"; shift ;;
+      --steam-user) steam_user="${2:?--steam-user NAME}"; shift ;;
       --new) new=1 ;;
       *) ((new)) && new_args+=("$1") || die "unknown option $1" ;;
     esac
     shift
   done
-  local tool
-  for tool in curl python3 unzip sha256sum systemctl; do
+  local tool current
+  for tool in curl python3 unzip sha256sum tar; do
     need "$tool" "install it with your package manager"
   done
+  [[ -n "${PCDS_CONTAINER:-}" ]] || need systemctl "pcds runs the server as a systemd user service (or use the Docker image)"
   mkdir -p "$RUN"
+  migrate_layout
+  write_env
   install_server
+  if [[ -n "$steam_user" ]]; then
+    download_game "$steam_user"
+    game_arg="$RUN/game"
+  fi
   if [[ -z "$(data_dir)" ]]; then
     cmd_extract ${game_arg:+--game "$game_arg"}
   fi
+  current="$(world_file)"
   if [[ -n "$world" ]]; then
     [[ -f "$world" ]] || die "no save at $world"
+    grep -q 'saveDisplayName' "$world" || die "$world is not a Planet Crafter save"
     active && die "stop the server first (pcds stop): it would save over the imported world"
-    if [[ -f "$WORLD" ]]; then
-      mkdir -p "$RUN/backups"
-      cp -p "$WORLD" "$RUN/backups/world-replaced-$(date -u +%Y%m%d-%H%M%S).json"
-    fi
-    cp "$world" "$WORLD"
-    say "world copied from $world"
+    [[ -f "$current" ]] && keep_copy "$(world_name)" replaced
+    mkdir -p "$WORLDS"
+    cp "$world" "$current"
+    say "world $(world_name) copied from $world"
   elif ((new)); then
-    cmd_new "${new_args[@]}"
-  elif [[ ! -f "$WORLD" ]]; then
+    if [[ -f "$current" ]]; then
+      say "keeping the world $(world_name) ('pcds world new NAME' makes another)"
+    else
+      new_world "$current" "${new_args[@]}"
+    fi
+  elif [[ ! -f "$current" ]]; then
     die "no world yet: pass --world SAVE.json (a save from your game) or --new"
   fi
-  write_env
-  write_unit
-  steamclient_check
+  [[ -n "${PCDS_CONTAINER:-}" ]] || write_unit
+  ensure_steamclient
   say "ready: 'pcds start' runs it now, 'pcds install-service' starts it at login"
+}
+
+# The game's own saves on this machine (Proton), newest first.
+local_saves() {
+  local lib d
+  while read -r lib; do
+    d="$lib/steamapps/compatdata/$APP_ID/pfx/drive_c/users/steamuser/AppData/LocalLow/MijuGames/Planet Crafter"
+    [[ -d "$d" ]] && grep -l 'saveDisplayName' "$d"/*.json 2> /dev/null
+  done < <(steam_libraries) | xargs -r -d '\n' ls -t 2> /dev/null | head -9
+  return 0
+}
+
+# On a terminal with saves of the game around: which one becomes the world (or a new one).
+pick_save() {
+  [[ -t 0 ]] || return 0
+  local saves=() i choice
+  mapfile -t saves < <(local_saves)
+  ((${#saves[@]})) || return 0
+  echo "Your saves of The Planet Crafter on this machine:" >&2
+  for i in "${!saves[@]}"; do
+    echo "  $((i + 1))) $(basename "${saves[$i]}" .json)  ($(date -r "${saves[$i]}" '+%Y-%m-%d %H:%M'))" >&2
+  done
+  read -r -p "Play one of them on the server (1-${#saves[@]}), or Enter for a new world: " choice
+  if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#saves[@]})); then
+    echo "${saves[$((choice - 1))]}"
+  fi
+  return 0
+}
+
+# How players get in, once the server answers.
+summary() {
+  local code="" ip _
+  for _ in $(seq 30); do
+    code="$(api GET /api/status 2> /dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("inviteCode") or "")' 2> /dev/null || true)"
+    [[ -n "$code" || "$(env_get PCDS_STEAM)" == off ]] && break
+    sleep 2
+  done
+  ip="$(ip -4 route get 1.1.1.1 2> /dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
+  if [[ -n "$code" ]]; then
+    code="$code   (it changes at every start unless PCDS_STEAM_TOKEN is set)"
+  else
+    code="none yet (see ./pcds logs; ./pcds code prints it)"
+  fi
+  echo
+  echo "  The server is running the world \"$(world_name)\"."
+  echo "    Invite code: $code"
+  echo "    Direct IP:   ${ip:-this machine}:$(port) (UDP; forward it on your router for players outside your network)"
+  echo "    Admin page:  http://$(env_get PCDS_ADMIN)/#token=$(env_get PCDS_ADMIN_TOKEN)"
+  echo "    Manage it:   cd $ROOT && ./pcds status | players | worlds | rules | logs"
+  echo
+}
+
+# From nothing to a running server: setup (game tables, a world, settings), the service, a
+# check that players get in, and how to join.
+cmd_up() {
+  local args=("$@") world_given=0 save a _
+  for a in "$@"; do
+    [[ "$a" == --world || "$a" == --new ]] && world_given=1
+  done
+  migrate_layout
+  if ((!world_given)) && [[ ! -f "$(world_file)" ]]; then
+    save="$(pick_save)"
+    if [[ -n "$save" ]]; then
+      args+=(--world "$save")
+    else
+      args+=(--new)
+    fi
+  fi
+  cmd_setup "${args[@]}"
+  if [[ -n "${PCDS_CONTAINER:-}" ]] || ! systemctl --user show-environment > /dev/null 2>&1; then
+    say "no systemd user session here: start the server with './pcds run'"
+    return 0
+  fi
+  systemctl --user enable "$UNIT" "$UNIT_NAME-update.timer" 2> /dev/null
+  systemctl --user restart "$UNIT"
+  systemctl --user start "$UNIT_NAME-update.timer"
+  if loginctl enable-linger "$USER" 2> /dev/null; then
+    say "the server starts with the machine and keeps running while you are logged out"
+  else
+    say "to keep it running while you are logged out: sudo loginctl enable-linger $USER"
+  fi
+  for _ in $(seq 60); do
+    api GET /api/status > /dev/null 2>&1 && break
+    sleep 1
+  done
+  cmd_selftest
+  summary
+}
+
+# The Docker image's start: the game tables (from the game mounted at /game, or downloaded
+# with STEAM_USER), a world, steamclient for invite codes, then the server as this process.
+cmd_container() {
+  local game data current installed newest
+  mkdir -p "$RUN" "$WORLDS"
+  migrate_layout force
+  write_env
+  install_server
+  if [[ -n "${STEAM_USER:-}" && ! -f "$RUN/game/Planet Crafter.exe" ]]; then
+    [[ -t 0 ]] || die "STEAM_USER: the first download needs a terminal for the Steam login (docker run -it ...)"
+    download_game "$STEAM_USER"
+  fi
+  update_downloaded_game
+  game="$(game_dir 2> /dev/null)" || game=""
+  if [[ -n "$game" ]]; then
+    data="$(data_dir)"
+    current="$(buildid_of "$game")"
+    installed="$( [[ -n "$data" ]] && cat "$data/buildid" 2> /dev/null || true)"
+    # The first start, or a game update: this game build's tables.
+    [[ -n "$data" && "$current" == "$installed" ]] || cmd_extract --game "$game"
+  fi
+  [[ -n "$(data_dir)" ]] || die "no game tables: mount your game folder at /game (-v '/path/to/The Planet Crafter:/game:ro'), or start once with 'docker run -it -e STEAM_USER=yourname ...' to download the game"
+  if [[ ! -f "$(world_file)" ]]; then
+    newest="$(ls -t "$WORLDS"/*.json 2> /dev/null | head -1 || true)"
+    if [[ -n "$newest" && -z "${PCDS_WORLD:-}" ]]; then
+      set_env PCDS_WORLD "$(basename "$newest" .json)"
+      say "running the world $(world_name) (the newest in $WORLDS)"
+    else
+      say "no world yet: making a new one, $(world_name)"
+      # shellcheck disable=SC2086
+      new_world "$(world_file)" ${PCDS_NEW_WORLD:-}
+    fi
+  fi
+  ensure_steamclient
+  say "manage it with: docker exec CONTAINER pcds worlds | players | rules | gui"
+  cmd_run
 }
 
 # The rules through the admin API: shown, set as SECTION.RULE=VALUE (values are JSON, else
@@ -676,15 +1018,24 @@ cmd_selftest() {
   fi
 }
 
+in_container() { [[ -z "${PCDS_CONTAINER:-}" ]] || die "in the container: use 'docker $1 CONTAINER' instead"; }
+
 case "${1:-}" in
+  up) shift; cmd_up "$@" ;;
   setup) shift; cmd_setup "$@" ;;
   new) shift; cmd_new "$@" ;;
+  worlds) cmd_worlds ;;
+  world) shift; cmd_world "$@" ;;
   start | stop | restart)
+    in_container "$1"
     [[ -f "$UNIT_DIR/$UNIT" ]] || die "run 'pcds setup' first"
     systemctl --user "$1" "$UNIT"
     ;;
   status) cmd_status ;;
-  logs) journalctl --user -o cat -u "$UNIT" -n 100 -f ;;
+  logs)
+    in_container logs
+    journalctl --user -o cat -u "$UNIT" -n 100 -f
+    ;;
   install-service) cmd_install_service ;;
   uninstall-service) cmd_uninstall_service ;;
   code) cmd_code ;;
@@ -702,6 +1053,7 @@ case "${1:-}" in
   update) shift; cmd_update "$@" ;;
   selftest) cmd_selftest ;;
   run) cmd_run ;;
+  container) cmd_container ;;
   build)
     build_server
     install_server

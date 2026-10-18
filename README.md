@@ -15,56 +15,87 @@ This project is not affiliated with Miju Games. You need your own copy of the ga
 reads the game tables it needs (items, buildings, scenes, network tables) from your installation
 once per game version, and nothing from the game is distributed here.
 
+## Quick start
+
+One command on a Linux machine with the game installed through Steam:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/perara/planet-crafter-dedicated-server/main/install.sh | bash
+```
+
+It checks the machine and offers to install what is missing (Wine, Xvfb, ...) with your package
+manager. Then it downloads the latest release into `~/planet-crafter-server` and sets everything
+up. It reads the game tables from your game, which takes a few minutes the first time. It asks
+whether to play one of your saves or a new world, and starts the server as a service that
+survives reboots. It checks that players can get in, and prints the invite code and the address
+to join. Run the same command again to upgrade; your worlds and settings stay.
+
+Options go after `bash -s --`, for example
+`curl -fsSL .../install.sh | bash -s -- --world ~/Standard-1.json`:
+`--dir DIR`, `--world SAVE.json`, `--new [--planet ID]`, `--game DIR` (a game folder outside Steam),
+`--steam-user NAME` (no game on this machine: download it with steamcmd and your Steam login),
+`--yes` (install packages without asking).
+
+Or with Docker, on any Linux with Docker (the host needs no Wine):
+
+```bash
+docker run -d --name pcds --restart unless-stopped \
+  -p 7777:7777/udp -p 127.0.0.1:7782:7782 \
+  -v "$PWD/pcds-data:/data" \
+  -v "$HOME/.local/share/Steam/steamapps/common/The Planet Crafter:/game:ro" \
+  ghcr.io/perara/planet-crafter-dedicated-server
+```
+
+See [Docker](#docker) for the data folder, managing worlds and Compose.
+
 ## Requirements
 
 - Linux x86_64 with systemd and glibc 2.34 or newer for the release build (Ubuntu 22.04,
-  Debian 12, Fedora 35, RHEL 9 and later). Run it as an ordinary user: `pcds` refuses to run as root.
-- Your copy of The Planet Crafter for Windows, installed through Steam on this machine, or the
-  game folder copied from a PC (the folder that contains `Planet Crafter.exe`).
-- Wine, curl, python3 and unzip. Wine is only used once per game version, to run the game
-  headless and read its tables. On a machine without a display, also Xvfb (`xvfb-run`; package
-  `xvfb` or `xorg-x11-server-Xvfb`).
-- For invite codes: Valve's `steamclient.so`. Install
-  [steamcmd](https://developer.valvesoftware.com/wiki/SteamCMD) and run `steamcmd +quit` once
-  (it creates `~/.steam/sdk64`), or have the Steam client installed. Without it, the server
-  offers direct IP only.
+  Debian 12, Fedora 35, RHEL 9 and later), or any machine with Docker. Run it as an ordinary
+  user: `pcds` refuses to run as root.
+- Your copy of The Planet Crafter for Windows: installed through Steam on this machine, the
+  game folder copied from a PC (the folder that contains `Planet Crafter.exe`), or downloaded
+  with `--steam-user NAME`.
+- Wine, curl, python3 and unzip, and Xvfb on a machine without a display (the installer and the
+  Docker image bring them).
+- For invite codes: Valve's `steamclient.so`, from the Steam client if it is installed, else
+  fetched with steamcmd (which needs 32-bit libraries such as `lib32gcc-s1`). Without it the
+  server offers direct IP only.
 - To build from source: [Rust](https://rustup.rs). To rebuild the extractor: Docker.
+
+**Why Wine?** The server is native Linux code and never runs under Wine. The game has no Linux
+version, so once per game version `pcds` runs the Windows game headless under Wine for a few
+minutes. It reads the tables the server needs: network registrations, items, buildings, every
+planet's scene and the procedural wrecks. After that Wine is not used until the next game
+update. The Docker image carries its own Wine.
 
 Tested with game version 2.103.
 
-## Install
+## Install by hand
 
-From a [release](https://github.com/perara/planet-crafter-dedicated-server/releases):
-
-```bash
-tar xzf pcds-v*-linux-x86_64.tar.gz
-cd pcds-v*-linux-x86_64
-```
-
-Or from source (built with cargo on the first `setup`):
+From a [release](https://github.com/perara/planet-crafter-dedicated-server/releases), or from
+source (built with cargo on the first `setup`):
 
 ```bash
-git clone https://github.com/perara/planet-crafter-dedicated-server.git
-cd planet-crafter-dedicated-server
+tar xzf pcds-v*-linux-x86_64.tar.gz && cd pcds-v*-linux-x86_64
+# or: git clone https://github.com/perara/planet-crafter-dedicated-server.git && cd planet-crafter-dedicated-server
+./pcds up                                   # what the installer runs: everything below at once
 ```
 
-Then set it up with a world from your game:
+`up` takes the same options as `setup`. Step by step:
 
 ```bash
-./pcds setup --world "/path/to/Standard-1.json"
+./pcds setup --world "/path/to/Standard-1.json"   # or: --new --planet Prime
+./pcds install-service    # start now and at login, pick up game updates hourly
+loginctl enable-linger $USER   # keep it running while you are logged out
+./pcds selftest           # a scripted connection over direct IP is approved and gets the world
 ```
 
-or with a new world:
-
-```bash
-./pcds setup --new --planet Prime
-```
-
-`setup` finds the game in your Steam library (or pass `--game DIR`), reads the game tables from
-it, puts the world in place, and writes the settings and a systemd user unit. Your game folder
-is never modified, and a modded one works too: the extraction leaves the game's own BepInEx,
-doorstop and `steam_appid.txt` out of its copy and brings its own. `setup --new` does not replace
-an existing world (pass `--force` for that), and `setup --world` refuses while the server runs.
+`setup` finds the game in any of your Steam libraries (or pass `--game DIR`), reads the game
+tables from it, puts the world in place, and writes the settings and a systemd user unit. Your
+game folder is never modified, and a modded one works too: the extraction leaves the game's own
+BepInEx, doorstop and `steam_appid.txt` out of its copy and brings its own. `setup --world`
+refuses while the server runs. The selftest does not become a player, so nothing is saved for it.
 
 Where the game keeps its saves:
 - Windows: `%USERPROFILE%\AppData\LocalLow\MijuGames\Planet Crafter\`
@@ -74,21 +105,53 @@ Where the game keeps its saves:
 
 ```bash
 ./pcds start              # also: stop, restart, status, logs
-./pcds selftest           # a scripted connection over direct IP is approved and gets the world
-./pcds install-service    # start at login and pick up game updates hourly
-loginctl enable-linger $USER   # keep it running while you are logged out
 ```
-
-The selftest does not become a player, so nothing is saved for it.
 
 ### Upgrading
 
+- Run the installer again, or `./pcds up` in a newer release folder (`up` points the systemd
+  unit at it; move the old folder's `run/` into it first).
 - From source: `git pull`, `./pcds build`, then `./pcds restart`.
-- From a release: `./pcds stop` in the old folder, unpack the new tarball, move the old
-  folder's `run/` into the new one, then run `./pcds setup` and `./pcds start` in the new
-  folder (`setup` points the systemd unit at it).
 
-The server installs the newer binary into `run/bin/` by itself when it starts.
+The server installs the newer binary into `run/bin/` by itself when it starts. An installation
+from before 0.5 has its `run/world.json` moved to `run/worlds/world.json` on the next start.
+
+## Docker
+
+The image `ghcr.io/perara/planet-crafter-dedicated-server` (tags `latest` and each version)
+holds the server and what the one-time table extraction needs. Everything the server keeps is in
+`/data`, a folder you mount:
+
+```
+data/
+  worlds/        one save per world; copy a save from the game here to add it
+  worlds/backups/   timestamped copies of the worlds
+  server.env     settings (see Settings); PCDS_WORLD names the world that runs
+  rules.json     server rules        access.json   access lists
+  data/<game version>/   the game tables, extracted on the first start
+```
+
+Mount your game folder read-only at `/game`. The first start extracts its tables, which takes a
+few minutes (`docker logs -f pcds`); later starts only extract again after a game update. Without
+the game on the machine, start once interactively and download it with your Steam login:
+`docker run -it -e STEAM_USER=yourname -v "$PWD/pcds-data:/data" ... ghcr.io/perara/planet-crafter-dedicated-server`.
+
+Manage it with `docker exec`:
+
+```bash
+docker exec pcds pcds worlds                 # the worlds in data/worlds, * = the one running
+docker exec pcds pcds world use mybase && docker restart pcds
+docker exec pcds pcds world new second --planet Aqualis
+docker exec pcds pcds world remove old       # kept in worlds/backups/
+docker exec pcds pcds code                   # the invite code
+docker exec pcds pcds players | rules | gui
+```
+
+The admin page listens on port 7782 inside the container; publish it on 127.0.0.1 only, as
+above. `PUID`/`PGID` (default 1000) set who owns `data/` on the host. On the first start without
+a world, the newest save in `data/worlds/` runs, or a new world is made (`PCDS_NEW_WORLD`, for
+example `--planet Aqualis`, chooses its options). [compose.yaml](compose.yaml) does the same with
+`docker compose up -d`.
 
 ## Joining
 
@@ -108,11 +171,12 @@ The server installs the newer binary into `run/bin/` by itself when it starts.
 | `PCDS_STEAM_TOKEN` | empty | a [game server login token](https://steamcommunity.com/dev/managegameservers) (app 1284190) keeps the invite code the same across restarts |
 | `PCDS_SESSION` | `4242` | the last four digits of the invite code |
 | `PCDS_AUTOSAVE` | `5` | minutes between saves; `0` saves only on stop |
-| `PCDS_BACKUPS` | `24` | save backups kept in `run/backups/`; `0` keeps none |
+| `PCDS_BACKUPS` | `24` | save backups kept in `run/worlds/backups/`; `0` keeps none |
 | `PCDS_BACKUP_MINUTES` | `60` | minutes between backups |
 | `PCDS_ADMIN` | `127.0.0.1:7782` | admin API and web page; `off` disables them |
 | `PCDS_ADMIN_TOKEN` | generated | the admin API's bearer token |
 | `PCDS_MAX_PLAYERS` | `16` | players at once; more are refused with the game's session-full message (the `limits.maxPlayers` rule overrides it) |
+| `PCDS_WORLD` | `world` | the world the server runs: `run/worlds/<name>.json` (`pcds world use NAME`) |
 | `PCDS_RULES` | `run/rules.json` | the server rules file (see [Server rules](#server-rules)) |
 
 `run/server.env` holds the admin token and is readable by your user only.
@@ -199,17 +263,23 @@ same machine shares.
 
 ## Worlds and backups
 
-- `run/world.json` is the world, in the game's save format. Stop the server before replacing it.
-- `./pcds new [--planet ID] [--start LOCATION] [--seed N] [--set KEY=VALUE]... [--force]` makes a
-  new world with the game's Standard settings. `--set` changes any game setting, for example
-  `--set modifierGaugeDrain=0.5 --set dyingConsequencesLabel=NoConsequences`. `--force` replaces an
-  existing world; the old one is kept in `run/backups/`.
-- `run/backups/` keeps timestamped copies of the world (one per `PCDS_BACKUP_MINUTES`, the newest
-  `PCDS_BACKUPS`), named by UTC time. Each start also backs up the world as it was before the
-  server touched it, at most once per 10 minutes. To restore one, stop the server and copy it
-  over `run/world.json`.
+- `run/worlds/` holds the worlds, one save per world in the game's format. `PCDS_WORLD` in
+  `server.env` names the one the server runs (default `world`).
+- `./pcds worlds` lists them; `./pcds world use NAME` switches (and restarts the server);
+  `./pcds world import SAVE.json [NAME]` adds a save, as does copying it into `run/worlds/`;
+  `./pcds world new NAME [--planet ID] [--start LOCATION] [--seed N] [--set KEY=VALUE]...` makes a
+  new one with the game's Standard settings (`--set` changes any game setting, for example
+  `--set modifierGaugeDrain=0.5 --set dyingConsequencesLabel=NoConsequences`);
+  `./pcds world remove NAME` moves one into `run/worlds/backups/`.
+- `./pcds new [OPTIONS] --force` replaces the running world with a new one; the old one is kept.
+- `run/worlds/backups/` keeps timestamped copies of each world (one per `PCDS_BACKUP_MINUTES`,
+  the newest `PCDS_BACKUPS`), named by UTC time. Each start also backs up the world as it was
+  before the server touched it, at most once per 10 minutes. To restore one, stop the server and
+  copy it over the world's file.
 - A server that keeps crashing stops after 5 starts in 10 minutes, so the older backups stay.
   `./pcds logs` shows why; `systemctl --user reset-failed pcds` and `./pcds start` try again.
+- Access lists (`access.json`) and rules (`rules.json`) belong to the installation and apply to
+  whichever world runs.
 
 ## Differences from hosting in the game
 
@@ -270,7 +340,7 @@ fingerprint of everything the server sends and saves. A change that should not a
 must leave the fingerprint as it was:
 
 ```bash
-PCDS_BENCH_SAVE=../run/world.json PCDS_RNG_SEED=1 PCDS_BENCH_PLAYERS=4 \
+PCDS_BENCH_SAVE=../run/worlds/world.json PCDS_RNG_SEED=1 PCDS_BENCH_PLAYERS=4 \
   cargo test --release bench -- --ignored --nocapture
 ```
 

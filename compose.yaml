@@ -1,0 +1,20 @@
+# docker compose up -d        then: docker compose logs -f
+#
+# ./data holds everything the server keeps: worlds/ (copy a save there to add a world),
+# server.env, rules.json, access.json, the game tables and backups. Manage it with
+# `docker compose exec pcds pcds worlds | world use NAME | players | rules | gui`.
+services:
+  pcds:
+    image: ghcr.io/perara/planet-crafter-dedicated-server:latest
+    restart: unless-stopped
+    ports:
+      - "7777:7777/udp"        # direct IP: players join HOST:7777
+      - "127.0.0.1:7782:7782"  # the admin page, on this machine only
+    volumes:
+      - ./data:/data
+      # Your copy of the game (only read, to extract its tables once per game version).
+      - ${GAME_DIR:-~/.local/share/Steam/steamapps/common/The Planet Crafter}:/game:ro
+    environment:
+      PUID: "1000"   # the owner of ./data on the host (id -u)
+      PGID: "1000"
+    stop_grace_period: 60s

@@ -24,4 +24,4 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - run: shellcheck -S error pcds
+      - run: shellcheck -S error pcds install.sh docker/entrypoint.sh

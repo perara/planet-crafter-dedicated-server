@@ -24,9 +24,12 @@ jobs:
           lib="$(ls -t server/target/release/build/steamworks-sys-*/out/libsteam_api.so | head -1)"
           cp server/target/release/pcds-server "$lib" extractor/prebuilt/PcdsExtractor.dll "dist/$name/bin/"
           cp server/web/index.html "dist/$name/web/"
-          cp pcds README.md LICENSE "dist/$name/"
+          cp pcds install.sh README.md LICENSE "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
           generate_release_notes: true
