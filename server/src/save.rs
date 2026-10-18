@@ -209,7 +209,9 @@ pub fn backup(path: &str, every: Duration, keep: usize) -> std::io::Result<()> {
         return Ok(());
     }
     let time = stamp(now);
-    std::fs::copy(path, dir.join(format!("{stem}-{time}.json")))?;
+    // Whole or not at all: a copy cut short (a full disk) under a backup's name would count as
+    // this hour's backup.
+    write_atomic(&dir.join(format!("{stem}-{time}.json")).to_string_lossy(), &std::fs::read(path)?)?;
     times.push(time);
     times.sort();
     times.dedup();
@@ -290,6 +292,42 @@ mod tests {
         let mut save = SaveFile::empty();
         save.objects = vec![serde_json::json!({"id": 5, "gId": "Iron", "liId": 0, "siIds": "", "pos": "0,0,0", "rot": "0,0,0,0", "planet": 0, "hunger": 0.0, "count": "0,0", "linkedWo": 0})];
         assert!(save.to_text().contains("{\"id\":5,\"gId\":\"Iron\"}"));
+    }
+
+    /// A backup cut short (by a file size limit here, as by a full disk) leaves nothing under a
+    /// backup's name: the next save makes one again. In a child: the limit is per process.
+    #[test]
+    fn a_cut_short_backup_is_not_kept() {
+        use std::os::unix::process::CommandExt;
+        let dir = std::env::temp_dir().join(format!("pcds-backup-cut-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("world.json"), vec![b'x'; 64 << 10]).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.args(["--exact", "save::tests::backup_under_a_size_limit", "--ignored"]).env("PCDS_BACKUP_CUT_DIR", &dir).stdout(std::process::Stdio::null());
+        // SAFETY: between fork and exec only async-signal-safe calls: signal and setrlimit.
+        unsafe {
+            child.pre_exec(|| {
+                libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                let limit = libc::rlimit { rlim_cur: 4096, rlim_max: 4096 };
+                if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        assert!(child.status().unwrap().success());
+        let left: Vec<_> = std::fs::read_dir(dir.join("backups")).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert!(left.is_empty(), "{left:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[ignore = "run by a_cut_short_backup_is_not_kept"]
+    fn backup_under_a_size_limit() {
+        let Ok(dir) = std::env::var("PCDS_BACKUP_CUT_DIR") else { return };
+        let save = Path::new(&dir).join("world.json");
+        assert!(backup(save.to_str().unwrap(), Duration::ZERO, 5).is_err());
     }
 
     #[test]
