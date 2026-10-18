@@ -148,8 +148,8 @@
   .bar > i { display: block; height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg, var(--accent2), var(--accent)); transition: width .8s cubic-bezier(.2,.8,.2,1); position: relative; overflow: hidden; }
   .bar > i::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.35), transparent); transform: translateX(-100%); animation: sheen 2.6s ease-in-out infinite; }
   @keyframes sheen { 60%, 100% { transform: translateX(100%); } }
-  .stages { display: flex; align-items: center; gap: 0; margin: 18px 0 6px; overflow-x: auto; padding: 6px 2px 4px; }
-  .stages .s { flex: 1 0 14px; height: 4px; background: var(--chip); position: relative; min-width: 14px; }
+  .stages { display: flex; align-items: center; gap: 0; margin: 18px 0 6px; padding: 6px 8px 4px; }
+  .stages .s { flex: 1 1 0; height: 4px; background: var(--chip); position: relative; min-width: 4px; }
   .stages .s::before { content: ""; position: absolute; left: -5px; top: -4px; width: 12px; height: 12px; border-radius: 50%; background: var(--panel); border: 2px solid var(--line); transition: background .4s, border-color .4s, transform .3s; }
   .stages .s.on { background: var(--accent); }
   .stages .s.on::before { background: var(--accent); border-color: var(--accent); }
