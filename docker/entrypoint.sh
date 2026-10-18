@@ -13,8 +13,11 @@ if [ "$(id -u)" = 0 ]; then
     exit 1
   }
   mkdir -p /data/home
-  # -h: symlinks themselves, never what they point to.
-  find /data -xdev \( ! -uid "$PUID" -o ! -gid "$PGID" \) -exec chown -h "$PUID:$PGID" {} + 2> /dev/null || true
+  # -h: symlinks themselves, never what they point to. A file it cannot give away (a
+  # read-only or foreign mount inside /data) is said, and the server starts anyway.
+  if ! find /data -xdev \( ! -uid "$PUID" -o ! -gid "$PGID" \) -exec chown -h "$PUID:$PGID" {} +; then
+    echo "entrypoint: not every file in /data could be given to $PUID:$PGID (see above): the server cannot write those" >&2
+  fi
   exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups /opt/pcds/pcds container
 fi
 exec /opt/pcds/pcds container

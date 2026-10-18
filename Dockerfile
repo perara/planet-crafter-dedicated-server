@@ -27,4 +27,8 @@ ENV PCDS_HOME=/data PCDS_CONTAINER=1 PCDS_ADMIN_BIND=0.0.0.0:7782 \
 VOLUME /data
 WORKDIR /data
 EXPOSE 7777/udp 7782/tcp
+# Healthy while the admin API answers (it answers only once the world runs; the first start
+# reads the game tables first). Needs PCDS_ADMIN on, as it is by default.
+HEALTHCHECK --interval=30s --timeout=15s --start-period=10m --retries=3 \
+  CMD pcds api GET /api/status > /dev/null || exit 1
 ENTRYPOINT ["tini", "--", "/opt/pcds/entrypoint.sh"]

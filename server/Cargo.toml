@@ -1,7 +1,9 @@
 [package]
 name = "pcds-server"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
+# Edition 2024 and let chains (1.88); clippy::incompatible_msrv checks the std APIs against it.
+rust-version = "1.88"
 description = "A dedicated server for The Planet Crafter: the game's host side, without the game"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/perara/planet-crafter-dedicated-server"

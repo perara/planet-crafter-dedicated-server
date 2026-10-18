@@ -26,17 +26,28 @@ impl Ctx {
     /// Whether this installation's server runs, or is still starting or stopping (its last save
     /// may be under way): the unit is this installation's when it reads this settings file; in
     /// the container, the server is a `pcds serve` of this user.
-    pub fn active(&self) -> bool {
+    /// Err when systemctl itself fails (no user session, no D-Bus): that is not a stopped server.
+    pub fn active(&self) -> Result<bool> {
         if self.container {
-            return self.server_pid().is_some();
+            return Ok(self.server_pid().is_some());
         }
-        let state = output(&mut self.systemctl(&["show", "-p", "ActiveState", "--value", &self.unit()])).unwrap_or_default();
-        running(&state) && self.ours()
+        Ok(running(&self.show("ActiveState")?) && self.ours()?)
     }
 
     /// The unit is this installation's: it reads this settings file.
-    fn ours(&self) -> bool {
-        output(&mut self.systemctl(&["show", "-p", "EnvironmentFiles", "--value", &self.unit()])).is_some_and(|files| files.contains(&*self.env_file.to_string_lossy()))
+    fn ours(&self) -> Result<bool> {
+        Ok(self.show("EnvironmentFiles")?.contains(&*self.env_file.to_string_lossy()))
+    }
+
+    /// A property of the server's unit (systemctl show); Err with what systemctl said when it
+    /// fails.
+    fn show(&self, property: &str) -> Result<String> {
+        let mut cmd = self.systemctl(&["show", "-p", property, "--value", &self.unit()]);
+        let out = cmd.stdin(std::process::Stdio::null()).output().map_err(|e| format!("{}: {e}", super::describe(&cmd)))?;
+        if !out.status.success() {
+            return Err(format!("{} failed ({}): {}", super::describe(&cmd), out.status, String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
     }
 
     /// Err when the unit file on disk is another installation's (it reads another settings
@@ -78,7 +89,7 @@ impl Ctx {
     }
 
     /// The units' files: the server, the update check and its timer.
-    fn unit_files(&self) -> Result<[(String, String); 3]> {
+    pub(super) fn unit_files(&self) -> Result<[(String, String); 3]> {
         let (run, env, exe) = (quoted(&self.run.display().to_string())?, plain(&self.env_file.display().to_string())?, quoted(&self.installed().display().to_string())?.replace('$', "$$"));
         let unit = quoted(&self.unit_name)?;
         let environment = format!("Environment=\"PCDS_HOME={run}\" \"PCDS_UNIT={unit}\"");
@@ -102,9 +113,9 @@ Restart=on-failure
 RestartSec=15
 # The stop (SIGTERM) goes to pcds run alone, which passes it to the front; the front has
 # its bank save the world and end. When the main process ends, systemd kills the rest of
-# the unit at once: pcds run therefore ends only after the front and its banks (a front
-# that crashed leaves its banks to save first, up to 60 s). What is still there after
-# the timeout is killed.
+# the unit at once: pcds run therefore ends only after the front and its banks (the front
+# gives its bank 60 s to save and end; a front that crashed leaves its banks 20 s more).
+# What is still there after the timeout is killed.
 KillMode=mixed
 TimeoutStopSec=90
 
@@ -191,7 +202,7 @@ WantedBy=timers.target
     pub fn restart_if_running(&self) -> Result {
         if self.container {
             say("restart the container for it to take effect (docker restart CONTAINER)");
-        } else if self.active() {
+        } else if self.active()? {
             check(&mut self.systemctl(&["restart", &self.unit()]))?;
             say("server restarted");
         }
@@ -204,8 +215,7 @@ WantedBy=timers.target
             say("restart the container for the server to run on the new tables (docker restart CONTAINER)");
             return Ok(());
         }
-        let state = output(&mut self.systemctl(&["show", "-p", "ActiveState", "--value", &self.unit()])).unwrap_or_default();
-        if !starts_after_update(&state) || !self.ours() {
+        if !starts_after_update(&self.show("ActiveState")?) || !self.ours()? {
             return Ok(());
         }
         // Failing on the old tables may have used up its start limit.

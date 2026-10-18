@@ -1,5 +1,5 @@
 //! Static per-game-version tables (data/<version>/netdata.json, read from the game's files by
-//! `pcds-server read-game`) and the game's string hash.
+//! `pcds read-game`) and the game's string hash.
 
 use std::collections::HashMap;
 

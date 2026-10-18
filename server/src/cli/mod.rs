@@ -4,7 +4,7 @@
 
 mod api;
 mod env;
-pub use env::build_id;
+pub use env::{build_id, find_tables};
 mod extract;
 mod setup;
 mod steam;
@@ -49,7 +49,8 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
   pcds rules [set SECTION.RULE=VALUE ... | reset]
                          show or change the server rules (rules.json; README \"Server rules\")
   pcds extract [--game DIR]   read the game tables again (from the game's files, no Wine)
-  pcds update [--game DIR]    after a game update: extract and restart when the game changed
+  pcds update [--game DIR]    after a game update, or for a release that reads another tables
+                         format: read the tables and restart when they changed
   pcds selftest               a scripted player joins over direct IP and checks the answers
   pcds run                    run the server in the foreground (what the service runs)
   pcds container              the Docker image's start (tables, world, then run)
@@ -64,7 +65,7 @@ The server and its tools:
 
 Everything the server keeps lives in run/ of the release or checkout folder (PCDS_HOME
 overrides it): worlds/ (one save per world, with their backups/), server.env, access.json,
-rules.json, data/<game version>/, the extractor, and bin/ (the program the units run, and the
+rules.json, data/<game version>/ (the game tables), and bin/ (the program the units run, and the
 two banks a/ and b/ the server runs from, with bin/active). The game folder is --game DIR,
 PCDS_GAME_DIR, the one used last (run/game-dir), else the Steam library that lists the game.
 ";
@@ -90,7 +91,7 @@ pub struct Ctx {
 }
 
 pub fn run(args: &[String]) -> ! {
-    let code = Ctx::new().and_then(|ctx| ctx.command(args)).unwrap_or_else(|e| {
+    let code = Ctx::new().and_then(|ctx| ctx.hand_over(args).and_then(|_| ctx.command(args))).unwrap_or_else(|e| {
         eprintln!("pcds: {e}");
         1
     });
@@ -138,6 +139,22 @@ impl Ctx {
         Ok(ctx)
     }
 
+    /// run/bin/pcds, what the units run, hands every command to the active bank's program
+    /// (exec, same pid). So the one rule is: the active bank's program is the server, the
+    /// launcher (`pcds run`: its supervisor), the game-update check and the tables' reader,
+    /// whichever build last wrote run/bin/pcds; an upgrade through the API, the automatic
+    /// update or `pcds upgrade` moves all of them at once. Any other copy of pcds (a release
+    /// folder, a checkout's build) runs as itself, and installs itself into a bank when newer.
+    fn hand_over(&self, args: &[String]) -> Result {
+        let program = self.program();
+        if !same_file(&self.exe, &self.installed()) || same_file(&program, &self.exe) {
+            return Ok(());
+        }
+        use std::os::unix::process::CommandExt;
+        let e = Command::new(&program).args(args).env("PCDS_HOME", &self.run).exec();
+        Err(format!("{}: {e}", program.display()))
+    }
+
     /// Runs one command; its exit code.
     fn command(&self, args: &[String]) -> Result<i32> {
         let a: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -159,6 +176,8 @@ impl Ctx {
                 if *what != "stop" {
                     self.install_newer()?;
                     self.refresh_unit()?;
+                    // A newer bank may read another tables format.
+                    self.ensure_tables(None)?;
                 }
                 return passthrough(&mut self.systemctl(&[what, &self.unit()]));
             }
@@ -226,6 +245,22 @@ fn game_option(args: &[&str]) -> Result<Option<PathBuf>> {
 
 fn say(message: impl std::fmt::Display) {
     println!("pcds: {message}");
+}
+
+/// An exclusive lock on `path` (flock), held while the file lives: Err with `busy` and the
+/// holder's pid when another process has it. The file holds the holder's pid.
+pub fn hold(path: &Path, busy: &str) -> Result<fs::File> {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    let mut file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // SAFETY: flock on a descriptor this function owns; the lock lasts as long as the file.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let holder = fs::read_to_string(path).unwrap_or_default();
+        return Err(format!("{busy} (process {}, which holds {}); stop it or wait for it", holder.trim(), path.display()));
+    }
+    // The holder, for the message above.
+    let _ = file.set_len(0).and_then(|_| write!(file, "{}", std::process::id()));
+    Ok(file)
 }
 
 /// Whether a program is on the PATH.
@@ -347,7 +382,7 @@ fn is_tty() -> bool {
     unsafe { libc::isatty(0) == 1 }
 }
 
-/// A random token (the admin API's, the extractor API's).
+/// A random token (the admin API's).
 fn token() -> Result<String> {
     let mut bytes = [0u8; 16];
     fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)).map_err(|e| format!("/dev/urandom: {e}"))?;
@@ -432,6 +467,18 @@ fn test_dir(name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lock_is_held_by_one_holder_at_a_time() {
+        let dir = test_dir("hold");
+        let path = dir.join("world.json.lock");
+        let first = hold(&path, "another server runs this world").unwrap();
+        let e = hold(&path, "another server runs this world").unwrap_err();
+        assert!(e.contains("another server runs this world") && e.contains(&std::process::id().to_string()), "{e}");
+        drop(first);
+        hold(&path, "another server runs this world").unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn sizes_read_like_du() {

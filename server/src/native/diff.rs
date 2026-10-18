@@ -1,4 +1,4 @@
-//! `pcds-server tables-diff EXPECTED_DIR ACTUAL_DIR [SECTION]`: compares two game table folders
+//! `pcds tables-diff EXPECTED_DIR ACTUAL_DIR [SECTION]`: compares two game table folders
 //! (data/<version>/) section by section, integers exactly and floats within 1e-5 (relative
 //! above 1, absolute below), and prints how much of each section matches with the first
 //! differences by JSON path; the scenes' water volumes and ore veins, listed in no order, item
@@ -132,7 +132,7 @@ fn scene_files(dir: &str) -> Vec<String> {
 
 pub fn run(args: &[String]) {
     let (Some(expected), Some(actual)) = (args.first(), args.get(1)) else {
-        eprintln!("usage: pcds-server tables-diff EXPECTED_DIR ACTUAL_DIR [SECTION]");
+        eprintln!("usage: pcds tables-diff EXPECTED_DIR ACTUAL_DIR [SECTION]");
         std::process::exit(2);
     };
     let only = args.get(2).map(String::as_str);
