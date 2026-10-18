@@ -1,0 +1,281 @@
+{
+"name": "ParityA",
+"id": 76561197999999901,
+"steps": [
+{
+"wait": 30000
+},
+{
+"rpc": "PlayerGaugesHandler.EatServerRpc",
+"on": "player:PlayerGaugesHandler",
+"args": [
+10
+],
+"after": 300
+},
+{
+"rpc": "PlayerGaugesHandler.DrinkServerRpc",
+"on": "player:PlayerGaugesHandler",
+"args": [
+10
+],
+"after": 300
+},
+{
+"rpc": "PlayerGaugesHandler.BreathServerRpc",
+"on": "player:PlayerGaugesHandler",
+"args": [
+10
+],
+"after": 300
+},
+{
+"rpc": "PlayerGaugesHandler.AddHealthServerRpc",
+"on": "player:PlayerGaugesHandler",
+"args": [
+-20.0
+],
+"after": 300
+},
+{
+"rpc": "PlayerGaugesHandler.AddOxygenServerRpc",
+"on": "player:PlayerGaugesHandler",
+"args": [
+5.5
+],
+"after": 300
+},
+{
+"rpc": "PlayerGaugesHandler.AddWaterServerRpc",
+"on": "player:PlayerGaugesHandler",
+"args": [
+-3.0
+],
+"after": 300
+},
+{
+"rpc": "PlayerGaugesHandler.RemoveToxicServerRpc",
+"on": "player:PlayerGaugesHandler",
+"args": [
+1.0
+],
+"after": 300
+},
+{
+"rpc": "PlayerGaugesHandler.PurifyServerRpc",
+"on": "player:PlayerGaugesHandler",
+"args": [
+5
+],
+"after": 300
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+"$equipment",
+0,
+null,
+null
+]
+},
+{
+"rpc": "InventoriesHandler.AddNewItemToInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+"#OxygenTank1",
+"$equipment"
+]
+},
+{
+"rpc": "PlayerGaugesHandler.UpdateGaugesDependingOnEquipmentServerRpc",
+"on": "player:PlayerGaugesHandler",
+"args": [
+"$equipment"
+],
+"after": 300
+},
+{
+"rpc": "InventoriesHandler.AddNewItemToInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+"#Backpack1",
+"$equipment"
+]
+},
+{
+"rpc": "PlayerGaugesHandler.UpdateGaugesDependingOnEquipmentServerRpc",
+"on": "player:PlayerGaugesHandler",
+"args": [
+"$equipment"
+],
+"after": 300
+},
+{
+"rpc": "PlayerGaugesHandler.SetHasRebreatherServerRpc",
+"on": "player:PlayerGaugesHandler",
+"args": [
+"$equipment"
+],
+"after": 300
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+"$equipment",
+0,
+null,
+null
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+"$inventory",
+0,
+null,
+null
+]
+},
+{
+"rpc": "PlayersDataManager.SetLightStatusServerRpc",
+"on": "PlayersDataManager",
+"args": [
+true,
+2
+]
+},
+{
+"rpc": "PlayersDataManager.SetJetpackStatusServerRpc",
+"on": "PlayersDataManager",
+"args": [
+true,
+1
+]
+},
+{
+"rpc": "PlayersDataManager.SetBackpackStatusServerRpc",
+"on": "PlayersDataManager",
+"args": [
+true,
+1
+]
+},
+{
+"rpc": "PlayersDataManager.SetSkinStatusServerRpc",
+"on": "PlayersDataManager",
+"args": [
+3
+]
+},
+{
+"rpc": "PlayersDataManager.GetPlayersPositionsServerRpc",
+"on": "PlayersDataManager",
+"args": []
+},
+{
+"rpc": "PlayerShareState.InputOnJumpServerRpc",
+"on": "player:PlayerShareState",
+"args": []
+},
+{
+"rpc": "PlayerShareState.StartConstructingServerRpc",
+"on": "player:PlayerShareState",
+"args": []
+},
+{
+"rpc": "PlayerShareState.StartMiningServerRpc",
+"on": "player:PlayerShareState",
+"args": [
+101333311,
+1.0,
+2
+]
+},
+{
+"rpc": "PlayerShareState.StopMiningServerRpc",
+"on": "player:PlayerShareState",
+"args": []
+},
+{
+"wait": 30000
+},
+{
+"rpc": "InventoriesHandler.AddNewItemToInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+"#Iron",
+"$inventory"
+]
+},
+{
+"rpc": "PlayerGaugesHandler.AddOxygenServerRpc",
+"on": "player:PlayerGaugesHandler",
+"args": [
+-500.0
+],
+"after": 3000
+},
+{
+"rpc": "PlayerGaugesHandler.AddHealthServerRpc",
+"on": "player:PlayerGaugesHandler",
+"args": [
+-500.0
+],
+"after": 3000
+},
+{
+"rpc": "PlayerStatus.HandleDyingConsequencesServerRpc",
+"on": "player:PlayerStatus",
+"args": [],
+"after": 2000
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+"$inventory",
+0,
+null,
+null
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+"$equipment",
+0,
+null,
+null
+]
+},
+{
+"wait": 15000
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+"$inventory",
+0,
+null,
+null
+]
+}
+]
+}

@@ -1,0 +1,572 @@
+{
+"name": "ParityA",
+"id": 76561197999999901,
+"steps": [
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+true,
+200,
+0,
+0,
+null,
+null
+],
+"capture": {
+"var": "bin",
+"rpc": "InventoriesHandler.RetrieveInventoryClientRpc",
+"arg": 1
+}
+},
+{
+"rpc": "InventoriesHandler.BeginInventoryWatchServerRpc",
+"on": "InventoriesHandler",
+"args": [
+133
+]
+},
+{
+"rpc": "InventoriesHandler.TransferAllItemsServerRpc",
+"on": "InventoriesHandler",
+"args": [
+133,
+"$bin"
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+133,
+0,
+null,
+null
+]
+},
+{
+"rpc": "InventoriesHandler.BeginInventoryWatchServerRpc",
+"on": "InventoriesHandler",
+"args": [
+83
+]
+},
+{
+"rpc": "InventoriesHandler.TransferAllItemsServerRpc",
+"on": "InventoriesHandler",
+"args": [
+83,
+"$bin"
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+83,
+0,
+null,
+null
+]
+},
+{
+"rpc": "WorldObjectsHandler.GetGameObjectFromWorldObjectServerRpc",
+"on": "WorldObjectsHandler",
+"args": [
+201494982
+],
+"capture": {
+"var": "grower",
+"rpc": "WorldObjectsHandler.GetGameObjectFromWorldObjectClientRpc",
+"arg": 0
+}
+},
+{
+"rpc": "InventoryAssociatedProxy.GetInventoryIdServerRpc",
+"on": [
+"$grower",
+2
+],
+"args": [],
+"capture": {
+"var": "growerout",
+"rpc": "InventoryAssociatedProxy.GetInventoryIdClientRpc",
+"arg": 2
+}
+},
+{
+"rpc": "WorldObjectAssociatedProxy.GetWorldObjectDetailsServerRpc",
+"on": [
+"$grower",
+3
+],
+"args": []
+},
+{
+"rpc": "InventoriesHandler.BeginInventoryWatchServerRpc",
+"on": "InventoriesHandler",
+"args": [
+"$growerout"
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+"$growerout",
+0,
+null,
+null
+]
+},
+{
+"rpc": "WorldObjectsHandler.GetGameObjectFromWorldObjectServerRpc",
+"on": "WorldObjectsHandler",
+"args": [
+205945571
+],
+"capture": {
+"var": "grower2",
+"rpc": "WorldObjectsHandler.GetGameObjectFromWorldObjectClientRpc",
+"arg": 0
+}
+},
+{
+"rpc": "InventoryAssociatedProxy.GetInventoryIdServerRpc",
+"on": [
+"$grower2",
+2
+],
+"args": [],
+"capture": {
+"var": "grower2out",
+"rpc": "InventoryAssociatedProxy.GetInventoryIdClientRpc",
+"arg": 2
+}
+},
+{
+"rpc": "WorldObjectAssociatedProxy.GetWorldObjectDetailsServerRpc",
+"on": [
+"$grower2",
+3
+],
+"args": []
+},
+{
+"rpc": "InventoriesHandler.BeginInventoryWatchServerRpc",
+"on": "InventoriesHandler",
+"args": [
+"$grower2out"
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+"$grower2out",
+0,
+null,
+null
+]
+},
+{
+"rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc",
+"on": "WorldObjectsHandler",
+"args": [
+"#Vegetube1",
+[
+590.0,
+2.0,
+676.0
+],
+[
+0,
+0,
+0,
+1
+],
+false,
+false,
+true,
+false
+],
+"after": 800,
+"capture": {
+"var": "tube",
+"rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectClientRpc",
+"arg": 0
+}
+},
+{
+"rpc": "InventoryAssociatedProxy.GetInventoryIdServerRpc",
+"on": [
+"$tube",
+1
+],
+"args": [],
+"capture": {
+"var": "tubeinv",
+"rpc": "InventoryAssociatedProxy.GetInventoryIdClientRpc",
+"arg": 2
+}
+},
+{
+"rpc": "InventoriesHandler.AddNewItemToInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+"#Seed0",
+"$tubeinv"
+]
+},
+{
+"rpc": "GrowthProxy.GetCurrentGrowthServerRpc",
+"on": [
+"$tube",
+2
+],
+"args": []
+},
+{
+"rpc": "ConstructibleProxy.MachineOutsideGrowerUpdateStartServerRpc",
+"on": [
+"$tube",
+0
+],
+"args": []
+},
+{
+"rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc",
+"on": "WorldObjectsHandler",
+"args": [
+"#Heater1",
+[
+586.0,
+2.0,
+676.0
+],
+[
+0,
+0,
+0,
+1
+],
+false,
+false,
+true,
+false
+],
+"after": 800
+},
+{
+"rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc",
+"on": "WorldObjectsHandler",
+"args": [
+"#Drill1",
+[
+582.0,
+2.0,
+676.0
+],
+[
+0,
+0,
+0,
+1
+],
+false,
+false,
+true,
+false
+],
+"after": 800
+},
+{
+"rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc",
+"on": "WorldObjectsHandler",
+"args": [
+"#EnergyGenerator1",
+[
+578.0,
+2.0,
+676.0
+],
+[
+0,
+0,
+0,
+1
+],
+false,
+false,
+true,
+false
+],
+"after": 800
+},
+{
+"rpc": "WorldObjectsHandler.GetEnergyGroupDataServerRpc",
+"on": "WorldObjectsHandler",
+"args": []
+},
+{
+"wait": 60000
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+133,
+0,
+null,
+null
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+83,
+0,
+null,
+null
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+"$growerout",
+0,
+null,
+null
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+"$grower2out",
+0,
+null,
+null
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+"$tubeinv",
+0,
+null,
+null
+]
+},
+{
+"rpc": "GrowthProxy.GetCurrentGrowthServerRpc",
+"on": [
+"$tube",
+2
+],
+"args": []
+},
+{
+"rpc": "WorldObjectAssociatedProxy.GetWorldObjectDetailsServerRpc",
+"on": [
+"$grower",
+3
+],
+"args": []
+},
+{
+"rpc": "WorldObjectsHandler.GetEnergyGroupDataServerRpc",
+"on": "WorldObjectsHandler",
+"args": []
+},
+{
+"wait": 60000
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+133,
+0,
+null,
+null
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+83,
+0,
+null,
+null
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+"$growerout",
+0,
+null,
+null
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+"$grower2out",
+0,
+null,
+null
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+"$tubeinv",
+0,
+null,
+null
+]
+},
+{
+"rpc": "GrowthProxy.GetCurrentGrowthServerRpc",
+"on": [
+"$tube",
+2
+],
+"args": []
+},
+{
+"rpc": "WorldObjectAssociatedProxy.GetWorldObjectDetailsServerRpc",
+"on": [
+"$grower",
+3
+],
+"args": []
+},
+{
+"rpc": "WorldObjectsHandler.GetEnergyGroupDataServerRpc",
+"on": "WorldObjectsHandler",
+"args": []
+},
+{
+"wait": 60000
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+133,
+0,
+null,
+null
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+83,
+0,
+null,
+null
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+"$growerout",
+0,
+null,
+null
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+"$grower2out",
+0,
+null,
+null
+]
+},
+{
+"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+"on": "InventoriesHandler",
+"args": [
+false,
+0,
+"$tubeinv",
+0,
+null,
+null
+]
+},
+{
+"rpc": "GrowthProxy.GetCurrentGrowthServerRpc",
+"on": [
+"$tube",
+2
+],
+"args": []
+},
+{
+"rpc": "WorldObjectAssociatedProxy.GetWorldObjectDetailsServerRpc",
+"on": [
+"$grower",
+3
+],
+"args": []
+},
+{
+"rpc": "WorldObjectsHandler.GetEnergyGroupDataServerRpc",
+"on": "WorldObjectsHandler",
+"args": []
+}
+]
+}

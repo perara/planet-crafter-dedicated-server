@@ -593,6 +593,11 @@ pub fn recycle_content(game: &mut Game, wo: i32, center: [f32; 3], size: [f32; 3
         }
         return;
     }
+    // The game casts the item's group to GroupItem here: a building (GroupConstructible) in a
+    // recycler throws, and nothing happens.
+    if !recipe.is_empty() && game.data.groups[group].constructible {
+        return;
+    }
     if recipe.is_empty() || game.data.groups[group].bool("cantBeRecycled") {
         if remove_item(game, item, inventory, false) {
             drop(game, item);
@@ -790,6 +795,11 @@ mod tests {
         assert_eq!(dropped.len(), 2);
         assert!(dropped.iter().all(|w| (-0.5..=0.5).contains(&w.position[0]) && (5.5..=6.5).contains(&w.position[1])));
         assert_eq!(game.wos.len(), before + 1, "the backpack went, its two ingredients came");
+        // A building with a recipe: the game's cast to GroupItem throws, nothing happens.
+        let chest = game.add_new_item(game.data.group("Container1").unwrap(), inv, 0).1;
+        recycle_content(&mut game, recycler, [0.0, 6.0, 0.0], [1.0, 1.0, 1.0]);
+        assert_eq!(game.inventories[&inv].items, vec![chest]);
+        remove_item(&mut game, chest, inv, true);
         // No recipe: the item itself drops.
         game.add_new_item(iron, inv, 0);
         let item = game.inventories[&inv].items[0];
