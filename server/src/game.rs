@@ -1066,10 +1066,16 @@ pub mod tests {
         assert_eq!(Args(g.net.spec.decode(method, &body).unwrap()).v3(0), [0.0, 0.0, 1.0]);
     }
 
+    /// An RPC to `object`, or with 0 to the scene handler of its class (RPCs run only on an
+    /// object that has their class).
     fn rpc_batch(g: &Game, client: u64, object: u64, name: &str, args: &[Value]) -> Vec<u8> {
         let (method, body) = g.net.spec.encode(name, args);
+        let (object, behaviour) = match object {
+            0 => g.net.find_class(name.split('.').next().unwrap()).unwrap(),
+            o => (o, 0),
+        };
         let mut w = Writer::new();
-        w.packed_u64(client).packed_u64(object).packed_u16(0).packed_u32(method).bytes(&body);
+        w.packed_u64(client).packed_u64(object).packed_u16(behaviour).packed_u32(method).bytes(&body);
         wire::batch(&[(protocol::RPC, w.0)])
     }
 

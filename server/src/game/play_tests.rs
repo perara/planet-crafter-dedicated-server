@@ -4,12 +4,14 @@
 use super::tests::{join, save};
 use super::*;
 
-/// An RPC as a client sends it: to `object`, or with 0 to the scene handler of its class.
+/// An RPC as a client sends it: to `object`, or with 0 to the scene handler of its class. It
+/// runs now: what the tick's budget queued runs as the next tick would.
 fn rpc(g: &mut Game, client: u64, object: u64, name: &str, args: Vec<Value>) {
-    if object == 0 {
-        return crate::testkit::send_scene(g, client, name, &args);
+    match object {
+        0 => crate::testkit::send_scene(g, client, name, &args),
+        _ => crate::testkit::send_on(g, client, object, name, &args),
     }
-    crate::testkit::send_on(g, client, object, name, &args);
+    crate::handlers::run_pending(g, |g, rpc| g.rpc_cost(rpc), |g, client, rpc| g.run_rpc(client, rpc));
 }
 
 /// Tick cost of the logistics task search and of destroys in a world with many stored items.
@@ -265,6 +267,7 @@ fn rpcs_run_only_on_objects_of_their_class() {
         let mut w = Writer::new();
         w.packed_u64(1).packed_u64(net).packed_u16(0).packed_u32(hash).bytes(&body);
         g.incoming_rpc(1, &w.0);
+        crate::handlers::run_pending(g, |g, rpc| g.rpc_cost(rpc), |g, client, rpc| g.run_rpc(client, rpc));
         g.save_requested
     };
     let objects: Vec<u64> = g.net.objects.keys().copied().filter(|o| !g.net.carries(*o, "MachineDeparturePlatform")).collect();
