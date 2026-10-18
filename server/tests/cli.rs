@@ -194,3 +194,18 @@ fn a_start_falls_back_to_the_other_bank() {
     assert!(text(&out).contains("started from bank b because bank a could not start the world"), "{}", text(&out));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A second server on a world another one runs is refused before it touches anything.
+#[test]
+fn one_server_per_world() {
+    use std::os::fd::AsRawFd;
+    let dir = test_dir("world-lock");
+    let save = dir.join("world.json");
+    let lock = std::fs::File::create(dir.join("world.json.lock")).unwrap();
+    // SAFETY: flock on a file this test owns.
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+    let out = Command::new(PCDS).arg("serve").arg(dir.join("no-tables")).arg(&save).env("PCDS_STEAM", "off").env("PCDS_LISTEN", "off").env("PCDS_ADMIN", "off").output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("another server runs this world"), "{}", text(&out));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

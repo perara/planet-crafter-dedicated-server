@@ -187,6 +187,11 @@ pub fn run(args: &[String]) {
         eprintln!("usage: pcds serve DATA_DIR SAVE.json (settings: see the source header of main.rs)");
         std::process::exit(2);
     };
+    // One server per world, for this front's life (released when the process ends).
+    let _world = crate::cli::hold(std::path::Path::new(&format!("{save}.lock")), "another server runs this world").unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1)
+    });
     // SAFETY: set before any other thread exists; the Steam API reads it during init.
     unsafe { std::env::set_var("SteamAppId", APP_ID) };
     let stop = Arc::new(AtomicBool::new(false));

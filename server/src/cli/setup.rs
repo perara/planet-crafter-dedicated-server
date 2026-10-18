@@ -146,6 +146,13 @@ impl Ctx {
     /// front's code once the front and its banks have ended (supervise). Returns only when it
     /// cannot start.
     pub fn run_server(&self) -> Result {
+        // By hand while the service runs it (under the unit, this process is its main one).
+        if !self.container && self.active()? {
+            let pid = self.server_pid().unwrap_or_default();
+            if pid != std::process::id().to_string() {
+                return Err(format!("the service {} runs this installation's server (pid {pid}): 'pcds stop' first, or 'pcds logs' to watch it", self.unit()));
+            }
+        }
         let world = self.world_file();
         if !world.is_file() {
             return Err(format!("no world at {}: 'pcds worlds', 'pcds world use NAME' or 'pcds world new NAME'", world.display()));

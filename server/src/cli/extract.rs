@@ -10,21 +10,6 @@ use std::process::{Command, Stdio};
 use super::env::build_id;
 use super::{say, Ctx, Result};
 
-/// One extraction at a time (the hourly update and a manual one).
-fn lock(path: &Path) -> Result<fs::File> {
-    use std::io::Write;
-    use std::os::fd::AsRawFd;
-    let mut file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    // SAFETY: flock on a descriptor this function owns; the lock lasts as long as the file.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        let holder = fs::read_to_string(path).unwrap_or_default();
-        return Err(format!("another extraction is running (process {}); stop it or wait for it", holder.trim()));
-    }
-    // The holder, for the message above.
-    let _ = file.set_len(0).and_then(|_| write!(file, "{}", std::process::id()));
-    Ok(file)
-}
-
 /// The tables being made: removed unless they were finished (moved into place).
 struct Unfinished(PathBuf);
 
@@ -40,7 +25,8 @@ impl Ctx {
         let game = self.game_dir(game)?;
         let build = build_id(&game)?;
         super::mkdir(&self.run.join("data"))?;
-        let _lock = lock(&self.run.join(".extract.lock"))?;
+        // One extraction at a time (the hourly update and a manual one).
+        let _lock = super::hold(&self.run.join(".extract.lock"), "another extraction is running")?;
         // Earlier extractions that failed (none runs: the lock is ours).
         for e in fs::read_dir(self.run.join("data")).into_iter().flatten().flatten() {
             if e.file_name().to_string_lossy().starts_with(".new-") {
