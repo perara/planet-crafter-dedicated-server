@@ -536,6 +536,72 @@ mod tests {
         assert!(g.ext.animals.vehicles.garages[&garage].recall.is_none());
     }
 
+    /// Modules in a vehicle's equipment resize it as the game's VehicleEquipment does: storage
+    /// modules the storage, equipment modules the equipment; taking out the logistics chip
+    /// clears the vehicle's logistics. Shrunk below what it holds, the rest drops beside it.
+    #[test]
+    fn vehicle_modules_resize_its_inventories() {
+        use crate::testkit::*;
+        let Some((mut g, _)) = world() else { return };
+        let (truck, _) = place(&mut g, "VehicleTruck", [600.0, 3.0, 494.0]);
+        let (storage, equipment) = (g.wos[&truck].linked_inventory, g.wos[&truck].secondary_inventories[0]);
+        let size = |g: &Game, i: i32| g.inventories[&i].size;
+        let (storage_size, equipment_size) = (size(&g, storage), size(&g, equipment));
+        let crate_module = give(&mut g, "VehicleInventorySize1", equipment);
+        g.propagate(equipment, crate_module, true);
+        assert_eq!(size(&g, storage), storage_size + 18);
+        let slot = give(&mut g, "VehicleEquipmentSize1", equipment);
+        g.propagate(equipment, slot, true);
+        assert_eq!(size(&g, equipment), equipment_size + 3);
+        // The storage filled past its old size, then the module out: the rest drops.
+        let fill: Vec<i32> = (0..storage_size + 2).map(|_| give(&mut g, "Iron", storage)).collect();
+        g.inventory_remove(equipment, crate_module);
+        g.propagate(equipment, crate_module, false);
+        assert_eq!(size(&g, storage), storage_size);
+        assert_eq!(g.inventories[&storage].items.len() as i32, storage_size);
+        assert!(fill.iter().rev().take(2).all(|i| g.wos[i].is_placed()), "the two over dropped");
+        // The logistics chip out: the storage's logistics are cleared.
+        let iron = g.data.group("Iron").unwrap();
+        g.inventories.get_mut(&storage).unwrap().logistic.supply = vec![iron];
+        let chip = give(&mut g, "VehicleLogistic1", equipment);
+        g.inventory_remove(equipment, chip);
+        g.propagate(equipment, chip, false);
+        assert!(g.inventories[&storage].logistic.supply.is_empty());
+    }
+
+    /// A parked vehicle goes to a player near it when its owner is far; physics are on only
+    /// with a player near, and the owner hears each change.
+    #[test]
+    fn parked_vehicles_go_to_a_near_player_and_sleep_with_nobody_near() {
+        use crate::testkit::*;
+        let Some((mut g, ann)) = world() else { return };
+        let bob = join(&mut g, 2, "Bob");
+        let (_, truck) = place(&mut g, "VehicleTruck", [600.0, 3.0, 494.0]);
+        assert_eq!(g.net.objects[&truck].owner, 1);
+        let frames = |g: &mut Game, seconds: f32| {
+            let end = g.time + seconds;
+            while g.time < end {
+                g.time += 0.05;
+                crate::animals::tick(g);
+            }
+        };
+        // Ann goes far away, Bob stands by the truck.
+        g.net.move_object(ann, [5000.0, 3.0, 5000.0], None);
+        g.net.move_object(bob, [605.0, 3.0, 494.0], None);
+        frames(&mut g, 2.0);
+        assert_eq!(g.net.objects[&truck].owner, 2, "the near player simulates it");
+        // Nobody near: its physics go off.
+        g.net.out.clear();
+        g.net.move_object(bob, [5000.0, 3.0, 4000.0], None);
+        frames(&mut g, 2.0);
+        let off = sent(&g, "UpdateNetworkRigidBodyState.SetRigidBodyEnabledClientRpc");
+        assert_eq!(off.into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(Target::Only(2), vec![json!(false)])]);
+        g.net.out.clear();
+        g.net.move_object(bob, [601.0, 3.0, 494.0], None);
+        frames(&mut g, 2.0);
+        assert_eq!(sent(&g, "UpdateNetworkRigidBodyState.SetRigidBodyEnabledClientRpc").last().map(|s| s.args.clone()), Some(vec![json!(true)]));
+    }
+
     #[test]
     fn reads_the_trucks_transform_bits() {
         // VehicleTruck's dumped sync tail: ClientNetworkTransform (behaviour 0) state.

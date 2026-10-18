@@ -333,6 +333,26 @@ mod tests {
         assert!(Rules::default().patched(&serde_json::json!({"gauges": {"thirstDrian": 2}})).is_err(), "typos are refused");
     }
 
+    /// No rules file, or an empty one: the game's behaviour; a saved one reads back the same; an
+    /// unreadable path is an error.
+    #[test]
+    fn rules_files_load_save_and_default() {
+        let dir = std::env::temp_dir().join(format!("pcds-rules-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rules.json").to_string_lossy().into_owned();
+        assert!(Rules::load(&path).unwrap() == Rules::default(), "missing");
+        std::fs::write(&path, "  \n").unwrap();
+        assert!(Rules::load(&path).unwrap() == Rules::default(), "empty");
+        let mut r = Rules::default();
+        r.limits.max_players = Some(3);
+        r.save(&path).unwrap();
+        let back = Rules::load(&path).unwrap();
+        assert!(back == r);
+        assert_eq!(back.max_players(), 3);
+        assert!(Rules::load(dir.to_str().unwrap()).is_err(), "a directory");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn out_of_range_rules_are_refused() {
         let Some(dir) = crate::test_data() else { return };
