@@ -45,6 +45,12 @@ mod admin;
 mod bank;
 mod chathooks;
 mod cli;
+#[cfg(test)]
+mod coverage;
+#[cfg(test)]
+mod scenario;
+#[cfg(test)]
+mod testkit;
 mod config;
 mod dashboard;
 mod data;
@@ -97,7 +103,7 @@ mod wire;
 mod world;
 
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use data::NetData;
@@ -156,19 +162,20 @@ fn no_tables(dir: &str, e: String) -> ! {
 /// What a world needs besides tables(): the wreck layouts and every free planet's scene dump,
 /// read at start, so a missing or broken file stops the server there and not in the game.
 /// (Default: none, the stand-in a restored game holds until handoff::restore gives it its own.)
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Scenes {
-    pub wrecks: Rc<instances::generate::Wrecks>,
+    pub wrecks: Arc<instances::generate::Wrecks>,
     /// Free planet id -> its scene dump. DLC planets have none: the extraction reads only the
     /// free ones, and nobody can travel to the others (planets.rs).
     pub planets: HashMap<String, PlanetScene>,
 }
 
 /// The parts of scenes/<planet>.json the server reads.
+#[derive(Clone)]
 pub struct PlanetScene {
     pub water_volumes: Vec<serde_json::Value>,
     pub ore_veins: Vec<serde_json::Value>,
-    pub instance_scenes: HashMap<String, Rc<instances::generate::InstanceScene>>,
+    pub instance_scenes: HashMap<String, Arc<instances::generate::InstanceScene>>,
 }
 
 /// wrecks.json and scenes/<planet>.json of every free planet in DATA_DIR, with every world
@@ -203,10 +210,10 @@ fn scene_tables(dir: &str, net: &NetData, data: &GameData) -> Scenes {
                 return Err(format!("{path}: no world instance scene {missing}"));
             }
             check_scene(&dump.water_volumes, &dump.ore_veins, data).map_err(|e| format!("{path}: {e}"))?;
-            let instance_scenes = dump.instance_scenes.into_iter().map(|(k, v)| (k, Rc::new(v))).collect();
+            let instance_scenes = dump.instance_scenes.into_iter().map(|(k, v)| (k, Arc::new(v))).collect();
             planets.insert(planet.id.clone(), PlanetScene { water_volumes: dump.water_volumes, ore_veins: dump.ore_veins, instance_scenes });
         }
-        Ok(Scenes { wrecks: Rc::new(wrecks), planets })
+        Ok(Scenes { wrecks: Arc::new(wrecks), planets })
     };
     load().unwrap_or_else(|e| no_tables(dir, e))
 }
@@ -231,20 +238,23 @@ fn check_scene(water: &[serde_json::Value], veins: &[serde_json::Value], data: &
     Ok(())
 }
 
-/// The tables tests run on: PCDS_TEST_DATA, else data/2.103. Each user extracts them from their
-/// own game, so they may be missing: then None, and the test skips.
+/// The tables tests run on: PCDS_TEST_DATA, else run/data/2.103 or data/2.103. Each user
+/// extracts them from their own game, so a checkout has none (CI): PCDS_TEST_DATA=none says so,
+/// and the tests that need them skip. Tables that cannot be found otherwise fail the test.
 #[cfg(test)]
 fn test_data() -> Option<&'static str> {
     static DIR: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    let dir = DIR.get_or_init(|| {
-        // PCDS_TEST_DATA, else the 2.103 tables `pcds extract` wrote into run/data.
-        let dirs = [env("PCDS_TEST_DATA"), Some(concat!(env!("CARGO_MANIFEST_DIR"), "/../run/data/2.103").into()), Some(concat!(env!("CARGO_MANIFEST_DIR"), "/data/2.103").into())];
-        dirs.into_iter().flatten().find(|d| std::path::Path::new(d).is_dir())
-    });
-    if dir.is_none() {
-        eprintln!("skipped: no game tables");
-    }
-    dir.as_deref()
+    DIR.get_or_init(|| match env("PCDS_TEST_DATA").as_deref() {
+        Some("none") => None,
+        Some(dir) if std::path::Path::new(dir).join("netdata.json").is_file() => Some(dir.to_string()),
+        Some(dir) => panic!("PCDS_TEST_DATA={dir}: no game tables there"),
+        None => {
+            let dirs = [concat!(env!("CARGO_MANIFEST_DIR"), "/../run/data/2.103"), concat!(env!("CARGO_MANIFEST_DIR"), "/data/2.103")];
+            let found = dirs.iter().find(|d| std::path::Path::new(d).join("netdata.json").is_file());
+            Some(found.unwrap_or_else(|| panic!("no game tables in {dirs:?}: set PCDS_TEST_DATA to a tables directory, or to none to skip the tests that need them")).to_string())
+        }
+    })
+    .as_deref()
 }
 
 /// The pause between frames, as the game's: timers, the game tick and Steam run once per frame.

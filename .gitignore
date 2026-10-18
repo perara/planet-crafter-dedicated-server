@@ -7,3 +7,5 @@
 # Release packaging.
 /dist/
 __pycache__/
+# Coverage reports and other rebuildable output.
+/out/

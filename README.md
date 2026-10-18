@@ -491,8 +491,10 @@ make build      # server/target/release/pcds (make install links it as ~/.local/
 make test       # also: make lint, make docker, make dist (the release tarball), make clean
 ```
 
-Tests that need game tables use `run/data/2.103` (or `PCDS_TEST_DATA`) and skip themselves
-without them, as in CI. `pcds probe HOST:PORT DATA_DIR SCRIPT.json` is a scripted player
+Tests that need game tables use `run/data/2.103` (or `PCDS_TEST_DATA`) and fail without
+them; `PCDS_TEST_DATA=none` skips them, as CI does (the tables are not in the repository).
+`src/coverage.txt` names the tests of every server RPC and every module; a test fails when an
+RPC or a module is missing from it. `pcds probe HOST:PORT DATA_DIR SCRIPT.json` is a scripted player
 that prints everything a server sends; `tools/probe_diff.py` compares two such runs (against a
 real game host and this server, for instance). `pcds tables-diff EXPECTED ACTUAL` compares two
 table folders section by section.

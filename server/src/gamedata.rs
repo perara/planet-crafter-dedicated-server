@@ -3,6 +3,7 @@
 //! other game asset, and the network layout of each world object the server can spawn.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -12,6 +13,7 @@ use crate::wire::Writer;
 /// DataConfig.WorldUnitType, in the game's order.
 pub const UNIT_TYPES: [&str; 8] = ["Oxygen", "Pressure", "Heat", "Energy", "Plants", "Insects", "Animals", "Purification"];
 
+#[derive(Clone)]
 pub struct Group {
     pub id: String,
     pub hash: i32,
@@ -25,7 +27,7 @@ pub struct Group {
     pub units: [f32; 8],
     pub has_prefab: bool,
     /// The asset's serialized fields, for everything not lifted into typed fields.
-    pub fields: Value,
+    pub fields: Arc<Value>,
 }
 
 impl Group {
@@ -56,21 +58,21 @@ pub struct Layout {
     pub tail_position: Option<usize>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct GameData {
     pub groups: Vec<Group>,
     by_id: HashMap<String, usize>,
     by_hash: HashMap<i32, usize>,
     /// Keyed by group id; "<id>#static" is the container variant for objects loaded from the save.
     /// Per group id (and "<id>#static"): the network object its world objects spawn as.
-    pub layouts: HashMap<String, ObjectDef>,
+    pub layouts: Arc<HashMap<String, ObjectDef>>,
     /// Every game asset, keyed "Type:name".
-    pub assets: serde_json::Map<String, Value>,
-    pub group_prefabs: Value,
+    pub assets: Arc<serde_json::Map<String, Value>>,
+    pub group_prefabs: Arc<Value>,
     /// Habitat panels: per group, each Panel's transform, colliders and bounds; the bounds of
     /// every panel look (panels.rs).
-    pub panels: Value,
-    pub singletons: Value,
+    pub panels: Arc<Value>,
+    pub singletons: Arc<Value>,
 }
 
 /// NetworkTransformState's position bits (x, y, z).
@@ -131,7 +133,7 @@ impl GameData {
                 secondary_inventories: fields["secondaryInventoriesSize"].as_array().into_iter().flatten().filter_map(Value::as_i64).map(|v| v as i32).collect(),
                 units: UNIT_TYPES.map(|u| fields[format!("{prefix}{u}")].as_f64().unwrap_or(0.0) as f32),
                 has_prefab: fields["associatedGameObject"].is_string(),
-                fields: fields.clone(),
+                fields: Arc::new(fields.clone()),
             });
         }
         let by_id: HashMap<String, usize> = groups.iter().enumerate().map(|(i, g)| (g.id.clone(), i)).collect();
@@ -149,11 +151,11 @@ impl GameData {
             groups,
             by_id,
             by_hash,
-            layouts,
-            assets,
-            group_prefabs: root["groupPrefabs"].take(),
-            panels: root["panels"].take(),
-            singletons: root["singletons"].take(),
+            layouts: Arc::new(layouts),
+            assets: Arc::new(assets),
+            group_prefabs: Arc::new(root["groupPrefabs"].take()),
+            panels: Arc::new(root["panels"].take()),
+            singletons: Arc::new(root["singletons"].take()),
         })
     }
 

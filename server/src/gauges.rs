@@ -222,3 +222,111 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, name: &str, a: &Args) -> b
     }
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::testkit::*;
+
+    fn set(g: &mut Game, object: u64, values: [f32; 4]) {
+        for (var, v) in ["_oxygenValue", "_thirstValue", "_healthValue", "_toxicValue"].into_iter().zip(values) {
+            set_f(g, object, var, v);
+        }
+    }
+
+    /// Each gauge RPC moves the sender's own gauge, clamped to its maximum and zero; one sent
+    /// on someone else's player changes nothing. The save holds the result.
+    #[test]
+    fn gauge_rpcs_change_the_senders_own_gauges_within_their_bounds() {
+        let Some((mut g, ann)) = world() else { return };
+        let bob = join(&mut g, 2, "Bob");
+        let cases: [(&str, serde_json::Value, [f32; 4]); 8] = [
+            ("PlayerGaugesHandler.AddOxygenServerRpc", json!(30.5), [80.5, 50.0, 50.0, 40.0]),
+            ("PlayerGaugesHandler.AddWaterServerRpc", json!(80.0), [50.0, 100.0, 50.0, 40.0]),
+            ("PlayerGaugesHandler.AddHealthServerRpc", json!(-10.0), [50.0, 50.0, 40.0, 40.0]),
+            ("PlayerGaugesHandler.RemoveToxicServerRpc", json!(55.0), [50.0, 50.0, 50.0, 0.0]),
+            ("PlayerGaugesHandler.DrinkServerRpc", json!(-60), [50.0, 0.0, 50.0, 40.0]),
+            ("PlayerGaugesHandler.BreathServerRpc", json!(20), [70.0, 50.0, 50.0, 40.0]),
+            ("PlayerGaugesHandler.EatServerRpc", json!(-50), [50.0, 50.0, 0.0, 0.0]),
+            ("PlayerGaugesHandler.PurifyServerRpc", json!(15), [50.0, 50.0, 50.0, 25.0]),
+        ];
+        for (name, arg, want) in cases {
+            set(&mut g, ann, [50.0, 50.0, 50.0, 40.0]);
+            set(&mut g, bob, [50.0, 50.0, 50.0, 40.0]);
+            send_on(&mut g, 1, ann, name, std::slice::from_ref(&arg));
+            assert_eq!(values(&g, ann), want, "{name}");
+            send_on(&mut g, 1, bob, name, &[arg]);
+            assert_eq!(values(&g, bob), [50.0, 50.0, 50.0, 40.0], "{name} on another player");
+        }
+        let saved = g.snapshot().players.into_iter().find(|p| p["name"] == "Ann").unwrap();
+        assert_eq!((saved["playerGaugeHealth"].as_f64(), saved["playerGaugeToxic"].as_f64()), (Some(50.0), Some(25.0)));
+    }
+
+    /// The first oxygen tank in the equipment sets the maximum; without one it is 100 again,
+    /// and oxygen above it is cut. A rebreather in the equipment slows oxygen loss outside.
+    #[test]
+    fn equipment_sets_the_oxygen_maximum_and_the_rebreather() {
+        let Some((mut g, ann)) = world() else { return };
+        let (_, equipment) = backpack(&g, 1);
+        let tank = give(&mut g, "OxygenTank1", equipment);
+        send_on(&mut g, 1, ann, "PlayerGaugesHandler.UpdateGaugesDependingOnEquipmentServerRpc", &[json!(equipment)]);
+        let bonus = g.data.groups[g.wos[&tank].group].fields["value"].as_i64().unwrap() as f32;
+        assert!(bonus > 0.0);
+        assert_eq!(get_f(&g, ann, "_oxygenMaxValue"), 100.0 + bonus);
+        set_f(&mut g, ann, "_oxygenValue", 100.0 + bonus);
+        g.inventory_remove(equipment, tank);
+        send_on(&mut g, 1, ann, "PlayerGaugesHandler.UpdateGaugesDependingOnEquipmentServerRpc", &[json!(equipment)]);
+        assert_eq!((get_f(&g, ann, "_oxygenMaxValue"), get_f(&g, ann, "_oxygenValue")), (100.0, 100.0));
+
+        let rebreather = g.data.singletons["PlayerGaugesHandler"]["oxygenRebreatherGroupData"].as_str().and_then(|r| g.data.group_of_ref(r)).expect("the rebreather group");
+        let id = g.create_world_object(rebreather, 0, true);
+        g.inventory_add(equipment, id, true);
+        send_on(&mut g, 1, ann, "PlayerGaugesHandler.SetHasRebreatherServerRpc", &[json!(equipment)]);
+        assert!(g.ext.gauges.0[&ann].rebreather);
+        g.inventory_remove(equipment, id);
+        send_on(&mut g, 1, ann, "PlayerGaugesHandler.SetHasRebreatherServerRpc", &[json!(equipment)]);
+        assert!(!g.ext.gauges.0[&ann].rebreather);
+    }
+
+    /// Every 0.2 s: oxygen falls outside, rises where the player can breathe (a habitat) and
+    /// falls more slowly under water once the air is breathable; nothing moves while paused.
+    #[test]
+    fn gauges_drain_every_fifth_of_a_second_as_in_the_game() {
+        let Some((mut g, ann)) = world() else { return };
+        let step = |g: &mut Game| {
+            g.time += TICK;
+            tick(g);
+            values(g, ann)
+        };
+        set(&mut g, ann, [50.0, 50.0, 50.0, 0.0]);
+        let v = step(&mut g);
+        assert!((v[0] - (50.0 - 1.9 * TICK)).abs() < 1e-4 && v[1] < 50.0 && v[2] < 50.0, "{v:?}");
+        assert!(!get_b(&g, ann, "_oxygenInfinityStatus") && get_f(&g, ann, "_currentOutsideOxygenChangeValuePerSec") == -1.9);
+        g.net.set(ann, CLASS, "_playerCanBreath", enc::bool(true));
+        let before = values(&g, ann)[0];
+        assert!((step(&mut g)[0] - (before + INSIDE_OXYGEN * TICK)).abs() < 1e-4);
+        g.net.set(ann, CLASS, "_playerCanBreath", enc::bool(false));
+        g.net.set(ann, CLASS, "_pauseConsumption", enc::bool(true));
+        let paused = values(&g, ann);
+        assert_eq!(step(&mut g), paused);
+        g.net.set(ann, CLASS, "_pauseConsumption", enc::bool(false));
+        // Air breathable (terraformation above the stage) but under water: -3.6/s.
+        let stage = stage_value(&g, "noNeedForOxygenStage");
+        let planet = g.planet_hash();
+        let units = &mut g.units.planet_mut(planet).unwrap().units;
+        units.iter_mut().find(|u| u.kind == crate::units::Kind::Terraformation).unwrap().total = stage as f32 * 2.0;
+        g.net.set(ann, CLASS, "_playerIsUnderWater", enc::bool(true));
+        let before = values(&g, ann)[0];
+        let after = step(&mut g)[0];
+        assert!((after - (before + UNDERWATER_OXYGEN * TICK)).abs() < 1e-4, "{before} -> {after}, stage {stage}, outside {}", get_f(&g, ann, "_currentOutsideOxygenChangeValuePerSec"));
+        g.net.set(ann, CLASS, "_playerIsUnderWater", enc::bool(false));
+        step(&mut g);
+        assert!(get_b(&g, ann, "_oxygenInfinityStatus"), "breathable air: oxygen does not run out");
+        // A player who left is dropped from the ticks.
+        g.disconnect(1);
+        step(&mut g);
+        assert!(!g.ext.gauges.0.contains_key(&ann));
+    }
+}

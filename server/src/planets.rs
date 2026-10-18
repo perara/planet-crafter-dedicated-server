@@ -293,9 +293,7 @@ pub mod tests {
         let Some(mut g) = game() else { return };
         let platform = g.data.group("DeparturePlatform").unwrap();
         let has_pose = g.data.group_prefabs["DeparturePlatform"]["components"].as_array().unwrap().iter().any(|c| c["poses"]["_landingPosition"].is_object());
-        if !has_pose {
-            return; // Game tables extracted before the dump carried component poses.
-        }
+        assert!(has_pose, "game tables extracted before the dump carried component poses: extract them again");
         let selenea = stable_hash("Selenea");
         switch_to_planet(&mut g, selenea, 0, 0);
         // A departure platform on Selenea, turned a quarter.
@@ -313,6 +311,22 @@ pub mod tests {
         let expected = [90.03, 27.062, 52.95];
         assert!((0..3).all(|i| (p[i] - expected[i]).abs() < 1e-3), "{p:?}");
         assert!((yaw_degrees(r) - 180.0).abs() < 0.01, "{r:?}");
+    }
+
+    /// The travel RPC (a departure platform's SwitchPlanet) moves the world to the planet; a
+    /// planet the server does not offer is refused.
+    #[test]
+    fn players_travel_by_rpc() {
+        use crate::testkit::*;
+        let Some(mut g) = game() else { return };
+        join(&mut g, 1, "Ann");
+        send_scene(&mut g, 1, "PlanetNetworkLoader.SwitchToPlanetServerRpc", &[json!(stable_hash("Humble")), json!(0), json!(0)]);
+        assert_eq!(g.planet_id(), "Prime");
+        send_scene(&mut g, 1, "PlanetNetworkLoader.SwitchToPlanetServerRpc", &[json!(stable_hash("Selenea")), json!(0), json!(0)]);
+        assert_eq!(g.planet_id(), "Selenea");
+        assert_eq!(sent(&g, "PlanetNetworkLoader.SwitchToPlanetClientRpc").len(), 1);
+        let g = reload(&mut g);
+        assert_eq!(g.planet_id(), "Selenea", "the save keeps where the world is");
     }
 
     #[test]

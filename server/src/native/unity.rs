@@ -785,11 +785,21 @@ pub fn is_component(id: i32) -> bool {
 pub mod tests {
     use super::*;
 
-    /// The installed game's data folder (PCDS_GAME_DIR or the default Steam library).
+    /// The installed game (PCDS_GAME_DIR, else the default Steam library). Without one the
+    /// tests that read it fail, unless PCDS_GAME_DIR=none says there is none (CI).
+    pub fn game_dir() -> Option<PathBuf> {
+        let game = match std::env::var("PCDS_GAME_DIR").ok().filter(|v| !v.is_empty()) {
+            Some(v) if v == "none" => return None,
+            Some(v) => PathBuf::from(v),
+            None => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/Steam/steamapps/common/The Planet Crafter"),
+        };
+        assert!(game.join("Planet Crafter_Data/globalgamemanagers").exists(), "no game in {}: set PCDS_GAME_DIR to the game's folder, or to none to skip the tests that read it", game.display());
+        Some(game)
+    }
+
+    /// The installed game's data folder.
     pub fn game_data() -> Option<PathBuf> {
-        let game = std::env::var("PCDS_GAME_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/Steam/steamapps/common/The Planet Crafter"));
-        let d = game.join("Planet Crafter_Data");
-        d.join("globalgamemanagers").exists().then_some(d)
+        Some(game_dir()?.join("Planet Crafter_Data"))
     }
 
     /// A serialized file with one GameObject of `size` bytes at `offset` past the data start.

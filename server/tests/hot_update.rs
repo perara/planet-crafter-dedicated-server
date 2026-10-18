@@ -3,7 +3,7 @@
 //! flip whose new bank dies, a flip refused at its HELLO, a bank killed outside a flip, and
 //! the updater against a release server on 127.0.0.1 (a good release, one whose sha256 does
 //! not match, one of another front protocol) and a rollback. Needs game tables
-//! (PCDS_TEST_DATA, else run/data/2.103): skipped without them, as the unit tests are.
+//! (PCDS_TEST_DATA, else run/data/2.103; PCDS_TEST_DATA=none skips it, as the unit tests).
 //! Steam is off: nothing here touches Steam.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -16,13 +16,15 @@ use serde_json::{json, Value};
 
 const PCDS: &str = env!("CARGO_BIN_EXE_pcds");
 
+/// As the unit tests' (main.rs test_data): PCDS_TEST_DATA=none skips, tables not found fail.
 fn tables() -> Option<String> {
-    let dirs = [std::env::var("PCDS_TEST_DATA").ok(), Some(concat!(env!("CARGO_MANIFEST_DIR"), "/../run/data/2.103").into())];
-    let found = dirs.into_iter().flatten().find(|d| Path::new(d).join("netdata.json").is_file());
-    if found.is_none() {
-        eprintln!("skipped: no game tables");
-    }
-    found
+    let dir = match std::env::var("PCDS_TEST_DATA").ok().filter(|v| !v.is_empty()) {
+        Some(v) if v == "none" => return None,
+        Some(dir) => dir,
+        None => concat!(env!("CARGO_MANIFEST_DIR"), "/../run/data/2.103").into(),
+    };
+    assert!(Path::new(&dir).join("netdata.json").is_file(), "no game tables in {dir}: set PCDS_TEST_DATA to a tables directory, or to none to skip");
+    Some(dir)
 }
 
 fn free_port() -> u16 {

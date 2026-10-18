@@ -216,10 +216,20 @@ pub fn check_save_format(settings: &Value) -> Result<(), String> {
 /// A game on a save with the test tables; None (the test skips) without them.
 #[cfg(test)]
 pub fn test_game(save: SaveFile) -> Option<Game> {
-    let dir = crate::test_data()?;
-    let (net_data, data, spec) = crate::tables(dir);
-    let scenes = crate::scene_tables(dir, &net_data, &data);
+    let (net_data, data, spec, scenes) = test_tables()?;
     Some(Game::new(net_data, data, spec, save, scenes))
+}
+
+/// The test tables, read once per test process (parsing them is most of a test's time).
+#[cfg(test)]
+pub fn test_tables() -> Option<(NetData, GameData, Spec, crate::Scenes)> {
+    static TABLES: std::sync::OnceLock<(NetData, GameData, Spec, crate::Scenes)> = std::sync::OnceLock::new();
+    let dir = crate::test_data()?;
+    Some(TABLES.get_or_init(|| {
+        let (net_data, data, spec) = crate::tables(dir);
+        let scenes = crate::scene_tables(dir, &net_data, &data);
+        (net_data, data, spec, scenes)
+    }).clone())
 }
 
 impl Game {
@@ -514,7 +524,7 @@ impl Game {
     /// so its bytes go through undecoded.
     // ponytail: the server keeps no animator, so a late joiner gets the spawn-time parameters
     // until the owner's next change; keep the last ParametersUpdate per object if that shows.
-    fn animator_relay(&mut self, client: u64, object: u64, behaviour: u16, method: u32, body: &[u8]) -> bool {
+    pub(crate) fn animator_relay(&mut self, client: u64, object: u64, behaviour: u16, method: u32, body: &[u8]) -> bool {
         let Some(name) = self.net.spec.get(method).map(|r| r.name.clone()) else { return false };
         let Some(client_rpc) = name.strip_prefix("NetworkAnimator.").and_then(|m| m.strip_suffix("ServerRpc")).map(|m| format!("NetworkAnimator.{m}ClientRpc")) else { return false };
         let Some(hash) = self.net.spec.hash(&client_rpc) else {
@@ -530,7 +540,7 @@ impl Game {
     }
 
     /// Hands an RPC to the ported handler that owns it.
-    fn rpc(&mut self, client: u64, object: u64, behaviour: u16, name: &str, a: Args) {
+    pub(crate) fn rpc(&mut self, client: u64, object: u64, behaviour: u16, name: &str, a: Args) -> bool {
         let handled = self.world_objects_rpc(client, name, &a)
             || self.inventories_rpc(client, name, &a)
             || self.players_rpc(client, name, &a)
@@ -541,6 +551,7 @@ impl Game {
         if !handled && self.unhandled.insert(name.to_string()) {
             eprintln!("rpc {name} is not handled");
         }
+        handled
     }
 
     pub fn kick(&mut self, client: u64, reason: &str) {
@@ -719,6 +730,59 @@ pub mod tests {
         game.players_rpc(client, "PlayerMainController.PlayerReadyServerRpc", &Args(vec![json!(0), json!(name)]));
         assert!(game.clients[&client].ready.is_some());
         object
+    }
+
+    /// ConnectionRequest: another game version, another session's invite code, a refused
+    /// address, a banned SteamID or a full server are each told why and dropped; the rest get
+    /// the world and everyone hears they came; leaving, everyone hears they went.
+    #[test]
+    fn connections_are_refused_as_the_game_and_the_access_lists_say() {
+        let Some(mut g) = test_game(save()) else { return };
+        let request = |data: &str| {
+            let mut w = Writer::new();
+            w.packed_i32(0).u64(0).i32(data.len() as i32).bytes(data.as_bytes());
+            w.0
+        };
+        let version = g.net_data.game_version.clone();
+        g.access.lists.banned_ips.push("10.6.6.6".into());
+        g.access.lists.banned_names.push("76561198000000066".into());
+        let cases: [(u64, Option<u64>, Option<&str>, String, &str); 4] = [
+            (1, None, None, "0.9|0".to_string(), "MENU_Network_Error_version_mismatch"),
+            (2, None, None, format!("{version}|{}", g.session_number.wrapping_add(1)), "MENU_Network_Error_version_mismatch"),
+            (3, None, Some("10.6.6.6"), format!("{version}|0"), crate::access::REFUSED),
+            (4, Some(76561198000000066), None, format!("{version}|0"), crate::access::REFUSED),
+        ];
+        for (client, steam, ip, data, why) in cases {
+            g.connect(client, steam, false, ip.map(String::from));
+            g.approve(client, &request(&data));
+            assert!(!g.clients[&client].approved && g.kicks.contains(&(client, why.to_string())), "client {client}");
+        }
+        g.rules.limits.max_players = Some(1);
+        join(&mut g, 5, "Ann");
+        g.connect(6, None, false, None);
+        g.approve(6, &request(&format!("{version}|{}", g.session_number)));
+        assert!(g.kicks.contains(&(6, "MULTIPLAYER_Game_Session_Full".to_string())));
+        g.net.out.clear();
+        g.disconnect(5);
+        assert!(g.net.out.iter().any(|(to, kind, _)| *to == Target::Except(5) && *kind == protocol::client_disconnected(5).0));
+        g.disconnect(6);
+        g.disconnect(99);
+    }
+
+    /// Every animator ServerRpc an owner sends goes out as its ClientRpc.
+    #[test]
+    fn every_animator_server_rpc_is_relayed() {
+        let Some(mut g) = test_game(save()) else { return };
+        let ann = join(&mut g, 1, "Ann");
+        for (server, client) in [("NetworkAnimator.SendAnimStateServerRpc", "NetworkAnimator.SendAnimStateClientRpc"), ("NetworkAnimator.SendParametersUpdateServerRpc", "NetworkAnimator.SendParametersUpdateClientRpc"), ("NetworkAnimator.SendAnimTriggerServerRpc", "NetworkAnimator.SendAnimTriggerClientRpc")] {
+            let mut w = Writer::new();
+            w.packed_u64(1).packed_u64(ann).packed_u16(7).packed_u32(g.net.spec.hash(server).unwrap()).bytes(&[9, 9]);
+            g.net.out.clear();
+            g.receive(1, &wire::batch(&[(protocol::RPC, w.0)]));
+            let mut want = Writer::new();
+            want.packed_u64(ann).packed_u16(7).packed_u32(g.net.spec.hash(client).unwrap()).bytes(&[9, 9]);
+            assert_eq!(g.net.out.iter().filter(|m| m.1 == protocol::CLIENT_RPC).map(|m| (m.0, m.2.clone())).collect::<Vec<_>>(), vec![(Target::Except(1), want.0)], "{server}");
+        }
     }
 
     /// An animal's owner animates it for everyone else; nobody else can.

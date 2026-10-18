@@ -574,3 +574,206 @@ fn dist2(a: [f32; 3], b: [f32; 3]) -> f32 {
 pub fn container_keeps_server_ownership(game: &Game, group: usize) -> bool {
     game.data.group_prefabs[&game.data.groups[group].id]["rigidbody"].as_bool().unwrap_or(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Value};
+
+    use crate::net::Target;
+    use crate::testkit::*;
+
+    const POD: i32 = 208217122;
+    /// A scene object's id (below the player-made ids) that the save does not hold.
+    const SCENE: i32 = 101_234_567;
+
+    #[test]
+    fn world_object_queries_answer_the_asking_client() {
+        let Some((mut g, _)) = world() else { return };
+        join(&mut g, 2, "Bob");
+        g.net.out.clear();
+        send_scene(&mut g, 1, "WorldObjectsHandler.HasWorldObjectAtPositionServerRpc", &[json!([558.2, 2.47, 494.1])]);
+        send_scene(&mut g, 1, "WorldObjectsHandler.HasWorldObjectAtPositionServerRpc", &[json!([1.0, 2.0, 3.0])]);
+        let answers: Vec<(Target, Value)> = sent(&g, "WorldObjectsHandler.HasWorldObjectAtPositionClientRpc").into_iter().map(|s| (s.to, s.args[0].clone())).collect();
+        assert_eq!(answers, vec![(Target::Only(1), json!(true)), (Target::Only(1), json!(false))]);
+
+        let pod = g.wos[&POD].net.unwrap();
+        send_scene(&mut g, 2, "WorldObjectsHandler.GetGameObjectFromWorldObjectServerRpc", &[json!(POD)]);
+        send_scene(&mut g, 2, "WorldObjectsHandler.GetGameObjectFromWorldObjectServerRpc", &[json!(123)]);
+        let answers: Vec<(Target, Value)> = sent(&g, "WorldObjectsHandler.GetGameObjectFromWorldObjectClientRpc").into_iter().map(|s| (s.to, s.args[0].clone())).collect();
+        assert_eq!(answers, vec![(Target::Only(2), json!(pod)), (Target::Only(2), json!(0))], "no object: network id 0");
+    }
+
+    #[test]
+    fn energy_group_data_sums_each_groups_generation_on_this_planet() {
+        let Some((mut g, _)) = world() else { return };
+        place(&mut g, "EnergyGenerator1", [570.0, 3.0, 500.0]);
+        place(&mut g, "EnergyGenerator1", [575.0, 3.0, 500.0]);
+        place(&mut g, "CraftStation1", [580.0, 3.0, 500.0]);
+        g.net.out.clear();
+        send_scene(&mut g, 1, "WorldObjectsHandler.GetEnergyGroupDataServerRpc", &[]);
+        let rows = one(&g, "WorldObjectsHandler.GetEnergyGroupDataClientRpc")[0].as_array().unwrap().clone();
+        let unit = |group: &str| g.data.groups[g.data.group(group).unwrap()].unit("Energy");
+        let row = |group: &str| rows.iter().find(|r| r[0] == hash(&g, group)).cloned();
+        assert_eq!(row("EnergyGenerator1"), Some(json!([hash(&g, "EnergyGenerator1"), 2.0 * unit("EnergyGenerator1"), 2])));
+        assert_eq!(row("CraftStation1"), Some(json!([hash(&g, "CraftStation1"), unit("CraftStation1"), 1])), "consumers count negative");
+        assert!(row("EscapePod").is_none(), "no energy, no row");
+    }
+
+    #[test]
+    fn genetics_details_list_each_traits_type_and_value_or_nothing() {
+        let Some((mut g, _)) = world() else { return };
+        let group = g.data.group(crate::genetics::TRAIT_GROUP).unwrap();
+        let (a, b) = (g.create_world_object(group, 0, true), g.create_world_object(group, 0, true));
+        g.wos.get_mut(&a).unwrap().trait_type = 7;
+        g.wos.get_mut(&a).unwrap().trait_value = 3;
+        g.net.out.clear();
+        send_scene(&mut g, 1, "WorldObjectsHandler.GetGeneticsDetailsServerRpc", &[json!([a, b])]);
+        let (tb, vb) = (g.wos[&b].trait_type, crate::genetics::trait_value(&g, &g.wos[&b]));
+        assert_eq!(one(&g, "WorldObjectsHandler.GetGeneticsDetailsClientRpc"), vec![json!(true), json!([7, tb]), json!([3, vb])]);
+        g.net.out.clear();
+        send_scene(&mut g, 1, "WorldObjectsHandler.GetGeneticsDetailsServerRpc", &[json!([a, 42])]);
+        assert_eq!(one(&g, "WorldObjectsHandler.GetGeneticsDetailsClientRpc"), vec![json!(false), json!([7, 0]), json!([3, 0])], "the game stops at the unknown one");
+    }
+
+    /// Building (CreateAndInstantiate), dropping (DropOnFloor, with and without a rotation) and
+    /// destroying, each as the save and the clients see it.
+    #[test]
+    fn objects_are_built_dropped_and_destroyed_as_in_the_game() {
+        let Some((mut g, _)) = world() else { return };
+        let (inventory, _) = backpack(&g, 1);
+        let generator = hash(&g, "EnergyGenerator1");
+        let built_before = g.group_count(true, g.data.group("EnergyGenerator1").unwrap());
+        // On the pod's spot with the check on, and of a group that does not exist: nothing.
+        for (hash, position) in [(generator, [558.2, 2.47, 494.1]), (12345, [600.0, 3.0, 500.0])] {
+            send_scene(&mut g, 1, "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc", &[json!(hash), json!(position), json!([0, 0, 0, 1]), json!(false), json!(true), json!(true), json!(false)]);
+            assert_eq!(one(&g, "WorldObjectsHandler.CreateAndInstantiateWorldObjectClientRpc"), vec![json!(0)]);
+            g.net.out.clear();
+        }
+        send_scene(&mut g, 1, "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc", &[json!(generator), json!([600.0, 3.0, 500.0]), json!([0, 0, 0, 1]), json!(true), json!(true), json!(true), json!(false)]);
+        let net = one(&g, "WorldObjectsHandler.CreateAndInstantiateWorldObjectClientRpc")[0].as_u64().unwrap();
+        let built = g.net.objects[&net].wo.unwrap();
+        assert_eq!(sent(&g, "GroupNetworkBase.StartDisolveAnimationClientRpc").len(), 1, "disolve");
+        assert_eq!(g.group_count(true, g.wos[&built].group), built_before + 1);
+        assert_eq!(saved_object(&mut g, built).unwrap()["pos"], "600,3,500");
+
+        // An Iron from the backpack dropped by Ann: hers to simulate, saved where it fell.
+        let iron = give(&mut g, "Iron", inventory);
+        g.inventory_remove(inventory, iron);
+        g.net.out.clear();
+        send_scene(&mut g, 1, "WorldObjectsHandler.DropOnFloorServerRpc", &[json!(iron), json!([561.0, 3.0, 497.0]), json!(0.5), json!(true), json!(false), json!(0), json!(0.0)]);
+        let dropped = g.wos[&iron].net.unwrap();
+        assert_eq!(g.net.objects[&dropped].owner, 1);
+        assert_eq!(one(&g, "GroupNetworkContainer.StartAndStopPhysicsAfterDelayClientRpc"), vec![json!(0.5), json!(true), json!(false)]);
+        assert_ne!(g.net.objects[&dropped].rotation, [0.0, 0.0, 0.0, 1.0], "an unrotated drop gets a random turn");
+        assert_eq!(saved_object(&mut g, iron).unwrap()["pos"], "561,3,497");
+        // With a rotation, the rotation is kept.
+        let ice = give(&mut g, "ice", inventory);
+        g.inventory_remove(inventory, ice);
+        let turned = crate::geometry::from_euler_y(30.0);
+        send_scene(&mut g, 1, "WorldObjectsHandler.DropOnFloorWithRotationServerRpc", &[json!(ice), json!([562.0, 3.0, 497.0]), json!(turned), json!(0.5), json!(false), json!(false), json!(0), json!(0.0)]);
+        assert_eq!(g.wos[&ice].rotation, turned);
+
+        // Destroyed: gone from the world, the clients' scenes, the counts and the save.
+        g.net.out.clear();
+        send_scene(&mut g, 1, "WorldObjectsHandler.DestroyWorldObjectServerRpc", &[json!(built), json!(true)]);
+        assert!(!g.wos.contains_key(&built) && !g.net.objects.contains_key(&net));
+        assert_eq!(g.group_count(true, g.data.group("EnergyGenerator1").unwrap()), built_before);
+        assert!(saved_object(&mut g, built).is_none());
+        // An item in an inventory comes out of it.
+        let carried = give(&mut g, "Iron", inventory);
+        send_scene(&mut g, 1, "WorldObjectsHandler.DestroyWorldObjectServerRpc", &[json!(carried), json!(false)]);
+        assert!(!g.inventories[&inventory].items.contains(&carried) && !g.wos.contains_key(&carried));
+    }
+
+    /// Scene objects (ids below the player-made ones) players took, disabled or regrew: the
+    /// server keeps them as the game does, and a reloaded world tells joining clients again.
+    #[test]
+    fn scene_objects_players_change_stay_changed_after_a_reload() {
+        let Some((mut g, _)) = world() else { return };
+        let iron = hash(&g, "Iron");
+        send_scene(&mut g, 1, "WorldObjectsHandler.DestroyWorldObjectFromSceneServerRpc", &[json!(SCENE), json!(iron), json!(1.5)]);
+        assert_eq!(one(&g, "WorldObjectsHandler.DestroyWorldObjectFromSceneResultClientRpc"), vec![json!(true)]);
+        assert_eq!(sent(&g, "WorldObjectsHandler.DestroyWorldObjectGOClientRpc")[0].args, vec![json!(SCENE), json!(iron), json!(1.5)], "everyone's copy goes");
+        assert!(!g.wos[&SCENE].is_placed() && !g.wos[&SCENE].dont_save);
+        // Again: it is no longer placed, so the second asker gets false.
+        g.net.out.clear();
+        send_scene(&mut g, 1, "WorldObjectsHandler.DestroyWorldObjectFromSceneServerRpc", &[json!(SCENE), json!(iron), json!(0.0)]);
+        assert_eq!(one(&g, "WorldObjectsHandler.DestroyWorldObjectFromSceneResultClientRpc"), vec![json!(false)]);
+
+        // Disabled with an item to generate where it stood: the item drops there.
+        let (disabled, magnesium) = (SCENE + 1, hash(&g, "Magnesium"));
+        send_scene(&mut g, 1, "WorldObjectsHandler.DisableWorldObjectFromSceneServerRpc", &[json!(disabled), json!(magnesium), json!(true), json!([565.0, 3.0, 495.0])]);
+        let drop = g.wos.values().find(|w| w.id != disabled && g.data.groups[w.group].hash == magnesium).expect("a Magnesium dropped");
+        assert_eq!(drop.position, [565.0, 3.0, 495.0]);
+        assert!(!g.wos[&disabled].is_placed() && !g.wos[&disabled].dont_save);
+
+        // A grown scene plant: its count and growth are everyone's and the save's.
+        let (grown, vegetable) = (SCENE + 2, hash(&g, "Vegetable0Seed"));
+        g.net.out.clear();
+        send_scene(&mut g, 1, "WorldObjectsHandler.SetSceneWorldObjectGrowthServerRpc", &[json!(grown), json!(vegetable), json!([1, 4])]);
+        assert_eq!(sent(&g, "WorldObjectsHandler.SetSceneWorldObjectGrowthClientRpc").iter().map(|s| (s.to, s.args.clone())).collect::<Vec<_>>(), vec![(Target::All, vec![json!(grown), json!(vegetable), json!([1, 4])])]);
+        assert_eq!((g.wos[&grown].count, g.wos[&grown].growth), ([1, 4], 25.0));
+
+        // A random-appearance object that appears (chance 100) is placed; one that does not
+        // (chance 0) goes from the asker's scene.
+        let (appears, absent, rot) = (SCENE + 3, SCENE + 4, [0.0, 0.0, 0.0, 1.0]);
+        g.net.out.clear();
+        send_scene(&mut g, 1, "WorldObjectsHandler.GenerateRandomAppearanceObjectServerRpc", &[json!(100.0), json!(iron), json!(appears), json!(-1), json!([570.0, 3.0, 490.0]), json!(rot)]);
+        send_scene(&mut g, 1, "WorldObjectsHandler.GenerateRandomAppearanceObjectServerRpc", &[json!(0.0), json!(iron), json!(absent), json!(-1), json!([571.0, 3.0, 490.0]), json!(rot)]);
+        assert_eq!(g.wos[&appears].position, [570.0, 3.0, 490.0]);
+        assert_eq!(sent(&g, "WorldObjectsHandler.DestroyWorldObjectGOClientRpc").iter().map(|s| (s.to, s.args[0].clone())).collect::<Vec<_>>(), vec![(Target::Only(1), json!(absent))]);
+        // Asked again from where it stands, it stays; from 2 m away (moved scene), it goes.
+        g.net.out.clear();
+        send_scene(&mut g, 1, "WorldObjectsHandler.GenerateRandomAppearanceObjectServerRpc", &[json!(0.0), json!(iron), json!(appears), json!(-1), json!([570.0, 3.0, 490.0]), json!(rot)]);
+        assert!(sent(&g, "WorldObjectsHandler.DestroyWorldObjectGOClientRpc").is_empty());
+        send_scene(&mut g, 1, "WorldObjectsHandler.GenerateRandomAppearanceObjectServerRpc", &[json!(100.0), json!(iron), json!(appears), json!(-1), json!([575.0, 3.0, 490.0]), json!(rot)]);
+        assert_eq!(sent(&g, "WorldObjectsHandler.DestroyWorldObjectGOClientRpc").len(), 1);
+
+        // After a restart, a joining client asks about each scene object it has.
+        let mut g = reload(&mut g);
+        join(&mut g, 2, "Bob");
+        g.net.out.clear();
+        for id in [SCENE, disabled, 100_000_001] {
+            send_scene(&mut g, 2, "WorldObjectsHandler.IsWorldObjectFromSceneActiveServerRpc", &[json!(id)]);
+        }
+        let gone: Vec<Value> = sent(&g, "WorldObjectsHandler.DestroyWorldObjectGOClientRpc").into_iter().inspect(|s| assert_eq!(s.to, Target::Only(2))).map(|s| s.args[0].clone()).collect();
+        assert_eq!(gone, vec![json!(SCENE), json!(disabled)], "the untouched one stays");
+        send_scene(&mut g, 2, "WorldObjectsHandler.RefreshSceneWorldObjectGrowthServerRpc", &[json!(grown)]);
+        assert_eq!(sent(&g, "WorldObjectsHandler.SetSceneWorldObjectGrowthClientRpc").last().unwrap().args, vec![json!(grown), json!(vegetable), json!([1, 4])]);
+        assert_eq!(g.wos[&appears].position, [570.0, 3.0, 490.0]);
+    }
+
+    #[test]
+    fn deconstruction_gives_the_recipe_to_the_backpack_or_the_floor() {
+        let Some((mut g, _)) = world() else { return };
+        let (inventory, _) = backpack(&g, 1);
+        let generator = g.data.group("EnergyGenerator1").unwrap();
+        let recipe: Vec<usize> = g.data.groups[generator].recipe.clone();
+        assert!(!recipe.is_empty());
+        let (built, _) = place(&mut g, "EnergyGenerator1", [600.0, 3.0, 500.0]);
+        let group_hash = g.data.groups[generator].hash;
+        let had = g.inventories[&inventory].items.len();
+        g.net.out.clear();
+        send_scene(&mut g, 1, "WorldObjectsHandler.RetrieveResourcesFromDeconstructionServerRpc", &[json!(built), json!(group_hash), json!(inventory), json!([600.0, 3.0, 500.0]), json!(1)]);
+        let mut got: Vec<usize> = g.inventories[&inventory].items[had..].iter().map(|i| g.wos[i].group).collect();
+        let mut want = recipe.clone();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
+        let hashes: Vec<Value> = recipe.iter().map(|r| json!(g.data.groups[*r].hash)).collect();
+        assert_eq!(one(&g, "WorldObjectsHandler.DisplayDeconstructResultClientRpc"), vec![json!([]), json!(hashes)]);
+
+        // No inventory (-1): everything drops a metre above the spot.
+        let before = g.wos.len();
+        send_scene(&mut g, 1, "WorldObjectsHandler.RetrieveResourcesFromDeconstructionServerRpc", &[json!(built), json!(group_hash), json!(-1), json!([600.0, 3.0, 500.0]), json!(1)]);
+        let dropped: Vec<_> = g.wos.values().skip(before).collect();
+        assert_eq!(dropped.len(), recipe.len());
+        assert!(dropped.iter().all(|w| w.position == [600.0, 4.0, 500.0] && w.net.is_some()));
+
+        // Free craft: deconstruction gives nothing back.
+        g.save.settings["freeCraft"] = json!(true);
+        let before = g.wos.len();
+        send_scene(&mut g, 1, "WorldObjectsHandler.RetrieveResourcesFromDeconstructionServerRpc", &[json!(built), json!(group_hash), json!(inventory), json!([600.0, 3.0, 500.0]), json!(1)]);
+        assert_eq!(g.wos.len(), before);
+    }
+}

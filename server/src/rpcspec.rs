@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use crate::wire::{Reader, Writer};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct Rpc {
     pub name: String,
     pub args: Vec<Arg>,
@@ -19,7 +19,7 @@ pub struct Rpc {
     decodable: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct Arg {
     pub name: String,
     #[serde(rename = "type")]
@@ -37,7 +37,7 @@ pub struct Arg {
     pub base: Option<String>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Spec {
     by_hash: HashMap<u32, Rpc>,
     by_name: HashMap<String, u32>,

@@ -354,8 +354,72 @@ pub fn inventory_changed(game: &mut Game, inventory: i32, wo: i32, added: bool) 
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
+    use super::PLAYERS;
     use crate::data::stable_hash;
     use crate::game::tests::join;
+    use crate::net::Target;
+    use crate::testkit::*;
+
+    /// A player's PlayersData entry: (light tier, light on, backpack, jetpack, skin).
+    fn entry(g: &crate::game::Game, client: u64) -> (i16, bool, i16, i16, i16) {
+        let (object, _) = g.net.find_class(PLAYERS).unwrap();
+        let item = list(g, object, PLAYERS, "_playersData").into_iter().find(|i| u64::from_le_bytes(i[0..8].try_into().unwrap()) == client).unwrap();
+        let short = |at: usize| i16::from_le_bytes(item[at..at + 2].try_into().unwrap());
+        (short(40), item[42] == 1, short(44), short(46), short(48))
+    }
+
+    /// The light, backpack, jetpack and skin each player shows the others, in their entry of
+    /// the players list; a player's RPC changes only its own.
+    #[test]
+    fn status_rpcs_change_the_senders_entry_in_the_players_list() {
+        let Some((mut g, _)) = world() else { return };
+        join(&mut g, 2, "Bob");
+        let before = entry(&g, 2);
+        send_scene(&mut g, 1, "PlayersDataManager.SetLightStatusServerRpc", &[json!(true), json!(2)]);
+        send_scene(&mut g, 1, "PlayersDataManager.SetBackpackStatusServerRpc", &[json!(true), json!(3)]);
+        send_scene(&mut g, 1, "PlayersDataManager.SetJetpackStatusServerRpc", &[json!(true), json!(4)]);
+        send_scene(&mut g, 1, "PlayersDataManager.SetSkinStatusServerRpc", &[json!(5)]);
+        assert_eq!(entry(&g, 1), (2, true, 3, 4, 5));
+        assert_eq!(entry(&g, 2), before);
+        // Taken off: tier 0, whatever tier is sent.
+        send_scene(&mut g, 1, "PlayersDataManager.SetBackpackStatusServerRpc", &[json!(false), json!(3)]);
+        send_scene(&mut g, 1, "PlayersDataManager.SetJetpackStatusServerRpc", &[json!(false), json!(4)]);
+        send_scene(&mut g, 1, "PlayersDataManager.SetLightStatusServerRpc", &[json!(false), json!(2)]);
+        assert_eq!(entry(&g, 1), (2, false, 0, 0, 5));
+    }
+
+    /// The map shows the other players where they stand; nobody else in the game: no answer.
+    #[test]
+    fn map_markers_show_the_other_players() {
+        let Some((mut g, _)) = world() else { return };
+        send_scene(&mut g, 1, "PlayersDataManager.GetPlayersPositionsServerRpc", &[]);
+        assert!(sent(&g, "PlayersDataManager.UpdateMapMarkerPositionsClientRpc").is_empty());
+        let bob = join(&mut g, 2, "Bob");
+        g.net.move_object(bob, [600.0, 5.0, 480.0], None);
+        approve(&mut g, 3);
+        g.net.out.clear();
+        send_scene(&mut g, 1, "PlayersDataManager.GetPlayersPositionsServerRpc", &[]);
+        let s = sent(&g, "PlayersDataManager.UpdateMapMarkerPositionsClientRpc");
+        assert_eq!(s.iter().map(|s| (s.to, s.args.clone())).collect::<Vec<_>>(), vec![(Target::Only(1), vec![json!([2]), json!([[600.0, 5.0, 480.0]])])], "not the one still loading");
+    }
+
+    /// PlayerReady: printable names of at most 64 characters, refused when access says no.
+    #[test]
+    fn player_names_are_cleaned_and_checked() {
+        let Some(mut g) = crate::game::test_game(save()) else { return };
+        approve(&mut g, 1);
+        let long = format!("A\u{7}nn{}", "x".repeat(100));
+        g.players_rpc(1, "PlayerMainController.PlayerReadyServerRpc", &crate::game::Args(vec![json!(0), json!(long)]));
+        let name = &g.clients[&1].ready.as_ref().unwrap().name;
+        assert_eq!((name.len(), &name[..3]), (64, "Ann"));
+        g.access.lists.banned_names.push("mallory".into());
+        approve(&mut g, 2);
+        g.players_rpc(2, "PlayerMainController.PlayerReadyServerRpc", &crate::game::Args(vec![json!(0), json!("Mallory")]));
+        assert!(g.clients[&2].ready.is_none());
+        assert!(g.kicks.contains(&(2, crate::access::REFUSED.to_string())));
+    }
 
     #[test]
     fn the_last_player_saved_on_the_current_planet_is_the_host() {
