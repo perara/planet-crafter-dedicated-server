@@ -519,7 +519,7 @@ impl Game {
     /// so its bytes go through undecoded.
     // ponytail: the server keeps no animator, so a late joiner gets the spawn-time parameters
     // until the owner's next change; keep the last ParametersUpdate per object if that shows.
-    fn animator_relay(&mut self, client: u64, object: u64, behaviour: u16, method: u32, body: &[u8]) -> bool {
+    pub(crate) fn animator_relay(&mut self, client: u64, object: u64, behaviour: u16, method: u32, body: &[u8]) -> bool {
         let Some(name) = self.net.spec.get(method).map(|r| r.name.clone()) else { return false };
         let Some(client_rpc) = name.strip_prefix("NetworkAnimator.").and_then(|m| m.strip_suffix("ServerRpc")).map(|m| format!("NetworkAnimator.{m}ClientRpc")) else { return false };
         let Some(hash) = self.net.spec.hash(&client_rpc) else {
@@ -534,8 +534,8 @@ impl Game {
         true
     }
 
-    /// Hands an RPC to the ported handler that owns it.
-    fn rpc(&mut self, client: u64, object: u64, behaviour: u16, name: &str, a: Args) {
+    /// Hands an RPC to the ported handler that owns it; false when none does.
+    pub(crate) fn rpc(&mut self, client: u64, object: u64, behaviour: u16, name: &str, a: Args) -> bool {
         let handled = self.world_objects_rpc(client, name, &a)
             || self.inventories_rpc(client, name, &a)
             || self.players_rpc(client, name, &a)
@@ -546,6 +546,7 @@ impl Game {
         if !handled && self.unhandled.insert(name.to_string()) {
             eprintln!("rpc {name} is not handled");
         }
+        handled
     }
 
     pub fn kick(&mut self, client: u64, reason: &str) {
