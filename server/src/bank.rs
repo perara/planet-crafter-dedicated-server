@@ -24,9 +24,10 @@ use crate::save::SaveFile;
 use crate::{access, chathooks, config, dashboard, protocol, rules, save, status, units, wire};
 
 /// What this bank says in its HELLO, and `pcds bank-info` prints: its version, the front
-/// protocol it speaks, the snapshot format it writes and the ones it reads.
+/// protocol it speaks, the snapshot format it writes and the ones it reads, and the format of
+/// the game tables it loads (and its read-game writes).
 pub fn info() -> Value {
-    json!({"version": env!("CARGO_PKG_VERSION"), "protocol": ipc::PROTOCOL, "format": crate::handoff::FORMAT, "reads": [crate::handoff::FORMAT - 1, crate::handoff::FORMAT]})
+    json!({"version": env!("CARGO_PKG_VERSION"), "protocol": ipc::PROTOCOL, "format": crate::handoff::FORMAT, "reads": [crate::handoff::FORMAT - 1, crate::handoff::FORMAT], "tablesFormat": crate::native::tables::TABLES_FORMAT})
 }
 
 fn fail_for_test(what: &str) -> bool {

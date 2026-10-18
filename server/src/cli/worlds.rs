@@ -34,7 +34,7 @@ impl Ctx {
         super::mkdir(&self.worlds)?;
         super::mkdir(&beside)?;
         let made = beside.join("world.json");
-        check(Command::new(&self.exe).arg("new-save").arg(&made).arg(&data).args(options))?;
+        check(Command::new(self.program()).arg("new-save").arg(&made).arg(&data).args(options))?;
         fs::rename(&made, path).map_err(|e| format!("{}: {e}", path.display()))?;
         let _ = fs::remove_dir(&beside);
         Ok(())

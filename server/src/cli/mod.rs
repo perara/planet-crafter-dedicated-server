@@ -49,7 +49,8 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
   pcds rules [set SECTION.RULE=VALUE ... | reset]
                          show or change the server rules (rules.json; README \"Server rules\")
   pcds extract [--game DIR]   read the game tables again (from the game's files, no Wine)
-  pcds update [--game DIR]    after a game update: extract and restart when the game changed
+  pcds update [--game DIR]    after a game update, or for a release that reads another tables
+                         format: read the tables and restart when they changed
   pcds selftest               a scripted player joins over direct IP and checks the answers
   pcds run                    run the server in the foreground (what the service runs)
   pcds container              the Docker image's start (tables, world, then run)
@@ -90,7 +91,7 @@ pub struct Ctx {
 }
 
 pub fn run(args: &[String]) -> ! {
-    let code = Ctx::new().and_then(|ctx| ctx.command(args)).unwrap_or_else(|e| {
+    let code = Ctx::new().and_then(|ctx| ctx.hand_over(args).and_then(|_| ctx.command(args))).unwrap_or_else(|e| {
         eprintln!("pcds: {e}");
         1
     });
@@ -138,6 +139,22 @@ impl Ctx {
         Ok(ctx)
     }
 
+    /// run/bin/pcds, what the units run, hands every command to the active bank's program
+    /// (exec, same pid). So the one rule is: the active bank's program is the server, the
+    /// launcher (`pcds run`: its supervisor), the game-update check and the tables' reader,
+    /// whichever build last wrote run/bin/pcds; an upgrade through the API, the automatic
+    /// update or `pcds upgrade` moves all of them at once. Any other copy of pcds (a release
+    /// folder, a checkout's build) runs as itself, and installs itself into a bank when newer.
+    fn hand_over(&self, args: &[String]) -> Result {
+        let program = self.program();
+        if !same_file(&self.exe, &self.installed()) || same_file(&program, &self.exe) {
+            return Ok(());
+        }
+        use std::os::unix::process::CommandExt;
+        let e = Command::new(&program).args(args).env("PCDS_HOME", &self.run).exec();
+        Err(format!("{}: {e}", program.display()))
+    }
+
     /// Runs one command; its exit code.
     fn command(&self, args: &[String]) -> Result<i32> {
         let a: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -159,6 +176,8 @@ impl Ctx {
                 if *what != "stop" {
                     self.install_newer()?;
                     self.refresh_unit()?;
+                    // A newer bank may read another tables format.
+                    self.ensure_tables(None)?;
                 }
                 return passthrough(&mut self.systemctl(&[what, &self.unit()]));
             }

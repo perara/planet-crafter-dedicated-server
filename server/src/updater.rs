@@ -115,6 +115,17 @@ pub fn compatible(info: &Value, live: &Value) -> Result<(), String> {
             info["tag"].as_str().unwrap_or("VERSION")
         ));
     }
+    // The tables on disk are the running bank's: a release that reads another format would
+    // refuse them (a live of Null: a HELLO checked on its own, nothing runs yet).
+    if !live.is_null() && info["tablesFormat"] != live["tablesFormat"] {
+        let theirs = |v: &Value| v.as_u64().map_or("none (a pcds from before table formats)".to_string(), |f| f.to_string());
+        return Err(format!(
+            "{what} reads game tables of format {}, the running server's are of format {}: it cannot take over the running world. pcds upgrade --restart {} installs it, reads the game tables again and restarts the server, which disconnects every player",
+            theirs(&info["tablesFormat"]),
+            theirs(&live["tablesFormat"]),
+            info["tag"].as_str().unwrap_or("VERSION")
+        ));
+    }
     let format = live["format"].as_u64().unwrap_or(0);
     if !info["reads"].as_array().is_some_and(|r| r.iter().any(|f| f.as_u64() == Some(format))) {
         return Err(format!(
@@ -561,6 +572,12 @@ pub mod tests {
         // A release that cannot read the running world's snapshot format.
         let old: Value = serde_json::from_str(r#"{"protocol": 2, "format": 7}"#).unwrap();
         assert!(compatible(&super::info(&banks, "b").map(|mut i| { i["protocol"] = crate::ipc::PROTOCOL.into(); i }).unwrap(), &old).unwrap_err().contains("format 7"));
+        // A release that reads game tables of another format than the running bank's.
+        let tables = |f: u64| json!({"version": "9.9.9", "tag": "v9.9.9", "protocol": crate::ipc::PROTOCOL, "reads": [1], "tablesFormat": f});
+        let live = json!({"format": 1, "tablesFormat": 1});
+        assert!(compatible(&tables(1), &live).is_ok());
+        let e = compatible(&tables(2), &live).unwrap_err();
+        assert!(e.contains("tables of format 2") && e.contains("are of format 1") && e.contains("pcds upgrade --restart v9.9.9"), "{e}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

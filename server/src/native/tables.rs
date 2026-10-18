@@ -12,6 +12,12 @@ use super::graph::Graph;
 use super::serial::{enum_name, read_fields, Layouts, Raw};
 use super::unity::{self, Data, Id};
 
+/// The format of what read_game writes, in its `tables-format` file: one more whenever any
+/// file it writes changes (a field, a section, a value read another way). A server loads only
+/// tables of its own format (main.rs), and `pcds update` reads them again with the active
+/// bank's program when the format differs.
+pub const TABLES_FORMAT: u32 = 1;
+
 /// GameData.MaxDepth.
 const MAX_DEPTH: usize = 6;
 
@@ -362,6 +368,7 @@ pub fn read_game(game: &Path, out: &Path) -> Result<String, String> {
     write(out, "wrecks.json", &pretty(&wrecks))?;
     write(out, "connection-request.hex", &request)?;
     write(out, "buildid", &build)?;
+    write(out, "tables-format", &TABLES_FORMAT.to_string())?;
     Ok(version)
 }
 

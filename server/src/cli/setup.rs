@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use super::env::{build_id, parse_env};
+use super::env::parse_env;
 use super::{need, say, sleep, wait_for, Ctx, Result};
 use crate::updater;
 
@@ -127,12 +127,13 @@ impl Ctx {
     /// front's code once the front and its banks have ended (supervise). Returns only when it
     /// cannot start.
     pub fn run_server(&self) -> Result {
-        let data = self.data_dir()?;
         let world = self.world_file();
         if !world.is_file() {
             return Err(format!("no world at {}: 'pcds worlds', 'pcds world use NAME' or 'pcds world new NAME'", world.display()));
         }
         self.install_newer()?;
+        // The tables of the bank that runs (installing may have changed which one).
+        let data = self.data_dir()?;
         let banks = self.banks();
         let front = banks.join(updater::active(&banks)).join("pcds");
         let mut server = Command::new(&front);
@@ -178,10 +179,7 @@ impl Ctx {
             self.download_game(&user)?;
             game = Some(self.run.join("game"));
         }
-        let game = self.game_dir(game.as_deref())?;
-        if self.tables(&build_id(&game)?).is_err() {
-            self.extract(Some(&game))?;
-        }
+        self.ensure_tables(game.as_deref())?;
         if world.is_some() && new {
             return Err("--world SAVE.json and --new: one or the other".into());
         }
@@ -322,12 +320,12 @@ impl Ctx {
         super::write(&script, r#"{"name":"PcdsSelftest","ready":false,"steps":[{"wait":2000}]}"#)?;
         let out = fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
         let err = out.try_clone().map_err(|e| e.to_string())?;
-        let probe = Command::new(&self.exe).arg("probe").arg(&address).arg(&data).arg(&script).stdin(Stdio::null()).stdout(out).stderr(err).spawn();
+        let probe = Command::new(self.program()).arg("probe").arg(&address).arg(&data).arg(&script).stdin(Stdio::null()).stdout(out).stderr(err).spawn();
         match probe {
             Ok(mut probe) => {
                 wait_for(&mut probe, Duration::from_secs(60));
             }
-            Err(e) => say(format!("the scripted player did not start: {}: {e}", self.exe.display())),
+            Err(e) => say(format!("the scripted player did not start: {}: {e}", self.program().display())),
         }
         let said = fs::read_to_string(&log).unwrap_or_default();
         let _ = fs::remove_file(&script);
@@ -363,10 +361,8 @@ impl Ctx {
         let game = self.game_dir(Some(&game)).map_err(|e| {
             format!("{e}: mount your game folder at /game (-v '/path/to/The Planet Crafter:/game:ro'), or start once with 'docker run -it -e STEAM_USER=yourname ...' to download the game")
         })?;
-        // The first start, or a game update: this game build's tables.
-        if self.tables(&build_id(&game)?).is_err() {
-            self.extract(Some(&game))?;
-        }
+        // The first start, a game update or a release that reads another tables format.
+        self.ensure_tables(Some(&game))?;
         if !self.world_file().is_file() {
             let newest = fs::read_dir(&self.worlds).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "json")).max_by_key(|p| super::modified(p));
             match newest {

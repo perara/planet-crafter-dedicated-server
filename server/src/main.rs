@@ -127,12 +127,27 @@ fn tables(dir: &str) -> (NetData, GameData, Spec) {
 /// The network tables alone: all a scripted player needs (the extraction joins with them
 /// before the game data is written).
 fn network_tables(dir: &str) -> (NetData, Spec) {
-    let load = || Ok::<_, String>((NetData::load(&format!("{dir}/netdata.json"))?, Spec::load(&format!("{dir}/rpcs.json"))?));
+    let load = || {
+        check_format(dir)?;
+        Ok::<_, String>((NetData::load(&format!("{dir}/netdata.json"))?, Spec::load(&format!("{dir}/rpcs.json"))?))
+    };
     load().unwrap_or_else(|e| no_tables(dir, e))
 }
 
+/// Tables another reader wrote (another format, or none: a pcds from before table formats)
+/// are not loaded: their files may say something else than this server reads them as.
+fn check_format(dir: &str) -> Result<(), String> {
+    let path = format!("{dir}/tables-format");
+    let ours = native::tables::TABLES_FORMAT;
+    let format = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}; this server reads tables format {ours}"))?;
+    if format.trim() != ours.to_string() {
+        return Err(format!("they are of tables format {}, this server reads format {ours}", format.trim()));
+    }
+    Ok(())
+}
+
 fn no_tables(dir: &str, e: String) -> ! {
-    eprintln!("no game tables in {dir}: run `pcds extract` (see README) ({e})");
+    eprintln!("the game tables in {dir} cannot be used: run `pcds update`, which reads them again (see README) ({e})");
     std::process::exit(1)
 }
 

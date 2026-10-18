@@ -59,6 +59,9 @@ impl Ctx {
             say(format!("{} installed in bank {target} (sha256 checked), the active one now: {}", release.tag, describe(&info)));
         }
         if running {
+            // The release now active may read another tables format (a stopped server gets
+            // them at 'pcds start').
+            self.ensure_tables(None)?;
             say("restarting the server: every player is disconnected and reconnects");
             return self.restart_if_running();
         }
