@@ -148,8 +148,8 @@ pub struct Game {
     pub sim_time: Option<f64>,
     pub rng: Rng,
     pub trace: bool,
-    /// The per-version data directory (data/<version>/), for subsystems that load more of it.
-    pub data_dir: String,
+    /// The wreck layouts and the planets' scene dumps (main.rs scene_tables).
+    pub scenes: crate::Scenes,
     pub timers: crate::scene::Timers,
     /// The server's own crafted-objects count (the save's stats).
     pub crafted_total: u64,
@@ -181,23 +181,14 @@ fn connection_data(body: &[u8]) -> Option<String> {
     Some(String::from_utf8_lossy(r.rest().get(..n)?).to_string())
 }
 
-/// JsonableGameState.ConvertOldFormatToNew: saves from before the dying consequences setting
-/// had only a mode, which also set the gauge drain.
-fn convert_old_format_to_new(settings: &mut Value) {
-    if !settings.is_object() || !settings["dyingConsequencesLabel"].is_null() {
-        return;
+/// Saves from before the dying consequences setting had only a game mode, which the game turns
+/// into dying consequences and a gauge drain at load (JsonableGameState.ConvertOldFormatToNew).
+/// The server does not convert them: the game does, when it opens and saves the world once.
+pub fn check_save_format(settings: &Value) -> Result<(), String> {
+    match settings["mode"].as_str() {
+        Some(mode) if settings["dyingConsequencesLabel"].is_null() => Err(format!("a save from an old game version (game mode \"{mode}\", no dying consequences): open it in the game and save it once, then try again")),
+        _ => Ok(()),
     }
-    let (dying, drain) = match settings["mode"].as_str() {
-        Some("Chill") => ("NoConsequences", Some(0.800000011920929)),
-        Some("Intense") => ("DropAllItems", Some(1.2000000476837158)),
-        Some("Hardcore") => ("DeleteSaveFile", Some(1.600000023841858)),
-        _ => ("DropSomeItems", None),
-    };
-    settings["dyingConsequencesLabel"] = json!(dying);
-    if let Some(drain) = drain {
-        settings["modifierGaugeDrain"] = json!(drain);
-    }
-    settings["startLocationLabel"] = json!("");
 }
 
 /// A game on a save with the test tables; None (the test skips) without them.
@@ -205,12 +196,12 @@ fn convert_old_format_to_new(settings: &mut Value) {
 pub fn test_game(save: SaveFile) -> Option<Game> {
     let dir = crate::test_data()?;
     let (net_data, data, spec) = crate::tables(dir);
-    Some(Game::new(net_data, data, spec, save, dir))
+    let scenes = crate::scene_tables(dir, &net_data, &data);
+    Some(Game::new(net_data, data, spec, save, scenes))
 }
 
 impl Game {
-    pub fn new(net_data: NetData, data: GameData, spec: Spec, mut save: SaveFile, data_dir: &str) -> Game {
-        convert_old_format_to_new(&mut save.settings);
+    pub fn new(net_data: NetData, data: GameData, spec: Spec, save: SaveFile, scenes: crate::Scenes) -> Game {
         // SavedDataHandler.InitSavedData loads the host's planet. This server has no host, so it
         // keeps the planet it travelled to in the world state (pcdsCurrentPlanet; the game
         // ignores unknown fields) and marks a saved player host for the game (mark_host).
@@ -238,7 +229,7 @@ impl Game {
             sim_time: None,
             rng: Rng::seeded(),
             trace: std::env::var_os("PCDS_TRACE").is_some(),
-            data_dir: String::new(),
+            scenes,
             timers: Default::default(),
             crafted_total: 0,
             units: Default::default(),
@@ -254,7 +245,6 @@ impl Game {
         };
         game.change_generation_for_groups();
         game.crafted_total = game.save.stats["craftedObjects"].as_u64().unwrap_or(0);
-        game.data_dir = data_dir.to_string();
         game.load();
         game
     }
@@ -758,13 +748,10 @@ pub mod tests {
     }
 
     #[test]
-    fn old_saves_get_dying_consequences_from_their_mode() {
-        let mut s = json!({"mode": "Hardcore"});
-        convert_old_format_to_new(&mut s);
-        assert_eq!((s["dyingConsequencesLabel"].as_str(), s["modifierGaugeDrain"].as_f64()), (Some("DeleteSaveFile"), Some(1.600000023841858)));
-        let mut s = json!({"mode": "Chill", "dyingConsequencesLabel": "DropAllItems"});
-        convert_old_format_to_new(&mut s);
-        assert_eq!(s["dyingConsequencesLabel"], "DropAllItems", "new saves are left alone");
+    fn saves_with_only_the_old_game_mode_are_refused() {
+        assert!(check_save_format(&json!({"mode": "Hardcore"})).unwrap_err().contains("Hardcore"));
+        assert!(check_save_format(&json!({"mode": "Chill", "dyingConsequencesLabel": "DropAllItems"})).is_ok());
+        assert!(check_save_format(&json!({"planetId": "Prime"})).is_ok());
     }
 
     /// Hostile input from joined clients never crashes the server: every server RPC with

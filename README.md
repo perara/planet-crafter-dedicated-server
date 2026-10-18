@@ -56,12 +56,12 @@ See [Docker](#docker) for the data folder, managing worlds and Compose.
 - Your copy of The Planet Crafter for Windows: installed through Steam on this machine, the
   game folder copied from a PC (the folder that contains `Planet Crafter.exe`), or downloaded
   with `--steam-user NAME`.
-- Wine, curl, python3 and unzip, and Xvfb on a machine without a display (the installer and the
-  Docker image bring them).
+- Wine, curl, unzip and tar, and Xvfb on a machine without a display (the installer and the
+  Docker image bring them). curl is only used for downloads (BepInEx, steamcmd).
 - For invite codes: Valve's `steamclient.so`, from the Steam client if it is installed, else
   fetched with steamcmd (which needs 32-bit libraries such as `lib32gcc-s1`). Without it the
   server offers direct IP only.
-- To build from source: [Rust](https://rustup.rs). To rebuild the extractor: Docker.
+- To build from source: [Rust](https://rustup.rs) and make. To rebuild the extractor: Docker.
 
 **Why Wine?** The server is native Linux code and never runs under Wine. The game has no Linux
 version, so once per game version `pcds` runs the Windows game headless under Wine for a few
@@ -74,13 +74,17 @@ Tested with game version 2.103.
 ## Install by hand
 
 From a [release](https://github.com/perara/planet-crafter-dedicated-server/releases), or from
-source (built with cargo on the first `setup`):
+source:
 
 ```bash
 tar xzf pcds-v*-linux-x86_64.tar.gz && cd pcds-v*-linux-x86_64
-# or: git clone https://github.com/perara/planet-crafter-dedicated-server.git && cd planet-crafter-dedicated-server
 ./pcds up                                   # what the installer runs: everything below at once
+# or: git clone https://github.com/perara/planet-crafter-dedicated-server.git && cd planet-crafter-dedicated-server
+#     make install && pcds up               # ~/.local/bin/pcds; the server keeps its files in the checkout's run/
 ```
+
+`pcds` is one program: the server itself (`pcds serve`) and the commands below. A release keeps
+`libsteam_api.so`, `PcdsExtractor.dll` and `web/` next to it.
 
 `up` takes the same options as `setup`. Step by step:
 
@@ -91,11 +95,14 @@ loginctl enable-linger $USER   # keep it running while you are logged out
 ./pcds selftest           # a scripted connection over direct IP is approved and gets the world
 ```
 
-`setup` finds the game in any of your Steam libraries (or pass `--game DIR`), reads the game
-tables from it, puts the world in place, and writes the settings and a systemd user unit. Your
+`setup` takes the game folder from `--game DIR` or `PCDS_GAME_DIR`, else the one it used last
+(`run/game-dir`), else the Steam library that lists the game in a `steamapps/libraryfolders.vdf`
+of `~/.local/share/Steam`, `~/.steam/steam` or the Flatpak's
+`~/.var/app/com.valvesoftware.Steam/.local/share/Steam`. It reads the
+game tables from it, puts the world in place, and writes the settings and a systemd user unit. Your
 game folder is never modified, and a modded one works too: the extraction leaves the game's own
 BepInEx, doorstop and `steam_appid.txt` out of its copy and brings its own. `setup --world`
-refuses while the server runs. The selftest does not become a player, so nothing is saved for it.
+refuses while the server runs, and when the save is the current world already. The selftest does not become a player, so nothing is saved for it.
 
 Where the game keeps its saves:
 - Windows: `%USERPROFILE%\AppData\LocalLow\MijuGames\Planet Crafter\`
@@ -109,12 +116,22 @@ Where the game keeps its saves:
 
 ### Upgrading
 
-- Run the installer again, or `./pcds up` in a newer release folder (`up` points the systemd
-  unit at it; move the old folder's `run/` into it first).
-- From source: `git pull`, `./pcds build`, then `./pcds restart`.
+- Run the installer again, or `./pcds up` in a newer release folder (move the old folder's `run/`
+  into it first).
+- From source: `git pull`, `make build`, then `pcds restart`.
 
-The server installs the newer binary into `run/bin/` by itself when it starts. An installation
-from before 0.5 has its `run/world.json` moved to `run/worlds/world.json` on the next start.
+The systemd units run `run/bin/pcds`, a copy of the program with `libsteam_api.so`,
+`PcdsExtractor.dll` and `web/` beside it, so `make clean` or a removed release folder does not
+take the server down. `setup`, `up` and `install-service` install the program there, and `start`
+and `restart` install a newer build or release first.
+
+From 0.5 or older (the bash `pcds`):
+- The units ran the bash `pcds`, which is gone: the server does not start until
+  `pcds install-service` (or `pcds up`) has written the units again.
+- A game build is recognised by a hash of its code now: the server stops with "the game changed"
+  until `pcds update` has extracted the game tables once more.
+- A world still in `run/world.json` (before 0.5) is not moved any more: move it to
+  `run/worlds/world.json` yourself.
 
 ## Docker
 
@@ -135,6 +152,8 @@ Mount your game folder read-only at `/game`. The first start extracts its tables
 few minutes (`docker logs -f pcds`); later starts only extract again after a game update. Without
 the game on the machine, start once interactively and download it with your Steam login:
 `docker run -it -e STEAM_USER=yourname -v "$PWD/pcds-data:/data" ... ghcr.io/perara/planet-crafter-dedicated-server`.
+From then on the container runs that download (`data/game`, updated at each start). The game
+must be there at every start: the server runs only on the tables of the game it finds.
 
 Manage it with `docker exec`:
 
@@ -173,7 +192,7 @@ example `--planet Aqualis`, chooses its options). [compose.yaml](compose.yaml) d
 | `PCDS_AUTOSAVE` | `5` | minutes between saves; `0` saves only on stop |
 | `PCDS_BACKUPS` | `24` | save backups kept in `run/worlds/backups/`; `0` keeps none |
 | `PCDS_BACKUP_MINUTES` | `60` | minutes between backups |
-| `PCDS_ADMIN` | `127.0.0.1:7782` | admin API and web page; `off` disables them |
+| `PCDS_ADMIN` | `127.0.0.1:7782` | admin API and web page; `off` disables them. `pcds` reaches it on 127.0.0.1, so bind it to 127.0.0.1 or 0.0.0.0 |
 | `PCDS_ADMIN_TOKEN` | generated | the admin API's bearer token |
 | `PCDS_MAX_PLAYERS` | `16` | players at once; more are refused with the game's session-full message (the `limits.maxPlayers` rule overrides it) |
 | `PCDS_WORLD` | `world` | the world the server runs: `run/worlds/<name>.json` (`pcds world use NAME`) |
@@ -254,12 +273,16 @@ reason in `./pcds logs`.
 
 Players and the server must run the same game version; players with another version are
 refused with the game's version-mismatch message. After a game update, `./pcds update` reads the
-new tables from the updated game and restarts the server (`install-service` runs it every hour).
+new tables from the updated game and restarts the server, unless you stopped it; a server that
+stopped on the old tables is started (`install-service` runs it every hour; in Docker, restart the
+container).
 On a machine without Steam, copy the updated game folder over and run
-`./pcds update --game DIR`; a copied folder is recognised by a hash of the game's code. The
-server uses the tables that match the installed game. One extraction runs at a time (it locks
-`run/.extract.lock`): it uses ports 7791 and 7781 on 127.0.0.1, which a second server on the
-same machine shares.
+`./pcds update --game DIR`. Every game folder, from Steam or copied, is recognised by a hash of
+its code (`Planet Crafter_Data/Managed/Assembly-CSharp.dll`). The server runs only on the tables
+that match the installed game: after a game update it does not start until `pcds update` has
+read the new ones, and it stops at start when a table file is missing. One extraction runs at a
+time (it locks `run/.extract.lock`): it uses ports 7791 and 7781 on 127.0.0.1, which a second
+server on the same machine shares.
 
 ## Worlds and backups
 
@@ -321,30 +344,34 @@ platform, landing spots, seats, machine ranges), the code says so in a `ponytail
   of its own on 127.0.0.1. It dumps the network tables, the game data, every free planet's
   scene with its world instance scenes, and the procedural wrecks' layouts to
   `run/data/<game version>/`. A prebuilt DLL is in `extractor/prebuilt/`.
-- `pcds` is the command line that ties them together.
+- `server/src/cli/` is the command line that ties them together, in the same program: `pcds
+  serve DATA_DIR SAVE.json` is the server, the other commands set it up and run it. It needs no
+  Python; curl only downloads, unzip and tar unpack BepInEx and steamcmd, systemd runs the
+  service.
 
 ## Development
 
 ```bash
-cd server && cargo test --release
+make build      # server/target/release/pcds (make install links it as ~/.local/bin/pcds)
+make test       # also: make lint, make docker, make dist (the release tarball), make clean
 ```
 
 Tests that need game tables use `run/data/2.103` (or `PCDS_TEST_DATA`) and skip themselves
-without them, as in CI. `pcds-server probe HOST:PORT DATA_DIR SCRIPT.json` is a scripted player
+without them, as in CI. `pcds probe HOST:PORT DATA_DIR SCRIPT.json` is a scripted player
 that prints everything a server sends. Run the same script against the extractor's game (a real
 host, `127.0.0.1:7791` while `pcds extract` runs) and against this server, then compare the two
-with `tools/probe_diff.py`. `./pcds build` rebuilds the server and the extractor.
+with `tools/probe_diff.py`. `make extractor` rebuilds the extractor plugin into
+`extractor/prebuilt/` (with Docker, against the game in `run/extractor/game`).
 
 `src/bench.rs` times the server's tick on a real save with a fixed clock and seed, and prints a
 fingerprint of everything the server sends and saves. A change that should not alter the game
 must leave the fingerprint as it was:
 
 ```bash
-PCDS_BENCH_SAVE=../run/worlds/world.json PCDS_RNG_SEED=1 PCDS_BENCH_PLAYERS=4 \
-  cargo test --release bench -- --ignored --nocapture
+make bench SAVE=run/worlds/world.json PLAYERS=4
 ```
 
-`pcds-server load 127.0.0.1:PORT DATA_DIR [PLAYERS] [SECONDS] [ACTION_MS]` is a load test:
+`pcds load 127.0.0.1:PORT DATA_DIR [PLAYERS] [SECONDS] [ACTION_MS]` is a load test:
 that many scripted players join over direct IP (each from its own 127.0.0.N address) and play:
 they walk, craft, drop and pick up items, build, eat, drink, mine, chat and sort. It prints the
 round trip of every call the server answers. `GET /api/status` shows the server's

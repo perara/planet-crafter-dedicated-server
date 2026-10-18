@@ -42,7 +42,6 @@ missing_packages() {
   command -v curl > /dev/null || need+=(curl)
   command -v tar > /dev/null || need+=(tar)
   command -v unzip > /dev/null || need+=(unzip)
-  command -v python3 > /dev/null || need+=(python3)
   command -v wine > /dev/null || need+=(wine)
   # The game runs once under Wine to read its tables: without a display, in Xvfb.
   if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && ! command -v xvfb-run > /dev/null; then
@@ -56,8 +55,6 @@ missing_packages() {
   local p
   for p in "${need[@]}"; do
     case "$pm:$p" in
-      apt-get:python3 | dnf:python3 | zypper:python3) echo python3 ;;
-      pacman:python3) echo python ;;
       apt-get:xvfb) echo xvfb ;;
       dnf:xvfb) echo xorg-x11-server-Xvfb ;;
       pacman:xvfb) echo xorg-server-xvfb ;;
@@ -119,7 +116,8 @@ main() {
 
   local tag url
   if [[ "$version" == latest ]]; then
-    tag="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
+    tag="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | sed -n 's/^ *"tag_name": *"\([^"]*\)".*/\1/p')"
+    [[ -n "$tag" ]] || die "no latest release found at https://github.com/$REPO/releases"
   else
     tag="$version"
   fi

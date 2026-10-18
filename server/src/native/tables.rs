@@ -260,78 +260,69 @@ impl Ctx {
     }
 }
 
+/// `pcds read-game GAME_DIR OUT_DIR`.
 pub fn run(args: &[String]) {
-    let (Some(game), Some(out)) = (args.first(), args.get(1)) else {
-        eprintln!("usage: pcds-server read-game GAME_DIR OUT_DIR");
+    let [game, out] = args else {
+        eprintln!("usage: pcds read-game GAME_DIR OUT_DIR");
         std::process::exit(2);
     };
-    let mut ctx = Ctx::open(Path::new(game)).unwrap_or_else(|e| {
-        eprintln!("read-game: {e}");
-        std::process::exit(1)
-    });
-    let started = std::time::Instant::now();
+    match read_game(Path::new(game), Path::new(out)) {
+        Ok(version) => println!("{out}: game tables for {version}"),
+        Err(e) => {
+            eprintln!("read-game: {e}");
+            std::process::exit(1)
+        }
+    }
+}
+
+fn write(out: &Path, name: &str, text: &str) -> Result<(), String> {
+    std::fs::write(out.join(name), text).map_err(|e| format!("{}: {e}", out.join(name).display()))
+}
+
+fn pretty(v: &Value) -> String {
+    serde_json::to_string_pretty(v).expect("JSON values serialize")
+}
+
+/// Reads every table the server needs from the game's files into OUT (netdata.json,
+/// rpcs.json, gamedata.json, connection-request.hex, buildid); returns the game version.
+/// Anything it cannot read is an error.
+pub fn read_game(game: &Path, out: &Path) -> Result<String, String> {
+    let mut ctx = Ctx::open(game).map_err(|e| e.to_string())?;
     let assets = ctx.assets();
-    eprintln!("read-game: {} assets in {:?}", assets.len(), started.elapsed());
     let group_prefabs = ctx.group_prefabs();
-    eprintln!("read-game: {} group prefabs in {:?}", group_prefabs.len(), started.elapsed());
     let mut misread: Vec<_> = ctx.misread.iter().collect();
-    misread.sort_by(|a, b| b.1.cmp(a.1));
     if !misread.is_empty() {
-        eprintln!("read-game: layouts that did not fit their data: {misread:?}");
+        misread.sort_by(|a, b| b.1.cmp(a.1));
+        return Err(format!("classes whose layout does not fit their data: {misread:?}"));
     }
     let planets = ctx.planets(&assets);
     let groups = ctx.group_table();
     let versions = ctx.message_versions();
-    let config = ctx.network_config();
-    let (tick_rate, player_prefab) = match &config {
-        Some((file, f)) => {
-            let tick = super::netdata::field(f, "TickRate").cloned();
-            let player = match super::netdata::field(f, "PlayerPrefab") {
-                Some(Raw::Ref(p, _)) => ctx.data.resolve(*file, *p).and_then(|root| ctx.prefab_hash(root)),
-                _ => None,
-            };
-            (tick.map(|t| ctx.value(*file, &t, 1)).unwrap_or(None), player)
-        }
-        None => (None, None),
-    };
-    let ggm = ctx.data.file("globalgamemanagers").expect("globalgamemanagers");
-    let settings = ctx.data.files[ggm].objects.iter().find(|o| o.class_id == 129).map(|o| o.path);
-    let version = settings
-        .ok_or_else(|| "no PlayerSettings".to_string())
-        .and_then(|p| super::typetree::bundle_version(&ctx.data.files[ggm].unity_version.clone(), ctx.data.files[ggm].data(ctx.data.files[ggm].object(p).unwrap())))
-        .unwrap_or_else(|e| {
-            eprintln!("read-game: {e}");
-            std::process::exit(1)
-        });
-    eprintln!("read-game: game {version}");
-    let fail = |e: String| -> ! {
-        eprintln!("read-game: {e}");
-        std::process::exit(1)
-    };
-    let scene = ctx.scene_objects().unwrap_or_else(|e| fail(e));
-    let player = match config.as_ref().and_then(|(file, f)| match super::netdata::field(f, "PlayerPrefab") {
-        Some(Raw::Ref(p, _)) => ctx.data.resolve(*file, *p),
+    let (config_file, config) = ctx.network_config().ok_or("no NetworkManager with a NetworkConfig")?;
+    let tick_rate = super::netdata::field(&config, "TickRate").cloned().and_then(|t| ctx.value(config_file, &t, 1)).ok_or("no NetworkConfig.TickRate")?;
+    let player_root = match super::netdata::field(&config, "PlayerPrefab") {
+        Some(Raw::Ref(p, _)) => ctx.data.resolve(config_file, *p),
         _ => None,
-    }) {
-        Some(root) => ctx.prefab(root, true).unwrap_or_else(|e| fail(format!("player prefab: {e}"))),
-        None => fail("no player prefab".into()),
-    };
+    }
+    .ok_or("no NetworkConfig.PlayerPrefab")?;
+    let player_hash = ctx.prefab_hash(player_root).ok_or("the player prefab has no NetworkObject")?;
+    let ggm = ctx.data.file("globalgamemanagers").map_err(|e| e.to_string())?;
+    let settings = ctx.data.files[ggm].objects.iter().find(|o| o.class_id == 129).map(|o| o.path).ok_or("no PlayerSettings")?;
+    let file = &ctx.data.files[ggm];
+    let version = super::typetree::bundle_version(&file.unity_version, file.data(file.object(settings).ok_or("no PlayerSettings")?))?;
+    let scene = ctx.scene_objects()?;
+    let player = ctx.prefab(player_root, true).map_err(|e| format!("player prefab: {e}"))?;
     let handler = ctx.find_behaviour(&["level4"], "SpaceCraft", "WorldUnitsHandler");
     let units = handler.and_then(|h| Some((h, ctx.behaviour(h)?))).and_then(|(h, b)| match super::netdata::field(&b.fields, "_planetUnitsNetworkObject") {
         Some(Raw::Ref(p, _)) => ctx.data.resolve(h.0, *p),
         _ => None,
     });
-    let units = match units {
-        Some(root) => ctx.prefab(root, false).unwrap_or_else(|e| fail(format!("planet units prefab: {e}"))),
-        None => fail("no WorldUnitsHandler._planetUnitsNetworkObject".into()),
-    };
-    eprintln!("read-game: {} scene objects", scene.len());
-    let netdata = json!({"gameVersion": version, "tickRate": tick_rate, "playerPrefab": player_prefab, "messageVersions": versions, "sceneObjects": scene, "prefabs": {"Player": player, "WorldUnitsPlanet": units}, "planets": planets, "groups": groups});
+    let units = ctx.prefab(units.ok_or("no WorldUnitsHandler._planetUnitsNetworkObject")?, false).map_err(|e| format!("planet units prefab: {e}"))?;
+    let netdata = json!({"gameVersion": version, "tickRate": tick_rate, "playerPrefab": player_hash, "messageVersions": versions, "sceneObjects": scene, "prefabs": {"Player": player, "WorldUnitsPlanet": units}, "planets": planets, "groups": groups});
     let rpcs = super::rpcs::rpcs(&ctx.layouts.asm);
-    eprintln!("read-game: {} RPCs", rpcs.len());
     // ConnectionRequestMessage as a client sends it (for the scripted test players): the
     // message versions, the config hash, the connection data "version|0".
-    let config_hash = config.as_ref().ok_or("no NetworkManager".to_string()).and_then(|(file, f)| ctx.config_hash(*file, f)).unwrap_or_else(|e| fail(format!("config hash: {e}")));
+    let config_hash = ctx.config_hash(config_file, &config).map_err(|e| format!("config hash: {e}"))?;
     let mut request = crate::wire::Writer::new();
     request.packed_i32(versions.len() as i32);
     for v in &versions {
@@ -341,29 +332,20 @@ pub fn run(args: &[String]) {
     request.u64(config_hash).i32(data.len() as i32).bytes(data.as_bytes());
     let request: String = request.0.iter().map(|b| format!("{b:02x}")).collect();
     // The build these tables are for: the game code's hash, as `pcds` checks it.
-    let code = std::fs::read(Path::new(game).join("Planet Crafter_Data/Managed/Assembly-CSharp.dll")).unwrap_or_else(|e| fail(format!("Assembly-CSharp.dll: {e}")));
-    let build = format!("{:016x}", xxhash_rust::xxh64::xxh64(&code, 0));
-    std::fs::create_dir_all(out).expect("create OUT_DIR");
-    std::fs::write(Path::new(out).join("connection-request.hex"), request).expect("write connection-request.hex");
-    std::fs::write(Path::new(out).join("buildid"), &build).expect("write buildid");
-    std::fs::write(Path::new(out).join("rpcs.json"), serde_json::to_string_pretty(&rpcs).unwrap()).expect("write rpcs.json");
-    std::fs::write(Path::new(out).join("netdata.json"), serde_json::to_string_pretty(&netdata).unwrap()).expect("write netdata.json");
-    let layouts = ctx.world_object_layouts(&assets, &group_prefabs).unwrap_or_else(|e| fail(format!("layouts: {e}")));
-    let player_root = match config.as_ref().and_then(|(file, f)| match super::netdata::field(f, "PlayerPrefab") {
-        Some(Raw::Ref(p, _)) => ctx.data.resolve(*file, *p),
-        _ => None,
-    }) {
-        Some(root) => root,
-        None => fail("no player prefab".into()),
-    };
-    let prime = assets.get("PlanetData:PlanetData-Prime").and_then(|p| p["sceneName"].as_str()).unwrap_or_else(|| fail("no PlanetData-Prime scene".into())).to_string();
-    let singletons = ctx.singletons(&prime, player_root).unwrap_or_else(|e| fail(format!("singletons: {e}")));
-    eprintln!("read-game: {} singletons", singletons.len());
-    let resources = ctx.find_in_scenes(&["BootScene", "GameMainScene", &prime], "SpaceCraft", "PanelsResources").unwrap_or_else(|e| fail(e)).unwrap_or_else(|| fail("no PanelsResources".into()));
-    let panels = ctx.panels(resources).unwrap_or_else(|e| fail(format!("panels: {e}")));
-    eprintln!("read-game: {} layouts", layouts.len());
+    let build = crate::cli::build_id(game)?;
+    let layouts = ctx.world_object_layouts(&assets, &group_prefabs).map_err(|e| format!("layouts: {e}"))?;
+    let prime = assets.get("PlanetData:PlanetData-Prime").and_then(|p| p["sceneName"].as_str()).ok_or("no PlanetData-Prime scene")?.to_string();
+    let singletons = ctx.singletons(&prime, player_root).map_err(|e| format!("singletons: {e}"))?;
+    let resources = ctx.find_in_scenes(&["BootScene", "GameMainScene", &prime], "SpaceCraft", "PanelsResources")?.ok_or("no PanelsResources")?;
+    let panels = ctx.panels(resources).map_err(|e| format!("panels: {e}"))?;
     let gamedata = json!({"assets": assets, "groupPrefabs": group_prefabs, "layouts": layouts, "singletons": singletons, "panels": panels});
-    std::fs::write(Path::new(out).join("gamedata.json"), serde_json::to_string_pretty(&gamedata).unwrap()).expect("write gamedata.json");
+    std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    write(out, "netdata.json", &pretty(&netdata))?;
+    write(out, "rpcs.json", &pretty(&Value::Object(rpcs)))?;
+    write(out, "gamedata.json", &pretty(&gamedata))?;
+    write(out, "connection-request.hex", &request)?;
+    write(out, "buildid", &build)?;
+    Ok(version)
 }
 
 /// Debug: a script class's serialized field layout (pcds-server native-layout GAME_DIR NS.CLASS).

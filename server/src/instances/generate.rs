@@ -123,12 +123,6 @@ pub struct Shape {
 }
 
 impl Shape {
-    /// An axis-aligned box.
-    pub fn between(min: [f32; 3], max: [f32; 3]) -> Shape {
-        let half = |i: usize| (max[i] - min[i]) / 2.0;
-        Shape { position: std::array::from_fn(|i| min[i] + half(i)), rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3], center: [0.0; 3], size: std::array::from_fn(|i| 2.0 * half(i)) }
-    }
-
     /// Collider.ClosestPoint(p) == p for a box.
     pub fn contains(&self, p: [f32; 3]) -> bool {
         let local = crate::geometry::rotate(crate::geometry::conj(self.rotation), crate::geometry::sub(p, self.position));
@@ -140,37 +134,39 @@ fn affine(a: &[f32; 12]) -> Matrix {
     [[a[0], a[1], a[2], a[3]], [a[4], a[5], a[6], a[7]], [a[8], a[9], a[10], a[11]], [0.0, 0.0, 0.0, 1.0]]
 }
 
-fn load<T: serde::de::DeserializeOwned>(path: &str, pick: impl FnOnce(serde_json::Value) -> serde_json::Value) -> Option<T> {
-    let value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    serde_json::from_value(pick(value)).map_err(|e| eprintln!("{path}: {e}")).ok()
+impl Wrecks {
+    /// wrecks.json, with a layout pool and the generator of every wreck size.
+    pub fn parse(text: &str) -> Result<Wrecks, String> {
+        let w: Wrecks = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        if w.seeds == 0 || w.generators.len() != super::GENERATORS.len() {
+            return Err(format!("{} seeds and {} generators, where the game has {}", w.seeds, w.generators.len(), super::GENERATORS.len()));
+        }
+        Ok(w)
+    }
 }
 
-/// wrecks.json, read once; none with tables extracted before it existed.
-pub fn wrecks(game: &mut Game) -> Option<Rc<Wrecks>> {
-    let path = format!("{}/wrecks.json", game.data_dir);
-    game.ext.planets.instances.wrecks.get_or_insert_with(|| load(&path, |v| v).map(Rc::new)).clone()
+/// wrecks.json, loaded at start.
+pub fn wrecks(game: &Game) -> Rc<Wrecks> {
+    game.scenes.wrecks.clone()
 }
 
-/// A world instance scene of the current planet.
-pub fn instance_scene(game: &Game, name: &str) -> Option<InstanceScene> {
-    load(&format!("{}/scenes/{}.json", game.data_dir, game.planet_id()), |mut v| v["instanceScenes"][name].take())
+/// A world instance scene of the current planet; None for a name the planet has none of.
+pub fn instance_scene(game: &Game, name: &str) -> Option<Rc<InstanceScene>> {
+    game.scenes.planets.get(game.planet_id())?.instance_scenes.get(name).cloned()
 }
 
 /// GenerateOnTrigger's trigger sphere radius, the scene wrecks' (owner 0) scaled down
 /// (OnNetworkSpawn's _sceneInstanceRadiusRatio).
-pub fn trigger_radius(game: &mut Game, index: usize, owner: i32) -> Option<f32> {
-    let w = wrecks(game)?;
-    let g = w.generators.get(index)?;
+pub fn trigger_radius(game: &Game, index: usize, owner: i32) -> f32 {
+    let g = &game.scenes.wrecks.generators[index];
     let radius = g.triggers.iter().map(|t| t.radius).fold(0.0, f32::max);
-    Some(if owner == 0 && g.scene_instance_radius_ratio > 0.0 { radius * g.scene_instance_radius_ratio } else { radius })
+    if owner == 0 && g.scene_instance_radius_ratio > 0.0 { radius * g.scene_instance_radius_ratio } else { radius }
 }
 
-/// The seed a wreck gets: one of the extractor's layouts (any seed without wrecks.json).
-pub fn pool_seed(game: &mut Game, seed: u32) -> u32 {
-    match wrecks(game) {
-        Some(w) if seed < 1 || seed > w.seeds => 1 + seed % w.seeds,
-        _ => seed,
-    }
+/// The seed a wreck gets: one of the extractor's layouts.
+pub fn pool_seed(game: &Game, seed: u32) -> u32 {
+    let seeds = game.scenes.wrecks.seeds;
+    if seed < 1 || seed > seeds { 1 + seed % seeds } else { seed }
 }
 
 /// RandomizePropData.RetrieveRandomProp.
@@ -231,7 +227,7 @@ fn create(game: &mut Game, group: &str, position: [f32; 3], rotation: [f32; 4]) 
 /// GenerateOnTrigger.Generate on the server: the network objects of a generator's wreck, from
 /// its seed's layout. Returns the generated world objects; none without the seed's layout.
 pub fn generate(game: &mut Game, index: usize, seed: u32, position: [f32; 3], rotation: [f32; 4]) -> Vec<i32> {
-    let Some(w) = wrecks(game) else { return Vec::new() };
+    let w = wrecks(game);
     let Some(data) = w.generators.get(index) else { return Vec::new() };
     let Some(layout) = data.layouts.get(&seed.to_string()) else { return Vec::new() };
     let root = trs(position, rotation, data.scale);

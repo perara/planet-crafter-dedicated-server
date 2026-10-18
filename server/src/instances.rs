@@ -6,13 +6,11 @@
 //! What a wreck and an opened world instance hold is generated in generate.rs.
 //!
 //! What the server cannot do, and what stands in for it:
-//! - Wrecks get seeds the extractor laid out (generate::pool_seed). Without wrecks.json (tables
-//!   extracted before it), wrecks stay empty and world instances get no generators or props.
+//! - Wrecks get seeds the extractor laid out (generate::pool_seed).
 
-mod generate;
+pub mod generate;
 
 use std::collections::HashSet;
-use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Value};
@@ -34,12 +32,6 @@ const GENERATORS: [(u32, i32); 3] = [(0x398a_5515, 0), (0x42d7_ff3e, 1), (0x953c
 const GENERATOR_FLAGS: u16 = 0x68;
 /// GameConfig.proceduralGeneratorsVersion.
 const VERSION: i64 = 16;
-/// Trigger sphere and scene wreck ratio of tables without wrecks.json (measured).
-const TRIGGER_RADIUS: f32 = 1000.0;
-const SCENE_INSTANCE_RADIUS_RATIO: f32 = 0.05;
-/// Where the instance scenes go on Prime (min, max), from the real game's spawns in them: the
-/// PreventBuilding box for tables without instance scenes.
-const INSTANCE_AREA: ([f32; 3], [f32; 3]) = ([-500.0, -1000.0, 3800.0], [3000.0, 3000.0, 7000.0]);
 /// GenerateOnTrigger.Clear despawns 5 frames after unloading (the real game: 0.17 s).
 const DESPAWN_DELAY: f32 = 0.17;
 /// The player's CharacterController height, for what drops from a player dying in an instance.
@@ -87,8 +79,6 @@ pub struct State {
     next_second: f32,
     /// Generators to despawn: (game time, network object).
     despawns: Vec<(f32, u64)>,
-    /// wrecks.json, once read.
-    wrecks: Option<Option<Rc<generate::Wrecks>>>,
     /// RandomizePropData.ignore of the wreck props (the game keeps it on the prefabs).
     ignored: HashSet<(String, usize)>,
     /// The opened instance scene's PreventBuilding collider.
@@ -196,10 +186,6 @@ fn inside_triggers(game: &Game, g: &Generator, position: [f32; 3]) -> bool {
     g.planet == game.planet_hash() && dist2(g.position, position) <= g.radius * g.radius
 }
 
-fn trigger_radius(game: &mut Game, index: usize, owner: i32) -> f32 {
-    generate::trigger_radius(game, index, owner).unwrap_or(if owner == 0 { TRIGGER_RADIUS * SCENE_INSTANCE_RADIUS_RATIO } else { TRIGGER_RADIUS })
-}
-
 fn generators(game: &Game) -> impl Iterator<Item = &Generator> {
     game.ext.planets.instances.instances.values().flatten()
 }
@@ -237,7 +223,7 @@ pub fn load_instance(game: &mut Game, owner: i32, position: [f32; 3], rotation: 
     game.net.set(net, GENERATOR, "_planetHash", enc::int(planet));
     game.net.set(net, GENERATOR, "_seed", uint(seed as u32));
     game.net.set(net, GENERATOR, "_owner", enc::int(owner));
-    let radius = trigger_radius(game, index, owner);
+    let radius = generate::trigger_radius(game, index, owner);
     let g = Generator { net, index, planet, seed: seed as u32, generated: false, generated_ids: IndexSet::new(), dropped_ids: IndexSet::new(), position, rotation, radius };
     state(game).instances.entry(owner).or_default().push(g);
     save(game);
@@ -479,12 +465,8 @@ pub fn set_and_open(game: &mut Game, data: Option<WorldInstance>) {
     save_opened(game);
     // HandleDataAfterLoad, once the scene is loaded: InitSceneVariables generates what a newly
     // opened instance holds; SetCurrentWorldInstanceCollider.
-    let scene = opened.as_ref().map(|o| generate::instance_scene(game, &o.scene));
-    state(game).prevent_building = match scene {
-        Some(Some(scene)) => scene.prevent_building,
-        Some(None) => Some(generate::Shape::between(INSTANCE_AREA.0, INSTANCE_AREA.1)),
-        None => None,
-    };
+    let scene = opened.as_ref().and_then(|o| generate::instance_scene(game, &o.scene));
+    state(game).prevent_building = scene.and_then(|s| s.prevent_building.clone());
     if let Some(o) = opened.filter(|o| !o.loaded_from_db) {
         generate::init_scene_variables(game, o.seed, o.difficulty, &o.scene);
     }
@@ -496,7 +478,7 @@ pub fn unload_world_instance(game: &mut Game) {
     let planet = game.planet_hash();
     let respawn = portal_generators(game).iter().filter(|w| w.planet_hash() == planet).last().map(|w| [w.position[0], w.position[1] + 7.0, w.position[2]]).unwrap_or([0.0; 3]);
     // The instance's wreck generators (whose triggers cover it) are what sends players back;
-    // without any (tables without wrecks.json), the instance area does it.
+    // without any (no wreck entry of its variation is active), the instance area does it.
     if !game.ext.planets.instances.instances.contains_key(&seed) {
         evacuate(game, &|game, p| in_instance_area(game, p), respawn, true);
     }
@@ -527,7 +509,6 @@ fn deserialize(game: &mut Game, instance_seed: i32) -> bool {
     let mut outdated = false;
     let int = |v: &Value| v.as_i64().unwrap_or(0) as i32;
     let ids = |v: &Value| -> IndexSet<i32> { v.as_str().unwrap_or("").split(',').filter_map(|s| s.parse().ok()).collect() };
-    let can_generate = generate::wrecks(game).is_some();
     for d in game.save.procedural.clone() {
         let index = int(&d["index"]) as usize;
         if index >= GENERATORS.len() {
@@ -543,7 +524,7 @@ fn deserialize(game: &mut Game, instance_seed: i32) -> bool {
         // wrecks) is generated again.
         let generated_ids = ids(&d["woIdsGenerated"]);
         let safe = game.data.group("ProceduralWreckSafe");
-        let generated = (d["wrecksWOGenerated"].as_bool() == Some(true) && (!generated_ids.is_empty() || !can_generate)) || generated_ids.iter().any(|id| game.wos.get(id).is_some_and(|w| Some(w.group) == safe));
+        let generated = (d["wrecksWOGenerated"].as_bool() == Some(true) && !generated_ids.is_empty()) || generated_ids.iter().any(|id| game.wos.get(id).is_some_and(|w| Some(w.group) == safe));
         game.net.set(net, GENERATOR, "_networkObjectGenerated", enc::bool(generated));
         for id in &generated_ids {
             // GroupNetworkBase.SetWorldObjectFromGeneratedWreck: wreck buildings do not count.
@@ -560,7 +541,7 @@ fn deserialize(game: &mut Game, instance_seed: i32) -> bool {
         game.net.set(net, GENERATOR, "_seed", uint(seed));
         let owner = if d["version"].as_i64().unwrap_or(0) < 3 { instance_seed } else { int(&d["owner"]) };
         game.net.set(net, GENERATOR, "_owner", enc::int(owner));
-        let radius = trigger_radius(game, index, owner);
+        let radius = generate::trigger_radius(game, index, owner);
         let g = Generator { net, index, planet, seed, generated, generated_ids, dropped_ids: ids(&d["woIdsDropped"]), position, rotation, radius };
         state(game).instances.entry(owner).or_default().push(g);
         outdated |= d["version"].as_i64() != Some(VERSION);
@@ -715,9 +696,6 @@ mod tests {
     #[test]
     fn wrecks_generate_what_the_game_generates_from_the_seed() {
         let Some(mut g) = crate::planets::tests::game() else { return };
-        if generate::wrecks(&mut g).is_none() {
-            return;
-        }
         // The real game (2.103) generating a wreck of each size from a save, one after the other
         // (the prefabs' ignore flags carry over): how many objects it spawned, the first two and
         // the last, in order.
@@ -742,9 +720,6 @@ mod tests {
     #[test]
     fn empty_wrecks_of_older_saves_get_a_known_seed_and_are_generated_again() {
         let Some(mut g) = crate::planets::tests::game() else { return };
-        if generate::wrecks(&mut g).is_none() {
-            return;
-        }
         g.save.procedural = vec![json!({"owner": 0, "planet": -1140328421, "index": 0, "seed": 310087828, "pos": "2000,50,2000", "rot": "0,0,0,1",
                                         "wrecksWOGenerated": true, "woIdsGenerated": "", "woIdsDropped": "", "version": VERSION})];
         init(&mut g);
@@ -759,9 +734,6 @@ mod tests {
     #[test]
     fn opened_instances_get_their_wreck_generators_and_props_as_in_the_game() {
         let Some(mut g) = crate::planets::tests::game() else { return };
-        if generate::instance_scene(&g, "Instance-HugeTrees").is_none() || generate::wrecks(&mut g).is_none() {
-            return;
-        }
         set_and_open(&mut g, prime_instance(400_000_032));
         // The real game (2.103) opening this instance: its variation keeps one of the two wreck
         // entries, and seven of the nine loot containers come out (ProceduralWreckContainer1).

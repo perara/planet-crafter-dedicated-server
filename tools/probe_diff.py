@@ -1,4 +1,4 @@
-"""Compare two probe transcripts (pcds-server probe output, JSON lines): the real game's and the
+"""Compare two probe transcripts (pcds probe output, JSON lines): the real game's and the
 standalone server's. Messages are matched in order per kind; timing, our own player's object id
 and values listed with --ignore are left out.
 

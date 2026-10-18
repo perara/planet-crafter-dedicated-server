@@ -39,6 +39,8 @@ pub enum Kind {
     Runtime,
     /// Not stored either, but the constructor creates it empty: [] at runtime.
     Created,
+    /// A layout this reader does not read ([SerializeReference]): reading it fails.
+    Unsupported,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -173,9 +175,9 @@ impl Layouts {
             // What Unity stores: the same, minus readonly fields and types it cannot store.
             let stored = written && flags & INIT_ONLY == 0 || serialize_reference && flags & STATIC == 0;
             if serialize_reference {
-                // ponytail: [SerializeReference] fields (a managed reference id, the objects in
-                // a registry after the fields) are not read; none of the tables need one so far.
-                out.push(Field { name, kind: Kind::I64, level });
+                // [SerializeReference]: a managed reference id, the objects in a registry after
+                // the fields. Not read: an object with one fails to fit its layout.
+                out.push(Field { name, kind: Kind::Unsupported, level });
                 continue;
             }
             match stored.then(|| self.kind(&sig, depth)).flatten() {
@@ -437,6 +439,7 @@ fn read_value(kind: &Kind, r: &mut Reader, item: bool) -> Option<Raw> {
         Kind::Builtin(b) => read_builtin(*b, r)?,
         Kind::Runtime => Raw::Unset,
         Kind::Created => Raw::Json(Value::Array(Vec::new())),
+        Kind::Unsupported => return None,
     };
     Some(v)
 }

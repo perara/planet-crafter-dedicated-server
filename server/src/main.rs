@@ -3,13 +3,14 @@
 //! Transport, and runs the game's server side, ported from the game (see game.rs), on the
 //! world in the save file, with the game's tables for this version (data/<version>/).
 //!
-//! Usage: pcds-server DATA_DIR SAVE.json
-//!        pcds-server new SAVE.json DATA_DIR [--planet ID] [--start LOCATION] [--seed N]
-//!                    [--set KEY=VALUE ...]   (a new world, see newworld.rs)
-//!        pcds-server --version [DATA_DIR]
-//!        pcds-server probe HOST:PORT DATA_DIR SCRIPT.json   (a scripted test player)
-//!        pcds-server load HOST:PORT DATA_DIR [PLAYERS] [SECONDS]   (a load test, see load.rs)
-//!        pcds-server extract RAW.json OUT_DIR   (a new game version's tables, see extract.rs)
+//! Usage: pcds serve DATA_DIR SAVE.json
+//!        pcds new-save SAVE.json DATA_DIR [--planet ID] [--start LOCATION] [--seed N]
+//!                  [--set KEY=VALUE ...]   (a new world, see newworld.rs)
+//!        pcds --version [DATA_DIR]
+//!        pcds probe HOST:PORT DATA_DIR SCRIPT.json   (a scripted test player)
+//!        pcds load HOST:PORT DATA_DIR [PLAYERS] [SECONDS]   (a load test, see load.rs)
+//!        pcds extract-raw RAW.json OUT_DIR   (a new game version's tables, see extract.rs)
+//!        pcds COMMAND ...   (installing and running a server: cli/)
 //! Environment:
 //!   PCDS_LISTEN       direct-IP address, default 0.0.0.0:7777; "off" disables
 //!   PCDS_STEAM        "off" disables invite codes (Steam game server)
@@ -31,6 +32,7 @@ mod animals;
 mod bench;
 mod access;
 mod admin;
+mod cli;
 mod data;
 mod deconstruct;
 mod energy;
@@ -77,6 +79,7 @@ mod world;
 
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -130,6 +133,51 @@ fn network_tables(dir: &str) -> (NetData, Spec) {
 fn no_tables(dir: &str, e: String) -> ! {
     eprintln!("no game tables in {dir}: run `pcds extract` (see README) ({e})");
     std::process::exit(1)
+}
+
+/// What a world needs besides tables(): the wreck layouts and every free planet's scene dump,
+/// read at start, so a missing or broken file stops the server there and not in the game.
+pub struct Scenes {
+    pub wrecks: Rc<instances::generate::Wrecks>,
+    /// Free planet id -> its scene dump. DLC planets have none: the extractor dumps only the
+    /// free ones, and nobody can travel to the others (planets.rs).
+    pub planets: HashMap<String, PlanetScene>,
+}
+
+/// The parts of scenes/<planet>.json the server reads.
+pub struct PlanetScene {
+    pub water_volumes: Vec<serde_json::Value>,
+    pub ore_veins: Vec<serde_json::Value>,
+    pub instance_scenes: HashMap<String, Rc<instances::generate::InstanceScene>>,
+}
+
+/// wrecks.json and scenes/<planet>.json of every free planet in DATA_DIR, with every world
+/// instance scene the planet's portals open.
+fn scene_tables(dir: &str, net: &NetData, data: &GameData) -> Scenes {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Dump {
+        water_volumes: Vec<serde_json::Value>,
+        ore_veins: Vec<serde_json::Value>,
+        instance_scenes: HashMap<String, instances::generate::InstanceScene>,
+    }
+    let read = |path: &str| std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"));
+    let load = || -> Result<Scenes, String> {
+        let wrecks = instances::generate::Wrecks::parse(&read(&format!("{dir}/wrecks.json"))?).map_err(|e| format!("{dir}/wrecks.json: {e}"))?;
+        let mut planets = HashMap::new();
+        for planet in net.planets.iter().filter(|p| p.steam_app_id == 0) {
+            let path = format!("{dir}/scenes/{}.json", planet.id);
+            let dump: Dump = serde_json::from_str(&read(&path)?).map_err(|e| format!("{path}: {e}"))?;
+            let names = data.asset(&format!("PlanetData:PlanetData-{}", planet.id)).and_then(|p| data.asset(p["instanceScenesData"].as_str()?)).and_then(|d| d["instanceSceneNames"].as_array());
+            if let Some(missing) = names.into_iter().flatten().filter_map(|n| n.as_str()).find(|n| !dump.instance_scenes.contains_key(*n)) {
+                return Err(format!("{path}: no world instance scene {missing}"));
+            }
+            let instance_scenes = dump.instance_scenes.into_iter().map(|(k, v)| (k, Rc::new(v))).collect();
+            planets.insert(planet.id.clone(), PlanetScene { water_volumes: dump.water_volumes, ore_veins: dump.ore_veins, instance_scenes });
+        }
+        Ok(Scenes { wrecks: Rc::new(wrecks), planets })
+    };
+    load().unwrap_or_else(|e| no_tables(dir, e))
 }
 
 /// The tables tests run on: PCDS_TEST_DATA, else data/2.103. Each user extracts them from their
@@ -191,36 +239,45 @@ const MOVEMENT_EVERY: Duration = Duration::from_millis(16);
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
-        Some("probe") => return probe::run(&args[2..]),
-        Some("load") => return load::run(&args[2..]),
-        Some("native-scan") => return native::unity::scan(&args[2..]),
-        Some("tables-diff") => return native::diff::run(&args[2..]),
-        Some("read-game") => return native::tables::run(&args[2..]),
-        Some("native-layout") => return native::tables::layout(&args[2..]),
-        Some("native-il") => return native::tables::il(&args[2..]),
-        Some("new") => return newworld::run(&args[2..]),
+        Some("serve") => match &args[2..] {
+            [dir, save] => serve(dir.clone(), save.clone()),
+            _ => {
+                eprintln!("usage: pcds serve DATA_DIR SAVE.json (settings: see the source header)");
+                std::process::exit(2);
+            }
+        },
+        Some("probe") => probe::run(&args[2..]),
+        Some("load") => load::run(&args[2..]),
+        Some("read-game") => native::tables::run(&args[2..]),
+        Some("tables-diff") => native::diff::run(&args[2..]),
+        Some("native-layout") => native::tables::layout(&args[2..]),
+        Some("native-il") => native::tables::il(&args[2..]),
+        Some("new-save") => newworld::run(&args[2..]),
         Some("--version") => {
-            println!("pcds-server {}", env!("CARGO_PKG_VERSION"));
+            println!("pcds {}", env!("CARGO_PKG_VERSION"));
             if let Some(dir) = args.get(2) {
                 println!("game tables {}", tables(dir).0.game_version);
             }
-            return;
         }
-        _ => {}
+        _ => cli::run(&args[1..]),
     }
-    if args.len() != 3 {
-        eprintln!("usage: pcds-server DATA_DIR SAVE.json (options: see the source header)");
-        std::process::exit(2);
-    }
-    let (dir, save_path) = (args[1].clone(), args[2].clone());
+}
+
+/// The server on the world in SAVE_PATH, with the tables in DIR, until it is stopped.
+fn serve(dir: String, save_path: String) {
     let (net_data, data, spec) = tables(&dir);
+    let scenes = scene_tables(&dir, &net_data, &data);
     let save = SaveFile::load(&save_path).unwrap_or_else(|e| {
         match e.kind() {
-            std::io::ErrorKind::NotFound => eprintln!("no save {save_path}: make a new world with `pcds-server new {save_path} {dir}`"),
+            std::io::ErrorKind::NotFound => eprintln!("no save {save_path}: make a new world with `pcds new-save {save_path} {dir}`"),
             _ => eprintln!("{save_path}: {e}"),
         }
         std::process::exit(1)
     });
+    if let Err(e) = game::check_save_format(&save.settings) {
+        eprintln!("{save_path}: {e}");
+        std::process::exit(1);
+    }
     // The save as it was before this server touched it (as every backup: none with PCDS_BACKUPS=0).
     // At most one per 10 minutes: a crash loop must not push the hourly backups out.
     if let Err(e) = save::backup(&save_path, Duration::from_secs(600), backups_kept()) {
@@ -235,7 +292,7 @@ fn main() {
         eprintln!("rules: {e}");
         std::process::exit(1)
     });
-    let mut game = Game::new(net_data, data, spec, save, &dir);
+    let mut game = Game::new(net_data, data, spec, save, scenes);
     rules::start(&mut game, loaded_rules, rules_path);
     game.access = access::Access::load(Some(env("PCDS_ACCESS").unwrap_or_else(|| beside_save("access.json"))));
     let mut autosave_minutes: u64 = env("PCDS_AUTOSAVE").and_then(|s| s.parse().ok()).unwrap_or(5).min(MAX_AUTOSAVE);
