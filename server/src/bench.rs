@@ -76,6 +76,10 @@ fn bench() {
     }
     let save = g.snapshot().to_text();
     save.hash(&mut h);
+    if let Some(f) = &mut dump {
+        use std::io::Write;
+        writeln!(f, "save {save}").unwrap();
+    }
     let per_tick = busy / ticks as u32;
     println!(
         "bench: {seconds} s simulated, {players} players, {ticks} ticks: {per_tick:?} per tick, cpu at real time {:.2}% of a core, {messages} messages, save {} bytes, fingerprint {:016x}",
