@@ -340,11 +340,13 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
         m.converter = Some(now);
     }
     let harvestable = root(game, group, "MachineGrowerVegetationHarvestable");
-    // RequireEnergy (WorldObjectAssociated.SetWorldObject -> AddToRequester).
+    // RequireEnergy (WorldObjectAssociated.SetWorldObject -> AddToRequester, which checks the
+    // machine's energy status at once: underwater it gets none).
     if root(game, group, "RequireEnergy").is_some() {
         let planet = game.wos[&wo].planet_hash();
         let enough = crate::energy::has_enough(game, planet);
-        game.ext.machines.energy.insert(wo, enough);
+        let runs = crate::energy::check_energy_status(game, wo, enough, &mut None);
+        game.ext.machines.energy.insert(wo, runs);
     }
     // MachineGrowerVegetationStatic.SetWorldObjectForGrower.
     if let Some(f) = root(game, group, "MachineGrowerVegetationStatic") {

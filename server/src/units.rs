@@ -23,7 +23,7 @@ pub enum Kind {
     Purification,
 }
 
-const KINDS: [Kind; 10] = [Kind::Oxygen, Kind::Heat, Kind::Pressure, Kind::Energy, Kind::Terraformation, Kind::Biomass, Kind::Plants, Kind::Insects, Kind::Animals, Kind::Purification];
+pub const KINDS: [Kind; 10] = [Kind::Oxygen, Kind::Heat, Kind::Pressure, Kind::Energy, Kind::Terraformation, Kind::Biomass, Kind::Plants, Kind::Insects, Kind::Animals, Kind::Purification];
 
 impl Kind {
     fn var(self) -> &'static str {

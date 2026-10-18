@@ -239,6 +239,26 @@ mod tests {
         }
     }
 
+    /// A machine built underwater has no energy from the start (RequireEnergyHandler.
+    /// AddToRequester checks it at once), not only from the next 2 s check: the real host left
+    /// a new lamp and generator at the shore out of GetEnergyGroupData right away.
+    #[test]
+    fn machines_built_underwater_have_no_energy_at_once() {
+        let Some((mut g, _)) = crate::testkit::world() else { return };
+        let stage = g.data.assets.iter().find(|(k, v)| k.starts_with("TerraformStage:") && v["startValue"].as_f64() == Some(0.0)).map(|(k, _)| k.clone()).unwrap();
+        let hash = g.planet_hash();
+        let p = g.units.planets.iter_mut().find(|p| p.hash == hash).unwrap();
+        let k = crate::units::KINDS.iter().position(|k| *k == crate::units::Kind::Terraformation).unwrap();
+        p.units[k].total = 10.0;
+        volumes(&mut g);
+        let planet = g.planet_id().to_string();
+        let positioning = serde_json::json!({"startTerraformStage": stage});
+        g.ext.water.planets.get_mut(&planet).unwrap().push(Volume { local_center: [0.0; 3], half: [5.0; 3], local_rotation: [0.0, 0.0, 0.0, 1.0], root_position: [570.0, 3.0, 500.0], root_rotation: [0.0, 0.0, 0.0, 1.0], positioning, active: true, activators: Value::Null, ignored: false, story: None });
+        let (generator, _) = crate::testkit::place(&mut g, "EnergyGenerator1", [570.0, 1.0, 500.0]);
+        assert_eq!(g.wos[&generator].energy, 0.0);
+        assert!(crate::energy::energy_group_data(&g).iter().all(|e| e[0] != serde_json::json!(g.data.groups[g.wos[&generator].group].hash)));
+    }
+
     #[test]
     fn an_inactive_object_stays_hidden_whatever_its_activators() {
         let Some(g) = crate::game::test_game(crate::game::tests::save()) else { return };
