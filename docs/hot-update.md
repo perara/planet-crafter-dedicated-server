@@ -51,12 +51,14 @@ whose front is gone saves and ends. Chat events go to the front as CHAT frames; 
 go as CHATCFG; replies come back as SAY. Replies that arrive while the world stands still
 (`world.pauseWhenEmpty`) are dropped with a log line.
 
-**Frames** (PROTOCOL 2): HELLO, START, RESTORE, READY, CONNECTED (JSON: ip, steamId, trusted),
+**Frames** (PROTOCOL 3): HELLO, START, RESTORE, READY, CONNECTED (JSON: ip, steamId, trusted),
 DATA, GONE, KICK, HANDOFF, SNAPSHOT, EXIT, RESUME, ADMIN, ANSWER, SAVE, STOP, CHAT, SAY, CHATCFG
 (`ipc.rs` lists what each carries). RESTORE and SNAPSHOT carry a memfd: the old bank serializes
 straight into it (`handoff::snapshot_to`), seals it, and sends the descriptor; the front passes
 the same descriptor on, and keeps one as the last snapshot. The snapshot never crosses the
-socket.
+socket. HANDOFF carries the flip's number and SNAPSHOT echoes it: the front drops a snapshot of
+any other flip (a late one from a flip that timed out). A frame shorter than its 9-byte head or
+longer than 64 MiB ends the link: the front treats that bank as ended.
 
 **A flip** (`POST /api/update`, `pcds upgrade`): the front starts the other bank; its HELLO is
 checked (front protocol, game tables, and that it reads the running world's snapshot format;
@@ -69,12 +71,18 @@ sends what is queued, snapshots and waits; RESTORE; the new bank restores and sa
 the snapshot (without the two clocks and the order of sets); the tests run with it.
 
 **A crash** (the live bank ends outside a flip): the front starts the same bank again from the
-last snapshot when it is newer than the save, else from the save, tells its players "The server
+last snapshot when it is newer than the save, else from the save (either way `access.json` and
+`rules.json` are read again from disk, so a ban after the last flip stays), tells its players "The server
 restarted after an error: join again" and closes their connections; the Steam login and the
 invite code stay. A snapshot restored this way drops every client in it. More than 5 crashes in
 10 minutes and the front exits (systemd's restart and start limit take over). At the first
 start, a bank that cannot load the world makes the front try the other bank once (a broken
-update falls back to the release that ran before).
+update falls back to the release that ran before). Every HELLO, at boot, flip or recovery, is
+checked the same way; a recovering bank of another protocol stops the front (exit 1). When the
+front stops while no bank holds the world (a stop during a recovery, the crash limit), the last
+snapshot, if newer than the save, is written to `world.json.snapshot` and the next start
+restores from it; a start whose save is newer deletes it. If a start cannot restore it, move it
+away.
 
 **The updater** (`updater.rs`, in a thread of the front, or in the CLI when the server is
 stopped): the release from `PCDS_RELEASES` (default GitHub's API for
@@ -83,10 +91,17 @@ the release workflow publishes them; the tarball's SHA-256 (ring) against the pu
 `tar -xzf --strip-components=1` into `run/bin/.<bank>.new`; `pcds bank-info` of the unpacked
 program (front protocol and snapshot formats; a release from before hot updates has none and is
 refused); the compatibility check; `bank.json`; then the folder is renamed over the bank. Any
-failure leaves the bank as it was. `PCDS_AUTO_UPDATE=on` checks every
+failure leaves the bank as it was (a failed rename puts the old bank back). Downloads are https
+only (http only for a `PCDS_RELEASES` on 127.0.0.1, which the tests use); versions and tags
+must match `v?[0-9A-Za-z._-]+`; the unpacked tree may hold only plain files and folders;
+`bank-info` runs with only PATH, HOME and LANG in its environment. The sha256 guards against a
+damaged download, not a forged release: releases are not signed. Renames into the banks and
+writes of `active` take a lock on `run/bin/.lock`. `PCDS_AUTO_UPDATE=on` checks every
 `PCDS_UPDATE_CHECK_HOURS` (default 24, the first check 10 minutes after the start) and installs
 and flips to a release later than the live bank's; it is off by default, and with it off the
-server never contacts GitHub on its own.
+server never contacts GitHub on its own. A rollback writes `run/bin/rolled-back` (the bank it
+left and that bank's tag); the automatic check skips that tag, and a later release, an explicit
+update or the next rollback clears or replaces the note.
 
 **The CLI.** `pcds upgrade [VERSION] [--restart] | --rollback | --check`. Running: through the
 admin API (`POST /api/update`, then `GET /api/update` until its outcome). `--restart` installs
@@ -94,11 +109,17 @@ into the standby bank without the protocol check, makes it active and restarts t
 path for a release that changes the front protocol). Stopped: the release becomes the active
 bank for the next start; `--rollback` points `active` at the other bank. `pcds status` lists
 both banks (version, tag, front protocol, snapshot format, which is active and which runs).
-`setup`, `start`, `restart` and `container` install this program into the standby bank and make
-it active when it is a newer build than the active bank's and in neither bank yet (a bank's copy
-keeps the program's modification time), so a rollback is not undone by the next start. The
-unit has `KillMode=mixed` (SIGTERM to the front only, which stops the bank). The dashboard's
-Overview has a "Server banks" panel; the Config tab shows PCDS_AUTO_UPDATE and
+`setup`, `start`, `restart`, `run` and `container` install this program into a bank by one rule
+(`bank_for` in `cli/setup.rs`): nothing when a bank already holds this exact program (compared by
+content); into the active bank when both are empty; else into the standby bank (or an empty
+active one) only when it is newer than every bank's (a later version, or the same version with a
+later program file), and never into the bank the owner rolled back from. `pcds run`, which the
+unit starts, runs the front as its child and stays the parent of the banks
+(`PR_SET_CHILD_SUBREAPER`): SIGTERM, SIGINT and SIGHUP go to the front; when the front ends,
+crashed or not, it waits up to 60 s for the banks to save, then ends what is left. The unit keeps
+`KillMode=mixed`; its main process is `pcds run`. The dashboard's
+Updates section shows the banks and has Check, Update now (only a newer release), Install and
+Roll back; the Config tab shows PCDS_AUTO_UPDATE and
 PCDS_UPDATE_CHECK_HOURS (server.env, read-only there).
 
 ### Measured

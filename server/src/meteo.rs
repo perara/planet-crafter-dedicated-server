@@ -390,6 +390,20 @@ pub fn current_global_stage(game: &Game) -> Option<String> {
     best.map(|b| b.1)
 }
 
+/// The current planet's terraformation stages for the admin page: each stage's key, unit and
+/// start value in order, and the stage reached (current_global_stage).
+pub fn stages(game: &Game) -> Value {
+    let mut list: Vec<Value> = refs(&planet_data(game)["allTerraStages"])
+        .into_iter()
+        .filter_map(|key| {
+            let s = game.data.asset(&key)?;
+            Some(serde_json::json!({"key": key, "unit": s["unitType"], "start": s["startValue"]}))
+        })
+        .collect();
+    list.sort_by(|a, b| a["start"].as_f64().partial_cmp(&b["start"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+    serde_json::json!({"current": current_global_stage(game), "list": list})
+}
+
 // ---- AsteroidsHandler (server) ---------------------------------------------------------------
 
 /// The server's AsteroidsHandler: its Unity.Mathematics.Random state (MeteoHandler publishes it

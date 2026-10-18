@@ -105,6 +105,11 @@ enum UpdateDone {
     Installed { seq: u64, bank: String, info: Value },
     Failed { seq: u64, message: String },
     UpToDate { seq: u64, tag: String },
+    /// The automatic check left the latest release out (the one rolled back from).
+    Skipped { seq: u64, message: String },
+    /// A check only (POST /api/update {"check": true}): the latest release, and whether it is
+    /// newer than the live bank's.
+    Checked { seq: u64, tag: String, newer: bool },
 }
 
 struct Updates {
@@ -118,6 +123,8 @@ struct Updates {
     every: Duration,
     next_check: Instant,
     latest: Option<String>,
+    /// The latest release is later than the live bank's (as the last check found).
+    newer: bool,
     checked: Option<u64>,
 }
 
@@ -193,48 +200,7 @@ pub fn run(args: &[String]) {
         }
     };
     let port = listen.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
-    let banks = crate::env("PCDS_BANKS").map(PathBuf::from);
-    let (tx, rx) = std::sync::mpsc::channel();
-    let auto = crate::env("PCDS_AUTO_UPDATE").as_deref() == Some("on");
-    let every = Duration::from_secs(crate::env("PCDS_UPDATE_CHECK_HOURS").and_then(|h| h.parse::<u64>().ok()).unwrap_or(24).clamp(1, 8760) * 3600);
-    let autosave_minutes = crate::autosave_start();
-    let mut front = Front {
-        dir: dir.clone(),
-        save: save.clone(),
-        banks,
-        utp,
-        steam: None,
-        invite_code: None,
-        port,
-        conns: HashMap::new(),
-        ip_clients: HashMap::new(),
-        next_client: 1,
-        pending_drop: Vec::new(),
-        kicked: HashSet::new(),
-        live: None,
-        next: None,
-        phase: Phase::Idle,
-        flip: None,
-        held: Vec::new(),
-        held_bytes: HashMap::new(),
-        last_snapshot: None,
-        recover_from: None,
-        crashes: VecDeque::new(),
-        exiting: Vec::new(),
-        admin: None,
-        answers: HashMap::new(),
-        next_request: 1,
-        hooks: Hooks::default(),
-        web: Default::default(),
-        autosave_minutes,
-        next_save: Instant::now() + Duration::from_secs(autosave_minutes.max(1) * 60),
-        // The first check a while after the start: a crash loop must not ask GitHub each time.
-        updates: Updates { tx, rx, busy: None, seq: 0, history: VecDeque::new(), auto, every, next_check: Instant::now() + every.min(Duration::from_secs(600)), latest: None, checked: None },
-        started: Instant::now(),
-        stop,
-        game_version: String::new(),
-        flips: 0,
-    };
+    let mut front = Front::new(dir, save, crate::env("PCDS_BANKS").map(PathBuf::from), utp, port, stop);
     front.boot();
     front.start_admin();
     front.start_steam();
@@ -242,6 +208,50 @@ pub fn run(args: &[String]) {
 }
 
 impl Front {
+    fn new(dir: &str, save: &str, banks: Option<PathBuf>, utp: Option<Utp>, port: u16, stop: Arc<AtomicBool>) -> Front {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let auto = crate::env("PCDS_AUTO_UPDATE").as_deref() == Some("on");
+        let every = Duration::from_secs(crate::env("PCDS_UPDATE_CHECK_HOURS").and_then(|h| h.parse::<u64>().ok()).unwrap_or(24).clamp(1, 8760) * 3600);
+        let autosave_minutes = crate::autosave_start();
+        Front {
+            dir: dir.to_string(),
+            save: save.to_string(),
+            banks,
+            utp,
+            steam: None,
+            invite_code: None,
+            port,
+            conns: HashMap::new(),
+            ip_clients: HashMap::new(),
+            next_client: 1,
+            pending_drop: Vec::new(),
+            kicked: HashSet::new(),
+            live: None,
+            next: None,
+            phase: Phase::Idle,
+            flip: None,
+            held: Vec::new(),
+            held_bytes: HashMap::new(),
+            last_snapshot: None,
+            recover_from: None,
+            crashes: VecDeque::new(),
+            exiting: Vec::new(),
+            admin: None,
+            answers: HashMap::new(),
+            next_request: 1,
+            hooks: Hooks::default(),
+            web: Default::default(),
+            autosave_minutes,
+            next_save: Instant::now() + Duration::from_secs(autosave_minutes.max(1) * 60),
+            // The first check a while after the start: a crash loop must not ask GitHub each time.
+            updates: Updates { tx, rx, busy: None, seq: 0, history: VecDeque::new(), auto, every, next_check: Instant::now() + every.min(Duration::from_secs(600)), latest: None, newer: false, checked: None },
+            started: Instant::now(),
+            stop,
+            game_version: String::new(),
+            flips: 0,
+        }
+    }
+
     /// The program of a bank: its folder's pcds, or this program without banks.
     fn exe(&self, bank: &str) -> PathBuf {
         match &self.banks {
@@ -289,14 +299,29 @@ impl Front {
     /// when the active one cannot start (a broken update), as a bootloader falls back.
     fn boot(&mut self) {
         let first = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
+        let kept = self.kept_snapshot().unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1)
+        });
         let mut tried = Vec::new();
         for bank in [first.clone(), updater::other(&first).to_string()] {
             if self.banks.as_ref().is_some_and(|b| !b.join(&bank).join("pcds").is_file()) {
                 continue;
             }
-            match self.boot_bank(&bank) {
+            let snapshot = match kept.as_ref().map(|(fd, _)| fd.try_clone()).transpose() {
+                Ok(fd) => fd,
+                Err(e) => {
+                    eprintln!("{}: {e}", snapshot_path(&self.save));
+                    std::process::exit(1);
+                }
+            };
+            match self.boot_bank(&bank, snapshot) {
                 Ok(b) => {
                     println!("bank {bank} (pid {}, pcds {}) running the world after {:?}", b.child.id(), b.hello["version"].as_str().unwrap_or("?"), b.started.elapsed());
+                    if let Some((fd, at)) = kept {
+                        println!("the world is the one kept in {} at the last stop (the last flip's snapshot, newer than the save)", snapshot_path(&self.save));
+                        self.last_snapshot = Some((fd, at));
+                    }
                     if bank != first {
                         eprintln!("bank {first} could not start the world ({}); running bank {bank}, which ran before", tried.join("; "));
                     }
@@ -317,22 +342,62 @@ impl Front {
             }
         }
         eprintln!("no bank could start the world: {}", tried.join("; "));
+        if kept.is_some() {
+            eprintln!("they were given the world kept in {} at the last stop; move it away to start from the save instead", snapshot_path(&self.save));
+        }
         std::process::exit(1);
     }
 
-    fn boot_bank(&self, bank: &str) -> Result<Bank, String> {
+    /// The snapshot keep_snapshot() left beside the save, when it is newer than the save (an
+    /// older one is removed: the save has its world).
+    fn kept_snapshot(&self) -> Result<Option<(OwnedFd, SystemTime)>, String> {
+        let path = snapshot_path(&self.save);
+        let Ok(at) = std::fs::metadata(&path).and_then(|m| m.modified()) else { return Ok(None) };
+        if at <= modified(&self.save) {
+            std::fs::remove_file(&path).map_err(|e| format!("{path}: {e}"))?;
+            println!("removed {path}: the save is newer");
+            return Ok(None);
+        }
+        let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+        let fd = ipc::memfd("pcds-snapshot", |w| std::io::Write::write_all(w, &bytes).map_err(|e| e.to_string())).map_err(|e| format!("{path}: {e}"))?;
+        Ok(Some((fd, at)))
+    }
+
+    /// The world is in no bank (the live one died, the next one is not running it yet): the
+    /// last flip's snapshot, when it is newer than the save, is kept beside the save, with the
+    /// snapshot's time; the next start runs it.
+    fn keep_snapshot(&self) {
+        let Some((fd, at)) = &self.last_snapshot else { return };
+        if *at <= modified(&self.save) {
+            return;
+        }
+        let path = snapshot_path(&self.save);
+        let kept = ipc::read_memfd(fd)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| crate::cli::replace_file(std::path::Path::new(&path), &bytes, 0o600))
+            .and_then(|_| std::fs::File::options().write(true).open(&path).and_then(|f| f.set_modified(*at)).map_err(|e| e.to_string()));
+        match kept {
+            Ok(()) => eprintln!("the world is in no bank: the last flip's snapshot (newer than the save) is kept in {path}; the next start runs it"),
+            Err(e) => eprintln!("the world is in no bank, and the last flip's snapshot could not be kept in {path} ({e}): the next start runs the save, which is older"),
+        }
+    }
+
+    fn boot_bank(&self, bank: &str, snapshot: Option<OwnedFd>) -> Result<Bank, String> {
         let mut b = self.spawn(bank, None)?;
         let deadline = Instant::now() + LOAD_DEADLINE;
         let hello = wait_frame(&mut b, deadline).ok_or("it ended before its hello (see above)")?;
-        if hello.kind != ipc::HELLO || hello.n != ipc::PROTOCOL {
+        b.hello = hello_of(&hello).inspect_err(|_| {
             let _ = b.child.kill();
             let _ = b.child.wait();
-            return Err(format!("it speaks front protocol {}, this front {}: start the server from that bank's own program (pcds restart)", hello.n, ipc::PROTOCOL));
+        })?;
+        match snapshot {
+            Some(fd) => b.link.queue(ipc::RESTORE, 0, b"{\"recover\":true}", Some(fd), 0),
+            None => b.link.queue(ipc::START, 0, &[], None, 0),
         }
-        b.hello = serde_json::from_slice(&hello.body).unwrap_or_default();
-        b.link.queue(ipc::START, 0, &[], None, 0);
         let ready = wait_frame(&mut b, deadline).ok_or("it ended while loading the world (see above)")?;
         if ready.kind != ipc::READY {
+            let _ = b.child.kill();
+            let _ = b.child.wait();
             return Err(format!("frame {} instead of READY", ready.kind));
         }
         Ok(b)
@@ -625,11 +690,12 @@ impl Front {
     fn read_banks(&mut self) -> bool {
         let mut sent = false;
         // Up to 4 MiB a loop from each: the clients' sessions must not wait on a flood.
+        // A bank whose bytes are no frames (ipc::MAX_FRAME) counts as one that ended.
         let live_alive = self.live.as_mut().is_none_or(|b| b.link.fill(4 << 20));
         while let Some(f) = self.live.as_mut().and_then(|b| b.link.next()) {
             sent |= self.on_live(f);
         }
-        if !live_alive {
+        if !live_alive || self.live.as_ref().is_some_and(|b| b.link.broken.is_some()) {
             self.live_died();
         }
         let next_alive = self.next.as_mut().is_none_or(|b| b.link.fill(4 << 20));
@@ -640,8 +706,11 @@ impl Front {
         while let Some(f) = self.live.as_mut().and_then(|b| b.link.next()) {
             sent |= self.on_live(f);
         }
-        if !next_alive && self.next.is_some() {
-            let status = self.next.as_mut().and_then(|b| b.child.wait().ok()).map(|s| s.to_string()).unwrap_or_default();
+        if self.live.as_ref().is_some_and(|b| b.link.broken.is_some()) {
+            self.live_died();
+        }
+        if (!next_alive || self.next.as_ref().is_some_and(|b| b.link.broken.is_some())) && self.next.is_some() {
+            let status = self.next.as_mut().map(end).unwrap_or_default();
             match self.phase {
                 Phase::Recovering => {
                     let b = self.next.take().unwrap();
@@ -667,11 +736,16 @@ impl Front {
                 Ok(event) => self.hooks.feed.push(event),
                 Err(e) => eprintln!("chat: an event the front cannot read ({e})"),
             },
-            ipc::CHATCFG => match serde_json::from_slice(&f.body) {
+            ipc::CHATCFG => match chat_config(&f.body) {
                 Ok(chat) => self.hooks.configure(chat),
-                Err(e) => eprintln!("chat: hook settings the front cannot read ({e})"),
+                Err(e) => eprintln!("chat: {e}; the hooks keep their settings"),
             },
-            ipc::SNAPSHOT if self.phase == Phase::Snapshotting => match f.fd {
+            // A SNAPSHOT answers the HANDOFF of one flip: one of an earlier flip (it came after
+            // that flip failed and the bank was told to go on) is not this flip's world.
+            ipc::SNAPSHOT if !self.flip.as_ref().is_some_and(|flip| flip.seq == f.n) || self.phase != Phase::Snapshotting => {
+                eprintln!("bank: a snapshot for flip {} dropped (the flip under way: {:?}, {:?})", f.n, self.flip.as_ref().map(|flip| flip.seq), self.phase);
+            }
+            ipc::SNAPSHOT => match f.fd {
                 Some(fd) => {
                     if let Some(flip) = self.flip.as_mut() {
                         flip.snapshot = serde_json::from_slice(&f.body).unwrap_or_default();
@@ -693,18 +767,21 @@ impl Front {
     fn on_next(&mut self, f: Frame) {
         match f.kind {
             ipc::HELLO => {
-                let hello: Value = serde_json::from_slice(&f.body).unwrap_or_default();
-                if let Some(b) = self.next.as_mut() {
+                let hello = hello_of(&f);
+                if let (Some(b), Ok(hello)) = (self.next.as_mut(), &hello) {
                     b.hello = hello.clone();
                 }
                 if self.phase == Phase::Recovering {
-                    let start = if f.n == ipc::PROTOCOL {
-                        match self.recover_from.take() {
-                            Some(fd) => (ipc::RESTORE, Some(fd)),
-                            None => (ipc::START, None),
-                        }
-                    } else {
-                        (ipc::START, None)
+                    // A bank of another protocol cannot be given the world: the front must be
+                    // started again, from that bank's program.
+                    if let Err(e) = &hello {
+                        let name = self.next.as_ref().map(|b| b.name.clone()).unwrap_or_default();
+                        eprintln!("bank {name} cannot run the world again: {e}; stopping");
+                        self.shutdown(1);
+                    }
+                    let start = match self.recover_from.take() {
+                        Some(fd) => (ipc::RESTORE, Some(fd)),
+                        None => (ipc::START, None),
                     };
                     let body: &[u8] = if start.0 == ipc::RESTORE { b"{\"recover\":true}" } else { b"" };
                     if let Some(b) = self.next.as_mut() {
@@ -715,6 +792,10 @@ impl Front {
                 if self.phase != Phase::Starting {
                     return;
                 }
+                let hello = match hello {
+                    Ok(hello) => hello,
+                    Err(e) => return self.fail_flip(&e),
+                };
                 let live = self.live.as_ref().map(|b| b.hello.clone()).unwrap_or_default();
                 let mut info = hello.clone();
                 info["protocol"] = f.n.into();
@@ -728,8 +809,9 @@ impl Front {
                 if let Some(flip) = self.flip.as_mut() {
                     flip.stopped = Some(Instant::now());
                 }
+                let seq = self.flip.as_ref().map_or(0, |flip| flip.seq);
                 if let Some(b) = self.live.as_mut() {
-                    b.link.queue(ipc::HANDOFF, 0, &[], None, 0);
+                    b.link.queue(ipc::HANDOFF, seq, &[], None, 0);
                     let _ = b.link.flush();
                 }
                 self.phase = Phase::Snapshotting;
@@ -780,6 +862,13 @@ impl Front {
             ready["restoreMs"].as_f64().unwrap_or(0.0)
         );
         println!("{message}");
+        // Rolled back: the automatic update must not bring back what the owner left.
+        if flip.reason == "rollback"
+            && let Some(dir) = &self.banks
+            && let Err(e) = updater::set_rolled_back(dir, &from)
+        {
+            eprintln!("banks: the rollback from bank {from} could not be noted ({e}): the automatic update may install its release again");
+        }
         let version = self.live.as_ref().map(|b| b.hello["version"].clone()).unwrap_or_default();
         self.record(flip.seq, true, &message, json!({"from": from, "to": to, "stoodMs": ms(stood), "snapshotBytes": flip.snapshot["bytes"], "snapshotMs": flip.snapshot["ms"], "restoreMs": ready["restoreMs"], "held": held, "verified": ready["verified"], "version": version}));
     }
@@ -830,7 +919,7 @@ impl Front {
     /// The live bank ended.
     fn live_died(&mut self) {
         let Some(mut b) = self.live.take() else { return };
-        let status = b.child.wait().map(|s| s.to_string()).unwrap_or_default();
+        let status = end(&mut b);
         let name = b.name.clone();
         eprintln!("bank {name} (pid {}) ended ({status})", b.child.id());
         match self.phase {
@@ -867,16 +956,19 @@ impl Front {
         self.held.clear();
         self.held_bytes.clear();
         self.answers.clear();
-        let save_time = std::fs::metadata(&self.save).and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH);
-        let from = match self.last_snapshot.take() {
-            Some((fd, at)) if at > save_time => {
-                self.recover_from = Some(fd);
-                format!("the snapshot of the last flip ({} s old, newer than the save)", at.elapsed().map(|d| d.as_secs()).unwrap_or(0))
-            }
-            _ => {
-                self.recover_from = None;
-                "the save".to_string()
-            }
+        // The snapshot stays held: should this bank die too before it saves, the next one
+        // starts from it again.
+        let save_time = modified(&self.save);
+        self.recover_from = None;
+        let from = match &self.last_snapshot {
+            Some((fd, at)) if *at > save_time => match fd.try_clone() {
+                Ok(fd) => {
+                    self.recover_from = Some(fd);
+                    format!("the snapshot of the last flip ({} s old, newer than the save)", at.elapsed().map(|d| d.as_secs()).unwrap_or(0))
+                }
+                Err(e) => format!("the save: the snapshot of the last flip, newer, could not be passed on ({e})"),
+            },
+            _ => "the save".to_string(),
         };
         match self.spawn(bank, None) {
             Ok(b) => {
@@ -1031,6 +1123,7 @@ impl Front {
             "auto": u.auto,
             "checkHours": u.every.as_secs() / 3600,
             "latest": u.latest,
+            "available": u.newer,
             "checkedAt": u.checked,
             "releases": self.banks.as_ref().map(|_| updater::releases_url()),
         })
@@ -1050,9 +1143,10 @@ impl Front {
         }
     }
 
-    /// POST /api/update: {"version": "v0.6.0"} (null: the latest), or {"rollback": true}: back
-    /// to the other bank. The answer comes at once with the request's "seq"; GET /api/update
-    /// has its outcome in "history" when done.
+    /// POST /api/update: {"version": "v0.6.0"} (null: the latest; "onlyNewer": true installs
+    /// it only if it is later than the live bank's), {"check": true}: only look up the latest,
+    /// or {"rollback": true}: back to the other bank. The answer comes at once with the
+    /// request's "seq"; GET /api/update has its outcome in "history" when done.
     fn update_request(&mut self, body: &Value) -> (u16, String) {
         if self.updates.busy.is_some() || self.phase != Phase::Idle {
             return (409, json!({"error": "an update or a flip is under way", "doing": self.updates.busy.as_ref().map(|b| b.1.clone())}).to_string());
@@ -1077,15 +1171,20 @@ impl Front {
         let Some(dir) = self.banks.clone() else {
             return (400, "{\"error\":\"no banks: this server runs from a build, not from pcds run (PCDS_BANKS); rollback flips between two copies of it\"}".into());
         };
+        if body["check"] == true {
+            self.check(seq);
+            return (200, json!({"ok": true, "seq": seq}).to_string());
+        }
         let version = body["version"].as_str().filter(|v| *v != "latest").map(str::to_string);
-        self.download(seq, dir, target, version, false);
+        self.download(seq, dir, target, version, body["onlyNewer"] == true, false);
         (200, json!({"ok": true, "seq": seq}).to_string())
     }
 
     /// A download into the standby bank, on a thread of its own (it takes seconds); the loop
-    /// flips when it is in. `only_newer`: the automatic check, which installs only a later
-    /// release than the live bank's.
-    fn download(&mut self, seq: u64, dir: PathBuf, bank: String, version: Option<String>, only_newer: bool) {
+    /// flips when it is in. `only_newer`: install only a later release than the live bank's.
+    /// `auto`: the automatic check, which also leaves out the release rolled back from; an
+    /// update asked for clears that note.
+    fn download(&mut self, seq: u64, dir: PathBuf, bank: String, version: Option<String>, only_newer: bool, auto: bool) {
         let live = self.live.as_ref().map(|b| b.hello.clone()).unwrap_or_default();
         let tx = self.updates.tx.clone();
         self.updates.busy = Some((seq, format!("downloading {} into bank {bank}", version.as_deref().unwrap_or("the latest release"))));
@@ -1095,10 +1194,30 @@ impl Front {
                 if only_newer && !updater::newer(&release.tag, live["version"].as_str().unwrap_or("")) {
                     return Ok(UpdateDone::UpToDate { seq, tag: release.tag });
                 }
+                if auto && let Some(why) = updater::auto_skips(&dir, &release.tag)? {
+                    return Ok(UpdateDone::Skipped { seq, message: why });
+                }
                 let info = updater::install(&release, &dir, &bank, Some(&live))?;
+                if !auto {
+                    updater::clear_rolled_back(&dir)?;
+                }
                 Ok(UpdateDone::Installed { seq, bank, info })
             })();
             let _ = tx.send(done.unwrap_or_else(|message: String| UpdateDone::Failed { seq, message }));
+        });
+    }
+
+    /// The latest release looked up on a thread of its own; nothing is installed.
+    fn check(&mut self, seq: u64) {
+        let live = self.live.as_ref().map(|b| b.hello["version"].as_str().unwrap_or("").to_string()).unwrap_or_default();
+        let tx = self.updates.tx.clone();
+        self.updates.busy = Some((seq, "checking for a new release".into()));
+        std::thread::spawn(move || {
+            let done = match updater::lookup(&updater::releases_url(), None) {
+                Ok(release) => UpdateDone::Checked { seq, newer: updater::newer(&release.tag, &live), tag: release.tag },
+                Err(message) => UpdateDone::Failed { seq, message },
+            };
+            let _ = tx.send(done);
         });
     }
 
@@ -1109,6 +1228,7 @@ impl Front {
                 UpdateDone::Installed { seq, bank, info } => {
                     let tag = info["tag"].as_str().unwrap_or("?").to_string();
                     self.updates.latest = Some(tag.clone());
+                    self.updates.newer = false;
                     println!("update: {tag} installed in bank {bank} (sha256 {} checked)", info["sha256"].as_str().unwrap_or(""));
                     if let Err(e) = self.flip_to(&bank, &format!("update to {tag}"), seq, None) {
                         self.record(seq, false, &format!("{tag} is in bank {bank}, but the flip did not start: {e}"), json!({}));
@@ -1120,7 +1240,18 @@ impl Front {
                 }
                 UpdateDone::UpToDate { seq, tag } => {
                     self.updates.latest = Some(tag.clone());
+                    self.updates.newer = false;
                     self.record(seq, true, &format!("up to date ({tag} is the latest release)"), json!({}));
+                }
+                UpdateDone::Skipped { seq, message } => {
+                    println!("update: {message}");
+                    self.record(seq, true, &message, json!({}));
+                }
+                UpdateDone::Checked { seq, tag, newer } => {
+                    self.updates.latest = Some(tag.clone());
+                    self.updates.newer = newer;
+                    let message = if newer { format!("{tag} is available") } else { format!("up to date ({tag} is the latest release)") };
+                    self.record(seq, true, &message, json!({"check": true}));
                 }
             }
         }
@@ -1131,7 +1262,7 @@ impl Front {
                 self.updates.seq += 1;
                 let seq = self.updates.seq;
                 println!("update: checking for a new release (PCDS_AUTO_UPDATE=on)");
-                self.download(seq, dir, bank, None, true);
+                self.download(seq, dir, bank, None, true, true);
             }
         }
     }
@@ -1140,12 +1271,16 @@ impl Front {
 
     /// Saves the world, ends the bank, disconnects everyone, exits.
     fn shutdown(&mut self, code: i32) -> ! {
-        if matches!(self.phase, Phase::Snapshotting | Phase::Restoring | Phase::Starting) {
+        if self.live.is_some() && matches!(self.phase, Phase::Snapshotting | Phase::Restoring | Phase::Starting) {
             self.fail_flip("the server is stopping");
         }
         if let Some(mut b) = self.next.take() {
             let _ = b.child.kill();
             let _ = b.child.wait();
+        }
+        // No live bank to save the world (it died; the next one was starting from the snapshot).
+        if self.live.is_none() {
+            self.keep_snapshot();
         }
         if let Some(mut b) = self.live.take() {
             b.link.queue(ipc::STOP, 0, &[], None, 0);
@@ -1165,6 +1300,9 @@ impl Front {
             }
             match b.child.try_wait() {
                 Ok(Some(_)) => {}
+                _ if b.link.broken.is_some() => {
+                    end(&mut b);
+                }
                 _ => {
                     let deadline = Instant::now() + Duration::from_secs(60);
                     while Instant::now() < deadline && matches!(b.child.try_wait(), Ok(None)) {
@@ -1186,6 +1324,57 @@ impl Front {
     }
 }
 
+/// Where the front keeps the last flip's snapshot when it stops with the world in no bank.
+fn snapshot_path(save: &str) -> String {
+    format!("{save}.snapshot")
+}
+
+fn modified(path: &str) -> SystemTime {
+    std::fs::metadata(path).and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH)
+}
+
+/// The hooks' settings a bank sent (CHATCFG). Err names the field only: a value may be a
+/// webhook URL or the secret, and serde's messages quote values.
+fn chat_config(body: &[u8]) -> Result<crate::rules::Chat, String> {
+    let v: Value = serde_json::from_slice(body).map_err(|_| "chat config unreadable (not JSON)".to_string())?;
+    serde_json::from_value(v.clone()).map_err(|_| {
+        let fields = v.as_object().into_iter().flatten();
+        match fields.into_iter().find(|(k, x)| serde_json::from_value::<crate::rules::Chat>(json!({ k.as_str(): x })).is_err()) {
+            Some((k, _)) => format!("chat config unreadable at chat.{k}"),
+            None => "chat config unreadable".to_string(),
+        }
+    })
+}
+
+/// A bank's HELLO, refused unless it speaks this front's protocol (at the boot, a flip and a
+/// restart after a crash alike: a world never goes to a bank that reads the frames otherwise).
+fn hello_of(f: &Frame) -> Result<Value, String> {
+    if f.kind != ipc::HELLO {
+        return Err(format!("frame {} instead of HELLO", f.kind));
+    }
+    let mut info: Value = serde_json::from_slice(&f.body).map_err(|e| format!("its HELLO is not JSON ({e})"))?;
+    info["protocol"] = f.n.into();
+    if f.n != ipc::PROTOCOL {
+        // The same words as an update refused for its protocol.
+        updater::compatible(&info, &Value::Null)?;
+    }
+    info.as_object_mut().map(|o| o.remove("protocol"));
+    Ok(info)
+}
+
+/// A bank whose socket closed (it is ending) or broke (it is killed): waited for; how it ended.
+fn end(b: &mut Bank) -> String {
+    if let Some(why) = &b.link.broken {
+        eprintln!("bank {} (pid {}): {why}; killed", b.name, b.child.id());
+        let _ = b.child.kill();
+    }
+    let status = b.child.wait().map(|s| s.to_string()).unwrap_or_default();
+    match &b.link.broken {
+        Some(why) => format!("{status}, after {why}"),
+        None => status,
+    }
+}
+
 /// A bank's next frame, read until `deadline` or its end.
 fn wait_frame(b: &mut Bank, deadline: Instant) -> Option<Frame> {
     loop {
@@ -1200,7 +1389,8 @@ fn wait_frame(b: &mut Bank, deadline: Instant) -> Option<Frame> {
         }
         ipc::wait(&[b.link.fd()], &[b.link.pending()], Duration::from_millis(100));
         if !b.link.fill(usize::MAX) {
-            let _ = b.child.wait();
+            let status = end(b);
+            eprintln!("bank {} ended ({status})", b.name);
             return None;
         }
     }
@@ -1274,6 +1464,74 @@ fn reassemble(split: &mut Option<(Vec<u8>, usize)>, data: &[u8]) -> Result<Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bank on one end of a socket pair (a sleeping process stands in for its program).
+    fn fake_bank(name: &str) -> (Bank, Link) {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        ours.set_nonblocking(true).unwrap();
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        (Bank { name: name.into(), child, link: Link::new(ours), hello: Value::Null, started: Instant::now() }, Link::new(theirs))
+    }
+
+    fn test_front() -> Front {
+        Front::new("data", "/nonexistent/world.json", None, None, 0, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn snapshot_fd(text: &str) -> OwnedFd {
+        ipc::memfd("test", |w| std::io::Write::write_all(w, text.as_bytes()).map_err(|e| e.to_string())).unwrap()
+    }
+
+    /// Flip 1 timed out and the old bank was told to go on; its late snapshot comes while
+    /// flip 2 waits for its own: dropped, and flip 2 takes only the snapshot of its HANDOFF.
+    #[test]
+    fn a_flip_takes_only_the_snapshot_of_its_own_handoff() {
+        let mut front = test_front();
+        let (live, mut old) = fake_bank("a");
+        let (next, mut new) = fake_bank("b");
+        front.live = Some(live);
+        front.next = Some(next);
+        front.phase = Phase::Starting;
+        front.flip = Some(Flip { seq: 2, reason: "test".into(), stopped: None, snapshot: Value::Null });
+        front.on_next(Frame { kind: ipc::HELLO, n: ipc::PROTOCOL, body: br#"{"format":1,"reads":[0,1]}"#.to_vec(), fd: None });
+        assert_eq!(front.phase, Phase::Snapshotting);
+        let handoff = old.recv().unwrap();
+        assert_eq!((handoff.kind, handoff.n), (ipc::HANDOFF, 2), "HANDOFF carries the flip");
+        old.send_fd(ipc::SNAPSHOT, 1, b"{}", Some(snapshot_fd("flip 1")));
+        old.send(ipc::SNAPSHOT, 1, &[]);
+        front.read_banks();
+        assert_eq!(front.phase, Phase::Snapshotting, "flip 1's snapshots are not flip 2's");
+        assert!(front.last_snapshot.is_none() && front.flip.is_some());
+        old.send_fd(ipc::SNAPSHOT, 2, b"{}", Some(snapshot_fd("flip 2")));
+        front.read_banks();
+        assert_eq!(front.phase, Phase::Restoring);
+        front.flush_banks();
+        let restore = new.recv().unwrap();
+        assert_eq!((restore.kind, ipc::read_memfd(restore.fd.as_ref().unwrap()).unwrap()), (ipc::RESTORE, b"flip 2".to_vec()));
+        for b in [front.live.take(), front.next.take()].into_iter().flatten() {
+            let mut child = b.child;
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    #[test]
+    fn a_bank_of_another_protocol_is_refused_on_every_path() {
+        let hello = |kind, n, body: &str| hello_of(&Frame { kind, n, body: body.as_bytes().to_vec(), fd: None });
+        assert_eq!(hello(ipc::HELLO, ipc::PROTOCOL, r#"{"version":"1"}"#).unwrap()["version"], "1");
+        assert!(hello(ipc::HELLO, 999, r#"{"version":"1"}"#).unwrap_err().contains("front protocol 999"));
+        assert!(hello(ipc::READY, ipc::PROTOCOL, "{}").is_err());
+        assert!(hello(ipc::HELLO, ipc::PROTOCOL, "not json").is_err());
+    }
+
+    #[test]
+    fn a_chat_config_error_never_shows_a_value() {
+        assert!(chat_config(br#"{"webhooks": ["https://example.com/hook"], "retries": 1}"#).is_ok());
+        for (body, field) in [(r#"{"webhooks": "https://hooks.example/t0psecret"}"#, "chat.webhooks"), (r#"{"secret": ["t0psecret"]}"#, "chat.secret"), (r#"{"t0psecret": 1}"#, "chat.t0psecret")] {
+            let e = chat_config(body.as_bytes()).unwrap_err();
+            assert_eq!(e, format!("chat config unreadable at {field}"));
+        }
+        assert_eq!(chat_config(b"{\"secret\": \"t0psecret").unwrap_err(), "chat config unreadable (not JSON)");
+    }
 
     #[test]
     fn steam_splits_are_bounded() {

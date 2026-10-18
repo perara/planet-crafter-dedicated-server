@@ -12,8 +12,8 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 /// The frames below. A bank that says another one in its HELLO is not used: such an update
-/// needs the front restarted (`pcds restart`).
-pub const PROTOCOL: u64 = 2;
+/// needs the front restarted (`pcds restart`). 3: HANDOFF and SNAPSHOT carry the flip's number.
+pub const PROTOCOL: u64 = 3;
 
 // game -> front: n PROTOCOL; body JSON {"version", "gameVersion", "format", "reads"}.
 pub const HELLO: u8 = 1;
@@ -32,10 +32,11 @@ pub const DATA: u8 = 6;
 pub const GONE: u8 = 7;
 // bank -> front: n client kicked: its reason went out as DATA, close it a moment later.
 pub const KICK: u8 = 8;
-// front -> bank: send everything queued, stop, snapshot.
+// front -> bank: n the flip; send everything queued, stop, snapshot.
 pub const HANDOFF: u8 = 9;
-// bank -> front: a memfd with the snapshot, body JSON {"bytes", "ms"}; no memfd: none could be
-// written and the bank went on. Then it waits for EXIT or RESUME.
+// bank -> front: n the flip of the HANDOFF it answers; a memfd with the snapshot, body JSON
+// {"bytes", "ms"}; no memfd: none could be written and the bank went on. Then it waits for EXIT
+// or RESUME. The front takes only the SNAPSHOT of the flip under way.
 pub const SNAPSHOT: u8 = 10;
 // front -> old bank: the new one runs, end.
 pub const EXIT: u8 = 11;
@@ -55,6 +56,10 @@ pub const CHAT: u8 = 17;
 pub const SAY: u8 = 18;
 // bank -> front: body JSON, the rules' chat section (the hooks' settings).
 pub const CHATCFG: u8 = 19;
+
+/// The largest frame either side takes (a world's join batch is a few MiB; a snapshot never
+/// crosses the socket). A frame shorter than its header or longer than this breaks the link.
+pub const MAX_FRAME: usize = 64 << 20;
 
 /// The fds a frame of this kind carries.
 fn carries_fd(kind: u8, body: &[u8]) -> bool {
@@ -97,13 +102,16 @@ pub struct Link {
     /// Bytes queued per client (front only): the caller drops a client over its bound.
     pub queued: crate::idmap::FxHashMap<u64, usize>,
     blocking: bool,
+    /// Why the peer's bytes are no frames (a length out of bounds): the link reads nothing
+    /// more and counts as gone.
+    pub broken: Option<String>,
 }
 
 impl Link {
     pub fn new(stream: UnixStream) -> Link {
         // SAFETY: F_GETFL only reads the descriptor's flags.
         let blocking = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) & libc::O_NONBLOCK == 0 };
-        Link { stream, inbox: Vec::new(), fds: VecDeque::new(), outbox: VecDeque::new(), queued: Default::default(), blocking }
+        Link { stream, inbox: Vec::new(), fds: VecDeque::new(), outbox: VecDeque::new(), queued: Default::default(), blocking, broken: None }
     }
 
     pub fn fd(&self) -> RawFd {
@@ -176,6 +184,9 @@ impl Link {
     /// Reads what is waiting, at most `max` bytes; false once the peer is gone. A blocking
     /// socket blocks here until something comes.
     pub fn fill(&mut self, max: usize) -> bool {
+        if self.broken.is_some() {
+            return false;
+        }
         let mut buf = vec![0u8; 1 << 16];
         let mut read = 0;
         while read < max {
@@ -197,9 +208,18 @@ impl Link {
         true
     }
 
-    /// The next whole frame read, if any.
+    /// The next whole frame read, if any. A length out of bounds breaks the link (`broken`):
+    /// None from here on, and fill() says the peer is gone.
     pub fn next(&mut self) -> Option<Frame> {
+        if self.broken.is_some() {
+            return None;
+        }
         let n = u32::from_le_bytes(self.inbox.get(..4)?.try_into().ok()?) as usize;
+        if !(9..=MAX_FRAME).contains(&n) {
+            self.broken = Some(format!("a frame of {n} bytes (a frame is 9 to {MAX_FRAME})"));
+            self.inbox.clear();
+            return None;
+        }
         let f = self.inbox.get(4..4 + n)?;
         let (kind, num, body) = (f[0], u64::from_le_bytes(f[1..9].try_into().ok()?), f[9..].to_vec());
         self.inbox.drain(..4 + n);
@@ -354,6 +374,24 @@ mod tests {
         assert!(front.pending() && front.queued[&3] > 0);
         drop(bank);
         assert!(front.flush().is_err(), "the peer is gone");
+    }
+
+    #[test]
+    fn a_frame_out_of_bounds_breaks_the_link_and_never_panics() {
+        for n in [0u32, 8, (MAX_FRAME + 1) as u32, u32::MAX] {
+            let (a, b) = UnixStream::pair().unwrap();
+            a.set_nonblocking(true).unwrap();
+            let mut front = Link::new(a);
+            let mut bank = Link::new(b);
+            bank.stream.write_all(&n.to_le_bytes()).unwrap();
+            bank.stream.write_all(&[DATA; 8]).unwrap();
+            assert!(front.fill(usize::MAX));
+            assert!(front.next().is_none(), "{n}");
+            assert!(front.broken.as_ref().is_some_and(|b| b.contains(&format!("{n} bytes"))), "{n}");
+            // From here the link counts as gone, even with more bytes coming.
+            bank.send(DATA, 1, b"x");
+            assert!(!front.fill(usize::MAX) && front.next().is_none());
+        }
     }
 
     /// The socket's cost alone, between two processes (docs/hot-update.md, "Latency budget"):

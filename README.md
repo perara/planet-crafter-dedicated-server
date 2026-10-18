@@ -233,16 +233,22 @@ example `--planet Aqualis`, chooses its options). [compose.yaml](compose.yaml) d
 ./pcds gui                     # the admin web page's address, with its token
 ```
 
-The admin web page has five tabs. **Overview**: players, uptime, loop rate and load, CPU,
-memory, network traffic, object counts, the server, game and table versions, the world, its
-seed and settings, the terraformation units, and the server banks (the two installed releases,
-which one runs, flips and updates). **Players**: who is online (ID, how they
-joined, state, gauges, position) with kick, ban and teleport, and a map of the players among the
-buildings. **World**: save now, save and stop, the worlds beside this one and this world's
-backups. **Config**: every setting (rules, access lists, autosave; the `server.env` settings
-read-only), drawn from the server's configuration schema. **Tools**: a chat message to everyone,
-kick, ban and unban by name, and the server log (from the journal when it runs as the `pcds`
-unit). The page uses the admin API: `GET /api/config` lists every setting with its type, range,
+The admin web page has eight sections (keys 1 to 8 switch between them). **Overview**: players,
+CPU, memory, loop load, loop rate and network traffic with live graphs of the last minutes, the
+terraformation total with its stages and the time to the next one, every planet unit with its
+rate, how to join (invite code, direct IP port), the server version with **Update now**, who is
+online and the latest chat. **Players**: a card per player (how they joined, state, oxygen,
+water, health and toxicity, position) with show on map, teleport (to coordinates or to another
+player), kick and ban. **Map**: the planet from above with the buildings, the players moving with
+their trails; drag, wheel or pinch to move and zoom, follow a player, and click a spot to teleport
+someone there (the height comes from the nearest building). **Chat**: the chat as it happens, and
+messages to everyone. **World**: save now, save and stop, the world settings, the worlds beside
+this one and this world's backups. **Updates**: the running and latest release, check, update
+now, install a given release or roll back (each a hand-over without disconnecting anyone), the
+two banks and the update history. **Config**: every setting (rules, access lists, autosave; the
+`server.env` settings read-only), drawn from the server's configuration schema, with search.
+**Tools**: kick, ban and unban by name, the ban list, and the server log, live and filterable
+(from the journal when it runs as the `pcds` unit). The page uses the admin API: `GET /api/config` lists every setting with its type, range,
 unit, default, value and whether it applies live; `POST /api/config` with
 `{"speed.growth": 2, "access.whitelist": ["Ann"]}` changes any of them (`null`: back to the
 default), all or none.
@@ -250,7 +256,9 @@ default), all or none.
 Access lists live in `run/access.json`: `allowedIPs` (addresses or CIDR ranges allowed to
 connect; empty means everyone), `whitelist` (names or SteamID64s; empty means everyone),
 `bannedNames` and `bannedIPs`. The server reads the file at start and writes it on every ban,
-unban or change from the web page: edit it by hand only while the server is stopped.
+unban or change from the web page: edit it by hand only while the server is stopped. A file
+that exists but does not parse stops the start (it is never read as empty lists, which would
+unban everyone): fix it or move it away.
 
 - **SteamIDs are verified for invite-code players only.** A SteamID64 entry matches only that
   verified SteamID, never a player name. A banned SteamID is refused as soon as it connects.

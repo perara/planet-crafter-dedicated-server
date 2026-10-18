@@ -67,8 +67,7 @@ impl Access {
     /// lists in memory stay as they were.
     fn save(&mut self, lists: Lists) -> Result<(), String> {
         if let Some(p) = &self.path {
-            let tmp = format!("{p}.tmp");
-            std::fs::write(&tmp, serde_json::to_string_pretty(&lists).unwrap_or_default()).and_then(|_| std::fs::rename(&tmp, p)).map_err(|e| {
+            crate::save::write_atomic(p, serde_json::to_string_pretty(&lists).unwrap_or_default().as_bytes()).map_err(|e| {
                 eprintln!("access: could not write {p}: {e}");
                 format!("could not write the access lists ({p}: {e}); nothing changed")
             })?;

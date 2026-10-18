@@ -151,14 +151,28 @@ impl SaveFile {
         text
     }
 
-    /// Writes atomically: a crash mid-write leaves the previous save.
+    /// Writes atomically (write_atomic).
     pub fn write(&self, path: &str) -> std::io::Result<()> {
-        let tmp = format!("{path}.tmp");
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(self.to_text().as_bytes())?;
+        write_atomic(path, self.to_text().as_bytes())
+    }
+}
+
+/// Writes a file atomically: a crash mid-write leaves the previous one. The file beside it is
+/// this write's own (two banks may write at once, as when the front ends during a flip): each
+/// rename moves one whole file over the path.
+pub fn write_atomic(path: &str, bytes: &[u8]) -> std::io::Result<()> {
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = format!("{path}.{}-{n}.tmp", std::process::id());
+    let written = std::fs::File::create_new(&tmp).and_then(|mut file| {
+        file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(&tmp, path)
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
+    written
 }
 
 /// UTC "YYYYMMDD-HHMMSS" (days to civil date: Howard Hinnant's algorithm).
@@ -209,6 +223,30 @@ pub fn backup(path: &str, every: Duration, keep: usize) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Two writers of one save at once: every write lands whole, nothing is left beside it.
+    #[test]
+    fn saves_written_at_once_never_mix() {
+        let dir = std::env::temp_dir().join(format!("pcds-save-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("world.json").to_string_lossy().to_string();
+        let writer = |name: &'static str| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let mut save = SaveFile::empty();
+                save.world = json!({"terraTokens": 1, "who": name.repeat(20_000)});
+                (0..50).try_for_each(|_| save.write(&path))
+            })
+        };
+        let (a, b) = (writer("a"), writer("b"));
+        a.join().unwrap().unwrap();
+        b.join().unwrap().unwrap();
+        let world = SaveFile::load(&path).unwrap().world;
+        assert!(world["who"] == "a".repeat(20_000) || world["who"] == "b".repeat(20_000));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn delimiters_inside_strings_and_partial_defaults_survive() {
