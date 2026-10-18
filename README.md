@@ -274,6 +274,12 @@ PCDS_BENCH_SAVE=../run/world.json PCDS_RNG_SEED=1 PCDS_BENCH_PLAYERS=4 \
   cargo test --release bench -- --ignored --nocapture
 ```
 
+`pcds-server load 127.0.0.1:PORT DATA_DIR [PLAYERS] [SECONDS] [ACTION_MS]` is a load test:
+that many scripted players join over direct IP (each from its own 127.0.0.N address) and play:
+they walk, craft, drop and pick up items, build, eat, drink, mine, chat and sort. It prints the
+round trip of every call the server answers. `GET /api/status` shows the server's
+`busyPercent` and `longestLoopMicros` over the last second.
+
 To add a server rule: a field in `src/rules.rs` with its default and range, read where the game
 decides that value, and a line in `rules::changed` when a change must reach what already exists.
 
