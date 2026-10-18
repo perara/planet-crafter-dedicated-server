@@ -50,10 +50,7 @@ struct Env {
 }
 
 fn env() -> Option<Env> {
-    let Some(path) = std::env::var("PCDS_BENCH_SAVE").ok() else {
-        eprintln!("bench: set PCDS_BENCH_SAVE");
-        return None;
-    };
+    let path = std::env::var("PCDS_BENCH_SAVE").expect("bench: set PCDS_BENCH_SAVE");
     let dir = crate::test_data()?;
     let var = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok());
     Some(Env { path, dir, seconds: var("PCDS_BENCH_SECONDS").unwrap_or(300.0), players: var("PCDS_BENCH_PLAYERS").unwrap_or(0.0) as u64, action_ms: var("PCDS_BENCH_ACTION_MS").unwrap_or(0.0) as u64, dump: std::env::var("PCDS_BENCH_DUMP").ok() })

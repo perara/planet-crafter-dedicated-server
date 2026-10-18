@@ -15,8 +15,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release --locked
         working-directory: server
+      # The game tables are not in the repository: the tests that need them skip, by this.
       - run: cargo test --release --locked
         working-directory: server
+        env:
+          PCDS_TEST_DATA: none
       # pcds-<tag>-linux-x86_64/: the pcds program with libsteam_api.so and web/ beside it,
       # install.sh, README.md and LICENSE (Makefile, dist).
       - name: Package

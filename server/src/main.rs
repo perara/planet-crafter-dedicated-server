@@ -45,6 +45,8 @@ mod admin;
 mod bank;
 mod chathooks;
 mod cli;
+#[cfg(test)]
+mod testkit;
 mod config;
 mod dashboard;
 mod data;
@@ -215,20 +217,23 @@ fn check_scene(water: &[serde_json::Value], veins: &[serde_json::Value], data: &
     Ok(())
 }
 
-/// The tables tests run on: PCDS_TEST_DATA, else data/2.103. Each user extracts them from their
-/// own game, so they may be missing: then None, and the test skips.
+/// The tables tests run on: PCDS_TEST_DATA, else run/data/2.103 or data/2.103. Each user
+/// extracts them from their own game, so a checkout has none (CI): PCDS_TEST_DATA=none says so,
+/// and the tests that need them skip. Tables that cannot be found otherwise fail the test.
 #[cfg(test)]
 fn test_data() -> Option<&'static str> {
     static DIR: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    let dir = DIR.get_or_init(|| {
-        // PCDS_TEST_DATA, else the 2.103 tables `pcds extract` wrote into run/data.
-        let dirs = [env("PCDS_TEST_DATA"), Some(concat!(env!("CARGO_MANIFEST_DIR"), "/../run/data/2.103").into()), Some(concat!(env!("CARGO_MANIFEST_DIR"), "/data/2.103").into())];
-        dirs.into_iter().flatten().find(|d| std::path::Path::new(d).is_dir())
-    });
-    if dir.is_none() {
-        eprintln!("skipped: no game tables");
-    }
-    dir.as_deref()
+    DIR.get_or_init(|| match env("PCDS_TEST_DATA").as_deref() {
+        Some("none") => None,
+        Some(dir) if std::path::Path::new(dir).join("netdata.json").is_file() => Some(dir.to_string()),
+        Some(dir) => panic!("PCDS_TEST_DATA={dir}: no game tables there"),
+        None => {
+            let dirs = [concat!(env!("CARGO_MANIFEST_DIR"), "/../run/data/2.103"), concat!(env!("CARGO_MANIFEST_DIR"), "/data/2.103")];
+            let found = dirs.iter().find(|d| std::path::Path::new(d).join("netdata.json").is_file());
+            Some(found.unwrap_or_else(|| panic!("no game tables in {dirs:?}: set PCDS_TEST_DATA to a tables directory, or to none to skip the tests that need them")).to_string())
+        }
+    })
+    .as_deref()
 }
 
 /// The pause between frames, as the game's: timers, the game tick and Steam run once per frame.

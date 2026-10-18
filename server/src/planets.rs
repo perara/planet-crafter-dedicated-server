@@ -293,9 +293,7 @@ pub mod tests {
         let Some(mut g) = game() else { return };
         let platform = g.data.group("DeparturePlatform").unwrap();
         let has_pose = g.data.group_prefabs["DeparturePlatform"]["components"].as_array().unwrap().iter().any(|c| c["poses"]["_landingPosition"].is_object());
-        if !has_pose {
-            return; // Game tables extracted before the dump carried component poses.
-        }
+        assert!(has_pose, "game tables extracted before the dump carried component poses: extract them again");
         let selenea = stable_hash("Selenea");
         switch_to_planet(&mut g, selenea, 0, 0);
         // A departure platform on Selenea, turned a quarter.

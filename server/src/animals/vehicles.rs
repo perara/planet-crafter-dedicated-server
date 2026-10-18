@@ -439,6 +439,7 @@ fn euler_angles(q: [f32; 4]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit::{client_rpcs, send_rpc};
 
     #[test]
     fn euler_angles_like_unity() {
@@ -459,24 +460,6 @@ mod tests {
         assert_eq!((object, p), (52, [553.0, 4.0, 491.0]));
         assert!((crate::geometry::euler_y(r.unwrap()) - 90.0).abs() < 1e-3);
         assert_eq!(m.len(), 2 + 1 + 3 + 3 + 24);
-    }
-
-    /// An RPC as a client sends it.
-    fn send_rpc(g: &mut Game, client: u64, object: u64, behaviour: u16, name: &str, args: &[Value]) {
-        let (method, body) = g.net.spec.encode(name, args);
-        let mut w = Writer::new();
-        w.packed_u64(client).packed_u64(object).packed_u16(behaviour).packed_u32(method).bytes(&body);
-        g.receive(client, &crate::wire::batch(&[(crate::protocol::RPC, w.0)]));
-    }
-
-    /// The queued ClientRpcs called `name`: (behaviour, arguments).
-    fn client_rpcs(g: &Game, name: &str) -> Vec<(u16, Vec<Value>)> {
-        let decode = |body: &[u8]| {
-            let mut r = Reader::new(body);
-            let (_, behaviour, method) = (r.packed_u64()?, r.packed_u16()?, r.packed_u32()?);
-            (g.net.spec.get(method)?.name == name).then(|| Some((behaviour, g.net.spec.decode(method, r.rest())?)))?
-        };
-        g.net.out.iter().filter(|(_, kind, _)| *kind == crate::protocol::CLIENT_RPC).filter_map(|(_, _, body)| decode(body)).collect()
     }
 
     /// Driving the rover as ActionTakeControl does. Its ownership callback first reads the
