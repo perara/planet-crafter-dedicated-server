@@ -146,6 +146,13 @@ pub struct Game {
     pub started: std::time::Instant,
     /// A fixed clock (seconds since start) for benchmarks; None: the real one.
     pub sim_time: Option<f64>,
+    /// Seconds the clock stood still while nobody was in the game (rules: world.pauseWhenEmpty),
+    /// and the clock at the last tick.
+    paused: f64,
+    last_clock: f64,
+    /// The clock moved since main last took this: an autosave of a world that stood still since
+    /// the last one would write that one again.
+    pub advanced: bool,
     pub rng: Rng,
     pub trace: bool,
     /// The wreck layouts and the planets' scene dumps (main.rs scene_tables).
@@ -227,6 +234,9 @@ impl Game {
             time: 0.0,
             started: std::time::Instant::now(),
             sim_time: None,
+            paused: 0.0,
+            last_clock: 0.0,
+            advanced: false,
             rng: Rng::seeded(),
             trace: std::env::var_os("PCDS_TRACE").is_some(),
             scenes,
@@ -257,8 +267,13 @@ impl Game {
         stable_hash(self.planet_id())
     }
 
+    /// Seconds since start, before the pauses: the bench's clock or the real one.
+    fn clock(&self) -> f64 {
+        self.sim_time.unwrap_or_else(|| self.started.elapsed().as_secs_f64())
+    }
+
     pub fn tick_number(&self) -> i32 {
-        (self.sim_time.unwrap_or_else(|| self.started.elapsed().as_secs_f64()) * self.net_data.tick_rate as f64) as i32
+        ((self.clock() - self.paused) * self.net_data.tick_rate as f64) as i32
     }
 
     /// SavedDataHandler.LoadSavedData: world objects, inventories, planets, players; then the
@@ -510,24 +525,38 @@ impl Game {
 
     /// One tick of the simulation, then the variable deltas.
     pub fn tick(&mut self) {
-        self.time = match self.sim_time {
-            Some(t) => t as f32,
-            None => self.started.elapsed().as_secs_f32(),
-        };
+        let clock = self.clock();
+        let last = std::mem::replace(&mut self.last_clock, clock);
+        if self.rules.world.pause_when_empty && !self.clients.values().any(|c| c.ready.is_some()) {
+            // Nobody in the game: the clock (game time and network ticks) holds, and every timer
+            // with it; it goes on from here when a player is in. Clients still hear it each second.
+            self.paused += clock - last;
+            if clock.floor() > last.floor() {
+                self.every_second();
+            }
+            self.net.flush();
+            return;
+        }
+        self.time = (clock - self.paused) as f32;
+        self.advanced = true;
         crate::scene::tick(self);
         if self.time >= self.next_time_sync {
             self.next_time_sync = self.time + 1.0;
-            let tick = self.tick_number();
-            self.out_to(Target::All, protocol::time_sync(tick));
-            // A connection that never becomes a player (no request, no PlayerReady) has the
-            // world without the checks PlayerReady makes: give it two minutes.
-            let stalled: Vec<u64> = self.clients.values().filter(|c| c.ready.is_none() && c.since.elapsed().as_secs() > 120).map(|c| c.id).collect();
-            for client in stalled {
-                println!("client {client}: never became a player, disconnecting");
-                self.kick(client, "MENU_Network_Error_Timeout");
-            }
+            self.every_second();
         }
         self.net.flush();
+    }
+
+    fn every_second(&mut self) {
+        let tick = self.tick_number();
+        self.out_to(Target::All, protocol::time_sync(tick));
+        // A connection that never becomes a player (no request, no PlayerReady) has the world
+        // without the checks PlayerReady makes: give it two minutes.
+        let stalled: Vec<u64> = self.clients.values().filter(|c| c.ready.is_none() && c.since.elapsed().as_secs() > 120).map(|c| c.id).collect();
+        for client in stalled {
+            println!("client {client}: never became a player, disconnecting");
+            self.kick(client, "MENU_Network_Error_Timeout");
+        }
     }
 
     /// The full save, written the way the game writes it.

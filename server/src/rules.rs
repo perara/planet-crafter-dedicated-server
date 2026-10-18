@@ -23,6 +23,7 @@ pub struct Rules {
     pub death: Death,
     pub loot: Loot,
     pub limits: Limits,
+    pub world: World,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -109,6 +110,15 @@ pub struct Limits {
     /// Building group id -> how many the world may have. One more is taken down at once and
     /// its materials go back to the builder.
     pub buildings: BTreeMap<String, u32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct World {
+    /// With no player in the game (past PlayerReady, as the game counts its players), the world
+    /// stands still: its clock, and with it every timer, day and night, growth, production,
+    /// terraformation, meteo, drone and vehicle. It goes on from there when a player is in.
+    pub pause_when_empty: bool,
 }
 
 pub const CONSEQUENCES: [&str; 4] = ["NoConsequences", "DropSomeItems", "DropAllItems", "DeleteSaveFile"];
@@ -371,6 +381,47 @@ mod tests {
             let timer = g.timers.0.iter().find_map(|(t, timer)| matches!(timer, crate::scene::Timer::Despawn(..)).then_some(*t - g.time));
             assert_eq!(timer, due, "{rule:?}");
         }
+    }
+
+    #[test]
+    fn an_empty_world_stands_still_and_goes_on_when_a_player_is_in() {
+        // Steps of whole binary fractions keep the clock exact.
+        fn run(g: &mut Game, seconds: f64, step: f64) {
+            let end = g.sim_time.unwrap() + seconds;
+            while g.sim_time.unwrap() < end {
+                g.sim_time = Some(g.sim_time.unwrap() + step);
+                g.tick();
+            }
+        }
+        let Some(mut g) = test_game(save()) else { return };
+        g.rules.world.pause_when_empty = true;
+        g.sim_time = Some(0.0);
+        run(&mut g, 10.0, 0.5);
+        assert_eq!(g.time, 0.0, "empty from the start");
+        join(&mut g, 1, "Ann");
+        run(&mut g, 1.0, 0.125);
+        assert!((g.time - 1.0).abs() < 1e-3, "on from where it stood, not 11 s on: {}", g.time);
+        // Ann drops iron (despawns in 30 s) and leaves: nothing moves for 100 s.
+        let iron = g.data.groups[g.data.group("Iron").unwrap()].hash;
+        g.world_objects_rpc(1, "WorldObjectsHandler.CreateAndDropOnFloorServerRpc", &Args(vec![json!(iron), json!([560.0, 3.0, 500.0]), json!(0.6), json!(true), json!(false), json!(30.0)]));
+        let (due, wo) = g.timers.0.iter().find_map(|(t, timer)| match timer { crate::scene::Timer::Despawn(wo, _) => Some((*t, *wo)), _ => None }).unwrap();
+        g.disconnect(1);
+        g.advanced = false;
+        let (held, tick) = (g.time, g.tick_number());
+        run(&mut g, 100.0, 0.5);
+        assert_eq!((g.time, g.tick_number(), g.timers.0.len()), (held, tick, 1), "time, network ticks and timers stand still");
+        assert!(g.wos.contains_key(&wo) && !g.advanced, "nothing despawned, nothing to autosave");
+        // Bob comes: the clock goes on from there, and the iron goes 30 s after it was dropped.
+        join(&mut g, 2, "Bob");
+        run(&mut g, 29.0, 0.125);
+        assert!((g.time - (held + 29.0)).abs() < 1e-3 && g.wos.contains_key(&wo), "no timer fires because the clock moved: {}", g.time);
+        run(&mut g, 2.0, 0.125);
+        assert!(g.time >= due && !g.wos.contains_key(&wo), "the despawn came on time");
+        // Off again while empty: the world goes on.
+        g.disconnect(2);
+        g.rules.world.pause_when_empty = false;
+        run(&mut g, 1.0, 0.5);
+        assert!((g.time - (held + 32.0)).abs() < 1e-3, "{}", g.time);
     }
 
     #[test]
