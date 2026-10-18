@@ -186,3 +186,81 @@ fn the_logistics_window_counts_drones_tasks_and_groups() {
     send_scene(&mut game, 1, "LogisticManager.RetrieveDronesCountServerRpc", &[]);
     assert_eq!(one(&game, "LogisticManager.RetrieveDronesCountClientRpc"), vec![json!(2), json!(0), json!(1)], "one task on its way to supply");
 }
+
+/// Grown produce lying in the world (a drone-pickable group) is fetched by a drone for a
+/// demand asking for it: it leaves the ground (its network object goes) and is saved in the
+/// demand container.
+#[test]
+fn drones_pick_up_produce_lying_in_the_world() {
+    let Some(mut game) = game() else { return };
+    build(&mut game, "EnergyGenerator6", [40.0, 2.0, 0.0]);
+    let station = build(&mut game, "DroneStation1", [10.0, 2.0, 10.0]);
+    let demand = build(&mut game, "Container1", [25.0, 2.0, 30.0]);
+    let (station_inv, demand_inv) = (game.wos[&station].linked_inventory, game.wos[&demand].linked_inventory);
+    let veg = game.data.group("Vegetable0Growable").unwrap();
+    let produce = game.create_world_object(veg, 0, true);
+    game.drop_on_floor(produce, [20.0, 2.0, 20.0], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 0.0, false, 0);
+    assert!(game.pickables.contains(&produce));
+    let net = game.wos[&produce].net.unwrap();
+    game.inventories.get_mut(&demand_inv).unwrap().logistic.demand = vec![veg];
+    set_dirty(&mut game, demand_inv);
+    add(&mut game, "Drone1", station_inv);
+    let start = game.ext.logistics.last_tick;
+    for t in 1..=40 * 30 {
+        frame(&mut game, start + t);
+        if items(&game, demand_inv).contains(&produce) {
+            break;
+        }
+    }
+    assert_eq!(items(&game, demand_inv), vec![produce]);
+    assert!(!game.net.objects.contains_key(&net) && game.wos[&produce].net.is_none(), "off the ground");
+    assert!(!game.wos[&produce].is_placed());
+}
+
+/// A drone carrying iron whose demand container is taken down loses its load, even with
+/// another demand for iron there: the game's FindDemandForDroneOrDestroyContent looks for one,
+/// but CreateNewTaskForWorldObject refuses a drone's own inventory as the source, so the load is
+/// always destroyed.
+#[test]
+fn a_drone_whose_demand_goes_loses_its_load() {
+    for second_demand in [true, false] {
+        let Some(mut game) = game() else { return };
+        build(&mut game, "EnergyGenerator6", [40.0, 2.0, 0.0]);
+        let station = build(&mut game, "DroneStation1", [10.0, 2.0, 10.0]);
+        let supply = build(&mut game, "Container1", [25.0, 2.0, 10.0]);
+        let demand = build(&mut game, "Container1", [25.0, 2.0, 60.0]);
+        let (station_inv, supply_inv, demand_inv) = (game.wos[&station].linked_inventory, game.wos[&supply].linked_inventory, game.wos[&demand].linked_inventory);
+        let iron = game.data.group("Iron").unwrap();
+        let item = add(&mut game, "Iron", supply_inv);
+        game.inventories.get_mut(&supply_inv).unwrap().logistic.supply = vec![iron];
+        set_dirty(&mut game, supply_inv);
+        game.inventories.get_mut(&demand_inv).unwrap().logistic.demand = vec![iron];
+        set_dirty(&mut game, demand_inv);
+        let drone = add(&mut game, "Drone1", station_inv);
+        let start = game.ext.logistics.last_tick;
+        let carried = |game: &Game| game.ext.logistics.drones.get(&drone).is_some_and(|d| items(game, d.inventory).contains(&item));
+        let mut t = 0;
+        while !carried(&game) {
+            t += 1;
+            assert!(t < 40 * 30, "the drone never took the iron");
+            frame(&mut game, start + t);
+        }
+        let other = second_demand.then(|| {
+            let other = build(&mut game, "Container1", [30.0, 2.0, 20.0]);
+            let inv = game.wos[&other].linked_inventory;
+            game.inventories.get_mut(&inv).unwrap().logistic.demand = vec![iron];
+            set_dirty(&mut game, inv);
+            inv
+        });
+        game.destroy_world_object(demand, true);
+        for _ in 0..40 * 30 {
+            t += 1;
+            frame(&mut game, start + t);
+        }
+        if let Some(inv) = other {
+            assert!(items(&game, inv).is_empty());
+        }
+        assert!(!game.wos.contains_key(&item), "destroyed");
+        assert!(items(&game, game.ext.logistics.drones[&drone].inventory).is_empty());
+    }
+}
