@@ -10,7 +10,7 @@
 //!     PCDS_FLIP_VERIFY   after a restore, check the state equals the snapshot (tests)
 //!     PCDS_BANK_FAIL     tests: "restore" dies on RESTORE, "protocol" says another protocol
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::os::fd::FromRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
@@ -29,6 +29,11 @@ use crate::{access, chathooks, config, dashboard, protocol, rules, save, status,
 pub fn info() -> Value {
     json!({"version": env!("CARGO_PKG_VERSION"), "protocol": ipc::PROTOCOL, "format": crate::handoff::FORMAT, "reads": [crate::handoff::FORMAT - 1, crate::handoff::FORMAT], "tablesFormat": crate::native::tables::TABLES_FORMAT})
 }
+
+/// What a client may be sent before it is a player (PlayerReady): the world in its
+/// ConnectionApproved and this much more (the world's changes while it loads). A session from a
+/// forged address never gets further: its world is all a spoofer can have sent to the victim.
+const LOADING_ALLOWANCE: i64 = 8 << 20;
 
 fn fail_for_test(what: &str) -> bool {
     std::env::var("PCDS_BANK_FAIL").is_ok_and(|v| v == what)
@@ -215,6 +220,8 @@ impl Bank {
         let mut approved: HashSet<u64> = game.clients.values().filter(|c| c.approved).map(|c| c.id).collect();
         // Kicked, until the front says the connection is closed.
         let mut kicked: HashSet<u64> = HashSet::new();
+        // Bytes approved clients that are no players yet may still be sent.
+        let mut loading: HashMap<u64, i64> = HashMap::new();
         let (mut mail, mut urgent): (crate::idmap::FxHashMap<u64, wire::Batch>, Vec<u64>) = Default::default();
         let (mut next_frame, mut movement_sent) = (Instant::now(), Instant::now());
         let mut loops = (0u32, Instant::now(), 0u32);
@@ -238,7 +245,8 @@ impl Bank {
                         let c: Value = serde_json::from_slice(&f.body).unwrap_or_default();
                         guarded(game, f.n, &self.save_path, |game| game.connect(f.n, c["steamId"].as_u64(), c["trusted"] == true, c["ip"].as_str().map(str::to_string)));
                     }
-                    ipc::DATA if !kicked.contains(&f.n) && game.clients.contains_key(&f.n) => {
+                    // Kicked this loop too (game.kicks goes out after it): nothing more counts.
+                    ipc::DATA if !kicked.contains(&f.n) && !game.kicks.iter().any(|(c, _)| *c == f.n) && game.clients.contains_key(&f.n) => {
                         let before = game.net.out.len();
                         guarded(game, f.n, &self.save_path, |game| game.receive(f.n, &f.body));
                         if game.net.out[before.min(game.net.out.len())..].iter().any(|(to, _, _)| to.reaches(f.n)) && !urgent.contains(&f.n) {
@@ -269,9 +277,9 @@ impl Bank {
                     }
                     ipc::HANDOFF => {
                         // A tick boundary with nothing queued: what is waiting goes out first.
-                        post(game, &mut approved, &mut mail);
+                        post(game, &mut approved, &mut mail, &mut loading);
                         let all: Vec<u64> = mail.keys().copied().collect();
-                        send(&mut self.link, &mut mail, &all);
+                        send(&mut self.link, &mut mail, &all, &mut loading);
                         forward_chat(game, &mut self.link);
                         let t = Instant::now();
                         match ipc::memfd("pcds-snapshot", |w| crate::handoff::snapshot_to(game, w)) {
@@ -307,15 +315,16 @@ impl Bank {
             }
             // What a client's own packets brought it goes out now; the rest (other players'
             // movement and doings, the world's changes) every MOVEMENT_EVERY.
-            post(game, &mut approved, &mut mail);
+            post(game, &mut approved, &mut mail, &mut loading);
             if frame && movement_sent.elapsed() >= crate::MOVEMENT_EVERY {
                 movement_sent = Instant::now();
                 let all: Vec<u64> = mail.keys().copied().collect();
-                send(&mut self.link, &mut mail, &all);
+                send(&mut self.link, &mut mail, &all, &mut loading);
             } else if !urgent.is_empty() {
-                send(&mut self.link, &mut mail, &urgent);
+                send(&mut self.link, &mut mail, &urgent, &mut loading);
             }
             urgent.clear();
+            check_loading(game, &mut loading);
             // Kicked or refused: what it was sent first, then the reason; the front closes the
             // connection a moment later and says GONE.
             for (client, reason) in std::mem::take(&mut game.kicks) {
@@ -323,7 +332,7 @@ impl Bank {
                     continue;
                 }
                 println!("client {client}: kicked ({reason})");
-                send(&mut self.link, &mut mail, &[client]);
+                send(&mut self.link, &mut mail, &[client], &mut HashMap::new());
                 self.link.send(ipc::DATA, client, &reason_batch(&reason));
                 self.link.send(ipc::KICK, client, &[]);
             }
@@ -360,19 +369,38 @@ pub fn reason_batch(reason: &str) -> Vec<u8> {
     wire::batch(&[(crate::DISCONNECT_REASON, w.0)])
 }
 
-fn send(link: &mut Link, mail: &mut crate::idmap::FxHashMap<u64, wire::Batch>, clients: &[u64]) {
+/// Kicks a client that is no player yet and was sent more than its allowance; forgets the
+/// ones that became players or left.
+fn check_loading(game: &mut Game, loading: &mut HashMap<u64, i64>) {
+    loading.retain(|c, left| match game.clients.get(c) {
+        Some(client) if client.ready.is_none() => {
+            if *left < 0 {
+                println!("client {c}: sent {} MiB more than its world while not a player; dropped", LOADING_ALLOWANCE >> 20);
+                game.kicks.push((*c, "MENU_Network_Error_Timeout".into()));
+            }
+            *left >= 0
+        }
+        _ => false,
+    });
+}
+
+/// `loading`: what each client that is no player yet may still be sent, counted down.
+fn send(link: &mut Link, mail: &mut crate::idmap::FxHashMap<u64, wire::Batch>, clients: &[u64], loading: &mut HashMap<u64, i64>) {
     for c in clients {
         if let Some(b) = mail.remove(c).filter(|b| !b.is_empty()) {
-            let b = b.finish();
+            let batch = b.finish();
             // Over the frame limit the front would end the link: that client goes instead (it
             // cannot go on without the batch). A join batch is ~14 bytes per world object.
-            if !ipc::fits(&b) {
-                eprintln!("client {c}: a batch of {} bytes is over the {} bytes a frame holds; it is dropped", b.len(), ipc::MAX_FRAME);
+            if !ipc::fits(&batch) {
+                eprintln!("client {c}: a batch of {} bytes is over the {} bytes a frame holds; it is dropped", batch.len(), ipc::MAX_FRAME);
                 link.send(ipc::DATA, *c, &reason_batch("The world is too large for this server to send"));
                 link.send(ipc::KICK, *c, &[]);
                 continue;
             }
-            link.send(ipc::DATA, *c, &b);
+            if let Some(left) = loading.get_mut(c) {
+                *left -= batch.len() as i64;
+            }
+            link.send(ipc::DATA, *c, &batch);
         }
     }
 }
@@ -756,11 +784,12 @@ fn final_save(game: &mut Game, path: &str) -> i32 {
 
 /// Sorts the queued messages into each approved client's batch, in queue order. A client gets
 /// messages queued after its ConnectionApproved: everything before is in the world it was sent.
-fn post(game: &mut Game, approved: &mut HashSet<u64>, mail: &mut crate::idmap::FxHashMap<u64, wire::Batch>) {
+fn post(game: &mut Game, approved: &mut HashSet<u64>, mail: &mut crate::idmap::FxHashMap<u64, wire::Batch>, loading: &mut HashMap<u64, i64>) {
     for (to, kind, body) in game.net.out.drain(..) {
         if kind == protocol::CONNECTION_APPROVED {
             if let Target::Only(c) = to {
                 approved.insert(c);
+                loading.insert(c, body.len() as i64 + LOADING_ALLOWANCE);
                 mail.entry(c).or_default().push(kind, &body);
             }
             continue;
@@ -787,6 +816,34 @@ mod tests {
         assert_eq!(game.kicks.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [7]);
         assert!(!SaveFile::load(&path).unwrap().objects.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A client that is no player yet gets its world and LOADING_ALLOWANCE more, then is
+    /// dropped; a player has no such bound.
+    #[test]
+    fn a_client_that_never_becomes_a_player_is_sent_its_world_and_a_bound() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || std::io::copy(&mut theirs, &mut std::io::sink()));
+        let mut link = Link::new(ours);
+        let (mut approved, mut mail, mut loading) = (HashSet::new(), Default::default(), HashMap::new());
+        game::tests::approve(&mut game, 1);
+        game::tests::join(&mut game, 2, "Ann");
+        post(&mut game, &mut approved, &mut mail, &mut loading);
+        assert!(loading[&1] > LOADING_ALLOWANCE && loading[&2] > LOADING_ALLOWANCE, "both got their world");
+        send(&mut link, &mut mail, &[1, 2], &mut loading);
+        check_loading(&mut game, &mut loading);
+        assert!(!loading.contains_key(&2), "a player is not counted");
+        assert!(game.kicks.is_empty() && loading[&1] > 0 && loading[&1] < LOADING_ALLOWANCE);
+        // The world's changes while it loads, past the allowance.
+        let chunk = vec![0u8; 1 << 20];
+        for _ in 0..=(LOADING_ALLOWANCE >> 20) {
+            game.out_to(Target::All, (protocol::CLIENT_RPC, chunk.clone()));
+            post(&mut game, &mut approved, &mut mail, &mut loading);
+            send(&mut link, &mut mail, &[1, 2], &mut loading);
+            check_loading(&mut game, &mut loading);
+        }
+        assert_eq!(game.kicks.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [1]);
     }
 
     /// A save that cannot be written (here a folder where the save goes): /api/save says so, as
@@ -835,7 +892,7 @@ mod tests {
         let mut mail: crate::idmap::FxHashMap<u64, wire::Batch> = Default::default();
         mail.entry(4).or_default().push(protocol::RPC, &vec![0; ipc::MAX_FRAME]);
         mail.entry(5).or_default().push(protocol::RPC, b"small");
-        send(&mut bank, &mut mail, &[4, 5]);
+        send(&mut bank, &mut mail, &[4, 5], &mut HashMap::new());
         // Any frame over the limit, whoever sends it: not sent.
         bank.send(ipc::DATA, 6, &vec![0; ipc::MAX_FRAME]);
         bank.send(ipc::GONE, 0, &[]);

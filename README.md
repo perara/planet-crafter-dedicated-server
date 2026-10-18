@@ -239,6 +239,7 @@ example `--planet Aqualis`, chooses its options). [compose.yaml](compose.yaml) d
 | `PCDS_ACCESS` | `run/access.json` | the access lists file (see [Administration](#administration)) |
 | `PCDS_WEB` | the bank's `web/index.html` | the admin web page's file (for a page of your own) |
 | `PCDS_TRACE` | empty | set: log every incoming message and RPC (debugging; a lot of output) |
+| `PCDS_TRUST_LOOPBACK` | `0` | `1`: believe the SteamID a direct-IP client from 127.0.0.1 claims (tests, load and probe tools); never behind a UDP relay (see Known limits) |
 | `PCDS_RELEASES` | GitHub's API for this project | where `pcds upgrade` and `PCDS_AUTO_UPDATE` look up releases (a mirror) |
 
 A value that is not what the setting takes (`PCDS_AUTOSAVE=five`, a port out of range) stops
@@ -459,14 +460,25 @@ platform, landing spots, seats, machine ranges), the code says so in a `ponytail
 
 ## Known limits
 
-- **Direct IP can be spoofed.** Unity Transport lets the client pick its connection token, so
-  someone who forges a player's address can start a session in their name without seeing the
-  answers. Invite codes (Steam networking) do not have this problem.
+- **Direct IP can be spoofed.** Unity Transport lets the client pick its connection token and
+  the server's packet numbers start at 0, so someone who forges a player's address can start a
+  session in their name without seeing the answers, and can acknowledge them blind. What that
+  reaches is bounded: a session that acknowledges nothing gets a few KB and ends after 15
+  seconds; one that acknowledges blind gets at most its world and 8 MiB more before PlayerReady;
+  at most 2 sessions per address may be joining at once and 4 new ones start per 10 seconds.
+  Invite codes (Steam networking) do not have this problem.
+- **Behind a UDP relay** (playit.gg, frp, `ssh -R`) every player comes from 127.0.0.1: the
+  per-address limits do not apply to loopback, and the SteamID a direct-IP client reports is
+  believed from 127.0.0.1 only with `PCDS_TRUST_LOOPBACK=1` (for tests and the load and probe
+  tools; never set it behind a relay).
 - **Connection slots can be flooded.** The server caps connections (128 in all, 8 per IP, 10
   seconds to send data) to protect its memory; a flood can still keep new players out while it
   lasts.
+- **Large worlds join over direct IP only.** The game's Steam transport takes at most 2.5 MiB
+  in one message; a world whose join message is larger is refused over Steam (logged).
 - **Clients are trusted with their own inventories**, as the game does: there are no ownership
-  checks on inventory changes, and no rate limits on game messages.
+  checks on inventory changes. Each client gets 32 units of RPC work per 5 ms tick (the rest
+  waits) and 10 chat lines at once, one a second after that, 500 characters each.
 
 ## How it works
 

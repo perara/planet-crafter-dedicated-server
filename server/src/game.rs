@@ -23,6 +23,33 @@ const FIRST_DYNAMIC_ID: u64 = 22;
 /// GameConfig.startPlayerInventorySize / startPlayerEquipmentSize.
 pub const START_INVENTORY_SIZE: i32 = 12;
 pub const START_EQUIPMENT_SIZE: i32 = 4;
+/// Approved clients from one address that are not players yet (see approve).
+const MAX_JOINING_PER_IP: usize = 2;
+/// The RPCs a game client sends while it loads, before its PlayerReady (the name and whitelist
+/// checks): what the objects of the world it was sent and the planet scene ask for as they
+/// spawn and start (GrowthProxy.InitGrowth, ConstructibleProxy.OnNetworkSpawn and
+/// MachineRocketBackAndForth.Awake, the inventory displays' Start, WorldObjectFromScene,
+/// MachineGenerationGroupVein, SceneInterpolationBase and GameEventActivateInterpolators,
+/// ToxicAreaVolumes and ToxicAreaDecal, WorldAnimalSpawnerData, ProceduralSceneInstance).
+/// Every other RPC before PlayerReady is dropped.
+const LOADING_RPCS: &[&str] = &[
+    "PlayerMainController.PlayerReadyServerRpc",
+    "GrowthProxy.GetCurrentGrowthServerRpc",
+    "ConstructibleProxy.MachineOutsideGrowerUpdateStartServerRpc",
+    "ConstructibleProxy.RetrieveRocketBackAndForthSpeedMultiplierServerRpc",
+    "InventoryAssociatedProxy.GetInventoryIdServerRpc",
+    "InventoriesHandler.GetOrCreateNewInventoryServerRpc",
+    "InventoriesHandler.BeginInventoryWatchServerRpc",
+    "WorldObjectAssociatedProxy.GetWorldObjectIdServerRpc",
+    "WorldObjectsHandler.IsWorldObjectFromSceneActiveServerRpc",
+    "WorldObjectsHandler.RefreshSceneWorldObjectGrowthServerRpc",
+    "SceneInterpolationHandler.RegisterInterpolatorServerRpc",
+    "SceneInterpolationHandler.CheckInterpolatorActiveServerRpc",
+    "ToxicAreaHandler.RegisterToAreaToxicFinishedServerRpc",
+    "ToxicAreaHandler.RegisterToAreaToxicProgressServerRpc",
+    "WorldAnimalSpawnerHandler.SpawnerRegisteredServerRpc",
+    "ProceduralInstancesHandler.LoadInstanceFromSceneServerRpc",
+];
 
 /// RPC arguments in signature order, with typed accessors.
 pub struct Args(pub Vec<Value>);
@@ -199,6 +226,18 @@ pub struct Game {
     misrouted: std::collections::HashSet<String>,
     /// A subsystem asks for a save (SavedDataHandler.SaveWorldData); main writes it after the tick.
     pub save_requested: bool,
+    /// Chat rate and RPC work per client.
+    #[serde(default)]
+    pub limits: crate::handlers::Limits,
+}
+
+/// An RPC message's method hash (after sender, object and behaviour).
+fn rpc_method(body: &[u8]) -> Option<u32> {
+    let mut r = Reader::new(body);
+    r.packed_u64()?;
+    r.packed_u64()?;
+    r.packed_u16()?;
+    r.packed_u32()
 }
 
 /// ConnectionRequestMessage's connection data: after the message versions and the config hash.
@@ -300,6 +339,7 @@ impl Game {
             misrouted: Default::default(),
             refused_inventories: Default::default(),
             save_requested: false,
+            limits: Default::default(),
         };
         game.sim_time = sim_time;
         game.change_generation_for_groups();
@@ -396,6 +436,7 @@ impl Game {
     /// The client left or was dropped: everyone else sees the player go; the save keeps them.
     pub fn disconnect(&mut self, client: u64) {
         let Some(c) = self.clients.shift_remove(&client) else { return };
+        self.limits.forget(client);
         if !c.approved {
             return;
         }
@@ -431,10 +472,31 @@ impl Game {
             }
         }
         // A banned SteamID never gets the world (names are only known at PlayerReady).
-        if let Some(id) = self.clients.get(&client).and_then(|c| c.verified_steam_id).filter(|id| self.access.steam_id_banned(*id)) {
+        let steam_id = self.clients.get(&client).and_then(|c| c.verified_steam_id);
+        if let Some(id) = steam_id.filter(|id| self.access.steam_id_banned(*id)) {
             println!("client {client}: refused (SteamID {id} is banned)");
             self.kick(client, crate::access::REFUSED);
             return;
+        }
+        // Nor does one the whitelist can no longer let in: it lists SteamIDs only, not this
+        // client's (a name entry may still match at PlayerReady).
+        let whitelist = &self.access.lists.whitelist;
+        let steam_entry = |v: &String| v.parse::<u64>().ok().filter(|id| *id >= crate::players::FIRST_STEAM_ID);
+        if !whitelist.is_empty() && whitelist.iter().all(|v| steam_entry(v).is_some_and(|id| Some(id) != steam_id)) {
+            println!("client {client}: refused (not on the whitelist)");
+            self.kick(client, crate::access::REFUSED);
+            return;
+        }
+        // A forged source address gets a session without seeing what it is sent: at most
+        // MAX_JOINING_PER_IP worlds go to one address before its players are in (loopback is
+        // exempt: nobody outside can forge it, and behind a UDP relay every player has it).
+        if let Some(ip) = self.clients.get(&client).and_then(|c| c.ip.clone()).filter(|ip| !ip.parse().is_ok_and(crate::utp::is_loopback)) {
+            let joining = self.clients.values().filter(|c| c.id != client && c.approved && c.ready.is_none() && c.ip.as_deref() == Some(ip.as_str())).count();
+            if joining >= MAX_JOINING_PER_IP {
+                println!("client {client}: refused ({joining} others from {ip} are still joining)");
+                self.kick(client, "Another player from your address is still joining: try again in a moment");
+                return;
+            }
         }
         let max = self.rules.max_players();
         if self.clients.values().filter(|c| c.approved).count() >= max {
@@ -480,6 +542,10 @@ impl Game {
     /// One batch from a client.
     pub fn receive(&mut self, client: u64, batch: &[u8]) {
         for (kind, body) in wire::messages(batch) {
+            // Kicked (refused at its request or PlayerReady, banned): nothing more counts.
+            if self.kicks.iter().any(|(c, _)| *c == client) {
+                return;
+            }
             if self.trace {
                 println!("trace client {client} -> {kind} {}", body.iter().map(|b| format!("{b:02x}")).collect::<String>());
             }
@@ -505,7 +571,16 @@ impl Game {
         if self.net.objects.get(&object).is_none_or(|o| o.owner != client) {
             return;
         }
-        if let Some(u) = crate::transform::update(body) {
+        let update = crate::transform::update(body);
+        // NaN or infinity: neither kept (the snapshot and save could not be read back) nor
+        // passed on; the next state moves the object on.
+        if update.as_ref().is_some_and(|u| !u.finite()) {
+            if self.unhandled.insert(format!("non-finite transform {client}")) {
+                eprintln!("client {client}: a transform that is not a number (NaN or infinity), dropped (logged once)");
+            }
+            return;
+        }
+        if let Some(u) = update.filter(|u| !u.local) {
             if let Some(o) = self.net.objects.get_mut(&u.object) {
                 u.apply(&mut o.position, &mut o.rotation);
                 let (position, rotation) = (o.position, o.rotation);
@@ -526,6 +601,32 @@ impl Game {
     }
 
     fn incoming_rpc(&mut self, client: u64, body: &[u8]) {
+        let Some(method) = rpc_method(body) else { return };
+        // Until PlayerReady (the name and whitelist checks) only what a loading client asks.
+        let loading = self.clients.get(&client).is_none_or(|c| c.ready.is_none());
+        if let Some(name) = self.net.spec.get(method).map(|r| r.name.as_str()).filter(|n| loading && !LOADING_RPCS.contains(n)) {
+            if self.unhandled.insert(format!("{name} before PlayerReady")) {
+                eprintln!("client {client}: {name} before PlayerReady, dropped (logged once)");
+            }
+            return;
+        }
+        if self.net.spec.get(method).is_some_and(|r| r.name == "ChatHandler.SendChatMessageServerRpc") && !self.limits.chat(client, self.time) {
+            return;
+        }
+        // A tick's work per client is bounded; the rest waits for the next ticks (tick()).
+        if !self.limits.spend(client, self.rpc_cost(body), body) {
+            return;
+        }
+        self.run_rpc(client, body);
+    }
+
+    /// The work of an RPC (handlers::rpc_cost).
+    fn rpc_cost(&self, body: &[u8]) -> u32 {
+        let name = rpc_method(body).and_then(|m| self.net.spec.get(m)).map(|r| r.name.as_str());
+        crate::handlers::rpc_cost(name.unwrap_or(""), self.wos.len())
+    }
+
+    fn run_rpc(&mut self, client: u64, body: &[u8]) {
         let mut r = Reader::new(body);
         let (Some(_sender), Some(object), Some(behaviour), Some(method)) = (r.packed_u64(), r.packed_u64(), r.packed_u16(), r.packed_u32()) else { return };
         if self.animator_relay(client, object, behaviour, method, r.rest()) {
@@ -609,6 +710,7 @@ impl Game {
 
     /// One tick of the simulation, then the variable deltas.
     pub fn tick(&mut self) {
+        crate::handlers::run_pending(self, |g, rpc| g.rpc_cost(rpc), |g, client, rpc| g.run_rpc(client, rpc));
         let clock = self.clock();
         let last = std::mem::replace(&mut self.last_clock, clock);
         let empty = self.rules.world.pause_when_empty && !self.clients.values().any(|c| c.ready.is_some());
@@ -865,6 +967,242 @@ pub mod tests {
         assert_eq!(w.position, [561.0, 3.0, 500.0]);
         let e = crate::transform::euler_angles(w.rotation);
         assert!((e[0] - 10.0).abs() < 0.01 && (e[1] - 20.0).abs() < 0.01 && (e[2] - 30.0).abs() < 0.01, "{e:?}");
+    }
+
+    /// Two sessions from one address may be joining at once; a third waits until one is in.
+    /// Loopback is exempt.
+    #[test]
+    fn at_most_two_clients_from_one_address_are_joining() {
+        let Some(mut g) = test_game(save()) else { return };
+        let request = |g: &Game| {
+            let data = format!("{}|0", g.net_data.game_version);
+            let mut w = Writer::new();
+            w.packed_i32(0).u64(0).i32(data.len() as i32).bytes(data.as_bytes());
+            w.0
+        };
+        for (client, ip) in [(1, "10.0.0.5"), (2, "10.0.0.5"), (3, "10.0.0.5"), (4, "10.0.0.6"), (5, "127.0.0.1"), (6, "127.0.0.1"), (7, "127.0.0.1")] {
+            g.connect(client, None, false, Some(ip.into()));
+            let r = request(&g);
+            g.approve(client, &r);
+        }
+        let approved: Vec<u64> = g.clients.values().filter(|c| c.approved).map(|c| c.id).collect();
+        assert_eq!(approved, [1, 2, 4, 5, 6, 7]);
+        assert_eq!(g.kicks.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [3]);
+        g.players_rpc(1, "PlayerMainController.PlayerReadyServerRpc", &Args(vec![json!(0), json!("Ann")]));
+        g.connect(8, None, false, Some("10.0.0.5".into()));
+        let r = request(&g);
+        g.approve(8, &r);
+        assert!(g.clients[&8].approved, "Ann is in: one joining from her address");
+    }
+
+    /// A dropped item's owner sends NaN: nothing changes, nothing is passed on, and the
+    /// snapshot still reads back.
+    #[test]
+    fn non_finite_transforms_are_dropped() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        join(&mut g, 2, "Bob");
+        let iron = g.create_world_object(g.data.group("Iron").unwrap(), 0, true);
+        g.drop_on_floor(iron, [560.0, 3.0, 500.0], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 0.0, false, 1);
+        let net = g.wos[&iron].net.unwrap();
+        g.net.out.clear();
+        for bad in [f32::NAN, f32::INFINITY] {
+            g.transform(1, &transform_message(net, 2 | 4 | 8, &[bad, 1.0, 2.0]));
+            g.transform(1, &transform_message(net, 32, &[bad]));
+        }
+        assert!(g.net.out.is_empty(), "not passed on");
+        assert_eq!((g.wos[&iron].position, g.net.objects[&net].position), ([560.0, 3.0, 500.0], [560.0, 3.0, 500.0]));
+        assert!(crate::handoff::snapshot(&g).is_ok());
+        g.transform(1, &transform_message(net, 2, &[561.0]));
+        assert_eq!(g.wos[&iron].position[0], 561.0);
+        assert_eq!(g.net.out.len(), 1);
+    }
+
+    /// A NetworkVariableDelta for `object`'s behaviour of `class`: `var` set to `bytes`.
+    pub fn delta(g: &Game, object: u64, class: &str, var: &str, bytes: &[u8]) -> Vec<u8> {
+        let b = g.net.objects[&object].behaviour(class).unwrap();
+        let mut w = Writer::new();
+        w.packed_u64(object).packed_u16(b.index).i32(4);
+        for v in &b.vars {
+            w.bool(v.name == var);
+            if v.name == var {
+                w.bytes(bytes);
+            }
+        }
+        w.0
+    }
+
+    /// A float variable the owner writes, as NaN or infinity: neither kept nor passed on.
+    #[test]
+    fn non_finite_owner_variables_are_dropped() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        let iron = g.create_world_object(g.data.group("Iron").unwrap(), 0, true);
+        g.drop_on_floor(iron, [560.0, 3.0, 500.0], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 0.0, false, 1);
+        let net = g.wos[&iron].net.unwrap();
+        let scale = |g: &Game| g.net.get(net, "GroupNetworkContainer", "_scale").cloned();
+        let before = scale(&g);
+        g.net.out.clear();
+        for bad in [f32::NAN, f32::NEG_INFINITY] {
+            let d = delta(&g, net, "GroupNetworkContainer", "_scale", &bad.to_le_bytes());
+            g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, d)]));
+        }
+        assert!(g.net.out.is_empty());
+        assert_eq!(format!("{:?}", scale(&g)), format!("{before:?}"));
+        let d = delta(&g, net, "GroupNetworkContainer", "_scale", &0.5f32.to_le_bytes());
+        g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, d)]));
+        assert!(matches!(scale(&g), Some(crate::net::VarValue::Plain(b)) if b == 0.5f32.to_le_bytes()));
+        assert_eq!(g.net.out.len(), 1, "passed on");
+    }
+
+    /// RPC floats come through JSON, which has no NaN or infinity: they read as 0.
+    #[test]
+    fn non_finite_rpc_floats_read_as_zero() {
+        let Some(g) = test_game(save()) else { return };
+        let name = "WorldObjectsHandler.HasWorldObjectAtPositionServerRpc";
+        let (method, mut body) = g.net.spec.encode(name, &[json!([1.0, 2.0, 3.0])]);
+        let at = body.len() - 12;
+        body.splice(at.., [f32::NAN, f32::INFINITY, 1.0].iter().flat_map(|f| f.to_le_bytes()));
+        assert_eq!(Args(g.net.spec.decode(method, &body).unwrap()).v3(0), [0.0, 0.0, 1.0]);
+    }
+
+    fn rpc_batch(g: &Game, client: u64, object: u64, name: &str, args: &[Value]) -> Vec<u8> {
+        let (method, body) = g.net.spec.encode(name, args);
+        let mut w = Writer::new();
+        w.packed_u64(client).packed_u64(object).packed_u16(0).packed_u32(method).bytes(&body);
+        wire::batch(&[(protocol::RPC, w.0)])
+    }
+
+    /// Before PlayerReady only what a loading client asks is answered; after it, everything.
+    /// A client refused at PlayerReady gets nothing more done, even in the same batch.
+    #[test]
+    fn rpcs_wait_for_player_ready_and_stop_at_a_kick() {
+        let Some(mut g) = test_game(save()) else { return };
+        let player = approve(&mut g, 1);
+        let chat = |g: &Game| rpc_batch(g, 1, 0, "ChatHandler.SendChatMessageServerRpc", &[json!("hi")]);
+        let chats = |g: &Game| g.net.out.iter().filter(|m| m.1 == protocol::CLIENT_RPC).count();
+        g.net.out.clear();
+        let b = chat(&g);
+        g.receive(1, &b);
+        assert_eq!(chats(&g), 0, "chat before PlayerReady is dropped");
+        let b = rpc_batch(&g, 1, 0, "WorldObjectsHandler.IsWorldObjectFromSceneActiveServerRpc", &[json!(208217122)]);
+        g.receive(1, &b);
+        assert_eq!(chats(&g), 1, "a loading query is answered");
+        g.net.out.clear();
+        let b = rpc_batch(&g, 1, player, "PlayerMainController.PlayerReadyServerRpc", &[json!(0), json!("Ann")]);
+        g.receive(1, &b);
+        g.net.out.clear();
+        let b = chat(&g);
+        g.receive(1, &b);
+        assert_eq!(chats(&g), 1, "a player chats");
+        // Mallory is banned by name: refused at PlayerReady, her chat in the same batch is not sent.
+        g.access.lists.banned_names = vec!["Mallory".into()];
+        let player = approve(&mut g, 2);
+        let mut both = wire::messages(&rpc_batch(&g, 2, player, "PlayerMainController.PlayerReadyServerRpc", &[json!(0), json!("Mallory")])).into_iter().map(|(k, b)| (k, b.to_vec())).collect::<Vec<_>>();
+        both.extend(wire::messages(&rpc_batch(&g, 2, 0, "ChatHandler.SendChatMessageServerRpc", &[json!("spam")])).into_iter().map(|(k, b)| (k, b.to_vec())));
+        g.net.out.clear();
+        g.receive(2, &wire::batch(&both));
+        assert!(g.kicks.iter().any(|(c, _)| *c == 2) && g.clients[&2].ready.is_none());
+        assert_eq!(chats(&g), 0);
+    }
+
+    /// A chat line is cut at MAX_CHAT characters; past the burst, messages wait for the rate.
+    #[test]
+    fn chat_has_a_length_and_a_rate() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        let said = |g: &mut Game, text: &str| {
+            g.net.out.clear();
+            let b = rpc_batch(g, 1, 0, "ChatHandler.SendChatMessageServerRpc", &[json!(text)]);
+            g.receive(1, &b);
+            g.net.out.iter().find(|m| m.1 == protocol::CLIENT_RPC).map(|m| {
+                let mut r = Reader::new(&m.2);
+                let (_, _, method) = (r.packed_u64(), r.packed_u16(), r.packed_u32().unwrap());
+                g.net.spec.decode(method, r.rest()).unwrap()[1].as_str().unwrap().chars().count()
+            })
+        };
+        assert_eq!(said(&mut g, &"x".repeat(5000)), Some(crate::handlers::MAX_CHAT));
+        for _ in 0..9 {
+            assert_eq!(said(&mut g, "hi"), Some(2));
+        }
+        assert_eq!(said(&mut g, "hi"), None, "the 11th at once");
+        g.time += 1.0;
+        assert_eq!(said(&mut g, "hi"), Some(2), "one a second after that");
+    }
+
+    /// 100 RPCs in one batch: 32 now, the rest in the next ticks, in order. A lookup over the
+    /// whole world costs by its size.
+    #[test]
+    fn a_tick_does_a_bounded_share_of_one_clients_rpcs() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        let one = wire::messages(&rpc_batch(&g, 1, 0, "WorldObjectsHandler.IsWorldObjectFromSceneActiveServerRpc", &[json!(208217122)])).into_iter().map(|(k, b)| (k, b.to_vec())).next().unwrap();
+        let answers = |g: &mut Game| {
+            let n = g.net.out.iter().filter(|m| m.1 == protocol::CLIENT_RPC && m.0 == Target::Only(1)).count();
+            g.net.out.clear();
+            n
+        };
+        g.net.out.clear();
+        g.receive(1, &wire::batch(&vec![one; 100]));
+        assert_eq!(answers(&mut g), 32);
+        let run = |g: &mut Game| crate::handlers::run_pending(g, |g, rpc| g.rpc_cost(rpc), |g, client, rpc| g.run_rpc(client, rpc));
+        for n in [32, 32, 4, 0] {
+            run(&mut g);
+            assert_eq!(answers(&mut g), n);
+        }
+        assert_eq!(crate::handlers::rpc_cost("WorldObjectsHandler.HasWorldObjectAtPositionServerRpc", 50_000), 49);
+    }
+
+    /// A whitelist of SteamIDs only: who is not on it never gets the world.
+    #[test]
+    fn a_steam_id_whitelist_is_checked_before_the_world_goes_out() {
+        let Some(mut g) = test_game(save()) else { return };
+        let listed = crate::players::FIRST_STEAM_ID + 42;
+        g.access.lists.whitelist = vec![listed.to_string()];
+        let request = |g: &Game| {
+            let data = format!("{}|0", g.net_data.game_version);
+            let mut w = Writer::new();
+            w.packed_i32(0).u64(0).i32(data.len() as i32).bytes(data.as_bytes());
+            w.0
+        };
+        for (client, steam) in [(1, Some(listed)), (2, Some(listed + 1)), (3, None)] {
+            g.connect(client, steam, false, None);
+            let r = request(&g);
+            g.approve(client, &r);
+        }
+        assert_eq!(g.kicks.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [2, 3]);
+        assert!(g.clients[&1].approved && !g.clients[&2].approved);
+        // With a name on it, everyone gets in to be checked at PlayerReady.
+        g.access.lists.whitelist.push("Ann".into());
+        g.connect(4, None, false, None);
+        let r = request(&g);
+        g.approve(4, &r);
+        assert!(g.clients[&4].approved);
+    }
+
+    /// The owner writes its emote, not its health maximum or dying state (the server's).
+    #[test]
+    fn owners_write_only_the_variables_the_game_lets_them() {
+        let Some(mut g) = test_game(save()) else { return };
+        let player = join(&mut g, 1, "Ann");
+        let bob = join(&mut g, 2, "Bob");
+        let var = |g: &Game, class: &str, name: &str| format!("{:?}", g.net.get(player, class, name));
+        let before = (var(&g, "PlayerGaugesHandler", "_healthMaxValue"), var(&g, "PlayerStatus", "_isDying"));
+        g.net.out.clear();
+        for (class, name, bytes) in [("PlayerGaugesHandler", "_healthMaxValue", 1000f32.to_le_bytes().to_vec()), ("PlayerStatus", "_isDying", vec![1])] {
+            let d = delta(&g, player, class, name, &bytes);
+            g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, d)]));
+        }
+        assert_eq!((var(&g, "PlayerGaugesHandler", "_healthMaxValue"), var(&g, "PlayerStatus", "_isDying")), before);
+        assert!(g.net.out.is_empty(), "nothing passed on");
+        let d = delta(&g, player, "PlayerShareState", "_emote", &crate::net::enc::short(3));
+        g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, d.clone())]));
+        assert_eq!(var(&g, "PlayerShareState", "_emote"), format!("{:?}", Some(crate::net::VarValue::Plain(crate::net::enc::short(3)))));
+        assert!(matches!(&g.net.out[..], [(Target::Except(1), NETWORK_VARIABLE_DELTA, body)] if *body == d));
+        g.net.out.clear();
+        let d = delta(&g, bob, "PlayerShareState", "_emote", &crate::net::enc::short(3));
+        g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, d)]));
+        assert!(g.net.out.is_empty(), "not the owner");
     }
 
     #[test]

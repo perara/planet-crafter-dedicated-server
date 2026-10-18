@@ -22,22 +22,24 @@ pub struct Update {
     pub euler: [Option<f32>; 3],
     /// The full rotation when the transform syncs quaternions (uncompressed).
     pub quaternion: Option<[f32; 4]>,
+    /// Relative to the parent: read (to be checked), not applied.
+    pub local: bool,
 }
 
-/// The update a message carries; None for half-float or local-space states (not decoded).
+/// The update a message carries; None for half-float states (not decoded).
 pub fn update(body: &[u8]) -> Option<Update> {
     let mut r = Reader::new(body);
     let object = r.packed_u64()?;
     r.packed_i32()?;
     let flags = r.packed_u32()?;
     r.packed_i32()?;
-    if flags & (HALF_FLOATS | IN_LOCAL_SPACE) != 0 {
+    if flags & HALF_FLOATS != 0 {
         return None;
     }
     if flags & TRACK_STATE_ID != 0 {
         r.u32()?;
     }
-    let mut u = Update { object, ..Default::default() };
+    let mut u = Update { object, local: flags & IN_LOCAL_SPACE != 0, ..Default::default() };
     for (i, axis) in POSITION_AXES.iter().enumerate() {
         if flags & axis != 0 {
             u.position[i] = Some(r.f32()?);
@@ -69,6 +71,11 @@ pub fn position_rotation(body: &[u8]) -> Option<(u64, [f32; 3], Option<[f32; 4]>
 }
 
 impl Update {
+    /// Every value it carries is a number (NaN or infinity would end up in the save).
+    pub fn finite(&self) -> bool {
+        self.position.iter().chain(&self.euler).flatten().chain(self.quaternion.iter().flatten()).all(|v| v.is_finite())
+    }
+
     /// NetworkTransform.ApplyUpdatedState: present axes replace the last state's; Euler angles
     /// merge on the current rotation's eulerAngles.
     pub fn apply(&self, position: &mut [f32; 3], rotation: &mut [f32; 4]) {
@@ -151,8 +158,20 @@ mod tests {
         let r = from_euler([0.0, 45.0, 0.0]);
         let u = update(&message(QUATERNION_SYNC | 16 | 32 | 64, &r)).unwrap();
         assert_eq!(u.quaternion, Some(r));
-        // Half floats are not decoded.
+        // Half floats are not decoded; local-space states are, only to be checked.
         assert!(update(&message(HALF_FLOATS | 2, &[1.0])).is_none());
+        assert!(update(&message(IN_LOCAL_SPACE | 2, &[1.0])).unwrap().local);
+    }
+
+    #[test]
+    fn states_with_nan_or_infinity_are_not_finite() {
+        assert!(update(&message(2 | 4 | 8, &[1.0, 2.0, 3.0])).unwrap().finite());
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(!update(&message(4, &[bad])).unwrap().finite());
+            assert!(!update(&message(32, &[bad])).unwrap().finite());
+            assert!(!update(&message(QUATERNION_SYNC | 16 | 32 | 64, &[0.0, bad, 0.0, 1.0])).unwrap().finite());
+            assert!(!update(&message(IN_LOCAL_SPACE | 2, &[bad])).unwrap().finite());
+        }
     }
 
     #[test]

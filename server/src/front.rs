@@ -35,7 +35,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use steamworks::networking_sockets::{ListenSocket, NetConnection};
-use steamworks::networking_types::{ListenSocketEvent, SendFlags};
+use steamworks::networking_types::{AppNetConnectionEnd, ListenSocketEvent, NetConnectionEnd, NetworkingConfigEntry, NetworkingConfigValue, SendFlags};
 use steamworks::{Server, ServerMode, SteamServersConnected};
 
 use crate::admin;
@@ -48,6 +48,10 @@ use crate::utp::{self, Utp};
 const APP_ID: &str = "1284190";
 /// The game's Steam transport splits messages above this size (see GameServerSockets.cs).
 const CHUNK: usize = 524_288;
+/// The game's Steam transport's receive buffer (SteamNetworkingSocketsTransport: 2621440).
+const MAX_STEAM_MESSAGE: usize = 5 * CHUNK;
+/// Steam's send buffer per connection: several joins' worth.
+const SEND_BUFFER: i32 = 32 << 20;
 /// The most a client's "Split" message may add up to (two of the game's chunks).
 const MAX_SPLIT: usize = 1 << 20;
 /// A client's frames waiting for the bank (a stalled or flipping world) past this: the client
@@ -76,7 +80,7 @@ const STOPPED: &str = "The world is stopped: join again later";
 
 enum Conn {
     /// Steam networking: the connection carries the verified SteamID.
-    Steam { steam_id: u64, connection: NetConnection, split: Option<(Vec<u8>, usize)> },
+    Steam { connection: NetConnection, split: Option<(Vec<u8>, usize)> },
     Ip(utp::Token),
 }
 
@@ -113,6 +117,8 @@ struct Flip {
     /// HANDOFF sent: the world stands from here.
     stopped: Option<Instant>,
     snapshot: Value,
+    /// Its snapshot: the last one (last_snapshot) once the new bank restored it and said READY.
+    kept: Option<(OwnedFd, SystemTime)>,
 }
 
 enum UpdateDone {
@@ -555,20 +561,25 @@ impl Front {
                 }
                 ListenSocketEvent::Connected(event) => {
                     let steam_id = event.remote().steam_id().map(|id| id.raw()).unwrap_or(0);
-                    joined.push((steam_id, event.take_connection()));
+                    let client = self.next_client;
+                    self.next_client += 1;
+                    // Its disconnect names the connection by this (not by SteamID: the same
+                    // player may have an old connection still closing).
+                    let connection = event.take_connection();
+                    let _ = connection.set_connection_user_data(client as i64);
+                    joined.push((client, steam_id, connection));
                 }
                 ListenSocketEvent::Disconnected(event) => {
                     let peer = event.remote().steam_id().map(|id| id.raw()).unwrap_or(0);
                     println!("{peer}: disconnected ({:?})", event.end_reason());
-                    gone.extend(self.conns.iter().filter(|(_, c)| matches!(c, Conn::Steam { steam_id, .. } if *steam_id == peer)).map(|(c, _)| *c));
+                    let fresh: Vec<(u64, u64)> = joined.iter().map(|(c, s, _)| (*c, *s)).collect();
+                    gone.extend(disconnected(event.user_data(), peer, &fresh));
                 }
             }
         }
-        for (steam_id, connection) in joined {
-            let client = self.next_client;
-            self.next_client += 1;
+        for (client, steam_id, connection) in joined {
             println!("client {client}: connected over Steam as {steam_id}");
-            self.conns.insert(client, Conn::Steam { steam_id, connection, split: None });
+            self.conns.insert(client, Conn::Steam { connection, split: None });
             self.to_bank(ipc::CONNECTED, client, json!({"steamId": steam_id, "trusted": false}).to_string().as_bytes(), 0);
         }
         for (client, conn) in self.conns.iter_mut() {
@@ -607,8 +618,7 @@ impl Front {
                     println!("client {client}: connected from {addr}");
                     self.ip_clients.insert(token, client);
                     self.conns.insert(client, Conn::Ip(token));
-                    // The SteamID a direct-IP client reports is only believed from this machine.
-                    let c = json!({"ip": addr.ip().to_string(), "trusted": addr.ip().is_loopback()});
+                    let c = json!({"ip": addr.ip().to_string(), "trusted": trusted(addr.ip(), crate::env("PCDS_TRUST_LOOPBACK").as_deref() == Some("1"))});
                     self.to_bank(ipc::CONNECTED, client, c.to_string().as_bytes(), 0);
                 }
                 utp::Event::Data(token, batch) => {
@@ -649,12 +659,14 @@ impl Front {
     /// Closes a connection from this side.
     fn close(&mut self, client: u64) {
         match self.conns.remove(&client) {
-            Some(Conn::Steam { connection, .. }) => drop(connection),
+            // Lingering: what was sent (a kick's reason) is delivered before the close.
+            Some(Conn::Steam { connection, .. }) => {
+                connection.close(NetConnectionEnd::App(AppNetConnectionEnd::generic_normal()), Some("closed by the server"), true);
+            }
             Some(Conn::Ip(token)) => {
                 self.ip_clients.remove(&token);
                 if let Some(utp) = self.utp.as_mut() {
-                    utp.flush();
-                    utp.disconnect(&token);
+                    utp.close(&token);
                 }
             }
             None => return,
@@ -667,7 +679,12 @@ impl Front {
         BYTES_OUT.fetch_add(batch.len() as u64, Ordering::Relaxed);
         match self.conns.get(&client) {
             Some(Conn::Steam { connection, .. }) => {
-                send(connection, batch);
+                // A batch it got only part of would be garbage to it: the client goes, loudly.
+                if let Err(e) = send(connection, batch) {
+                    eprintln!("client {client}: {e}; dropped");
+                    self.kicked.insert(client);
+                    self.close(client);
+                }
                 false
             }
             Some(Conn::Ip(token)) => {
@@ -812,8 +829,8 @@ impl Front {
                 Some(fd) => {
                     if let Some(flip) = self.flip.as_mut() {
                         flip.snapshot = serde_json::from_slice(&f.body).unwrap_or_default();
+                        flip.kept = fd.try_clone().ok().map(|d| (d, SystemTime::now()));
                     }
-                    self.last_snapshot = fd.try_clone().ok().map(|d| (d, SystemTime::now()));
                     if let Some(n) = self.next.as_mut() {
                         n.link.queue(ipc::RESTORE, 0, b"{\"recover\":false}", Some(fd), 0);
                     }
@@ -909,7 +926,11 @@ impl Front {
             println!("bank {to} (pid {}) runs the world again", self.live.as_ref().map_or(0, |b| b.child.id()));
             return;
         }
-        let Some(flip) = self.flip.take() else { return };
+        let Some(mut flip) = self.flip.take() else { return };
+        // Restored, so a crash restarts from it (one that failed to restore must not be).
+        if let Some(kept) = flip.kept.take() {
+            self.last_snapshot = Some(kept);
+        }
         let stood = flip.stopped.map(|t| t.elapsed()).unwrap_or_default();
         self.flips += 1;
         let verified = match ready["verified"].as_bool() {
@@ -974,7 +995,7 @@ impl Front {
         println!("flip to bank {bank} ({reason}): pid {} loading", b.child.id());
         self.next = Some(b);
         self.phase = Phase::Starting;
-        self.flip = Some(Flip { seq, reason: reason.to_string(), stopped: None, snapshot: Value::Null });
+        self.flip = Some(Flip { seq, reason: reason.to_string(), stopped: None, snapshot: Value::Null, kept: None });
         self.updates.busy = Some((seq, format!("flipping to bank {bank}")));
         Ok(())
     }
@@ -1521,6 +1542,23 @@ impl Front {
     }
 }
 
+/// The client a Steam disconnect is about: the one whose connection carries its id; one that
+/// closed before its id was set (connected and gone within one poll) is the one of that
+/// SteamID that connected in this poll.
+fn disconnected(user_data: i64, peer: u64, joined_now: &[(u64, u64)]) -> Vec<u64> {
+    match u64::try_from(user_data).ok().filter(|c| *c > 0) {
+        Some(client) => vec![client],
+        None => joined_now.iter().filter(|(_, s)| *s == peer).map(|(c, _)| *c).collect(),
+    }
+}
+
+/// Whether the SteamID a direct-IP client reports is believed: only from this machine, and
+/// only when asked (PCDS_TRUST_LOOPBACK=1: tests, the load and probe tools). Behind a UDP
+/// relay (playit.gg, frp, ssh -R) every player comes from 127.0.0.1.
+fn trusted(ip: std::net::IpAddr, opted_in: bool) -> bool {
+    opted_in && utp::is_loopback(ip)
+}
+
 /// An update's work on a thread of its own, whose outcome always comes: a panic in it is a
 /// Failed one, so the update is never busy for ever.
 fn answer_on_thread(tx: Sender<UpdateDone>, seq: u64, work: impl FnOnce() -> Result<UpdateDone, String> + Send + 'static) {
@@ -1640,24 +1678,59 @@ fn steam_login(version: &str, session_number: u32) -> Result<(Server, ListenSock
         std::thread::sleep(Duration::from_millis(50));
     }
     drop(client);
-    let listen = steam.networking_sockets().create_listen_socket_p2p(0, None).map_err(|_| "P2P listen socket failed")?;
+    // Room for the largest join queued at once (the default is 512 KiB); connections take it
+    // from the listen socket.
+    let buffer = NetworkingConfigEntry::new_int32(NetworkingConfigValue::SendBufferSize, SEND_BUFFER);
+    let listen = steam.networking_sockets().create_listen_socket_p2p(0, [buffer]).map_err(|_| "P2P listen socket failed")?;
     let steam_id = steam.steam_id().raw();
     let code = format!("{}{:04}", crate::protocol::invite_code(steam_id), session_number);
     println!("steam: game server {steam_id}, invite code {code}");
     Ok((steam, listen, code))
 }
 
-/// The game's Steam transport frames batches over 512 KiB as "Split<n>" plus n chunks.
-fn send(connection: &NetConnection, batch: &[u8]) {
-    if batch.len() <= CHUNK {
-        let _ = connection.send_message(batch, SendFlags::RELIABLE);
-        return;
+/// The game's Steam transport frames batches over 512 KiB as "Split<n>" plus n chunks. Its
+/// receive buffer holds MAX_STEAM_MESSAGE, and it reads n as one digit: bigger batches go as
+/// several, split between messages. Err when Steam refuses a send (the client then has part
+/// of a batch) or one message is too big for the game.
+fn send(connection: &NetConnection, batch: &[u8]) -> Result<(), String> {
+    for part in steam_parts(batch)? {
+        let refused = |e| format!("Steam refused a send of {} bytes ({e:?})", part.len());
+        if part.len() <= CHUNK {
+            connection.send_message(&part, SendFlags::RELIABLE).map_err(refused)?;
+            continue;
+        }
+        let chunks: Vec<&[u8]> = part.chunks(CHUNK).collect();
+        connection.send_message(format!("Split{}", chunks.len()).as_bytes(), SendFlags::RELIABLE).map_err(refused)?;
+        for c in chunks {
+            connection.send_message(c, SendFlags::RELIABLE).map_err(refused)?;
+        }
     }
-    let chunks: Vec<&[u8]> = batch.chunks(CHUNK).collect();
-    let _ = connection.send_message(format!("Split{}", chunks.len()).as_bytes(), SendFlags::RELIABLE);
-    chunks.iter().for_each(|c| {
-        let _ = connection.send_message(c, SendFlags::RELIABLE);
-    });
+    Ok(())
+}
+
+/// A batch as batches the game's Steam transport takes (each at most MAX_STEAM_MESSAGE).
+fn steam_parts(batch: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    if batch.len() <= MAX_STEAM_MESSAGE {
+        return Ok(vec![batch.to_vec()]);
+    }
+    let (mut parts, mut part, mut size) = (Vec::new(), crate::wire::Batch::default(), 16);
+    for (kind, body) in crate::wire::messages(batch) {
+        // The message's kind and length are at most 5 bytes each.
+        let n = body.len() + 10;
+        if 16 + n > MAX_STEAM_MESSAGE {
+            return Err(format!("a message of {} bytes (type {kind}), and the game's Steam transport takes at most {MAX_STEAM_MESSAGE} at once: this world can be joined over direct IP only", body.len()));
+        }
+        if size + n > MAX_STEAM_MESSAGE {
+            parts.push(std::mem::take(&mut part).finish());
+            size = 16;
+        }
+        part.push(kind, body);
+        size += n;
+    }
+    if !part.is_empty() {
+        parts.push(part.finish());
+    }
+    Ok(parts)
 }
 
 /// A client's messages back into batches. Err for a split the game never sends (a count other
@@ -1731,7 +1804,7 @@ mod tests {
         front.live = Some(live);
         front.next = Some(next);
         front.phase = Phase::Starting;
-        front.flip = Some(Flip { seq: 2, reason: "test".into(), stopped: None, snapshot: Value::Null });
+        front.flip = Some(Flip { seq: 2, reason: "test".into(), stopped: None, snapshot: Value::Null, kept: None });
         front.on_next(Frame { kind: ipc::HELLO, n: ipc::PROTOCOL, body: br#"{"format":1,"reads":[0,1]}"#.to_vec(), fd: None });
         assert_eq!(front.phase, Phase::Snapshotting);
         let handoff = old.recv().unwrap();
@@ -1747,8 +1820,12 @@ mod tests {
         front.flush_banks();
         let restore = new.recv().unwrap();
         assert_eq!((restore.kind, ipc::read_memfd(restore.fd.as_ref().unwrap()).unwrap()), (ipc::RESTORE, b"flip 2".to_vec()));
-        for b in [front.live.take(), front.next.take()].into_iter().flatten() {
-            let mut child = b.child;
+        // A crash restarts from it only once the new bank restored it.
+        assert!(front.last_snapshot.is_none());
+        front.on_next(Frame { kind: ipc::READY, n: 0, body: b"{}".to_vec(), fd: None });
+        assert_eq!(front.last_snapshot.as_ref().map(|(fd, _)| ipc::read_memfd(fd).unwrap()), Some(b"flip 2".to_vec()));
+        let exiting = front.exiting.drain(..).map(|(c, _)| c);
+        for mut child in [front.live.take(), front.next.take()].into_iter().flatten().map(|b| b.child).chain(exiting) {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -1771,6 +1848,38 @@ mod tests {
             assert_eq!(e, format!("chat config unreadable at {field}"));
         }
         assert_eq!(chat_config(b"{\"secret\": \"t0psecret").unwrap_err(), "chat config unreadable (not JSON)");
+    }
+
+    #[test]
+    fn a_steam_disconnect_names_its_connection_not_the_steam_id() {
+        // Client 3 is the same player's new connection: the old one's close is client 2's.
+        assert_eq!(disconnected(2, 76561198000000042, &[(3, 76561198000000042)]), [2]);
+        assert_eq!(disconnected(-1, 76561198000000042, &[(3, 76561198000000042), (4, 1)]), [3]);
+        assert!(disconnected(-1, 5, &[]).is_empty());
+    }
+
+    #[test]
+    fn loopback_is_trusted_only_when_asked() {
+        let local = "127.0.0.1".parse().unwrap();
+        assert!(!trusted(local, false), "a relay's players all come from 127.0.0.1");
+        assert!(trusted(local, true) && trusted("::ffff:127.0.0.1".parse().unwrap(), true));
+        assert!(!trusted("10.0.0.2".parse().unwrap(), true));
+    }
+
+    /// Batches past the game's 2.5 MiB go as several, split between messages, so "Split" never
+    /// needs two digits; one message over it is an error, not garbage.
+    #[test]
+    fn steam_batches_fit_the_games_transport() {
+        let small = crate::wire::batch(&[(1, vec![7; 100])]);
+        assert_eq!(steam_parts(&small).unwrap(), [small.clone()]);
+        let big = crate::wire::batch(&[(1, vec![1; 1 << 20]), (2, vec![2; 1 << 20]), (3, vec![3; 1 << 20]), (4, vec![4; 10])]);
+        let parts = steam_parts(&big).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(parts.iter().all(|p| p.len() <= MAX_STEAM_MESSAGE && p.len().div_ceil(CHUNK) <= 9));
+        let back: Vec<(u32, Vec<u8>)> = parts.iter().flat_map(|p| crate::wire::messages(p).into_iter().map(|(k, b)| (k, b.to_vec())).collect::<Vec<_>>()).collect();
+        assert_eq!(back, crate::wire::messages(&big).into_iter().map(|(k, b)| (k, b.to_vec())).collect::<Vec<_>>());
+        let world = crate::wire::batch(&[(1, vec![0; 3 << 20])]);
+        assert!(steam_parts(&world).unwrap_err().contains("direct IP"));
     }
 
     #[test]
