@@ -191,7 +191,10 @@ docker exec pcds pcds players | rules | gui
 ```
 
 The admin page listens on port 7782 inside the container; publish it on 127.0.0.1 only, as
-above. `PUID`/`PGID` (default 1000) set who owns `data/` on the host. On the first start without
+above. The image's health check asks the admin API for the server's status (`docker ps` shows
+it healthy once the world runs), so it needs `PCDS_ADMIN` on, as it is by default.
+`--stop-timeout 90` gives the server time to save the world at `docker stop` (Docker's default
+of 10 s would kill it during the save); Compose has `stop_grace_period: 90s`. `PUID`/`PGID` (default 1000) set who owns `data/` on the host. On the first start without
 a world, the newest save in `data/worlds/` runs, or a new world is made (`PCDS_NEW_WORLD`, for
 example `--planet Aqualis`, chooses its options). [compose.yaml](compose.yaml) does the same with
 `docker compose up -d`.
