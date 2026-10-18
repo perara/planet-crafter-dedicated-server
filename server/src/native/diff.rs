@@ -82,7 +82,7 @@ pub fn run(args: &[String]) {
     };
     let only = args.get(2).map(String::as_str);
     let show = std::env::var("PCDS_DIFF_SHOW").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
-    let mut files = vec!["gamedata.json".to_string(), "netdata.json".to_string(), "rpcs.json".to_string()];
+    let mut files = vec!["gamedata.json".to_string(), "netdata.json".to_string(), "rpcs.json".to_string(), "wrecks.json".to_string()];
     let mut scenes: Vec<String> = std::fs::read_dir(format!("{expected}/scenes")).into_iter().flatten().flatten().map(|e| format!("scenes/{}", e.file_name().to_string_lossy())).collect();
     scenes.sort();
     files.extend(scenes);

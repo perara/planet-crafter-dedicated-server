@@ -13,6 +13,11 @@ use super::serial::Raw;
 struct Op {
     code: u16,
     arg: i64,
+    /// Byte offset of the instruction, and of the next one (branch targets count from it).
+    at: usize,
+    end: usize,
+    /// switch: its targets' offsets.
+    targets: Vec<usize>,
 }
 
 /// Operand size of an opcode (ECMA-335 III); None for unknown opcodes.
@@ -34,6 +39,7 @@ fn decode(il: &[u8]) -> Result<Vec<Op>, String> {
     let mut out = Vec::new();
     let mut at = 0;
     while at < il.len() {
+        let start = at;
         let mut code = il[at] as u16;
         at += 1;
         if code == 0xFE {
@@ -52,11 +58,15 @@ fn decode(il: &[u8]) -> Result<Vec<Op>, String> {
             4 => i32::from_le_bytes(b[..4].try_into().unwrap()) as i64,
             _ => i64::from_le_bytes(b),
         };
+        let mut raw = Vec::new();
         if code == 0x45 {
             // switch: the count, then that many 4-byte targets.
-            at += 4 * arg as u32 as usize;
+            for _ in 0..arg as u32 {
+                raw.push(i32::from_le_bytes(il.get(at..at + 4).ok_or("truncated IL")?.try_into().unwrap()));
+                at += 4;
+            }
         }
-        out.push(Op { code, arg });
+        out.push(Op { code, arg, at: start, end: at, targets: raw.iter().map(|t| (at as i64 + *t as i64) as usize).collect() });
     }
     Ok(out)
 }
@@ -171,10 +181,85 @@ fn initializers(asm: &Assembly, il: &[u8]) -> Result<Vec<(String, Val)>, String>
     Ok(out)
 }
 
-/// Debug: an IL body as opcode, operand and the member or string it names.
+/// ECMA-335 III opcode names.
+fn mnemonic(code: u16) -> &'static str {
+    const ONE: [&str; 0xE1] = [
+        "nop", "break", "ldarg.0", "ldarg.1", "ldarg.2", "ldarg.3", "ldloc.0", "ldloc.1", "ldloc.2", "ldloc.3", "stloc.0", "stloc.1", "stloc.2", "stloc.3", "ldarg.s", "ldarga.s",
+        "starg.s", "ldloc.s", "ldloca.s", "stloc.s", "ldnull", "ldc.i4.m1", "ldc.i4.0", "ldc.i4.1", "ldc.i4.2", "ldc.i4.3", "ldc.i4.4", "ldc.i4.5", "ldc.i4.6", "ldc.i4.7", "ldc.i4.8", "ldc.i4.s",
+        "ldc.i4", "ldc.i8", "ldc.r4", "ldc.r8", "?", "dup", "pop", "jmp", "call", "calli", "ret", "br.s", "brfalse.s", "brtrue.s", "beq.s", "bge.s",
+        "bgt.s", "ble.s", "blt.s", "bne.un.s", "bge.un.s", "bgt.un.s", "ble.un.s", "blt.un.s", "br", "brfalse", "brtrue", "beq", "bge", "bgt", "ble", "blt",
+        "bne.un", "bge.un", "bgt.un", "ble.un", "blt.un", "switch", "ldind.i1", "ldind.u1", "ldind.i2", "ldind.u2", "ldind.i4", "ldind.u4", "ldind.i8", "ldind.i", "ldind.r4", "ldind.r8",
+        "ldind.ref", "stind.ref", "stind.i1", "stind.i2", "stind.i4", "stind.i8", "stind.r4", "stind.r8", "add", "sub", "mul", "div", "div.un", "rem", "rem.un", "and",
+        "or", "xor", "shl", "shr", "shr.un", "neg", "not", "conv.i1", "conv.i2", "conv.i4", "conv.i8", "conv.r4", "conv.r8", "conv.u4", "conv.u8", "callvirt",
+        "cpobj", "ldobj", "ldstr", "newobj", "castclass", "isinst", "conv.r.un", "?", "?", "unbox", "throw", "ldfld", "ldflda", "stfld", "ldsfld", "ldsflda",
+        "stsfld", "stobj", "conv.ovf.i1.un", "conv.ovf.i2.un", "conv.ovf.i4.un", "conv.ovf.i8.un", "conv.ovf.u1.un", "conv.ovf.u2.un", "conv.ovf.u4.un", "conv.ovf.u8.un", "conv.ovf.i.un", "conv.ovf.u.un", "box", "newarr", "ldlen", "ldelema",
+        "ldelem.i1", "ldelem.u1", "ldelem.i2", "ldelem.u2", "ldelem.i4", "ldelem.u4", "ldelem.i8", "ldelem.i", "ldelem.r4", "ldelem.r8", "ldelem.ref", "stelem.i", "stelem.i1", "stelem.i2", "stelem.i4", "stelem.i8",
+        "stelem.r4", "stelem.r8", "stelem.ref", "ldelem", "stelem", "unbox.any", "?", "?", "?", "?", "?", "?", "?", "?", "?", "?",
+        "?", "?", "?", "conv.ovf.i1", "conv.ovf.u1", "conv.ovf.i2", "conv.ovf.u2", "conv.ovf.i4", "conv.ovf.u4", "conv.ovf.i8", "conv.ovf.u8", "?", "?", "?", "?", "?",
+        "?", "?", "refanyval", "ckfinite", "?", "?", "mkrefany", "?", "?", "?", "?", "?", "?", "?", "?", "?",
+        "ldtoken", "conv.u2", "conv.u1", "conv.i", "conv.ovf.i", "conv.ovf.u", "add.ovf", "add.ovf.un", "mul.ovf", "mul.ovf.un", "sub.ovf", "sub.ovf.un", "endfinally", "leave", "leave.s", "stind.i",
+        "conv.u",
+    ];
+    const TWO: [&str; 0x1F] = [
+        "arglist", "ceq", "cgt", "cgt.un", "clt", "clt.un", "ldftn", "ldvirtftn", "?", "ldarg", "ldarga", "starg", "ldloc", "ldloca", "stloc", "localloc",
+        "?", "endfilter", "unaligned.", "volatile.", "tail.", "initobj", "constrained.", "cpblk", "initblk", "no.", "rethrow", "?", "sizeof", "refanytype", "readonly.",
+    ];
+    match code {
+        0..=0xE0 => ONE[code as usize],
+        0xFE00..=0xFE1E => TWO[(code - 0xFE00) as usize],
+        _ => "?",
+    }
+}
+
+/// A type without its assembly: Namespace.Name, generic arguments in <>.
+pub fn type_text(sig: &TypeSig) -> String {
+    match sig {
+        TypeSig::Class(t) | TypeSig::ValueType(t) => t.full(),
+        TypeSig::GenericInst { ty, args, .. } => format!("{}<{}>", ty.full(), args.iter().map(type_text).collect::<Vec<_>>().join(",")),
+        TypeSig::SzArray(e) => format!("{}[]", type_text(e)),
+        TypeSig::Var(n) => format!("!{n}"),
+        TypeSig::MVar(n) => format!("!!{n}"),
+        TypeSig::ByRef(e) => format!("{}&", type_text(e)),
+        TypeSig::Array(e, r) => format!("{}[{}]", type_text(e), ",".repeat(*r as usize - 1)),
+        TypeSig::Ptr(e) => format!("{}*", type_text(e)),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Debug: an IL body, one instruction a line: offset, opcode name, operand (branch targets as
+/// offsets, members and strings by name).
 pub fn disassemble(asm: &Assembly, il: &[u8]) -> Vec<String> {
-    let ops = decode(il).unwrap_or_default();
-    ops.iter().map(|op| format!("{:#06x} {:#x} {}", op.code, op.arg, asm.member(op.arg as u32).map(|m| format!("{m:?}")).or_else(|| asm.user_string(op.arg as u32).map(|s| format!("{s:?}"))).unwrap_or_default())).collect()
+    let ops = decode(il).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        Vec::new()
+    });
+    ops.iter()
+        .map(|op| {
+            let operand = match op.code {
+                0x2B..=0x37 | 0x38..=0x44 | 0xDD | 0xDE => format!("IL_{:04x}", (op.end as i64 + op.arg) as usize),
+                0x45 => op.targets.iter().map(|t| format!("IL_{t:04x}")).collect::<Vec<_>>().join(","),
+                0x22 => format!("{}", f32::from_bits(op.arg as u32)),
+                0x23 => format!("{}", f64::from_bits(op.arg as u64)),
+                0x72 => format!("{:?}", asm.user_string(op.arg as u32).unwrap_or_default()),
+                _ if op.end - op.at > 1 + (op.code > 0xFF) as usize => match asm.member(op.arg as u32) {
+                    Some(Member::Method { owner, name, params, generic, .. }) => {
+                        let g = if generic.is_empty() { String::new() } else { format!("<{}>", generic.iter().map(type_text).collect::<Vec<_>>().join(",")) };
+                        format!("{}::{name}{g}({})", type_text(&owner), params.iter().map(type_text).collect::<Vec<_>>().join(","))
+                    }
+                    Some(Member::Field { owner, name }) => format!("{}::{name}", type_text(&owner)),
+                    None => asm.type_token(op.arg as u32).map(|t| type_text(&t)).unwrap_or_else(|| format!("{:#x}", op.arg)),
+                },
+                _ => String::new(),
+            };
+            format!("IL_{:04x}: {} {operand}", op.at, mnemonic(op.code))
+        })
+        .collect()
+}
+
+/// The methods an IL body calls, creates or takes the address of (call, callvirt, newobj,
+/// ldftn, ldvirtftn), with the opcode.
+pub fn calls(asm: &Assembly, il: &[u8]) -> Vec<(u16, Member)> {
+    decode(il).unwrap_or_default().iter().filter(|op| matches!(op.code, 0x28 | 0x6F | 0x73 | 0xFE06 | 0xFE07)).filter_map(|op| Some((op.code, asm.member(op.arg as u32)?))).collect()
 }
 
 /// The fields a class's constructor or Awake sets to a new, empty collection (List, Dictionary,

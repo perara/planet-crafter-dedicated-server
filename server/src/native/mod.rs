@@ -7,5 +7,7 @@ pub mod panels;
 pub mod rpcs;
 pub mod serial;
 pub mod tables;
+pub mod tessera;
 pub mod typetree;
 pub mod unity;
+pub mod wrecks;

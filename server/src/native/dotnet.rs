@@ -221,6 +221,44 @@ impl Assembly {
         }
     }
 
+    /// A type token's type (TypeDef, TypeRef, TypeSpec): newarr, box, castclass, ldtoken, ...
+    pub fn type_token(&self, token: u32) -> Option<TypeSig> {
+        let table = (token >> 24) as usize;
+        matches!(table, TYPE_DEF | TYPE_REF | TYPE_SPEC).then(|| self.type_sig((table, token & 0xFF_FFFF))).flatten()
+    }
+
+    /// A method body's local variable types (the fat header's LocalVarSig, II.23.2.6).
+    pub fn locals(&self, method: &MethodDef) -> Vec<TypeSig> {
+        let d = &self.img.data;
+        let Some(at) = self.img.offset(method.rva) else { return Vec::new() };
+        if Reader::at(d, at).u16().is_none_or(|h| h & 3 != 3) {
+            return Vec::new();
+        }
+        let Some(token) = Reader::at(d, at + 8).u32().filter(|t| *t >> 24 == STANDALONE_SIG as u32) else { return Vec::new() };
+        let mut r = Reader::new(self.img.blob(self.img.cell(STANDALONE_SIG, token & 0xFF_FFFF, 0)));
+        if r.u8() != Some(0x07) {
+            return Vec::new();
+        }
+        let n = r.compressed().unwrap_or(0);
+        (0..n).map_while(|_| {
+            // Constraint (pinned) and byref markers.
+            while matches!(r.peek(), Some(0x45)) {
+                r.u8();
+            }
+            self.sig_type(&mut r)
+        }).collect()
+    }
+
+    /// A static field's initial data (FieldRVA: the bytes array initializers copy), `len` bytes.
+    pub fn field_data(&self, namespace: &str, class: &str, field: &str, len: usize) -> Option<&[u8]> {
+        let t = self.find(namespace, class)?;
+        let i = self.types[t].fields.iter().position(|f| f.name == field)?;
+        let row = self.field_at.iter().position(|x| *x == Some((t, i)))? as u32 + 1;
+        let r = (1..=self.img.rows(FIELD_RVA)).find(|&r| self.img.cell(FIELD_RVA, r, 1) == row)?;
+        let at = self.img.offset(self.img.cell(FIELD_RVA, r, 0))?;
+        self.img.data.get(at..at + len)
+    }
+
     /// An ldstr operand's literal.
     pub fn user_string(&self, token: u32) -> Option<String> {
         (token >> 24 == 0x70).then(|| self.img.user_string(token & 0xFF_FFFF)).flatten()
@@ -769,6 +807,7 @@ const EVENT: usize = 0x14;
 const PROPERTY: usize = 0x17;
 const MODULE_REF: usize = 0x1A;
 const TYPE_SPEC: usize = 0x1B;
+const FIELD_RVA: usize = 0x1D;
 const ASSEMBLY: usize = 0x20;
 const ASSEMBLY_REF: usize = 0x23;
 const FILE: usize = 0x26;
@@ -1079,6 +1118,9 @@ impl<'a> Reader<'a> {
     }
     fn u8(&mut self) -> Option<u8> {
         Some(self.bytes(1)?[0])
+    }
+    fn peek(&self) -> Option<u8> {
+        self.d.get(self.p).copied()
     }
     fn u16(&mut self) -> Option<u16> {
         Some(u16::from_le_bytes(self.bytes(2)?.try_into().ok()?))

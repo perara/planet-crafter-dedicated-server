@@ -198,6 +198,8 @@ fn main() {
         Some("read-game") => return native::tables::run(&args[2..]),
         Some("native-layout") => return native::tables::layout(&args[2..]),
         Some("native-il") => return native::tables::il(&args[2..]),
+        Some("native-wrecks") => return native::wrecks::debug(&args[2..]),
+        Some("native-reach") => return native::wrecks::reach(&args[2..]),
         Some("new") => return newworld::run(&args[2..]),
         Some("--version") => {
             println!("pcds-server {}", env!("CARGO_PKG_VERSION"));

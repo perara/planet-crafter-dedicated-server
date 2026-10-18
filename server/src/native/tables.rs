@@ -348,6 +348,10 @@ pub fn run(args: &[String]) {
     eprintln!("read-game: {} layouts", layouts.len());
     let gamedata = json!({"assets": assets, "groupPrefabs": group_prefabs, "layouts": layouts, "singletons": singletons, "panels": panels});
     std::fs::write(Path::new(out).join("gamedata.json"), serde_json::to_string_pretty(&gamedata).unwrap()).expect("write gamedata.json");
+    let started = std::time::Instant::now();
+    let wrecks = ctx.wrecks().unwrap_or_else(|e| fail(format!("wrecks: {e}")));
+    eprintln!("read-game: wreck layouts in {:?}", started.elapsed());
+    std::fs::write(Path::new(out).join("wrecks.json"), serde_json::to_string_pretty(&wrecks).unwrap()).expect("write wrecks.json");
 }
 
 /// Debug: a script class's serialized field layout (pcds-server native-layout GAME_DIR NS.CLASS).
@@ -366,15 +370,36 @@ pub fn layout(args: &[String]) {
     }
 }
 
-/// Debug: a method's IL (pcds-server native-il GAME_DIR NS.CLASS METHOD).
+/// Debug: a method's IL, every method's for `*` (pcds-server native-il GAME_DIR [ASSEMBLY!]NS.CLASS METHOD).
 pub fn il(args: &[String]) {
     let ctx = Ctx::open(Path::new(&args[0])).expect("open game");
-    let (ns, class) = args[1].rsplit_once('.').unwrap_or(("", &args[1]));
-    let t = TypeName { scope: None, namespace: ns.into(), name: class.into() };
+    // ASSEMBLY!NS.CLASS: a class of that assembly (names several assemblies define).
+    let (scope, name) = match args[1].split_once('!') {
+        Some((a, n)) => (Some(a.to_string()), n),
+        None => (None, args[1].as_str()),
+    };
+    let (ns, class) = name.rsplit_once('.').unwrap_or(("", name));
+    let t = TypeName { scope, namespace: ns.into(), name: class.into() };
     let asm = &ctx.layouts.asm;
     let a = asm.assembly_of(&t).expect("no such type");
-    for m in asm.def(&t).unwrap().methods.iter().filter(|m| m.name == args[2]) {
-        println!("{}({:?})", m.name, m.params);
+    let def = asm.def(&t).unwrap();
+    if args[2] == "*" {
+        println!("class {} : {:?} {:?}", t.full(), def.extends, def.interfaces);
+        for f in &def.fields {
+            // An array initializer's data: as many bytes as its type's ClassLayout size.
+            let size = match &f.sig {
+                super::dotnet::TypeSig::ValueType(n) => asm.def(&TypeName { scope: t.scope.clone(), ..n.clone() }).and_then(|d| d.class_layout).map(|l| l.1 as usize),
+                super::dotnet::TypeSig::I8 | super::dotnet::TypeSig::U8 if f.flags & 0x100 != 0 => Some(8),
+                super::dotnet::TypeSig::I4 | super::dotnet::TypeSig::U4 if f.flags & 0x100 != 0 => Some(4),
+                _ => None,
+            };
+            let data = size.and_then(|n| a.field_data(&t.namespace, &t.name, &f.name, n)).map(|b| format!(" data {b:02x?}")).unwrap_or_default();
+            println!("  field {} {:?} flags={:#x}{}{data}", f.name, f.sig, f.flags, f.constant.map(|c| format!(" = {c}")).unwrap_or_default());
+        }
+    }
+    for m in def.methods.iter().filter(|m| m.name == args[2] || args[2] == "*") {
+        println!("{}({:?}) flags={:#x} {} IL bytes", m.name, m.params, m.flags, a.il(m).map_or(0, |b| b.len()));
+        println!("  locals {:?}", a.locals(m));
         for line in super::netvars::disassemble(a, a.il(m).unwrap_or_default()) {
             println!("  {line}");
         }
