@@ -151,7 +151,7 @@ pub fn run(args: &[String]) {
 }
 
 /// Every difference between two table folders, printed; returns their count.
-fn diff(expected: &str, actual: &str, only: Option<&str>, show: usize) -> Result<usize, String> {
+pub(crate) fn diff(expected: &str, actual: &str, only: Option<&str>, show: usize) -> Result<usize, String> {
     let mut files: Vec<String> = ["gamedata.json", "netdata.json", "rpcs.json", "wrecks.json", "connection-request.hex", "buildid"].map(String::from).to_vec();
     let mut scenes = scene_files(expected);
     scenes.extend(scene_files(actual));

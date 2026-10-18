@@ -16,11 +16,12 @@ jobs:
           workspaces: server
       - run: cargo build --release --locked
         working-directory: server
-      # The game tables are not in the repository: the tests that need them skip, by this.
+      # Neither the game tables nor the game are here: the tests that need them skip, by these.
       - run: cargo test --release --locked
         working-directory: server
         env:
           PCDS_TEST_DATA: none
+          PCDS_GAME_DIR: none
 
   script:
     runs-on: ubuntu-22.04

@@ -415,3 +415,21 @@ pub fn il(args: &[String]) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The whole extraction from the installed game writes the tables the other tests run on,
+    /// without a difference. It reads every game file (about 40 s), so it runs by hand:
+    /// cargo test --release read_game_writes -- --ignored
+    #[test]
+    #[ignore]
+    fn read_game_writes_the_test_tables() {
+        let (Some(game), Some(expected)) = (crate::native::unity::tests::game_dir(), crate::test_data()) else { return };
+        let out = std::env::temp_dir().join(format!("pcds-read-game-{}", std::process::id()));
+        std::fs::create_dir_all(&out).unwrap();
+        let version = super::read_game(&game, &out).unwrap();
+        let differences = crate::native::diff::diff(expected, out.to_str().unwrap(), None, 8).unwrap();
+        std::fs::remove_dir_all(&out).unwrap();
+        assert_eq!(differences, 0, "the tables read from game {version} differ from {expected}");
+    }
+}
