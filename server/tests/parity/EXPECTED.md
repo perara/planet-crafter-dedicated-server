@@ -65,7 +65,9 @@ energy: the grower's random state).
   AddNewItem... on inventory 3 in `inventories.json`): AddOrRemoveItem false, an empty
   RetrieveInventory. The game's host takes them from anyone.
 - **Unknown group hashes** in UnlockGroupGlobally are refused; the game adds any int to
-  `_unlockedGroups` (a client could grow that list without end).
+  `_unlockedGroups`, and from then on its saves fail: SaveWorldData's GetGroupsStringIds
+  throws on the unknown hash and the catch drops the save (the reference wrote no save after
+  `crafting.json`, and did without the 12345 step).
 - **A failed AddNewItemToInventory destroys the object it made.** The game leaves it in the
   world (saved as `{"id":…,"gId":…}`), one more per call against a full inventory.
 - **A direct-IP player who claims id 0** gets an id from its name; the game keeps every such
