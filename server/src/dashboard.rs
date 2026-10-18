@@ -97,6 +97,7 @@ pub fn player(game: &Game, c: &crate::game::Client, via: String) -> Value {
         "position": object.and_then(|o| game.net.objects.get(&o)).map(|o| o.position.map(tenth)),
         // Oxygen, water, health, toxic.
         "gauges": object.map(|o| crate::gauges::values(game, o).map(tenth)),
+        "gaugeMax": object.map(|o| crate::gauges::maxima(game, o).map(tenth)),
     })
 }
 

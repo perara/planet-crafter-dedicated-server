@@ -51,6 +51,12 @@ pub fn values(game: &Game, object: u64) -> [f32; 4] {
     ["_oxygenValue", "_thirstValue", "_healthValue", "_toxicValue"].map(|v| get_f(game, object, v))
 }
 
+/// The maxima of `values` (toxicity's is a fixed 100).
+pub fn maxima(game: &Game, object: u64) -> [f32; 4] {
+    let [o, w, h] = ["_oxygenMaxValue", "_thirstMaxValue", "_healthMaxValue"].map(|v| get_f(game, object, v));
+    [o, w, h, INITIAL]
+}
+
 /// UpdateGaugesDependingOnEquipmentServerRpc: the oxygen maximum the first tank gives.
 fn oxygen_max(game: &Game, equipment: i32) -> Option<f32> {
     game.inventories.get(&equipment)?.items.iter().find_map(|i| {
