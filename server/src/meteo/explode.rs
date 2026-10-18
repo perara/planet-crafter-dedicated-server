@@ -11,15 +11,16 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::game::Game;
+use crate::idmap::{FxHashMap, FxHashSet};
 
 #[derive(Default)]
 pub struct Explode {
     /// Explode / Exploded parameters by group.
-    explosives: HashMap<usize, Explosive>,
+    explosives: FxHashMap<usize, Explosive>,
     explodables: HashMap<usize, Explodable>,
     /// Explosives in the world and their last seen setting: SettingProxy.OnSettingUpdate only
     /// reaches Explode for changes after the object spawned.
-    seen: HashMap<i32, i32>,
+    seen: FxHashMap<i32, i32>,
     /// Explode._exploded.
     exploded: HashSet<i32>,
     /// Explode._explodedSet: what any blast already reached.
@@ -88,7 +89,7 @@ fn scan(game: &mut Game) {
     let now = game.time;
     let e = &mut game.ext.meteo.explode;
     let current: Vec<(i32, i32, u64, Explosive)> = game.wos.values().filter_map(|w| Some((w.id, w.setting, w.net?, *e.explosives.get(&w.group)?))).collect();
-    let mut present = HashSet::new();
+    let mut present = FxHashSet::default();
     for (id, setting, net, x) in current {
         present.insert(id);
         let previous = e.seen.insert(id, setting);

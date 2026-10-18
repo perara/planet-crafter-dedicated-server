@@ -18,9 +18,13 @@ fn due(m: &super::Machine, now: f32) -> [bool; 4] {
     ]
 }
 
-/// Whether tick has anything to do now.
-pub(super) fn is_due(m: &super::Machine, now: f32) -> bool {
-    due(m, now).contains(&true)
+/// The earliest time tick has anything to do (due(m, now) has a true from then on).
+pub(super) fn next_due(m: &super::Machine) -> f32 {
+    let g = m.generator.as_ref();
+    [g.and_then(|g| g.rays.as_ref()).map(|r| r.next), g.filter(|g| !g.dead).map(|g| g.next), m.autocrafter.as_ref().map(|a| a.next), m.disintegrator.as_ref().map(|d| d.next)]
+        .into_iter()
+        .flatten()
+        .fold(f32::INFINITY, f32::min)
 }
 
 pub fn tick(game: &mut Game, wo: i32, now: f32) {
@@ -30,17 +34,17 @@ pub fn tick(game: &mut Game, wo: i32, now: f32) {
         mining_rays(game, wo, now);
     }
     if generate {
-        let g = game.ext.machines.list.get_mut(&wo).unwrap().generator.as_mut().unwrap();
+        let g = game.ext.machines.get_mut(&wo).unwrap().generator.as_mut().unwrap();
         g.next = now + g.period();
         try_to_generate(game, wo);
     }
     if craft {
-        let a = game.ext.machines.list.get_mut(&wo).unwrap().autocrafter.as_mut().unwrap();
+        let a = game.ext.machines.get_mut(&wo).unwrap().autocrafter.as_mut().unwrap();
         a.next = now + a.period;
         try_to_craft(game, wo);
     }
     if disintegrate {
-        let d = game.ext.machines.list.get_mut(&wo).unwrap().disintegrator.as_mut().unwrap();
+        let d = game.ext.machines.get_mut(&wo).unwrap().disintegrator.as_mut().unwrap();
         d.next = now + d.period;
         if has_energy(game, wo) {
             try_to_disintegrate(game, wo);
@@ -149,7 +153,7 @@ pub struct Rays {
 fn mining_rays(game: &mut Game, wo: i32, now: f32) {
     let stage = crate::meteo::current_global_stage(game);
     let (active, loaded) = (is_active(game, wo), game.ext.machines.loaded);
-    let g = game.ext.machines.list.get_mut(&wo).unwrap().generator.as_mut().unwrap();
+    let g = game.ext.machines.get_mut(&wo).unwrap().generator.as_mut().unwrap();
     let r = g.rays.as_mut().unwrap();
     r.next = now + RAY_CHECK_EVERY;
     let cast = if r.pending {
@@ -173,14 +177,14 @@ fn mining_rays(game: &mut Game, wo: i32, now: f32) {
         }
         let g = game.ext.machines.list.get(&wo).unwrap().generator.as_ref().unwrap();
         let veins = g.vein_groups(game, wo);
-        game.ext.machines.list.get_mut(&wo).unwrap().generator.as_mut().unwrap().groups.extend(veins);
+        game.ext.machines.get_mut(&wo).unwrap().generator.as_mut().unwrap().groups.extend(veins);
     }
 }
 
 /// AddToGenerationSpeedMultiplier: the loop restarts with the new period.
 fn add_generation_speed(game: &mut Game, wo: i32, add: f32) {
     let now = game.time;
-    if let Some(g) = game.ext.machines.list.get_mut(&wo).and_then(|m| m.generator.as_mut()) {
+    if let Some(g) = game.ext.machines.get_mut(&wo).and_then(|m| m.generator.as_mut()) {
         g.speed += add;
         g.next = now + g.period();
     }
@@ -198,7 +202,7 @@ fn try_to_generate(game: &mut Game, wo: i32) {
         return;
     }
     let Some(count) = game.wos.get(&vein).map(|v| v.count) else {
-        game.ext.machines.list.get_mut(&wo).unwrap().generator.as_mut().unwrap().dead = true;
+        game.ext.machines.get_mut(&wo).unwrap().generator.as_mut().unwrap().dead = true;
         return;
     };
     let when_empty = game.ext.machines.list[&wo].generator.as_ref().unwrap().when_vein_empty;
@@ -433,7 +437,7 @@ fn fuse_value(game: &Game, fuse: usize) -> f32 {
 
 /// MachineGrowerBase.AddToGrowthSpeedMultiplier on each grower component of a machine.
 fn add_growth_speed(game: &mut Game, wo: i32, add: f32) {
-    let Some(m) = game.ext.machines.list.get_mut(&wo) else { return };
+    let Some(m) = game.ext.machines.get_mut(&wo) else { return };
     // Every component keeps its own multiplier, all the same.
     let count = m.growers.len();
     m.grow_multiplier += add;
@@ -486,7 +490,7 @@ pub fn change_multiplier(game: &mut Game, wo: i32) {
             }
         }
     }
-    if let Some(o) = game.ext.machines.list.get_mut(&wo).and_then(|m| m.optimizer.as_mut()) {
+    if let Some(o) = game.ext.machines.get_mut(&wo).and_then(|m| m.optimizer.as_mut()) {
         o.modified = modified;
     }
     // RequireEnergyHandler.UpdateAllEnergyRequesterDelayed.
@@ -495,7 +499,7 @@ pub fn change_multiplier(game: &mut Game, wo: i32) {
 
 /// RemovePreviouslySetWorldObjects: every multiplier the fuses gave is taken back.
 fn remove_previously_set(game: &mut Game, wo: i32) {
-    let Some(o) = game.ext.machines.list.get_mut(&wo).and_then(|m| m.optimizer.as_mut()) else { return };
+    let Some(o) = game.ext.machines.get_mut(&wo).and_then(|m| m.optimizer.as_mut()) else { return };
     let modified = std::mem::take(&mut o.modified);
     let planet = game.wos.get(&wo).map(|w| w.planet_hash()).unwrap_or(0);
     for (id, fuse) in modified {

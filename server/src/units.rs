@@ -151,6 +151,8 @@ pub struct Units {
     pub constructed_index: f32,
     next_compute: f32,
     next_define: f32,
+    /// The terraformation totals _unitSysTerraformation was last made from (bits).
+    sys_from: Option<Vec<u32>>,
 }
 
 impl Units {
@@ -358,8 +360,13 @@ pub fn tick(game: &mut Game) {
             }
         }
     }
-    let sys = system_terraformation(game);
-    game.set_on("WorldUnitsHandler", "_unitSysTerraformation", sys);
+    // A function of the planets' terraformation totals: made again only when one changed.
+    let totals = || game.units.planets.iter().map(|p| p.get(Kind::Terraformation).total.to_bits());
+    if !game.units.sys_from.as_ref().is_some_and(|from| totals().eq(from.iter().copied())) {
+        game.units.sys_from = Some(totals().collect());
+        let sys = system_terraformation(game);
+        game.set_on("WorldUnitsHandler", "_unitSysTerraformation", sys);
+    }
 }
 
 /// WorldUnitSystemTerraformation: the planets' terraformation multiplied together.

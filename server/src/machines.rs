@@ -42,9 +42,18 @@ pub struct Machines {
     veins: Option<veins::State>,
     /// tick's list of machines (kept to reuse its allocation).
     ids: Vec<i32>,
+    /// No machine has anything due before this (a lower bound; every change to a machine
+    /// resets it, and tick skips its walk until then).
+    next_due: f32,
 }
 
 impl Machines {
+    /// A machine to change (its timers may move earlier: tick walks all machines again).
+    fn get_mut(&mut self, wo: &i32) -> Option<&mut Machine> {
+        self.next_due = f32::NEG_INFINITY;
+        self.list.get_mut(wo)
+    }
+
     pub fn with_energy(&self) -> Vec<i32> {
         self.energy.keys().copied().collect()
     }
@@ -350,6 +359,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     let (unit_generation, unit_multipliers) = (m.unit_generation.clone(), m.unit_multipliers.clone());
     let destruct = m.destruct_if_full && m.linked != 0;
     let wants_start = has_harvestable;
+    game.ext.machines.next_due = f32::NEG_INFINITY;
     game.ext.machines.list.insert(wo, m);
     if linked != 0 && game.ext.machines.listening.get(&linked) == Some(&wo) {
         if has_vegetation {
@@ -474,25 +484,34 @@ pub fn tick(game: &mut Game) {
         grabbed(game, item);
     }
     let now = game.time;
+    if now < game.ext.machines.next_due {
+        return;
+    }
+    let next_due = |m: &Machine| production::next_due(m).min(growers::next_due(m)).min(m.floater.map_or(f32::INFINITY, |(_, due)| due));
+    let mut earliest = f32::INFINITY;
+    game.ext.machines.next_due = f32::INFINITY;
     let mut ids = std::mem::take(&mut game.ext.machines.ids);
     ids.clear();
     ids.extend(game.ext.machines.list.keys());
     for &wo in &ids {
         // Nothing due at its turn: the ticks below would do nothing.
-        let due = |m: &Machine| production::is_due(m, now) || growers::is_due(m, now) || m.floater.is_some_and(|(_, due)| now >= due);
-        if !game.ext.machines.list.get(&wo).is_some_and(due) {
+        let Some(due) = game.ext.machines.list.get(&wo).map(next_due) else { continue };
+        if now < due {
+            earliest = earliest.min(due);
             continue;
         }
         production::tick(game, wo, now);
         growers::tick(game, wo, now);
         if let Some((interval, due)) = game.ext.machines.list.get(&wo).and_then(|m| m.floater) {
             if now >= due {
-                game.ext.machines.list.get_mut(&wo).unwrap().floater = Some((interval, now + interval));
+                game.ext.machines.get_mut(&wo).unwrap().floater = Some((interval, now + interval));
                 float_on_water(game, wo);
             }
         }
     }
     game.ext.machines.ids = ids;
+    // Changed while walking (each machine that ran): walk again next tick.
+    game.ext.machines.next_due = game.ext.machines.next_due.min(earliest);
 }
 
 /// MachineFloater.SetReferencePositionOnSurface: the world object of a floating machine goes to

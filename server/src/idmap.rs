@@ -33,3 +33,5 @@ impl Hasher for Fx {
 
 pub type IdMap<K, V> = indexmap::IndexMap<K, V, BuildHasherDefault<Fx>>;
 pub type IdSet<K> = indexmap::IndexSet<K, BuildHasherDefault<Fx>>;
+pub type FxHashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<Fx>>;
+pub type FxHashSet<K> = std::collections::HashSet<K, BuildHasherDefault<Fx>>;

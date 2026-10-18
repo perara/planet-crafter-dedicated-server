@@ -108,12 +108,13 @@ pub fn reset_current_growth(game: &mut Game, wo: i32, value: f32) {
     }
 }
 
-/// Whether tick has anything to do now (the conditions tick checks, in one place).
-pub(super) fn is_due(m: &super::Machine, now: f32) -> bool {
-    m.linked_grower.as_ref().is_some_and(|g| now >= g.next)
-        || m.converter.is_some_and(|t| now >= t)
-        || matches!(m.vegetation.as_ref().map(|v| v.coroutine), Some(Coroutine::Waiting(t) | Coroutine::Growing(t)) if now >= t)
-        || m.harvestable.as_ref().and_then(|h| h.next).is_some_and(|t| now >= t)
+/// The earliest time tick has anything to do (the times tick checks, in one place).
+pub(super) fn next_due(m: &super::Machine) -> f32 {
+    let vegetation = m.vegetation.as_ref().and_then(|v| match v.coroutine {
+        Coroutine::Waiting(t) | Coroutine::Growing(t) => Some(t),
+        Coroutine::None => None,
+    });
+    [m.linked_grower.as_ref().map(|g| g.next), m.converter, vegetation, m.harvestable.as_ref().and_then(|h| h.next)].into_iter().flatten().fold(f32::INFINITY, f32::min)
 }
 
 pub fn tick(game: &mut Game, wo: i32, now: f32) {
@@ -126,20 +127,20 @@ pub fn tick(game: &mut Game, wo: i32, now: f32) {
         linked_grower_update(game, wo, now);
     }
     if convert_due {
-        game.ext.machines.list.get_mut(&wo).unwrap().converter = Some(now + 2.0);
+        game.ext.machines.get_mut(&wo).unwrap().converter = Some(now + 2.0);
         convert_if_fully_grown(game, wo);
     }
     match vegetation {
         Some(Coroutine::Waiting(t)) if now >= t => launch_growing(game, wo),
         Some(Coroutine::Growing(t)) if now >= t => {
-            let v = game.ext.machines.list.get_mut(&wo).unwrap().vegetation.as_mut().unwrap();
+            let v = game.ext.machines.get_mut(&wo).unwrap().vegetation.as_mut().unwrap();
             v.coroutine = Coroutine::Growing(now + v.interval);
             grow(game, wo);
         }
         _ => {}
     }
     if harvest_due {
-        let h = game.ext.machines.list.get_mut(&wo).and_then(|m| m.harvestable.as_mut()).unwrap();
+        let h = game.ext.machines.get_mut(&wo).and_then(|m| m.harvestable.as_mut()).unwrap();
         h.next = Some(now + h.interval);
         update_content_growth(game, wo);
     }
@@ -168,7 +169,7 @@ fn linked_groups(game: &Game, wo: i32) -> Vec<usize> {
 
 /// MachineGrowerIfLinkedGroup.UpdateGrowth, every 2 s.
 fn linked_grower_update(game: &mut Game, wo: i32, now: f32) {
-    let g = game.ext.machines.list.get_mut(&wo).unwrap().linked_grower.as_mut().unwrap();
+    let g = game.ext.machines.get_mut(&wo).unwrap().linked_grower.as_mut().unwrap();
     g.next = now + LINKED_UPDATE_EVERY;
     let rate = g.rate;
     if !has_energy(game, wo) || !net_has(game, wo, "GrowthProxy") || !net_has(game, wo, "LinkedGroupsProxy") {
@@ -252,7 +253,7 @@ fn update_things(game: &mut Game, wo: i32) {
             }
         }
     }
-    game.ext.machines.list.get_mut(&wo).unwrap().vegetation.as_mut().unwrap().things = things;
+    game.ext.machines.get_mut(&wo).unwrap().vegetation.as_mut().unwrap().things = things;
 }
 
 /// SetGrowerInventory.
@@ -266,7 +267,7 @@ pub fn vegetation_inventory_set(game: &mut Game, wo: i32) {
 /// LaunchGrowingProcess after the first: the growing loop restarts if there is something to grow.
 fn launch_growing(game: &mut Game, wo: i32) {
     let now = game.time;
-    let v = game.ext.machines.list.get_mut(&wo).unwrap().vegetation.as_mut().unwrap();
+    let v = game.ext.machines.get_mut(&wo).unwrap().vegetation.as_mut().unwrap();
     if v.interval <= 0.1 {
         v.interval = 0.1;
     }
@@ -279,7 +280,7 @@ fn grow(game: &mut Game, wo: i32) {
         return;
     }
     let multiplier = game.ext.machines.list[&wo].grow_multiplier;
-    let v = game.ext.machines.list.get_mut(&wo).unwrap().vegetation.as_mut().unwrap();
+    let v = game.ext.machines.get_mut(&wo).unwrap().vegetation.as_mut().unwrap();
     if v.things.is_empty() {
         return;
     }
@@ -351,7 +352,7 @@ impl Harvestable {
 }
 
 fn harvestable(game: &mut Game, wo: i32) -> Option<&mut Harvestable> {
-    game.ext.machines.list.get_mut(&wo)?.harvestable.as_mut()
+    game.ext.machines.get_mut(&wo)?.harvestable.as_mut()
 }
 
 /// Init (a frame after Awake, once the local player started): watch the second inventory,
