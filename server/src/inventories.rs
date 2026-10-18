@@ -242,7 +242,9 @@ impl Game {
         ok
     }
 
-    /// AddNewItemToInventoryServerRpc without its reply: (success, world object id).
+    /// AddNewItemToInventoryServerRpc without its reply: (success, world object id). The game
+    /// keeps the new world object when the inventory refuses it (full, not authorized): a saved
+    /// object in no inventory, one per call. Here it goes again.
     pub fn add_new_item(&mut self, group: usize, inventory: i32, client: u64) -> (bool, i32) {
         if !self.inventories.contains_key(&inventory) {
             return (false, 0);
@@ -252,6 +254,8 @@ impl Game {
         if ok {
             self.propagate(inventory, wo, true);
             self.dirty_inventory(inventory, client, false);
+        } else {
+            self.destroy_world_object(wo, true);
         }
         (ok, wo)
     }

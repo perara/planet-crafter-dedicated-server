@@ -107,3 +107,18 @@ fn a_transfer_to_the_same_inventory_keeps_the_item() {
         assert_eq!(g.inventories[&inv].items, items, "{name}");
     }
 }
+
+/// L2: adding a new item to an inventory that refuses it leaves no world object behind.
+#[test]
+fn a_refused_new_item_is_not_kept() {
+    let Some(mut g) = test_game(save()) else { return };
+    join(&mut g, 1, "Ann");
+    let inv = g.create_inventory(0, 0, 0, &[], &[]);
+    let (before, saved) = (g.wos.len(), g.snapshot().objects.len());
+    let iron = g.data.groups[g.data.group("Iron").unwrap()].hash;
+    for _ in 0..10 {
+        rpc(&mut g, 1, 0, "InventoriesHandler.AddNewItemToInventoryServerRpc", vec![json!(iron), json!(inv)]);
+    }
+    assert_eq!((g.wos.len(), g.snapshot().objects.len()), (before, saved));
+    assert_eq!(g.group_count(false, g.data.group("Iron").unwrap()), 0, "the group count is back");
+}
