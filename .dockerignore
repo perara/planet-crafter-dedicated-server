@@ -1,5 +1,3 @@
 .git
 run
 server/target
-extractor/bin
-extractor/obj

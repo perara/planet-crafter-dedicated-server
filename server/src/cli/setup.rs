@@ -122,7 +122,7 @@ impl Ctx {
                 other => return Err(format!("unknown option {other}")),
             }
         }
-        for tool in ["curl", "unzip", "tar"] {
+        for tool in ["curl", "tar"] {
             need(tool, "install it with your package manager")?;
         }
         if !self.container {

@@ -49,7 +49,7 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
   pcds gui | token | config | api METHOD PATH [JSON]
   pcds rules [set SECTION.RULE=VALUE ... | reset]
                          show or change the server rules (rules.json; README \"Server rules\")
-  pcds extract [--game DIR]   read the game tables again (Wine runs the game for the wreck layouts)
+  pcds extract [--game DIR]   read the game tables again (from the game's files, no Wine)
   pcds update [--game DIR]    after a game update: extract and restart when the game changed
   pcds selftest               a scripted player joins over direct IP and checks the answers
   pcds run                    run the server in the foreground (what the service runs)
@@ -73,20 +73,15 @@ PCDS_GAME_DIR, the one used last (run/game-dir), else the Steam library that lis
 /// Where this installation's files are.
 #[derive(Clone)]
 pub struct Ctx {
-    /// This program. Its folder is a release (the program, libsteam_api.so, PcdsExtractor.dll
-    /// and web/ side by side, as in the Docker image), or server/target/<profile>/ of the
-    /// checkout it was built in: the web page and the extractor are then the checkout's.
+    /// This program. Its folder is a release (the program, libsteam_api.so and web/ side by
+    /// side, as in the Docker image), or server/target/<profile>/ of the checkout it was built
+    /// in: the web page is then the checkout's.
     exe: PathBuf,
     web: PathBuf,
-    extractor_dll: PathBuf,
     run: PathBuf,
     env_file: PathBuf,
     worlds: PathBuf,
     steamcmd: PathBuf,
-    ext: PathBuf,
-    ext_game: PathBuf,
-    ext_log: PathBuf,
-    cache: PathBuf,
     unit_dir: PathBuf,
     /// PCDS_HOME and PCDS_UNIT give a second server on the same machine its own folder and units.
     unit_name: String,
@@ -108,29 +103,21 @@ impl Ctx {
         let exe = std::env::current_exe().map_err(|e| format!("where is this program: {e}"))?;
         let dir = exe.parent().ok_or("this program has no folder")?.to_path_buf();
         let checkout = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let (root, web, extractor_dll) = if dir.starts_with(checkout.join("target")) {
-            let root = checkout.parent().ok_or("no checkout folder")?.to_path_buf();
-            (root.clone(), checkout.join("web/index.html"), root.join("extractor/prebuilt/PcdsExtractor.dll"))
+        let (root, web) = if dir.starts_with(checkout.join("target")) {
+            (checkout.parent().ok_or("no checkout folder")?.to_path_buf(), checkout.join("web/index.html"))
         } else {
-            (dir.clone(), dir.join("web/index.html"), dir.join("PcdsExtractor.dll"))
+            (dir.clone(), dir.join("web/index.html"))
         };
         let run = crate::env("PCDS_HOME").map(PathBuf::from).unwrap_or_else(|| root.join("run"));
         let run = std::path::absolute(&run).map_err(|e| format!("{}: {e}", run.display()))?;
         let home = PathBuf::from(crate::env("HOME").ok_or("HOME is not set")?);
         let unit_dir = crate::env("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config")).join("systemd/user");
-        let ext = run.join("extractor");
-        let ext_game = ext.join("game");
         let ctx = Ctx {
             exe,
             web,
-            extractor_dll,
             env_file: run.join("server.env"),
             worlds: run.join("worlds"),
             steamcmd: run.join("steamcmd"),
-            ext_log: ext_game.join("BepInEx/LogOutput.log"),
-            ext_game,
-            ext,
-            cache: run.join("cache"),
             run,
             unit_dir,
             unit_name: crate::env("PCDS_UNIT").unwrap_or_else(|| "pcds".into()),
@@ -419,18 +406,12 @@ fn is_save(path: &Path) -> bool {
 #[cfg(test)]
 fn test_ctx(dir: &Path) -> Ctx {
     let run = dir.join("run");
-    let ext = run.join("extractor");
     Ctx {
         exe: dir.join("build/pcds"),
         web: dir.join("build/web/index.html"),
-        extractor_dll: dir.join("build/PcdsExtractor.dll"),
         env_file: run.join("server.env"),
         worlds: run.join("worlds"),
         steamcmd: run.join("steamcmd"),
-        ext_log: ext.join("game/BepInEx/LogOutput.log"),
-        ext_game: ext.join("game"),
-        ext,
-        cache: run.join("cache"),
         run,
         unit_dir: dir.join("systemd"),
         unit_name: "pcds-cli-test".into(),

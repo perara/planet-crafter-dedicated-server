@@ -142,7 +142,7 @@ fn no_tables(dir: &str, e: String) -> ! {
 #[derive(Default)]
 pub struct Scenes {
     pub wrecks: Rc<instances::generate::Wrecks>,
-    /// Free planet id -> its scene dump. DLC planets have none: the extractor dumps only the
+    /// Free planet id -> its scene dump. DLC planets have none: the extraction reads only the
     /// free ones, and nobody can travel to the others (planets.rs).
     pub planets: HashMap<String, PlanetScene>,
 }

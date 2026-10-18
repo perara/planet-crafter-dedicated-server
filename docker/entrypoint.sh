@@ -11,8 +11,7 @@ if [ "$(id -u)" = 0 ]; then
     exit 1
   }
   mkdir -p /data/home
-  # -h: symlinks themselves (the extractor's view of the game and Wine's drive links point
-  # outside /data).
+  # -h: symlinks themselves, never what they point to.
   find /data -xdev \( ! -uid "$PUID" -o ! -gid "$PGID" \) -exec chown -h "$PUID:$PGID" {} + 2> /dev/null || true
   exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups /opt/pcds/pcds container
 fi

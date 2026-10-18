@@ -23,9 +23,10 @@ One command on a Linux machine with the game installed through Steam:
 curl -fsSL https://raw.githubusercontent.com/perara/planet-crafter-dedicated-server/main/install.sh | bash
 ```
 
-It checks the machine and offers to install what is missing (Wine, Xvfb, ...) with your package
-manager. Then it downloads the latest release into `~/planet-crafter-server` and sets everything
-up. It reads the game tables from your game, which takes a few minutes the first time. It asks
+It checks the machine and offers to install what is missing (curl, 32-bit libraries for
+steamcmd) with your package manager. Then it downloads the latest release into
+`~/planet-crafter-server` and sets everything up. It reads the game tables from your game's
+files, which takes about half a minute. It asks
 whether to play one of your saves or a new world, and starts the server as a service that
 survives reboots. It checks that players can get in, and prints the invite code and the address
 to join. Run the same command again to upgrade; your worlds and settings stay.
@@ -36,7 +37,7 @@ Options go after `bash -s --`, for example
 `--steam-user NAME` (no game on this machine: download it with steamcmd and your Steam login),
 `--yes` (install packages without asking).
 
-Or with Docker, on any Linux with Docker (the host needs no Wine):
+Or with Docker, on any Linux with Docker:
 
 ```bash
 docker run -d --name pcds --restart unless-stopped \
@@ -56,19 +57,15 @@ See [Docker](#docker) for the data folder, managing worlds and Compose.
 - Your copy of The Planet Crafter for Windows: installed through Steam on this machine, the
   game folder copied from a PC (the folder that contains `Planet Crafter.exe`), or downloaded
   with `--steam-user NAME`.
-- Wine, curl, unzip and tar, and Xvfb on a machine without a display (the installer and the
-  Docker image bring them). curl is only used for downloads (BepInEx, steamcmd).
+- curl and tar (the installer and the Docker image bring them), for steamcmd.
 - For invite codes: Valve's `steamclient.so`, from the Steam client if it is installed, else
   fetched with steamcmd (which needs 32-bit libraries such as `lib32gcc-s1`). Without it the
   server offers direct IP only.
-- To build from source: [Rust](https://rustup.rs) and make. To rebuild the extractor: Docker.
+- To build from source: [Rust](https://rustup.rs) and make.
 
-**Why Wine?** The server is native Linux code and never runs under Wine. Once per game
-version `pcds` reads the tables the server needs (network registrations, items, buildings,
-every planet's scene) straight from the game's files, in seconds. Only the procedural wreck
-interiors are laid out by the game itself, so for those `pcds` runs the Windows game headless
-under Wine once, for a few minutes. After that Wine is not used until the next game update.
-The Docker image carries its own Wine.
+**No Wine.** The server is native Linux code, and so is reading the game: once per game version
+`pcds` reads the tables the server needs (network registrations, items, buildings, every
+planet's scene, the wrecks' layouts) straight from the game's files, about half a minute.
 
 Tested with game version 2.103.
 
@@ -85,7 +82,7 @@ tar xzf pcds-v*-linux-x86_64.tar.gz && cd pcds-v*-linux-x86_64
 ```
 
 `pcds` is one program: the server itself (`pcds serve`) and the commands below. A release keeps
-`libsteam_api.so`, `PcdsExtractor.dll` and `web/` next to it.
+`libsteam_api.so` and `web/` next to it.
 
 `up` takes the same options as `setup`. Step by step:
 
@@ -101,8 +98,7 @@ loginctl enable-linger $USER   # keep it running while you are logged out
 of `~/.local/share/Steam`, `~/.steam/steam` or the Flatpak's
 `~/.var/app/com.valvesoftware.Steam/.local/share/Steam`. It reads the
 game tables from it, puts the world in place, and writes the settings and a systemd user unit. Your
-game folder is never modified, and a modded one works too: the extraction leaves the game's own
-BepInEx, doorstop and `steam_appid.txt` out of its copy and brings its own. `setup --world`
+game folder is only read, and a modded one works too. `setup --world`
 refuses while the server runs, and when the save is the current world already. The selftest does not become a player, so nothing is saved for it.
 
 Where the game keeps its saves:
@@ -408,8 +404,8 @@ server on the same machine shares.
 - **Endings do not restart the session:** after a player's ending the server keeps running.
 - **New worlds start from the Standard settings.** Other modes are a matter of `--set`.
 - **Procedural wrecks come in 64 layouts per size.** The game lays wrecks out from a random
-  seed with a solver the server does not run; `pcds extract` has the game lay out 64 seeds of
-  each wreck size, and the server gives its wrecks those. What a wreck then holds (safes,
+  seed with a solver (Tessera); `pcds extract` lays out 64 seeds of each wreck size with a
+  port of it, and the server gives its wrecks those. What a wreck then holds (safes,
   containers, locked doors, generators, loot) is picked from its seed as in the game. Wrecks a
   world from the game had already generated keep what they hold.
 - **Sleeping does not skip the night:** the game sends the server no signal for it.
@@ -436,17 +432,13 @@ platform, landing spots, seats, machine ranges), the code says so in a `ponytail
   class by class.
 - `server/src/native/` reads the game's tables from its files (Unity serialized files, the
   game's .NET metadata and IL) into `run/data/<game version>/`: `pcds read-game GAME_DIR OUT`.
-- `extractor/` is a BepInEx plugin that `pcds extract` runs in the game, under Wine, on a world
-  of its own on 127.0.0.1, for the one table the game must compute itself: the procedural
-  wrecks' layouts (wrecks.json). A prebuilt DLL is in `extractor/prebuilt/`.
 - The server runs as two processes of the same program (docs/hot-update.md): the front (`pcds
   serve DATA_DIR SAVE.json`: the sockets, Steam and the invite code, the admin page, the chat
   hooks) and a bank (`pcds bank`: the world), started from the active release and replaced by a
   new one with the world handed over, while the front keeps every player connected.
 - `server/src/cli/` is the command line that ties them together, in the same program: `pcds
   serve` is the server, the other commands set it up and run it. It needs no
-  Python; curl only downloads, unzip and tar unpack BepInEx and steamcmd, systemd runs the
-  service.
+  Python; curl downloads and tar unpacks steamcmd, systemd runs the service.
 
 ## Development
 
@@ -457,10 +449,9 @@ make test       # also: make lint, make docker, make dist (the release tarball),
 
 Tests that need game tables use `run/data/2.103` (or `PCDS_TEST_DATA`) and skip themselves
 without them, as in CI. `pcds probe HOST:PORT DATA_DIR SCRIPT.json` is a scripted player
-that prints everything a server sends. Run the same script against the extractor's game (a real
-host, `127.0.0.1:7791` while `pcds extract` runs) and against this server, then compare the two
-with `tools/probe_diff.py`. `make extractor` rebuilds the extractor plugin into
-`extractor/prebuilt/` (with Docker, against the game in `run/extractor/game`).
+that prints everything a server sends; `tools/probe_diff.py` compares two such runs (against a
+real game host and this server, for instance). `pcds tables-diff EXPECTED ACTUAL` compares two
+table folders section by section.
 
 `src/bench.rs` times the server's tick on a real save with a fixed clock and seed, and prints a
 fingerprint of everything the server sends and saves. A change that should not alter the game
@@ -486,8 +477,7 @@ page shows it with no page code), read where the game decides that value, and a 
 GPL-3.0-or-later; see [LICENSE](LICENSE).
 
 As an additional permission under section 7 of the GNU GPL version 3, you may link this program
-with the Steamworks SDK (`libsteam_api`), and the extractor with The Planet Crafter's, Unity's
-and BepInEx's assemblies, and convey the result, without those parts being covered by this
-license.
+with the Steamworks SDK (`libsteam_api`) and convey the result, without that part being
+covered by this license.
 
 The Planet Crafter is a trademark of Miju Games. Steam and the Steamworks SDK belong to Valve.
