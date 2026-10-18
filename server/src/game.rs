@@ -992,6 +992,31 @@ pub mod tests {
         assert!(g.clients[&4].approved);
     }
 
+    /// The owner writes its emote, not its health maximum or dying state (the server's).
+    #[test]
+    fn owners_write_only_the_variables_the_game_lets_them() {
+        let Some(mut g) = test_game(save()) else { return };
+        let player = join(&mut g, 1, "Ann");
+        let bob = join(&mut g, 2, "Bob");
+        let var = |g: &Game, class: &str, name: &str| format!("{:?}", g.net.get(player, class, name));
+        let before = (var(&g, "PlayerGaugesHandler", "_healthMaxValue"), var(&g, "PlayerStatus", "_isDying"));
+        g.net.out.clear();
+        for (class, name, bytes) in [("PlayerGaugesHandler", "_healthMaxValue", 1000f32.to_le_bytes().to_vec()), ("PlayerStatus", "_isDying", vec![1])] {
+            let d = delta(&g, player, class, name, &bytes);
+            g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, d)]));
+        }
+        assert_eq!((var(&g, "PlayerGaugesHandler", "_healthMaxValue"), var(&g, "PlayerStatus", "_isDying")), before);
+        assert!(g.net.out.is_empty(), "nothing passed on");
+        let d = delta(&g, player, "PlayerShareState", "_emote", &crate::net::enc::short(3));
+        g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, d.clone())]));
+        assert_eq!(var(&g, "PlayerShareState", "_emote"), format!("{:?}", Some(crate::net::VarValue::Plain(crate::net::enc::short(3)))));
+        assert!(matches!(&g.net.out[..], [(Target::Except(1), NETWORK_VARIABLE_DELTA, body)] if *body == d));
+        g.net.out.clear();
+        let d = delta(&g, bob, "PlayerShareState", "_emote", &crate::net::enc::short(3));
+        g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, d)]));
+        assert!(g.net.out.is_empty(), "not the owner");
+    }
+
     #[test]
     fn loading_clients_are_not_the_nearest() {
         let Some(mut g) = test_game(save()) else { return };

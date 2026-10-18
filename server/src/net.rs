@@ -223,10 +223,33 @@ fn list_item(ty: &str, r: &mut crate::wire::Reader) -> Option<()> {
     }
 }
 
-/// Applies a NetworkVariableDelta a client sent for variables its object lets the owner write.
-/// Unknown layouts are left alone (the message is still passed on as is).
-/// Applies a delta the owning client wrote; false (nothing to pass on) when the sender does
-/// not own the object.
+/// The variables the game lets an object's owner write (NetworkVariableWritePermission.Owner in
+/// the game's classes; the tables do not carry the permission). The rest are the server's.
+const OWNER_WRITES: &[(&str, &str)] = &[
+    ("AIAnimalStateController", "_randomState"),
+    ("AIAnimalStateController", "_spawnPosition"),
+    ("AIAnimalStateController", "_currentState"),
+    ("AIAnimalStateController", "_avoidancePriority"),
+    ("AIAnimalStateController", "_disabled"),
+    ("GroupNetworkContainer", "_scale"),
+    ("GroupNetworkContainer", "_transformSync"),
+    ("GroupNetworkContainer", "_groupHashOverride"),
+    ("PlayerGaugesHandler", "_playerCanBreath"),
+    ("PlayerGaugesHandler", "_playerIsUnderWater"),
+    ("PlayerGaugesHandler", "_pauseConsumption"),
+    ("PlayerShareState", "_jetpacking"),
+    ("PlayerShareState", "_emote"),
+    ("PlayerStatus", "_ready"),
+    ("VehicleShareData", "_steerInput"),
+    ("VehicleShareData", "_angularVelocity"),
+    ("VehicleShareData", "_throttleInput"),
+    ("VehicleShareData", "_lights"),
+];
+
+/// Applies a NetworkVariableDelta the owning client wrote; false (nothing applied, nothing to
+/// pass on) when the sender does not own the object, or the delta writes a variable the game
+/// does not let the owner write (as Netcode's server: it reads no further), one it cannot
+/// read, or a value that is not a number.
 pub fn apply_delta(net: &mut Net, client: u64, body: &[u8]) -> bool {
     let mut r = crate::wire::Reader::new(body);
     let (Some(object), Some(behaviour)) = (r.packed_u64(), r.packed_u16()) else { return false };
@@ -246,13 +269,10 @@ pub fn apply_delta(net: &mut Net, client: u64, body: &[u8]) -> bool {
         if !dirty {
             continue;
         }
-        if v.ty.starts_with("NetworkList") {
-            break;
-        }
-        let Some(bytes) = read_value(&v.ty, &mut r) else { break };
-        if !finite(&v.ty, &bytes) {
+        if !OWNER_WRITES.contains(&(b.class.as_str(), v.name.as_str())) {
             return false;
         }
+        let Some(bytes) = read_value(&v.ty, &mut r).filter(|bytes| finite(&v.ty, bytes)) else { return false };
         writes.push((i, bytes));
     }
     for (i, bytes) in writes {
@@ -609,6 +629,24 @@ impl IntoTarget for (u32, Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every owner-written variable of a class the tables have is one of its variables (a
+    /// renamed one would otherwise be refused without a word).
+    #[test]
+    fn owner_writes_name_variables_of_the_tables() {
+        let Some(g) = crate::game::test_game(crate::game::tests::save()) else { return };
+        let mut seen = std::collections::HashMap::new();
+        let layouts = g.data.layouts.values().map(|l| &l.behaviours).chain(g.net_data.prefabs.values().map(|p| &p.behaviours));
+        for b in layouts.flatten() {
+            seen.entry(b.class.clone()).or_insert_with(Vec::new).extend(b.vars.iter().map(|v| v.name.clone()));
+        }
+        for (class, var) in OWNER_WRITES {
+            if let Some(vars) = seen.get(*class) {
+                assert!(vars.iter().any(|v| v == var), "{class}.{var}");
+            }
+        }
+        assert!(seen.contains_key("PlayerShareState") && seen.contains_key("GroupNetworkContainer"));
+    }
 
     #[test]
     fn fixed_strings_cut_at_capacity() {
