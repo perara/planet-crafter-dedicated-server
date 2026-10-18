@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, Write};
 use std::os::unix::process::CommandExt;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -83,7 +84,9 @@ impl Ctx {
     }
 
     /// The server in the foreground, as the unit runs it: the front from the active bank, on
-    /// the installed game's tables, the world, the settings. Returns only when it cannot start.
+    /// the installed game's tables, the world, the settings; this process exits with the
+    /// front's code once the front and its banks have ended (supervise). Returns only when it
+    /// cannot start.
     pub fn run_server(&self) -> Result {
         let data = self.data_dir()?;
         let world = self.world_file();
@@ -105,7 +108,8 @@ impl Ctx {
         // Access lists and rules are the installation's, whichever world runs.
         server.env("PCDS_ACCESS", get("PCDS_ACCESS").unwrap_or_else(|| self.run.join("access.json").display().to_string()));
         server.env("PCDS_RULES", get("PCDS_RULES").unwrap_or_else(|| self.run.join("rules.json").display().to_string()));
-        Err(format!("{}: {}", front.display(), server.exec()))
+        let code = supervise(server).map_err(|e| format!("{}: {e}", front.display()))?;
+        std::process::exit(code)
     }
 
     pub fn setup(&self, args: &[String]) -> Result {
@@ -344,6 +348,81 @@ impl Ctx {
     }
 }
 
+/// How long the banks of a front that ended get to save and end before they are killed.
+const BANKS_GRACE: Duration = Duration::from_secs(60);
+
+/// The front, run as a child of this process, which ends only after every process the front
+/// left behind. A front that crashes leaves its banks running; they save the world when they
+/// find it gone (bank.rs) and end. Under systemd (KillMode=mixed) and in Docker (tini, then
+/// the container's PID namespace) the end of the main process kills what is left of the unit
+/// or container at once, before any bank could save: this process is that main process, a
+/// subreaper the orphaned banks are handed to, and it waits for them (BANKS_GRACE at most,
+/// then kills the front's process group). SIGTERM, SIGINT and SIGHUP go on to the front, which
+/// stops its banks with a save itself. The front's exit code, or 128 + its signal.
+fn supervise(mut front: Command) -> Result<i32> {
+    // A signal that comes before the front's pid is known waits in PENDING: whichever of the
+    // handler and this thread sees both sends it (one swap takes it).
+    static FRONT: AtomicI32 = AtomicI32::new(0);
+    static PENDING: AtomicI32 = AtomicI32::new(0);
+    fn pass(pid: i32) {
+        let signal = PENDING.swap(0, Ordering::SeqCst);
+        if pid > 0 && signal != 0 {
+            // SAFETY: kill(2) is async-signal-safe.
+            unsafe { libc::kill(pid, signal) };
+        }
+    }
+    extern "C" fn pass_on(signal: libc::c_int) {
+        PENDING.store(signal, Ordering::SeqCst);
+        pass(FRONT.load(Ordering::SeqCst));
+    }
+    // SAFETY: prctl and signal dispositions of this process; the handler only touches atomics
+    // and calls kill(2).
+    unsafe {
+        if libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) != 0 {
+            return Err(format!("cannot wait for the banks (PR_SET_CHILD_SUBREAPER): {}", std::io::Error::last_os_error()));
+        }
+        for s in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+            libc::signal(s, pass_on as *const () as libc::sighandler_t);
+        }
+    }
+    // Its own process group: what is left of it can be killed as one, and a terminal's Ctrl-C
+    // reaches it once, through this process.
+    let child = front.process_group(0).spawn().map_err(|e| e.to_string())?;
+    FRONT.store(child.id() as i32, Ordering::SeqCst);
+    pass(child.id() as i32);
+    let pid = FRONT.load(Ordering::SeqCst);
+    let (mut code, mut deadline) = (None, None);
+    loop {
+        let mut status = 0;
+        let flags = if code.is_some() { libc::WNOHANG } else { 0 };
+        // SAFETY: waits for any child of this process (the front, then the orphaned banks).
+        let ended = unsafe { libc::waitpid(-1, &mut status, flags) };
+        if ended == pid {
+            let c = if libc::WIFEXITED(status) { libc::WEXITSTATUS(status) } else { 128 + libc::WTERMSIG(status) };
+            code = Some(c);
+            deadline = Some(std::time::Instant::now() + BANKS_GRACE);
+            FRONT.store(0, Ordering::SeqCst);
+        } else if ended > 0 {
+            continue;
+        } else if ended == 0 {
+            if deadline.is_some_and(|d| std::time::Instant::now() > d) {
+                eprintln!("pcds: the banks of the front did not end within {} s of it: killed", BANKS_GRACE.as_secs());
+                // SAFETY: the front's process group, which only it and its banks are in.
+                unsafe { libc::kill(-pid, libc::SIGKILL) };
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        } else {
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EINTR) => {}
+                // No child left: the front and every bank have ended.
+                _ => break,
+            }
+        }
+    }
+    code.ok_or_else(|| "the front was never waited for".to_string())
+}
+
 /// Whether two programs are the same build: the same size and modification time (a bank's
 /// copy keeps its source's time).
 fn program_equal(a: &Path, b: &Path) -> bool {
@@ -380,6 +459,51 @@ mod tests {
         assert_eq!(backups, ["{\"saveDisplayName\":\"live\"}"]);
         assert!(!dir.join("run/worlds/world.new").exists());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// supervise() in a process of its own: a subreaper is handed every orphan of its process,
+    /// which the test harness must not be. PCDS_SUPERVISE_TEST names the folder; "crash" or
+    /// "stop" what the stand-in front does.
+    #[test]
+    #[ignore]
+    fn supervise_in_a_process_of_its_own() {
+        let (Some(dir), Ok(what)) = (std::env::var_os("PCDS_SUPERVISE_TEST"), std::env::var("PCDS_SUPERVISE_WHAT")) else { return };
+        let script = match what.as_str() {
+            // It starts a bank that saves a moment after the front is gone, and crashes.
+            "crash" => "(sleep 0.5; echo saved > \"$0/saved\") & exit 3",
+            // The stop goes to the front; it has its bank save, and ends.
+            _ => "trap '(sleep 0.3; echo saved > \"$0/saved\") & exit 0' TERM; echo up > \"$0/up\"; while :; do sleep 0.05; done",
+        };
+        let mut front = Command::new("sh");
+        front.arg("-c").arg(script).arg(&dir);
+        std::process::exit(supervise(front).unwrap());
+    }
+
+    #[test]
+    fn the_banks_of_a_front_that_ended_get_to_save_first() {
+        for what in ["crash", "stop"] {
+            let dir = super::super::test_dir(&format!("supervise-{what}"));
+            let mut helper = Command::new(std::env::current_exe().unwrap())
+                .args(["cli::setup::tests::supervise_in_a_process_of_its_own", "--ignored", "--exact", "--nocapture"])
+                .env("PCDS_SUPERVISE_TEST", &dir)
+                .env("PCDS_SUPERVISE_WHAT", what)
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            if what == "stop" {
+                let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                while !dir.join("up").is_file() {
+                    assert!(std::time::Instant::now() < deadline, "the front did not start");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                // SAFETY: the helper process this test started (systemctl stop's SIGTERM).
+                assert_eq!(unsafe { libc::kill(helper.id() as i32, libc::SIGTERM) }, 0);
+            }
+            let status = super::super::wait_for(&mut helper, Duration::from_secs(30)).expect("the helper ends");
+            assert_eq!(status.code(), Some(if what == "crash" { 3 } else { 0 }), "{what}: the front's exit code");
+            assert_eq!(fs::read_to_string(dir.join("saved")).ok().as_deref(), Some("saved\n"), "{what}: the bank saved before the end");
+            fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     /// This program goes into a bank once: the first install into a, a newer build into the
