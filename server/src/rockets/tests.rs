@@ -271,3 +271,37 @@ fn interplanetary_transfers_take_items_from_the_planets_inventories() {
     transfer(&mut g, vec![json!(iron), json!(2), json!(stable_hash("Prime")), json!(73)]);
     assert_eq!(groups_in(&g, 72), vec!["Iron", "ice"], "nothing more moved");
 }
+
+/// A platform's growth proxy is the rocket's flight: asked, the asker hears it; reset, everyone.
+#[test]
+fn a_platforms_growth_is_its_rockets_flight() {
+    let platform = 210_000_080;
+    let Some(mut g) = game(vec![placed(platform, "TradePlatform1", "100,10,100", "Prime", json!({"liId": 53, "grwth": 40}))], vec![json!({"id": 53, "woIds": "", "size": 25})]) else { return };
+    g.net.out.clear();
+    assert!(rpc(&mut g, platform, "GrowthProxy.GetCurrentGrowthServerRpc"));
+    let to = |g: &Game| crate::testkit::sent(g, "GrowthProxy.SetCurrentGrowthClientRpc").into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>();
+    assert_eq!(to(&g), vec![(crate::net::Target::Only(1), vec![json!(40.0)])]);
+    g.net.out.clear();
+    let net = g.wos[&platform].net.unwrap();
+    assert!(super::rpc(&mut g, 1, net, 0, "GrowthProxy.ResetCurrentGrowthServerRpc", &Args(vec![json!(12.0)])));
+    assert_eq!((g.wos[&platform].growth, to(&g)), (12.0, vec![(crate::net::Target::All, vec![json!(12.0)])]));
+}
+
+/// An exchange rocket set to automatic (setting 1) that lands full goes again 5 s later.
+#[test]
+fn automatic_exchange_rockets_go_again_when_they_land_full() {
+    let (exchange, depot) = (210_000_090, 210_000_091);
+    let humble = stable_hash("Humble");
+    let Some(mut g) = game(
+        vec![
+            placed(exchange, "InterplanetaryExchangePlatform1", "100,10,100", "Prime", json!({"liId": 80, "liPlanet": humble, "set": 1})),
+            placed(depot, "PlanetaryDeliveryDepot1", "50,10,50", "Humble", json!({"liId": 81})),
+            json!({"id": 210_000_092, "gId": "Iron"}),
+        ],
+        vec![json!({"id": 80, "woIds": "210000092", "size": 1}), json!({"id": 81, "woIds": "", "size": 40})],
+    ) else { return };
+    super::add_speed_multiplier(&mut g, exchange, 9.0);
+    assert!(rpc(&mut g, exchange, "ConstructibleProxy.SendInSpaceRocketBackAndForthServerRpc"));
+    run_until(&mut g, 120.0, |g| g.wos[&exchange].growth == 0.0).expect("the rocket comes back");
+    assert!(run_until(&mut g, 6.0, |g| g.wos[&exchange].growth > 0.0).is_some_and(|t| t >= 4.9), "launched again after 5 s");
+}

@@ -603,6 +603,43 @@ pub(crate) mod tests {
         assert!(g.snapshot().story_events.contains(&serde_json::json!({"stringId": "StoryEvent-Mont-Open"})));
     }
 
+    /// The meteo coroutine: its first try a minute in launches the queued event (a rocket's,
+    /// a story's) before any random one; the event ends after its duration; later tries launch
+    /// a random event of the planet's own list as often as the rules' chance says (never at 0).
+    #[test]
+    fn the_meteo_loop_launches_queued_events_first_then_random_ones() {
+        let Some(mut g) = game() else { return };
+        let run = |g: &mut Game, until: f32| {
+            while g.time < until {
+                g.time += 0.1;
+                tick(g);
+            }
+        };
+        let queued = "MeteoEventData:MeteoEvent-BasicOresFullRed";
+        queue_meteo_event(&mut g, queued, Some([5.0, 6.0, 7.0]));
+        g.rules.meteo.event_chance = 0.0;
+        run(&mut g, 59.0);
+        assert_eq!(g.ext.meteo.selected, -1, "nothing before the first try");
+        run(&mut g, 61.0);
+        assert_eq!(g.ext.meteo.events[g.ext.meteo.selected as usize], queued);
+        assert!(g.ext.meteo.queue.is_empty());
+        assert_eq!(var(&g, HANDLER, "_asteroidReferencePosition"), vec3([5.0, 6.0, 7.0]));
+        let duration = num(g.data.asset(queued).unwrap(), "duration");
+        run(&mut g, 61.0 + duration + 1.0);
+        assert_eq!(g.ext.meteo.selected, -1, "over after its duration");
+        assert!(g.ext.meteo.asteroids.events.is_empty(), "its asteroids stop with it");
+        // Chance 0: no random event, however long.
+        let next = g.ext.meteo.next_try;
+        let every = g.ext.meteo.try_every;
+        run(&mut g, next + 3.0 * every);
+        assert_eq!(g.ext.meteo.selected, -1);
+        // A chance that cannot miss: the next try launches one of the planet's own events.
+        g.rules.meteo.event_chance = 1.0e9;
+        let next = g.ext.meteo.next_try;
+        run(&mut g, next + 0.5);
+        assert!((0..g.ext.meteo.original_count as i32).contains(&g.ext.meteo.selected), "{}", g.ext.meteo.selected);
+    }
+
     #[test]
     fn day_night_matches_the_real_server() {
         // _dayNightLerpValue as the real server sent it, night step 1 and the 0.35 steps after.
