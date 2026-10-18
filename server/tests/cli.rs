@@ -216,3 +216,21 @@ fn one_server_per_world() {
     assert!(text(&out).contains("another server runs this world"), "{}", text(&out));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A server.env value that is not what the setting takes stops the start, naming it (and
+/// never showing a secret's value).
+#[test]
+fn bad_settings_stop_the_start() {
+    let dir = test_dir("settings");
+    let fake = fake_systemctl(&dir, "echo inactive");
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::write(dir.join("run/server.env"), "PCDS_AUTOSAVE=five\nPCDS_SESSION=12345\n").unwrap();
+    let out = pcds(&dir, &fake, &["run"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("server.env: ") && text(&out).contains("PCDS_AUTOSAVE: \"five\" is not a whole number") && text(&out).contains("PCDS_SESSION: 12345"), "{}", text(&out));
+    // The front itself checks its environment too.
+    let out = Command::new(PCDS).arg("serve").arg(dir.join("no-tables")).arg(dir.join("world.json")).env("PCDS_BACKUPS", "lots").output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(text(&out).contains("PCDS_BACKUPS: \"lots\""), "{}", text(&out));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

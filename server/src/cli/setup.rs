@@ -153,6 +153,13 @@ impl Ctx {
                 return Err(format!("the service {} runs this installation's server (pid {pid}): 'pcds stop' first, or 'pcds logs' to watch it", self.unit()));
             }
         }
+        // Started by hand: the settings file (the unit has systemd read it).
+        let mut settings = HashMap::new();
+        if crate::env("PCDS_ADMIN_TOKEN").is_none() && self.env_file.is_file() {
+            settings.extend(parse_env(&fs::read_to_string(&self.env_file).map_err(|e| format!("{}: {e}", self.env_file.display()))?));
+        }
+        let get = |key: &str| settings.get(key).filter(|v| !v.is_empty()).cloned().or_else(|| crate::env(key));
+        crate::config::check_env(&get)?;
         let world = self.world_file();
         if !world.is_file() {
             return Err(format!("no world at {}: 'pcds worlds', 'pcds world use NAME' or 'pcds world new NAME'", world.display()));
@@ -174,12 +181,6 @@ impl Ctx {
         let game = self.game_dir(None)?;
         let data = self.tables(&build_id(&game)?)?;
         let banks = self.banks();
-        // Started by hand: the settings file (the unit has systemd read it).
-        let mut settings = HashMap::new();
-        if crate::env("PCDS_ADMIN_TOKEN").is_none() && self.env_file.is_file() {
-            settings.extend(parse_env(&fs::read_to_string(&self.env_file).map_err(|e| format!("{}: {e}", self.env_file.display()))?));
-        }
-        let get = |key: &str| settings.get(key).filter(|v| !v.is_empty()).cloned().or_else(|| crate::env(key));
         let front = |bank: &str| {
             let mut server = Command::new(banks.join(bank).join("pcds"));
             server.arg("serve").arg(&data).arg(&world).env("PCDS_BANKS", &banks).envs(&settings);

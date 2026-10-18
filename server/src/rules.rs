@@ -240,7 +240,7 @@ impl Rules {
 
     /// limits.maxPlayers, else PCDS_MAX_PLAYERS, else 16.
     pub fn max_players(&self) -> usize {
-        self.limits.max_players.or_else(|| std::env::var("PCDS_MAX_PLAYERS").ok().and_then(|v| v.parse().ok())).unwrap_or(16)
+        self.limits.max_players.unwrap_or_else(|| crate::config::env_number("PCDS_MAX_PLAYERS") as usize)
     }
 }
 

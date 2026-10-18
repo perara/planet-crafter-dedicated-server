@@ -126,7 +126,7 @@ fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, data: crate:
     if let Err(e) = save::backup(save_path, Duration::from_secs(600), backups_kept()) {
         eprintln!("backup failed: {e}");
     }
-    let session_number: u32 = crate::env("PCDS_SESSION").map(|s| s.parse().expect("PCDS_SESSION: a number")).unwrap_or(4242);
+    let session_number = config::env_number("PCDS_SESSION") as u32;
     // A rules or access file that does not hold up stops the start, before the world loads.
     let rules_path = rules_path(save_path);
     let loaded_rules = rules::Rules::load(&rules_path).and_then(|r| r.validate(&data).map(|_| r)).unwrap_or_else(|e| {
@@ -606,7 +606,7 @@ fn game_at(dir: &std::path::Path, data_dir: &str) -> Value {
 }
 
 fn backups_kept() -> usize {
-    crate::env("PCDS_BACKUPS").and_then(|s| s.parse().ok()).unwrap_or(24)
+    config::env_number("PCDS_BACKUPS") as usize
 }
 
 /// One client's share of the game. A panic there (the hook printed it) kicks that client and
@@ -620,7 +620,7 @@ fn guarded(game: &mut Game, client: u64, save_path: &str, work: impl FnOnce(&mut
 }
 
 fn persist(game: &mut Game, path: &str) {
-    let every: u64 = crate::env("PCDS_BACKUP_MINUTES").and_then(|s| s.parse().ok()).unwrap_or(60);
+    let every = config::env_number("PCDS_BACKUP_MINUTES");
     if let Err(e) = save::backup(path, Duration::from_secs(every.saturating_mul(60)), backups_kept()) {
         eprintln!("backup failed: {e}");
     }

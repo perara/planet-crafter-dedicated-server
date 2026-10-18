@@ -193,6 +193,11 @@ pub fn run(args: &[String]) {
         eprintln!("usage: pcds serve DATA_DIR SAVE.json (settings: see the source header of main.rs)");
         std::process::exit(2);
     };
+    // Settings that are not what they should be stop the start, before anything is opened.
+    if let Err(e) = crate::config::check_env(crate::env) {
+        eprintln!("{e}");
+        std::process::exit(2);
+    }
     // One server per world, for this front's life (released when the process ends).
     let _world = crate::cli::hold(std::path::Path::new(&format!("{save}.lock")), "another server runs this world").unwrap_or_else(|e| {
         eprintln!("{e}");
@@ -226,7 +231,7 @@ impl Front {
     fn new(dir: &str, save: &str, banks: Option<PathBuf>, utp: Option<Utp>, port: u16, stop: Arc<AtomicBool>) -> Front {
         let (tx, rx) = std::sync::mpsc::channel();
         let auto = crate::env("PCDS_AUTO_UPDATE").as_deref() == Some("on");
-        let every = Duration::from_secs(crate::env("PCDS_UPDATE_CHECK_HOURS").and_then(|h| h.parse::<u64>().ok()).unwrap_or(24).clamp(1, 8760) * 3600);
+        let every = Duration::from_secs(crate::config::env_number("PCDS_UPDATE_CHECK_HOURS") * 3600);
         let autosave_minutes = crate::autosave_start();
         Front {
             dir: dir.to_string(),
@@ -448,7 +453,7 @@ impl Front {
         if crate::env("PCDS_STEAM").as_deref() == Some("off") {
             return;
         }
-        let session: u32 = crate::env("PCDS_SESSION").and_then(|s| s.parse().ok()).unwrap_or(4242);
+        let session = crate::config::env_number("PCDS_SESSION") as u32;
         match steam_login(&self.game_version, session) {
             Ok((steam, listen, code)) => {
                 self.invite_code = Some(code);
