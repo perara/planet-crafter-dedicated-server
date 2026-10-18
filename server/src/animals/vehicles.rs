@@ -505,6 +505,37 @@ mod tests {
         assert_eq!((seat(&g, net, pilot), bool_var(&g, net, "OwnershipSwitcher", "_locked")), (None, false));
     }
 
+    /// Recalling a vehicle to its garage: refused while someone drives it; else the server takes
+    /// it, teleports it to the spot, and the garage cools down for ten minutes.
+    #[test]
+    fn vehicles_recalled_to_their_garage_are_taken_and_teleported() {
+        use crate::testkit::*;
+        let Some((mut g, _)) = world() else { return };
+        let (_, garage) = place(&mut g, "VehicleCrafter1", [570.0, 3.0, 500.0]);
+        let (_, truck) = place(&mut g, "VehicleTruck", [600.0, 3.0, 494.0]);
+        assert_eq!(g.net.objects[&truck].owner, 1, "parked: the nearest player simulates it");
+        let target = [572.0, 3.0, 506.0];
+        let rotation = crate::geometry::from_euler_y(90.0);
+        send_on(&mut g, 1, truck, "OwnershipSwitcher.AskForOwnershipServerRpc", &[]);
+        send_on(&mut g, 1, garage, "VehicleBackToGarage.MoveVehicleToPositionServerRpc", &[json!(truck), json!(target), json!(rotation)]);
+        assert_eq!(var(&g, garage, "VehicleBackToGarage", "_cooldown"), enc::float(COOLDOWN_START), "driven: no recall");
+        send_on(&mut g, 1, truck, "OwnershipSwitcher.ResetOwnershipServerRpc", &[]);
+        send_on(&mut g, 1, garage, "VehicleBackToGarage.MoveVehicleToPositionServerRpc", &[json!(truck), json!(target), json!(rotation)]);
+        assert_eq!(var(&g, garage, "VehicleBackToGarage", "_cooldown"), enc::float(COOLDOWN));
+        assert_eq!(g.net.objects[&truck].owner, 0, "the server takes it");
+        for _ in 0..3 {
+            g.time += 0.05;
+            crate::animals::tick(&mut g);
+        }
+        assert_eq!(g.net.objects[&truck].position, target);
+        assert!(g.ext.animals.vehicles.garages[&garage].recall.is_none(), "done");
+        let cooldown = f32::from_le_bytes(var(&g, garage, "VehicleBackToGarage", "_cooldown")[..4].try_into().unwrap());
+        assert!(cooldown < COOLDOWN && cooldown > COOLDOWN - 1.0, "{cooldown}");
+        // Not a vehicle: nothing.
+        send_on(&mut g, 1, garage, "VehicleBackToGarage.MoveVehicleToPositionServerRpc", &[json!(garage), json!(target), json!(rotation)]);
+        assert!(g.ext.animals.vehicles.garages[&garage].recall.is_none());
+    }
+
     #[test]
     fn reads_the_trucks_transform_bits() {
         // VehicleTruck's dumped sync tail: ClientNetworkTransform (behaviour 0) state.
