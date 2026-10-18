@@ -249,6 +249,7 @@ reason in `./pcds logs`.
 | `loot.amount` | `1` | items in generated containers (wreck safes, crates), times this, up to the container's size |
 | `limits.maxPlayers` | `PCDS_MAX_PLAYERS` | players at once |
 | `limits.buildings` | none | building group id to how many the world may have; one more is taken down at once and its materials go back to the builder |
+| `world.pauseWhenEmpty` | `false` | with no player in the game the world stands still (time, day and night, growth, production, terraformation, meteo, timers and despawns, drones and vehicles) and goes on from there, with no catching up, when one is. A player counts once loaded in, as the game counts its players; one still loading sees the world as it stopped. An autosave of a world that stood still since the last one is skipped (no write, no backup) |
 
 ## Game updates
 

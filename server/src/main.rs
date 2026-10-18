@@ -485,7 +485,11 @@ fn main() {
         }
         if autosave_minutes > 0 && Instant::now() >= next_save {
             next_save += Duration::from_secs(autosave_minutes * 60);
-            persist(&mut game, &save_path);
+            // A world that stood still since the last autosave (rules: world.pauseWhenEmpty) is
+            // that save already: no write, and no backup that only repeats the one before.
+            if std::mem::take(&mut game.advanced) {
+                persist(&mut game, &save_path);
+            }
         }
         let work = woke.elapsed();
         busy = (busy.0 + work, busy.1.max(work));
