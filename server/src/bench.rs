@@ -4,7 +4,7 @@
 //!   PCDS_BENCH_SAVE=world.json PCDS_RNG_SEED=1 [PCDS_BENCH_SECONDS=300] [PCDS_BENCH_PLAYERS=4] \
 //!     [PCDS_BENCH_ACTION_MS=200] [PCDS_BENCH_DUMP=messages.txt] cargo test --release bench -- --ignored --nocapture
 //!
-//! PCDS_BENCH_DUMP writes every message (per tick, sorted) and the final save, to compare two
+//! PCDS_BENCH_DUMP writes every message (the joins', then per tick, sorted) and the final save, to compare two
 //! runs (two builds, two table sets) line by line.
 //!
 //! The loop steps like the server's (a tick every 5 ms); players walk in circles, sending a
@@ -59,7 +59,7 @@ fn env() -> Option<Env> {
 fn load(e: &Env) -> Game {
     let (net_data, data, spec) = crate::tables(e.dir);
     let scenes = crate::scene_tables(e.dir, &net_data, &data);
-    Game::new(net_data, data, spec, SaveFile::load(&e.path).unwrap(), scenes)
+    Game::with_clock(net_data, data, spec, SaveFile::load(&e.path).unwrap(), scenes, Some(0.0))
 }
 
 /// A bench player's own bookkeeping (what load.rs's bot learns from the server's answers).
@@ -141,11 +141,15 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
     let mut h = std::collections::hash_map::DefaultHasher::new();
     let objects: Vec<u64> = (1..=e.players).map(|c| join(&mut g, c, &format!("Bench{c}"))).collect();
     let mut players: Vec<Player> = (1..=e.players).map(|c| Player { rng: 0x9e37_79b9_7f4a_7c15 ^ c.wrapping_mul(0x2545_f491_4f6c_dd1d), ..Default::default() }).collect();
-    let mut messages = fingerprint(&mut h, &mut g.net.out).0;
+    let (mut messages, _, joined) = fingerprint(&mut h, &mut g.net.out);
     let (step, net_tick, act_every) = (0.005, 1.0 / g.net_data.tick_rate as f64, e.action_ms as f64 / 1000.0);
     let (mut t, mut next_move, mut next_act, mut next_swap, mut busy, mut seq) = (0.0, 0.0, act_every, swap_every, Duration::ZERO, 0);
     let (mut ticks, mut dumped) = (Vec::new(), Vec::new());
     let mut file = e.dump.as_ref().map(|p| std::io::BufWriter::new(std::fs::File::create(p).unwrap()));
+    if let Some(f) = &mut file {
+        use std::io::Write;
+        joined.iter().for_each(|line| writeln!(f, "join {line}").unwrap());
+    }
     while t < e.seconds {
         t += step;
         g.sim_time = Some(t);

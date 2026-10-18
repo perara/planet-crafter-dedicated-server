@@ -234,6 +234,12 @@ pub fn test_tables() -> Option<(NetData, GameData, Spec, crate::Scenes)> {
 
 impl Game {
     pub fn new(net_data: NetData, data: GameData, spec: Spec, save: SaveFile, scenes: crate::Scenes) -> Game {
+        Game::with_clock(net_data, data, spec, save, scenes, None)
+    }
+
+    /// A game whose clock is `sim_time` from the start (the bench's fixed clock): what the load
+    /// spawns gets the same ticks in every run, not the real time the load took.
+    pub fn with_clock(net_data: NetData, data: GameData, spec: Spec, save: SaveFile, scenes: crate::Scenes, sim_time: Option<f64>) -> Game {
         // SavedDataHandler.InitSavedData loads the host's planet. This server has no host, so it
         // keeps the planet it travelled to in the world state (pcdsCurrentPlanet; the game
         // ignores unknown fields) and marks a saved player host for the game (mark_host).
@@ -279,6 +285,7 @@ impl Game {
             unhandled: Default::default(),
             save_requested: false,
         };
+        game.sim_time = sim_time;
         game.change_generation_for_groups();
         game.crafted_total = game.save.stats["craftedObjects"].as_u64().unwrap_or(0);
         game.load();
