@@ -97,7 +97,7 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
         "WorldObjectAssociatedProxy.GetWorldObjectIdServerRpc" => {
             if let Some(w) = wo.and_then(|w| game.wos.get(&w)) {
                 let hash = game.data.groups[w.group].hash;
-                game.net.rpc(Target::Only(client), object, "WorldObjectAssociatedProxy.GetWorldObjectIdClientRpc", &[json!(w.id), json!(hash)]);
+                game.net.rpc_on(Target::Only(client), object, behaviour, "WorldObjectAssociatedProxy.GetWorldObjectIdClientRpc", &[json!(w.id), json!(hash)]);
             }
         }
         "WorldObjectAssociatedProxy.GetWorldObjectDetailsServerRpc" => {
@@ -107,7 +107,7 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
                 let multipliers: Vec<f32> = order.iter().map(|u| crate::model::unit_index(u).map(|i| w.unit_multiplier[i]).unwrap_or(0.0)).collect();
                 let hash = game.data.groups[w.group].hash;
                 let args = [json!(w.id), json!(hash), json!(w.energy), json!(multipliers), json!(w.hunger), json!(w.linked_inventory)];
-                game.net.rpc(Target::Only(client), object, "WorldObjectAssociatedProxy.GetWorldObjectDetailsClientRpc", &args);
+                game.net.rpc_on(Target::Only(client), object, behaviour, "WorldObjectAssociatedProxy.GetWorldObjectDetailsClientRpc", &args);
             }
         }
         "InventoryAssociatedProxy.GetInventoryIdServerRpc" => {
@@ -119,7 +119,8 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
             if let Some(w) = wo.and_then(|w| game.wos.get(&w)) {
                 let inventory = if index < 0 { w.linked_inventory } else { w.secondary_inventories.get(index as usize).copied().unwrap_or(0) };
                 let args = [json!(w.id), json!(game.data.groups[w.group].hash), json!(inventory)];
-                game.net.rpc(Target::Only(client), object, "InventoryAssociatedProxy.GetInventoryIdClientRpc", &args);
+                // To the proxy that asked: a proxy takes the id it is sent as its own, for good.
+                game.net.rpc_on(Target::Only(client), object, behaviour, "InventoryAssociatedProxy.GetInventoryIdClientRpc", &args);
             }
         }
         // PlayStation Network only: nothing to do on PC.
@@ -355,5 +356,25 @@ mod tests {
         let at = g.net.objects[&ann].position;
         g.net.move_object(loading, at, None);
         assert_eq!(super::others_in_range(&g, 1, 5.0), vec![2]);
+    }
+
+    #[test]
+    fn inventory_ids_answer_the_proxy_that_asked() {
+        // The truck's storage proxy (its linked inventory) and its equipment's (secondary 0):
+        // VehicleEquipment asks for the equipment at spawn; the storage took that answer as its own.
+        let Some(mut g) = crate::planets::tests::game() else { return };
+        let truck = g.data.group("VehicleTruck").unwrap();
+        let (id, net) = g.create_and_instantiate(truck, [565.0, 3.0, 500.0], [0.0, 0.0, 0.0, 1.0], false, true, false);
+        let expected = [g.wos[&id].linked_inventory, g.wos[&id].secondary_inventories[0]];
+        let proxies: Vec<u16> = g.net.objects[&net].behaviours.iter().filter(|b| b.class == "InventoryAssociatedProxy").map(|b| b.index).collect();
+        assert_eq!(proxies.len(), 2);
+        for (behaviour, inventory) in proxies.into_iter().zip(expected) {
+            g.net.out.clear();
+            super::rpc(&mut g, 1, net, behaviour, "InventoryAssociatedProxy.GetInventoryIdServerRpc", &Args(vec![]));
+            let mut r = crate::wire::Reader::new(&g.net.out[0].2);
+            let (object, to, method) = (r.packed_u64().unwrap(), r.packed_u16().unwrap(), r.packed_u32().unwrap());
+            assert_eq!((object, to), (net, behaviour), "the answer goes to the asking proxy");
+            assert_eq!(g.net.spec.decode(method, r.rest()).unwrap()[2], json!(inventory));
+        }
     }
 }

@@ -445,6 +445,12 @@ impl Net {
             eprintln!("rpc {name}: object {object} has no {class}");
             return;
         };
+        self.rpc_on(to, object, behaviour, name, args);
+    }
+
+    /// A ClientRpc on one behaviour by index: a ServerRpc's answer goes back to the behaviour
+    /// that sent it, as `this` does in the game (an object can carry several of one class).
+    pub fn rpc_on(&mut self, to: Target, object: u64, behaviour: u16, name: &str, args: &[Value]) {
         let (method, body) = self.spec.encode(name, args);
         if method == 0 {
             return;
