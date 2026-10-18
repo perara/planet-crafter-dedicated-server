@@ -13,7 +13,7 @@ What legitimately differs is normalized away:
 - network object ids the server allocates: an object is named by scene id, by prefab hash and
   position for objects in the approval, and by prefab hash and creation order for new ones;
 - world object ids the server allocates (WorldObjectsIdHandler: 20xxxxxxx, not in SAVE.json):
-  numbered by first appearance ("WO#1", ...);
+  named by the step they first appear in and their rank there ("WO@12.1", ...);
 - floats are compared to 3 decimals (0.1% for large values).
 
 Network variable deltas are decoded with the tables and compared as state: the value each
@@ -284,7 +284,9 @@ class Transcript:
         self.labels = {}     # net id -> label
         self.objects = {}    # label -> {hash, position, vars}
         self.created = {}    # hash -> count of creations during the run
-        self.wo = {}         # allocated world object id -> "WO#n"
+        self.wo = {}         # allocated world object id -> "WO@step.n"
+        self.wo_in_step = {}  # step -> world object ids first seen there
+        self.step = 0
         self.state = {}      # (label, var) -> value
         self.writes = {}     # (label, var) -> deltas that wrote it
         self.series = {}     # (label, var) -> [(t, value)] of numbers that drift with time
@@ -310,8 +312,11 @@ class Transcript:
         if isinstance(v, bool):
             return v
         if isinstance(v, int) and 200_000_000 <= v < 210_000_000 and v not in self.known:
+            # Named by the script step it first appeared in, and its rank there: one server
+            # allocating an extra object does not renumber all later ones.
             if v not in self.wo:
-                self.wo[v] = f'WO#{len(self.wo) + 1}'
+                self.wo_in_step[self.step] = self.wo_in_step.get(self.step, 0) + 1
+                self.wo[v] = f'WO@{self.step}.{self.wo_in_step[self.step]}'
             return self.wo[v]
         if isinstance(v, list):
             return [self.norm(x) for x in v]
@@ -416,6 +421,7 @@ class Transcript:
                 self.events.append((step, {'msg': 'destroy', 'object': self.label(l['id'])}))
             elif m == 'call':
                 step += 1
+                self.step = step
                 adding = l['args'][0] if l['name'] == 'InventoriesHandler.AddNewItemToInventoryServerRpc' and 'args' in l else None
                 if 'skipped' in l:
                     self.events.append((step, {'msg': 'call', 'name': l['name'], 'skipped': l['skipped'], 'tag': l.get('tag')}))
