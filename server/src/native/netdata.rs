@@ -6,7 +6,7 @@ use serde_json::{json, Map, Value};
 
 use super::serial::Raw;
 use super::tables::Ctx;
-use super::dotnet::TypeName;
+use super::dotnet::{TypeName, TypeSig};
 use super::unity::{self, Id};
 
 /// A field of a read object by name (the first one: a class's own field hides its base's).
@@ -424,5 +424,99 @@ impl Ctx {
             out.insert(class, Value::Object(self.fields(id.0, &b.fields, 0)));
         }
         Ok(out)
+    }
+}
+
+impl Ctx {
+    fn hash_of(&mut self, from: usize, r: Option<&Raw>) -> Result<u32, String> {
+        let root = match r {
+            Some(Raw::Ref(p, _)) => self.data.resolve(from, *p),
+            _ => None,
+        };
+        let hash = root.and_then(|root| self.prefab_hash(root)).ok_or("a network prefab without a NetworkObject")?;
+        u32::from_str_radix(&hash, 16).map_err(|e| e.to_string())
+    }
+
+    /// NetworkPrefab.SourcePrefabGlobalObjectIdHash of every prefab the NetworkPrefabsLists
+    /// register, and of the player prefab (NetworkManager adds it).
+    fn registered_prefabs(&mut self, file: usize, config: &[(String, Raw)]) -> Result<Vec<u32>, String> {
+        let lists = match field(config, "Prefabs") {
+            Some(Raw::Fields(_, f)) => match field(f, "NetworkPrefabsLists") {
+                Some(Raw::List(l)) => l.clone(),
+                other => return Err(format!("NetworkPrefabs.NetworkPrefabsLists: {other:?}")),
+            },
+            other => return Err(format!("NetworkConfig.Prefabs: {other:?}")),
+        };
+        let mut out = Vec::new();
+        for list in lists {
+            let Raw::Ref(p, _) = list else { return Err("a NetworkPrefabsList that is not a reference".into()) };
+            let id = self.data.resolve(file, p).ok_or("a NetworkPrefabsList that cannot be found")?;
+            let b = self.behaviour(id).ok_or("unreadable NetworkPrefabsList")?;
+            let Some(Raw::List(entries)) = field(&b.fields, "List").cloned() else { return Err("NetworkPrefabsList.List".into()) };
+            for e in entries {
+                let Raw::Fields(_, f) = e else { return Err("a NetworkPrefab that is not a struct".into()) };
+                let hash = match field(&f, "Override") {
+                    Some(Raw::Enum(0, ..)) => self.hash_of(id.0, field(&f, "Prefab"))?,
+                    Some(Raw::Enum(1, ..)) => self.hash_of(id.0, field(&f, "SourcePrefabToOverride"))?,
+                    Some(Raw::Enum(2, ..)) => match field(&f, "SourceHashToOverride") {
+                        Some(Raw::UInt(h)) => *h as u32,
+                        other => return Err(format!("NetworkPrefab.SourceHashToOverride: {other:?}")),
+                    },
+                    other => return Err(format!("NetworkPrefab.Override: {other:?}")),
+                };
+                out.push(hash);
+            }
+        }
+        out.push(self.hash_of(file, field(config, "PlayerPrefab"))?);
+        Ok(out)
+    }
+
+    /// NetworkConfig.GetConfig: XXHash64 of the settings both ends must share (ProtocolVersion,
+    /// Netcode's version string, the prefab hashes when ForceSamePrefabs, TickRate,
+    /// ConnectionApproval, ForceSamePrefabs, EnableSceneManagement,
+    /// EnsureNetworkVariableLengthSafety, RpcHashSize), as FastBufferWriter writes them.
+    pub fn config_hash(&mut self, file: usize, config: &[(String, Raw)]) -> Result<u64, String> {
+        let asm = self.layouts.asm.clone();
+        let t = TypeName { scope: Some("Unity.Netcode.Runtime".into()), namespace: "Unity.Netcode".into(), name: "NetworkConfig".into() };
+        let get = asm.def(&t).and_then(|d| d.methods.iter().find(|m| m.name == "GetConfig")).ok_or("no NetworkConfig.GetConfig")?;
+        let a = asm.assembly_of(&t).unwrap();
+        let version = super::netvars::first_string(a, a.il(get).unwrap_or_default()).ok_or("GetConfig: no version string")?;
+        let int = |n: &str| match field(config, n) {
+            Some(Raw::UInt(v)) => Ok(*v),
+            Some(Raw::Int(v)) => Ok(*v as u64),
+            Some(Raw::Enum(v, ..)) => Ok(*v as u64),
+            other => Err(format!("NetworkConfig.{n}: {other:?}")),
+        };
+        let flag = |n: &str| match field(config, n) {
+            Some(Raw::Bool(b)) => Ok(*b as u8),
+            other => Err(format!("NetworkConfig.{n}: {other:?}")),
+        };
+        let mut w = Vec::new();
+        w.extend((int("ProtocolVersion")? as u16).to_le_bytes());
+        // WriteValueSafe(string, oneByteChars: false): the length, then UTF-16 units.
+        let units: Vec<u16> = version.encode_utf16().collect();
+        w.extend((units.len() as u32).to_le_bytes());
+        units.iter().for_each(|u| w.extend(u.to_le_bytes()));
+        if flag("ForceSamePrefabs")? != 0 {
+            // NetworkPrefabOverrideLinks' keys in order: each prefab's source hash.
+            let mut hashes = self.registered_prefabs(file, config)?;
+            hashes.sort();
+            hashes.dedup();
+            hashes.iter().for_each(|h| w.extend(h.to_le_bytes()));
+        }
+        w.extend((int("TickRate")? as u32).to_le_bytes());
+        for n in ["ConnectionApproval", "ForceSamePrefabs", "EnableSceneManagement", "EnsureNetworkVariableLengthSafety"] {
+            w.push(flag(n)?);
+        }
+        let hash_size = TypeName { scope: Some("Unity.Netcode.Runtime".into()), namespace: "Unity.Netcode".into(), name: "HashSize".into() };
+        let size = match asm.enum_base(&hash_size) {
+            Some(TypeSig::U1 | TypeSig::I1) => 1,
+            Some(TypeSig::U2 | TypeSig::I2) => 2,
+            Some(TypeSig::U8 | TypeSig::I8) => 8,
+            Some(_) => 4,
+            None => return Err("no Unity.Netcode.HashSize enum".into()),
+        };
+        w.extend(&int("RpcHashSize")?.to_le_bytes()[..size]);
+        Ok(xxhash_rust::xxh64::xxh64(&w, 0))
     }
 }

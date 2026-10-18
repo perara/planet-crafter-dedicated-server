@@ -329,7 +329,23 @@ pub fn run(args: &[String]) {
     let netdata = json!({"gameVersion": version, "tickRate": tick_rate, "playerPrefab": player_prefab, "messageVersions": versions, "sceneObjects": scene, "prefabs": {"Player": player, "WorldUnitsPlanet": units}, "planets": planets, "groups": groups});
     let rpcs = super::rpcs::rpcs(&ctx.layouts.asm);
     eprintln!("read-game: {} RPCs", rpcs.len());
+    // ConnectionRequestMessage as a client sends it (for the scripted test players): the
+    // message versions, the config hash, the connection data "version|0".
+    let config_hash = config.as_ref().ok_or("no NetworkManager".to_string()).and_then(|(file, f)| ctx.config_hash(*file, f)).unwrap_or_else(|e| fail(format!("config hash: {e}")));
+    let mut request = crate::wire::Writer::new();
+    request.packed_i32(versions.len() as i32);
+    for v in &versions {
+        request.u32(v[0].as_u64().unwrap_or(0) as u32).packed_i32(v[1].as_i64().unwrap_or(0) as i32);
+    }
+    let data = format!("{version}|0");
+    request.u64(config_hash).i32(data.len() as i32).bytes(data.as_bytes());
+    let request: String = request.0.iter().map(|b| format!("{b:02x}")).collect();
+    // The build these tables are for: the game code's hash, as `pcds` checks it.
+    let code = std::fs::read(Path::new(game).join("Planet Crafter_Data/Managed/Assembly-CSharp.dll")).unwrap_or_else(|e| fail(format!("Assembly-CSharp.dll: {e}")));
+    let build = format!("{:016x}", xxhash_rust::xxh64::xxh64(&code, 0));
     std::fs::create_dir_all(out).expect("create OUT_DIR");
+    std::fs::write(Path::new(out).join("connection-request.hex"), request).expect("write connection-request.hex");
+    std::fs::write(Path::new(out).join("buildid"), &build).expect("write buildid");
     std::fs::write(Path::new(out).join("rpcs.json"), serde_json::to_string_pretty(&rpcs).unwrap()).expect("write rpcs.json");
     std::fs::write(Path::new(out).join("netdata.json"), serde_json::to_string_pretty(&netdata).unwrap()).expect("write netdata.json");
     let layouts = ctx.world_object_layouts(&assets, &group_prefabs).unwrap_or_else(|e| fail(format!("layouts: {e}")));

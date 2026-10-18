@@ -206,6 +206,11 @@ pub fn bool_argument(asm: &Assembly, il: &[u8], method: &str) -> Option<bool> {
     }
 }
 
+/// The first string literal an IL body loads (ldstr).
+pub fn first_string(asm: &Assembly, il: &[u8]) -> Option<String> {
+    decode(il).ok()?.iter().find(|op| op.code == 0x72).and_then(|op| asm.user_string(op.arg as u32))
+}
+
 /// The first int32 constant an IL body loads (ldc.i4.*).
 pub fn first_int(il: &[u8]) -> Option<i64> {
     decode(il).ok()?.iter().find_map(|op| match op.code {
