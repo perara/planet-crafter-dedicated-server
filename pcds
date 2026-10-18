@@ -103,14 +103,31 @@ world_arg() {
   echo "$name"
 }
 
-# Until 0.5 there was one world, run/world.json. Moved while the server is stopped ("force":
-# the server is the one starting).
+# Until 0.5 there was one world, run/world.json: it moves to worlds/world.json with its
+# backups, while no server runs from it. "force": the server is the one starting; "stop": stop
+# it first (setup and up, which start it again).
 migrate_layout() {
-  [[ -f "$RUN/world.json" && ! -e "$WORLDS" ]] || return 0
-  [[ "${1:-}" == force ]] || ! active || return 0
-  mkdir -p "$WORLDS"
+  [[ -f "$RUN/world.json" ]] || return 0
+  if [[ -e "$WORLDS/world.json" ]]; then
+    say "both $RUN/world.json and $WORLDS/world.json exist: the server runs the second; move the first into $WORLDS under another name to keep it"
+    return 0
+  fi
+  case "${1:-}" in
+    force) ;;
+    stop)
+      if active; then
+        say "stopping the server to move its world into $WORLDS"
+        systemctl --user stop "$UNIT"
+      fi
+      ;;
+    *) active && return 0 ;;
+  esac
+  mkdir -p "$WORLDS/backups"
   mv "$RUN/world.json" "$WORLDS/world.json"
-  [[ -d "$RUN/backups" ]] && mv "$RUN/backups" "$WORLDS/backups"
+  if [[ -d "$RUN/backups" ]]; then
+    mv -n "$RUN/backups"/*.json "$WORLDS/backups/" 2> /dev/null || true
+    rmdir "$RUN/backups" 2> /dev/null || true
+  fi
   say "worlds now live in $WORLDS (world.json and its backups moved there)"
 }
 
@@ -805,7 +822,7 @@ cmd_setup() {
   done
   [[ -n "${PCDS_CONTAINER:-}" ]] || need systemctl "pcds runs the server as a systemd user service (or use the Docker image)"
   mkdir -p "$RUN"
-  migrate_layout
+  migrate_layout stop
   write_env
   install_server
   if [[ -n "$steam_user" ]]; then
@@ -895,7 +912,7 @@ cmd_up() {
   for a in "$@"; do
     [[ "$a" == --world || "$a" == --new ]] && world_given=1
   done
-  migrate_layout
+  migrate_layout stop
   if ((!world_given)) && [[ ! -f "$(world_file)" ]]; then
     save="$(pick_save)"
     if [[ -n "$save" ]]; then
