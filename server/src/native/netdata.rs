@@ -16,72 +16,68 @@ pub fn field<'a>(fields: &'a [(String, Raw)], name: &str) -> Option<&'a Raw> {
 
 impl Ctx {
     /// The first MonoBehaviour of a script class in the given files.
-    pub fn find_behaviour(&mut self, files: &[&str], namespace: &str, class: &str) -> Option<Id> {
+    pub fn find_behaviour(&mut self, files: &[&str], namespace: &str, class: &str) -> Result<Option<Id>, String> {
         for name in files {
-            let Ok(f) = self.data.file(name) else { continue };
+            let f = self.data.file(name).map_err(|e| format!("{name}: {e}"))?;
             let behaviours: Vec<i64> = self.data.files[f].objects.iter().filter(|o| o.class_id == unity::MONO_BEHAVIOUR).map(|o| o.path).collect();
             for path in behaviours {
                 let id = Id(f, path);
-                if self.graph.script(&mut self.data, id).is_some_and(|s| s.0 == namespace && s.1 == class) {
-                    return Some(id);
+                if self.graph.script(&mut self.data, id)?.is_some_and(|s| s.0 == namespace && s.1 == class) {
+                    return Ok(Some(id));
                 }
             }
         }
-        None
+        Ok(None)
     }
 
-    /// NetworkObject.GlobalObjectIdHash of a prefab root, as 8 hex digits.
-    pub fn prefab_hash(&mut self, root: Id) -> Option<String> {
-        self.graph_file(root.0);
-        let components = self.graph.nodes.get(&root)?.components.clone();
-        for (c, class) in components {
-            if class != unity::MONO_BEHAVIOUR || self.graph.script(&mut self.data, c).is_none_or(|s| s.1 != "NetworkObject") {
-                continue;
-            }
-            let b = self.behaviour(c)?;
-            if let Some(Raw::UInt(h)) = field(&b.fields, "GlobalObjectIdHash") {
-                return Some(format!("{:08x}", h));
-            }
+    /// NetworkObject.GlobalObjectIdHash of a prefab root, as 8 hex digits; None when the root
+    /// has no NetworkObject.
+    pub fn prefab_hash(&mut self, root: Id) -> Result<Option<String>, String> {
+        self.graph_file(root.0)?;
+        let Some(c) = self.network_object_of(root)? else { return Ok(None) };
+        match field(&self.behaviour(c)?.fields, "GlobalObjectIdHash") {
+            Some(Raw::UInt(h)) => Ok(Some(format!("{:08x}", h))),
+            other => Err(format!("NetworkObject.GlobalObjectIdHash: {other:?}")),
         }
-        None
     }
 
     /// Manifest planets: GetPlanetList(allPlanets: true), the ones shown in the build.
-    pub fn planets(&mut self, assets: &Map<String, Value>) -> Vec<Value> {
-        let list = assets.get("PlanetList:Planets").and_then(|p| p["_planets"].as_array()).cloned().unwrap_or_default();
-        list.iter()
-            .filter_map(|r| assets.get(r.as_str()?))
-            .filter(|p| p["showInBuild"].as_bool() == Some(true))
-            .map(|p| {
-                let id = p["id"].as_str().unwrap_or("");
-                json!({"id": id, "hash": crate::data::stable_hash(id), "steamAppId": p["steamAppId"], "startingPlanet": p["startingPlanet"]})
-            })
-            .collect()
+    pub fn planets(&mut self, assets: &Map<String, Value>) -> Result<Vec<Value>, String> {
+        let list = assets.get("PlanetList:Planets").and_then(|p| p["_planets"].as_array()).ok_or("no PlanetList:Planets._planets")?;
+        let mut out = Vec::new();
+        for r in list {
+            let p = r.as_str().and_then(|r| assets.get(r)).ok_or_else(|| format!("PlanetList:Planets._planets: {r} is not an asset"))?;
+            if p["showInBuild"].as_bool().ok_or_else(|| format!("{r}: showInBuild"))? {
+                let id = p["id"].as_str().ok_or_else(|| format!("{r}: no id"))?;
+                out.push(json!({"id": id, "hash": crate::data::stable_hash(id), "steamAppId": p["steamAppId"], "startingPlanet": p["startingPlanet"]}));
+            }
+        }
+        Ok(out)
     }
 
     /// Manifest groups: id -> hash, prefab name and prefab hash.
-    pub fn group_table(&mut self) -> Map<String, Value> {
+    pub fn group_table(&mut self) -> Result<Map<String, Value>, String> {
         let mut out = Map::new();
         for (gid, prefab) in self.groups.clone() {
             let (name, hash) = match prefab {
                 Some(root) => {
-                    self.graph_file(root.0);
-                    (self.graph.nodes.get(&root).map(|n| json!(n.name)).unwrap_or(Value::Null), self.prefab_hash(root).map(Value::from).unwrap_or(Value::Null))
+                    self.graph_file(root.0)?;
+                    let name = self.graph.nodes.get(&root).map(|n| json!(n.name)).ok_or_else(|| format!("{gid}: its prefab is not a GameObject"))?;
+                    (name, self.prefab_hash(root)?.map(Value::from).unwrap_or(Value::Null))
                 }
                 None => (Value::Null, Value::Null),
             };
             out.insert(gid.clone(), json!({"hash": crate::data::stable_hash(&gid), "prefab": name, "prefabHash": hash}));
         }
-        out
+        Ok(out)
     }
 
     /// The NetworkManager's NetworkConfig fields.
-    pub fn network_config(&mut self) -> Option<(usize, Vec<(String, Raw)>)> {
-        let id = self.find_behaviour(&["level0", "level1", "level4"], "Unity.Netcode", "NetworkManager")?;
-        let b = self.behaviour(id)?;
-        match field(&b.fields, "NetworkConfig")? {
-            Raw::Fields(_, f) => Some((id.0, f.clone())),
-            _ => None,
+    pub fn network_config(&mut self) -> Result<(usize, Vec<(String, Raw)>), String> {
+        let id = self.find_behaviour(&["level0", "level1", "level4"], "Unity.Netcode", "NetworkManager")?.ok_or("no NetworkManager in level0, level1 or level4")?;
+        match field(&self.behaviour(id)?.fields, "NetworkConfig") {
+            Some(Raw::Fields(_, f)) => Ok((id.0, f.clone())),
+            other => Err(format!("NetworkManager.NetworkConfig: {other:?}")),
         }
     }
 
@@ -126,14 +122,22 @@ fn yes(fields: &[(String, Raw)], name: &str) -> bool {
 
 impl Ctx {
     /// The NetworkObject component of a game object.
-    pub fn network_object_of(&mut self, node: Id) -> Option<Id> {
-        let components = self.graph.nodes.get(&node)?.components.clone();
-        components.into_iter().find(|(c, class)| *class == unity::MONO_BEHAVIOUR && self.graph.script(&mut self.data, *c).is_some_and(|s| s.1 == "NetworkObject")).map(|(c, _)| c)
+    pub fn network_object_of(&mut self, node: Id) -> Result<Option<Id>, String> {
+        let components = self.graph.nodes.get(&node).ok_or_else(|| format!("{node:?}: not a game object of a file read"))?.components.clone();
+        for (c, class) in components {
+            if class == unity::MONO_BEHAVIOUR && self.graph.script(&mut self.data, c)?.is_some_and(|s| s.0 == "Unity.Netcode" && s.1 == "NetworkObject") {
+                return Ok(Some(c));
+            }
+        }
+        Ok(None)
     }
 
-    fn script_type(&mut self, behaviour: Id) -> Option<TypeName> {
-        let (namespace, name, assembly) = self.graph.script(&mut self.data, behaviour)?.clone();
-        Some(TypeName { scope: Some(assembly.trim_end_matches(".dll").to_string()), namespace, name })
+    /// A MonoBehaviour's script class, which must have one and be in the assemblies.
+    fn script_type(&mut self, behaviour: Id) -> Result<TypeName, String> {
+        let (namespace, name, assembly) = self.graph.script(&mut self.data, behaviour)?.ok_or_else(|| format!("{behaviour:?}: a MonoBehaviour without a script"))?.clone();
+        let t = TypeName { scope: Some(assembly.trim_end_matches(".dll").to_string()), namespace, name };
+        self.layouts.asm.resolve(&t).ok_or_else(|| format!("{}.{} ({assembly}): not in the game's assemblies", t.namespace, t.name))?;
+        Ok(t)
     }
 
     /// NetworkObject.SceneObject's flag bit for a property (what its getter tests).
@@ -155,7 +159,7 @@ impl Ctx {
     /// NetworkTransform.OnSynchronize's state for a spawn: the flags from the component's
     /// settings, and the transform's own values for each synchronized axis.
     fn transform_state(&mut self, behaviour: Id, node: Id, root: Id) -> Result<Value, String> {
-        let b = self.behaviour(behaviour).ok_or("unreadable NetworkTransform")?;
+        let b = self.behaviour(behaviour)?;
         let f = &b.fields;
         for unsupported in ["UseHalfFloatPrecision", "UseQuaternionSynchronization", "SyncScaleX", "SyncScaleY", "SyncScaleZ", "SlerpPosition", "SwitchTransformSpaceWhenParented"] {
             if yes(f, unsupported) {
@@ -175,7 +179,7 @@ impl Ctx {
         if yes(f, "UseUnreliableDeltas") {
             flags |= self.transform_bit("k_UseUnreliableDeltas")?;
         }
-        let x = self.graph.nodes.get(&node).and_then(|n| n.transform).and_then(|t| self.graph.xforms.get(&t)).ok_or("no transform")?;
+        let x = self.graph.xform(node).ok_or("no transform")?;
         let euler = crate::transform::euler_angles(x.rotation);
         let mut values = Vec::new();
         for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
@@ -197,7 +201,7 @@ impl Ctx {
     /// (GetComponentsInChildren, the ones this object owns) with their variables and
     /// NetworkTransform states.
     fn network_object(&mut self, object: Id, scene: bool) -> Entry {
-        let b = self.behaviour(object).ok_or("unreadable NetworkObject")?;
+        let b = self.behaviour(object)?;
         let root = b.game_object.ok_or("NetworkObject without a game object")?;
         let f = b.fields.clone();
         let uint = |n: &str| match field(&f, n) {
@@ -230,7 +234,7 @@ impl Ctx {
             // A NetworkObject below this one owns its own subtree.
             let parent_owned = n == root || self.graph.parent(n).is_some_and(|p| owned.contains(&p));
             let components = self.graph.nodes.get(&n).map(|x| x.components.clone()).unwrap_or_default();
-            if !parent_owned || (n != root && self.network_object_of(n).is_some()) {
+            if !parent_owned || (n != root && self.network_object_of(n)?.is_some()) {
                 continue;
             }
             owned.insert(n);
@@ -238,12 +242,12 @@ impl Ctx {
                 if class != unity::MONO_BEHAVIOUR {
                     continue;
                 }
-                let Some(ty) = self.script_type(c) else { continue };
+                let ty = self.script_type(c)?;
                 if !self.layouts.asm.derives_from(&ty, "Unity.Netcode.NetworkBehaviour") {
                     continue;
                 }
                 let index = behaviours.len();
-                let fields = self.behaviour(c).map(|b| b.fields).unwrap_or_default();
+                let fields = self.behaviour(c)?.fields;
                 let vars = super::netvars::variables(&self.layouts.asm, &ty, &fields)?;
                 behaviours.push(json!({"class": ty.name, "behaviourId": index, "vars": vars}));
                 if self.layouts.asm.derives_from(&ty, "Unity.Netcode.Components.NetworkTransform") {
@@ -253,7 +257,7 @@ impl Ctx {
                 }
             }
         }
-        let scale = self.graph.nodes.get(&root).and_then(|n| n.transform).and_then(|t| self.graph.xforms.get(&t)).map(|x| x.scale).unwrap_or([1.0; 3]);
+        let scale = self.graph.xform(root).ok_or("no transform")?.scale;
         let mut out = Map::new();
         out.insert("name".into(), json!(name));
         out.insert("hash".into(), json!(hash));
@@ -268,19 +272,19 @@ impl Ctx {
     /// The in-scene network objects of the game's main scene, in the order the server spawns
     /// them on start (file order), numbered from 2 as the game's own server numbers them.
     pub fn scene_objects(&mut self) -> Result<Vec<Value>, String> {
-        let main = self.data.build_scenes().iter().position(|s| s.ends_with("/GameMainScene.unity")).ok_or("no GameMainScene in the build")?;
+        let main = self.data.build_scenes()?.iter().position(|s| s.ends_with("/GameMainScene.unity")).ok_or("no GameMainScene in the build")?;
         let file = self.data.file(&format!("level{main}")).map_err(|e| e.to_string())?;
-        self.graph_file(file);
+        self.graph_file(file)?;
         let behaviours: Vec<i64> = self.data.files[file].objects.iter().filter(|o| o.class_id == unity::MONO_BEHAVIOUR).map(|o| o.path).collect();
         let mut out = Vec::new();
         for path in behaviours {
             let id = Id(file, path);
-            if self.graph.script(&mut self.data, id).is_none_or(|s| s.1 != "NetworkObject") {
+            if self.graph.script(&mut self.data, id)?.is_none_or(|s| s.0 != "Unity.Netcode" || s.1 != "NetworkObject") {
                 continue;
             }
             let mut entry = self.network_object(id, true)?;
-            let parent = self.behaviour(id).and_then(|b| b.game_object).and_then(|g| self.graph.parent(g));
-            if parent.is_some_and(|p| self.network_object_of(p).is_some()) {
+            let parent = self.behaviour(id)?.game_object.and_then(|g| self.graph.parent(g));
+            if let Some(p) = parent && self.network_object_of(p)?.is_some() {
                 return Err(format!("{}: in-scene network objects below another are not supported", entry["name"]));
             }
             entry.insert("id".into(), json!(out.len() + 2));
@@ -291,8 +295,8 @@ impl Ctx {
 
     /// The prefab of a network object (its root's NetworkObject) as a spawn describes it.
     pub fn prefab(&mut self, root: Id, player: bool) -> Entry {
-        self.graph_file(root.0);
-        let object = self.network_object_of(root).ok_or("prefab without a NetworkObject")?;
+        self.graph_file(root.0)?;
+        let object = self.network_object_of(root)?.ok_or("prefab without a NetworkObject")?;
         let mut entry = self.network_object(object, false)?;
         if player {
             let flags = entry["flags"].as_u64().unwrap_or(0) as u16 | self.scene_flag("IsPlayerObject")?;
@@ -308,8 +312,8 @@ impl Ctx {
     /// NetworkObject, else the handler's container prefab (with an inventory when the group has
     /// one; a "#static" one for the others loaded from the save).
     pub fn world_object_layouts(&mut self, assets: &Map<String, Value>, group_prefabs: &Map<String, Value>) -> Result<Map<String, Value>, String> {
-        let handler = self.find_behaviour(&["level4"], "SpaceCraft", "WorldObjectsHandler").ok_or("no WorldObjectsHandler")?;
-        let fields = self.behaviour(handler).ok_or("unreadable WorldObjectsHandler")?.fields;
+        let handler = self.find_behaviour(&["level4"], "SpaceCraft", "WorldObjectsHandler")?.ok_or("no WorldObjectsHandler")?;
+        let fields = self.behaviour(handler)?.fields;
         // InstantiateWorldObject: networkObject.Spawn(destroyWithScene).
         let asm = &self.layouts.asm;
         let t = TypeName { scope: Some("Assembly-CSharp".into()), namespace: "SpaceCraft".into(), name: "WorldObjectsHandler".into() };
@@ -322,7 +326,7 @@ impl Ctx {
         };
         let container = |ctx: &mut Ctx, name: &str| -> Result<Value, String> {
             let root = match field(&fields, name) {
-                Some(Raw::Ref(p, _)) => ctx.data.resolve(handler.0, *p),
+                Some(Raw::Ref(p, _)) => ctx.data.resolve(handler.0, *p)?,
                 _ => None,
             };
             let mut entry = ctx.prefab(root.ok_or(format!("WorldObjectsHandler.{name}: no prefab"))?, false)?;
@@ -363,8 +367,8 @@ impl Ctx {
         let mut out = Map::new();
         for (gid, prefab) in self.groups.clone() {
             let Some(root) = prefab else { continue };
-            self.graph_file(root.0);
-            if self.network_object_of(root).is_some() {
+            self.graph_file(root.0)?;
+            if self.network_object_of(root)?.is_some() {
                 let mut entry = self.prefab(root, false).map_err(|e| format!("{gid}: {e}"))?;
                 entry.insert("prefab".into(), entry["name"].clone());
                 out.insert(gid, spawned(Value::Object(entry)));
@@ -387,12 +391,12 @@ impl Ctx {
             let f = self.scene_file(s)?;
             names.push(self.data.files[f].name.clone());
         }
-        Ok(self.find_behaviour(&names.iter().map(String::as_str).collect::<Vec<_>>(), namespace, class))
+        self.find_behaviour(&names.iter().map(String::as_str).collect::<Vec<_>>(), namespace, class)
     }
 
     /// The build file of a scene by name (scene N of the build is levelN).
     pub fn scene_file(&mut self, name: &str) -> Result<usize, String> {
-        let scenes = self.data.build_scenes();
+        let scenes = self.data.build_scenes()?;
         let index = scenes.iter().position(|s| s.rsplit('/').next() == Some(&format!("{name}.unity"))).ok_or_else(|| format!("no scene {name} in the build (it starts {:?})", &scenes[..scenes.len().min(8)]))?;
         self.data.file(&format!("level{index}")).map_err(|e| format!("level{index}: {e}"))
     }
@@ -404,15 +408,15 @@ impl Ctx {
         let mut found: Vec<Id> = Vec::new();
         for scene in ["BootScene", "GameMainScene", planet_scene] {
             let f = self.scene_file(scene)?;
-            self.graph_file(f);
+            self.graph_file(f)?;
             found.extend(self.data.files[f].objects.iter().filter(|o| o.class_id == unity::MONO_BEHAVIOUR).map(|o| Id(f, o.path)));
         }
-        self.graph_file(player.0);
-        found.extend(self.graph.behaviours_in_children(&mut self.data, player).into_iter().map(|b| b.0));
+        self.graph_file(player.0)?;
+        found.extend(self.graph.behaviours_in_children(&mut self.data, player)?.into_iter().map(|b| b.0));
         let mut by_class: indexmap::IndexMap<String, Vec<Id>> = Default::default();
         for id in found {
-            let Some((namespace, class, _)) = self.graph.script(&mut self.data, id).cloned() else { continue };
-            let attached = self.data.reader(id).and_then(|mut r| unity::behaviour(&mut r)).is_some_and(|h| !h.game_object.is_null());
+            let Some((namespace, class, _)) = self.graph.script(&mut self.data, id)?.cloned() else { continue };
+            let attached = !self.data.reader(id).and_then(|mut r| unity::behaviour(&mut r)).ok_or_else(|| format!("{id:?}: unreadable MonoBehaviour"))?.game_object.is_null();
             if namespace == "SpaceCraft" && attached {
                 by_class.entry(class).or_default().push(id);
             }
@@ -420,8 +424,8 @@ impl Ctx {
         let mut out = Map::new();
         for (class, ids) in by_class {
             let [id] = ids[..] else { continue };
-            let b = self.behaviour(id).ok_or(format!("{class}: unreadable"))?;
-            out.insert(class, Value::Object(self.fields(id.0, &b.fields, 0)));
+            let b = self.behaviour(id)?;
+            out.insert(class.clone(), Value::Object(self.fields(id.0, &b.fields, 0).map_err(|e| format!("{class}: {e}"))?));
         }
         Ok(out)
     }
@@ -430,10 +434,10 @@ impl Ctx {
 impl Ctx {
     fn hash_of(&mut self, from: usize, r: Option<&Raw>) -> Result<u32, String> {
         let root = match r {
-            Some(Raw::Ref(p, _)) => self.data.resolve(from, *p),
-            _ => None,
+            Some(Raw::Ref(p, _)) => self.data.resolve(from, *p)?.ok_or("a null network prefab")?,
+            other => return Err(format!("a network prefab is {other:?}")),
         };
-        let hash = root.and_then(|root| self.prefab_hash(root)).ok_or("a network prefab without a NetworkObject")?;
+        let hash = self.prefab_hash(root)?.ok_or("a network prefab without a NetworkObject")?;
         u32::from_str_radix(&hash, 16).map_err(|e| e.to_string())
     }
 
@@ -450,8 +454,8 @@ impl Ctx {
         let mut out = Vec::new();
         for list in lists {
             let Raw::Ref(p, _) = list else { return Err("a NetworkPrefabsList that is not a reference".into()) };
-            let id = self.data.resolve(file, p).ok_or("a NetworkPrefabsList that cannot be found")?;
-            let b = self.behaviour(id).ok_or("unreadable NetworkPrefabsList")?;
+            let id = self.data.resolve(file, p)?.ok_or("a null NetworkPrefabsList")?;
+            let b = self.behaviour(id)?;
             let Some(Raw::List(entries)) = field(&b.fields, "List").cloned() else { return Err("NetworkPrefabsList.List".into()) };
             for e in entries {
                 let Raw::Fields(_, f) = e else { return Err("a NetworkPrefab that is not a struct".into()) };

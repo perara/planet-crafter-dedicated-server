@@ -2,7 +2,6 @@
 //! `pcds-server read-game GAME_DIR OUT_DIR` writes what `pcds extract` gets from the running
 //! game (extractor/*.cs), table by table, so `tables-diff` can hold one against the other.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -30,8 +29,6 @@ pub struct Ctx {
     pub data: Data,
     pub graph: Graph,
     pub layouts: Layouts,
-    /// Behaviours whose fields did not end where their data ends (a layout to fix).
-    pub misread: HashMap<String, usize>,
     /// Group id -> its prefab's root game object (GroupData.associatedGameObject).
     pub groups: Vec<(String, Option<Id>)>,
     /// Files whose game objects are in the graph.
@@ -48,137 +45,147 @@ impl Ctx {
         let dir = game.join("Planet Crafter_Data");
         let data = Data::open(&dir)?;
         let asm = Assemblies::load_dir(&dir.join("Managed"))?;
-        Ok(Ctx { data, graph: Graph::default(), layouts: Layouts::new(Rc::new(asm)), misread: HashMap::new(), groups: Vec::new(), graphed: Default::default() })
+        Ok(Ctx { data, graph: Graph::default(), layouts: Layouts::new(Rc::new(asm)), groups: Vec::new(), graphed: Default::default() })
     }
 
-    pub fn behaviour(&mut self, id: Id) -> Option<Behaviour> {
-        let (namespace, class, assembly) = self.graph.script(&mut self.data, id)?.clone();
+    /// A MonoBehaviour with its fields; an error unless its script's field layout fits its
+    /// data exactly.
+    pub fn behaviour(&mut self, id: Id) -> Result<Behaviour, String> {
+        let file = self.data.files[id.0].name.clone();
+        let (namespace, class, assembly) = self.graph.script(&mut self.data, id)?.ok_or_else(|| format!("{file}: MonoBehaviour {} has no script", id.1))?.clone();
         let fields = self.layouts.fields(&TypeName { scope: Some(assembly.trim_end_matches(".dll").to_string()), namespace: namespace.clone(), name: class.clone() });
-        let file = id.0;
-        let mut r = self.data.reader(id)?;
-        let head = unity::behaviour(&mut r)?;
+        let mut r = self.data.reader(id).ok_or_else(|| format!("{file}: no object {}", id.1))?;
+        let head = unity::behaviour(&mut r).ok_or_else(|| format!("{file}: unreadable MonoBehaviour {}", id.1))?;
         let values = read_fields(&fields, &mut r);
-        if values.is_none() || r.pos != r.b.len() {
-            *self.misread.entry(format!("{namespace}.{class}")).or_default() += 1;
-        }
-        let game_object = self.data.resolve(file, head.game_object);
-        Some(Behaviour { namespace, class, game_object, enabled: head.enabled, name: head.name, fields: values.unwrap_or_default() })
+        let fits = values.is_some() && r.pos == r.b.len();
+        let values = values.filter(|_| fits).ok_or_else(|| format!("{namespace}.{class} ({file} object {}): its field layout does not fit its data", id.1))?;
+        let game_object = self.data.resolve(id.0, head.game_object)?;
+        Ok(Behaviour { namespace, class, game_object, enabled: head.enabled, name: head.name, fields: values })
     }
 
-    fn game_object_name(&mut self, id: Id) -> Option<String> {
-        let mut r = self.data.reader(id)?;
-        unity::game_object(&mut r).map(|g| g.name)
+    fn game_object_name(&mut self, id: Id) -> Result<String, String> {
+        self.data.reader(id).and_then(|mut r| unity::game_object(&mut r)).map(|g| g.name).ok_or_else(|| format!("{}: unreadable GameObject {}", self.data.files[id.0].name, id.1))
     }
 
     /// GameData.Value of a reference: "Type:name" for game assets, "GameObject:name",
     /// "Type@gameObject" for components; None (left out) for other Unity objects.
-    fn reference(&mut self, file: usize, p: unity::PPtr) -> Option<Value> {
-        let Some(target) = self.data.resolve(file, p) else { return Some(Value::Null) };
-        let Some(class) = self.data.class_of(target) else { return Some(Value::Null) };
-        match class {
-            unity::GAME_OBJECT => Some(json!(format!("GameObject:{}", self.game_object_name(target)?))),
+    fn reference(&mut self, file: usize, p: unity::PPtr) -> Result<Option<Value>, String> {
+        let Some(target) = self.data.resolve(file, p)? else { return Ok(Some(Value::Null)) };
+        let class = self.data.class_of(target).expect("resolve finds the object");
+        let at = format!("{} object {}", self.data.files[target.0].name, target.1);
+        Ok(Some(match class {
+            unity::GAME_OBJECT => json!(format!("GameObject:{}", self.game_object_name(target)?)),
             unity::MONO_BEHAVIOUR => {
-                let mut r = self.data.reader(target)?;
-                let head = unity::behaviour(&mut r)?;
-                let (namespace, script, _) = self.graph.script(&mut self.data, target)?.clone();
-                match self.data.resolve(target.0, head.game_object) {
+                let head = self.data.reader(target).and_then(|mut r| unity::behaviour(&mut r)).ok_or_else(|| format!("{}: unreadable MonoBehaviour", at))?;
+                let (namespace, script, _) = self.graph.script(&mut self.data, target)?.ok_or_else(|| format!("{}: a MonoBehaviour without a script", at))?.clone();
+                match self.data.resolve(target.0, head.game_object)? {
                     // `IsGameObjectType(so) ? Ref(so) : null`: a null string, so JSON null for
                     // other ScriptableObjects.
-                    None => Some(if namespace == "SpaceCraft" { json!(format!("{script}:{}", head.name)) } else { Value::Null }),
-                    Some(go) => Some(json!(format!("{script}@{}", self.game_object_name(go)?))),
+                    None => if namespace == "SpaceCraft" { json!(format!("{script}:{}", head.name)) } else { Value::Null },
+                    Some(go) => json!(format!("{script}@{}", self.game_object_name(go)?)),
                 }
             }
-            _ => {
-                // A component (its data starts with its game object), named by its class.
-                let go = self.data.reader(target)?.pptr()?;
-                let go = self.data.resolve(target.0, go).filter(|g| self.data.class_of(*g) == Some(unity::GAME_OBJECT))?;
-                Some(json!(format!("{}@{}", unity::class_name(class)?, self.game_object_name(go)?)))
+            c if unity::is_component(c) => {
+                // A component: its data starts with its game object; named by its class.
+                let go = self.data.reader(target).and_then(|mut r| r.pptr()).ok_or_else(|| format!("{}: unreadable component", at))?;
+                let go = self.data.resolve(target.0, go)?.filter(|g| self.data.class_of(*g) == Some(unity::GAME_OBJECT)).ok_or_else(|| format!("{}: a component without a game object", at))?;
+                json!(format!("{}@{}", unity::class_name(c).expect("components are named"), self.game_object_name(go)?))
             }
-        }
+            // `case UnityEngine.Object _: return null`: left out.
+            c if unity::class_name(c).is_some() => return Ok(None),
+            c => return Err(format!("{}: unknown Unity class id {c} (add it to native/unity.rs class_name, and is_component if it is one)", at)),
+        }))
     }
 
     /// GameData.Value: the value as JSON, None when the extractor leaves the field out.
-    pub fn value(&mut self, file: usize, v: &Raw, depth: usize) -> Option<Value> {
-        match v {
-            Raw::Null => Some(Value::Null),
-            Raw::Bool(b) => Some(json!(b)),
-            Raw::Int(i) => Some(json!(i)),
-            Raw::UInt(u) => Some(json!(u)),
-            Raw::Float(f) => Some(json!(f)),
-            Raw::Single(f) => Some(single(*f)),
-            Raw::Str(s) => Some(json!(s)),
-            Raw::Enum(v, names, flags) => Some(json!(enum_name(*v, names, *flags))),
-            Raw::Ref(p, _) => self.reference(file, *p),
-            Raw::Json(j) => Some(j.clone()),
-            Raw::Omit => None,
-            Raw::Unset => Some(Value::Null),
+    pub fn value(&mut self, file: usize, v: &Raw, depth: usize) -> Result<Option<Value>, String> {
+        Ok(Some(match v {
+            Raw::Null => Value::Null,
+            Raw::Bool(b) => json!(b),
+            Raw::Int(i) => json!(i),
+            Raw::UInt(u) => json!(u),
+            Raw::Float(f) => json!(f),
+            Raw::Single(f) => single(*f),
+            Raw::Str(s) => json!(s),
+            Raw::Enum(v, names, flags) => json!(enum_name(*v, names, *flags)),
+            Raw::Ref(p, _) => return self.reference(file, *p),
+            Raw::Json(j) => j.clone(),
+            Raw::Omit => return Ok(None),
+            Raw::Unset => Value::Null,
             Raw::List(items) => {
                 if depth > MAX_DEPTH {
-                    return None;
+                    return Ok(None);
                 }
-                Some(Value::Array(items.iter().map(|i| self.value(file, i, depth + 1).unwrap_or(Value::Null)).collect()))
+                let mut out = Vec::new();
+                for i in items {
+                    out.push(self.value(file, i, depth + 1)?.unwrap_or(Value::Null));
+                }
+                Value::Array(out)
             }
             // GameData.cs writes a dictionary as [key, value] pairs; Unity's SerializedDictionary
             // stores the keys and the values as two lists.
             Raw::Fields(t, fields) if t.name == "SerializedDictionary`2" => {
-                let (Some(Raw::List(keys)), Some(Raw::List(values))) = (super::netdata::field(fields, "m_Keys"), super::netdata::field(fields, "m_Values")) else { return None };
-                let pairs = keys.iter().zip(values).map(|(k, v)| json!([self.value(file, k, depth + 1).unwrap_or(Value::Null), self.value(file, v, depth + 1).unwrap_or(Value::Null)])).collect();
-                Some(Value::Array(pairs))
+                let (Some(Raw::List(keys)), Some(Raw::List(values))) = (super::netdata::field(fields, "m_Keys"), super::netdata::field(fields, "m_Values")) else { return Err(format!("a SerializedDictionary without m_Keys and m_Values lists: {fields:?}")) };
+                if keys.len() != values.len() {
+                    return Err(format!("a SerializedDictionary with {} keys and {} values", keys.len(), values.len()));
+                }
+                let mut pairs = Vec::new();
+                for (k, v) in keys.iter().zip(values) {
+                    pairs.push(json!([self.value(file, k, depth + 1)?.unwrap_or(Value::Null), self.value(file, v, depth + 1)?.unwrap_or(Value::Null)]));
+                }
+                Value::Array(pairs)
             }
             Raw::Fields(t, fields) => {
                 if depth > MAX_DEPTH || t.namespace != "SpaceCraft" {
-                    return None;
+                    return Ok(None);
                 }
-                Some(Value::Object(self.fields(file, fields, depth)))
+                Value::Object(self.fields(file, fields, depth)?)
             }
-        }
+        }))
     }
 
     /// GameData.Fields: each field's value one level deeper; fields of derived classes win.
-    pub fn fields(&mut self, file: usize, fields: &[(String, Raw)], depth: usize) -> Map<String, Value> {
+    pub fn fields(&mut self, file: usize, fields: &[(String, Raw)], depth: usize) -> Result<Map<String, Value>, String> {
         let mut out = Map::new();
         for (name, v) in fields {
             if out.contains_key(name) {
                 continue;
             }
-            if let Some(j) = self.value(file, v, depth + 1) {
+            if let Some(j) = self.value(file, v, depth + 1).map_err(|e| format!("{name}: {e}"))? {
                 out.insert(name.clone(), j);
             }
         }
-        out
+        Ok(out)
     }
 
     /// GameData.Assets: every game ScriptableObject, keyed "Type:name".
-    pub fn assets(&mut self) -> Map<String, Value> {
+    pub fn assets(&mut self) -> Result<Map<String, Value>, String> {
         let mut names: Vec<String> = std::fs::read_dir(&self.data.dir).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".assets")).collect();
         names.sort();
         let mut found: Vec<(String, String, Value)> = Vec::new();
         for name in names {
-            let Ok(f) = self.data.file(&name) else { continue };
+            let f = self.data.file(&name).map_err(|e| format!("{name}: {e}"))?;
             let behaviours: Vec<i64> = self.data.files[f].objects.iter().filter(|o| o.class_id == unity::MONO_BEHAVIOUR).map(|o| o.path).collect();
             for path in behaviours {
                 let id = Id(f, path);
                 // ScriptableObjects only: no game object. The script read first is cheap.
-                let Some(head) = self.data.reader(id).and_then(|mut r| unity::behaviour(&mut r)) else { continue };
-                if !head.game_object.is_null() || self.graph.script(&mut self.data, id).is_none_or(|s| s.0 != "SpaceCraft") {
+                let head = self.data.reader(id).and_then(|mut r| unity::behaviour(&mut r)).ok_or_else(|| format!("{name}: unreadable MonoBehaviour {path}"))?;
+                if !head.game_object.is_null() || self.graph.script(&mut self.data, id)?.is_none_or(|s| s.0 != "SpaceCraft") {
                     continue;
                 }
-                let Some(b) = self.behaviour(id) else { continue };
+                let b = self.behaviour(id)?;
                 if b.class.starts_with("GroupData") {
-                    let id_field = b.fields.iter().find_map(|(n, v)| match v {
-                        Raw::Str(s) if n == "id" => Some(s.clone()),
-                        _ => None,
-                    });
-                    let prefab = b.fields.iter().find_map(|(n, v)| match v {
-                        Raw::Ref(p, _) if n == "associatedGameObject" => Some(*p),
-                        _ => None,
-                    });
-                    if let Some(gid) = id_field {
-                        let prefab = prefab.and_then(|p| self.data.resolve(f, p));
-                        self.groups.push((gid, prefab));
-                    }
+                    let gid = match super::netdata::field(&b.fields, "id") {
+                        Some(Raw::Str(s)) => s.clone(),
+                        other => return Err(format!("{}:{}: GroupData.id is {other:?}", b.class, b.name)),
+                    };
+                    let prefab = match super::netdata::field(&b.fields, "associatedGameObject") {
+                        Some(Raw::Ref(p, _)) => self.data.resolve(f, *p)?,
+                        other => return Err(format!("{}:{}: GroupData.associatedGameObject is {other:?}", b.class, b.name)),
+                    };
+                    self.groups.push((gid, prefab));
                 }
-                let fields = Value::Object(self.fields(f, &b.fields, 0));
+                let fields = Value::Object(self.fields(f, &b.fields, 0).map_err(|e| format!("{}:{}: {e}", b.class, b.name))?);
                 found.push((format!("{}:{}", b.class, b.name), b.name, fields));
             }
         }
@@ -188,44 +195,46 @@ impl Ctx {
         for (key, _, fields) in found {
             assets.insert(key, fields);
         }
-        assets
+        Ok(assets)
     }
 }
 
 impl Ctx {
     /// The game objects of a file, read once.
-    pub fn graph_file(&mut self, file: usize) {
-        if self.graphed.insert(file) {
-            self.graph.add_file(&mut self.data, file);
+    pub fn graph_file(&mut self, file: usize) -> Result<(), String> {
+        if !self.graphed.contains(&file) {
+            self.graph.add_file(&mut self.data, file)?;
+            self.graphed.insert(file);
         }
+        Ok(())
     }
 
     /// GameData.Components: the game's MonoBehaviours on and under a root (inactive ones too),
     /// with their path, fields and the transforms their Transform fields point to.
-    pub fn components(&mut self, root: Id) -> Vec<Value> {
-        self.graph_file(root.0);
+    pub fn components(&mut self, root: Id) -> Result<Vec<Value>, String> {
+        self.graph_file(root.0)?;
         let mut out = Vec::new();
-        for (id, node, namespace, _) in self.graph.behaviours_in_children(&mut self.data, root) {
+        for (id, node, namespace, _) in self.graph.behaviours_in_children(&mut self.data, root)? {
             if namespace != "SpaceCraft" {
                 continue;
             }
-            let Some(b) = self.behaviour(id) else { continue };
+            let b = self.behaviour(id)?;
             let mut c = Map::new();
             c.insert("type".into(), json!(b.class));
             c.insert("path".into(), json!(self.graph.path(root, node)));
-            c.insert("fields".into(), Value::Object(self.fields(id.0, &b.fields, 0)));
-            let poses = self.poses(root, id.0, &b.fields);
+            c.insert("fields".into(), Value::Object(self.fields(id.0, &b.fields, 0).map_err(|e| format!("{}: {e}", b.class))?));
+            let poses = self.poses(root, id.0, &b.fields)?;
             if !poses.is_empty() {
                 c.insert("poses".into(), Value::Object(poses));
             }
             out.push(Value::Object(c));
         }
-        out
+        Ok(out)
     }
 
     /// GameData.Poses: serialized Transform fields, relative to the root.
-    fn poses(&mut self, root: Id, file: usize, fields: &[(String, Raw)]) -> Map<String, Value> {
-        let (rp, rr, rs) = self.graph.world(root);
+    fn poses(&mut self, root: Id, file: usize, fields: &[(String, Raw)]) -> Result<Map<String, Value>, String> {
+        let (rp, rr, rs) = self.graph.world(root)?;
         let inverse = crate::geometry::conj(rr);
         let mut poses = Map::new();
         for (name, v) in fields {
@@ -233,30 +242,30 @@ impl Ctx {
             if t.namespace != "UnityEngine" || t.name != "Transform" || poses.contains_key(name) {
                 continue;
             }
-            let Some(target) = self.data.resolve(file, *p) else { continue };
-            let Some(node) = self.graph.node_of_transform(target) else { continue };
-            let (tp, tr, _) = self.graph.world(node);
+            let Some(target) = self.data.resolve(file, *p)? else { continue };
+            let node = self.graph.node_of_transform(target).ok_or_else(|| format!("{name}: {target:?} is not a transform of a file read"))?;
+            let (tp, tr, _) = self.graph.world(node)?;
             let d = crate::geometry::rotate(inverse, [tp[0] - rp[0], tp[1] - rp[1], tp[2] - rp[2]]);
             let local = [d[0] / rs[0], d[1] / rs[1], d[2] / rs[2]];
             let rotation = crate::geometry::mul(inverse, tr);
             poses.insert(name.clone(), json!({"position": local.map(single).to_vec(), "rotation": rotation.map(single).to_vec()}));
         }
-        poses
+        Ok(poses)
     }
 
     /// GameData.GroupPrefabs: each group's prefab, whether it has a Rigidbody, its components.
-    pub fn group_prefabs(&mut self) -> Map<String, Value> {
+    pub fn group_prefabs(&mut self) -> Result<Map<String, Value>, String> {
         let mut out = Map::new();
         for (gid, prefab) in self.groups.clone() {
             let Some(root) = prefab else { continue };
-            self.graph_file(root.0);
-            let Some(node) = self.graph.nodes.get(&root) else { continue };
+            self.graph_file(root.0)?;
+            let node = self.graph.nodes.get(&root).ok_or_else(|| format!("{gid}: its associatedGameObject is not a GameObject"))?;
             let name = node.name.clone();
             let rigidbody = node.components.iter().any(|(_, c)| *c == unity::RIGIDBODY);
-            let components = self.components(root);
+            let components = self.components(root).map_err(|e| format!("{gid}: {e}"))?;
             out.insert(gid, json!({"prefab": name, "rigidbody": rigidbody, "components": components}));
         }
-        out
+        Ok(out)
     }
 }
 
@@ -288,35 +297,31 @@ fn pretty(v: &Value) -> String {
 /// Anything it cannot read is an error.
 pub fn read_game(game: &Path, out: &Path) -> Result<String, String> {
     let mut ctx = Ctx::open(game).map_err(|e| e.to_string())?;
-    let assets = ctx.assets();
-    let group_prefabs = ctx.group_prefabs();
-    let mut misread: Vec<_> = ctx.misread.iter().collect();
-    if !misread.is_empty() {
-        misread.sort_by(|a, b| b.1.cmp(a.1));
-        return Err(format!("classes whose layout does not fit their data: {misread:?}"));
-    }
-    let planets = ctx.planets(&assets);
-    let groups = ctx.group_table();
+    let assets = ctx.assets()?;
+    let group_prefabs = ctx.group_prefabs()?;
+    let planets = ctx.planets(&assets)?;
+    let groups = ctx.group_table()?;
     let versions = ctx.message_versions();
-    let (config_file, config) = ctx.network_config().ok_or("no NetworkManager with a NetworkConfig")?;
-    let tick_rate = super::netdata::field(&config, "TickRate").cloned().and_then(|t| ctx.value(config_file, &t, 1)).ok_or("no NetworkConfig.TickRate")?;
+    let (config_file, config) = ctx.network_config()?;
+    let tick_rate = super::netdata::field(&config, "TickRate").cloned().ok_or("no NetworkConfig.TickRate")?;
+    let tick_rate = ctx.value(config_file, &tick_rate, 1)?.ok_or("NetworkConfig.TickRate left out")?;
     let player_root = match super::netdata::field(&config, "PlayerPrefab") {
-        Some(Raw::Ref(p, _)) => ctx.data.resolve(config_file, *p),
+        Some(Raw::Ref(p, _)) => ctx.data.resolve(config_file, *p)?,
         _ => None,
     }
     .ok_or("no NetworkConfig.PlayerPrefab")?;
-    let player_hash = ctx.prefab_hash(player_root).ok_or("the player prefab has no NetworkObject")?;
+    let player_hash = ctx.prefab_hash(player_root)?.ok_or("the player prefab has no NetworkObject")?;
     let ggm = ctx.data.file("globalgamemanagers").map_err(|e| e.to_string())?;
     let settings = ctx.data.files[ggm].objects.iter().find(|o| o.class_id == 129).map(|o| o.path).ok_or("no PlayerSettings")?;
     let file = &ctx.data.files[ggm];
     let version = super::typetree::bundle_version(&file.unity_version, file.data(file.object(settings).ok_or("no PlayerSettings")?))?;
     let scene = ctx.scene_objects()?;
     let player = ctx.prefab(player_root, true).map_err(|e| format!("player prefab: {e}"))?;
-    let handler = ctx.find_behaviour(&["level4"], "SpaceCraft", "WorldUnitsHandler");
-    let units = handler.and_then(|h| Some((h, ctx.behaviour(h)?))).and_then(|(h, b)| match super::netdata::field(&b.fields, "_planetUnitsNetworkObject") {
-        Some(Raw::Ref(p, _)) => ctx.data.resolve(h.0, *p),
-        _ => None,
-    });
+    let handler = ctx.find_behaviour(&["level4"], "SpaceCraft", "WorldUnitsHandler")?.ok_or("no WorldUnitsHandler in level4")?;
+    let units = match super::netdata::field(&ctx.behaviour(handler)?.fields, "_planetUnitsNetworkObject") {
+        Some(Raw::Ref(p, _)) => ctx.data.resolve(handler.0, *p)?,
+        other => return Err(format!("WorldUnitsHandler._planetUnitsNetworkObject: {other:?}")),
+    };
     let units = ctx.prefab(units.ok_or("no WorldUnitsHandler._planetUnitsNetworkObject")?, false).map_err(|e| format!("planet units prefab: {e}"))?;
     let netdata = json!({"gameVersion": version, "tickRate": tick_rate, "playerPrefab": player_hash, "messageVersions": versions, "sceneObjects": scene, "prefabs": {"Player": player, "WorldUnitsPlanet": units}, "planets": planets, "groups": groups});
     let rpcs = super::rpcs::rpcs(&ctx.layouts.asm);

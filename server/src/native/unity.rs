@@ -154,6 +154,10 @@ pub struct File {
     pub externals: Vec<String>,
 }
 
+/// The serialized-file format and the Unity minor version this reader knows the layouts of.
+pub const SERIALIZED_FORMAT: u32 = 22;
+pub const UNITY_MINOR: &str = "6000.3";
+
 impl File {
     pub fn open(path: &Path) -> std::io::Result<File> {
         let bad = |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {what}", path.display()));
@@ -165,10 +169,10 @@ impl File {
         let be32 = |at: usize| u32::from_be_bytes(b[at..at + 4].try_into().unwrap());
         let be64 = |at: usize| u64::from_be_bytes(b[at..at + 8].try_into().unwrap());
         let version = be32(8);
-        if version < 22 || b[16] != 0 {
-            return Err(bad(&format!("serialized file format {version} or big-endian (only 22+, little-endian, are read)")));
+        if version != SERIALIZED_FORMAT || b[16] != 0 {
+            return Err(bad(&format!("serialized file format {version}{}: only format {SERIALIZED_FORMAT}, little-endian, is read (add the new format to native/unity.rs)", if b[16] != 0 { ", big-endian" } else { "" })));
         }
-        let data_offset = be64(32) as usize;
+        let data_offset = usize::try_from(be64(32)).map_err(|_| bad("data offset out of range"))?;
         let mut r = Reader { b, pos: 48 };
         let header = (|| {
             let unity_version = r.cstring()?;
@@ -191,7 +195,7 @@ impl File {
             for _ in 0..r.count()? {
                 r.align();
                 let path = r.i64()?;
-                let start = data_offset + r.u64()? as usize;
+                let start = data_offset.checked_add(usize::try_from(r.u64()?).ok()?)?;
                 let size = r.u32()? as usize;
                 let class_id = *types.get(r.i32()? as usize)?;
                 objects.push(Object { path, start, size, class_id });
@@ -211,8 +215,11 @@ impl File {
             }
             Some((unity_version, objects, externals))
         })();
-        let Some((unity_version, objects, externals)) = header else { return Err(bad("unreadable header (type trees in the file?)")) };
-        if objects.iter().any(|o| o.start + o.size > b.len()) {
+        let Some((unity_version, objects, externals)) = header else { return Err(bad("unreadable header (type trees in the file, or an object offset out of range?)")) };
+        if unity_version.split('.').take(2).collect::<Vec<_>>().join(".") != UNITY_MINOR {
+            return Err(bad(&format!("Unity {unity_version}: only Unity {UNITY_MINOR}'s files are read (check the layouts in native/ and add {unity_version}'s)")));
+        }
+        if objects.iter().any(|o| o.start.checked_add(o.size).is_none_or(|end| end > b.len())) {
             return Err(bad("an object lies past the end of the file"));
         }
         let by_path = objects.iter().enumerate().map(|(i, o)| (o.path, i)).collect();
@@ -243,10 +250,10 @@ pub struct Data {
 
 impl Data {
     /// The build's scene paths by build index (scene N is the file levelN).
-    pub fn build_scenes(&mut self) -> Vec<String> {
-        let Ok(ggm) = self.file("globalgamemanagers") else { return Vec::new() };
-        let settings = self.files[ggm].objects.iter().find(|o| o.class_id == BUILD_SETTINGS).map(|o| o.path);
-        settings.and_then(|p| build_scenes(&mut self.reader(Id(ggm, p))?)).unwrap_or_default()
+    pub fn build_scenes(&mut self) -> Result<Vec<String>, String> {
+        let ggm = self.file("globalgamemanagers").map_err(|e| e.to_string())?;
+        let settings = self.files[ggm].objects.iter().find(|o| o.class_id == BUILD_SETTINGS).map(|o| o.path).ok_or("globalgamemanagers: no BuildSettings")?;
+        self.reader(Id(ggm, settings)).and_then(|mut r| build_scenes(&mut r)).ok_or_else(|| "globalgamemanagers: unreadable BuildSettings".into())
     }
 
     pub fn open(dir: &Path) -> std::io::Result<Data> {
@@ -269,41 +276,58 @@ impl Data {
         Ok(self.files.len() - 1)
     }
 
-    /// Where a reference from a file points; None for null and for Unity's built-in resources.
-    pub fn resolve(&mut self, from: usize, p: PPtr) -> Option<Id> {
-        if p.is_null() {
-            return None;
-        }
+    /// The external file a reference names (None: this file).
+    fn external(&self, from: usize, p: PPtr) -> Result<Option<String>, String> {
         if p.file == 0 {
-            return Some(Id(from, p.path));
+            return Ok(None);
         }
-        let name = self.files[from].externals.get(p.file as usize - 1)?.clone();
-        if name.contains("unity default resources") || name.contains("unity_builtin_extra") {
-            return None;
+        let f = &self.files[from];
+        let name = usize::try_from(p.file).ok().and_then(|i| f.externals.get(i.checked_sub(1)?));
+        name.cloned().map(Some).ok_or_else(|| format!("{}: a reference to external file {} of {}", f.name, p.file, f.externals.len()))
+    }
+
+    /// The object a reference points to, which must exist.
+    fn found(&self, from: usize, id: Id) -> Result<Option<Id>, String> {
+        match self.files[id.0].object(id.1) {
+            Some(_) => Ok(Some(id)),
+            None => Err(format!("{}: a reference to object {} of {}, which has none", self.files[from].name, id.1, self.files[id.0].name)),
         }
-        Some(Id(self.file(&name).ok()?, p.path))
+    }
+
+    /// Where a reference from a file points; None for null and for Unity's built-in resources.
+    /// A file that cannot be read, or an object it lacks, is an error.
+    pub fn resolve(&mut self, from: usize, p: PPtr) -> Result<Option<Id>, String> {
+        if p.is_null() {
+            return Ok(None);
+        }
+        let Some(name) = self.external(from, p)? else { return self.found(from, Id(from, p.path)) };
+        if BUILTIN.iter().any(|b| name.contains(b)) {
+            return Ok(None);
+        }
+        let file = self.file(&name).map_err(|e| format!("{} references {name}: {e}", self.files[from].name))?;
+        self.found(from, Id(file, p.path))
     }
 
     /// Where a reference points, Unity's built-in resources (Resources/unity default resources,
-    /// unity_builtin_extra) included.
-    pub fn resolve_builtin(&mut self, from: usize, p: PPtr) -> Option<Id> {
-        if p.is_null() || p.file == 0 {
-            return self.resolve(from, p);
+    /// unity_builtin_extra) included; None only for null.
+    pub fn resolve_builtin(&mut self, from: usize, p: PPtr) -> Result<Option<Id>, String> {
+        if p.is_null() {
+            return Ok(None);
         }
-        let name = self.files[from].externals.get(p.file as usize - 1)?.clone();
-        let builtin = ["unity default resources", "unity_builtin_extra"].into_iter().find(|b| name.contains(b));
+        let builtin = self.external(from, p)?.and_then(|name| BUILTIN.into_iter().find(|b| name.contains(b)));
         let Some(builtin) = builtin else { return self.resolve(from, p) };
         let key = format!("resources/{builtin}");
         let file = match self.by_name.get(&key) {
             Some(i) => *i,
             None => {
-                let f = File::open(&self.dir.join("Resources").join(builtin)).ok()?;
+                let path = self.dir.join("Resources").join(builtin);
+                let f = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
                 self.files.push(f);
                 self.by_name.insert(key, self.files.len() - 1);
                 self.files.len() - 1
             }
         };
-        Some(Id(file, p.path))
+        self.found(from, Id(file, p.path))
     }
 
     pub fn class_of(&self, id: Id) -> Option<i32> {
@@ -316,6 +340,9 @@ impl Data {
         Some(Reader::new(f.data(f.object(id.1)?)))
     }
 }
+
+/// Unity's built-in resource files, which `resolve` leaves unresolved.
+const BUILTIN: [&str; 2] = ["unity default resources", "unity_builtin_extra"];
 
 pub const GAME_OBJECT: i32 = 1;
 pub const TRANSFORM: i32 = 4;
@@ -739,8 +766,28 @@ pub fn class_name(id: i32) -> Option<&'static str> {
         1125 => "BuildReport",
         1126 => "PackedAssets",
         1127 => "VideoClipImporter",
+        // Unity 6 classes in the shipped files.
+        73398921 => "VFXRenderer",
+        655991488 => "MultiplayerManager",
+        850595691 => "LightingSettings",
+        937362698 => "VFXManager",
+        1403656975 => "StreamingManager",
+        1953259897 => "TerrainLayer",
+        2058629509 => "VisualEffectAsset",
+        2083052967 => "VisualEffect",
         _ => return None,
     })
+}
+
+/// Whether a built-in class derives from Component (has a game object): the ones of
+/// `class_name` that do.
+pub fn is_component(id: i32) -> bool {
+    matches!(
+        id,
+        2 | 4 | 8 | 12 | 15 | 20 | 23 | 25 | 26 | 33 | 41 | 45 | 50 | 53 | 54 | 56..=61 | 64..=66 | 68 | 70 | 75 | 76 | 81 | 82 | 87 | 88 | 92 | 95 | 96 | 102 | 108 | 111 | 114 | 119 | 120 | 122..=125
+            | 131..=133 | 135..=138 | 140 | 143..=146 | 148 | 153 | 154 | 160 | 161 | 163..=170 | 180..=183 | 191..=193 | 195 | 198 | 199 | 205 | 208 | 210 | 212 | 215 | 218 | 220 | 222..=225 | 227
+            | 229..=235 | 246..=257 | 259 | 320 | 328 | 330 | 331 | 362 | 73398921 | 2083052967
+    )
 }
 
 #[cfg(test)]
@@ -752,6 +799,66 @@ pub mod tests {
         let game = std::env::var("PCDS_GAME_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/Steam/steamapps/common/The Planet Crafter"));
         let d = game.join("Planet Crafter_Data");
         d.join("globalgamemanagers").exists().then_some(d)
+    }
+
+    /// A serialized file with one GameObject of `size` bytes at `offset` past the data start.
+    fn synthetic(format: u32, unity: &str, offset: u64, size: u32) -> Vec<u8> {
+        let mut b = vec![0u8; 48];
+        b[8..12].copy_from_slice(&format.to_be_bytes());
+        b.extend(unity.as_bytes());
+        b.push(0);
+        b.extend(19i32.to_le_bytes());
+        b.push(0);
+        b.extend(1i32.to_le_bytes());
+        b.extend(GAME_OBJECT.to_le_bytes());
+        b.push(0);
+        b.extend((-1i16).to_le_bytes());
+        b.extend([0; 16]);
+        b.extend(1i32.to_le_bytes());
+        while b.len() % 4 != 0 {
+            b.push(0);
+        }
+        b.extend(1i64.to_le_bytes());
+        b.extend(offset.to_le_bytes());
+        b.extend(size.to_le_bytes());
+        b.extend(0i32.to_le_bytes());
+        b.extend(0i32.to_le_bytes());
+        b.extend(0i32.to_le_bytes());
+        let data = b.len() as u64;
+        b[32..40].copy_from_slice(&data.to_be_bytes());
+        b.extend([0; 8]);
+        b
+    }
+
+    fn open(bytes: &[u8]) -> std::io::Result<File> {
+        let path = std::env::temp_dir().join(format!("pcds-unity-test-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::write(&path, bytes).unwrap();
+        let f = File::open(&path);
+        std::fs::remove_file(&path).unwrap();
+        f
+    }
+
+    #[test]
+    fn only_format_22_files_of_unity_6000_3_with_objects_inside_open() {
+        let f = open(&synthetic(22, "6000.3.2f1", 0, 8)).unwrap();
+        assert_eq!((f.objects.len(), f.objects[0].class_id, f.data(&f.objects[0]).len()), (1, GAME_OBJECT, 8));
+        let err = |b: Vec<u8>| open(&b).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(err(synthetic(23, "6000.3.2f1", 0, 8)).contains("format 23"));
+        assert!(err(synthetic(22, "6000.4.0f1", 0, 8)).contains("Unity 6000.4.0f1"));
+        assert!(err(synthetic(22, "6000.3.2f1", 4, 8)).contains("past the end"));
+        assert!(!err(synthetic(22, "6000.3.2f1", u64::MAX, 8)).is_empty());
+        assert!(err(synthetic(22, "6000.3.2f1", u64::MAX - 1000, u32::MAX)).contains("past the end"));
+    }
+
+    #[test]
+    fn the_shipped_class_ids_are_named() {
+        // The class ids in 2.103's files (all of them, scanned from their headers).
+        let shipped = [1, 4, 5, 11, 13, 19, 20, 21, 23, 28, 30, 33, 43, 47, 48, 49, 54, 55, 64, 65, 72, 74, 75, 78, 81, 82, 83, 84, 89, 90, 91, 94, 95, 98, 104, 108, 111, 114, 115, 116, 126, 128, 129, 134, 135, 136, 137, 141, 143, 146, 147, 150, 154, 156, 157, 195, 196, 198, 199, 205, 210, 212, 213, 215, 218, 221, 222, 223, 224, 225, 241, 243, 245, 300, 328, 329, 73398921, 655991488, 850595691, 937362698, 1403656975, 1953259897, 2058629509, 2083052967];
+        for id in shipped {
+            assert!(class_name(id).is_some(), "class {id}");
+        }
+        assert!(is_component(73398921) && is_component(2083052967) && is_component(MONO_BEHAVIOUR) && is_component(RECT_TRANSFORM));
+        assert!(!is_component(MESH) && !is_component(2058629509) && !is_component(GAME_OBJECT));
     }
 
     #[test]
@@ -781,7 +888,7 @@ pub fn scan(args: &[String]) {
         let behaviours: Vec<i64> = data.files[f].objects.iter().filter(|o| o.class_id == MONO_BEHAVIOUR).map(|o| o.path).collect();
         for path in behaviours {
             let Some(b) = data.reader(Id(f, path)).and_then(|mut r| behaviour(&mut r)) else { continue };
-            let Some(sid) = data.resolve(f, b.script) else { continue };
+            let Some(sid) = data.resolve(f, b.script).expect("resolve") else { continue };
             let class = scripts.entry(sid).or_insert_with(|| data.reader(sid).and_then(|mut r| mono_script(&mut r)).map(|s| format!("{}.{}", s.namespace, s.class)).unwrap_or_default()).clone();
             if class.starts_with("SpaceCraft.") {
                 *counts.entry(class).or_default() += 1;

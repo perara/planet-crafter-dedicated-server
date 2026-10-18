@@ -68,15 +68,13 @@ fn load(game: &Game, planet: &str) -> Vec<Volume> {
     out
 }
 
-/// A scene object's state when its scene loads: its HideDependingOnTerraStage components (on it
-/// and its parents, "activators" in the dump) decide it once. Without activators (an older
-/// dump) the state at dump time stands.
+/// A scene object's state when its scene loads: active in the scene, and not hidden by its
+/// HideDependingOnTerraStage components (on it and its parents, "activators" in the dump),
+/// which decide once and can only hide (an inactive object runs none of its own).
 pub fn shown_at_load(game: &Game, object: &Value) -> bool {
-    let Some(activators) = object["activators"].as_array() else { return object["active"].as_bool().unwrap_or(true) };
-    if activators.is_empty() {
-        return object["active"].as_bool().unwrap_or(true);
-    }
-    !activators.iter().filter(|a| a["type"] == "HideDependingOnTerraStage").any(|a| {
+    let active = object["active"].as_bool().unwrap_or(true);
+    let activators = object["activators"].as_array().map(Vec::as_slice).unwrap_or_default();
+    active && !activators.iter().filter(|a| a["type"] == "HideDependingOnTerraStage").any(|a| {
         let f = &a["fields"];
         let (unit, start) = (stage_unit(game, &f["terraformStage"]), stage_value(game, &f["terraformStage"]).unwrap_or(0.0));
         (f["hideIfGreater"].as_bool() == Some(true) && unit > start) || (f["hideIfLesser"].as_bool() == Some(true) && unit < start)
@@ -239,6 +237,14 @@ mod tests {
             g.wos.get_mut(&123).unwrap().growth = growth;
             assert_eq!(box_now(&g, &v).unwrap().0, [10.0, y, 30.0], "progress {growth}");
         }
+    }
+
+    #[test]
+    fn an_inactive_object_stays_hidden_whatever_its_activators() {
+        let Some(g) = crate::game::test_game(crate::game::tests::save()) else { return };
+        let positioning = serde_json::json!([{"type": "WorldUnitPositioning", "fields": {}}]);
+        assert!(!shown_at_load(&g, &serde_json::json!({"active": false, "activators": positioning})));
+        assert!(shown_at_load(&g, &serde_json::json!({"active": true, "activators": positioning})));
     }
 
     #[test]
