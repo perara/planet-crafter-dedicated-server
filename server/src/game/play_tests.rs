@@ -272,3 +272,21 @@ fn rpcs_run_only_on_objects_of_their_class() {
     let chest_net = g.wos[&chest].net.unwrap();
     assert!(g.net.carries(chest_net, "GroupNetworkBase") && !g.net.carries(chest_net, "MachineDeparturePlatform"));
 }
+
+/// M3: a player's name keeps none of the save's delimiters nor a quote, so the game splits the
+/// save (on '@', then '|') and finds the name ("name":"[^"]*?",) as written.
+#[test]
+fn player_names_cannot_break_the_save() {
+    let Some(mut g) = test_game(save()) else { return };
+    join(&mut g, 1, "a\"|b@c");
+    g.disconnect(1);
+    let text = g.snapshot().to_text();
+    let sections: Vec<&str> = text.split('@').collect();
+    assert_eq!(sections.len(), 11, "ten sections, each ended by '@'");
+    let players: Vec<&str> = sections[2].split('|').collect();
+    assert_eq!(players.len(), 1);
+    let at = players[0].find("\"name\":\"").unwrap() + 8;
+    let name = &players[0][at..at + players[0][at..].find('"').unwrap()];
+    assert_eq!(name, "a' b c");
+    assert_eq!(SaveFile::from_text(&text).players[0]["name"], "a' b c");
+}

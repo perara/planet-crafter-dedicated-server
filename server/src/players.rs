@@ -232,8 +232,15 @@ impl Game {
         match name {
             "PlayerMainController.PlayerReadyServerRpc" => {
                 let claimed = a.u(0);
-                // Printable, and short enough for logs and the player list.
-                let player_name: String = a.s(1).unwrap_or_default().chars().filter(|c| !c.is_control()).take(64).collect();
+                // Printable, and short enough for logs and the player list. The save's
+                // delimiters go as JSONExport.CleanStringForInsertInJson takes them out of texts
+                // ('|' and '@' to spaces), and quotes too: the game finds a player's name with
+                // "name":"[^"]*?", so one with a quote in it makes the save unloadable.
+                let player_name: String = a.s(1).unwrap_or_default().chars().filter(|c| !c.is_control()).take(64).map(|c| match c {
+                    '|' | '@' => ' ',
+                    '"' => '\'',
+                    c => c,
+                }).collect();
                 let Some(c) = self.clients.get(&client) else { return true };
                 // Once per connection: another PlayerReady would take another saved character.
                 if c.ready.is_some() {
