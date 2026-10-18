@@ -130,7 +130,7 @@ impl Ctx {
                 }
                 println!("{}", serde_json::to_string_pretty(&status).unwrap_or_default());
             }
-            Err(_) => println!("admin API not answering yet"),
+            Err(e) => println!("admin API: {e}"),
         }
         Ok(())
     }

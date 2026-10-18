@@ -83,6 +83,9 @@ impl Ctx {
                 if !file(&name).is_file() {
                     return Err(format!("no world {name} in {} ('pcds worlds' lists them)", self.worlds.display()));
                 }
+                if crate::env("PCDS_WORLD").is_some_and(|w| w != name) {
+                    return Err("PCDS_WORLD is set in this environment (the container's): change it there".into());
+                }
                 self.write_env()?;
                 self.set_env("PCDS_WORLD", &name)?;
                 say(format!("the server runs {name} from now on"));

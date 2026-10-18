@@ -93,6 +93,9 @@ impl Ctx {
         if self.tables(&build_id(&game)?).is_err() {
             self.extract(Some(&game))?;
         }
+        if world.is_some() && new {
+            return Err("--world SAVE.json and --new: one or the other".into());
+        }
         let current = self.world_file();
         let name = self.world_name();
         if let Some(world) = world {
@@ -231,8 +234,11 @@ impl Ctx {
         let out = fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
         let err = out.try_clone().map_err(|e| e.to_string())?;
         let probe = Command::new(&self.exe).arg("probe").arg(&address).arg(&data).arg(&script).stdin(Stdio::null()).stdout(out).stderr(err).spawn();
-        if let Ok(mut probe) = probe {
-            wait_for(&mut probe, Duration::from_secs(60));
+        match probe {
+            Ok(mut probe) => {
+                wait_for(&mut probe, Duration::from_secs(60));
+            }
+            Err(e) => say(format!("the scripted player did not start: {}: {e}", self.exe.display())),
         }
         let said = fs::read_to_string(&log).unwrap_or_default();
         let _ = fs::remove_file(&script);

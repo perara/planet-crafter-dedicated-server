@@ -183,8 +183,14 @@ impl Ctx {
             ["unban", value] => println!("{}", self.api("POST", "/api/unban", Some(&serde_json::json!({"value": value}).to_string()))?),
             ["unban", ..] => return usage("pcds unban NAME_OR_IP"),
             ["gui"] => println!("{}", self.gui_url()),
-            ["token"] => println!("{}", self.env_get("PCDS_ADMIN_TOKEN").unwrap_or_default()),
-            ["config"] => return passthrough(Command::new(crate::env("EDITOR").unwrap_or_else(|| "nano".into())).arg(&self.env_file)),
+            ["token"] => println!("{}", self.env_get("PCDS_ADMIN_TOKEN").ok_or(format!("no PCDS_ADMIN_TOKEN in {}", self.env_file.display()))?),
+            ["config"] => {
+                // EDITOR may carry arguments ("code -w").
+                let editor = crate::env("EDITOR").unwrap_or_else(|| "nano".into());
+                let mut words = editor.split_whitespace();
+                let program = words.next().ok_or("EDITOR is empty")?;
+                return passthrough(Command::new(program).args(words).arg(&self.env_file));
+            }
             ["api", method, path] => println!("{}", self.api(method, path, None)?),
             ["api", method, path, body] => println!("{}", self.api(method, path, Some(body))?),
             ["api", ..] => return usage("pcds api METHOD PATH [JSON]"),
