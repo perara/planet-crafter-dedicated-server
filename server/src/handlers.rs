@@ -513,6 +513,12 @@ mod tests {
         // The same look again: nothing.
         send_rpc(&mut g, 1, net, panels[0], "Panel.ChangePanelServerRpc", &[json!(7), json!(true), json!(false)]);
         assert_eq!(counted(&g, 7), before + 1);
+        // Loaded again, the saved look is set through ChangePanel and counted (the real host's
+        // list at join counts every saved panel that is not the prefab's look).
+        let g = reload(&mut g);
+        let (handler, _) = g.net.find_class("WorldObjectsHandler").unwrap();
+        let counted = list(&g, handler, "WorldObjectsHandler", "_constructedPanelTypes").iter().find(|i| i32::from_le_bytes(i[0..4].try_into().unwrap()) == 7).map(|i| i32::from_le_bytes(i[4..8].try_into().unwrap()));
+        assert_eq!(counted, Some(1));
     }
 
     /// Jumping, building, deconstructing and mining are shown to the players in range of the

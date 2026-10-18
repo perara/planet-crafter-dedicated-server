@@ -188,12 +188,22 @@ impl Game {
         o.init_list("LinkedGroupsProxy", "_linkedGroupsHash", linked);
         o.init("LinkedPlanetProxy", "_linkedPlanet", enc::int(wo.planet_linked));
         if let Some(panels) = wo.panels.clone() {
+            // SetPanelsForNewlyInstantiatedWorldObject: Panel.ChangePanel per saved type, which
+            // counts each one that changes the panel in _constructedPanelTypes (loads included).
+            let mut changed = Vec::new();
             let mut i = 0;
             for b in o.behaviours.iter_mut().filter(|b| b.class == "Panel") {
                 if let (Some(p), Some(v)) = (panels.get(i), b.vars.iter_mut().find(|v| v.name == "_currentSubPanelType")) {
-                    v.value = VarValue::Plain(enc::enumeration(*p));
+                    let new = enc::enumeration(*p);
+                    if !matches!(&v.value, VarValue::Plain(b) if *b == new) {
+                        changed.push(*p);
+                    }
+                    v.value = VarValue::Plain(new);
                 }
                 i += 1;
+            }
+            for p in changed {
+                self.panel_constructed(p);
             }
         }
         if constructible && !from_db {
