@@ -2,7 +2,6 @@
 //! messages queued for them this tick (spawns, despawns, RPCs, variable deltas), in the order
 //! Netcode would send them.
 
-use indexmap::IndexMap;
 use serde_json::Value;
 
 use crate::data::BehaviourDef;
@@ -359,17 +358,19 @@ pub fn behaviours(defs: &[BehaviourDef]) -> Vec<NetBehaviour> {
 }
 
 pub struct Net {
-    pub objects: IndexMap<u64, NetObj>,
+    pub objects: crate::idmap::IdMap<u64, NetObj>,
     next_id: u64,
     /// Messages queued this tick, in order.
     pub out: Vec<(Target, u32, Vec<u8>)>,
     pub spec: Spec,
     pub scene_handle: i32,
+    /// Objects with a variable changed since the last flush (the only ones flush looks at).
+    dirty: Vec<u64>,
 }
 
 impl Net {
     pub fn new(spec: Spec, scene_handle: i32, first_dynamic_id: u64) -> Net {
-        Net { objects: IndexMap::new(), next_id: first_dynamic_id, out: Vec::new(), spec, scene_handle }
+        Net { objects: Default::default(), next_id: first_dynamic_id, out: Vec::new(), spec, scene_handle, dirty: Vec::new() }
     }
 
     /// Adds an in-scene object (fixed id, part of every join, never sent as a spawn).
@@ -386,6 +387,10 @@ impl Net {
         w.u8(1).bytes(&o.scene_object(self.scene_handle));
         self.out.push((Target::All, protocol::CREATE_OBJECT, w.0));
         let id = o.id;
+        // A respawned object (a parked drone) keeps changes made while it was away.
+        if o.behaviours.iter().any(|b| b.vars.iter().any(|v| v.dirty.is_some())) {
+            self.dirty.push(id);
+        }
         self.objects.insert(id, o);
         id
     }
@@ -465,6 +470,7 @@ impl Net {
         }
         v.value = VarValue::Plain(bytes);
         v.dirty = Some(Vec::new());
+        self.dirty.push(object);
     }
 
     /// Sets a plain variable; a change goes out as a delta at the end of the tick.
@@ -478,6 +484,7 @@ impl Net {
         }
         v.value = VarValue::Plain(bytes);
         v.dirty = Some(Vec::new());
+        self.dirty.push(object);
     }
 
     /// Applies explicit list events (when the game's own add/remove order matters).
@@ -501,13 +508,21 @@ impl Net {
             }
         }
         v.dirty.get_or_insert_with(Vec::new).extend(events);
+        self.dirty.push(object);
     }
 
     /// NetworkVariableDelta messages for everything changed this tick.
     pub fn flush(&mut self) {
         const RELIABLE_FRAGMENTED_SEQUENCED: i32 = 4;
         let mut messages = Vec::new();
-        for o in self.objects.values_mut() {
+        // In object order, as a walk over every object would find them.
+        let mut dirty = std::mem::take(&mut self.dirty);
+        let mut at: Vec<usize> = dirty.drain(..).filter_map(|id| self.objects.get_index_of(&id)).collect();
+        at.sort_unstable();
+        at.dedup();
+        self.dirty = dirty;
+        for i in at {
+            let (_, o) = self.objects.get_index_mut(i).unwrap();
             for b in &mut o.behaviours {
                 if b.vars.iter().all(|v| v.dirty.is_none()) {
                     continue;

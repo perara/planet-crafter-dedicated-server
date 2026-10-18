@@ -8,12 +8,24 @@ use serde_json::{json, Value};
 use super::{add_new, components, dist, f32_of, force_reset, has_energy, is_active, is_full, items, remove_item, Game};
 use crate::net::Target;
 
+/// What tick runs now: mining rays, generate, craft, disintegrate.
+fn due(m: &super::Machine, now: f32) -> [bool; 4] {
+    [
+        m.generator.as_ref().and_then(|g| g.rays.as_ref()).is_some_and(|r| now >= r.next),
+        m.generator.as_ref().is_some_and(|g| !g.dead && now >= g.next),
+        m.autocrafter.as_ref().is_some_and(|a| now >= a.next),
+        m.disintegrator.as_ref().is_some_and(|d| now >= d.next),
+    ]
+}
+
+/// Whether tick has anything to do now.
+pub(super) fn is_due(m: &super::Machine, now: f32) -> bool {
+    due(m, now).contains(&true)
+}
+
 pub fn tick(game: &mut Game, wo: i32, now: f32) {
     let Some(m) = game.ext.machines.list.get(&wo) else { return };
-    let generate = m.generator.as_ref().is_some_and(|g| !g.dead && now >= g.next);
-    let cast = m.generator.as_ref().and_then(|g| g.rays.as_ref()).is_some_and(|r| now >= r.next);
-    let craft = m.autocrafter.as_ref().is_some_and(|a| now >= a.next);
-    let disintegrate = m.disintegrator.as_ref().is_some_and(|d| now >= d.next);
+    let [cast, generate, craft, disintegrate] = due(m, now);
     if cast {
         mining_rays(game, wo, now);
     }

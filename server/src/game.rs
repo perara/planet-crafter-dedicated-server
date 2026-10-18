@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use crate::data::{stable_hash, NetData, ObjectDef};
 use crate::gamedata::{GameData, Layout};
+use crate::idmap::{IdMap, IdSet};
 use crate::model::{Inventory, WorldObject};
 use crate::net::{self, ListEvent, Net, NetObj, Target};
 use crate::protocol::{self, CONNECTION_APPROVED, CONNECTION_REQUEST, NETWORK_TRANSFORM, NETWORK_VARIABLE_DELTA};
@@ -92,7 +93,11 @@ pub struct PlayerState {
 pub struct Rng(u64);
 
 impl Rng {
+    /// PCDS_RNG_SEED fixes the sequence (benchmarks and replays compare runs).
     pub fn seeded() -> Rng {
+        if let Some(seed) = std::env::var("PCDS_RNG_SEED").ok().and_then(|s| s.parse::<u64>().ok()) {
+            return Rng(seed | 1);
+        }
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
         Rng(seed | 1)
     }
@@ -121,10 +126,10 @@ pub struct Game {
     pub net: Net,
     /// The save's sections the handlers below keep as JSON (world state, planets, players...).
     pub save: SaveFile,
-    pub wos: IndexMap<i32, WorldObject>,
-    pub inventories: IndexMap<i32, Inventory>,
+    pub wos: IdMap<i32, WorldObject>,
+    pub inventories: IdMap<i32, Inventory>,
     /// WorldObjectsHandler._constructedWorldObjects / _itemsPickablesWorldObjects.
-    pub constructed: IndexSet<i32>,
+    pub constructed: IdSet<i32>,
     pub pickables: IndexSet<i32>,
     /// InventoriesHandler._clientInventoryWatchers: inventory -> client -> count.
     pub watchers: HashMap<i32, IndexMap<u64, u32>>,
@@ -139,6 +144,8 @@ pub struct Game {
     /// Seconds since start (the game's Time.time).
     pub time: f32,
     pub started: std::time::Instant,
+    /// A fixed clock (seconds since start) for benchmarks; None: the real one.
+    pub sim_time: Option<f64>,
     pub rng: Rng,
     pub trace: bool,
     /// The per-version data directory (data/<version>/), for subsystems that load more of it.
@@ -227,9 +234,9 @@ impl Game {
             net_data,
             net: Net::new(spec, scene_handle, FIRST_DYNAMIC_ID),
             save,
-            wos: IndexMap::new(),
-            inventories: IndexMap::new(),
-            constructed: IndexSet::new(),
+            wos: IdMap::default(),
+            inventories: IdMap::default(),
+            constructed: IdSet::default(),
             pickables: IndexSet::new(),
             watchers: HashMap::new(),
             tmp_inventory_id: -2,
@@ -240,6 +247,7 @@ impl Game {
             planet,
             time: 0.0,
             started: std::time::Instant::now(),
+            sim_time: None,
             rng: Rng::seeded(),
             trace: std::env::var_os("PCDS_TRACE").is_some(),
             data_dir: String::new(),
@@ -270,7 +278,7 @@ impl Game {
     }
 
     pub fn tick_number(&self) -> i32 {
-        (self.started.elapsed().as_secs_f64() * self.net_data.tick_rate as f64) as i32
+        (self.sim_time.unwrap_or_else(|| self.started.elapsed().as_secs_f64()) * self.net_data.tick_rate as f64) as i32
     }
 
     /// SavedDataHandler.LoadSavedData: world objects, inventories, planets, players; then the
@@ -523,7 +531,10 @@ impl Game {
 
     /// One tick of the simulation, then the variable deltas.
     pub fn tick(&mut self) {
-        self.time = self.started.elapsed().as_secs_f32();
+        self.time = match self.sim_time {
+            Some(t) => t as f32,
+            None => self.started.elapsed().as_secs_f32(),
+        };
         crate::scene::tick(self);
         if self.time >= self.next_time_sync {
             self.next_time_sync = self.time + 1.0;

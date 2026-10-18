@@ -16,7 +16,6 @@ mod veins;
 
 use std::collections::HashMap;
 
-use indexmap::IndexMap;
 use serde_json::{json, Value};
 
 use crate::game::{Args, Game};
@@ -26,13 +25,13 @@ use crate::net::Target;
 #[derive(Default)]
 pub struct Machines {
     /// World object -> has energy (machines with a RequireEnergy component).
-    pub energy: HashMap<i32, bool>,
+    pub energy: crate::idmap::IdMap<i32, bool>,
     /// The machine components of instantiated world objects, in instantiation order.
-    list: IndexMap<i32, Machine>,
+    list: crate::idmap::IdMap<i32, Machine>,
     /// Inventory -> the machine whose delegates listen to it (inventoryContentModified).
     listening: HashMap<i32, i32>,
     /// ActionGrabable.grabedEvent: grown item -> (harvesting machine, the item's network object).
-    grab: IndexMap<i32, (i32, u64)>,
+    grab: crate::idmap::IdMap<i32, (i32, u64)>,
     /// Machines whose Start (or a coroutine's first `yield return null`) is due next tick.
     starting: Vec<i32>,
     /// MachineAutoCrafter._instancedAutocrafters.
@@ -41,6 +40,8 @@ pub struct Machines {
     loaded: bool,
     /// The current planet's ore veins.
     veins: Option<veins::State>,
+    /// tick's list of machines (kept to reuse its allocation).
+    ids: Vec<i32>,
 }
 
 impl Machines {
@@ -382,7 +383,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
 
 pub fn on_destroyed(game: &mut Game, wo: &WorldObject) {
     let machines = &mut game.ext.machines;
-    machines.energy.remove(&wo.id);
+    machines.energy.swap_remove(&wo.id);
     if machines.list.shift_remove(&wo.id).is_some() {
         machines.listening.retain(|_, m| *m != wo.id);
     }
@@ -473,8 +474,15 @@ pub fn tick(game: &mut Game) {
         grabbed(game, item);
     }
     let now = game.time;
-    let ids: Vec<i32> = game.ext.machines.list.keys().copied().collect();
-    for wo in ids {
+    let mut ids = std::mem::take(&mut game.ext.machines.ids);
+    ids.clear();
+    ids.extend(game.ext.machines.list.keys());
+    for &wo in &ids {
+        // Nothing due at its turn: the ticks below would do nothing.
+        let due = |m: &Machine| production::is_due(m, now) || growers::is_due(m, now) || m.floater.is_some_and(|(_, due)| now >= due);
+        if !game.ext.machines.list.get(&wo).is_some_and(due) {
+            continue;
+        }
         production::tick(game, wo, now);
         growers::tick(game, wo, now);
         if let Some((interval, due)) = game.ext.machines.list.get(&wo).and_then(|m| m.floater) {
@@ -484,6 +492,7 @@ pub fn tick(game: &mut Game) {
             }
         }
     }
+    game.ext.machines.ids = ids;
 }
 
 /// MachineFloater.SetReferencePositionOnSurface: the world object of a floating machine goes to

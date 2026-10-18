@@ -11,7 +11,6 @@ use serde_json::Value;
 use crate::game::Game;
 use crate::geometry::{conj, mul, q, rotate, sub, v3};
 
-#[derive(Clone, Debug)]
 struct Volume {
     /// Box in the moving root's local space: center, half size, rotation, scale.
     local_center: [f32; 3],
@@ -132,14 +131,14 @@ fn root_now(game: &Game, v: &Volume) -> Option<[f32; 3]> {
     Some([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t])
 }
 
-/// The current planet's water volumes.
-fn volumes(game: &mut Game) -> Vec<Volume> {
-    let planet = game.planet_id().to_string();
-    if !game.ext.water.planets.contains_key(&planet) {
-        let volumes = load(game, &planet);
-        game.ext.water.planets.insert(planet.clone(), volumes);
+/// The current planet's water volumes (loaded on first use).
+fn volumes(game: &mut Game) -> &[Volume] {
+    let planet = game.planet_id();
+    if !game.ext.water.planets.contains_key(planet) {
+        let volumes = load(game, planet);
+        game.ext.water.planets.insert(planet.to_string(), volumes);
     }
-    game.ext.water.planets[&planet].clone()
+    &game.ext.water.planets[game.planet_id()]
 }
 
 /// A volume's box now: world center and rotation; None while the volume is hidden.
@@ -149,27 +148,36 @@ fn box_now(game: &Game, v: &Volume) -> Option<([f32; 3], [f32; 4])> {
     Some(([root[0] + c[0], root[1] + c[1], root[2] + c[2]], mul(v.root_rotation, v.local_rotation)))
 }
 
-/// WaterHandler.IsUnderWater on the current planet.
-pub fn is_under_water(game: &mut Game, position: [f32; 3]) -> bool {
-    let volumes: Vec<Volume> = volumes(game).into_iter().filter(|v| !v.ignored).collect();
+/// The boxes WaterHandler.IsUnderWater tests on the current planet now: world center,
+/// rotation and half size of each shown volume; empty before the water starts to rise. They
+/// only move with terraformation, so one set serves every check of an energy update.
+pub fn underwater_boxes(game: &mut Game) -> Vec<([f32; 3], [f32; 4], [f32; 3])> {
+    volumes(game);
+    let game = &*game;
+    let volumes = game.ext.water.planets[game.planet_id()].iter().filter(|v| !v.ignored);
     // _hasWaterStartedToRise: past the earliest stage any volume starts rising at.
-    let earliest = volumes.iter().filter_map(|v| stage_value(game, &v.positioning["startTerraformStage"])).fold(f64::MAX, f64::min);
+    let earliest = volumes.clone().filter_map(|v| stage_value(game, &v.positioning["startTerraformStage"])).fold(f64::MAX, f64::min);
     if crate::units::value(game, crate::units::Kind::Terraformation, 0) <= earliest {
-        return false;
+        return Vec::new();
     }
-    volumes.iter().any(|v| {
-        let Some((center, rotation)) = box_now(game, v) else { return false };
-        let local = rotate(conj(rotation), sub(position, center));
-        (0..3).all(|i| local[i].abs() <= v.half[i])
+    volumes.filter_map(|v| box_now(game, v).map(|(center, rotation)| (center, rotation, v.half))).collect()
+}
+
+/// IsUnderWater against underwater_boxes.
+pub fn in_boxes(boxes: &[([f32; 3], [f32; 4], [f32; 3])], position: [f32; 3]) -> bool {
+    boxes.iter().any(|(center, rotation, half)| {
+        let local = rotate(conj(*rotation), sub(position, *center));
+        (0..3).all(|i| local[i].abs() <= half[i])
     })
 }
 
 /// Physics.Raycast straight down from `origin` against the Water layer, within `distance`: the
 /// height of the first water surface hit. A ray that starts inside a box does not hit it.
 pub fn surface_below(game: &mut Game, origin: [f32; 3], distance: f32) -> Option<f32> {
-    let volumes = volumes(game);
+    volumes(game);
+    let game = &*game;
     let mut nearest: Option<f32> = None;
-    for v in &volumes {
+    for v in &game.ext.water.planets[game.planet_id()] {
         let Some((center, rotation)) = box_now(game, v) else { continue };
         let (o, d) = (rotate(conj(rotation), sub(origin, center)), rotate(conj(rotation), [0.0, -1.0, 0.0]));
         // Slabs: the ray's entry and exit along each box axis.

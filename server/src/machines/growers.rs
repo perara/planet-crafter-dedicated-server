@@ -108,6 +108,14 @@ pub fn reset_current_growth(game: &mut Game, wo: i32, value: f32) {
     }
 }
 
+/// Whether tick has anything to do now (the conditions tick checks, in one place).
+pub(super) fn is_due(m: &super::Machine, now: f32) -> bool {
+    m.linked_grower.as_ref().is_some_and(|g| now >= g.next)
+        || m.converter.is_some_and(|t| now >= t)
+        || matches!(m.vegetation.as_ref().map(|v| v.coroutine), Some(Coroutine::Waiting(t) | Coroutine::Growing(t)) if now >= t)
+        || m.harvestable.as_ref().and_then(|h| h.next).is_some_and(|t| now >= t)
+}
+
 pub fn tick(game: &mut Game, wo: i32, now: f32) {
     let Some(m) = game.ext.machines.list.get(&wo) else { return };
     let linked_due = m.linked_grower.as_ref().is_some_and(|g| now >= g.next);

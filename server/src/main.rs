@@ -25,6 +25,8 @@
 //!   PCDS_TRACE        log every incoming message and RPC
 
 mod animals;
+#[cfg(test)]
+mod bench;
 mod access;
 mod admin;
 mod data;
@@ -39,6 +41,7 @@ mod gauges;
 mod genetics;
 mod geometry;
 mod handlers;
+mod idmap;
 mod hooks;
 mod instances;
 mod inventories;

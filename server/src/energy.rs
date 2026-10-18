@@ -25,6 +25,7 @@ pub fn update_all_energy_requesters(game: &mut Game) {
     crate::units::define_energy(game);
     let machines: Vec<i32> = game.ext.machines.with_energy();
     let current = game.planet_hash();
+    let mut water = None;
     for wo in machines {
         let Some((planet, position, group)) = game.wos.get(&wo).map(|w| (w.planet_hash(), w.position, w.group)) else { continue };
         let enough = has_enough(game, planet);
@@ -33,7 +34,10 @@ pub fn update_all_energy_requesters(game: &mut Game) {
         let mut underwater = false;
         if planet == current {
             let works = game.data.prefab_components(&game.data.groups[group].id, "RequireEnergy").first().and_then(|c| c["worksUnderWater"].as_bool()).unwrap_or(false);
-            underwater = !works && crate::water::is_under_water(game, [position[0], position[1] + 2.0, position[2]]);
+            if !works {
+                let boxes = water.get_or_insert_with(|| crate::water::underwater_boxes(game));
+                underwater = crate::water::in_boxes(boxes, [position[0], position[1] + 2.0, position[2]]);
+            }
             if underwater {
                 if game.wos.get(&wo).is_some_and(|w| w.energy != 0.0) {
                     game.units.force_reset(current);
