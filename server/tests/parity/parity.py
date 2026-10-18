@@ -1,6 +1,8 @@
 """Compare two probe transcripts of the same script: the real game host's (REF) and ours.
 
-    python3 parity.py DATA_DIR SAVE.json REF.jsonl OURS.jsonl [--state-only] [--events-only]
+    python3 parity.py DATA_DIR SAVE.json REF.jsonl OURS.jsonl [--state-only] [--events-only] [--both-game]
+
+--both-game compares two runs of the real host (their noise).
 
 DATA_DIR holds the network tables (netdata.json) both transcripts were taken with; SAVE.json
 is the save both servers started from (its world object ids are kept, new ones are numbered).
@@ -211,6 +213,7 @@ class Tables:
         self.scene = {o['id']: o for o in d['sceneObjects']}
         self.prefabs = {p['hash']: p for p in d['prefabs'].values()}
         self.prefab_name = {p['hash']: p['name'] for p in d['prefabs'].values()}
+        self.group_name = {g['hash']: name for name, g in d['groups'].items()}
         # World object prefabs: one layout per group (groups sharing a prefab share its hash).
         for name, layout in json.load(open(f'{data_dir}/gamedata.json'))['layouts'].items():
             self.prefabs.setdefault(layout['hash'], layout)
@@ -287,6 +290,9 @@ class Transcript:
         self.series = {}     # (label, var) -> [(t, value)] of numbers that drift with time
         self.events = []     # (step, normalized line)
         self.at_join = {}    # (label, var) -> value in the approval
+        self.growth = {}     # label -> [(t, growth)] the server told
+        self.failed_adds = {}  # group hash -> AddNewItemToInventory calls that failed
+        self.is_game = False   # the real game host's transcript
         self.player = next((l['player'] for l in self.lines if l['msg'] == 'joined'), None)
         self.client = next((l['client'] for l in self.lines if l['msg'] == 'joined'), None)
         self._run()
@@ -397,6 +403,7 @@ class Transcript:
     def _run(self):
         step = 0
         net_ids = {}
+        adding = None
         for l in self.lines:
             m = l['msg']
             if m == 'approved object':
@@ -409,12 +416,19 @@ class Transcript:
                 self.events.append((step, {'msg': 'destroy', 'object': self.label(l['id'])}))
             elif m == 'call':
                 step += 1
+                adding = l['args'][0] if l['name'] == 'InventoriesHandler.AddNewItemToInventoryServerRpc' and 'args' in l else None
                 if 'skipped' in l:
                     self.events.append((step, {'msg': 'call', 'name': l['name'], 'skipped': l['skipped'], 'tag': l.get('tag')}))
                 else:
                     self.events.append((step, {'msg': 'call', 'name': l['name'], 'object': self.label(l['object']), 'args': self.norm(l['args']), 'tag': l.get('tag')}))
             elif m == 'rpc':
                 args = l['args']
+                if l['name'] == 'InventoriesHandler.AddNewItemClientRpc' and adding is not None and args and args[0] is False:
+                    self.failed_adds[adding] = self.failed_adds.get(adding, 0) + 1
+                # Growth drifts with time: compared by its rate (diff_growth), not in the events.
+                if l['name'] == 'GrowthProxy.SetCurrentGrowthClientRpc' and args and isinstance(args[0], float):
+                    self.growth.setdefault(self.label(l['object']), []).append((l['t'], args[0]))
+                    args = ['growth']
                 # A network object id the server allocated (Netcode reuses freed ones): its label.
                 if l['name'] == 'WorldObjectsHandler.CreateAndInstantiateWorldObjectClientRpc' and args and args[0]:
                     net_ids[args[0]] = self.label(args[0])
@@ -438,7 +452,13 @@ def count_change(t, k):
     def table(v):
         return {tuple(x[:-1]): x[-1] for x in (v or [])}
     start, end = table(t.at_join.get(k)), table(t.state.get(k))
-    return {str(g): end.get(g, 0) - start.get(g, 0) for g in set(start) | set(end) if end.get(g, 0) != start.get(g, 0)}
+    change = {g: end.get(g, 0) - start.get(g, 0) for g in set(start) | set(end)}
+    # The game keeps the object a failed AddNewItemToInventory made; this server destroys it
+    # (EXPECTED: safety rules). Counted out of the game's change.
+    if t.is_game and k[1].endswith('_allWorldObjectsGroups'):
+        for g, n in t.failed_adds.items():
+            change[(g,)] = change.get((g,), 0) - n
+    return {str(g): v for g, v in change.items() if v}
 
 
 def dumps(x):
@@ -455,25 +475,73 @@ def close(a, b):
     return a == b
 
 
+# A server message the other server sent the same, only a step or two earlier or later: the
+# coroutines of the two servers run on their own clocks (EXPECTED: Time).
+SHIFT = 10
+
+
 def diff_events(ref, ours):
     n = 0
     steps = sorted({s for s, _ in ref.events} | {s for s, _ in ours.events})
+    only = {}
     for s in steps:
         # Within a step the order of answers can follow a tick's (hash-based) order: compare sorted.
         a = sorted(dumps(e) for st, e in ref.events if st == s)
         b = sorted(dumps(e) for st, e in ours.events if st == s)
-        if a == b:
+        for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+            if op != 'equal':
+                only.setdefault(s, ([], []))
+                only[s][0].extend(a[i1:i2])
+                only[s][1].extend(b[j1:j2])
+    # Pair what one server sent in a step with the same message the other sent within SHIFT steps.
+    shifted = []
+    for s in sorted(only):
+        for x in list(only[s][0]):
+            if '"msg": "call"' in x:
+                continue
+            for t in sorted(only, key=lambda t: abs(t - s)):
+                if t != s and abs(t - s) <= SHIFT and x in only[t][1]:
+                    only[s][0].remove(x)
+                    only[t][1].remove(x)
+                    shifted.append((s, t, x))
+                    break
+    for s in sorted(only):
+        a, b = only[s]
+        if not a and not b:
             continue
         call = next((e for st, e in ref.events if st == s and e['msg'] == 'call'), {'name': 'join'})
         print(f'## step {s}: {call["name"]}' + (f' [{call["tag"]}]' if call.get('tag') else ''))
-        for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
-            if op == 'equal':
+        for x in a:
+            print(f'- ref:  {x}')
+        for x in b:
+            print(f'+ ours: {x}')
+        n += max(len(a), len(b))
+    if shifted:
+        print(f'## steps apart (the same message, at most {SHIFT} steps earlier or later)')
+        for s, t, x in shifted:
+            print(f'~ shifted: ref step {s}, ours step {t}: {x}')
+        n += len(shifted)
+    return n
+
+
+def diff_growth(ref, ours):
+    """The growth each server told for an object: the same rate (5 %) between its reports, when
+    they span 30 s or more; otherwise the same values (1 %, or 0.5). Where it stood at one moment
+    depends on when each server's machines started (EXPECTED: Time)."""
+    n = 0
+    for k in sorted(set(ref.growth) | set(ours.growth)):
+        # The first report can be the spawn's, before the machine started: rates from the second.
+        a, b = ref.growth.get(k, []), ours.growth.get(k, [])
+        a, b = (a[1:] if len(a) > 2 else a), (b[1:] if len(b) > 2 else b)
+        rate = lambda p: (p[-1][1] - p[0][1]) * 1000 / (p[-1][0] - p[0][0]) if len(p) > 1 and p[-1][0] - p[0][0] >= 30000 else None
+        ra, rb = rate(a), rate(b)
+        if ra is not None and rb is not None:
+            if abs(ra - rb) <= max(0.05 * max(abs(ra), abs(rb)), 1e-4):
                 continue
-            for x in a[i1:i2]:
-                print(f'- ref:  {x}')
-            for x in b[j1:j2]:
-                print(f'+ ours: {x}')
-            n += max(i2 - i1, j2 - j1)
+        elif len(a) == len(b) and all(abs(x[1] - y[1]) <= max(0.01 * max(abs(x[1]), abs(y[1])), 0.5) for x, y in zip(a, b)):
+            continue
+        print(f'~ {k} growth: ref {[round(v, 3) for _, v in a][:12]} (rate {ra}) ours {[round(v, 3) for _, v in b][:12]} (rate {rb})')
+        n += 1
     return n
 
 
@@ -523,8 +591,11 @@ def diff_state(ref, ours):
         if k[1].endswith(COUNTS):
             a, b = count_change(ref, k), count_change(ours, k)
             if a != b:
-                print(f'~ {k[0]} {k[1]} change during the run: ref {dumps(a)[:400]} ours {dumps(b)[:400]}')
-                n += 1
+                name = lambda g: ','.join(ref.t.group_name.get(int(x), x) for x in g.strip('()').replace(' ', '').split(',') if x)
+                for g in sorted(set(a) | set(b), key=name):
+                    if a.get(g, 0) != b.get(g, 0):
+                        print(f'~ {k[0]} {k[1]} of {name(g)}: changed by ref {a.get(g, 0)} ours {b.get(g, 0)} during the run')
+                        n += 1
             continue
         a, b = ref.norm(ref.state.get(k)), ours.norm(ours.state.get(k))
         sa, sb = ref.series.get(k), ours.series.get(k)
@@ -553,6 +624,8 @@ def main():
     t = Tables(data_dir)
     known = save_ids(save)
     ref, ours = Transcript(ref_path, t, known), Transcript(ours_path, t, known)
+    # --both-game: two runs of the real host (the noise between them).
+    ref.is_game, ours.is_game = True, '--both-game' in flags
     total = 0
     if '--state-only' not in flags and '--events-only' not in flags:
         print('# approval (objects and their variables at join)')
@@ -563,6 +636,7 @@ def main():
     if '--events-only' not in flags:
         print('# state (network variables at the end; writes = deltas that set them)')
         total += diff_state(ref, ours)
+        total += diff_growth(ref, ours)
     print(f'{total} difference(s)')
     sys.exit(1 if total else 0)
 
