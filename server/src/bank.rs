@@ -232,7 +232,7 @@ impl Bank {
                             Ok(fd) => {
                                 let len = std::fs::File::from(fd.try_clone().expect("dup")).metadata().map(|m| m.len()).unwrap_or(0);
                                 let head = json!({"bytes": len, "ms": t.elapsed().as_secs_f64() * 1000.0});
-                                self.link.send_fd(ipc::SNAPSHOT, 0, head.to_string().as_bytes(), Some(fd));
+                                self.link.send_fd(ipc::SNAPSHOT, f.n, head.to_string().as_bytes(), Some(fd));
                                 // The world stays in memory until the new bank runs.
                                 match self.link.recv() {
                                     Some(f) if f.kind == ipc::RESUME => println!("bank: resumed, the new bank failed"),
@@ -245,7 +245,7 @@ impl Bank {
                             }
                             Err(e) => {
                                 eprintln!("bank: no snapshot ({e}); going on");
-                                self.link.send(ipc::SNAPSHOT, 0, &[]);
+                                self.link.send(ipc::SNAPSHOT, f.n, &[]);
                             }
                         }
                     }

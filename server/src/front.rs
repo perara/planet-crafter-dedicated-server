@@ -198,48 +198,7 @@ pub fn run(args: &[String]) {
         }
     };
     let port = listen.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
-    let banks = crate::env("PCDS_BANKS").map(PathBuf::from);
-    let (tx, rx) = std::sync::mpsc::channel();
-    let auto = crate::env("PCDS_AUTO_UPDATE").as_deref() == Some("on");
-    let every = Duration::from_secs(crate::env("PCDS_UPDATE_CHECK_HOURS").and_then(|h| h.parse::<u64>().ok()).unwrap_or(24).clamp(1, 8760) * 3600);
-    let autosave_minutes = crate::autosave_start();
-    let mut front = Front {
-        dir: dir.clone(),
-        save: save.clone(),
-        banks,
-        utp,
-        steam: None,
-        invite_code: None,
-        port,
-        conns: HashMap::new(),
-        ip_clients: HashMap::new(),
-        next_client: 1,
-        pending_drop: Vec::new(),
-        kicked: HashSet::new(),
-        live: None,
-        next: None,
-        phase: Phase::Idle,
-        flip: None,
-        held: Vec::new(),
-        held_bytes: HashMap::new(),
-        last_snapshot: None,
-        recover_from: None,
-        crashes: VecDeque::new(),
-        exiting: Vec::new(),
-        admin: None,
-        answers: HashMap::new(),
-        next_request: 1,
-        hooks: Hooks::default(),
-        web: Default::default(),
-        autosave_minutes,
-        next_save: Instant::now() + Duration::from_secs(autosave_minutes.max(1) * 60),
-        // The first check a while after the start: a crash loop must not ask GitHub each time.
-        updates: Updates { tx, rx, busy: None, seq: 0, history: VecDeque::new(), auto, every, next_check: Instant::now() + every.min(Duration::from_secs(600)), latest: None, newer: false, checked: None },
-        started: Instant::now(),
-        stop,
-        game_version: String::new(),
-        flips: 0,
-    };
+    let mut front = Front::new(dir, save, crate::env("PCDS_BANKS").map(PathBuf::from), utp, port, stop);
     front.boot();
     front.start_admin();
     front.start_steam();
@@ -247,6 +206,50 @@ pub fn run(args: &[String]) {
 }
 
 impl Front {
+    fn new(dir: &str, save: &str, banks: Option<PathBuf>, utp: Option<Utp>, port: u16, stop: Arc<AtomicBool>) -> Front {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let auto = crate::env("PCDS_AUTO_UPDATE").as_deref() == Some("on");
+        let every = Duration::from_secs(crate::env("PCDS_UPDATE_CHECK_HOURS").and_then(|h| h.parse::<u64>().ok()).unwrap_or(24).clamp(1, 8760) * 3600);
+        let autosave_minutes = crate::autosave_start();
+        Front {
+            dir: dir.to_string(),
+            save: save.to_string(),
+            banks,
+            utp,
+            steam: None,
+            invite_code: None,
+            port,
+            conns: HashMap::new(),
+            ip_clients: HashMap::new(),
+            next_client: 1,
+            pending_drop: Vec::new(),
+            kicked: HashSet::new(),
+            live: None,
+            next: None,
+            phase: Phase::Idle,
+            flip: None,
+            held: Vec::new(),
+            held_bytes: HashMap::new(),
+            last_snapshot: None,
+            recover_from: None,
+            crashes: VecDeque::new(),
+            exiting: Vec::new(),
+            admin: None,
+            answers: HashMap::new(),
+            next_request: 1,
+            hooks: Hooks::default(),
+            web: Default::default(),
+            autosave_minutes,
+            next_save: Instant::now() + Duration::from_secs(autosave_minutes.max(1) * 60),
+            // The first check a while after the start: a crash loop must not ask GitHub each time.
+            updates: Updates { tx, rx, busy: None, seq: 0, history: VecDeque::new(), auto, every, next_check: Instant::now() + every.min(Duration::from_secs(600)), latest: None, newer: false, checked: None },
+            started: Instant::now(),
+            stop,
+            game_version: String::new(),
+            flips: 0,
+        }
+    }
+
     /// The program of a bank: its folder's pcds, or this program without banks.
     fn exe(&self, bank: &str) -> PathBuf {
         match &self.banks {
@@ -338,6 +341,8 @@ impl Front {
         b.link.queue(ipc::START, 0, &[], None, 0);
         let ready = wait_frame(&mut b, deadline).ok_or("it ended while loading the world (see above)")?;
         if ready.kind != ipc::READY {
+            let _ = b.child.kill();
+            let _ = b.child.wait();
             return Err(format!("frame {} instead of READY", ready.kind));
         }
         Ok(b)
@@ -630,11 +635,12 @@ impl Front {
     fn read_banks(&mut self) -> bool {
         let mut sent = false;
         // Up to 4 MiB a loop from each: the clients' sessions must not wait on a flood.
+        // A bank whose bytes are no frames (ipc::MAX_FRAME) counts as one that ended.
         let live_alive = self.live.as_mut().is_none_or(|b| b.link.fill(4 << 20));
         while let Some(f) = self.live.as_mut().and_then(|b| b.link.next()) {
             sent |= self.on_live(f);
         }
-        if !live_alive {
+        if !live_alive || self.live.as_ref().is_some_and(|b| b.link.broken.is_some()) {
             self.live_died();
         }
         let next_alive = self.next.as_mut().is_none_or(|b| b.link.fill(4 << 20));
@@ -645,8 +651,11 @@ impl Front {
         while let Some(f) = self.live.as_mut().and_then(|b| b.link.next()) {
             sent |= self.on_live(f);
         }
-        if !next_alive && self.next.is_some() {
-            let status = self.next.as_mut().and_then(|b| b.child.wait().ok()).map(|s| s.to_string()).unwrap_or_default();
+        if self.live.as_ref().is_some_and(|b| b.link.broken.is_some()) {
+            self.live_died();
+        }
+        if (!next_alive || self.next.as_ref().is_some_and(|b| b.link.broken.is_some())) && self.next.is_some() {
+            let status = self.next.as_mut().map(end).unwrap_or_default();
             match self.phase {
                 Phase::Recovering => {
                     let b = self.next.take().unwrap();
@@ -676,7 +685,12 @@ impl Front {
                 Ok(chat) => self.hooks.configure(chat),
                 Err(e) => eprintln!("chat: hook settings the front cannot read ({e})"),
             },
-            ipc::SNAPSHOT if self.phase == Phase::Snapshotting => match f.fd {
+            // A SNAPSHOT answers the HANDOFF of one flip: one of an earlier flip (it came after
+            // that flip failed and the bank was told to go on) is not this flip's world.
+            ipc::SNAPSHOT if !self.flip.as_ref().is_some_and(|flip| flip.seq == f.n) || self.phase != Phase::Snapshotting => {
+                eprintln!("bank: a snapshot for flip {} dropped (the flip under way: {:?}, {:?})", f.n, self.flip.as_ref().map(|flip| flip.seq), self.phase);
+            }
+            ipc::SNAPSHOT => match f.fd {
                 Some(fd) => {
                     if let Some(flip) = self.flip.as_mut() {
                         flip.snapshot = serde_json::from_slice(&f.body).unwrap_or_default();
@@ -733,8 +747,9 @@ impl Front {
                 if let Some(flip) = self.flip.as_mut() {
                     flip.stopped = Some(Instant::now());
                 }
+                let seq = self.flip.as_ref().map_or(0, |flip| flip.seq);
                 if let Some(b) = self.live.as_mut() {
-                    b.link.queue(ipc::HANDOFF, 0, &[], None, 0);
+                    b.link.queue(ipc::HANDOFF, seq, &[], None, 0);
                     let _ = b.link.flush();
                 }
                 self.phase = Phase::Snapshotting;
@@ -835,7 +850,7 @@ impl Front {
     /// The live bank ended.
     fn live_died(&mut self) {
         let Some(mut b) = self.live.take() else { return };
-        let status = b.child.wait().map(|s| s.to_string()).unwrap_or_default();
+        let status = end(&mut b);
         let name = b.name.clone();
         eprintln!("bank {name} (pid {}) ended ({status})", b.child.id());
         match self.phase {
@@ -1198,6 +1213,9 @@ impl Front {
             }
             match b.child.try_wait() {
                 Ok(Some(_)) => {}
+                _ if b.link.broken.is_some() => {
+                    end(&mut b);
+                }
                 _ => {
                     let deadline = Instant::now() + Duration::from_secs(60);
                     while Instant::now() < deadline && matches!(b.child.try_wait(), Ok(None)) {
@@ -1219,6 +1237,19 @@ impl Front {
     }
 }
 
+/// A bank whose socket closed (it is ending) or broke (it is killed): waited for; how it ended.
+fn end(b: &mut Bank) -> String {
+    if let Some(why) = &b.link.broken {
+        eprintln!("bank {} (pid {}): {why}; killed", b.name, b.child.id());
+        let _ = b.child.kill();
+    }
+    let status = b.child.wait().map(|s| s.to_string()).unwrap_or_default();
+    match &b.link.broken {
+        Some(why) => format!("{status}, after {why}"),
+        None => status,
+    }
+}
+
 /// A bank's next frame, read until `deadline` or its end.
 fn wait_frame(b: &mut Bank, deadline: Instant) -> Option<Frame> {
     loop {
@@ -1233,7 +1264,8 @@ fn wait_frame(b: &mut Bank, deadline: Instant) -> Option<Frame> {
         }
         ipc::wait(&[b.link.fd()], &[b.link.pending()], Duration::from_millis(100));
         if !b.link.fill(usize::MAX) {
-            let _ = b.child.wait();
+            let status = end(b);
+            eprintln!("bank {} ended ({status})", b.name);
             return None;
         }
     }
@@ -1307,6 +1339,55 @@ fn reassemble(split: &mut Option<(Vec<u8>, usize)>, data: &[u8]) -> Result<Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bank on one end of a socket pair (a sleeping process stands in for its program).
+    fn fake_bank(name: &str) -> (Bank, Link) {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        ours.set_nonblocking(true).unwrap();
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        (Bank { name: name.into(), child, link: Link::new(ours), hello: Value::Null, started: Instant::now() }, Link::new(theirs))
+    }
+
+    fn test_front() -> Front {
+        Front::new("data", "/nonexistent/world.json", None, None, 0, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn snapshot_fd(text: &str) -> OwnedFd {
+        ipc::memfd("test", |w| std::io::Write::write_all(w, text.as_bytes()).map_err(|e| e.to_string())).unwrap()
+    }
+
+    /// Flip 1 timed out and the old bank was told to go on; its late snapshot comes while
+    /// flip 2 waits for its own: dropped, and flip 2 takes only the snapshot of its HANDOFF.
+    #[test]
+    fn a_flip_takes_only_the_snapshot_of_its_own_handoff() {
+        let mut front = test_front();
+        let (live, mut old) = fake_bank("a");
+        let (next, mut new) = fake_bank("b");
+        front.live = Some(live);
+        front.next = Some(next);
+        front.phase = Phase::Starting;
+        front.flip = Some(Flip { seq: 2, reason: "test".into(), stopped: None, snapshot: Value::Null });
+        front.on_next(Frame { kind: ipc::HELLO, n: ipc::PROTOCOL, body: br#"{"format":1,"reads":[0,1]}"#.to_vec(), fd: None });
+        assert_eq!(front.phase, Phase::Snapshotting);
+        let handoff = old.recv().unwrap();
+        assert_eq!((handoff.kind, handoff.n), (ipc::HANDOFF, 2), "HANDOFF carries the flip");
+        old.send_fd(ipc::SNAPSHOT, 1, b"{}", Some(snapshot_fd("flip 1")));
+        old.send(ipc::SNAPSHOT, 1, &[]);
+        front.read_banks();
+        assert_eq!(front.phase, Phase::Snapshotting, "flip 1's snapshots are not flip 2's");
+        assert!(front.last_snapshot.is_none() && front.flip.is_some());
+        old.send_fd(ipc::SNAPSHOT, 2, b"{}", Some(snapshot_fd("flip 2")));
+        front.read_banks();
+        assert_eq!(front.phase, Phase::Restoring);
+        front.flush_banks();
+        let restore = new.recv().unwrap();
+        assert_eq!((restore.kind, ipc::read_memfd(restore.fd.as_ref().unwrap()).unwrap()), (ipc::RESTORE, b"flip 2".to_vec()));
+        for b in [front.live.take(), front.next.take()].into_iter().flatten() {
+            let mut child = b.child;
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 
     #[test]
     fn steam_splits_are_bounded() {

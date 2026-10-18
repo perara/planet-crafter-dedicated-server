@@ -299,7 +299,7 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
 
     // The status shows the banks and the update knobs.
     let (_, status) = server.api("GET", "/api/status", json!({}));
-    assert_eq!((status["banks"]["frontProtocol"].as_u64(), status["update"]["auto"].as_bool()), (Some(2), Some(false)));
+    assert_eq!((status["banks"]["frontProtocol"].as_u64(), status["update"]["auto"].as_bool()), (Some(3), Some(false)));
     assert_eq!(status["banks"]["installed"].as_array().unwrap().len(), 2);
 
     // Stopped through the API: the bank saves, the front ends.
