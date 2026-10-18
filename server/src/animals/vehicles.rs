@@ -458,6 +458,67 @@ mod tests {
         assert_eq!(m.len(), 2 + 1 + 3 + 3 + 24);
     }
 
+    /// An RPC as a client sends it.
+    fn send_rpc(g: &mut Game, client: u64, object: u64, behaviour: u16, name: &str, args: &[Value]) {
+        let (method, body) = g.net.spec.encode(name, args);
+        let mut w = Writer::new();
+        w.packed_u64(client).packed_u64(object).packed_u16(behaviour).packed_u32(method).bytes(&body);
+        g.receive(client, &crate::wire::batch(&[(crate::protocol::RPC, w.0)]));
+    }
+
+    /// The queued ClientRpcs called `name`: (behaviour, arguments).
+    fn client_rpcs(g: &Game, name: &str) -> Vec<(u16, Vec<Value>)> {
+        let decode = |body: &[u8]| {
+            let mut r = Reader::new(body);
+            let (_, behaviour, method) = (r.packed_u64()?, r.packed_u16()?, r.packed_u32()?);
+            (g.net.spec.get(method)?.name == name).then(|| Some((behaviour, g.net.spec.decode(method, r.rest())?)))?
+        };
+        g.net.out.iter().filter(|(_, kind, _)| *kind == crate::protocol::CLIENT_RPC).filter_map(|(_, _, body)| decode(body)).collect()
+    }
+
+    /// Driving the rover as ActionTakeControl does. Its ownership callback first reads the
+    /// equipment VehicleEquipment got from the InventoryEquipment proxy at spawn: without that
+    /// answer the inventory is null, the callback throws, the player never sits down and the
+    /// rover stays locked. Then the controller goes on, the pilot seat holds the player, the seat
+    /// carries the player along, and getting out unlocks the rover.
+    #[test]
+    fn the_rover_can_be_entered_driven_and_left() {
+        let Some(mut g) = crate::game::test_game(crate::game::tests::save()) else { return };
+        let player = crate::game::tests::join(&mut g, 1, "Ann");
+        let truck = g.data.group("VehicleTruck").unwrap();
+        let (id, net) = g.create_and_instantiate(truck, [560.0, 3.0, 494.0], [0.0, 0.0, 0.0, 1.0], false, true, false);
+        let components = g.data.group_prefabs["VehicleTruck"]["components"].as_array().unwrap();
+        let nth = components.iter().filter(|c| c["type"] == "InventoryAssociatedProxy").position(|c| c["path"] == "InventoryEquipment").unwrap();
+        let proxy = g.net.objects[&net].behaviours.iter().filter(|b| b.class == "InventoryAssociatedProxy").nth(nth).unwrap().index;
+        g.net.out.clear();
+        send_rpc(&mut g, 1, net, proxy, "InventoryAssociatedProxy.GetInventoryIdServerRpc", &[]);
+        let answers: Vec<(u16, Value)> = client_rpcs(&g, "InventoryAssociatedProxy.GetInventoryIdClientRpc").into_iter().map(|(b, a)| (b, a[2].clone())).collect();
+        assert_eq!(answers, vec![(proxy, json!(g.wos[&id].secondary_inventories[0]))], "VehicleEquipment's proxy gets the equipment");
+
+        let index = |class| g.net.behaviour_index(net, class).unwrap();
+        let (switcher, body, pilot) = (index("OwnershipSwitcher"), index("UpdateNetworkRigidBodyState"), index("LockNetworkPlayerPosition"));
+        g.net.out.clear();
+        send_rpc(&mut g, 1, net, switcher, "OwnershipSwitcher.AskForOwnershipServerRpc", &[]);
+        assert_eq!(client_rpcs(&g, "OwnershipSwitcher.AskForOwnershipResultClientRpc"), vec![(switcher, vec![json!(true)])]);
+        send_rpc(&mut g, 1, net, body, "UpdateNetworkRigidBodyState.SetVehicleControllerEnabledServerRpc", &[json!(true)]);
+        assert_eq!(client_rpcs(&g, "UpdateNetworkRigidBodyState.SetVehicleControllerEnabledClientRpc"), vec![(body, vec![json!(true)])]);
+        send_rpc(&mut g, 1, net, pilot, "LockNetworkPlayerPosition.SetPlayerLockedServerRpc", &[json!(true), json!(1)]);
+        assert_eq!((g.net.objects[&net].owner, seat(&g, net, pilot)), (1, Some(1)));
+
+        // The driver's transforms move the rover; the seat takes the player along.
+        let mut w = Writer::new();
+        w.packed_u64(net).packed_i32(0).packed_u32(2 | 4 | 8).packed_i32(1).f32(600.0).f32(3.0).f32(494.0);
+        g.receive(1, &crate::wire::batch(&[(crate::protocol::NETWORK_TRANSFORM, w.0)]));
+        g.time += 1.0;
+        crate::animals::tick(&mut g);
+        assert_eq!((g.net.objects[&player].position, g.net.objects[&net].owner), ([600.0, 3.0, 494.0], 1));
+
+        // GetOut: the seat is freed and the rover unlocked for the next driver.
+        send_rpc(&mut g, 1, net, pilot, "LockNetworkPlayerPosition.SetPlayerLockedServerRpc", &[json!(false), json!(0)]);
+        send_rpc(&mut g, 1, net, switcher, "OwnershipSwitcher.ResetOwnershipServerRpc", &[]);
+        assert_eq!((seat(&g, net, pilot), bool_var(&g, net, "OwnershipSwitcher", "_locked")), (None, false));
+    }
+
     #[test]
     fn reads_the_trucks_transform_bits() {
         // VehicleTruck's dumped sync tail: ClientNetworkTransform (behaviour 0) state.
