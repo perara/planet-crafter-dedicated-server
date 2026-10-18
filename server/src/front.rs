@@ -332,12 +332,10 @@ impl Front {
         let mut b = self.spawn(bank, None)?;
         let deadline = Instant::now() + LOAD_DEADLINE;
         let hello = wait_frame(&mut b, deadline).ok_or("it ended before its hello (see above)")?;
-        if hello.kind != ipc::HELLO || hello.n != ipc::PROTOCOL {
+        b.hello = hello_of(&hello).inspect_err(|_| {
             let _ = b.child.kill();
             let _ = b.child.wait();
-            return Err(format!("it speaks front protocol {}, this front {}: start the server from that bank's own program (pcds restart)", hello.n, ipc::PROTOCOL));
-        }
-        b.hello = serde_json::from_slice(&hello.body).unwrap_or_default();
+        })?;
         b.link.queue(ipc::START, 0, &[], None, 0);
         let ready = wait_frame(&mut b, deadline).ok_or("it ended while loading the world (see above)")?;
         if ready.kind != ipc::READY {
@@ -681,9 +679,9 @@ impl Front {
                 Ok(event) => self.hooks.feed.push(event),
                 Err(e) => eprintln!("chat: an event the front cannot read ({e})"),
             },
-            ipc::CHATCFG => match serde_json::from_slice(&f.body) {
+            ipc::CHATCFG => match chat_config(&f.body) {
                 Ok(chat) => self.hooks.configure(chat),
-                Err(e) => eprintln!("chat: hook settings the front cannot read ({e})"),
+                Err(e) => eprintln!("chat: {e}; the hooks keep their settings"),
             },
             // A SNAPSHOT answers the HANDOFF of one flip: one of an earlier flip (it came after
             // that flip failed and the bank was told to go on) is not this flip's world.
@@ -712,18 +710,21 @@ impl Front {
     fn on_next(&mut self, f: Frame) {
         match f.kind {
             ipc::HELLO => {
-                let hello: Value = serde_json::from_slice(&f.body).unwrap_or_default();
-                if let Some(b) = self.next.as_mut() {
+                let hello = hello_of(&f);
+                if let (Some(b), Ok(hello)) = (self.next.as_mut(), &hello) {
                     b.hello = hello.clone();
                 }
                 if self.phase == Phase::Recovering {
-                    let start = if f.n == ipc::PROTOCOL {
-                        match self.recover_from.take() {
-                            Some(fd) => (ipc::RESTORE, Some(fd)),
-                            None => (ipc::START, None),
-                        }
-                    } else {
-                        (ipc::START, None)
+                    // A bank of another protocol cannot be given the world: the front must be
+                    // started again, from that bank's program.
+                    if let Err(e) = &hello {
+                        let name = self.next.as_ref().map(|b| b.name.clone()).unwrap_or_default();
+                        eprintln!("bank {name} cannot run the world again: {e}; stopping");
+                        self.shutdown(1);
+                    }
+                    let start = match self.recover_from.take() {
+                        Some(fd) => (ipc::RESTORE, Some(fd)),
+                        None => (ipc::START, None),
                     };
                     let body: &[u8] = if start.0 == ipc::RESTORE { b"{\"recover\":true}" } else { b"" };
                     if let Some(b) = self.next.as_mut() {
@@ -734,6 +735,10 @@ impl Front {
                 if self.phase != Phase::Starting {
                     return;
                 }
+                let hello = match hello {
+                    Ok(hello) => hello,
+                    Err(e) => return self.fail_flip(&e),
+                };
                 let live = self.live.as_ref().map(|b| b.hello.clone()).unwrap_or_default();
                 let mut info = hello.clone();
                 info["protocol"] = f.n.into();
@@ -1237,6 +1242,35 @@ impl Front {
     }
 }
 
+/// The hooks' settings a bank sent (CHATCFG). Err names the field only: a value may be a
+/// webhook URL or the secret, and serde's messages quote values.
+fn chat_config(body: &[u8]) -> Result<crate::rules::Chat, String> {
+    let v: Value = serde_json::from_slice(body).map_err(|_| "chat config unreadable (not JSON)".to_string())?;
+    serde_json::from_value(v.clone()).map_err(|_| {
+        let fields = v.as_object().into_iter().flatten();
+        match fields.into_iter().find(|(k, x)| serde_json::from_value::<crate::rules::Chat>(json!({ k.as_str(): x })).is_err()) {
+            Some((k, _)) => format!("chat config unreadable at chat.{k}"),
+            None => "chat config unreadable".to_string(),
+        }
+    })
+}
+
+/// A bank's HELLO, refused unless it speaks this front's protocol (at the boot, a flip and a
+/// restart after a crash alike: a world never goes to a bank that reads the frames otherwise).
+fn hello_of(f: &Frame) -> Result<Value, String> {
+    if f.kind != ipc::HELLO {
+        return Err(format!("frame {} instead of HELLO", f.kind));
+    }
+    let mut info: Value = serde_json::from_slice(&f.body).map_err(|e| format!("its HELLO is not JSON ({e})"))?;
+    info["protocol"] = f.n.into();
+    if f.n != ipc::PROTOCOL {
+        // The same words as an update refused for its protocol.
+        updater::compatible(&info, &Value::Null)?;
+    }
+    info.as_object_mut().map(|o| o.remove("protocol"));
+    Ok(info)
+}
+
 /// A bank whose socket closed (it is ending) or broke (it is killed): waited for; how it ended.
 fn end(b: &mut Bank) -> String {
     if let Some(why) = &b.link.broken {
@@ -1387,6 +1421,25 @@ mod tests {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+
+    #[test]
+    fn a_bank_of_another_protocol_is_refused_on_every_path() {
+        let hello = |kind, n, body: &str| hello_of(&Frame { kind, n, body: body.as_bytes().to_vec(), fd: None });
+        assert_eq!(hello(ipc::HELLO, ipc::PROTOCOL, r#"{"version":"1"}"#).unwrap()["version"], "1");
+        assert!(hello(ipc::HELLO, 999, r#"{"version":"1"}"#).unwrap_err().contains("front protocol 999"));
+        assert!(hello(ipc::READY, ipc::PROTOCOL, "{}").is_err());
+        assert!(hello(ipc::HELLO, ipc::PROTOCOL, "not json").is_err());
+    }
+
+    #[test]
+    fn a_chat_config_error_never_shows_a_value() {
+        assert!(chat_config(br#"{"webhooks": ["https://example.com/hook"], "retries": 1}"#).is_ok());
+        for (body, field) in [(r#"{"webhooks": "https://hooks.example/t0psecret"}"#, "chat.webhooks"), (r#"{"secret": ["t0psecret"]}"#, "chat.secret"), (r#"{"t0psecret": 1}"#, "chat.t0psecret")] {
+            let e = chat_config(body.as_bytes()).unwrap_err();
+            assert_eq!(e, format!("chat config unreadable at {field}"));
+        }
+        assert_eq!(chat_config(b"{\"secret\": \"t0psecret").unwrap_err(), "chat config unreadable (not JSON)");
     }
 
     #[test]
