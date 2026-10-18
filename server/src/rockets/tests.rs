@@ -165,7 +165,8 @@ fn rocket_of_another_planet_lands_without_flying() {
 #[test]
 fn rocket_sent_to_space_multiplies_oxygen() {
     let (platform, rocket) = (210_000_010, 210_000_011);
-    let Some(mut g) = game(vec![placed(platform, "LaunchPlatform", "200,10,200", "Prime", json!({})), placed(rocket, "RocketOxygen1", "200,11.5,200.5", "Prime", json!({}))], vec![]) else { return };
+    // On the platform's craft spawn (ActionSendInSpace.locationGameObject: -3, 5.556, -15.957706).
+    let Some(mut g) = game(vec![placed(platform, "LaunchPlatform", "200,10,200", "Prime", json!({})), placed(rocket, "RocketOxygen1", "197,15.556,184.042294", "Prime", json!({}))], vec![]) else { return };
     let rocket_net = g.wos[&rocket].net.unwrap();
     assert!(rpc(&mut g, platform, "ConstructibleProxy.SendInSpaceServerRpc"));
     assert!(!g.wos[&rocket].is_placed());

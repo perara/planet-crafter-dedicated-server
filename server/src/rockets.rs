@@ -46,9 +46,8 @@ const SPACE_LOCATION: [f32; 3] = [-500.0, -500.0, -500.0];
 const ROCKET_DESPAWN_AFTER: f32 = 40.0;
 /// MachineDeparturePlatform.DepartureType.InterplanetaryTravel.
 const INTERPLANETARY_TRAVEL: i32 = 9;
-/// How far from its platform a rocket stands, for tables read before the craft spawn's place
-/// was recorded (ActionSendInSpace.locationGameObject's pose): the nearest rocket within this
-/// distance of the platform stands for the one exactly on the spawn.
+/// MachineDeparturePlatform's MachineGetInRange around its craft spawn: the nearest rocket
+/// within this distance of the platform.
 const ROCKET_ON_PLATFORM_RANGE: f32 = 8.0;
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -164,24 +163,20 @@ fn rocket_on(game: &Game, platform: i32, component: &str) -> Option<i32> {
         .map(|(_, id)| id)
 }
 
-/// ActionSendInSpace.locationGameObject (the craft spawn) of a platform, in the world; None
-/// for tables read before its place was recorded.
-fn launch_spot(game: &Game, platform: i32) -> Option<[f32; 3]> {
-    let p = game.wos.get(&platform)?;
-    let components = game.data.group_prefabs[&game.data.groups[p.group].id]["components"].as_array()?;
-    let pose = components.iter().find(|c| c["type"] == "ActionSendInSpace").map(|c| &c["poses"]["locationGameObject"]["position"]).filter(|v| v.is_array())?;
-    let d = crate::geometry::rotate(p.rotation, [0, 1, 2].map(|i| pose[i].as_f64().unwrap_or(0.0) as f32));
-    Some([0, 1, 2].map(|i| p.position[i] + d[i]))
-}
-
-/// Where ActionSendInSpace (the launch button) is, the position SendSomethingInSpace gets; the
-/// platform's own for tables read before components' poses were recorded.
-fn button_position(game: &Game, platform: i32) -> [f32; 3] {
+/// A platform's ActionSendInSpace pose (`key`: "pose", the button's own; or "poses" field
+/// `field`), in the world. Err: the tables do not have it, which they always do from tables
+/// format 2 (pcds update reads them again).
+fn send_pose(game: &Game, platform: i32, field: Option<&str>) -> Result<[f32; 3], String> {
     let p = &game.wos[&platform];
-    let pose = game.data.group_prefabs[&game.data.groups[p.group].id]["components"].as_array().into_iter().flatten().find(|c| c["type"] == "ActionSendInSpace").map(|c| &c["pose"]["position"]).filter(|v| v.is_array());
-    let Some(pose) = pose else { return p.position };
+    let group = &game.data.groups[p.group].id;
+    let component = game.data.group_prefabs[group]["components"].as_array().into_iter().flatten().find(|c| c["type"] == "ActionSendInSpace");
+    let pose = component.map(|c| match field {
+        Some(f) => &c["poses"][f]["position"],
+        None => &c["pose"]["position"],
+    });
+    let pose = pose.and_then(|v| v.as_array()).filter(|a| a.len() == 3 && a.iter().all(|x| x.is_number())).ok_or_else(|| format!("{group}: the tables have no ActionSendInSpace {} pose", field.unwrap_or("button")))?;
     let d = crate::geometry::rotate(p.rotation, [0, 1, 2].map(|i| pose[i].as_f64().unwrap_or(0.0) as f32));
-    [0, 1, 2].map(|i| p.position[i] + d[i])
+    Ok([0, 1, 2].map(|i| p.position[i] + d[i]))
 }
 
 /// ActionSendInSpace.SendRocket's lookup: WorldObjectsHandler.GetWorldObjectAtPosition, the
@@ -198,15 +193,19 @@ fn send_in_space(game: &mut Game, client: u64, object: u64) {
     if !game.wos.get(&platform).is_some_and(|w| has_component(game, w.group, "ActionSendInSpace")) {
         return;
     }
-    let found = match launch_spot(game, platform) {
-        Some(spot) => object_at(game, spot),
-        None => rocket_on(game, platform, "MachineRocket"),
+    // ActionSendInSpace.locationGameObject (the craft spawn) and the button itself.
+    let (spot, platform_position) = match (send_pose(game, platform, Some("locationGameObject")), send_pose(game, platform, None)) {
+        (Ok(s), Ok(b)) => (s, b),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("rocket launch refused: {e}");
+            game.net.rpc(Target::Only(client), object, "ConstructibleProxy.SendInSpaceDisplayErrorClientRpc", &[]);
+            return;
+        }
     };
-    let Some(rocket) = found else {
+    let Some(rocket) = object_at(game, spot) else {
         game.net.rpc(Target::Only(client), object, "ConstructibleProxy.SendInSpaceDisplayErrorClientRpc", &[]);
         return;
     };
-    let platform_position = button_position(game, platform);
     let w = game.wos.get_mut(&rocket).unwrap();
     w.reset_position();
     let (group, net) = (w.group, w.net);

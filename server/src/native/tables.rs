@@ -16,7 +16,7 @@ use super::unity::{self, Data, Id};
 /// file it writes changes (a field, a section, a value read another way). A server loads only
 /// tables of its own format (main.rs), and `pcds update` reads them again with the active
 /// bank's program when the format differs.
-pub const TABLES_FORMAT: u32 = 1;
+pub const TABLES_FORMAT: u32 = 2;
 
 /// GameData.MaxDepth.
 const MAX_DEPTH: usize = 6;

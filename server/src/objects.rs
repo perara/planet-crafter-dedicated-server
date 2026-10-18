@@ -158,7 +158,7 @@ impl Game {
             return None;
         };
         let mut o = NetObj::from_layout(&def.layout(self.tick_number()));
-        let no_group_hash = def.group_hash_on_spawn == Some(false);
+        let no_group_hash = !def.group_hash_on_spawn;
         let (inventory_size, secondary, hash) = (g.inventory_size, g.secondary_inventories.clone(), g.hash);
         let constructible = g.constructible;
         let energy = g.unit("Energy");
@@ -616,7 +616,7 @@ mod tests {
     #[test]
     fn prefabs_without_a_root_group_base_keep_group_hash_zero() {
         let Some((mut g, _)) = world() else { return };
-        std::sync::Arc::make_mut(&mut g.data.layouts).get_mut("EscapePod").unwrap().group_hash_on_spawn = Some(false);
+        std::sync::Arc::make_mut(&mut g.data.layouts).get_mut("EscapePod").unwrap().group_hash_on_spawn = false;
         let (_, pod) = place(&mut g, "EscapePod", [570.0, 3.0, 500.0]);
         let (_, chest) = place(&mut g, "Container1", [575.0, 3.0, 500.0]);
         let hash = |g: &crate::game::Game, net| var(g, net, "ConstructibleProxy", "_groupHash");
