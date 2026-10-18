@@ -78,14 +78,14 @@ pub struct Unit {
     pub increase: f32,
     pub decrease: f32,
     pub label: i32,
-    previous_index: f32,
+    previous_index: u64,
     pub force_reset: bool,
     dirty: bool,
 }
 
 impl Unit {
     fn new(kind: Kind, total: f32) -> Unit {
-        Unit { kind, total, per_sec: 0.0, increase: 0.0, decrease: 0.0, label: 0, previous_index: 0.0, force_reset: false, dirty: true }
+        Unit { kind, total, per_sec: 0.0, increase: 0.0, decrease: 0.0, label: 0, previous_index: 0, force_reset: false, dirty: true }
     }
 
     fn bytes(&self) -> Vec<u8> {
@@ -149,7 +149,9 @@ impl PlanetUnits {
 pub struct Units {
     pub planets: Vec<PlanetUnits>,
     /// WorldObjectsHandler._stateConstructedObjectsIndex: changes when buildings come or go.
-    pub constructed_index: f32,
+    /// The game's is a float, which stops counting at 2^24 changes (the units would then never
+    /// be recounted); a u64 does not.
+    pub constructed_index: u64,
     next_compute: f32,
     next_define: f32,
     /// The terraformation totals _unitSysTerraformation was last made from (bits).
@@ -414,7 +416,7 @@ pub fn planet_states(game: &Game) -> Vec<Value> {
 
 /// WorldObjectsHandler.ChangeStateIndex: buildings changed, rates need recomputing.
 pub fn constructed_changed(game: &mut Game) {
-    game.units.constructed_index += 1.0;
+    game.units.constructed_index += 1;
 }
 
 #[cfg(test)]

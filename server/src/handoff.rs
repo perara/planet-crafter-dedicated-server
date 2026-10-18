@@ -79,7 +79,8 @@ fn migrate(from: u32, state: serde_json::Value) -> Result<serde_json::Value, Str
     let mut state = state;
     match from {
         // 2: the world objects (an id -> object map) and the constructed and pickable sets (id
-        // lists) became Slots, in their order and with no slot free yet.
+        // lists) became Slots, in their order and with no slot free yet; the units' constructed
+        // index became an integer.
         1 => {
             let wos = std::mem::take(&mut state["wos"]);
             let slots: Vec<serde_json::Value> = wos.as_object().into_iter().flatten().map(|(id, wo)| serde_json::json!([id.parse::<i32>().unwrap_or(0), wo])).collect();
@@ -87,6 +88,12 @@ fn migrate(from: u32, state: serde_json::Value) -> Result<serde_json::Value, Str
             for set in ["constructed", "pickables"] {
                 let ids: Vec<serde_json::Value> = state[set].as_array().into_iter().flatten().map(|id| serde_json::json!([id, null])).collect();
                 state[set] = serde_json::json!({"slots": ids, "free": []});
+            }
+            // The constructed-objects index, a float, became a u64.
+            let int = |v: &mut serde_json::Value| *v = serde_json::json!(v.as_f64().unwrap_or(0.0) as u64);
+            int(&mut state["units"]["constructed_index"]);
+            for p in state["units"]["planets"].as_array_mut().into_iter().flatten() {
+                p["units"].as_array_mut().into_iter().flatten().for_each(|u| int(&mut u["previous_index"]));
             }
             Ok(state)
         }

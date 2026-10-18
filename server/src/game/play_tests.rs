@@ -239,6 +239,11 @@ fn a_format_1_snapshot_restores() {
     for set in ["constructed", "pickables"] {
         state[set] = Value::Array(pairs(&state[set]).into_iter().map(|(k, _)| k).collect());
     }
+    let float = |v: &mut Value| *v = json!(v.as_u64().unwrap() as f64);
+    float(&mut state["units"]["constructed_index"]);
+    for p in state["units"]["planets"].as_array_mut().unwrap() {
+        p["units"].as_array_mut().unwrap().iter_mut().for_each(|u| float(&mut u["previous_index"]));
+    }
     let old = format!("{{\"format\":1,\"game_version\":\"{}\"}}\n{state}", g.net_data.game_version);
     let (net_data, data, spec, scenes) = test_tables().unwrap();
     let h = crate::handoff::restore(net_data, data, spec, &old, scenes).unwrap();
@@ -364,4 +369,14 @@ fn player_inventory_ids_stay_theirs() {
     let inv = g.clients[&2].ready.as_ref().unwrap().inventory;
     assert!(g.inventories.get(&inv).is_some_and(|i| i.items.is_empty() && i.size == START_INVENTORY_SIZE));
     assert_eq!(holders_mismatch(&g), None);
+}
+
+/// L4: the constructed-objects index goes on counting past 2^24 (a float stops there, and the
+/// units would never be recounted again).
+#[test]
+fn the_constructed_index_never_stops() {
+    let Some(mut g) = test_game(save()) else { return };
+    g.units.constructed_index = 1 << 24;
+    crate::units::constructed_changed(&mut g);
+    assert_eq!(g.units.constructed_index, (1 << 24) + 1);
 }
