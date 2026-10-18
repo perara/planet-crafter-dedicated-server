@@ -7,7 +7,8 @@
 //! "on": TARGET, "args": [...]}]}. TARGET is a scene behaviour class ("InventoriesHandler"),
 //! "player:Class" for a behaviour on our own player, or [object id, behaviour index].
 //! "$player" in args stands for our player's object id, "$client" for our client id,
-//! "$inventory" / "$equipment" for the inventory ids the server gave us.
+//! "$inventory" / "$equipment" for the inventory ids the server gave us, "#Iron" for the stable
+//! hash of a group (or planet) id.
 //! A step may capture a value from what the server answered, for later steps as "$name":
 //! "capture": {"var": "box", "rpc": "WorldObjectsHandler.CreateAndInstantiateWorldObjectClientRpc",
 //! "arg": 0} (an RPC argument) or {"var": "crate", "create": true} (the id of the first object
@@ -165,6 +166,7 @@ fn substitute(v: &Value, s: &Session) -> Value {
         Value::String(t) if t == "$inventory" => json!(s.inventory),
         Value::String(t) if t == "$equipment" => json!(s.equipment),
         Value::String(t) if t.starts_with('$') && s.vars.contains_key(&t[1..]) => s.vars[&t[1..]].clone(),
+        Value::String(t) if t.starts_with('#') => json!(crate::data::stable_hash(&t[1..])),
         Value::Array(items) => Value::Array(items.iter().map(|i| substitute(i, s)).collect()),
         other => other.clone(),
     }
