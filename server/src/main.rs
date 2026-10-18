@@ -53,7 +53,6 @@ mod native;
 mod machines;
 mod meteo;
 mod model;
-mod native;
 mod net;
 mod newworld;
 mod objects;
@@ -198,6 +197,7 @@ fn main() {
         Some("native-scan") => return native::unity::scan(&args[2..]),
         Some("tables-diff") => return native::diff::run(&args[2..]),
         Some("read-game") => return native::tables::run(&args[2..]),
+        Some("native-layout") => return native::tables::layout(&args[2..]),
         Some("extract") => return extract::run(&args[2..]),
         Some("new") => return newworld::run(&args[2..]),
         Some("--version") => {

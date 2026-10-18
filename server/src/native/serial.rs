@@ -34,6 +34,9 @@ pub enum Kind {
     /// A [Serializable] class or struct, inline: its full type name and fields.
     Struct(TypeName, Rc<Vec<Field>>),
     Builtin(Builtin),
+    /// A field GameData.cs writes that Unity does not serialize (an event, a dictionary...):
+    /// no data, and its value at runtime is unset.
+    Runtime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -134,8 +137,9 @@ impl Layouts {
     }
 
     fn class_fields(&mut self, ty: &TypeName, generic: &[TypeSig], depth: usize) -> Vec<Field> {
-        let Some((a, i)) = self.asm.resolve(ty) else { return Vec::new() };
-        let def = &self.asm.0[a].types()[i];
+        let asm = self.asm.clone();
+        let Some((a, i)) = asm.resolve(ty) else { return Vec::new() };
+        let def = &asm.0[a].types()[i];
         // Unity stops at its own base classes: they serialize nothing of the script's.
         let mut out = match &def.extends {
             Some(TypeSig::Class(b)) if !matches!(full(b).as_str(), "UnityEngine.MonoBehaviour" | "UnityEngine.ScriptableObject" | "UnityEngine.Object" | "System.Object" | "UnityEngine.Behaviour" | "UnityEngine.Component") => self.class_fields(b, &[], depth),
@@ -156,20 +160,23 @@ impl Layouts {
         for (name, sig, flags, serialize_field, serialize_reference) in fields {
             const STATIC: u16 = 0x10;
             const INIT_ONLY: u16 = 0x20;
-            const LITERAL: u16 = 0x40;
             const NOT_SERIALIZED: u16 = 0x80;
             let public = flags & 0x7 == 0x6;
-            if flags & (STATIC | INIT_ONLY | LITERAL | NOT_SERIALIZED) != 0 || !(public || serialize_field || serialize_reference) {
-                continue;
-            }
+            // What GameData.cs writes: public (and not [NonSerialized]) or [SerializeField].
+            let written = flags & STATIC == 0 && ((public && flags & NOT_SERIALIZED == 0) || serialize_field);
+            // What Unity stores: the same, minus readonly fields and types it cannot store.
+            let stored = written && flags & INIT_ONLY == 0 || serialize_reference && flags & STATIC == 0;
             if serialize_reference {
                 // ponytail: [SerializeReference] fields (a managed reference id, the objects in
                 // a registry after the fields) are not read; none of the tables need one so far.
                 out.push(Field { name, kind: Kind::I64 });
                 continue;
             }
-            if let Some(kind) = self.kind(&sig, depth) {
-                out.push(Field { name, kind });
+            match stored.then(|| self.kind(&sig, depth)).flatten() {
+                Some(kind) => out.push(Field { name, kind }),
+                // A written field Unity cannot store keeps its default: null for a reference type.
+                None if written && !is_value_type(&sig) => out.push(Field { name, kind: Kind::Runtime }),
+                None => {}
             }
         }
         out
@@ -215,8 +222,9 @@ impl Layouts {
         if self.is_unity_object(t) {
             return Some(Kind::Object(t.clone()));
         }
-        let (a, i) = self.asm.resolve(t)?;
-        let def = &self.asm.0[a].types()[i];
+        let asm = self.asm.clone();
+        let (a, i) = asm.resolve(t)?;
+        let def = &asm.0[a].types()[i];
         let base = def.extends.as_ref().and_then(|e| match e {
             TypeSig::Class(b) | TypeSig::ValueType(b) => Some(full(b)),
             TypeSig::GenericInst { ty, .. } => Some(full(ty)),
@@ -238,6 +246,10 @@ impl Layouts {
         let fields = Rc::new(self.class_fields(t, args, depth + 1));
         Some(Kind::Struct(t.clone(), fields))
     }
+}
+
+fn is_value_type(sig: &TypeSig) -> bool {
+    matches!(sig, TypeSig::ValueType(_) | TypeSig::GenericInst { value_type: true, .. }) || !matches!(sig, TypeSig::Class(_) | TypeSig::GenericInst { .. } | TypeSig::SzArray(_) | TypeSig::Array(..) | TypeSig::String | TypeSig::Object)
 }
 
 /// A generic parameter replaced by its argument.
@@ -268,6 +280,8 @@ pub enum Raw {
     Json(Value),
     /// A value GameData.cs leaves out (Unity structs it has no case for).
     Omit,
+    /// A field with no serialized data: null at runtime.
+    Unset,
 }
 
 fn read_builtin(b: Builtin, r: &mut Reader) -> Option<Raw> {
@@ -342,31 +356,41 @@ pub fn read_fields(fields: &[Field], r: &mut Reader) -> Option<Vec<(String, Raw)
 }
 
 fn read_kind(kind: &Kind, r: &mut Reader) -> Option<Raw> {
-    // Values smaller than 4 bytes are padded to 4, as are strings and arrays.
+    read_value(kind, r, false)
+}
+
+/// `item`: an array element, which Unity packs (only the whole array is padded).
+fn read_value(kind: &Kind, r: &mut Reader, item: bool) -> Option<Raw> {
+    // Fields smaller than 4 bytes are padded to 4, as are strings and arrays.
+    let pad = |r: &mut Reader| {
+        if !item {
+            r.align();
+        }
+    };
     let v = match kind {
         Kind::Bool => {
             let b = r.bool()?;
-            r.align();
+            pad(r);
             Raw::Bool(b)
         }
         Kind::I8 => {
             let v = r.u8()? as i8;
-            r.align();
+            pad(r);
             Raw::Int(v as i64)
         }
         Kind::U8 => {
             let v = r.u8()?;
-            r.align();
+            pad(r);
             Raw::UInt(v as u64)
         }
         Kind::I16 => {
             let v = r.i16()?;
-            r.align();
+            pad(r);
             Raw::Int(v as i64)
         }
         Kind::U16 | Kind::Char => {
             let v = r.u16()?;
-            r.align();
+            pad(r);
             Raw::UInt(v as u64)
         }
         Kind::I32 => Raw::Int(r.i32()? as i64),
@@ -389,7 +413,7 @@ fn read_kind(kind: &Kind, r: &mut Reader) -> Option<Raw> {
             let n = r.count()?;
             let mut items = Vec::with_capacity(n.min(4096));
             for _ in 0..n {
-                items.push(read_kind(item, r)?);
+                items.push(read_value(item, r, true)?);
             }
             r.align();
             Raw::List(items)
@@ -399,6 +423,7 @@ fn read_kind(kind: &Kind, r: &mut Reader) -> Option<Raw> {
             Raw::Fields(t.clone(), v)
         }
         Kind::Builtin(b) => read_builtin(*b, r)?,
+        Kind::Runtime => Raw::Unset,
     };
     Some(v)
 }

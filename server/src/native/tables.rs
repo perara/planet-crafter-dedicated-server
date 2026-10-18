@@ -11,7 +11,7 @@ use serde_json::{json, Map, Value};
 use super::dotnet::{Assemblies, TypeName};
 use super::graph::Graph;
 use super::serial::{enum_name, read_fields, Layouts, Raw};
-use super::unity::{self, Data, Id, Reader};
+use super::unity::{self, Data, Id};
 
 /// GameData.MaxDepth.
 const MAX_DEPTH: usize = 6;
@@ -82,7 +82,9 @@ impl Ctx {
                 let head = unity::behaviour(&mut r)?;
                 let (namespace, script, _) = self.graph.script(&mut self.data, target)?.clone();
                 match self.data.resolve(target.0, head.game_object) {
-                    None => (namespace == "SpaceCraft").then(|| json!(format!("{script}:{}", head.name))),
+                    // `IsGameObjectType(so) ? Ref(so) : null`: a null string, so JSON null for
+                    // other ScriptableObjects.
+                    None => Some(if namespace == "SpaceCraft" { json!(format!("{script}:{}", head.name)) } else { Value::Null }),
                     Some(go) => Some(json!(format!("{script}@{}", self.game_object_name(go)?))),
                 }
             }
@@ -109,6 +111,7 @@ impl Ctx {
             Raw::Ref(p, _) => self.reference(file, *p),
             Raw::Json(j) => Some(j.clone()),
             Raw::Omit => None,
+            Raw::Unset => Some(Value::Null),
             Raw::List(items) => {
                 if depth > MAX_DEPTH {
                     return None;
@@ -269,7 +272,26 @@ pub fn run(args: &[String]) {
     if !misread.is_empty() {
         eprintln!("read-game: layouts that did not fit their data: {misread:?}");
     }
+    let rpcs = super::rpcs::rpcs(&ctx.layouts.asm);
+    eprintln!("read-game: {} RPCs", rpcs.len());
     std::fs::create_dir_all(out).expect("create OUT_DIR");
+    std::fs::write(Path::new(out).join("rpcs.json"), serde_json::to_string_pretty(&rpcs).unwrap()).expect("write rpcs.json");
     let gamedata = json!({"assets": assets, "groupPrefabs": group_prefabs});
     std::fs::write(Path::new(out).join("gamedata.json"), serde_json::to_string_pretty(&gamedata).unwrap()).expect("write gamedata.json");
+}
+
+/// Debug: a script class's serialized field layout (pcds-server native-layout GAME_DIR NS.CLASS).
+pub fn layout(args: &[String]) {
+    let ctx = Ctx::open(Path::new(&args[0])).expect("open game");
+    let (ns, class) = args[1].rsplit_once('.').unwrap_or(("", &args[1]));
+    let mut layouts = Layouts::new(ctx.layouts.asm.clone());
+    let fields = layouts.fields(&TypeName { scope: None, namespace: ns.into(), name: class.into() });
+    for f in fields.iter() {
+        println!("{} {:?}", f.name, f.kind);
+    }
+    if let Some((a, i)) = ctx.layouts.asm.resolve(&TypeName { scope: None, namespace: ns.into(), name: class.into() }) {
+        for f in &ctx.layouts.asm.0[a].types()[i].fields {
+            println!("  declared: {} flags={:#x} {:?} attrs={:?}", f.name, f.flags, f.sig, f.attributes.iter().map(|x| format!("{}.{}", x.ty.namespace, x.ty.name)).collect::<Vec<_>>());
+        }
+    }
 }
