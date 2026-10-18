@@ -120,6 +120,9 @@ fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, data: crate:
         eprintln!("{save_path}: {e}");
         std::process::exit(1);
     }
+    let folder = std::path::Path::new(save_path).parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    save::sweep(folder);
+    save::sweep(&folder.join("backups"));
     // The save as it was before this server touched it (as every backup: none with PCDS_BACKUPS=0).
     // At most one per 10 minutes: a crash loop must not push the hourly backups out.
     if let Err(e) = save::backup(save_path, Duration::from_secs(600), backups_kept()) {
@@ -255,18 +258,8 @@ impl Bank {
                         let answer = json!({"status": status, "body": body, "autosaveMinutes": autosave});
                         self.link.send(ipc::ANSWER, f.n, answer.to_string().as_bytes());
                     }
-                    ipc::SAVE => {
-                        // A world that stood still since the last autosave (rules:
-                        // world.pauseWhenEmpty) is that save already: no write, and no backup
-                        // that only repeats the one before.
-                        if std::mem::take(&mut game.advanced) {
-                            persist(game, &self.save_path);
-                        }
-                    }
-                    ipc::STOP => {
-                        persist(game, &self.save_path);
-                        std::process::exit(0);
-                    }
+                    ipc::SAVE => autosave(game, &self.save_path),
+                    ipc::STOP => std::process::exit(final_save(game, &self.save_path)),
                     ipc::SAY => chathooks::say(game, &String::from_utf8_lossy(&f.body)),
                     ipc::HANDOFF => {
                         // A tick boundary with nothing queued: what is waiting goes out first.
@@ -284,10 +277,7 @@ impl Bank {
                                 match self.link.recv() {
                                     Some(f) if f.kind == ipc::RESUME => println!("bank: resumed, the new bank failed"),
                                     Some(f) if f.kind == ipc::EXIT => std::process::exit(0),
-                                    _ => {
-                                        persist(game, &self.save_path);
-                                        std::process::exit(0);
-                                    }
+                                    _ => std::process::exit(final_save(game, &self.save_path)),
                                 }
                             }
                             Err(e) => {
@@ -303,11 +293,11 @@ impl Bank {
                 // The whole world may be half-updated: keep what there is; the front starts the
                 // bank again from the save.
                 eprintln!("the game tick panicked: saving and stopping");
-                persist(game, &self.save_path);
+                let _ = persist(game, &self.save_path);
                 std::process::exit(1);
             }
             if std::mem::take(&mut game.save_requested) {
-                persist(game, &self.save_path);
+                let _ = persist(game, &self.save_path);
             }
             // What a client's own packets brought it goes out now; the rest (other players'
             // movement and doings, the world's changes) every MOVEMENT_EVERY.
@@ -337,8 +327,7 @@ impl Bank {
             let pause = next_frame.saturating_duration_since(Instant::now());
             if ipc::wait(&[self.link.fd()], &[], pause)[0] && !self.link.fill(usize::MAX) {
                 println!("bank: the front is gone; saving and stopping");
-                persist(game, &self.save_path);
-                return;
+                std::process::exit(final_save(game, &self.save_path));
             }
         }
     }
@@ -368,7 +357,16 @@ pub fn reason_batch(reason: &str) -> Vec<u8> {
 fn send(link: &mut Link, mail: &mut crate::idmap::FxHashMap<u64, wire::Batch>, clients: &[u64]) {
     for c in clients {
         if let Some(b) = mail.remove(c).filter(|b| !b.is_empty()) {
-            link.send(ipc::DATA, *c, &b.finish());
+            let b = b.finish();
+            // Over the frame limit the front would end the link: that client goes instead (it
+            // cannot go on without the batch). A join batch is ~14 bytes per world object.
+            if !ipc::fits(&b) {
+                eprintln!("client {c}: a batch of {} bytes is over the {} bytes a frame holds; it is dropped", b.len(), ipc::MAX_FRAME);
+                link.send(ipc::DATA, *c, &reason_batch("The world is too large for this server to send"));
+                link.send(ipc::KICK, *c, &[]);
+                continue;
+            }
+            link.send(ipc::DATA, *c, &b);
         }
     }
 }
@@ -428,6 +426,11 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
         Err(e) => (500, json!({"error": e}).to_string()),
     };
     let field = |k: &str| body[k].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    // A request's outcome: its JSON, or 400 with what is wrong.
+    let answer = |r: Result<Value, String>| match r {
+        Ok(v) => (200, v.to_string()),
+        Err(e) => (400, json!({"error": e}).to_string()),
+    };
     match (method, path) {
         // The bank's part; the front adds its own (invite code, network, banks, traffic).
         ("GET", "/api/status") => {
@@ -457,13 +460,13 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
                 "tables": {"version": game.net_data.game_version, "buildId": ctx.build_id},
                 "world": {"seed": game.save.settings["worldSeed"], "settings": game.save.settings},
                 "objects": {"world": game.wos.len(), "network": game.net.objects.len(), "inventories": game.inventories.len()},
+                "held": game.held,
+                "s3": crate::s3::status(&game.rules.backup),
+                "lastSave": LAST_SAVE.with_borrow(Value::clone),
             });
             (200, body.to_string())
         }
-        ("POST", "/api/save") => {
-            persist(game, ctx.save_path);
-            ok()
-        }
+        ("POST", "/api/save") => kept(persist(game, ctx.save_path)),
         ("POST", "/api/kick") => match who(body).and_then(|w| find_client(game, &w)) {
             Ok(Some(c)) => {
                 game.kick(c, "Kicked");
@@ -566,7 +569,57 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
             }
             Err(e) => e,
         },
-        ("GET", "/api/worlds") => (200, dashboard::worlds(ctx.save_path).to_string()),
+        ("GET", "/api/worlds") => {
+            let mut w = dashboard::worlds(ctx.save_path);
+            w["choices"] = crate::newworld::choices(&game.net_data, &game.data);
+            w["backupsKept"] = backups_kept().into();
+            w["s3"] = crate::s3::status(&game.rules.backup);
+            (200, w.to_string())
+        }
+        ("POST", "/api/worlds/new") => match dashboard::body::<dashboard::NewWorld>(body) {
+            Ok(w) => answer(dashboard::world_new(game, ctx.save_path, w)),
+            Err(e) => e,
+        },
+        ("POST", "/api/worlds/remove") => match field("name") {
+            Some(n) => answer(dashboard::world_remove(ctx.save_path, &n)),
+            None => (400, "{\"error\":\"'name' is required\"}".into()),
+        },
+        ("POST", "/api/worlds/file") => match field("name") {
+            Some(n) => answer(dashboard::world_file(ctx.save_path, &n, body["backup"] == true)),
+            None => (400, "{\"error\":\"'name' is required\"}".into()),
+        },
+        ("POST", "/api/worlds/restore") => match (field("backup"), field("name")) {
+            (Some(b), Some(n)) => answer(dashboard::world_restore(ctx.save_path, &b, &n)),
+            _ => (400, "{\"error\":\"'backup' and 'name' are required\"}".into()),
+        },
+        // A backup now (after a save), copied to S3 when that is set.
+        ("POST", "/api/backup") => {
+            if backups_kept() == 0 {
+                return (400, "{\"error\":\"backups are off (PCDS_BACKUPS=0)\"}".into());
+            }
+            if let Err(e) = game.snapshot().write(ctx.save_path) {
+                return (500, json!({"error": format!("save failed: {e}")}).to_string());
+            }
+            if let Err(e) = save::backup(ctx.save_path, Duration::ZERO, backups_kept()) {
+                return (500, json!({"error": format!("backup failed: {e}")}).to_string());
+            }
+            let made = crate::s3::newest_backup(ctx.save_path).and_then(|p| p.file_stem().map(|f| f.to_string_lossy().to_string()));
+            let s3 = crate::s3::after_backup(&game.rules.backup, ctx.save_path, false);
+            (200, json!({"backup": made, "s3": s3.as_ref().ok().cloned().flatten(), "s3Error": s3.err()}).to_string())
+        }
+        ("POST", "/api/backup/s3") => answer(crate::s3::after_backup(&game.rules.backup, ctx.save_path, true).map(|k| json!({"key": k}))),
+        // The admin's pause: the world stands still (clock, machines, growth, gauges) until resumed.
+        ("POST", "/api/pause") => match body["paused"].as_bool() {
+            Some(p) => {
+                if game.held != p {
+                    game.held = p;
+                    println!("world {} by the admin", if p { "paused" } else { "resumed" });
+                    game.ext.chat.replies.push_back(if p { "The world is paused by the server admin." } else { "The world goes on." }.to_string());
+                }
+                (200, json!({"paused": p}).to_string())
+            }
+            None => (400, "{\"error\":\"'paused': true or false\"}".into()),
+        },
         ("GET", "/api/map") => (200, dashboard::map(game).to_string()),
         _ => (404, "{\"error\":\"unknown endpoint\"}".into()),
     }
@@ -582,19 +635,64 @@ fn guarded(game: &mut Game, client: u64, save_path: &str, work: impl FnOnce(&mut
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(game))).is_err() {
         eprintln!("client {client}: the server panicked on it; kicked, saving");
         game.kick(client, "Server error");
-        persist(game, save_path);
+        let _ = persist(game, save_path);
     }
 }
 
-fn persist(game: &mut Game, path: &str) {
+thread_local! {
+    /// The last save's outcome, for GET /api/status: {"ok", "at" (Unix seconds), "error"}. The
+    /// game loop's thread saves and answers the API.
+    static LAST_SAVE: std::cell::RefCell<Value> = const { std::cell::RefCell::new(Value::Null) };
+}
+
+fn persist(game: &mut Game, path: &str) -> Result<(), String> {
     let every: u64 = crate::env("PCDS_BACKUP_MINUTES").and_then(|s| s.parse().ok()).unwrap_or(60);
     if let Err(e) = save::backup(path, Duration::from_secs(every.saturating_mul(60)), backups_kept()) {
         eprintln!("backup failed: {e}");
     }
-    match game.snapshot().write(path) {
+    let saved = game.snapshot().write(path).map_err(|e| format!("{path}: {e}"));
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    LAST_SAVE.set(json!({"ok": saved.is_ok(), "at": at, "error": saved.as_ref().err()}));
+    match &saved {
         Ok(()) => println!("saved {path}"),
         Err(e) => eprintln!("save failed: {e}"),
     }
+    // The newest backup off-site (on a thread), when S3 is set and it is not there yet.
+    if let Err(e) = crate::s3::after_backup(&game.rules.backup, path, false) {
+        eprintln!("backup: {e}");
+    }
+    saved
+}
+
+/// The front's autosave. A world that stood still since the last one (rules:
+/// world.pauseWhenEmpty) is that save already: no write, and no backup that only repeats the
+/// one before. A save that failed is tried again at the next one.
+fn autosave(game: &mut Game, path: &str) {
+    if std::mem::take(&mut game.advanced) && persist(game, path).is_err() {
+        game.advanced = true;
+    }
+}
+
+/// The save before the bank ends, and the code it ends with. When the save fails (a full disk,
+/// a folder made read-only) the world is kept as a snapshot beside it, where the front keeps
+/// one (front::kept_snapshot: the next start runs it), else in the temporary folder; the code
+/// is 1, and the front says so.
+fn final_save(game: &mut Game, path: &str) -> i32 {
+    let Err(e) = persist(game, path) else { return 0 };
+    let beside = crate::front::snapshot_path(path);
+    let name = std::path::Path::new(&beside).file_name().unwrap_or_default().to_string_lossy().to_string();
+    let elsewhere = std::env::temp_dir().join(format!("pcds-{}-{name}", std::process::id())).to_string_lossy().to_string();
+    let mut bytes = Vec::new();
+    let kept = crate::handoff::snapshot_to(game, &mut bytes).and_then(|()| {
+        let write = |to: &str| save::write_atomic(to, &bytes).map_err(|e| format!("{to}: {e}"));
+        write(&beside).map(|()| None).or_else(|b| write(&elsewhere).map(|()| Some(b)))
+    });
+    match kept {
+        Ok(None) => eprintln!("the world could not be saved ({e}): it is kept in {beside}, and the next start runs it"),
+        Ok(Some(b)) => eprintln!("the world could not be saved ({e}) nor kept beside it ({b}): it is kept in {elsewhere}; move it to {beside} for the next start to run it"),
+        Err(k) => eprintln!("the world could not be saved ({e}) nor kept ({k}): what it did since the last save is lost"),
+    }
+    1
 }
 
 /// Sorts the queued messages into each approved client's batch, in queue order. A client gets
@@ -632,11 +730,126 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A save that cannot be written (here a folder where the save goes): /api/save says so, as
+    /// the status does; the autosave tries again; the last save keeps the world as a snapshot the
+    /// next start runs, and the bank ends with 1.
+    #[test]
+    fn a_failed_save_is_reported_retried_and_kept() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let dir = std::env::temp_dir().join(format!("pcds-savefail-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("world.json")).unwrap();
+        let path = dir.join("world.json").to_string_lossy().to_string();
+        let ctx = Ctx { save_path: &path, build_id: None, loop_rate: 0, busy: Default::default() };
+        let (status, answer) = admin_request(&mut game, "POST", "/api/save", &json!({}), &ctx, &mut 5);
+        assert!(status == 500 && answer.contains("world.json"), "{status} {answer}");
+        let (_, s) = admin_request(&mut game, "GET", "/api/status", &json!({}), &ctx, &mut 5);
+        let last = serde_json::from_str::<Value>(&s).unwrap()["lastSave"].clone();
+        assert!(last["ok"] == false && last["at"].as_u64() > Some(0) && last["error"].as_str().is_some_and(|e| e.contains("world.json")), "{last}");
+        game.advanced = true;
+        autosave(&mut game, &path);
+        assert!(game.advanced, "the next autosave tries again");
+        assert_eq!(final_save(&mut game, &path), 1);
+        let kept = std::fs::read(crate::front::snapshot_path(&path)).unwrap();
+        let tables = crate::test_data().unwrap();
+        let (n, d, s) = crate::tables(tables);
+        let scenes = crate::scene_tables(tables, &n, &d);
+        let back = crate::handoff::restore_bytes(n, d, s, &kept, scenes).unwrap();
+        assert_eq!(back.wos.len(), game.wos.len());
+        // Written: the status says so.
+        std::fs::remove_dir(&path).unwrap();
+        autosave(&mut game, &path);
+        assert!(!game.advanced);
+        let (_, s) = admin_request(&mut game, "GET", "/api/status", &json!({}), &ctx, &mut 5);
+        assert_eq!(serde_json::from_str::<Value>(&s).unwrap()["lastSave"]["ok"], true);
+        assert_eq!(final_save(&mut game, &path), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A batch over the frame limit never reaches the socket (the front would end the link and
+    /// the bank with it): its client is told why and dropped; the link goes on.
+    #[test]
+    fn a_batch_over_the_frame_limit_drops_its_client_not_the_bank() {
+        let (a, b) = UnixStream::pair().unwrap();
+        a.set_nonblocking(true).unwrap();
+        let (mut front, mut bank) = (Link::new(a), Link::new(b));
+        let mut mail: crate::idmap::FxHashMap<u64, wire::Batch> = Default::default();
+        mail.entry(4).or_default().push(protocol::RPC, &vec![0; ipc::MAX_FRAME]);
+        mail.entry(5).or_default().push(protocol::RPC, b"small");
+        send(&mut bank, &mut mail, &[4, 5]);
+        // Any frame over the limit, whoever sends it: not sent.
+        bank.send(ipc::DATA, 6, &vec![0; ipc::MAX_FRAME]);
+        bank.send(ipc::GONE, 0, &[]);
+        let mut frames = Vec::new();
+        while frames.last() != Some(&(ipc::GONE, 0)) {
+            assert!(front.fill(usize::MAX));
+            while let Some(f) = front.next() {
+                frames.push((f.kind, f.n));
+            }
+        }
+        assert!(front.broken.is_none());
+        assert_eq!(frames, [(ipc::DATA, 4), (ipc::KICK, 4), (ipc::DATA, 5), (ipc::GONE, 0)]);
+    }
+
     /// An admin API call as the bank answers it: (status, JSON answer).
     fn call(game: &mut Game, method: &str, path: &str, body: Value, autosave: &mut u64) -> (u16, Value) {
         let ctx = Ctx { save_path: "", build_id: None, loop_rate: 0, busy: Default::default() };
         let (status, answer) = admin_request(game, method, path, &body, &ctx, autosave);
         (status, serde_json::from_str(&answer).unwrap())
+    }
+
+    /// Worlds made, read, restored and removed through the API, a backup on demand, and the
+    /// admin's pause holding the clock.
+    #[test]
+    fn worlds_backups_and_the_pause_through_the_api() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let dir = std::env::temp_dir().join(format!("pcds-bank-worlds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let save_path = dir.join("world.json").to_string_lossy().to_string();
+        game.snapshot().write(&save_path).unwrap();
+        let mut autosave = 5;
+        let ctx = Ctx { save_path: &save_path, build_id: None, loop_rate: 0, busy: Default::default() };
+        let mut call = |game: &mut Game, method: &str, path: &str, body: Value| {
+            let (status, answer) = admin_request(game, method, path, &body, &ctx, &mut autosave);
+            (status, serde_json::from_str::<Value>(&answer).unwrap())
+        };
+        let (status, w) = call(&mut game, "GET", "/api/worlds", json!({}));
+        assert_eq!((status, w["current"].as_str()), (200, Some("world")));
+        let planet = w["choices"]["planets"][0]["id"].as_str().unwrap().to_string();
+        let (status, made) = call(&mut game, "POST", "/api/worlds/new", json!({"name": "second", "planet": planet, "seed": 7, "mode": "Chill"}));
+        assert_eq!((status, made["seed"].as_u64()), (200, Some(7)), "{made}");
+        let made = crate::save::SaveFile::load(&dir.join("second.json").to_string_lossy()).unwrap();
+        assert_eq!((made.settings["planetId"].as_str(), made.settings["mode"].as_str()), (Some(planet.as_str()), Some("Chill")));
+        for bad in [json!({"name": "second"}), json!({"name": "../x"}), json!({"name": "rules"}), json!({"name": "x", "mode": "Easy"}), json!({"name": "x", "planet": "Nowhere"})] {
+            assert_eq!(call(&mut game, "POST", "/api/worlds/new", bad.clone()).0, 400, "{bad}");
+        }
+        let (status, file) = call(&mut game, "POST", "/api/worlds/file", json!({"name": "second"}));
+        assert_eq!((status, file["text"].as_str().map(|t| t.contains("planetId"))), (200, Some(true)));
+        // A backup now, then that backup as a new world.
+        let (status, b) = call(&mut game, "POST", "/api/backup", json!({}));
+        let backup = b["backup"].as_str().unwrap_or_else(|| panic!("{status} {b}")).to_string();
+        assert!(backup.starts_with("world-") && b["s3"].is_null() && b["s3Error"].is_null(), "S3 off: {b}");
+        assert_eq!(call(&mut game, "POST", "/api/worlds/restore", json!({"backup": backup, "name": "third"})).0, 200);
+        assert!(dir.join("third.json").is_file());
+        assert_eq!(call(&mut game, "POST", "/api/backup/s3", json!({})).0, 400, "S3 off");
+        // Removed into backups/, never the running world.
+        assert_eq!(call(&mut game, "POST", "/api/worlds/remove", json!({"name": "world"})).0, 400);
+        assert_eq!(call(&mut game, "POST", "/api/worlds/remove", json!({"name": "second"})).0, 200);
+        assert!(!dir.join("second.json").exists() && std::fs::read_dir(dir.join("backups")).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("second-removed-")));
+        // Paused: the clock holds with a player in; resumed: it goes on.
+        game::tests::join(&mut game, 1, "Ann");
+        assert_eq!(call(&mut game, "POST", "/api/pause", json!({"paused": true})).0, 200);
+        let before = game.time;
+        game.sim_time = Some(game.sim_time.unwrap_or(0.0) + 5.0);
+        game.tick();
+        assert_eq!(game.time, before, "paused");
+        assert_eq!(call(&mut game, "GET", "/api/status", json!({})).1["held"], true);
+        assert_eq!(call(&mut game, "POST", "/api/pause", json!({"paused": false})).0, 200);
+        game.sim_time = Some(game.sim_time.unwrap() + 5.0);
+        game.tick();
+        assert!(game.time > before, "resumed");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A ban and a rules change written after a snapshot are in the game restored from it.

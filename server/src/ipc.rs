@@ -61,6 +61,11 @@ pub const CHATCFG: u8 = 19;
 /// crosses the socket). A frame shorter than its header or longer than this breaks the link.
 pub const MAX_FRAME: usize = 64 << 20;
 
+/// Whether a frame with this body is within MAX_FRAME.
+pub fn fits(body: &[u8]) -> bool {
+    9 + body.len() <= MAX_FRAME
+}
+
 /// The fds a frame of this kind carries.
 fn carries_fd(kind: u8, body: &[u8]) -> bool {
     kind == RESTORE || (kind == SNAPSHOT && !body.is_empty())
@@ -118,8 +123,13 @@ impl Link {
         self.stream.as_raw_fd()
     }
 
-    /// Queues a frame (with its memfd); written by flush().
+    /// Queues a frame (with its memfd); written by flush(). One over MAX_FRAME is not sent (the
+    /// other side would break the link on it), with a line in the log.
     pub fn queue(&mut self, kind: u8, n: u64, body: &[u8], fd: Option<OwnedFd>, client: u64) {
+        if !fits(body) {
+            eprintln!("ipc: a frame {kind} of {} bytes not sent: a frame holds at most {MAX_FRAME}", 9 + body.len());
+            return;
+        }
         let bytes = encode(kind, n, body);
         if client != 0 {
             *self.queued.entry(client).or_default() += bytes.len();

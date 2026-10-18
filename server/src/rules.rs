@@ -26,6 +26,28 @@ pub struct Rules {
     pub limits: Limits,
     pub world: World,
     pub chat: Chat,
+    pub backup: Backup,
+}
+
+/// Off-site copies of the save backups: each new backup is uploaded to an S3-compatible bucket
+/// (AWS S3, Cloudflare R2, Backblaze B2, MinIO...) as <prefix><backup file name>. Off while
+/// s3Bucket is unset; the keys are never shown or logged.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct Backup {
+    /// https://s3.<region>.amazonaws.com, https://<account>.r2.cloudflarestorage.com, ...
+    pub s3_endpoint: Option<String>,
+    pub s3_bucket: Option<String>,
+    pub s3_region: String,
+    pub s3_prefix: String,
+    pub s3_access_key: Option<String>,
+    pub s3_secret_key: Option<String>,
+}
+
+impl Default for Backup {
+    fn default() -> Self {
+        Backup { s3_endpoint: None, s3_bucket: None, s3_region: "us-east-1".into(), s3_prefix: "pcds/".into(), s3_access_key: None, s3_secret_key: None }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -149,7 +171,7 @@ impl Default for Chat {
 }
 
 /// Rules shown only as set, never with their value (URLs and arguments may hold tokens).
-const HIDDEN: [&str; 3] = ["chat.webhooks", "chat.secret", "chat.exec"];
+const HIDDEN: [&str; 5] = ["chat.webhooks", "chat.secret", "chat.exec", "backup.s3AccessKey", "backup.s3SecretKey"];
 
 /// The rules as the admin API shows them: the HIDDEN ones as "(set)" when set.
 pub fn shown(rules: &Rules) -> Value {
@@ -199,6 +221,27 @@ impl Rules {
             if !uri.is_some_and(|u| matches!(u.scheme_str(), Some("http" | "https")) && u.host().is_some()) {
                 return Err(format!("chat.webhooks: entry {} is not an http:// or https:// URL", i + 1));
             }
+        }
+        let b = &self.backup;
+        if let Some(url) = &b.s3_endpoint {
+            let uri = url.parse::<ureq::http::Uri>().ok();
+            if !uri.is_some_and(|u| matches!(u.scheme_str(), Some("http" | "https")) && u.host().is_some() && u.path().trim_matches('/').is_empty()) {
+                return Err("backup.s3Endpoint: an http:// or https:// address without a path (the bucket is s3Bucket)".into());
+            }
+        }
+        if let Some(bucket) = &b.s3_bucket
+            && (!(3..=63).contains(&bucket.len()) || !bucket.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'.' || c == b'-'))
+        {
+            return Err("backup.s3Bucket: 3 to 63 lower-case letters, digits, '.' and '-'".into());
+        }
+        if b.s3_region.is_empty() || !b.s3_region.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
+            return Err("backup.s3Region: letters, digits and '-' (us-east-1, auto, ...)".into());
+        }
+        if b.s3_prefix.contains("..") || b.s3_prefix.starts_with('/') || !b.s3_prefix.bytes().all(|c| c.is_ascii_alphanumeric() || b"/._-".contains(&c)) {
+            return Err("backup.s3Prefix: letters, digits, '/', '.', '_' and '-', not starting with '/'".into());
+        }
+        if b.s3_access_key.as_deref() == Some("") || b.s3_secret_key.as_deref() == Some("") {
+            return Err("backup.s3AccessKey / s3SecretKey: empty (null: unset)".into());
         }
         if chat.secret.as_deref() == Some("") {
             return Err("chat.secret: empty (null: unsigned)".into());

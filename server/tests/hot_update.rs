@@ -381,3 +381,61 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
     assert_eq!(noted, json!({"bank": "b", "tag": "v9.9.9"}));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A stop whose save fails (the save's path made a folder): the bank keeps the world as a
+/// snapshot beside the save and ends with 1, the front says so and ends with 1, and the next
+/// start runs that snapshot.
+#[test]
+fn a_stop_whose_save_fails_keeps_the_world() {
+    let Some(data) = tables() else { return };
+    let dir = std::env::temp_dir().join(format!("pcds-savefail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = dir.join("world.json");
+    assert!(Command::new(PCDS).arg("new-save").arg(&save).arg(&data).stdout(Stdio::null()).status().unwrap().success());
+    let banks = banks(&dir);
+    let server = start(&dir, &data, &banks, "http://127.0.0.1:9/releases");
+    std::fs::rename(&save, dir.join("world.json.away")).unwrap();
+    std::fs::create_dir(&save).unwrap();
+    let (status, answer) = server.api("POST", "/api/save", json!({}));
+    assert!(status == 500 && answer["error"].as_str().is_some_and(|e| e.contains("world.json")), "{status} {answer}");
+    let (_, s) = server.api("GET", "/api/status", json!({}));
+    assert_eq!(s["lastSave"]["ok"], false, "{}", s["lastSave"]);
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    let status = server.child.wait().unwrap();
+    let log = server.log();
+    assert!(!status.success() && log.contains("it is kept in") && log.contains("at the stop: the world may not be saved"), "{status}\n{log}");
+    drop(server);
+    std::fs::remove_dir(&save).unwrap();
+    std::fs::rename(dir.join("world.json.away"), &save).unwrap();
+    let server = start(&dir, &data, &banks, "http://127.0.0.1:9/releases");
+    assert!(server.log().contains("the world is the one kept in"), "{}", server.log());
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A kept snapshot on other game tables (a game update after a stop with the world in no bank)
+/// is moved aside, and the world starts from the save.
+#[test]
+fn a_kept_snapshot_that_can_never_run_is_set_aside() {
+    let Some(data) = tables() else { return };
+    let dir = std::env::temp_dir().join(format!("pcds-unusable-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(Command::new(PCDS).arg("new-save").arg(dir.join("world.json")).arg(&data).stdout(Stdio::null()).status().unwrap().success());
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(dir.join("world.json.snapshot"), "{\"format\":1,\"game_version\":\"0.0.1\"}\n{}").unwrap();
+    let server = start(&dir, &data, &banks(&dir), "http://127.0.0.1:9/releases");
+    assert!(server.log().contains("can never run (it is on game \"0.0.1\"'s tables"), "{}", server.log());
+    let names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+    assert!(!names.contains(&"world.json.snapshot".to_string()) && names.iter().any(|n| n.starts_with("world.json.snapshot.unusable-")), "{names:?}");
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
