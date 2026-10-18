@@ -53,6 +53,12 @@ const MAX_SPLIT: usize = 1 << 20;
 /// A client's frames waiting for the bank (a stalled or flipping world) past this: the client
 /// is dropped, not the world.
 const MAX_CLIENT_QUEUE: usize = 16 << 20;
+/// At a stop, the live bank gets this long to take STOP and save, then as long again to end,
+/// before it is killed: 60 s in all, under the supervisor's 20 s for orphans (cli/setup.rs
+/// BANKS_GRACE) and systemd's TimeoutStopSec=90 (and Docker's --stop-timeout 90), so
+/// systemd's or Docker's kill comes last.
+pub const STOP_GRACE: Duration = Duration::from_secs(30);
+
 /// The front's exit code when no bank could start the world at its boot: `pcds run` then
 /// starts the other bank's own front (a release whose front or bank cannot run, cli/setup.rs).
 pub const BOOT_FAILED: i32 = 75;
@@ -1299,7 +1305,7 @@ impl Front {
         }
         if let Some(mut b) = self.live.take() {
             b.link.queue(ipc::STOP, 0, &[], None, 0);
-            let deadline = Instant::now() + Duration::from_secs(60);
+            let deadline = Instant::now() + STOP_GRACE;
             loop {
                 if b.link.flush().is_err() || Instant::now() > deadline {
                     break;
@@ -1319,7 +1325,7 @@ impl Front {
                     end(&mut b);
                 }
                 _ => {
-                    let deadline = Instant::now() + Duration::from_secs(60);
+                    let deadline = Instant::now() + STOP_GRACE;
                     while Instant::now() < deadline && matches!(b.child.try_wait(), Ok(None)) {
                         std::thread::sleep(Duration::from_millis(50));
                     }

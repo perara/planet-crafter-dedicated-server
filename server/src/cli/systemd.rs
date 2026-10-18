@@ -89,7 +89,7 @@ impl Ctx {
     }
 
     /// The units' files: the server, the update check and its timer.
-    fn unit_files(&self) -> Result<[(String, String); 3]> {
+    pub(super) fn unit_files(&self) -> Result<[(String, String); 3]> {
         let (run, env, exe) = (quoted(&self.run.display().to_string())?, plain(&self.env_file.display().to_string())?, quoted(&self.installed().display().to_string())?.replace('$', "$$"));
         let unit = quoted(&self.unit_name)?;
         let environment = format!("Environment=\"PCDS_HOME={run}\" \"PCDS_UNIT={unit}\"");
@@ -113,9 +113,9 @@ Restart=on-failure
 RestartSec=15
 # The stop (SIGTERM) goes to pcds run alone, which passes it to the front; the front has
 # its bank save the world and end. When the main process ends, systemd kills the rest of
-# the unit at once: pcds run therefore ends only after the front and its banks (a front
-# that crashed leaves its banks to save first, up to 60 s). What is still there after
-# the timeout is killed.
+# the unit at once: pcds run therefore ends only after the front and its banks (the front
+# gives its bank 60 s to save and end; a front that crashed leaves its banks 20 s more).
+# What is still there after the timeout is killed.
 KillMode=mixed
 TimeoutStopSec=90
 

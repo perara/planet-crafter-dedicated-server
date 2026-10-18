@@ -40,7 +40,7 @@ Options go after `bash -s --`, for example
 Or with Docker, on any Linux with Docker:
 
 ```bash
-docker run -d --name pcds --restart unless-stopped \
+docker run -d --name pcds --restart unless-stopped --stop-timeout 90 \
   -p 7777:7777/udp -p 127.0.0.1:7782:7782 \
   -v "$PWD/pcds-data:/data" \
   -v "$HOME/.local/share/Steam/steamapps/common/The Planet Crafter:/game:ro" \

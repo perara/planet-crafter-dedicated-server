@@ -443,8 +443,10 @@ impl Ctx {
     }
 }
 
-/// How long the banks of a front that ended get to save and end before they are killed.
-const BANKS_GRACE: Duration = Duration::from_secs(60);
+/// How long the banks of a front that ended get to save and end before they are killed. A
+/// stop gives the front 60 s (front.rs STOP_GRACE twice), then this: 80 s, under the unit's
+/// TimeoutStopSec=90.
+const BANKS_GRACE: Duration = Duration::from_secs(20);
 
 /// A stop (SIGTERM, SIGINT, SIGHUP) came to supervise(): a front that then ends is no failure
 /// to fall back from.
@@ -624,6 +626,20 @@ mod tests {
             assert_eq!(fs::read_to_string(dir.join("saved")).ok().as_deref(), Some("saved\n"), "{what}: the bank saved before the end");
             fs::remove_dir_all(&dir).unwrap();
         }
+    }
+
+    /// A stop: the front's grace for its bank, then the supervisor's for orphans, all before
+    /// systemd's kill.
+    #[test]
+    fn systemd_kills_last_at_a_stop() {
+        let dir = super::super::test_dir("stop-timeouts");
+        let units = super::super::test_ctx(&dir).unit_files().unwrap();
+        let timeout: u64 = units[0].1.lines().find_map(|l| l.strip_prefix("TimeoutStopSec=")).unwrap().parse().unwrap();
+        assert!(crate::front::STOP_GRACE * 2 + BANKS_GRACE + Duration::from_secs(5) <= Duration::from_secs(timeout));
+        let compose = include_str!("../../../compose.yaml");
+        assert!(compose.contains(&format!("stop_grace_period: {timeout}s")), "compose.yaml stops as late as the unit");
+        assert!(include_str!("../../../README.md").contains(&format!("--stop-timeout {timeout}")), "so does the README's docker run");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The other bank, unless it is empty or the one rolled back from.
