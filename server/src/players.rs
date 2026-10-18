@@ -222,7 +222,9 @@ impl Game {
             "planetId": self.planet_id(),
             "totalCraftedObjects": self.total_crafted.get(&client).copied().unwrap_or(state.total_crafted),
             "totalTerraTokenEarned": self.all_time_tokens.get(&client).copied().unwrap_or(state.total_tokens),
-            "cameraView": state.camera_view,
+            // UpdatePlayerStateData: a player other than the host is saved with camera view 1
+            // exactly when it faces yaw 0 (the game tests the rotation, not the camera).
+            "cameraView": i32::from(crate::geometry::euler_y(state.rotation).abs() < 1.1920929e-7),
         })
     }
 
@@ -453,6 +455,18 @@ mod tests {
         let Some(g) = crate::game::test_game(saved) else { return };
         let bob = g.saved_players.iter().find(|p| p["name"] == "Bob").unwrap();
         assert_eq!(bob["totalCraftedObjects"], 0);
+    }
+
+    /// The saved camera view follows the game's rule for players who are not the host.
+    #[test]
+    fn saved_camera_view_is_one_at_yaw_zero() {
+        let Some(mut g) = crate::planets::tests::game() else { return };
+        let ann = join(&mut g, 1, "Ann");
+        let saved = |g: &mut crate::game::Game| g.snapshot().players.into_iter().find(|p| p["name"] == "Ann").unwrap()["cameraView"].clone();
+        g.net.objects.get_mut(&ann).unwrap().rotation = [0.0, 0.0, 0.0, 1.0];
+        assert_eq!(saved(&mut g), 1);
+        g.net.objects.get_mut(&ann).unwrap().rotation = crate::geometry::from_euler_y(90.0);
+        assert_eq!(saved(&mut g), 0);
     }
 
     #[test]
