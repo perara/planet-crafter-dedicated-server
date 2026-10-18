@@ -377,6 +377,9 @@ pub fn remove_inventory(game: &mut Game, inventory: i32) {
             set_state(game, uid, State::Done);
         }
     }
+    // The LogisticEntity went with its inventory: one created with the same id later is
+    // another, found again (an entity kept would name the old building, gone or elsewhere).
+    game.ext.logistics.entities.remove(&inventory);
 }
 
 /// LogisticEntity.SetDirty after DirtyInventoryLogisticsServerRpc set the groups: Deserialize
@@ -1250,3 +1253,5 @@ fn visibility(game: &mut Game) {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod play_tests;
