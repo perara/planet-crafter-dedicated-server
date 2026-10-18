@@ -24,7 +24,6 @@ impl Ctx {
         super::mkdir(&bin.join("web"))?;
         super::install_file(&self.exe, &self.installed())?;
         super::install_file(&lib, &bin.join("libsteam_api.so"))?;
-        super::install_file(&self.extractor_dll, &bin.join("PcdsExtractor.dll"))?;
         super::install_file(&self.web, &bin.join("web/index.html"))
     }
 
@@ -76,7 +75,7 @@ impl Ctx {
                 other => return Err(format!("unknown option {other}")),
             }
         }
-        for tool in ["curl", "unzip", "tar"] {
+        for tool in ["curl", "tar"] {
             need(tool, "install it with your package manager")?;
         }
         if !self.container {

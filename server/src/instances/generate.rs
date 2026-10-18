@@ -1,11 +1,11 @@
 //! What the host generates in procedural wrecks and world instances: GenerateOnTrigger.Generate
 //! (the network objects of a wreck: safes, containers, locked doors, generators) and
 //! WorldInstanceScene.InitSceneVariables (a world instance's variation, its wreck generators and
-//! its shared random props), from the extractor's wrecks.json and scenes/<planet>.json.
+//! its shared random props), from wrecks.json and scenes/<planet>.json (native/).
 //!
-//! ponytail: Tessera, which lays out a wreck's tiles from its seed, is not ported. The extractor
-//! has the game lay out seeds 1..=N of every generator, and the server gives its wrecks those
-//! seeds (pool_seed). Port Tessera (DeBroglie's WFC on a Sylves cube grid) to take any seed.
+//! ponytail: the extraction lays out seeds 1..=N of every generator with native/tessera.rs (a
+//! port of the game's Tessera), and the server gives its wrecks those seeds (pool_seed). Running
+//! that port here, off the tick, would give every wreck its own seed as the game does.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -163,7 +163,7 @@ pub fn trigger_radius(game: &Game, index: usize, owner: i32) -> f32 {
     if owner == 0 && g.scene_instance_radius_ratio > 0.0 { radius * g.scene_instance_radius_ratio } else { radius }
 }
 
-/// The seed a wreck gets: one of the extractor's layouts.
+/// The seed a wreck gets: one of the laid-out seeds in wrecks.json.
 pub fn pool_seed(game: &Game, seed: u32) -> u32 {
     let seeds = game.scenes.wrecks.seeds;
     if seed < 1 || seed > seeds { 1 + seed % seeds } else { seed }

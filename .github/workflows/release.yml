@@ -17,8 +17,8 @@ jobs:
         working-directory: server
       - run: cargo test --release --locked
         working-directory: server
-      # pcds-<tag>-linux-x86_64/: the pcds program with libsteam_api.so, PcdsExtractor.dll and
-      # web/ beside it, install.sh, README.md and LICENSE (Makefile, dist).
+      # pcds-<tag>-linux-x86_64/: the pcds program with libsteam_api.so and web/ beside it,
+      # install.sh, README.md and LICENSE (Makefile, dist).
       - name: Package
         run: make dist VERSION="${GITHUB_REF_NAME}"
       - uses: softprops/action-gh-release@v2

@@ -9,8 +9,6 @@
 #   make lint        clippy and shellcheck
 #   make docker      the Docker image (IMAGE=...)
 #   make dist        the release tarball, as the release workflow makes it (VERSION=vX.Y.Z)
-#   make extractor   the extractor plugin, into extractor/prebuilt/ (Docker; needs run/extractor/game
-#                    from one `pcds extract`)
 #   make clean
 
 SHELL := /bin/bash
@@ -26,7 +24,7 @@ IMAGE ?= planet-crafter-dedicated-server
 SAVE ?= run/worlds/world.json
 PLAYERS ?= 4
 
-.PHONY: build install test bench lint docker dist extractor clean
+.PHONY: build install test bench lint docker dist clean
 
 # The program finds libsteam_api.so next to itself; copied then renamed, so a running copy keeps its own.
 build:
@@ -55,19 +53,10 @@ docker:
 
 dist: build
 	rm -rf dist/$(DIST) && mkdir -p dist/$(DIST)/web
-	cp $(RELEASE)/pcds $(RELEASE)/libsteam_api.so extractor/prebuilt/PcdsExtractor.dll install.sh README.md LICENSE dist/$(DIST)/
+	cp $(RELEASE)/pcds $(RELEASE)/libsteam_api.so install.sh README.md LICENSE dist/$(DIST)/
 	cp server/web/index.html dist/$(DIST)/web/
 	tar -C dist -czf dist/$(DIST).tar.gz $(DIST)
 	cd dist && sha256sum $(DIST).tar.gz > $(DIST).tar.gz.sha256
-
-# Compiled against the game's assemblies and BepInEx in the extractor's view of the game.
-extractor:
-	test -d run/extractor/game/BepInEx/core || { echo "no extractor game folder yet: run 'pcds extract' once" >&2; exit 1; }
-	game="$$(readlink -f "run/extractor/game/Planet Crafter_Data")" && mkdir -p run/cache/nuget && \
-	  docker run --rm -v "$(CURDIR):/src" -v "$(CURDIR)/run/extractor/game:/game" -v "$${game%/*}:$${game%/*}:ro" \
-	    -v "$(CURDIR)/run/cache/nuget:/root/.nuget/packages" -w /src/extractor -e GameDir=/game mcr.microsoft.com/dotnet/sdk:8.0 \
-	    bash -c "dotnet build -c Release -nologo -v q && chown -R $$(id -u):$$(id -g) /src/extractor /root/.nuget/packages"
-	cp extractor/bin/Release/net472/PcdsExtractor.dll extractor/prebuilt/PcdsExtractor.dll
 
 clean:
 	cargo clean $(MANIFEST)

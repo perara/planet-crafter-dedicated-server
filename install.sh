@@ -3,7 +3,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/perara/planet-crafter-dedicated-server/main/install.sh | bash
 #
-# It checks the machine, offers to install what is missing (Wine, Xvfb, ...) with your package
+# It checks the machine, offers to install what is missing (curl, 32-bit libraries) with your package
 # manager, downloads the latest release into ~/planet-crafter-server, and runs `pcds up`: the
 # game tables from your copy of the game, a world (one of your saves, or a new one), the
 # systemd user service, a selftest, and the invite code and address players join with.
@@ -41,12 +41,6 @@ missing_packages() {
   local pm=$1 need=()
   command -v curl > /dev/null || need+=(curl)
   command -v tar > /dev/null || need+=(tar)
-  command -v unzip > /dev/null || need+=(unzip)
-  command -v wine > /dev/null || need+=(wine)
-  # The game runs once under Wine to read its tables: without a display, in Xvfb.
-  if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && ! command -v xvfb-run > /dev/null; then
-    need+=(xvfb)
-  fi
   # steamcmd (invite codes without the Steam client, or --steam-user) is a 32-bit program.
   if [[ ! -f "$HOME/.steam/sdk64/steamclient.so" && ! -f "$HOME/.local/share/Steam/linux64/steamclient.so" ]] &&
     [[ ! -e /lib/ld-linux.so.2 && ! -e /lib32/ld-linux.so.2 && ! -e /usr/lib32/ld-linux.so.2 ]]; then
@@ -55,10 +49,6 @@ missing_packages() {
   local p
   for p in "${need[@]}"; do
     case "$pm:$p" in
-      apt-get:xvfb) echo xvfb ;;
-      dnf:xvfb) echo xorg-x11-server-Xvfb ;;
-      pacman:xvfb) echo xorg-server-xvfb ;;
-      zypper:xvfb) echo xvfb-run ;;
       apt-get:lib32) echo lib32gcc-s1 ;;
       dnf:lib32) echo glibc.i686 libstdc++.i686 ;;
       pacman:lib32) echo lib32-gcc-libs ;;
@@ -85,7 +75,6 @@ install_packages() {
     *) die "missing: ${packages[*]}; install them with your package manager and run this again" ;;
   esac
   say "missing: ${packages[*]}"
-  [[ "$pm" == pacman && " ${packages[*]} " == *" wine "* ]] && say "(on Arch, wine needs the multilib repository enabled)"
   if ((YES)) || ask "install them now with: $cmd ?"; then
     bash -c "$cmd" < /dev/null
   else
