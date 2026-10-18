@@ -167,3 +167,30 @@ fn a_failed_game_download_fails_the_update() {
     assert!(pcds(&dir, &fake, &["update", "--game", game_arg]).status.success());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `pcds run` whose active bank's front cannot start the world (exit 75) starts the other
+/// bank's front, makes it the active one, and says so in pcds status.
+#[test]
+fn a_start_falls_back_to_the_other_bank() {
+    let dir = test_dir("fallback");
+    let fake = fake_systemctl(&dir, "echo inactive");
+    let game = with_reader(&dir, 1);
+    assert!(pcds(&dir, &fake, &["extract", "--game", game.to_str().unwrap()]).status.success());
+    std::fs::create_dir_all(dir.join("run/worlds")).unwrap();
+    std::fs::write(dir.join("run/worlds/world.json"), "{\"saveDisplayName\":\"w\"}").unwrap();
+    let serving = |serve: &str| format!("if [ \"$1\" = serve ]; then {serve}; fi\n{READER}");
+    fake_bank(&dir, "a", &serving("echo 'no bank could start the world' >&2; exit 75"), 1);
+    fake_bank(&dir, "b", &serving("echo \"bank b runs $3\"; exit 0"), 1);
+    for f in ["format", "build"] {
+        std::fs::copy(dir.join("run/bin/a").join(f), dir.join("run/bin/b").join(f)).unwrap();
+    }
+    let out = pcds(&dir, &fake, &["run"]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    assert!(said.contains("bank a could not start the world: its front (pcds 9.0.0) ended without running it (exit 75") && said.contains("Starting bank b"), "{said}");
+    assert!(said.contains(&format!("bank b runs {}", dir.join("run/worlds/world.json").display())), "{said}");
+    assert_eq!(std::fs::read_to_string(dir.join("run/bin/active")).unwrap().trim(), "b");
+    let out = pcds(&dir, &fake, &["status"]);
+    assert!(text(&out).contains("started from bank b because bank a could not start the world"), "{}", text(&out));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

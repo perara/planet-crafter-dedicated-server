@@ -346,6 +346,32 @@ pub fn clear_rolled_back(banks: &Path) -> Result<(), String> {
     }
 }
 
+/// A start that ran bank `to` because bank `from` could not start the world (the front's boot,
+/// or `pcds run` when the active bank's front could not): banks/fallback, {"from", "to",
+/// "reason", "at"}. Shown (describe, so /api/status and `pcds status`) while `to` is the active
+/// bank; `pcds upgrade` clears it.
+pub fn note_fallback(banks: &Path, from: &str, to: &str, reason: &str) -> Result<(), String> {
+    let at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let note = json!({"from": from, "to": to, "reason": reason, "at": at});
+    let _lock = lock(banks)?;
+    crate::cli::replace_file(&banks.join("fallback"), (note.to_string() + "\n").as_bytes(), 0o644)
+}
+
+/// The fallback note, while the bank it started is the active one.
+pub fn fallback(banks: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(banks.join("fallback")).ok()?;
+    serde_json::from_str(&text).ok().filter(|v: &Value| v["to"] == active(banks).as_str())
+}
+
+pub fn clear_fallback(banks: &Path) -> Result<(), String> {
+    let path = banks.join("fallback");
+    let _lock = lock(banks)?;
+    match std::fs::remove_file(&path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{}: {e}", path.display())),
+        _ => Ok(()),
+    }
+}
+
 /// What the automatic update does with the latest release `tag` after a rollback: skip it
 /// (Some: why) when it is the release rolled back from; a later one clears the note.
 pub fn auto_skips(banks: &Path, tag: &str) -> Result<Option<String>, String> {
@@ -392,7 +418,7 @@ fn version_key(v: &str) -> (Vec<u64>, bool, Vec<Part<'_>>) {
 /// The admin API's view of the banks.
 pub fn describe(banks: &Path) -> Value {
     let installed: Vec<Value> = BANKS.iter().map(|b| json!({"bank": b, "info": info(banks, b)})).collect();
-    json!({"dir": banks, "active": active(banks), "installed": installed})
+    json!({"dir": banks, "active": active(banks), "installed": installed, "fallback": fallback(banks)})
 }
 
 #[cfg(test)]
@@ -650,6 +676,22 @@ pub mod tests {
         assert_eq!(rolled_back(&dir).unwrap()["tag"], "v0.7.1");
         clear_rolled_back(&dir).unwrap();
         clear_rolled_back(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_fallback_is_noted_while_its_bank_is_active() {
+        let dir = test_dir("fallback");
+        set_active(&dir, "a").unwrap();
+        note_fallback(&dir, "b", "a", "could not start the world").unwrap();
+        let shown = describe(&dir)["fallback"].clone();
+        assert_eq!((shown["from"].as_str(), shown["to"].as_str(), shown["reason"].as_str()), (Some("b"), Some("a"), Some("could not start the world")));
+        // A flip or an upgrade to the other bank: no longer what runs.
+        set_active(&dir, "b").unwrap();
+        assert!(describe(&dir)["fallback"].is_null());
+        set_active(&dir, "a").unwrap();
+        clear_fallback(&dir).unwrap();
+        assert!(fallback(&dir).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

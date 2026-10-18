@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, Write};
 use std::os::unix::process::CommandExt;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -159,22 +159,45 @@ impl Ctx {
         let game = self.game_dir(None)?;
         let data = self.tables(&build_id(&game)?)?;
         let banks = self.banks();
-        let front = banks.join(updater::active(&banks)).join("pcds");
-        let mut server = Command::new(&front);
-        server.arg("serve").arg(&data).arg(&world).env("PCDS_BANKS", &banks);
         // Started by hand: the settings file (the unit has systemd read it).
         let mut settings = HashMap::new();
         if crate::env("PCDS_ADMIN_TOKEN").is_none() && self.env_file.is_file() {
             settings.extend(parse_env(&fs::read_to_string(&self.env_file).map_err(|e| format!("{}: {e}", self.env_file.display()))?));
         }
-        server.envs(&settings);
         let get = |key: &str| settings.get(key).filter(|v| !v.is_empty()).cloned().or_else(|| crate::env(key));
-        // Access lists and rules are the installation's, whichever world runs.
-        server.env("PCDS_ACCESS", get("PCDS_ACCESS").unwrap_or_else(|| self.run.join("access.json").display().to_string()));
-        server.env("PCDS_RULES", get("PCDS_RULES").unwrap_or_else(|| self.run.join("rules.json").display().to_string()));
-        // The game the tables are for: /api/status says when it has changed (bank.rs).
-        server.env("PCDS_GAME_DIR", &game);
-        let code = supervise(server).map_err(|e| format!("{}: {e}", front.display()))?;
+        let front = |bank: &str| {
+            let mut server = Command::new(banks.join(bank).join("pcds"));
+            server.arg("serve").arg(&data).arg(&world).env("PCDS_BANKS", &banks).envs(&settings);
+            // Access lists and rules are the installation's, whichever world runs.
+            server.env("PCDS_ACCESS", get("PCDS_ACCESS").unwrap_or_else(|| self.run.join("access.json").display().to_string()));
+            server.env("PCDS_RULES", get("PCDS_RULES").unwrap_or_else(|| self.run.join("rules.json").display().to_string()));
+            // The game the tables are for: /api/status says when it has changed (bank.rs).
+            server.env("PCDS_GAME_DIR", &game);
+            server
+        };
+        let first = updater::active(&banks);
+        let mut code = supervise(front(&first)).map_err(|e| format!("{}: {e}", banks.join(&first).display()))?;
+        // The release of the active bank cannot run the world (its front tried both banks, and
+        // the other is of another front protocol, or it fell over): the other bank's own front,
+        // which ran before, unless the owner rolled back from it. Said loudly and noted
+        // (pcds status, /api/status); a second failure puts everything back as it was.
+        if code == crate::front::BOOT_FAILED && !STOP_ASKED.load(Ordering::SeqCst) {
+            match fallback_bank(&banks, &first) {
+                Ok(other) => {
+                    let reason = format!("could not start the world: its front (pcds {}) ended without running it (exit {code}; see pcds logs)", updater::info(&banks, &first).map_or("?".into(), |i| i["version"].as_str().unwrap_or("?").to_string()));
+                    eprintln!("pcds: bank {first} {reason}. Starting bank {other}, which ran before");
+                    updater::note_fallback(&banks, &first, &other, &reason)?;
+                    updater::set_active(&banks, &other)?;
+                    code = supervise(front(&other)).map_err(|e| format!("{}: {e}", banks.join(&other).display()))?;
+                    if code == crate::front::BOOT_FAILED && !STOP_ASKED.load(Ordering::SeqCst) {
+                        eprintln!("pcds: bank {other} could not start the world either; bank {first} is the active one again");
+                        updater::set_active(&banks, &first)?;
+                        updater::clear_fallback(&banks)?;
+                    }
+                }
+                Err(why) => eprintln!("pcds: bank {first} could not start the world, and bank {}: {why}", updater::other(&first)),
+            }
+        }
         std::process::exit(code)
     }
 
@@ -416,6 +439,23 @@ impl Ctx {
 /// How long the banks of a front that ended get to save and end before they are killed.
 const BANKS_GRACE: Duration = Duration::from_secs(60);
 
+/// A stop (SIGTERM, SIGINT, SIGHUP) came to supervise(): a front that then ends is no failure
+/// to fall back from.
+static STOP_ASKED: AtomicBool = AtomicBool::new(false);
+
+/// The bank `pcds run` falls back to when the active one's front cannot start the world: the
+/// other one, when it holds a release and is not the one the owner rolled back from.
+fn fallback_bank(banks: &Path, failed: &str) -> std::result::Result<String, String> {
+    let other = updater::other(failed);
+    if updater::info(banks, other).is_none() {
+        return Err("holds no release to fall back to".into());
+    }
+    if updater::rolled_back(banks).is_some_and(|r| r["bank"] == other) {
+        return Err("is the one the server was rolled back from: it is not started (pcds upgrade --rollback goes back to it)".into());
+    }
+    Ok(other.to_string())
+}
+
 /// The front, run as a child of this process, which ends only after every process the front
 /// left behind. A front that crashes leaves its banks running; they save the world when they
 /// find it gone (bank.rs) and end. Under systemd (KillMode=mixed) and in Docker (tini, then
@@ -437,6 +477,7 @@ fn supervise(mut front: Command) -> Result<i32> {
         }
     }
     extern "C" fn pass_on(signal: libc::c_int) {
+        STOP_ASKED.store(true, Ordering::SeqCst);
         PENDING.store(signal, Ordering::SeqCst);
         pass(FRONT.load(Ordering::SeqCst));
     }
@@ -576,6 +617,21 @@ mod tests {
             assert_eq!(fs::read_to_string(dir.join("saved")).ok().as_deref(), Some("saved\n"), "{what}: the bank saved before the end");
             fs::remove_dir_all(&dir).unwrap();
         }
+    }
+
+    /// The other bank, unless it is empty or the one rolled back from.
+    #[test]
+    fn a_start_falls_back_to_the_bank_that_ran_before() {
+        let dir = super::super::test_dir("fallback-bank");
+        let banks = dir.join("bin");
+        assert!(fallback_bank(&banks, "a").unwrap_err().contains("no release"));
+        fs::create_dir_all(banks.join("b")).unwrap();
+        fs::write(banks.join("b/pcds"), "").unwrap();
+        updater::write_info(&banks.join("b"), &serde_json::json!({"version": "0.6.0"})).unwrap();
+        assert_eq!(fallback_bank(&banks, "a").unwrap(), "b");
+        updater::set_rolled_back(&banks, "b").unwrap();
+        assert!(fallback_bank(&banks, "a").unwrap_err().contains("rolled back from"));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The rule of bank_for(): a build into a bank once (the first into the active bank, a

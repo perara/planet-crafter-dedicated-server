@@ -53,6 +53,10 @@ const MAX_SPLIT: usize = 1 << 20;
 /// A client's frames waiting for the bank (a stalled or flipping world) past this: the client
 /// is dropped, not the world.
 const MAX_CLIENT_QUEUE: usize = 16 << 20;
+/// The front's exit code when no bank could start the world at its boot: `pcds run` then
+/// starts the other bank's own front (a release whose front or bank cannot run, cli/setup.rs).
+pub const BOOT_FAILED: i32 = 75;
+
 /// A new bank's tables and world load in seconds; the restore must be READY within this.
 const LOAD_DEADLINE: Duration = Duration::from_secs(120);
 const READY_DEADLINE: Duration = Duration::from_secs(5);
@@ -323,7 +327,13 @@ impl Front {
                         self.last_snapshot = Some((fd, at));
                     }
                     if bank != first {
-                        eprintln!("bank {first} could not start the world ({}); running bank {bank}, which ran before", tried.join("; "));
+                        let reason = tried.join("; ");
+                        eprintln!("bank {first} could not start the world ({reason}); running bank {bank}, which ran before");
+                        if let Some(dir) = &self.banks
+                            && let Err(e) = updater::note_fallback(dir, &first, &bank, &format!("could not load the world: {reason}"))
+                        {
+                            eprintln!("banks: {e}");
+                        }
                     }
                     self.game_version = b.hello["gameVersion"].as_str().unwrap_or("").to_string();
                     *self.web.write().unwrap_or_else(|e| e.into_inner()) = self.web_page(&bank);
@@ -345,7 +355,7 @@ impl Front {
         if kept.is_some() {
             eprintln!("they were given the world kept in {} at the last stop; move it away to start from the save instead", snapshot_path(&self.save));
         }
-        std::process::exit(1);
+        std::process::exit(BOOT_FAILED);
     }
 
     /// The snapshot keep_snapshot() left beside the save, when it is newer than the save (an
