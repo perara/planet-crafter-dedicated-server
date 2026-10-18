@@ -297,14 +297,29 @@ impl Front {
     /// when the active one cannot start (a broken update), as a bootloader falls back.
     fn boot(&mut self) {
         let first = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
+        let kept = self.kept_snapshot().unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1)
+        });
         let mut tried = Vec::new();
         for bank in [first.clone(), updater::other(&first).to_string()] {
             if self.banks.as_ref().is_some_and(|b| !b.join(&bank).join("pcds").is_file()) {
                 continue;
             }
-            match self.boot_bank(&bank) {
+            let snapshot = match kept.as_ref().map(|(fd, _)| fd.try_clone()).transpose() {
+                Ok(fd) => fd,
+                Err(e) => {
+                    eprintln!("{}: {e}", snapshot_path(&self.save));
+                    std::process::exit(1);
+                }
+            };
+            match self.boot_bank(&bank, snapshot) {
                 Ok(b) => {
                     println!("bank {bank} (pid {}, pcds {}) running the world after {:?}", b.child.id(), b.hello["version"].as_str().unwrap_or("?"), b.started.elapsed());
+                    if let Some((fd, at)) = kept {
+                        println!("the world is the one kept in {} at the last stop (the last flip's snapshot, newer than the save)", snapshot_path(&self.save));
+                        self.last_snapshot = Some((fd, at));
+                    }
                     if bank != first {
                         eprintln!("bank {first} could not start the world ({}); running bank {bank}, which ran before", tried.join("; "));
                     }
@@ -325,10 +340,47 @@ impl Front {
             }
         }
         eprintln!("no bank could start the world: {}", tried.join("; "));
+        if kept.is_some() {
+            eprintln!("they were given the world kept in {} at the last stop; move it away to start from the save instead", snapshot_path(&self.save));
+        }
         std::process::exit(1);
     }
 
-    fn boot_bank(&self, bank: &str) -> Result<Bank, String> {
+    /// The snapshot keep_snapshot() left beside the save, when it is newer than the save (an
+    /// older one is removed: the save has its world).
+    fn kept_snapshot(&self) -> Result<Option<(OwnedFd, SystemTime)>, String> {
+        let path = snapshot_path(&self.save);
+        let Ok(at) = std::fs::metadata(&path).and_then(|m| m.modified()) else { return Ok(None) };
+        if at <= modified(&self.save) {
+            std::fs::remove_file(&path).map_err(|e| format!("{path}: {e}"))?;
+            println!("removed {path}: the save is newer");
+            return Ok(None);
+        }
+        let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+        let fd = ipc::memfd("pcds-snapshot", |w| std::io::Write::write_all(w, &bytes).map_err(|e| e.to_string())).map_err(|e| format!("{path}: {e}"))?;
+        Ok(Some((fd, at)))
+    }
+
+    /// The world is in no bank (the live one died, the next one is not running it yet): the
+    /// last flip's snapshot, when it is newer than the save, is kept beside the save, with the
+    /// snapshot's time; the next start runs it.
+    fn keep_snapshot(&self) {
+        let Some((fd, at)) = &self.last_snapshot else { return };
+        if *at <= modified(&self.save) {
+            return;
+        }
+        let path = snapshot_path(&self.save);
+        let kept = ipc::read_memfd(fd)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| crate::cli::replace_file(std::path::Path::new(&path), &bytes, 0o600))
+            .and_then(|_| std::fs::File::options().write(true).open(&path).and_then(|f| f.set_modified(*at)).map_err(|e| e.to_string()));
+        match kept {
+            Ok(()) => eprintln!("the world is in no bank: the last flip's snapshot (newer than the save) is kept in {path}; the next start runs it"),
+            Err(e) => eprintln!("the world is in no bank, and the last flip's snapshot could not be kept in {path} ({e}): the next start runs the save, which is older"),
+        }
+    }
+
+    fn boot_bank(&self, bank: &str, snapshot: Option<OwnedFd>) -> Result<Bank, String> {
         let mut b = self.spawn(bank, None)?;
         let deadline = Instant::now() + LOAD_DEADLINE;
         let hello = wait_frame(&mut b, deadline).ok_or("it ended before its hello (see above)")?;
@@ -336,7 +388,10 @@ impl Front {
             let _ = b.child.kill();
             let _ = b.child.wait();
         })?;
-        b.link.queue(ipc::START, 0, &[], None, 0);
+        match snapshot {
+            Some(fd) => b.link.queue(ipc::RESTORE, 0, b"{\"recover\":true}", Some(fd), 0),
+            None => b.link.queue(ipc::START, 0, &[], None, 0),
+        }
         let ready = wait_frame(&mut b, deadline).ok_or("it ended while loading the world (see above)")?;
         if ready.kind != ipc::READY {
             let _ = b.child.kill();
@@ -892,16 +947,19 @@ impl Front {
         self.held.clear();
         self.held_bytes.clear();
         self.answers.clear();
-        let save_time = std::fs::metadata(&self.save).and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH);
-        let from = match self.last_snapshot.take() {
-            Some((fd, at)) if at > save_time => {
-                self.recover_from = Some(fd);
-                format!("the snapshot of the last flip ({} s old, newer than the save)", at.elapsed().map(|d| d.as_secs()).unwrap_or(0))
-            }
-            _ => {
-                self.recover_from = None;
-                "the save".to_string()
-            }
+        // The snapshot stays held: should this bank die too before it saves, the next one
+        // starts from it again.
+        let save_time = modified(&self.save);
+        self.recover_from = None;
+        let from = match &self.last_snapshot {
+            Some((fd, at)) if *at > save_time => match fd.try_clone() {
+                Ok(fd) => {
+                    self.recover_from = Some(fd);
+                    format!("the snapshot of the last flip ({} s old, newer than the save)", at.elapsed().map(|d| d.as_secs()).unwrap_or(0))
+                }
+                Err(e) => format!("the save: the snapshot of the last flip, newer, could not be passed on ({e})"),
+            },
+            _ => "the save".to_string(),
         };
         match self.spawn(bank, None) {
             Ok(b) => {
@@ -1193,12 +1251,16 @@ impl Front {
 
     /// Saves the world, ends the bank, disconnects everyone, exits.
     fn shutdown(&mut self, code: i32) -> ! {
-        if matches!(self.phase, Phase::Snapshotting | Phase::Restoring | Phase::Starting) {
+        if self.live.is_some() && matches!(self.phase, Phase::Snapshotting | Phase::Restoring | Phase::Starting) {
             self.fail_flip("the server is stopping");
         }
         if let Some(mut b) = self.next.take() {
             let _ = b.child.kill();
             let _ = b.child.wait();
+        }
+        // No live bank to save the world (it died; the next one was starting from the snapshot).
+        if self.live.is_none() {
+            self.keep_snapshot();
         }
         if let Some(mut b) = self.live.take() {
             b.link.queue(ipc::STOP, 0, &[], None, 0);
@@ -1240,6 +1302,15 @@ impl Front {
         }
         std::process::exit(code)
     }
+}
+
+/// Where the front keeps the last flip's snapshot when it stops with the world in no bank.
+fn snapshot_path(save: &str) -> String {
+    format!("{save}.snapshot")
+}
+
+fn modified(path: &str) -> SystemTime {
+    std::fs::metadata(path).and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH)
 }
 
 /// The hooks' settings a bank sent (CHATCFG). Err names the field only: a value may be a

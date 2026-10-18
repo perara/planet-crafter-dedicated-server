@@ -323,6 +323,33 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
     println!("{}", server.log().lines().filter(|l| l.starts_with("flip ") || l.contains("restarting") || l.starts_with("update")).collect::<Vec<_>>().join("\n"));
     drop(server);
 
+    // Stopped while a bank starts again after a crash: no bank holds the world, so the last
+    // flip's snapshot (newer than the save) is kept beside the save, and the next start runs it.
+    let server = start(&dir, &data, &banks, &releases);
+    assert_eq!(server.update(json!({"rollback": true}))["ok"], true, "{}", server.log());
+    let pid = server.live()["pid"].as_u64().unwrap();
+    // SAFETY: the live bank of the front this test started, by the pid that front reports.
+    assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGKILL) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !server.log().contains("restarting bank") {
+        assert!(Instant::now() < deadline, "no restart\n{}", server.log());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    let status = server.child.wait().unwrap();
+    let kept = dir.join("world.json.snapshot");
+    assert!(status.success() && kept.is_file() && server.log().contains("is kept in"), "{status}\n{}", server.log());
+    drop(server);
+    let server = start(&dir, &data, &banks, &releases);
+    assert!(server.log().contains("the world is the one kept in"), "{}", server.log());
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success());
+    let time = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap();
+    assert!(time(&dir.join("world.json")) > time(&kept), "saved at the stop: the next start removes the kept snapshot");
+    drop(server);
+
     // The command line with the server stopped: a release into the standby bank, made the
     // active one for the next start; status shows both banks; a rollback points back.
     let home = dir.join("cli");
