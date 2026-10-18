@@ -15,7 +15,8 @@
 //! spawned). Targets may then be ["$box", BEHAVIOUR_INDEX]. "$hash:398a5515" is the first object
 //! of that prefab hash the server spawned for us. "ready": false skips the
 //! PlayerReady the game sends first, so the player stays as it spawned; "id": N makes the player
-//! claim Steam id N there.
+//! claim Steam id N there. A step's "tag" is printed with its call (which sweep row it exercises);
+//! a step whose "$name" was never captured is skipped (printed with "skipped").
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -186,6 +187,15 @@ fn substitute(v: &Value, s: &Session) -> Value {
     }
 }
 
+/// The first "$name" left after substitution (a capture that failed), if any.
+fn unresolved(v: &Value) -> Option<String> {
+    match v {
+        Value::String(t) if t.starts_with('$') => Some(t.clone()),
+        Value::Array(items) => items.iter().find_map(unresolved),
+        _ => None,
+    }
+}
+
 pub fn run(args: &[String]) {
     let [addr, dir, script] = args else {
         eprintln!("usage: pcds probe HOST:PORT DATA_DIR SCRIPT.json");
@@ -229,12 +239,18 @@ pub fn run(args: &[String]) {
             continue;
         }
         let Some(name) = step["rpc"].as_str() else { continue };
-        let (object, behaviour) = target(&substitute(&step["on"], &s), &data, s.player);
+        let on = substitute(&step["on"], &s);
         let args: Vec<Value> = step["args"].as_array().cloned().unwrap_or_default().iter().map(|a| substitute(a, &s)).collect();
+        // A value an earlier step failed to capture: the call cannot be made (both servers alike).
+        if let Some(var) = unresolved(&on).or_else(|| args.iter().find_map(unresolved)) {
+            print(s.started, json!({"msg": "call", "name": name, "skipped": var, "tag": step["tag"]}));
+            continue;
+        }
+        let (object, behaviour) = target(&on, &data, s.player);
         let (method, body) = spec.encode(name, &args);
         let mut w = Writer::new();
         w.packed_u64(s.client).packed_u64(object).packed_u16(behaviour).packed_u32(method).bytes(&body);
-        print(s.started, json!({"msg": "call", "name": name, "object": object, "behaviour": behaviour, "args": args}));
+        print(s.started, json!({"msg": "call", "name": name, "object": object, "behaviour": behaviour, "args": args, "tag": step["tag"]}));
         s.send(&[(RPC, w.0)]);
         let got = s.pump(step["after"].as_u64().unwrap_or(300), &spec);
         let capture = &step["capture"];

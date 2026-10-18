@@ -286,6 +286,7 @@ class Transcript:
         self.writes = {}     # (label, var) -> deltas that wrote it
         self.series = {}     # (label, var) -> [(t, value)] of numbers that drift with time
         self.events = []     # (step, normalized line)
+        self.at_join = {}    # (label, var) -> value in the approval
         self.player = next((l['player'] for l in self.lines if l['msg'] == 'joined'), None)
         self.client = next((l['client'] for l in self.lines if l['msg'] == 'joined'), None)
         self._run()
@@ -335,6 +336,8 @@ class Transcript:
         for k, v in vars_.items():
             if not k.startswith('?'):
                 self.state[(label, k)] = v
+                if not created:
+                    self.at_join[(label, k)] = v
         return label
 
     def _delta(self, l):
@@ -405,7 +408,10 @@ class Transcript:
                 self.events.append((step, {'msg': 'destroy', 'object': self.label(l['id'])}))
             elif m == 'call':
                 step += 1
-                self.events.append((step, {'msg': 'call', 'name': l['name'], 'object': self.label(l['object']), 'args': self.norm(l['args'])}))
+                if 'skipped' in l:
+                    self.events.append((step, {'msg': 'call', 'name': l['name'], 'skipped': l['skipped'], 'tag': l.get('tag')}))
+                else:
+                    self.events.append((step, {'msg': 'call', 'name': l['name'], 'object': self.label(l['object']), 'args': self.norm(l['args']), 'tag': l.get('tag')}))
             elif m == 'rpc':
                 args = l['args']
                 self.events.append((step, {'msg': 'rpc', 'name': l['name'], 'object': self.label(l['object']), 'args': self.norm(args)}))
@@ -413,6 +419,18 @@ class Transcript:
                 self._delta(l)
             elif m in ('captured', 'capture failed', 'disconnected'):
                 self.events.append((step, {k: self.norm(v) for k, v in l.items() if k != 't'}))
+
+
+# Per-group counts of world objects: the save's machines produced for longer on the reference
+# before the probe joined, so these are compared by their change during the run.
+COUNTS = ('WorldObjectsHandler._allWorldObjectsGroups', 'LogisticInterplanetaryManager._itemsInPlanetaryLogisticsGroups')
+
+
+def count_change(t, k):
+    def table(v):
+        return {tuple(x[:-1]): x[-1] for x in (v or [])}
+    start, end = table(t.at_join.get(k)), table(t.state.get(k))
+    return {str(g): end.get(g, 0) - start.get(g, 0) for g in set(start) | set(end) if end.get(g, 0) != start.get(g, 0)}
 
 
 def dumps(x):
@@ -439,7 +457,7 @@ def diff_events(ref, ours):
         if a == b:
             continue
         call = next((e for st, e in ref.events if st == s and e['msg'] == 'call'), {'name': 'join'})
-        print(f'## step {s}: {call["name"]}')
+        print(f'## step {s}: {call["name"]}' + (f' [{call["tag"]}]' if call.get('tag') else ''))
         for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
             if op == 'equal':
                 continue
@@ -470,7 +488,7 @@ def diff_approved(ref, ours):
                     print(f'~ object {k} {f}: ref {ra[k][f]} ours {oa[k][f]}'); n += 1
             rv, ov = ra[k]['vars'], oa[k]['vars']
             for v in sorted(set(rv) | set(ov)):
-                if v.startswith('WorldUnitsPlanet._unit'):
+                if v.startswith('WorldUnitsPlanet._unit') or v.endswith(COUNTS):
                     continue  # ours stands still until the first player; compared in the state
                 if not close(rv.get(v), ov.get(v)):
                     print(f'~ object {k} {v}: ref {dumps(rv.get(v))[:400]} ours {dumps(ov.get(v))[:400]}'); n += 1
@@ -494,6 +512,12 @@ def diff_state(ref, ours):
     n = 0
     keys = sorted(set(ref.state) | set(ours.state))
     for k in keys:
+        if k[1].endswith(COUNTS):
+            a, b = count_change(ref, k), count_change(ours, k)
+            if a != b:
+                print(f'~ {k[0]} {k[1]} change during the run: ref {dumps(a)[:400]} ours {dumps(b)[:400]}')
+                n += 1
+            continue
         a, b = ref.norm(ref.state.get(k)), ours.norm(ours.state.get(k))
         sa, sb = ref.series.get(k), ours.series.get(k)
         if isinstance(a, list) and isinstance(b, list) and len(a) == 5 and k[1].startswith('WorldUnitsPlanet.') and close(a[1:], b[1:]):
