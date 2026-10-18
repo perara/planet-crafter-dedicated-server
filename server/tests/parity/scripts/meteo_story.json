@@ -1,0 +1,19 @@
+{"name": "ParityA", "id": 76561197999999901, "steps": [
+ {"rpc": "MeteoHandler.LaunchSpecificMeteoEventServerRpc", "on": "MeteoHandler", "args": [0], "after": 8000},
+ {"rpc": "MeteoHandler.LaunchSpecificMeteoEventServerRpc", "on": "MeteoHandler", "args": [5], "after": 8000},
+ {"rpc": "MeteoHandler.LaunchSpecificMeteoEventServerRpc", "on": "MeteoHandler", "args": [16], "after": 8000},
+ {"rpc": "MeteoHandler.LaunchSpecificMeteoEventServerRpc", "on": "MeteoHandler", "args": [24], "after": 3000},
+ {"rpc": "StoryEventsHandler.LaunchSpecificStoryEventEventServerRpc", "on": "StoryEventsHandler", "args": ["#StoryEvent-Message-Help3"], "after": 1000},
+ {"rpc": "StoryEventsHandler.LaunchSpecificStoryEventEventServerRpc", "on": "StoryEventsHandler", "args": ["#StoryEvent-Message-Help3"], "after": 500},
+ {"rpc": "StoryEventsHandler.LaunchSpecificStoryEventEventServerRpc", "on": "StoryEventsHandler", "args": ["#StoryEvent-Message-TradePlatform"], "after": 1000},
+ {"rpc": "StoryEventsHandler.LaunchSpecificStoryEventEventServerRpc", "on": "StoryEventsHandler", "args": ["#StoryEvent-FirstRain"], "after": 500},
+ {"rpc": "MessagesHandler.AddNewReceivedMessageServerRpc", "on": "MessagesHandler", "args": ["#Message_Other1", true]},
+ {"rpc": "MessagesHandler.AddNewReceivedMessageServerRpc", "on": "MessagesHandler", "args": ["#Message_Other1", true]},
+ {"rpc": "MessagesHandler.AddNewReceivedMessageServerRpc", "on": "MessagesHandler", "args": ["#Message_Other2", false]},
+ {"rpc": "MessagesHandler.AddNewReceivedMessageServerRpc", "on": "MessagesHandler", "args": ["#Message_Help1", true]},
+ {"rpc": "MessagesHandler.MarkAsReadServerRpc", "on": "MessagesHandler", "args": [[false, "#Message_Other1"]]},
+ {"rpc": "MessagesHandler.MarkAsReadServerRpc", "on": "MessagesHandler", "args": [[false, "#Message_Neighbour1"]]},
+ {"rpc": "MessagesHandler.MarkAsReadServerRpc", "on": "MessagesHandler", "args": [[false, "#Message_Help3"]], "after": 1000},
+ {"wait": 40000},
+ {"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc", "on": "InventoriesHandler", "args": [false, 0, "$inventory", 0, null, null], "after": 1000}
+]}

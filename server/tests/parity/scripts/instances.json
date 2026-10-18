@@ -1,0 +1,17 @@
+{"name": "ParityA", "id": 76561197999999901, "steps": [
+ {"rpc": "ProceduralInstancesHandler.LoadInstanceFromSceneServerRpc", "on": "ProceduralInstancesHandler", "args": [102368270, [1250.623, -51.60085, -215.7026], [-0.00115074, -0.3532449, -0.01073181, -0.9354687], 1], "after": 800},
+ {"rpc": "GenerateOnTrigger.GenerateNetworkObjectsServerRpc", "on": ["$hash:42d7ff3e", 0], "args": [], "after": 1000},
+ {"rpc": "ProceduralInstancesHandler.LoadInstanceFromSceneServerRpc", "on": "ProceduralInstancesHandler", "args": [101900777, [640.0, 2.0, 640.0], [0, 0, 0, 1], 1], "after": 1000, "capture": {"var": "wreck", "create": true}},
+ {"rpc": "ProceduralInstancesHandler.LoadInstanceFromSceneServerRpc", "on": "ProceduralInstancesHandler", "args": [101900777, [640.0, 2.0, 640.0], [0, 0, 0, 1], 1], "after": 500},
+ {"rpc": "GenerateOnTrigger.GenerateNetworkObjectsServerRpc", "on": ["$wreck", 0], "args": [], "after": 4000},
+ {"rpc": "GenerateOnTrigger.GenerateNetworkObjectsServerRpc", "on": ["$wreck", 0], "args": [], "after": 1000},
+ {"rpc": "WorldInstanceHandler.UpdateChoicesServerRpc", "on": "WorldInstanceHandler", "args": [3], "after": 500},
+ {"rpc": "WorldInstanceHandler.SetAndOpenWorldInstanceSceneServerRpc", "on": "WorldInstanceHandler", "args": [[400000032, 1200, "Instance-HugeTrees", 0, 0, ["#PulsarQuartz", "#PulsarQuartz", "#PulsarQuartz"]]], "after": 4000},
+ {"rpc": "WorldInstanceHandler.SetAndOpenWorldInstanceSceneServerRpc", "on": "WorldInstanceHandler", "args": [[123456789, 1200, "Instance-CargoSpaceShip", 3, 2, []]], "after": 1000},
+ {"rpc": "GenerateOnTrigger.GenerateNetworkObjectsServerRpc", "on": ["$hash:398a5515", 0], "args": [], "after": 3000},
+ {"wait": 5000},
+ {"rpc": "WorldInstanceHandler.UnloadInstanceServerRpc", "on": "WorldInstanceHandler", "args": [], "after": 2000},
+ {"rpc": "WorldInstanceHandler.UnloadInstanceServerRpc", "on": "WorldInstanceHandler", "args": [], "after": 500},
+ {"wait": 20000},
+ {"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc", "on": "InventoriesHandler", "args": [false, 0, "$inventory", 0, null, null], "after": 1000}
+]}

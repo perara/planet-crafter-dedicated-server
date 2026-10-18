@@ -1,0 +1,7 @@
+{"name": "ParityA", "id": 76561197999999901, "steps": [
+ {"rpc": "ChatHandler.SendChatMessageServerRpc", "on": "ChatHandler", "args": ["hello from ParityA"]},
+ {"rpc": "ChatHandler.SendChatMessageServerRpc", "on": "ChatHandler", "args": ["Parity long chat message Parity long chat message Parity long chat message Parity long chat message Parity long chat message Parity long chat message Parity long chat message Parity long chat message Parity long chat message Parity long chat message Parity long chat message Parity long chat message "], "after": 500},
+ {"rpc": "PlanetNetworkLoader.SwitchToPlanetServerRpc", "on": "PlanetNetworkLoader", "args": ["#Selenea", 0, 0], "after": 15000},
+ {"rpc": "ChatHandler.SendChatMessageServerRpc", "on": "ChatHandler", "args": ["hello from Selenea"], "after": 500},
+ {"rpc": "InventoriesHandler.GetOrCreateNewInventoryServerRpc", "on": "InventoriesHandler", "args": [false, 0, "$inventory", 0, null, null], "after": 1000}
+]}
