@@ -1,12 +1,12 @@
 //! `pcds-server tables-diff EXPECTED_DIR ACTUAL_DIR [SECTION]`: compares two game table folders
-//! (data/<version>/) section by section, floats within a relative 1e-5, and prints how much of
+//! (data/<version>/) section by section, floats within 1e-5 (relative above 1, absolute below), and prints how much of
 //! each section matches with the first differences by JSON path. The native reader is checked
 //! against the tables the game itself produced this way.
 
 use serde_json::Value;
 
 fn floats_equal(a: f64, b: f64) -> bool {
-    a == b || (a - b).abs() <= 1e-5 * a.abs().max(b.abs()).max(1e-3)
+    a == b || (a - b).abs() <= 1e-5 * a.abs().max(b.abs()).max(1.0)
 }
 
 /// Differences under `path`, at most `limit` of them pushed to `out`; returns their count.

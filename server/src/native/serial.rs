@@ -37,6 +37,8 @@ pub enum Kind {
     /// A field GameData.cs writes that Unity does not serialize (an event, a dictionary...):
     /// no data, and its value at runtime is unset.
     Runtime,
+    /// Not stored either, but the constructor creates it empty: [] at runtime.
+    Created,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -152,6 +154,7 @@ impl Layouts {
             _ => Vec::new(),
         };
         let level = out.iter().map(|f| f.level + 1).max().unwrap_or(0);
+        let mut created: Option<Vec<String>> = None;
         let fields: Vec<(String, TypeSig, u16, bool, bool)> = def
             .fields
             .iter()
@@ -178,7 +181,10 @@ impl Layouts {
             match stored.then(|| self.kind(&sig, depth)).flatten() {
                 Some(kind) => out.push(Field { name, kind, level }),
                 // A written field Unity cannot store keeps its default: null for a reference type.
-                None if written && !is_value_type(&sig) => out.push(Field { name, kind: Kind::Runtime, level }),
+                None if written && !is_value_type(&sig) => {
+                    let created = created.get_or_insert_with(|| super::netvars::created_collections(&asm, ty)).contains(&name);
+                    out.push(Field { name, kind: if created { Kind::Created } else { Kind::Runtime }, level })
+                }
                 None => {}
             }
         }
@@ -430,6 +436,7 @@ fn read_value(kind: &Kind, r: &mut Reader, item: bool) -> Option<Raw> {
         }
         Kind::Builtin(b) => read_builtin(*b, r)?,
         Kind::Runtime => Raw::Unset,
+        Kind::Created => Raw::Json(Value::Array(Vec::new())),
     };
     Some(v)
 }

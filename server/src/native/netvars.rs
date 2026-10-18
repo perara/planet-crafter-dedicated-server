@@ -144,7 +144,7 @@ fn initializers(asm: &Assembly, il: &[u8]) -> Result<Vec<(String, Val)>, String>
                 stack.push(if matches!(v, Val::Str(_) | Val::Int(_) | Val::Float(_)) { v } else { Val::Unknown });
             }
             0x28 | 0x6F => match asm.member(token) {
-                Some(Member::Method { owner, name, params, instance, ret }) => {
+                Some(Member::Method { owner, name, params, instance, ret, .. }) => {
                     let at = stack.len().saturating_sub(params.len() + instance as usize);
                     stack.truncate(at);
                     if ret != TypeSig::Void {
@@ -175,6 +175,23 @@ fn initializers(asm: &Assembly, il: &[u8]) -> Result<Vec<(String, Val)>, String>
 pub fn disassemble(asm: &Assembly, il: &[u8]) -> Vec<String> {
     let ops = decode(il).unwrap_or_default();
     ops.iter().map(|op| format!("{:#06x} {:#x} {}", op.code, op.arg, asm.member(op.arg as u32).map(|m| format!("{m:?}")).or_else(|| asm.user_string(op.arg as u32).map(|s| format!("{s:?}"))).unwrap_or_default())).collect()
+}
+
+/// The fields a class's constructor or Awake sets to a new, empty collection (List, Dictionary,
+/// HashSet, ...): what they hold when nothing has been added yet.
+pub fn created_collections(asm: &Assemblies, class: &TypeName) -> Vec<String> {
+    let (Some(def), Some(a)) = (asm.def(class), asm.assembly_of(class)) else { return Vec::new() };
+    let mut out = Vec::new();
+    for m in def.methods.iter().filter(|m| (m.name == ".ctor" || m.name == "Awake") && m.params.is_empty()) {
+        for (name, v) in initializers(a, a.il(m).unwrap_or_default()).unwrap_or_default() {
+            if let Val::New(TypeSig::GenericInst { ty, .. }, args) = v {
+                if ty.namespace == "System.Collections.Generic" && args.iter().all(|a| matches!(a, Val::Int(_))) && !out.contains(&name) {
+                    out.push(name);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The bool constant passed to the first call of `method` in an IL body (ldc.i4.0/1 right

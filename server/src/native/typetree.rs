@@ -1,8 +1,12 @@
 //! Reading a built-in class by its Unity type tree (depth, type, name, size, align rows), for
-//! the one class whose layout is too long to write out by hand: PlayerSettings, for the game
-//! version. Layouts change with Unity versions, so each is tied to one.
+//! the classes whose layouts are too long to write out by hand: PlayerSettings (the game
+//! version) and Mesh (its bounds). Layouts change with Unity versions, so each is tied to one.
+
+use std::ops::Range;
 
 use super::unity::Reader;
+
+type Rows<'a> = &'a [(u8, &'a str, &'a str, i32, bool)];
 
 struct Node<'a> {
     ty: &'a str,
@@ -12,7 +16,7 @@ struct Node<'a> {
     children: Vec<Node<'a>>,
 }
 
-fn build<'a>(rows: &[(u8, &'a str, &'a str, i32, bool)], at: &mut usize, depth: u8) -> Vec<Node<'a>> {
+fn build<'a>(rows: Rows<'a>, at: &mut usize, depth: u8) -> Vec<Node<'a>> {
     let mut out = Vec::new();
     while *at < rows.len() && rows[*at].0 == depth {
         let (_, ty, name, size, align) = rows[*at];
@@ -23,58 +27,189 @@ fn build<'a>(rows: &[(u8, &'a str, &'a str, i32, bool)], at: &mut usize, depth: 
     out
 }
 
-/// Reads a node, returning the string value of `want` when the walk reaches it.
-fn read(n: &Node, r: &mut Reader, want: &str) -> Result<Option<String>, ()> {
-    if n.ty == "string" {
-        let s = r.string().ok_or(())?;
-        return Ok((n.name == want).then_some(s));
-    }
-    if let Some(array) = n.children.iter().find(|c| c.ty == "Array") {
-        let count = r.count().ok_or(())?;
-        let item = array.children.get(1).ok_or(())?;
+/// Skips one node's data: arrays (an int count, then the items), typeless data (an int count of
+/// bytes), structs (their children), fixed-size leaves; then the padding the node asks for.
+fn skip(n: &Node, r: &mut Reader) -> Option<()> {
+    if n.ty == "TypelessData" {
+        let count = r.count()?;
+        r.bytes(count)?;
+    } else if let Some(array) = n.children.iter().find(|c| c.ty == "Array") {
+        let count = r.count()?;
+        let item = array.children.get(1)?;
         for _ in 0..count {
-            read(item, r, want)?;
+            skip(item, r)?;
         }
-        if array.align || n.align {
+        if array.align {
             r.align();
         }
-        return Ok(None);
-    }
-    if n.children.is_empty() {
-        r.bytes(usize::try_from(n.size).map_err(|_| ())?).ok_or(())?;
+    } else if n.children.is_empty() {
+        r.bytes(usize::try_from(n.size).ok()?)?;
     } else {
         for c in &n.children {
-            if let Some(found) = read(c, r, want)? {
-                return Ok(Some(found));
-            }
+            skip(c, r)?;
         }
     }
     if n.align {
         r.align();
     }
-    Ok(None)
+    Some(())
 }
 
-/// PlayerSettings.bundleVersion (Application.version), for the Unity versions with a layout.
-pub fn bundle_version(unity_version: &str, data: &[u8]) -> Result<String, String> {
-    let rows = match unity_version.split('.').take(2).collect::<Vec<_>>().as_slice() {
-        ["6000", "3"] => PLAYER_SETTINGS_6000_3,
-        _ => return Err(format!("no PlayerSettings layout for Unity {unity_version}: the game's version cannot be read (add one to native/typetree.rs)")),
-    };
+/// The byte range of each top-level field, reading the object by its rows; with `whole`, the
+/// rows must account for every byte of it.
+fn fields<'a>(rows: Rows<'a>, data: &[u8], whole: bool) -> Result<Vec<(&'a str, Range<usize>)>, String> {
     let nodes = build(rows, &mut 0, 1);
     let mut r = Reader::new(data);
+    let mut out = Vec::new();
     for n in &nodes {
-        match read(n, &mut r, "bundleVersion") {
-            Ok(Some(v)) => return Ok(v),
-            Ok(None) => {}
-            Err(()) => return Err(format!("PlayerSettings did not read as Unity {unity_version}'s layout (at {})", n.name)),
-        }
+        let start = r.pos;
+        skip(n, &mut r).ok_or_else(|| format!("the data ends in {}", n.name))?;
+        out.push((n.name, start..r.pos));
     }
-    Err("PlayerSettings has no bundleVersion".into())
+    if whole && r.pos != data.len() {
+        return Err(format!("{} of {} bytes read", r.pos, data.len()));
+    }
+    Ok(out)
 }
 
-/// Unity 6000.3's PlayerSettings layout from its first field to bundleVersion, as (depth,
-/// type, name, byte size, aligned after): the game version is bundleVersion.
+fn layout_for<'a>(unity_version: &str, layouts: &[(&str, Rows<'a>)], class: &str) -> Result<Rows<'a>, String> {
+    let minor = unity_version.split('.').take(2).collect::<Vec<_>>().join(".");
+    layouts.iter().find(|(v, _)| *v == minor).map(|(_, rows)| *rows).ok_or_else(|| format!("no {class} layout for Unity {unity_version} (add one to native/typetree.rs)"))
+}
+
+/// PlayerSettings.bundleVersion (Application.version).
+pub fn bundle_version(unity_version: &str, data: &[u8]) -> Result<String, String> {
+    let rows = layout_for(unity_version, &[("6000.3", PLAYER_SETTINGS_6000_3)], "PlayerSettings")?;
+    let fields = fields(rows, data, false).map_err(|e| format!("PlayerSettings is not Unity {unity_version}'s: {e}"))?;
+    let range = fields.iter().find(|(n, _)| *n == "bundleVersion").map(|(_, r)| r.clone()).ok_or("PlayerSettings has no bundleVersion")?;
+    Reader::new(&data[range]).string().ok_or_else(|| "unreadable bundleVersion".into())
+}
+
+/// The byte range of the field at `path` (names from the top level down through structs).
+fn locate(nodes: &[Node], r: &mut Reader, path: &[&str]) -> Option<Range<usize>> {
+    for n in nodes {
+        if n.name == path[0] {
+            if path.len() == 1 {
+                let start = r.pos;
+                skip(n, r)?;
+                return Some(start..r.pos);
+            }
+            return locate(&n.children, r, &path[1..]);
+        }
+        skip(n, r)?;
+    }
+    None
+}
+
+/// PackedBitVector.UnpackFloats: each item `bits` wide, start + range * q / (2^bits - 1).
+fn unpack_floats(r: &mut Reader) -> Option<Vec<f32>> {
+    let (count, range, start) = (r.u32()? as usize, r.f32()?, r.f32()?);
+    let n = r.count()?;
+    let data = r.bytes(n)?;
+    r.align();
+    let bits = r.u8()? as u32;
+    if count == 0 || bits == 0 || bits > 32 {
+        return Some(vec![start; count]);
+    }
+    let max = ((1u64 << bits) - 1) as f32;
+    let scale = 1.0 / range;
+    let (mut at, mut bit) = (0usize, 0u32);
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let (mut x, mut have) = (0u64, 0u32);
+        while have < bits {
+            x |= ((*data.get(at)? as u64) >> bit) << have;
+            let take = (bits - have).min(8 - bit);
+            bit += take;
+            have += take;
+            if bit == 8 {
+                at += 1;
+                bit = 0;
+            }
+        }
+        x &= (1u64 << bits) - 1;
+        out.push(x as f32 / (scale * max) + start);
+    }
+    Some(out)
+}
+
+/// Bytes per component of a VertexFormat (Float32, Float16, UNorm8, SNorm8, UNorm16, SNorm16,
+/// UInt8, SInt8, UInt16, SInt16, UInt32, SInt32).
+const FORMAT_SIZE: [usize; 12] = [4, 2, 1, 1, 2, 2, 1, 1, 2, 2, 4, 4];
+
+fn half(bits: u16) -> f32 {
+    let (sign, exp, man) = ((bits >> 15) as u32, ((bits >> 10) & 0x1f) as i32, (bits & 0x3ff) as f32);
+    let v = match exp {
+        0 => man * 2f32.powi(-24),
+        31 => f32::INFINITY,
+        _ => (1.0 + man / 1024.0) * 2f32.powi(exp - 15),
+    };
+    if sign == 1 { -v } else { v }
+}
+
+/// Mesh.bounds: center and extent, the box around its vertex positions (float or half-float
+/// channels, or a compressed mesh's), else the stored m_LocalAABB.
+/// `stream`: the bytes of an external vertex stream (path, offset, size).
+pub fn mesh_bounds(unity_version: &str, data: &[u8], stream: &dyn Fn(&str, u64, usize) -> Option<Vec<u8>>) -> Result<([f32; 3], [f32; 3]), String> {
+    let rows = layout_for(unity_version, &[("6000.3", MESH_6000_3)], "Mesh")?;
+    fields(rows, data, true).map_err(|e| format!("a Mesh is not Unity {unity_version}'s: {e}"))?;
+    let nodes = build(rows, &mut 0, 1);
+    let at = |path: &[&str]| locate(&nodes, &mut Reader::new(data), path).ok_or_else(|| format!("Mesh has no {}", path.join(".")));
+    let compressed = unpack_floats(&mut Reader::new(&data[at(&["m_CompressedMesh", "m_Vertices"])?])).ok_or("unreadable compressed vertices")?;
+    let positions: Vec<[f32; 3]> = if compressed.len() >= 3 {
+        compressed.chunks_exact(3).map(|v| [v[0], v[1], v[2]]).collect()
+    } else {
+        let count = Reader::new(&data[at(&["m_VertexData", "m_VertexCount"])?]).u32().ok_or("m_VertexCount")? as usize;
+        let mut r = Reader::new(&data[at(&["m_VertexData", "m_Channels"])?]);
+        let channels: Vec<[u8; 4]> = (0..r.count().ok_or("m_Channels")?).map(|_| Some([r.u8()?, r.u8()?, r.u8()?, r.u8()? & 0x0f])).collect::<Option<_>>().ok_or("m_Channels")?;
+        let mut r = Reader::new(&data[at(&["m_VertexData", "m_DataSize"])?]);
+        let n = r.count().ok_or("m_DataSize")?;
+        let mut bytes = r.bytes(n).ok_or("m_DataSize")?.to_vec();
+        if bytes.is_empty() && count > 0 {
+            let mut r = Reader::new(&data[at(&["m_StreamData"])?]);
+            let (offset, size) = (r.u64().ok_or("m_StreamData")?, r.u32().ok_or("m_StreamData")? as usize);
+            let path = r.string().ok_or("m_StreamData")?;
+            bytes = stream(&path, offset, size).ok_or_else(|| format!("vertex stream {path} unreadable"))?;
+        }
+        // Streams follow each other, each padded to 16 bytes; a vertex's channels in a stream
+        // follow each other.
+        let size = |c: &[u8; 4]| FORMAT_SIZE.get(c[2] as usize).map(|s| s * c[3] as usize).ok_or("an unknown vertex format");
+        let [stream_of, offset, format, dimension] = *channels.first().ok_or("a mesh without a position channel")?;
+        if dimension < 3 || format > 1 {
+            return Err(format!("vertex positions as format {format} x{dimension}: not read"));
+        }
+        let mut start = 0;
+        for s in 0..stream_of {
+            let stride: usize = channels.iter().filter(|c| c[0] == s && c[3] > 0).map(size).sum::<Result<usize, _>>()?;
+            start = (start + stride * count).next_multiple_of(16);
+        }
+        let stride: usize = channels.iter().filter(|c| c[0] == stream_of && c[3] > 0).map(size).sum::<Result<usize, _>>()?;
+        (0..count)
+            .map(|i| {
+                let at = start + i * stride + offset as usize;
+                let component = |k: usize| match format {
+                    0 => bytes.get(at + 4 * k..at + 4 * k + 4).map(|b| f32::from_le_bytes(b.try_into().unwrap())),
+                    _ => bytes.get(at + 2 * k..at + 2 * k + 2).map(|b| half(u16::from_le_bytes(b.try_into().unwrap()))),
+                };
+                Some([component(0)?, component(1)?, component(2)?])
+            })
+            .collect::<Option<_>>()
+            .ok_or("vertex data shorter than its vertices")?
+    };
+    if positions.is_empty() {
+        let mut r = Reader::new(&data[at(&["m_LocalAABB"])?]);
+        return Ok((r.vec3().ok_or("m_LocalAABB")?, r.vec3().ok_or("m_LocalAABB")?));
+    }
+    let (mut min, mut max) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for v in &positions {
+        for i in 0..3 {
+            min[i] = min[i].min(v[i]);
+            max[i] = max[i].max(v[i]);
+        }
+    }
+    Ok(([0, 1, 2].map(|i| (min[i] + max[i]) * 0.5), [0, 1, 2].map(|i| (max[i] - min[i]) * 0.5)))
+}
+
 pub const PLAYER_SETTINGS_6000_3: &[(u8, &str, &str, i32, bool)] = &[
     (1, "GUID", "productGUID", 16, false),
     (2, "unsigned int", "data[0]", 4, false),
@@ -297,4 +432,260 @@ pub const PLAYER_SETTINGS_6000_3: &[(u8, &str, &str, i32, bool)] = &[
     (2, "Array", "Array", -1, true),
     (3, "int", "size", 4, false),
     (3, "char", "data", 1, false),
+];
+
+pub const MESH_6000_3: &[(u8, &str, &str, i32, bool)] = &[
+    (1, "string", "m_Name", -1, false),
+    (2, "Array", "Array", -1, true),
+    (3, "int", "size", 4, false),
+    (3, "char", "data", 1, false),
+    (1, "vector", "m_SubMeshes", -1, false),
+    (2, "Array", "Array", -1, true),
+    (3, "int", "size", 4, false),
+    (3, "SubMesh", "data", 48, false),
+    (4, "unsigned int", "firstByte", 4, false),
+    (4, "unsigned int", "indexCount", 4, false),
+    (4, "int", "topology", 4, false),
+    (4, "unsigned int", "baseVertex", 4, false),
+    (4, "unsigned int", "firstVertex", 4, false),
+    (4, "unsigned int", "vertexCount", 4, false),
+    (4, "AABB", "localAABB", 24, false),
+    (5, "Vector3f", "m_Center", 12, false),
+    (6, "float", "x", 4, false),
+    (6, "float", "y", 4, false),
+    (6, "float", "z", 4, false),
+    (5, "Vector3f", "m_Extent", 12, false),
+    (6, "float", "x", 4, false),
+    (6, "float", "y", 4, false),
+    (6, "float", "z", 4, false),
+    (1, "BlendShapeData", "m_Shapes", -1, false),
+    (2, "vector", "vertices", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "BlendShapeVertex", "data", 40, false),
+    (5, "Vector3f", "vertex", 12, false),
+    (6, "float", "x", 4, false),
+    (6, "float", "y", 4, false),
+    (6, "float", "z", 4, false),
+    (5, "Vector3f", "normal", 12, false),
+    (6, "float", "x", 4, false),
+    (6, "float", "y", 4, false),
+    (6, "float", "z", 4, false),
+    (5, "Vector3f", "tangent", 12, false),
+    (6, "float", "x", 4, false),
+    (6, "float", "y", 4, false),
+    (6, "float", "z", 4, false),
+    (5, "unsigned int", "index", 4, false),
+    (2, "vector", "shapes", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "MeshBlendShape", "data", 10, false),
+    (5, "unsigned int", "firstVertex", 4, false),
+    (5, "unsigned int", "vertexCount", 4, false),
+    (5, "bool", "hasNormals", 1, false),
+    (5, "bool", "hasTangents", 1, true),
+    (2, "vector", "channels", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "MeshBlendShapeChannel", "data", -1, false),
+    (5, "string", "name", -1, false),
+    (6, "Array", "Array", -1, true),
+    (7, "int", "size", 4, false),
+    (7, "char", "data", 1, false),
+    (5, "unsigned int", "nameHash", 4, false),
+    (5, "int", "frameIndex", 4, false),
+    (5, "int", "frameCount", 4, false),
+    (2, "vector", "fullWeights", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "float", "data", 4, false),
+    (1, "vector", "m_BindPose", -1, false),
+    (2, "Array", "Array", -1, true),
+    (3, "int", "size", 4, false),
+    (3, "Matrix4x4f", "data", 64, false),
+    (4, "float", "e00", 4, false),
+    (4, "float", "e01", 4, false),
+    (4, "float", "e02", 4, false),
+    (4, "float", "e03", 4, false),
+    (4, "float", "e10", 4, false),
+    (4, "float", "e11", 4, false),
+    (4, "float", "e12", 4, false),
+    (4, "float", "e13", 4, false),
+    (4, "float", "e20", 4, false),
+    (4, "float", "e21", 4, false),
+    (4, "float", "e22", 4, false),
+    (4, "float", "e23", 4, false),
+    (4, "float", "e30", 4, false),
+    (4, "float", "e31", 4, false),
+    (4, "float", "e32", 4, false),
+    (4, "float", "e33", 4, false),
+    (1, "vector", "m_BoneNameHashes", -1, false),
+    (2, "Array", "Array", -1, true),
+    (3, "int", "size", 4, false),
+    (3, "unsigned int", "data", 4, false),
+    (1, "unsigned int", "m_RootBoneNameHash", 4, false),
+    (1, "vector", "m_BonesAABB", -1, false),
+    (2, "Array", "Array", -1, true),
+    (3, "int", "size", 4, false),
+    (3, "MinMaxAABB", "data", 24, false),
+    (4, "Vector3f", "m_Min", 12, false),
+    (5, "float", "x", 4, false),
+    (5, "float", "y", 4, false),
+    (5, "float", "z", 4, false),
+    (4, "Vector3f", "m_Max", 12, false),
+    (5, "float", "x", 4, false),
+    (5, "float", "y", 4, false),
+    (5, "float", "z", 4, false),
+    (1, "VariableBoneCountWeights", "m_VariableBoneCountWeights", -1, false),
+    (2, "vector", "m_Data", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "unsigned int", "data", 4, false),
+    (1, "UInt8", "m_MeshCompression", 1, false),
+    (1, "bool", "m_IsReadable", 1, false),
+    (1, "bool", "m_KeepVertices", 1, false),
+    (1, "bool", "m_KeepIndices", 1, true),
+    (1, "int", "m_IndexFormat", 4, false),
+    (1, "vector", "m_IndexBuffer", -1, false),
+    (2, "Array", "Array", -1, true),
+    (3, "int", "size", 4, false),
+    (3, "UInt8", "data", 1, false),
+    (1, "VertexData", "m_VertexData", -1, true),
+    (2, "unsigned int", "m_VertexCount", 4, false),
+    (2, "vector", "m_Channels", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "ChannelInfo", "data", 4, false),
+    (5, "UInt8", "stream", 1, false),
+    (5, "UInt8", "offset", 1, false),
+    (5, "UInt8", "format", 1, false),
+    (5, "UInt8", "dimension", 1, false),
+    (2, "TypelessData", "m_DataSize", -1, true),
+    (3, "int", "size", 4, false),
+    (3, "UInt8", "data", 1, false),
+    (1, "CompressedMesh", "m_CompressedMesh", -1, false),
+    (2, "PackedBitVector", "m_Vertices", -1, false),
+    (3, "unsigned int", "m_NumItems", 4, false),
+    (3, "float", "m_Range", 4, false),
+    (3, "float", "m_Start", 4, false),
+    (3, "vector", "m_Data", -1, false),
+    (4, "Array", "Array", -1, true),
+    (5, "int", "size", 4, false),
+    (5, "UInt8", "data", 1, false),
+    (3, "UInt8", "m_BitSize", 1, true),
+    (2, "PackedBitVector", "m_UV", -1, false),
+    (3, "unsigned int", "m_NumItems", 4, false),
+    (3, "float", "m_Range", 4, false),
+    (3, "float", "m_Start", 4, false),
+    (3, "vector", "m_Data", -1, false),
+    (4, "Array", "Array", -1, true),
+    (5, "int", "size", 4, false),
+    (5, "UInt8", "data", 1, false),
+    (3, "UInt8", "m_BitSize", 1, true),
+    (2, "PackedBitVector", "m_Normals", -1, false),
+    (3, "unsigned int", "m_NumItems", 4, false),
+    (3, "float", "m_Range", 4, false),
+    (3, "float", "m_Start", 4, false),
+    (3, "vector", "m_Data", -1, false),
+    (4, "Array", "Array", -1, true),
+    (5, "int", "size", 4, false),
+    (5, "UInt8", "data", 1, false),
+    (3, "UInt8", "m_BitSize", 1, true),
+    (2, "PackedBitVector", "m_Tangents", -1, false),
+    (3, "unsigned int", "m_NumItems", 4, false),
+    (3, "float", "m_Range", 4, false),
+    (3, "float", "m_Start", 4, false),
+    (3, "vector", "m_Data", -1, false),
+    (4, "Array", "Array", -1, true),
+    (5, "int", "size", 4, false),
+    (5, "UInt8", "data", 1, false),
+    (3, "UInt8", "m_BitSize", 1, true),
+    (2, "PackedBitVector", "m_Weights", -1, false),
+    (3, "unsigned int", "m_NumItems", 4, false),
+    (3, "vector", "m_Data", -1, false),
+    (4, "Array", "Array", -1, true),
+    (5, "int", "size", 4, false),
+    (5, "UInt8", "data", 1, false),
+    (3, "UInt8", "m_BitSize", 1, true),
+    (2, "PackedBitVector", "m_NormalSigns", -1, false),
+    (3, "unsigned int", "m_NumItems", 4, false),
+    (3, "vector", "m_Data", -1, false),
+    (4, "Array", "Array", -1, true),
+    (5, "int", "size", 4, false),
+    (5, "UInt8", "data", 1, false),
+    (3, "UInt8", "m_BitSize", 1, true),
+    (2, "PackedBitVector", "m_TangentSigns", -1, false),
+    (3, "unsigned int", "m_NumItems", 4, false),
+    (3, "vector", "m_Data", -1, false),
+    (4, "Array", "Array", -1, true),
+    (5, "int", "size", 4, false),
+    (5, "UInt8", "data", 1, false),
+    (3, "UInt8", "m_BitSize", 1, true),
+    (2, "PackedBitVector", "m_FloatColors", -1, false),
+    (3, "unsigned int", "m_NumItems", 4, false),
+    (3, "float", "m_Range", 4, false),
+    (3, "float", "m_Start", 4, false),
+    (3, "vector", "m_Data", -1, false),
+    (4, "Array", "Array", -1, true),
+    (5, "int", "size", 4, false),
+    (5, "UInt8", "data", 1, false),
+    (3, "UInt8", "m_BitSize", 1, true),
+    (2, "PackedBitVector", "m_BoneIndices", -1, false),
+    (3, "unsigned int", "m_NumItems", 4, false),
+    (3, "vector", "m_Data", -1, false),
+    (4, "Array", "Array", -1, true),
+    (5, "int", "size", 4, false),
+    (5, "UInt8", "data", 1, false),
+    (3, "UInt8", "m_BitSize", 1, true),
+    (2, "PackedBitVector", "m_Triangles", -1, false),
+    (3, "unsigned int", "m_NumItems", 4, false),
+    (3, "vector", "m_Data", -1, false),
+    (4, "Array", "Array", -1, true),
+    (5, "int", "size", 4, false),
+    (5, "UInt8", "data", 1, false),
+    (3, "UInt8", "m_BitSize", 1, true),
+    (2, "unsigned int", "m_UVInfo", 4, false),
+    (1, "AABB", "m_LocalAABB", 24, false),
+    (2, "Vector3f", "m_Center", 12, false),
+    (3, "float", "x", 4, false),
+    (3, "float", "y", 4, false),
+    (3, "float", "z", 4, false),
+    (2, "Vector3f", "m_Extent", 12, false),
+    (3, "float", "x", 4, false),
+    (3, "float", "y", 4, false),
+    (3, "float", "z", 4, false),
+    (1, "int", "m_MeshUsageFlags", 4, false),
+    (1, "int", "m_CookingOptions", 4, false),
+    (1, "vector", "m_BakedConvexCollisionMesh", -1, false),
+    (2, "Array", "Array", -1, true),
+    (3, "int", "size", 4, false),
+    (3, "UInt8", "data", 1, false),
+    (1, "vector", "m_BakedTriangleCollisionMesh", -1, false),
+    (2, "Array", "Array", -1, true),
+    (3, "int", "size", 4, false),
+    (3, "UInt8", "data", 1, false),
+    (1, "float", "m_MeshMetrics[0]", 4, false),
+    (1, "float", "m_MeshMetrics[1]", 4, true),
+    (1, "StreamingInfo", "m_StreamData", -1, false),
+    (2, "UInt64", "offset", 8, false),
+    (2, "unsigned int", "size", 4, false),
+    (2, "string", "path", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "char", "data", 1, false),
+    (1, "MeshLodInfo", "m_MeshLodInfo", -1, false),
+    (2, "LodSelectionCurve", "m_LodSelectionCurve", 8, false),
+    (3, "float", "m_LodSlope", 4, false),
+    (3, "float", "m_LodBias", 4, true),
+    (2, "int", "m_NumLevels", 4, true),
+    (2, "vector", "m_SubMeshes", -1, true),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "MeshLodSubMesh", "data", -1, false),
+    (5, "vector", "m_Levels", -1, true),
+    (6, "Array", "Array", -1, true),
+    (7, "int", "size", 4, false),
+    (7, "MeshLodRange", "data", 8, false),
+    (8, "unsigned int", "m_IndexStart", 4, false),
+    (8, "unsigned int", "m_IndexCount", 4, true),
 ];

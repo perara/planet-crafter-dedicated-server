@@ -71,8 +71,9 @@ pub struct MethodDef {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Member {
     Field { owner: TypeSig, name: String },
-    /// `instance`: takes `this` (HASTHIS); `ret`: its return type.
-    Method { owner: TypeSig, name: String, params: Vec<TypeSig>, instance: bool, ret: TypeSig },
+    /// `instance`: takes `this` (HASTHIS); `ret`: its return type; `generic`: a generic
+    /// method's type arguments (MethodSpec).
+    Method { owner: TypeSig, name: String, params: Vec<TypeSig>, instance: bool, ret: TypeSig, generic: Vec<TypeSig> },
 }
 
 /// A custom attribute: its type and decoded constructor and named arguments.
@@ -191,7 +192,7 @@ impl Assembly {
             METHOD => {
                 let (t, i) = (*self.method_at.get((row as usize).checked_sub(1)?)?)?;
                 let m = &self.types[t].methods[i];
-                Some(Member::Method { owner: type_of(t)?, name: m.name.clone(), params: m.params.iter().map(|p| p.1.clone()).collect(), instance: m.flags & 0x10 == 0, ret: m.ret.clone() })
+                Some(Member::Method { owner: type_of(t)?, name: m.name.clone(), params: m.params.iter().map(|p| p.1.clone()).collect(), instance: m.flags & 0x10 == 0, ret: m.ret.clone(), generic: Vec::new() })
             }
             MEMBER_REF => {
                 let owner = self.type_sig(img.refer(MEMBER_REF, row, 0))?;
@@ -201,11 +202,20 @@ impl Assembly {
                     return Some(Member::Field { owner, name });
                 }
                 let (ret, params) = self.method_sig(&mut Reader::new(sig))?;
-                Some(Member::Method { owner, name, params, instance: sig.first()? & 0x20 != 0, ret })
+                Some(Member::Method { owner, name, params, instance: sig.first()? & 0x20 != 0, ret, generic: Vec::new() })
             }
             METHOD_SPEC => {
                 let (t, r) = img.refer(METHOD_SPEC, row, 0);
-                self.member(((t as u32) << 24) | r)
+                let mut m = self.member(((t as u32) << 24) | r)?;
+                // MethodSpec instantiation (II.23.2.15): 0x0A, the count, the type arguments.
+                let mut b = Reader::new(img.blob(img.cell(METHOD_SPEC, row, 1)));
+                if b.u8() == Some(0x0A) {
+                    let args = (0..b.compressed()?).map(|_| self.sig_type(&mut b)).collect::<Option<Vec<_>>>()?;
+                    if let Member::Method { generic, .. } = &mut m {
+                        *generic = args;
+                    }
+                }
+                Some(m)
             }
             _ => None,
         }

@@ -126,7 +126,7 @@ fn yes(fields: &[(String, Raw)], name: &str) -> bool {
 
 impl Ctx {
     /// The NetworkObject component of a game object.
-    fn network_object_of(&mut self, node: Id) -> Option<Id> {
+    pub fn network_object_of(&mut self, node: Id) -> Option<Id> {
         let components = self.graph.nodes.get(&node)?.components.clone();
         components.into_iter().find(|(c, class)| *class == unity::MONO_BEHAVIOUR && self.graph.script(&mut self.data, *c).is_some_and(|s| s.1 == "NetworkObject")).map(|(c, _)| c)
     }
@@ -374,6 +374,54 @@ impl Ctx {
                 out.insert(format!("{gid}#static"), rigid(fixed.clone(), &gid));
                 out.insert(gid.clone(), rigid(plain.clone(), &gid));
             }
+        }
+        Ok(out)
+    }
+}
+
+impl Ctx {
+    /// The first MonoBehaviour of a script class in the named scenes.
+    pub fn find_in_scenes(&mut self, scenes: &[&str], namespace: &str, class: &str) -> Result<Option<Id>, String> {
+        let mut names = Vec::new();
+        for s in scenes {
+            let f = self.scene_file(s)?;
+            names.push(self.data.files[f].name.clone());
+        }
+        Ok(self.find_behaviour(&names.iter().map(String::as_str).collect::<Vec<_>>(), namespace, class))
+    }
+
+    /// The build file of a scene by name (scene N of the build is levelN).
+    pub fn scene_file(&mut self, name: &str) -> Result<usize, String> {
+        let scenes = self.data.build_scenes();
+        let index = scenes.iter().position(|s| s.rsplit('/').next() == Some(&format!("{name}.unity"))).ok_or_else(|| format!("no scene {name} in the build (it starts {:?})", &scenes[..scenes.len().min(8)]))?;
+        self.data.file(&format!("level{index}")).map_err(|e| format!("level{index}: {e}"))
+    }
+
+    /// GameData.Singletons: the game's MonoBehaviour classes with exactly one instance (inactive
+    /// ones included) in the scenes a server on the planet has loaded (BootScene,
+    /// GameMainScene, the planet's scene) and on the player, with that instance's fields.
+    pub fn singletons(&mut self, planet_scene: &str, player: Id) -> Result<Map<String, Value>, String> {
+        let mut found: Vec<Id> = Vec::new();
+        for scene in ["BootScene", "GameMainScene", planet_scene] {
+            let f = self.scene_file(scene)?;
+            self.graph_file(f);
+            found.extend(self.data.files[f].objects.iter().filter(|o| o.class_id == unity::MONO_BEHAVIOUR).map(|o| Id(f, o.path)));
+        }
+        self.graph_file(player.0);
+        found.extend(self.graph.behaviours_in_children(&mut self.data, player).into_iter().map(|b| b.0));
+        let mut by_class: indexmap::IndexMap<String, Vec<Id>> = Default::default();
+        for id in found {
+            let Some((namespace, class, _)) = self.graph.script(&mut self.data, id).cloned() else { continue };
+            let attached = self.data.reader(id).and_then(|mut r| unity::behaviour(&mut r)).is_some_and(|h| !h.game_object.is_null());
+            if namespace == "SpaceCraft" && attached {
+                by_class.entry(class).or_default().push(id);
+            }
+        }
+        let mut out = Map::new();
+        for (class, ids) in by_class {
+            let [id] = ids[..] else { continue };
+            let b = self.behaviour(id).ok_or(format!("{class}: unreadable"))?;
+            out.insert(class, Value::Object(self.fields(id.0, &b.fields, 0)));
         }
         Ok(out)
     }

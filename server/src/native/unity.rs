@@ -284,6 +284,28 @@ impl Data {
         Some(Id(self.file(&name).ok()?, p.path))
     }
 
+    /// Where a reference points, Unity's built-in resources (Resources/unity default resources,
+    /// unity_builtin_extra) included.
+    pub fn resolve_builtin(&mut self, from: usize, p: PPtr) -> Option<Id> {
+        if p.is_null() || p.file == 0 {
+            return self.resolve(from, p);
+        }
+        let name = self.files[from].externals.get(p.file as usize - 1)?.clone();
+        let builtin = ["unity default resources", "unity_builtin_extra"].into_iter().find(|b| name.contains(b));
+        let Some(builtin) = builtin else { return self.resolve(from, p) };
+        let key = format!("resources/{builtin}");
+        let file = match self.by_name.get(&key) {
+            Some(i) => *i,
+            None => {
+                let f = File::open(&self.dir.join("Resources").join(builtin)).ok()?;
+                self.files.push(f);
+                self.by_name.insert(key, self.files.len() - 1);
+                self.files.len() - 1
+            }
+        };
+        Some(Id(file, p.path))
+    }
+
     pub fn class_of(&self, id: Id) -> Option<i32> {
         Some(self.files[id.0].object(id.1)?.class_id)
     }

@@ -3,6 +3,7 @@ pub mod dotnet;
 pub mod graph;
 pub mod netdata;
 pub mod netvars;
+pub mod panels;
 pub mod rpcs;
 pub mod serial;
 pub mod tables;

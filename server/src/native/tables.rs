@@ -118,6 +118,13 @@ impl Ctx {
                 }
                 Some(Value::Array(items.iter().map(|i| self.value(file, i, depth + 1).unwrap_or(Value::Null)).collect()))
             }
+            // GameData.cs writes a dictionary as [key, value] pairs; Unity's SerializedDictionary
+            // stores the keys and the values as two lists.
+            Raw::Fields(t, fields) if t.name == "SerializedDictionary`2" => {
+                let (Some(Raw::List(keys)), Some(Raw::List(values))) = (super::netdata::field(fields, "m_Keys"), super::netdata::field(fields, "m_Values")) else { return None };
+                let pairs = keys.iter().zip(values).map(|(k, v)| json!([self.value(file, k, depth + 1).unwrap_or(Value::Null), self.value(file, v, depth + 1).unwrap_or(Value::Null)])).collect();
+                Some(Value::Array(pairs))
+            }
             Raw::Fields(t, fields) => {
                 if depth > MAX_DEPTH || t.namespace != "SpaceCraft" {
                     return None;
@@ -326,8 +333,20 @@ pub fn run(args: &[String]) {
     std::fs::write(Path::new(out).join("rpcs.json"), serde_json::to_string_pretty(&rpcs).unwrap()).expect("write rpcs.json");
     std::fs::write(Path::new(out).join("netdata.json"), serde_json::to_string_pretty(&netdata).unwrap()).expect("write netdata.json");
     let layouts = ctx.world_object_layouts(&assets, &group_prefabs).unwrap_or_else(|e| fail(format!("layouts: {e}")));
+    let player_root = match config.as_ref().and_then(|(file, f)| match super::netdata::field(f, "PlayerPrefab") {
+        Some(Raw::Ref(p, _)) => ctx.data.resolve(*file, *p),
+        _ => None,
+    }) {
+        Some(root) => root,
+        None => fail("no player prefab".into()),
+    };
+    let prime = assets.get("PlanetData:PlanetData-Prime").and_then(|p| p["sceneName"].as_str()).unwrap_or_else(|| fail("no PlanetData-Prime scene".into())).to_string();
+    let singletons = ctx.singletons(&prime, player_root).unwrap_or_else(|e| fail(format!("singletons: {e}")));
+    eprintln!("read-game: {} singletons", singletons.len());
+    let resources = ctx.find_in_scenes(&["BootScene", "GameMainScene", &prime], "SpaceCraft", "PanelsResources").unwrap_or_else(|e| fail(e)).unwrap_or_else(|| fail("no PanelsResources".into()));
+    let panels = ctx.panels(resources).unwrap_or_else(|e| fail(format!("panels: {e}")));
     eprintln!("read-game: {} layouts", layouts.len());
-    let gamedata = json!({"assets": assets, "groupPrefabs": group_prefabs, "layouts": layouts});
+    let gamedata = json!({"assets": assets, "groupPrefabs": group_prefabs, "layouts": layouts, "singletons": singletons, "panels": panels});
     std::fs::write(Path::new(out).join("gamedata.json"), serde_json::to_string_pretty(&gamedata).unwrap()).expect("write gamedata.json");
 }
 
