@@ -96,7 +96,7 @@ mod wire;
 mod world;
 
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use data::NetData;
@@ -139,19 +139,20 @@ fn no_tables(dir: &str, e: String) -> ! {
 /// What a world needs besides tables(): the wreck layouts and every free planet's scene dump,
 /// read at start, so a missing or broken file stops the server there and not in the game.
 /// (Default: none, the stand-in a restored game holds until handoff::restore gives it its own.)
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Scenes {
-    pub wrecks: Rc<instances::generate::Wrecks>,
+    pub wrecks: Arc<instances::generate::Wrecks>,
     /// Free planet id -> its scene dump. DLC planets have none: the extraction reads only the
     /// free ones, and nobody can travel to the others (planets.rs).
     pub planets: HashMap<String, PlanetScene>,
 }
 
 /// The parts of scenes/<planet>.json the server reads.
+#[derive(Clone)]
 pub struct PlanetScene {
     pub water_volumes: Vec<serde_json::Value>,
     pub ore_veins: Vec<serde_json::Value>,
-    pub instance_scenes: HashMap<String, Rc<instances::generate::InstanceScene>>,
+    pub instance_scenes: HashMap<String, Arc<instances::generate::InstanceScene>>,
 }
 
 /// wrecks.json and scenes/<planet>.json of every free planet in DATA_DIR, with every world
@@ -186,10 +187,10 @@ fn scene_tables(dir: &str, net: &NetData, data: &GameData) -> Scenes {
                 return Err(format!("{path}: no world instance scene {missing}"));
             }
             check_scene(&dump.water_volumes, &dump.ore_veins, data).map_err(|e| format!("{path}: {e}"))?;
-            let instance_scenes = dump.instance_scenes.into_iter().map(|(k, v)| (k, Rc::new(v))).collect();
+            let instance_scenes = dump.instance_scenes.into_iter().map(|(k, v)| (k, Arc::new(v))).collect();
             planets.insert(planet.id.clone(), PlanetScene { water_volumes: dump.water_volumes, ore_veins: dump.ore_veins, instance_scenes });
         }
-        Ok(Scenes { wrecks: Rc::new(wrecks), planets })
+        Ok(Scenes { wrecks: Arc::new(wrecks), planets })
     };
     load().unwrap_or_else(|e| no_tables(dir, e))
 }

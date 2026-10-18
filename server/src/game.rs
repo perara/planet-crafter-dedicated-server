@@ -212,10 +212,20 @@ pub fn check_save_format(settings: &Value) -> Result<(), String> {
 /// A game on a save with the test tables; None (the test skips) without them.
 #[cfg(test)]
 pub fn test_game(save: SaveFile) -> Option<Game> {
-    let dir = crate::test_data()?;
-    let (net_data, data, spec) = crate::tables(dir);
-    let scenes = crate::scene_tables(dir, &net_data, &data);
+    let (net_data, data, spec, scenes) = test_tables()?;
     Some(Game::new(net_data, data, spec, save, scenes))
+}
+
+/// The test tables, read once per test process (parsing them is most of a test's time).
+#[cfg(test)]
+pub fn test_tables() -> Option<(NetData, GameData, Spec, crate::Scenes)> {
+    static TABLES: std::sync::OnceLock<(NetData, GameData, Spec, crate::Scenes)> = std::sync::OnceLock::new();
+    let dir = crate::test_data()?;
+    Some(TABLES.get_or_init(|| {
+        let (net_data, data, spec) = crate::tables(dir);
+        let scenes = crate::scene_tables(dir, &net_data, &data);
+        (net_data, data, spec, scenes)
+    }).clone())
 }
 
 impl Game {
