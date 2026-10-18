@@ -145,8 +145,9 @@ pub fn switch_to_planet(game: &mut Game, planet_hash: i32, rocket_wo: i32, spawn
     game.create_world_object(pod_group, pod, true);
     let w = game.wos.get_mut(&pod).unwrap();
     w.position = position;
-    // Unity normalizes a zero quaternion (some spawn positions have one) to the identity.
-    w.rotation = if rotation == [0.0; 4] { [0.0, 0.0, 0.0, 1.0] } else { rotation };
+    // Kept as given (some spawn positions have a zero quaternion: the save then has no "rot");
+    // the spawned object's transform gets the identity Unity makes of it.
+    w.rotation = rotation;
     w.planet = planet_hash;
     game.instantiate(pod, false, 0);
     if rocket_wo != 0 {
@@ -272,6 +273,13 @@ pub mod tests {
         let pod_group = interplanetary_pod(&g).unwrap();
         let pod = g.first_world_object_of_group(pod_group, selenea).unwrap();
         assert_eq!(g.wos[&pod].position, [-415.0, 34.65, -82.0]);
+        // The spawn's zero quaternion: kept in the world object (the real host saves the pod
+        // without "rot"), the identity on its network object.
+        assert_eq!(g.wos[&pod].rotation, [0.0; 4]);
+        assert_eq!(g.net.objects[&g.wos[&pod].net.unwrap()].rotation, [0.0, 0.0, 0.0, 1.0]);
+        let text = g.snapshot().to_text();
+        let saved = text.split('|').find(|r| r.contains(&format!("\"id\":{pod},"))).unwrap();
+        assert!(!saved.contains("\"rot\""), "{saved}");
         assert_eq!(g.inventories[&g.wos[&pod].linked_inventory].items, vec![iron]);
         assert!(!g.wos.contains_key(&205000000), "the rocket is gone");
         // Prime's escape pod is now inactive for clients.

@@ -173,7 +173,8 @@ impl Game {
         }
         let wo = &self.wos[&id];
         o.position = wo.position;
-        o.rotation = wo.rotation;
+        // Object.Instantiate makes a zero quaternion the identity.
+        o.rotation = if wo.rotation == [0.0; 4] { [0.0, 0.0, 0.0, 1.0] } else { wo.rotation };
         o.wo = Some(id);
         let active = wo.planet_hash() == self.planet_hash();
         // InstantiateWorldObject and GroupNetworkBase.OnNetworkSpawn: an own prefab whose root
