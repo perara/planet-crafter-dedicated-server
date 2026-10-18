@@ -100,3 +100,75 @@ pub fn rpc(game: &mut Game, client: u64, name: &str, a: &Args) -> bool {
     }
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::testkit::*;
+
+    #[test]
+    fn groups_unlocked_globally_are_everyones_and_saved() {
+        let Some((mut g, _)) = world() else { return };
+        let drone = hash(&g, "DroneStation1");
+        send_scene(&mut g, 1, "UnlockedGroupsHandler.UnlockGroupGloballyServerRpc", &[json!(drone), json!(true), json!(true)]);
+        send_scene(&mut g, 1, "UnlockedGroupsHandler.UnlockGroupGloballyServerRpc", &[json!(drone), json!(true), json!(true)]);
+        assert_eq!(unlocked(&g).iter().filter(|h| **h == drone).count(), 1, "once");
+        let popups = sent(&g, "UnlockedGroupsHandler.UnlockGroupGloballyClientRpc");
+        assert_eq!(popups.iter().map(|s| (s.to, s.args.clone())).collect::<Vec<_>>(), vec![(Target::All, vec![json!(drone), json!(true)])]);
+        // Without the popup: unlocked, nobody told.
+        let teleporter = hash(&g, "Teleporter1");
+        g.net.out.clear();
+        send_scene(&mut g, 1, "UnlockedGroupsHandler.UnlockGroupGloballyServerRpc", &[json!(teleporter), json!(false), json!(false)]);
+        assert!(sent(&g, "UnlockedGroupsHandler.UnlockGroupGloballyClientRpc").is_empty());
+        let mut g = reload(&mut g);
+        for group in ["DroneStation1", "Teleporter1"] {
+            assert!(is_globally_unlocked(&g, g.data.group(group).unwrap()), "{group} after a reload");
+        }
+        assert!(g.snapshot().world["unlockedGroups"].as_str().unwrap().contains("DroneStation1"));
+    }
+
+    /// A blueprint chip decodes into the group it names, else a random locked group of the
+    /// lowest tier left; the chip is used up. With everything unlocked, the client hears so.
+    #[test]
+    fn blueprint_chips_decode_into_a_locked_group() {
+        let Some((mut g, _)) = world() else { return };
+        let (bag, _) = backpack(&g, 1);
+        let chip_group = blueprint_group(&g).expect("the blueprint chip group");
+        let chip_id = g.data.groups[chip_group].id.clone();
+        let chip = give(&mut g, &chip_id, bag);
+        let autocrafter = g.data.group("AutoCrafter1").unwrap();
+        g.wos.get_mut(&chip).unwrap().linked_groups = Some(vec![autocrafter]);
+        send_scene(&mut g, 1, "UnlockedGroupsHandler.DecodeBlueprintServerRpc", &[json!(chip)]);
+        assert!(is_globally_unlocked(&g, autocrafter));
+        assert!(!g.wos.contains_key(&chip) && !g.inventories[&bag].items.contains(&chip), "used up");
+        assert_eq!(one(&g, "UnlockedGroupsHandler.PlayAudioOnDecodeClientRpc"), Vec::<serde_json::Value>::new());
+        assert_eq!(one(&g, "UnlockedGroupsHandler.UnlockGroupGloballyClientRpc"), vec![json!(g.data.groups[autocrafter].hash), json!(true)]);
+
+        // An unlinked chip: a random group of the first tier that still has a locked one.
+        let before = unlocked(&g).len();
+        let chip = give(&mut g, &chip_id, bag);
+        send_scene(&mut g, 1, "UnlockedGroupsHandler.DecodeBlueprintServerRpc", &[json!(chip)]);
+        assert_eq!(unlocked(&g).len(), before + 1);
+        // Unknown chips: nothing.
+        g.net.out.clear();
+        send_scene(&mut g, 1, "UnlockedGroupsHandler.DecodeBlueprintServerRpc", &[json!(-3)]);
+        assert!(g.net.out.is_empty());
+        // Every tier's groups unlocked: no more chip to unlock.
+        let data = g.data.asset(g.data.singletons["UnlockingHandler"]["unlockingData"].as_str().unwrap()).unwrap().clone();
+        for tier in 1..=10 {
+            for r in data[format!("tier{tier}GroupToUnlock")].as_array().into_iter().flatten() {
+                if let Some(group) = r.as_str().and_then(|r| g.data.group_of_ref(r)) {
+                    let h = g.data.groups[group].hash;
+                    unlock_globally(&mut g, h, false, false);
+                }
+            }
+        }
+        let chip = give(&mut g, &chip_id, bag);
+        g.net.out.clear();
+        send_scene(&mut g, 1, "UnlockedGroupsHandler.DecodeBlueprintServerRpc", &[json!(chip)]);
+        assert_eq!(sent(&g, "UnlockedGroupsHandler.NoMoreChipToUnlockClientRpc").len(), 1);
+        assert!(g.wos.contains_key(&chip), "kept");
+    }
+}

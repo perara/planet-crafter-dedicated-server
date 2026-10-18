@@ -566,6 +566,239 @@ pub fn culture_cmp(a: &str, b: &str) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit::*;
+    use serde_json::Value;
+
+    /// The one AddOrRemoveItemClientRpc result each request gets.
+    fn result(g: &mut Game) -> bool {
+        let r = one(g, "InventoriesHandler.AddOrRemoveItemClientRpc")[0].as_bool().unwrap();
+        g.net.out.clear();
+        r
+    }
+
+    fn retrieved(g: &mut Game) -> Vec<Value> {
+        let r = one(g, "InventoriesHandler.RetrieveInventoryClientRpc");
+        g.net.out.clear();
+        r
+    }
+
+    fn saved_items(g: &mut Game, inventory: i32) -> String {
+        g.snapshot().inventories.iter().find(|i| i["id"] == inventory).map(|i| i["woIds"].as_str().unwrap().to_string()).unwrap()
+    }
+
+    #[test]
+    fn inventories_are_created_and_found_as_the_game_asks() {
+        let Some((mut g, _)) = world() else { return };
+        let (iron, ice) = (hash(&g, "Iron"), hash(&g, "ice"));
+        // Created with content and the groups it takes; the new id is the next after the biggest.
+        let next = g.inventories.keys().filter(|i| **i < SPECIAL_INVENTORY_IDS).max().unwrap() + 1;
+        send_scene(&mut g, 1, "InventoriesHandler.GetOrCreateNewInventoryServerRpc", &[json!(true), json!(4), json!(0), json!(0), json!([iron, iron]), json!([iron])]);
+        let r = retrieved(&mut g);
+        assert_eq!((&r[0], &r[1], &r[2], &r[4]), (&json!(4), &json!(next), &json!([iron, iron]), &json!(false)));
+        assert_eq!(g.inventories[&next].items.len(), 2);
+        // Only Iron goes in.
+        send_scene(&mut g, 1, "InventoriesHandler.AddNewItemToInventoryServerRpc", &[json!(ice), json!(next)]);
+        assert_eq!(one(&g, "InventoriesHandler.AddNewItemClientRpc")[0], json!(false));
+        g.net.out.clear();
+        // Not created when asked only to get: an empty answer.
+        send_scene(&mut g, 1, "InventoriesHandler.GetOrCreateNewInventoryServerRpc", &[json!(false), json!(4), json!(next + 100), json!(0), json!(null), json!(null)]);
+        assert_eq!(retrieved(&mut g), vec![json!(0), json!(-1), json!([]), json!([]), json!(false)]);
+        // By world object, and by the first world object of a group (any planet: 0).
+        let (container, _) = place(&mut g, "Container1", [570.0, 3.0, 500.0]);
+        let pod = g.wos[&container].linked_inventory;
+        send_scene(&mut g, 1, "InventoriesHandler.GetOrCreateNewInventoryFromWoIDServerRpc", &[json!(container)]);
+        assert_eq!(retrieved(&mut g)[1], json!(pod));
+        send_scene(&mut g, 1, "InventoriesHandler.GetOrCreateNewInventoryFromWoIDServerRpc", &[json!(5)]);
+        assert_eq!(retrieved(&mut g)[1], json!(-1));
+        let pod_group = hash(&g, "Container1");
+        send_scene(&mut g, 1, "InventoriesHandler.GetInventoryFromFirstWorldObjectOfGroupServerRpc", &[json!(pod_group), json!(0)]);
+        assert_eq!(retrieved(&mut g)[1], json!(pod));
+        send_scene(&mut g, 1, "InventoriesHandler.GetInventoryFromFirstWorldObjectOfGroupServerRpc", &[json!(pod_group), json!(1234)]);
+        assert_eq!(retrieved(&mut g)[1], json!(-1), "none on that planet");
+        // A traits flag for inventories holding genetic traits.
+        let dna = g.create_inventory(5, 0, 0, &[], &[]);
+        let t = give(&mut g, crate::genetics::TRAIT_GROUP, dna);
+        g.wos.get_mut(&t).unwrap().trait_type = 2;
+        send_scene(&mut g, 1, "InventoriesHandler.GetOrCreateNewInventoryServerRpc", &[json!(false), json!(0), json!(dna), json!(0), json!(null), json!(null)]);
+        assert_eq!(retrieved(&mut g)[4], json!(true));
+    }
+
+    /// Every add, remove and transfer gets exactly one AddOrRemoveItem result, and the save holds
+    /// what each one did.
+    #[test]
+    fn items_are_added_removed_and_transferred_with_one_result_each() {
+        let Some((mut g, _)) = world() else { return };
+        let (bag, _) = backpack(&g, 1);
+        let chest = g.create_inventory(3, 0, 0, &[], &[]);
+        let (iron, ice) = (hash(&g, "Iron"), hash(&g, "ice"));
+
+        send_scene(&mut g, 1, "InventoriesHandler.AddNewItemToInventoryServerRpc", &[json!(iron), json!(chest)]);
+        let a = one(&g, "InventoriesHandler.AddNewItemClientRpc");
+        assert_eq!(a[0], json!(true));
+        let first = a[1].as_i64().unwrap() as i32;
+        g.net.out.clear();
+        send_scene(&mut g, 1, "InventoriesHandler.AddNewItemToInventoryServerRpc", &[json!(12345), json!(chest)]);
+        assert_eq!(one(&g, "InventoriesHandler.AddNewItemClientRpc"), vec![json!(false), json!(0)]);
+        g.net.out.clear();
+        let loose = g.create_world_object(g.data.group("ice").unwrap(), 0, true);
+        send_scene(&mut g, 1, "InventoriesHandler.AddExistingItemToInventoryServerRpc", &[json!(loose), json!(chest), json!(true)]);
+        assert!(result(&mut g));
+        send_scene(&mut g, 1, "InventoriesHandler.AddExistingItemToInventoryServerRpc", &[json!(-5), json!(chest), json!(true)]);
+        assert!(!result(&mut g), "no such object");
+        assert_eq!(saved_items(&mut g, chest), format!("{first},{loose}"));
+
+        // One item, all of a group, everything.
+        send_scene(&mut g, 1, "InventoriesHandler.TransferItemServerRpc", &[json!(chest), json!(bag), json!(first)]);
+        assert!(result(&mut g));
+        send_scene(&mut g, 1, "InventoriesHandler.TransferItemServerRpc", &[json!(chest), json!(bag), json!(first)]);
+        assert!(!result(&mut g), "not in there any more");
+        assert!(g.inventories[&bag].items.contains(&first));
+        let bag_ice = g.inventories[&bag].items.iter().filter(|i| g.data.groups[g.wos[*i].group].hash == ice).count();
+        send_scene(&mut g, 1, "InventoriesHandler.TransferAllSameGroupServerRpc", &[json!(chest), json!(bag), json!(ice)]);
+        assert!(result(&mut g));
+        assert_eq!(g.inventories[&bag].items.iter().filter(|i| g.data.groups[g.wos[*i].group].hash == ice).count(), bag_ice + 1);
+        send_scene(&mut g, 1, "InventoriesHandler.TransferAllSameGroupServerRpc", &[json!(chest), json!(-77), json!(ice)]);
+        assert!(!result(&mut g), "no target inventory");
+        let carried = g.inventories[&bag].items.clone();
+        send_scene(&mut g, 1, "InventoriesHandler.TransferAllItemsServerRpc", &[json!(bag), json!(chest)]);
+        assert!(result(&mut g));
+        assert_eq!(g.inventories[&chest].items.len(), 3, "as many as fit");
+        assert_eq!(g.inventories[&bag].items.len(), carried.len() - 3);
+
+        // Removing: one by id (destroyed), the last of each group, a list (all or nothing), all.
+        let back = g.inventories[&chest].items.clone();
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveItemFromInventoryServerRpc", &[json!(back[0]), json!(chest), json!(true)]);
+        assert!(result(&mut g));
+        assert!(!g.wos.contains_key(&back[0]));
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveItemFromInventoryServerRpc", &[json!(back[0]), json!(chest), json!(true)]);
+        assert!(!result(&mut g));
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveWorldObjectsFromInventoryServerRpc", &[json!([back[1], 999]), json!(chest), json!(true)]);
+        assert!(!result(&mut g), "999 is not in there: nothing goes");
+        assert_eq!(g.inventories[&chest].items, back[1..]);
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveWorldObjectsFromInventoryServerRpc", &[json!([back[1]]), json!(chest), json!(false)]);
+        assert!(result(&mut g));
+        assert!(g.wos.contains_key(&back[1]), "kept: destroy was false");
+        let group = g.data.groups[g.wos[&back[2]].group].hash;
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveItemsFromInventoryServerRpc", &[json!([group]), json!(chest), json!(true)]);
+        assert!(result(&mut g));
+        assert!(g.inventories[&chest].items.is_empty() && !g.wos.contains_key(&back[2]));
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveItemsFromInventoryServerRpc", &[json!([group]), json!(-9), json!(true)]);
+        assert!(!result(&mut g));
+        // All, but what cannot be destroyed.
+        let keep = give(&mut g, "WardenKey", chest);
+        let gone = give(&mut g, "Iron", chest);
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveAndDestroyAllItemsFromInventoryServerRpc", &[json!(chest)]);
+        assert!(result(&mut g));
+        assert_eq!(g.inventories[&chest].items, vec![keep]);
+        assert!(!g.wos.contains_key(&gone));
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveAndDestroyAllItemsFromInventoryServerRpc", &[json!(-9)]);
+        assert!(!result(&mut g));
+        assert_eq!(saved_items(&mut g, chest), keep.to_string());
+    }
+
+    /// An open inventory's other watchers hear each change; the one making it does not.
+    #[test]
+    fn watchers_hear_the_changes_others_make() {
+        let Some((mut g, _)) = world() else { return };
+        join(&mut g, 2, "Bob");
+        let chest = g.create_inventory(5, 0, 0, &[], &[]);
+        let iron = hash(&g, "Iron");
+        let dirty = |g: &Game| sent(g, "InventoriesHandler.DirtyInventoryClientRpc").into_iter().map(|s| s.to).collect::<Vec<_>>();
+        send_scene(&mut g, 1, "InventoriesHandler.BeginInventoryWatchServerRpc", &[json!(chest)]);
+        send_scene(&mut g, 1, "InventoriesHandler.AddNewItemToInventoryServerRpc", &[json!(iron), json!(chest)]);
+        assert!(dirty(&g).is_empty(), "alone: no one to tell");
+        send_scene(&mut g, 2, "InventoriesHandler.BeginInventoryWatchServerRpc", &[json!(chest)]);
+        g.net.out.clear();
+        send_scene(&mut g, 1, "InventoriesHandler.AddNewItemToInventoryServerRpc", &[json!(iron), json!(chest)]);
+        assert_eq!(dirty(&g), vec![Target::Only(2)]);
+        let d = &sent(&g, "InventoriesHandler.DirtyInventoryClientRpc")[0].args;
+        assert_eq!((&d[0], &d[1], &d[2]), (&json!(5), &json!(chest), &json!([iron, iron])));
+        // Stopped watching: no more news; CheckInventoryWatchAndDirty watches again and tells
+        // every watcher, the asker too.
+        send_scene(&mut g, 2, "InventoriesHandler.StopInventoryWatchServerRpc", &[json!(chest)]);
+        g.net.out.clear();
+        send_scene(&mut g, 1, "InventoriesHandler.AddNewItemToInventoryServerRpc", &[json!(iron), json!(chest)]);
+        assert!(dirty(&g).is_empty());
+        send_scene(&mut g, 2, "InventoriesHandler.CheckInventoryWatchAndDirtyServerRpc", &[json!(chest)]);
+        assert_eq!(dirty(&g), vec![Target::Only(1), Target::Only(2)]);
+        // Destroyed while open: every watcher's window closes.
+        g.net.out.clear();
+        g.destroy_inventory(chest, true);
+        assert_eq!(sent(&g, "InventoriesHandler.CloseInventoryOnWatchersClientRpc").into_iter().map(|s| s.to).collect::<Vec<_>>(), vec![Target::Only(2), Target::Only(1)]);
+    }
+
+    #[test]
+    fn logistics_settings_are_kept_saved_and_told_to_watchers() {
+        let Some((mut g, _)) = world() else { return };
+        join(&mut g, 2, "Bob");
+        let chest = g.create_inventory(5, 0, 0, &[], &[]);
+        let (iron, ice) = (hash(&g, "Iron"), hash(&g, "ice"));
+        send_scene(&mut g, 2, "InventoriesHandler.BeginInventoryWatchServerRpc", &[json!(chest)]);
+        send_scene(&mut g, 1, "InventoriesHandler.BeginInventoryWatchServerRpc", &[json!(chest)]);
+        send_scene(&mut g, 1, "InventoriesHandler.DirtyInventoryLogisticsServerRpc", &[json!(chest), json!([iron]), json!([ice]), json!(2)]);
+        let s = sent(&g, "InventoriesHandler.DirtyInventoryLogisticsClientRpc");
+        assert_eq!(s.iter().map(|s| (s.to, s.args.clone())).collect::<Vec<_>>(), vec![(Target::Only(2), vec![json!(chest), json!([iron]), json!([ice]), json!(2)])]);
+        g.net.out.clear();
+        send_scene(&mut g, 2, "InventoriesHandler.RetrieveInventoryLogisticsServerRpc", &[json!(chest)]);
+        assert_eq!(one(&g, "InventoriesHandler.DirtyInventoryLogisticsClientRpc"), vec![json!(chest), json!([iron]), json!([ice]), json!(2)]);
+        let saved = g.snapshot().inventories.into_iter().find(|i| i["id"] == chest).unwrap();
+        assert_eq!((&saved["demandGrps"], &saved["supplyGrps"], &saved["priority"]), (&json!("Iron"), &json!("ice"), &json!(2)));
+    }
+
+    #[test]
+    fn shrinking_drops_what_no_longer_fits_and_locks_and_sorting_follow_the_game() {
+        let Some((mut g, _)) = world() else { return };
+        let chest = g.create_inventory(3, 0, 0, &[], &[]);
+        let items: Vec<i32> = ["Iron", "ice", "Iron"].iter().map(|n| give(&mut g, n, chest)).collect();
+        send_scene(&mut g, 1, "InventoriesHandler.SetInventorySizeServerRpc", &[json!(chest), json!(-1), json!([570.0, 3.0, 500.0])]);
+        assert!(result(&mut g));
+        assert_eq!((g.inventories[&chest].size, g.inventories[&chest].items.clone()), (2, items[..2].to_vec()));
+        assert_eq!(g.wos[&items[2]].position, [570.0, 3.0, 500.0]);
+        assert!(g.wos[&items[2]].net.is_some(), "on the floor");
+
+        // Sorted by group id, case-insensitively: ice before Iron.
+        g.inventories.get_mut(&chest).unwrap().size = 5;
+        give(&mut g, "Iron", chest);
+        send_scene(&mut g, 1, "InventoriesHandler.SortInventoryServerRpc", &[json!(chest)]);
+        let names: Vec<&str> = g.inventories[&chest].items.iter().map(|i| g.data.groups[g.wos[i].group].id.as_str()).collect();
+        assert_eq!(names, ["ice", "Iron", "Iron"]);
+
+        // Locked for 2 s: the items lock once the time is up, and cannot be taken then.
+        let (bag, _) = backpack(&g, 1);
+        send_scene(&mut g, 1, "InventoriesHandler.LockInventoryContentServerRpc", &[json!(chest), json!(true), json!(2.0)]);
+        assert!(result(&mut g));
+        let item = g.inventories[&chest].items[0];
+        g.time += 3.0;
+        send_scene(&mut g, 1, "InventoriesHandler.TransferItemServerRpc", &[json!(chest), json!(bag), json!(item)]);
+        assert!(!result(&mut g), "locked");
+        send_scene(&mut g, 1, "InventoriesHandler.LockInventoryContentServerRpc", &[json!(chest), json!(false), json!(0.0)]);
+        assert!(result(&mut g));
+        send_scene(&mut g, 1, "InventoriesHandler.TransferItemServerRpc", &[json!(chest), json!(bag), json!(item)]);
+        assert!(result(&mut g), "unlocked");
+    }
+
+    /// Picking up a scene object (a rock's Iron) or a dropped item into an inventory.
+    #[test]
+    fn world_objects_picked_up_go_into_the_inventory_and_out_of_the_scene() {
+        let Some((mut g, _)) = world() else { return };
+        let (bag, _) = backpack(&g, 1);
+        let iron = hash(&g, "Iron");
+        send_scene(&mut g, 1, "InventoriesHandler.AddWorldObjectToInventoryServerRpc", &[json!(101_000_001), json!(iron), json!(bag), json!(false)]);
+        assert!(result(&mut g));
+        assert!(g.inventories[&bag].items.contains(&101_000_001));
+        assert!(!g.wos[&101_000_001].dont_save, "the save keeps it: the rock is gone for good");
+        // An item lying in the world: its network object goes.
+        let dropped = g.create_world_object(g.data.group("ice").unwrap(), 0, true);
+        g.drop_on_floor(dropped, [561.0, 3.0, 497.0], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 0.0, false, 1);
+        let net = g.wos[&dropped].net.unwrap();
+        let ice = hash(&g, "ice");
+        send_scene(&mut g, 1, "InventoriesHandler.AddWorldObjectToInventoryServerRpc", &[json!(dropped), json!(ice), json!(bag), json!(true)]);
+        assert!(result(&mut g));
+        assert!(!g.net.objects.contains_key(&net) && g.wos[&dropped].net.is_none());
+        // Already in an inventory (not placed): refused.
+        send_scene(&mut g, 1, "InventoriesHandler.AddWorldObjectToInventoryServerRpc", &[json!(dropped), json!(ice), json!(bag), json!(true)]);
+        assert!(!result(&mut g));
+    }
 
     #[test]
     fn culture_order_ignores_case_first() {

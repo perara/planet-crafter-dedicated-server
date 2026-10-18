@@ -3,7 +3,7 @@
 
 use serde_json::Value;
 
-pub use crate::game::tests::{join, save};
+pub use crate::game::tests::{approve, join, save};
 use crate::game::{test_game, Game};
 use crate::net::{Target, VarValue};
 use crate::wire::{Reader, Writer};
@@ -110,4 +110,14 @@ pub fn backpack(g: &Game, client: u64) -> (i32, i32) {
 /// The group hash of a group id.
 pub fn hash(g: &Game, group: &str) -> i32 {
     g.data.groups[g.data.group(group).unwrap_or_else(|| panic!("no group {group}"))].hash
+}
+
+/// The world saved as the game's save text and loaded again, as a server restart does.
+pub fn reload(g: &mut Game) -> Game {
+    test_game(crate::save::SaveFile::from_text(&g.snapshot().to_text())).unwrap()
+}
+
+/// A saved world object of the snapshot, by id.
+pub fn saved_object(g: &mut Game, id: i32) -> Option<Value> {
+    g.snapshot().objects.into_iter().find(|o| o["id"] == id)
 }
