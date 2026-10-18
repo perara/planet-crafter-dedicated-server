@@ -365,6 +365,18 @@ pub fn behaviours(defs: &[BehaviourDef]) -> Vec<NetBehaviour> {
 /// .GetSceneRelativeInSceneNetworkObject); this server sends no scene events to map one.
 const SCENE_HANDLE: i32 = 0;
 
+/// The behaviour classes on the game's network objects that inherit RPCs from `class`, which
+/// none carries itself: GroupNetworkBase (the game's C#: ConstructibleProxy and
+/// GroupNetworkContainer extend it) and Netcode's NetworkTransform (ClientNetworkTransform).
+/// No other class with ServerRpcs has a subclass in the game's code.
+pub fn subclasses(class: &str) -> &'static [&'static str] {
+    match class {
+        "GroupNetworkBase" => &["ConstructibleProxy", "GroupNetworkContainer"],
+        "NetworkTransform" => &["ClientNetworkTransform"],
+        _ => &[],
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Net {
     pub objects: crate::idmap::IdMap<u64, NetObj>,
@@ -434,15 +446,16 @@ impl Net {
         self.objects.values().find_map(|o| o.behaviour(class).map(|b| (o.id, b.index)))
     }
 
+    /// Whether an object carries a behaviour that runs RPCs declared on `class`.
+    pub fn carries(&self, object: u64, class: &str) -> bool {
+        self.behaviour_index(object, class).is_some() || subclasses(class).iter().any(|c| self.behaviour_index(object, c).is_some())
+    }
+
     /// A ClientRpc by "Class.Method" on the object's behaviour of that class (or of a class
     /// inheriting the method).
     pub fn rpc(&mut self, to: Target, object: u64, name: &str, args: &[Value]) {
         let class = name.split('.').next().unwrap_or("");
-        let subclasses: &[&str] = match class {
-            "GroupNetworkBase" => &["ConstructibleProxy", "GroupNetworkContainer"],
-            _ => &[],
-        };
-        let behaviour = self.behaviour_index(object, class).or_else(|| subclasses.iter().find_map(|c| self.behaviour_index(object, c)));
+        let behaviour = self.behaviour_index(object, class).or_else(|| subclasses(class).iter().find_map(|c| self.behaviour_index(object, c)));
         let Some(behaviour) = behaviour else {
             eprintln!("rpc {name}: object {object} has no {class}");
             return;

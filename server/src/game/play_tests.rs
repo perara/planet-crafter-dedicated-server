@@ -4,12 +4,12 @@
 use super::tests::{join, save};
 use super::*;
 
-/// An RPC as a client sends it.
+/// An RPC as a client sends it: to `object`, or with 0 to the scene handler of its class.
 fn rpc(g: &mut Game, client: u64, object: u64, name: &str, args: Vec<Value>) {
-    let (hash, body) = g.net.spec.encode(name, &args);
-    let mut w = Writer::new();
-    w.packed_u64(client).packed_u64(object).packed_u16(0).packed_u32(hash).bytes(&body);
-    g.incoming_rpc(client, &w.0);
+    if object == 0 {
+        return crate::testkit::send_scene(g, client, name, &args);
+    }
+    crate::testkit::send_on(g, client, object, name, &args);
 }
 
 /// Tick cost of the logistics task search and of destroys in a world with many stored items.
@@ -243,4 +243,32 @@ fn a_format_1_snapshot_restores() {
     let (net_data, data, spec, scenes) = test_tables().unwrap();
     let h = crate::handoff::restore(net_data, data, spec, &old, scenes).unwrap();
     crate::handoff::verify(&h, text.as_bytes()).unwrap();
+}
+
+/// M2: an RPC runs only on an object with a behaviour of its class (or a subclass), as Netcode
+/// routes it: a departure sequence started on anything but a departure platform does nothing
+/// (it used to force a full save each time).
+#[test]
+fn rpcs_run_only_on_objects_of_their_class() {
+    let Some(mut g) = crate::planets::tests::game() else { return };
+    join(&mut g, 1, "Ann");
+    let chest = crate::machines::tests::build(&mut g, "Container1", [600.0, 5.0, 600.0]);
+    let platform = crate::machines::tests::build(&mut g, "DeparturePlatform", [650.0, 5.0, 600.0]);
+    let start = |g: &mut Game, net: u64| {
+        g.save_requested = false;
+        let (hash, body) = g.net.spec.encode("MachineDeparturePlatform.StartDepartureSequenceServerRpc", &[json!(1), json!(0), json!(0)]);
+        let mut w = Writer::new();
+        w.packed_u64(1).packed_u64(net).packed_u16(0).packed_u32(hash).bytes(&body);
+        g.incoming_rpc(1, &w.0);
+        g.save_requested
+    };
+    let objects: Vec<u64> = g.net.objects.keys().copied().filter(|o| !g.net.carries(*o, "MachineDeparturePlatform")).collect();
+    for net in objects {
+        assert!(!start(&mut g, net), "object {net}");
+    }
+    let platform_net = g.wos[&platform].net.unwrap();
+    assert!(start(&mut g, platform_net), "a departure platform starts");
+    // GroupNetworkBase's RPCs run on its subclasses' behaviours.
+    let chest_net = g.wos[&chest].net.unwrap();
+    assert!(g.net.carries(chest_net, "GroupNetworkBase") && !g.net.carries(chest_net, "MachineDeparturePlatform"));
 }

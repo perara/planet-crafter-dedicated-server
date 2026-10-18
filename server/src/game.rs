@@ -191,6 +191,9 @@ pub struct Game {
     next_time_sync: f32,
     #[serde(skip)]
     unhandled: std::collections::HashSet<String>,
+    /// RPCs refused for the object they were sent to (logged once each).
+    #[serde(skip)]
+    misrouted: std::collections::HashSet<String>,
     /// A subsystem asks for a save (SavedDataHandler.SaveWorldData); main writes it after the tick.
     pub save_requested: bool,
 }
@@ -291,6 +294,7 @@ impl Game {
             session_number: 4242,
             next_time_sync: 0.0,
             unhandled: Default::default(),
+            misrouted: Default::default(),
             save_requested: false,
         };
         game.sim_time = sim_time;
@@ -530,6 +534,15 @@ impl Game {
         let Some(name) = self.net.spec.get(method).map(|r| r.name.clone()) else { return };
         if self.trace {
             println!("trace client {client} rpc {name} on {object}/{behaviour} {}", Value::Array(args.clone()));
+        }
+        // Netcode runs an RPC on a behaviour of the object it is sent to: one of the RPC's class
+        // or a subclass. Sent to any other object it runs nowhere (handlers here go by name).
+        let class = name.split('.').next().unwrap_or("");
+        if !self.net.carries(object, class) {
+            if self.misrouted.insert(name.clone()) {
+                eprintln!("client {client}: rpc {name} on object {object}, which has no {class}: ignored (logged once per RPC)");
+            }
+            return;
         }
         self.rpc(client, object, behaviour, &name, Args(args));
     }
@@ -991,7 +1004,11 @@ pub mod tests {
             let name = names[(r.next() % names.len() as u64) as usize].clone();
             let args: Vec<Value> = (0..r.next() % 9).map(|_| pick(&mut r, &g)).collect();
             let client = 1 + r.next() % 2;
-            let objects: Vec<u64> = g.net.objects.keys().copied().collect();
+            // Mostly to an object that runs it (others are refused before any handler), now
+            // and then to any.
+            let class = name.split('.').next().unwrap_or("");
+            let carriers: Vec<u64> = g.net.objects.keys().copied().filter(|o| g.net.carries(*o, class)).collect();
+            let objects: Vec<u64> = if carriers.is_empty() || r.next() % 4 == 0 { g.net.objects.keys().copied().collect() } else { carriers };
             let object = objects[(r.next() % objects.len() as u64) as usize];
             let behaviour = (r.next() % 6) as u16;
             let (hash, mut body) = g.net.spec.encode(&name, &args);
