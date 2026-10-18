@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, Write};
 use std::os::unix::process::CommandExt;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -17,10 +18,10 @@ impl Ctx {
     /// The server runs from run/bin, so rebuilding or upgrading never touches a running server:
     /// run/bin/pcds (what the units run) with what it loads beside it, as in a release, and the
     /// banks run/bin/a and run/bin/b, each a whole install, with run/bin/active naming the one
-    /// the front starts (docs/hot-update.md). This program goes into the standby bank and
-    /// becomes the active one when it is newer than the active bank's and in neither bank yet
-    /// (so a rollback stays rolled back); the running server moves to it at its next start, or
-    /// at once with `pcds upgrade --restart`.
+    /// the front starts (docs/hot-update.md). The launcher is replaced by a later build of this
+    /// program (its copy keeps the build's time). Whether this program also goes into a bank
+    /// is bank_for()'s rule; the running server moves to it at its next start, or at once with
+    /// `pcds upgrade --restart`.
     pub fn install_server(&self) -> Result {
         let lib = self.exe.with_file_name("libsteam_api.so");
         if !lib.is_file() {
@@ -31,19 +32,18 @@ impl Ctx {
         if !super::same_file(&self.exe, &launcher) && (!launcher.is_file() || super::modified(&self.exe) > super::modified(&launcher)) {
             super::mkdir(&bin.join("web"))?;
             super::install_file(&self.exe, &launcher)?;
+            keep_time(&self.exe, &launcher)?;
             super::install_file(&lib, &bin.join("libsteam_api.so"))?;
             super::install_file(&self.web, &bin.join("web/index.html"))?;
         }
         let banks = self.banks();
-        let active = updater::active(&banks);
-        let in_bank = |b: &str| program_equal(&self.exe, &banks.join(b).join("pcds"));
-        if updater::BANKS.iter().any(|b| in_bank(b)) {
-            return Ok(());
-        }
-        let target = match updater::info(&banks, &active) {
-            None => active.clone(),
-            Some(_) if super::modified(&self.exe) > super::modified(&banks.join(&active).join("pcds")) => updater::other(&active).to_string(),
-            Some(_) => return Ok(()),
+        let target = match self.bank_for(&banks)? {
+            Ok(target) => target,
+            Err(Some(why)) => {
+                say(why);
+                return Ok(());
+            }
+            Err(None) => return Ok(()),
         };
         self.install_bank(&target, &lib)?;
         updater::set_active(&banks, &target)?;
@@ -51,17 +51,57 @@ impl Ctx {
         Ok(())
     }
 
+    /// The bank this program goes into (`pcds run`, start, restart, setup and the container's
+    /// start all ask), or Err with why not (None: nothing to say). The rule:
+    /// - a bank that holds this very program (the same bytes) is enough: nothing;
+    /// - both banks are empty: the active one (the first install);
+    /// - else the standby bank (the active one while it is empty), and only when this program
+    ///   is newer than what each bank holds: a later version, or the same version built later (the program file's time; a
+    ///   bank's copy keeps the time of what it was copied from). So an older launcher never
+    ///   replaces or downgrades a release `pcds upgrade` installed, and a bank that holds a
+    ///   rollback target keeps it;
+    /// - never the bank the owner rolled back from (updater::rolled_back): an explicit
+    ///   `pcds upgrade` or the next rollback lifts that.
+    fn bank_for(&self, banks: &Path) -> Result<std::result::Result<String, Option<String>>> {
+        let active = updater::active(banks);
+        let program = |b: &str| banks.join(b).join("pcds");
+        for b in updater::BANKS {
+            if program(b).is_file() && program_equal(&self.exe, &program(b))? {
+                return Ok(Err(None));
+            }
+        }
+        if updater::BANKS.iter().all(|b| updater::info(banks, b).is_none()) {
+            return Ok(Ok(active));
+        }
+        let version = env!("CARGO_PKG_VERSION");
+        let newer_than = |b: &str| match updater::info(banks, b) {
+            None => true,
+            Some(info) => {
+                let held = info["version"].as_str().unwrap_or("");
+                updater::newer(version, held) || (!updater::newer(held, version) && super::modified(&self.exe) > super::modified(&program(b)))
+            }
+        };
+        if !updater::BANKS.iter().all(|b| newer_than(b)) {
+            return Ok(Err(None));
+        }
+        // The standby bank, or the active one while it is empty.
+        let target = if updater::info(banks, &active).is_none() { active } else { updater::other(&active).to_string() };
+        if updater::rolled_back(banks).is_some_and(|r| r["bank"] == target.as_str()) {
+            return Ok(Err(Some(format!("pcds {version} is newer than both banks, but bank {target} is the one the server was rolled back from: it is kept ('pcds upgrade' installs a release there)"))));
+        }
+        Ok(Ok(target))
+    }
+
     /// This program as a bank: its files beside the bank, then moved over it (the files keep
     /// their times: a later build is newer than the bank).
     fn install_bank(&self, bank: &str, lib: &Path) -> Result {
         let banks = self.banks();
-        let new = banks.join(format!(".{bank}.new"));
+        let new = updater::staging(&banks, bank);
         let _ = fs::remove_dir_all(&new);
         super::mkdir(&new.join("web"))?;
         let copy = |from: &Path, to: &Path| -> Result {
             fs::copy(from, to).map_err(|e| format!("{} -> {}: {e}", from.display(), to.display()))?;
-            let time = fs::metadata(from).and_then(|m| m.modified()).map_err(|e| e.to_string())?;
-            fs::File::options().write(true).open(to).and_then(|f| f.set_modified(time)).map_err(|e| format!("{}: {e}", to.display()))
+            keep_time(from, to)
         };
         let result = (|| {
             copy(&self.exe, &new.join("pcds"))?;
@@ -83,7 +123,9 @@ impl Ctx {
     }
 
     /// The server in the foreground, as the unit runs it: the front from the active bank, on
-    /// the installed game's tables, the world, the settings. Returns only when it cannot start.
+    /// the installed game's tables, the world, the settings; this process exits with the
+    /// front's code once the front and its banks have ended (supervise). Returns only when it
+    /// cannot start.
     pub fn run_server(&self) -> Result {
         let data = self.data_dir()?;
         let world = self.world_file();
@@ -105,7 +147,8 @@ impl Ctx {
         // Access lists and rules are the installation's, whichever world runs.
         server.env("PCDS_ACCESS", get("PCDS_ACCESS").unwrap_or_else(|| self.run.join("access.json").display().to_string()));
         server.env("PCDS_RULES", get("PCDS_RULES").unwrap_or_else(|| self.run.join("rules.json").display().to_string()));
-        Err(format!("{}: {}", front.display(), server.exec()))
+        let code = supervise(server).map_err(|e| format!("{}: {e}", front.display()))?;
+        std::process::exit(code)
     }
 
     pub fn setup(&self, args: &[String]) -> Result {
@@ -344,13 +387,95 @@ impl Ctx {
     }
 }
 
-/// Whether two programs are the same build: the same size and modification time (a bank's
-/// copy keeps its source's time).
-fn program_equal(a: &Path, b: &Path) -> bool {
-    match (fs::metadata(a), fs::metadata(b)) {
-        (Ok(a), Ok(b)) => a.len() == b.len() && a.modified().ok() == b.modified().ok(),
-        _ => false,
+/// How long the banks of a front that ended get to save and end before they are killed.
+const BANKS_GRACE: Duration = Duration::from_secs(60);
+
+/// The front, run as a child of this process, which ends only after every process the front
+/// left behind. A front that crashes leaves its banks running; they save the world when they
+/// find it gone (bank.rs) and end. Under systemd (KillMode=mixed) and in Docker (tini, then
+/// the container's PID namespace) the end of the main process kills what is left of the unit
+/// or container at once, before any bank could save: this process is that main process, a
+/// subreaper the orphaned banks are handed to, and it waits for them (BANKS_GRACE at most,
+/// then kills the front's process group). SIGTERM, SIGINT and SIGHUP go on to the front, which
+/// stops its banks with a save itself. The front's exit code, or 128 + its signal.
+fn supervise(mut front: Command) -> Result<i32> {
+    // A signal that comes before the front's pid is known waits in PENDING: whichever of the
+    // handler and this thread sees both sends it (one swap takes it).
+    static FRONT: AtomicI32 = AtomicI32::new(0);
+    static PENDING: AtomicI32 = AtomicI32::new(0);
+    fn pass(pid: i32) {
+        let signal = PENDING.swap(0, Ordering::SeqCst);
+        if pid > 0 && signal != 0 {
+            // SAFETY: kill(2) is async-signal-safe.
+            unsafe { libc::kill(pid, signal) };
+        }
     }
+    extern "C" fn pass_on(signal: libc::c_int) {
+        PENDING.store(signal, Ordering::SeqCst);
+        pass(FRONT.load(Ordering::SeqCst));
+    }
+    // SAFETY: prctl and signal dispositions of this process; the handler only touches atomics
+    // and calls kill(2).
+    unsafe {
+        if libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) != 0 {
+            return Err(format!("cannot wait for the banks (PR_SET_CHILD_SUBREAPER): {}", std::io::Error::last_os_error()));
+        }
+        for s in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+            libc::signal(s, pass_on as *const () as libc::sighandler_t);
+        }
+    }
+    // Its own process group: what is left of it can be killed as one, and a terminal's Ctrl-C
+    // reaches it once, through this process.
+    let child = front.process_group(0).spawn().map_err(|e| e.to_string())?;
+    FRONT.store(child.id() as i32, Ordering::SeqCst);
+    pass(child.id() as i32);
+    let pid = FRONT.load(Ordering::SeqCst);
+    let (mut code, mut deadline) = (None, None);
+    loop {
+        let mut status = 0;
+        let flags = if code.is_some() { libc::WNOHANG } else { 0 };
+        // SAFETY: waits for any child of this process (the front, then the orphaned banks).
+        let ended = unsafe { libc::waitpid(-1, &mut status, flags) };
+        if ended == pid {
+            let c = if libc::WIFEXITED(status) { libc::WEXITSTATUS(status) } else { 128 + libc::WTERMSIG(status) };
+            code = Some(c);
+            deadline = Some(std::time::Instant::now() + BANKS_GRACE);
+            FRONT.store(0, Ordering::SeqCst);
+        } else if ended > 0 {
+            continue;
+        } else if ended == 0 {
+            if deadline.is_some_and(|d| std::time::Instant::now() > d) {
+                eprintln!("pcds: the banks of the front did not end within {} s of it: killed", BANKS_GRACE.as_secs());
+                // SAFETY: the front's process group, which only it and its banks are in.
+                unsafe { libc::kill(-pid, libc::SIGKILL) };
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        } else {
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EINTR) => {}
+                // No child left: the front and every bank have ended.
+                _ => break,
+            }
+        }
+    }
+    code.ok_or_else(|| "the front was never waited for".to_string())
+}
+
+/// Whether two programs are the same build: the same bytes (sizes first, then sha256).
+fn program_equal(a: &Path, b: &Path) -> Result<bool> {
+    let size = |p: &Path| fs::metadata(p).map(|m| m.len()).map_err(|e| format!("{}: {e}", p.display()));
+    if size(a)? != size(b)? {
+        return Ok(false);
+    }
+    let sum = |p: &Path| fs::read(p).map(|bytes| ring::digest::digest(&ring::digest::SHA256, &bytes)).map_err(|e| format!("{}: {e}", p.display()));
+    Ok(sum(a)?.as_ref() == sum(b)?.as_ref())
+}
+
+/// A copy's time made its source's (a later build is newer than what a bank holds).
+fn keep_time(from: &Path, to: &Path) -> Result {
+    let time = fs::metadata(from).and_then(|m| m.modified()).map_err(|e| format!("{}: {e}", from.display()))?;
+    fs::File::options().write(true).open(to).and_then(|f| f.set_modified(time)).map_err(|e| format!("{}: {e}", to.display()))
 }
 
 #[cfg(test)]
@@ -382,9 +507,55 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// This program goes into a bank once: the first install into a, a newer build into the
-    /// standby bank (then the active one), the same build never again (a rollback to the
-    /// other bank stays).
+    /// supervise() in a process of its own: a subreaper is handed every orphan of its process,
+    /// which the test harness must not be. PCDS_SUPERVISE_TEST names the folder; "crash" or
+    /// "stop" what the stand-in front does.
+    #[test]
+    #[ignore]
+    fn supervise_in_a_process_of_its_own() {
+        let (Some(dir), Ok(what)) = (std::env::var_os("PCDS_SUPERVISE_TEST"), std::env::var("PCDS_SUPERVISE_WHAT")) else { return };
+        let script = match what.as_str() {
+            // It starts a bank that saves a moment after the front is gone, and crashes.
+            "crash" => "(sleep 0.5; echo saved > \"$0/saved\") & exit 3",
+            // The stop goes to the front; it has its bank save, and ends.
+            _ => "trap '(sleep 0.3; echo saved > \"$0/saved\") & exit 0' TERM; echo up > \"$0/up\"; while :; do sleep 0.05; done",
+        };
+        let mut front = Command::new("sh");
+        front.arg("-c").arg(script).arg(&dir);
+        std::process::exit(supervise(front).unwrap());
+    }
+
+    #[test]
+    fn the_banks_of_a_front_that_ended_get_to_save_first() {
+        for what in ["crash", "stop"] {
+            let dir = super::super::test_dir(&format!("supervise-{what}"));
+            let mut helper = Command::new(std::env::current_exe().unwrap())
+                .args(["cli::setup::tests::supervise_in_a_process_of_its_own", "--ignored", "--exact", "--nocapture"])
+                .env("PCDS_SUPERVISE_TEST", &dir)
+                .env("PCDS_SUPERVISE_WHAT", what)
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            if what == "stop" {
+                let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                while !dir.join("up").is_file() {
+                    assert!(std::time::Instant::now() < deadline, "the front did not start");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                // SAFETY: the helper process this test started (systemctl stop's SIGTERM).
+                assert_eq!(unsafe { libc::kill(helper.id() as i32, libc::SIGTERM) }, 0);
+            }
+            let status = super::super::wait_for(&mut helper, Duration::from_secs(30)).expect("the helper ends");
+            assert_eq!(status.code(), Some(if what == "crash" { 3 } else { 0 }), "{what}: the front's exit code");
+            assert_eq!(fs::read_to_string(dir.join("saved")).ok().as_deref(), Some("saved\n"), "{what}: the bank saved before the end");
+            fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    /// The rule of bank_for(): a build into a bank once (the first into the active bank, a
+    /// later one into the standby bank, which becomes the active one); the launcher, which is
+    /// that build, adds nothing; nothing over a newer release, nor over the bank rolled back
+    /// from.
     #[test]
     fn builds_go_into_the_standby_bank_once() {
         let dir = super::super::test_dir("install-bank");
@@ -395,21 +566,43 @@ mod tests {
         }
         let banks = ctx.banks();
         let program = |b: &str| fs::read_to_string(banks.join(b).join("pcds")).ok();
+        let build = |text: &str| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            fs::write(dir.join("build/pcds"), text).unwrap();
+        };
         ctx.install_server().unwrap();
         assert_eq!((updater::active(&banks), program("a"), program("b")), ("a".into(), Some("build 1".into()), None));
         assert_eq!(updater::info(&banks, "a").unwrap()["protocol"], crate::ipc::PROTOCOL);
         assert!(banks.join("a/libsteam_api.so").is_file() && banks.join("a/web/index.html").is_file() && ctx.installed().is_file());
         ctx.install_server().unwrap();
         assert!(!banks.join("b").exists(), "the same build again: nothing");
+        // pcds run is the launcher, run/bin/pcds: a copy of build 1, in bank a already.
+        let launcher = Ctx { exe: ctx.installed(), ..ctx.clone() };
+        launcher.install_server().unwrap();
+        assert!(!banks.join("b").exists(), "the launcher's own build: nothing");
         // A later build.
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        fs::write(dir.join("build/pcds"), "build 2").unwrap();
+        build("build 2");
         ctx.install_server().unwrap();
         assert_eq!((updater::active(&banks), program("a"), program("b")), ("b".into(), Some("build 1".into()), Some("build 2".into())));
-        // Rolled back to a: the build in b is not installed over it again.
+        // Rolled back to a: neither the build in b nor the launcher go over a or b again.
         updater::set_active(&banks, "a").unwrap();
+        updater::set_rolled_back(&banks, "b").unwrap();
         ctx.install_server().unwrap();
-        assert_eq!((updater::active(&banks), program("a")), ("a".into(), Some("build 1".into())));
+        launcher.install_server().unwrap();
+        assert_eq!((updater::active(&banks), program("a"), program("b")), ("a".into(), Some("build 1".into()), Some("build 2".into())));
+        // A later build still leaves alone the bank rolled back from.
+        build("build 3");
+        ctx.install_server().unwrap();
+        assert_eq!((updater::active(&banks), program("b")), ("a".into(), Some("build 2".into())));
+        updater::clear_rolled_back(&banks).unwrap();
+        ctx.install_server().unwrap();
+        assert_eq!((updater::active(&banks), program("b")), ("b".into(), Some("build 3".into())));
+        // A release of a later version in the standby bank (pcds upgrade): an older build never
+        // goes over it, however new its file.
+        updater::write_info(&banks.join("a"), &serde_json::json!({"version": "99.0.0", "tag": "v99.0.0", "protocol": crate::ipc::PROTOCOL})).unwrap();
+        build("build 4");
+        ctx.install_server().unwrap();
+        assert_eq!((updater::active(&banks), program("a"), program("b")), ("b".into(), Some("build 1".into()), Some("build 3".into())));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

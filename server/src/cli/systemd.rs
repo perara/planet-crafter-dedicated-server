@@ -100,8 +100,11 @@ EnvironmentFile={env}
 ExecStart=\"{exe}\" run
 Restart=on-failure
 RestartSec=15
-# The stop goes to the front, which has the bank save the world and end; the rest of the
-# unit's processes are killed only if they are still there after the timeout.
+# The stop (SIGTERM) goes to pcds run alone, which passes it to the front; the front has
+# its bank save the world and end. When the main process ends, systemd kills the rest of
+# the unit at once: pcds run therefore ends only after the front and its banks (a front
+# that crashed leaves its banks to save first, up to 60 s). What is still there after
+# the timeout is killed.
 KillMode=mixed
 TimeoutStopSec=90
 

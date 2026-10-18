@@ -251,6 +251,8 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
     // save), its players told to join again; then players get in again.
     let players = load(&server, &data, 2, 6);
     std::thread::sleep(Duration::from_secs(3));
+    // A ban after the last flip: in access.json, not in that flip's snapshot.
+    assert_eq!(server.api("POST", "/api/ban", json!({"name": "Mallory"})).0, 200);
     let pid = server.live()["pid"].as_u64().unwrap();
     // SAFETY: the live bank of the front this test started, by the pid that front reports.
     assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGKILL) }, 0);
@@ -265,6 +267,8 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
     assert!(log.contains("ended (signal: 9") && log.contains("from the snapshot of the last flip") && log.contains("runs the world again"), "{log}");
     let (ok, said) = finish(load(&server, &data, 1, 3));
     assert!(ok, "a player gets in after the restart: {said}");
+    let (_, status) = server.api("GET", "/api/status", json!({}));
+    assert_eq!(status["access"]["bannedNames"], json!(["Mallory"]), "the ban outlived the restart from the snapshot");
 
     // Updates from the release server, into the bank that does not run.
     let standby = if server.live()["bank"] == "a" { "b" } else { "a" };
@@ -287,6 +291,9 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
     let back = server.update(json!({"rollback": true}));
     assert_eq!(back["ok"], true, "{back}");
     assert_ne!(server.live()["bank"], standby);
+    // Noted: the automatic update does not bring v9.9.9 back.
+    let noted: Value = serde_json::from_str(&std::fs::read_to_string(banks.join("rolled-back")).unwrap()).unwrap();
+    assert_eq!(noted, json!({"bank": standby, "tag": "v9.9.9"}));
     let (ok, said) = finish(players);
     assert!(ok, "players stayed through the update and the rollback:\n{said}");
     // A check looks the latest release up and installs nothing.
@@ -299,7 +306,7 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
 
     // The status shows the banks and the update knobs.
     let (_, status) = server.api("GET", "/api/status", json!({}));
-    assert_eq!((status["banks"]["frontProtocol"].as_u64(), status["update"]["auto"].as_bool()), (Some(2), Some(false)));
+    assert_eq!((status["banks"]["frontProtocol"].as_u64(), status["update"]["auto"].as_bool()), (Some(3), Some(false)));
     assert_eq!(status["banks"]["installed"].as_array().unwrap().len(), 2);
 
     // Stopped through the API: the bank saves, the front ends.
@@ -319,6 +326,33 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
     println!("{}", server.log().lines().filter(|l| l.starts_with("flip ") || l.contains("restarting") || l.starts_with("update")).collect::<Vec<_>>().join("\n"));
     drop(server);
 
+    // Stopped while a bank starts again after a crash: no bank holds the world, so the last
+    // flip's snapshot (newer than the save) is kept beside the save, and the next start runs it.
+    let server = start(&dir, &data, &banks, &releases);
+    assert_eq!(server.update(json!({"rollback": true}))["ok"], true, "{}", server.log());
+    let pid = server.live()["pid"].as_u64().unwrap();
+    // SAFETY: the live bank of the front this test started, by the pid that front reports.
+    assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGKILL) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !server.log().contains("restarting bank") {
+        assert!(Instant::now() < deadline, "no restart\n{}", server.log());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    let status = server.child.wait().unwrap();
+    let kept = dir.join("world.json.snapshot");
+    assert!(status.success() && kept.is_file() && server.log().contains("is kept in"), "{status}\n{}", server.log());
+    drop(server);
+    let server = start(&dir, &data, &banks, &releases);
+    assert!(server.log().contains("the world is the one kept in"), "{}", server.log());
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success());
+    let time = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap();
+    assert!(time(&dir.join("world.json")) > time(&kept), "saved at the stop: the next start removes the kept snapshot");
+    drop(server);
+
     // The command line with the server stopped: a release into the standby bank, made the
     // active one for the next start; status shows both banks; a rollback points back.
     let home = dir.join("cli");
@@ -331,6 +365,7 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
     };
     let (ok, said) = pcds(&["upgrade", "v9.9.9"]);
     assert!(ok && said.contains("v9.9.9 installed in bank b (sha256 checked)"), "{said}");
+    assert!(!home.join("bin/rolled-back").exists(), "an update asked for clears the rollback note");
     assert_eq!(std::fs::read_to_string(home.join("bin/active")).unwrap().trim(), "b");
     let (ok, said) = pcds(&["status"]);
     assert!(ok && said.contains("state=stopped") && said.contains("bank b: pcds") && said.contains("(v9.9.9)") && said.contains("[active]"), "{said}");
@@ -339,5 +374,7 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
     let (ok, said) = pcds(&["upgrade", "--rollback"]);
     assert!(ok && said.contains("bank a"), "{said}");
     assert_eq!(std::fs::read_to_string(home.join("bin/active")).unwrap().trim(), "a");
+    let noted: Value = serde_json::from_str(&std::fs::read_to_string(home.join("bin/rolled-back")).unwrap()).unwrap();
+    assert_eq!(noted, json!({"bank": "b", "tag": "v9.9.9"}));
     std::fs::remove_dir_all(&dir).unwrap();
 }
