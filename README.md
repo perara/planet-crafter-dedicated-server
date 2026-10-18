@@ -156,6 +156,11 @@ From 0.5 or older (the bash `pcds`):
   until `pcds update` has extracted the game tables once more.
 - A world still in `run/world.json` (before 0.5) is not moved any more: move it to
   `run/worlds/world.json` yourself.
+- What the Wine-era table extraction left (`run/extractor/`, a Wine prefix with copies of the
+  game's files; `/data/extractor` in Docker; `run/bin/pcds-server`; a 0.5 release folder's
+  `bin/pcds-server` and `bin/PcdsExtractor.dll`; unfinished `run/data/.<version>.new/`) is
+  removed by the first `pcds update`, `pcds up`, `pcds setup` or container start, which says
+  so.
 
 ## Docker
 

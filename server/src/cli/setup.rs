@@ -136,6 +136,35 @@ impl Ctx {
         result
     }
 
+    /// What pcds 0.5 (the bash pcds and its Wine extractor) left behind and nothing reads any
+    /// more, removed (each said; setup, up, update and the container's start ask): run/extractor
+    /// (a Wine prefix, BepInEx, copies of the game's exe and dlls; /data/extractor in Docker),
+    /// run/bin/pcds-server, a 0.5 release folder's bin/pcds-server and bin/PcdsExtractor.dll,
+    /// and unfinished extractions run/data/.<version>.new.
+    pub fn remove_leftovers(&self) {
+        let release_bin = self.exe.parent().map(|d| d.join("bin"));
+        let mut paths = vec![self.run.join("extractor"), self.run.join("bin/pcds-server")];
+        paths.extend(release_bin.iter().flat_map(|bin| [bin.join("pcds-server"), bin.join("PcdsExtractor.dll")]));
+        for e in fs::read_dir(self.run.join("data")).into_iter().flatten().flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') && name.ends_with(".new") && name.len() > ".new".len() {
+                paths.push(e.path());
+            }
+        }
+        for path in paths {
+            let Ok(meta) = path.symlink_metadata() else { continue };
+            let removed = if meta.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+            match removed {
+                Ok(()) => say(format!("removed {}: left over from pcds 0.5, nothing uses it", path.display())),
+                Err(e) => eprintln!("pcds: {} (left over from pcds 0.5) could not be removed: {e}", path.display()),
+            }
+        }
+        // The 0.5 release folder's bin/, once empty.
+        if let Some(bin) = release_bin {
+            let _ = fs::remove_dir(bin);
+        }
+    }
+
     /// After an upgrade (a new build or release), the newer program into run/bin.
     pub fn install_newer(&self) -> Result {
         self.install_server()
@@ -238,6 +267,7 @@ impl Ctx {
             need("systemctl", "pcds runs the server as a systemd user service (or use the Docker image)")?;
         }
         super::mkdir(&self.run)?;
+        self.remove_leftovers();
         self.write_env()?;
         self.install_server()?;
         if let Some(user) = steam_user {
@@ -408,6 +438,7 @@ impl Ctx {
     /// with STEAM_USER), a world, steamclient for invite codes, then the server as this process.
     pub fn container(&self) -> Result {
         super::mkdir(&self.worlds)?;
+        self.remove_leftovers();
         self.write_env()?;
         self.install_server()?;
         let downloaded = self.run.join("game");
@@ -648,6 +679,29 @@ mod tests {
         let compose = include_str!("../../../compose.yaml");
         assert!(compose.contains(&format!("stop_grace_period: {timeout}s")), "compose.yaml stops as late as the unit");
         assert!(include_str!("../../../README.md").contains(&format!("--stop-timeout {timeout}")), "so does the README's docker run");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// pcds 0.5's leftovers go, and nothing else.
+    #[test]
+    fn what_pcds_0_5_left_is_removed() {
+        let dir = super::super::test_dir("leftovers");
+        let ctx = super::super::test_ctx(&dir);
+        let gone = ["run/extractor/game/Planet Crafter.exe", "run/extractor/prefix/drive_c/x", "run/bin/pcds-server", "build/bin/pcds-server", "build/bin/PcdsExtractor.dll", "run/data/.2.103.new/netdata.json"];
+        let kept = ["run/bin/pcds", "run/data/2.103/netdata.json", "run/data/.new-7/netdata.json", "run/.new/world.json", "build/pcds"];
+        for f in gone.iter().chain(&kept) {
+            fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
+            fs::write(dir.join(f), "").unwrap();
+        }
+        ctx.remove_leftovers();
+        for f in gone {
+            assert!(!dir.join(f).exists(), "{f}");
+        }
+        assert!(!dir.join("run/extractor").exists() && !dir.join("run/data/.2.103.new").exists() && !dir.join("build/bin").exists());
+        for f in kept {
+            assert!(dir.join(f).is_file(), "{f}");
+        }
+        ctx.remove_leftovers();
         fs::remove_dir_all(&dir).unwrap();
     }
 

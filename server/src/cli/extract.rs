@@ -65,6 +65,7 @@ impl Ctx {
     /// download that steamcmd could not update fails the command (after the tables of the game
     /// as it is are looked after).
     pub fn update(&self, game: Option<&Path>) -> Result {
+        self.remove_leftovers();
         let fetched = self.update_downloaded_game();
         let tables = self.update_tables(game);
         match fetched {
