@@ -35,7 +35,7 @@ fn pcds(dir: &Path, path: &Path, args: &[&str]) -> Output {
 fn pcds_at(program: &Path, dir: &Path, path: &Path, args: &[&str]) -> Output {
     let search = format!("{}:{}", path.display(), std::env::var("PATH").unwrap_or_default());
     let mut cmd = Command::new(program);
-    cmd.args(args).env("PCDS_HOME", dir.join("run")).env("PCDS_UNIT", "pcds-cli-itest").env("PATH", search).env_remove("PCDS_CONTAINER");
+    cmd.args(args).env("PCDS_HOME", dir.join("run")).env("PCDS_UNIT", "pcds-cli-itest").env("PATH", search).env("HOME", dir.join("home")).env_remove("PCDS_CONTAINER").env_remove("PCDS_GAME_DIR");
     // A program just written may still be open in a child another test forks at that moment.
     for _ in 0..100 {
         match cmd.output() {
@@ -92,37 +92,78 @@ fn the_launcher_hands_commands_to_the_active_bank() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// `pcds extract` and `pcds update` read the tables with the active bank's program, and read
-/// them again when that program reads another tables format than the tables on disk.
-#[test]
-fn tables_are_read_by_the_active_bank_in_its_format() {
-    let dir = test_dir("reader");
-    let fake = fake_systemctl(&dir, "echo inactive");
-    let game = dir.join("game");
-    std::fs::create_dir_all(game.join("Planet Crafter_Data/Managed")).unwrap();
-    std::fs::write(game.join("Planet Crafter.exe"), "").unwrap();
-    std::fs::write(game.join("Planet Crafter_Data/Managed/Assembly-CSharp.dll"), "code").unwrap();
-    // `read-game GAME OUT`: the tables, with the format in the file next to the program.
-    let reader = r#"[ "$1" = read-game ] || exit 2
+/// A stand-in `pcds read-game GAME OUT`: the tables, of the build and format in the files next
+/// to it.
+const READER: &str = r#"[ "$1" = read-game ] || exit 2
 mkdir -p "$3" && echo '{"gameVersion": "2.103"}' > "$3/netdata.json"
 id=$(cat "$(dirname "$0")/build") && printf %s "$id" > "$3/buildid"
 cp "$(dirname "$0")/format" "$3/tables-format"
 echo "read by bank a" > "$3/reader""#;
-    fake_bank(&dir, "a", reader, 7);
-    std::fs::write(dir.join("run/bin/a/format"), "7").unwrap();
+
+/// An installation in dir/run with a stand-in game (dir/game) and a stand-in bank a whose
+/// `read-game` writes tables of the format in run/bin/a/format; the game.
+fn with_reader(dir: &Path, format: u32) -> PathBuf {
+    let game = dir.join("game");
+    std::fs::create_dir_all(game.join("Planet Crafter_Data/Managed")).unwrap();
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    std::fs::write(game.join("Planet Crafter.exe"), "").unwrap();
+    std::fs::write(game.join("Planet Crafter_Data/Managed/Assembly-CSharp.dll"), "code").unwrap();
+    fake_bank(dir, "a", READER, format);
+    std::fs::write(dir.join("run/bin/a/format"), format.to_string()).unwrap();
     // The build pcds computes (xxh64 of the game code), for the stand-in to write.
     std::fs::write(dir.join("run/bin/a/build"), format!("{:016x}", xxhash_rust::xxh64::xxh64(b"code", 0))).unwrap();
-    let out = pcds(&dir, &fake, &["extract", "--game", game.to_str().unwrap()]);
+    game
+}
+
+/// `pcds extract` and `pcds update` read the tables with the active bank's program, and read
+/// them again when that program reads another tables format than the tables on disk. `pcds
+/// status` says when the game has no tables.
+#[test]
+fn tables_are_read_by_the_active_bank_in_its_format() {
+    let dir = test_dir("reader");
+    let fake = fake_systemctl(&dir, "echo inactive");
+    let game = with_reader(&dir, 7);
+    let game_arg = game.to_str().unwrap();
+    let out = pcds(&dir, &fake, &["status"]);
+    assert!(text(&out).contains("game: game not found"), "{}", text(&out));
+    let out = pcds(&dir, &fake, &["extract", "--game", game_arg]);
     assert!(out.status.success(), "{}", text(&out));
     let tables = dir.join("run/data/2.103");
     assert_eq!(std::fs::read_to_string(tables.join("reader")).unwrap(), "read by bank a\n");
-    let out = pcds(&dir, &fake, &["update", "--game", game.to_str().unwrap()]);
+    let out = pcds(&dir, &fake, &["update", "--game", game_arg]);
     assert!(out.status.success() && text(&out).contains("up to date"), "{}", text(&out));
-    // A newer bank that reads format 8: update reads the tables again with it.
-    fake_bank(&dir, "a", reader, 8);
+    let out = pcds(&dir, &fake, &["status"]);
+    assert!(out.status.success() && !text(&out).contains("game"), "{}", text(&out));
+    // A newer bank that reads format 8: status says so, and update reads them again with it.
+    fake_bank(&dir, "a", READER, 8);
     std::fs::write(dir.join("run/bin/a/format"), "8").unwrap();
-    let out = pcds(&dir, &fake, &["update", "--game", game.to_str().unwrap()]);
+    let out = pcds(&dir, &fake, &["status"]);
+    assert!(text(&out).contains("has no tables: the tables in") && text(&out).contains("of tables format 7, the server reads format 8"), "{}", text(&out));
+    let out = pcds(&dir, &fake, &["update", "--game", game_arg]);
     assert!(out.status.success() && text(&out).contains("of tables format 7, the server reads format 8"), "{}", text(&out));
     assert_eq!(std::fs::read_to_string(tables.join("tables-format")).unwrap(), "8");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A game downloaded with steamcmd that steamcmd cannot update fails `pcds update` (the
+/// update check's unit), after the tables of the game as it is are looked after.
+#[test]
+fn a_failed_game_download_fails_the_update() {
+    let dir = test_dir("steamcmd");
+    let fake = fake_systemctl(&dir, "echo inactive");
+    let game = with_reader(&dir, 1);
+    let game_arg = game.to_str().unwrap();
+    assert!(pcds(&dir, &fake, &["extract", "--game", game_arg]).status.success());
+    std::fs::write(dir.join("run/steam-user"), "someone\n").unwrap();
+    std::fs::create_dir_all(dir.join("run/steamcmd")).unwrap();
+    let steamcmd = dir.join("run/steamcmd/steamcmd.sh");
+    std::fs::write(&steamcmd, "#!/bin/sh\necho 'Login Failure: Account Logon Denied'\nexit 5\n").unwrap();
+    std::fs::set_permissions(&steamcmd, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = pcds(&dir, &fake, &["update", "--game", game_arg]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("up to date") && text(&out).contains("the game update through steamcmd failed") && text(&out).contains("--steam-user someone"), "{}", text(&out));
+    assert!(std::fs::read_to_string(dir.join("run/steamcmd/update.log")).unwrap().contains("Logon Denied"));
+    std::fs::write(&steamcmd, "#!/bin/sh\nexit 0\n").unwrap();
+    assert!(pcds(&dir, &fake, &["update", "--game", game_arg]).status.success());
     std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -119,12 +119,15 @@ impl Ctx {
     /// Err (exit 1) when systemctl fails, or when the server runs and its admin API does not
     /// answer (the Docker image's health check).
     pub fn status(&self) -> Result {
+        let game = self.game_line();
         if !self.active()? {
             println!("state=stopped");
             self.print_banks(None);
+            game.iter().for_each(|l| println!("{l}"));
             return Ok(());
         }
         println!("state=running pid={}", self.server_pid().unwrap_or_default());
+        game.iter().for_each(|l| println!("{l}"));
         match self.api_json("GET", "/api/status") {
             Ok(status) => {
                 self.print_banks(Some(&status["banks"]));
@@ -137,6 +140,15 @@ impl Ctx {
                 self.print_banks(None);
                 Err(format!("admin API: {e}"))
             }
+        }
+    }
+
+    /// A line for `pcds status` when the installed game has no tables for the server (a game
+    /// update that pcds update has not read yet), or cannot be found.
+    fn game_line(&self) -> Option<String> {
+        match self.game_dir(None).and_then(|game| super::build_id(&game)) {
+            Err(e) => Some(format!("game: {e}")),
+            Ok(build) => self.tables(&build).err().map(|e| format!("game build {build} has no tables: {e}")),
         }
     }
 

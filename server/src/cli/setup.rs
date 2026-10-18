@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use super::env::parse_env;
+use super::env::{build_id, parse_env};
 use super::{need, say, sleep, wait_for, Ctx, Result};
 use crate::updater;
 
@@ -133,7 +133,8 @@ impl Ctx {
         }
         self.install_newer()?;
         // The tables of the bank that runs (installing may have changed which one).
-        let data = self.data_dir()?;
+        let game = self.game_dir(None)?;
+        let data = self.tables(&build_id(&game)?)?;
         let banks = self.banks();
         let front = banks.join(updater::active(&banks)).join("pcds");
         let mut server = Command::new(&front);
@@ -148,6 +149,8 @@ impl Ctx {
         // Access lists and rules are the installation's, whichever world runs.
         server.env("PCDS_ACCESS", get("PCDS_ACCESS").unwrap_or_else(|| self.run.join("access.json").display().to_string()));
         server.env("PCDS_RULES", get("PCDS_RULES").unwrap_or_else(|| self.run.join("rules.json").display().to_string()));
+        // The game the tables are for: /api/status says when it has changed (bank.rs).
+        server.env("PCDS_GAME_DIR", &game);
         let code = supervise(server).map_err(|e| format!("{}: {e}", front.display()))?;
         std::process::exit(code)
     }
@@ -355,7 +358,11 @@ impl Ctx {
             }
             self.download_game(user)?;
         }
-        self.update_downloaded_game();
+        // A game update that fails is said, and the server starts on the game as it is (a
+        // Steam outage must not keep the container down; pcds update tries again).
+        if let Err(e) = self.update_downloaded_game() {
+            eprintln!("pcds: {e}; starting on the game as it is");
+        }
         // The game steamcmd downloaded, else the one mounted at /game.
         let game = if steam_user.is_some() || self.run.join("steam-user").is_file() { downloaded } else { PathBuf::from("/game") };
         let game = self.game_dir(Some(&game)).map_err(|e| {

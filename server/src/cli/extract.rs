@@ -75,9 +75,23 @@ impl Ctx {
         Ok(true)
     }
 
-    /// After a game update: the new build's tables, and the server restarted on them.
+    /// After a game update: the new build's tables, and the server restarted on them. A game
+    /// download that steamcmd could not update fails the command (after the tables of the game
+    /// as it is are looked after).
     pub fn update(&self, game: Option<&Path>) -> Result {
-        self.update_downloaded_game();
+        let fetched = self.update_downloaded_game();
+        let tables = self.update_tables(game);
+        match fetched {
+            Err(e) if tables.is_ok() => Err(e),
+            Err(e) => {
+                eprintln!("pcds: {e}");
+                tables
+            }
+            Ok(()) => tables,
+        }
+    }
+
+    fn update_tables(&self, game: Option<&Path>) -> Result {
         let game = self.game_dir(game)?;
         let build = build_id(&game)?;
         match self.tables(&build) {

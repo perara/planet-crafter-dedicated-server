@@ -104,7 +104,7 @@ pub fn run(args: &[String]) {
     };
     let ready = json!({"restoreMs": started.elapsed().as_secs_f64() * 1000.0 - verify_ms, "verifyMs": verify_ms, "verified": verified});
     link.send(ipc::READY, 0, ready.to_string().as_bytes());
-    Bank { game, link, save_path: save_path.clone(), build_id }.serve();
+    Bank { game, link, save_path: save_path.clone(), build_id, data_dir: dir.clone() }.serve();
 }
 
 /// The world from the save, as a start of the whole server loads it. Exits on what stops a
@@ -191,6 +191,7 @@ struct Bank {
     link: Link,
     save_path: String,
     build_id: Option<String>,
+    data_dir: String,
 }
 
 /// What the status shows of this bank's loop: loops in the last second, its work time and
@@ -198,6 +199,7 @@ struct Bank {
 struct Ctx<'a> {
     save_path: &'a str,
     build_id: Option<&'a str>,
+    data_dir: &'a str,
     loop_rate: u32,
     busy: (Duration, Duration),
 }
@@ -251,7 +253,7 @@ impl Bank {
                     ipc::ADMIN => {
                         let r: Value = serde_json::from_slice(&f.body).unwrap_or_default();
                         let mut autosave = r["autosaveMinutes"].as_u64().unwrap_or_else(crate::autosave_start);
-                        let ctx = Ctx { save_path: &self.save_path, build_id: self.build_id.as_deref(), loop_rate: loops.2, busy: busy_last };
+                        let ctx = Ctx { save_path: &self.save_path, build_id: self.build_id.as_deref(), data_dir: &self.data_dir, loop_rate: loops.2, busy: busy_last };
                         let (status, body) = admin_request(game, r["method"].as_str().unwrap_or(""), r["path"].as_str().unwrap_or(""), &r["body"], &ctx, &mut autosave);
                         let answer = json!({"status": status, "body": body, "autosaveMinutes": autosave});
                         self.link.send(ipc::ANSWER, f.n, answer.to_string().as_bytes());
@@ -455,7 +457,7 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
                 "players": players,
                 "access": game.access.lists,
                 "serverVersion": env!("CARGO_PKG_VERSION"),
-                "tables": {"version": game.net_data.game_version, "buildId": ctx.build_id},
+                "tables": tables_status(game, ctx),
                 "world": {"seed": game.save.settings["worldSeed"], "settings": game.save.settings},
                 "objects": {"world": game.wos.len(), "network": game.net.objects.len(), "inventories": game.inventories.len()},
             });
@@ -561,6 +563,48 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
     }
 }
 
+/// /api/status's "tables": the version and build these tables are for, the installed game's
+/// build (PCDS_GAME_DIR, which pcds run sets), and a warning when that game has no tables of
+/// this server's format (a game update `pcds update` has not read yet).
+fn tables_status(game: &Game, ctx: &Ctx) -> Value {
+    let installed = installed_game(ctx.data_dir);
+    let warning = installed["warning"].clone();
+    json!({"version": game.net_data.game_version, "buildId": ctx.build_id, "game": installed, "warning": warning})
+}
+
+/// The installed game's build and whether it has tables; hashed again only when the game's
+/// code file changes (stat on each call). ponytail: tables read after the hash are seen at
+/// the next restart, which `pcds update` does once it has read them.
+fn installed_game(data_dir: &str) -> Value {
+    crate::env("PCDS_GAME_DIR").map_or(Value::Null, |game| game_at(std::path::Path::new(&game), data_dir))
+}
+
+fn game_at(dir: &std::path::Path, data_dir: &str) -> Value {
+    use std::sync::Mutex;
+    static SEEN: Mutex<Option<((std::time::SystemTime, u64), Value)>> = Mutex::new(None);
+    let code = dir.join("Planet Crafter_Data/Managed/Assembly-CSharp.dll");
+    let key = match std::fs::metadata(&code).and_then(|m| Ok((m.modified()?, m.len()))) {
+        Ok(key) => key,
+        Err(e) => return json!({"warning": format!("the game is gone ({}: {e}): pcds update", code.display())}),
+    };
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((k, v)) = seen.as_ref()
+        && *k == key
+    {
+        return v.clone();
+    }
+    let data = std::path::Path::new(data_dir).parent().unwrap_or(std::path::Path::new(data_dir));
+    let v = match crate::cli::build_id(dir) {
+        Ok(build) => {
+            let missing = crate::cli::find_tables(data, &build, crate::native::tables::TABLES_FORMAT).is_err();
+            json!({"buildId": build, "hasTables": !missing, "warning": missing.then(|| format!("game build {build} has no tables: run pcds update"))})
+        }
+        Err(e) => json!({"warning": e}),
+    };
+    *seen = Some((key, v.clone()));
+    v
+}
+
 fn backups_kept() -> usize {
     crate::env("PCDS_BACKUPS").and_then(|s| s.parse().ok()).unwrap_or(24)
 }
@@ -623,7 +667,7 @@ mod tests {
 
     /// An admin API call as the bank answers it: (status, JSON answer).
     fn call(game: &mut Game, method: &str, path: &str, body: Value, autosave: &mut u64) -> (u16, Value) {
-        let ctx = Ctx { save_path: "", build_id: None, loop_rate: 0, busy: Default::default() };
+        let ctx = Ctx { save_path: "", build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
         let (status, answer) = admin_request(game, method, path, &body, &ctx, autosave);
         (status, serde_json::from_str(&answer).unwrap())
     }
@@ -671,6 +715,29 @@ mod tests {
             assert!(!text.contains("t0ken") && !text.contains("s3cret") && !text.contains("k3y"), "{text}");
         }
         assert_eq!(read["rules"]["chat"]["secret"], "(set)");
+    }
+
+    /// The installed game's build, and a warning once it has no tables (a game update).
+    #[test]
+    fn status_warns_of_a_game_without_tables() {
+        let dir = std::env::temp_dir().join(format!("pcds-game-status-{}", std::process::id()));
+        let code = dir.join("game/Planet Crafter_Data/Managed/Assembly-CSharp.dll");
+        std::fs::create_dir_all(code.parent().unwrap()).unwrap();
+        std::fs::write(&code, "build 1").unwrap();
+        let build = crate::cli::build_id(&dir.join("game")).unwrap();
+        let tables = dir.join("data/2.103");
+        std::fs::create_dir_all(&tables).unwrap();
+        std::fs::write(tables.join("buildid"), &build).unwrap();
+        std::fs::write(tables.join("tables-format"), crate::native::tables::TABLES_FORMAT.to_string()).unwrap();
+        let data = tables.to_str().unwrap();
+        assert_eq!(game_at(&dir.join("game"), data), json!({"buildId": build, "hasTables": true, "warning": null}));
+        // The game updated (another size: a new hash at once).
+        std::fs::write(&code, "build 2, longer").unwrap();
+        let v = game_at(&dir.join("game"), data);
+        let build = crate::cli::build_id(&dir.join("game")).unwrap();
+        assert_eq!(v["warning"], format!("game build {build} has no tables: run pcds update"));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(game_at(&dir.join("game"), data)["warning"].as_str().unwrap().contains("the game is gone"));
     }
 
     #[test]
