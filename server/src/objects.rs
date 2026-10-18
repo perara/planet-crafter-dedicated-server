@@ -279,6 +279,11 @@ impl Game {
     /// DestroyWorldObjectGOOnAllClients: removes what stands for the object in everyone's scene.
     pub fn destroy_go_on_all_clients(&mut self, id: i32, disolve: f32) {
         let Some(wo) = self.wos.get(&id) else { return };
+        // The components on the GameObject go with it (Drone.OnDestroy).
+        if wo.net.is_some() {
+            crate::logistics::on_go_destroyed(self, id);
+        }
+        let Some(wo) = self.wos.get(&id) else { return };
         match wo.net {
             Some(net) => self.net.despawn(net),
             None => self.destroy_go_rpc(Target::All, id, disolve),

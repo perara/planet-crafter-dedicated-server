@@ -350,6 +350,16 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     }
 }
 
+/// A world object's GameObject was destroyed and the world object stays (a drone picked up):
+/// Drone.OnDestroy.
+pub fn on_go_destroyed(game: &mut Game, wo: i32) {
+    if game.ext.logistics.drones.contains_key(&wo) {
+        drone_on_destroy(game, wo);
+        game.ext.logistics.drones.shift_remove(&wo);
+        game.ext.logistics.check_busy.retain(|d| *d != wo);
+    }
+}
+
 /// A world object was destroyed: its drone (Drone.OnDestroy) or station goes.
 pub fn on_destroyed(game: &mut Game, wo: &WorldObject) {
     if game.ext.logistics.drones.contains_key(&wo.id) {

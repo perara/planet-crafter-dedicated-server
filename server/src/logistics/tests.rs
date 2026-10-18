@@ -264,3 +264,25 @@ fn a_drone_whose_demand_goes_loses_its_load() {
         assert!(items(&game, game.ext.logistics.drones[&drone].inventory).is_empty());
     }
 }
+
+/// A drone item dropped on the floor is a drone (Drone.Awake); picked up again, its GameObject
+/// goes and Drone.OnDestroy with it: no drone left in the logistics, and no second destroy for
+/// its network object (sweep_items_2, Drone1|pick up).
+#[test]
+fn a_drone_picked_up_from_the_floor_is_no_drone_any_more() {
+    let Some(mut game) = game() else { return };
+    let g = game.data.group("Drone1").unwrap();
+    let drone = game.create_world_object(g, 0, true);
+    game.drop_on_floor(drone, [20.0, 2.0, 20.0], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 0.0, false, 0);
+    assert!(game.ext.logistics.drones.contains_key(&drone));
+    let bag = game.create_inventory(10, 0, 0, &[], &[]);
+    game.net.out.clear();
+    game.inventories_rpc(1, "InventoriesHandler.AddWorldObjectToInventoryServerRpc", &crate::game::Args(vec![json!(drone), json!(game.data.groups[g].hash), json!(bag), json!(true)]));
+    assert!(!game.ext.logistics.drones.contains_key(&drone));
+    let start = game.ext.logistics.last_tick;
+    for t in 1..=60 {
+        frame(&mut game, start + t);
+    }
+    let destroys = game.net.out.iter().filter(|(_, kind, _)| *kind == DESTROY_OBJECT).count();
+    assert_eq!(destroys, 1);
+}
