@@ -675,6 +675,12 @@ const OK: i32 = 0;
 const SOMETHING_INSIDE: i32 = 1;
 const INVENTORY_NOT_EMPTY: i32 = 2;
 
+/// GroupNetworkBase.DeconstructServerRpc: GetComponentInChildren<ActionDeconstructible>(); without
+/// one (wreck safes, effigies, space multipliers, Warden objects) the game does nothing at all.
+pub fn deconstructible(game: &Game, wo: i32) -> bool {
+    game.wos.get(&wo).is_some_and(|w| !components(game, w.group, "ActionDeconstructible", false).is_empty())
+}
+
 /// ActionDeconstructible.CheckDeconstructOnServer: 0 Ok, 1 SomethingInside, 2 InventoryNotEmpty.
 pub fn deconstruct_status(game: &Game, wo: i32) -> i32 {
     let Some(w) = game.wos.get(&wo) else { return OK };

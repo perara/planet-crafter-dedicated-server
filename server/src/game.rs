@@ -222,6 +222,9 @@ pub fn test_game(save: SaveFile) -> Option<Game> {
     Some(Game::new(net_data, data, spec, save, scenes))
 }
 
+#[cfg(test)]
+mod play_tests;
+
 impl Game {
     pub fn new(net_data: NetData, data: GameData, spec: Spec, save: SaveFile, scenes: crate::Scenes) -> Game {
         // SavedDataHandler.InitSavedData loads the host's planet. This server has no host, so it

@@ -11,7 +11,7 @@ const OK: i32 = 0;
 
 pub fn deconstruct(game: &mut Game, client: u64, object: u64, time: f32) {
     let Some(wo) = game.net.objects.get(&object).and_then(|o| o.wo) else { return };
-    if game.ext.deconstructing.contains(&wo) {
+    if game.ext.deconstructing.contains(&wo) || !crate::machines::deconstructible(game, wo) {
         return;
     }
     let status = check(game, wo);
