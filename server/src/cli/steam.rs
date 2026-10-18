@@ -130,10 +130,15 @@ impl Ctx {
     /// The game folder: --game DIR, PCDS_GAME_DIR, the one used last (run/game-dir), else the
     /// Steam library that lists the game. The one chosen is remembered.
     pub fn game_dir(&self, arg: Option<&Path>) -> Result<PathBuf> {
+        self.find_game_dir(arg, crate::env("PCDS_GAME_DIR"))
+    }
+
+    /// game_dir with PCDS_GAME_DIR given (tests give their own, whatever the process has).
+    fn find_game_dir(&self, arg: Option<&Path>, env_dir: Option<String>) -> Result<PathBuf> {
         let remembered = self.run.join("game-dir");
         let (dir, from) = if let Some(dir) = arg {
             (dir.to_path_buf(), "--game".to_string())
-        } else if let Some(dir) = crate::env("PCDS_GAME_DIR") {
+        } else if let Some(dir) = env_dir {
             (PathBuf::from(dir), "PCDS_GAME_DIR".to_string())
         } else if let Ok(text) = fs::read_to_string(&remembered) {
             (PathBuf::from(text.trim_end_matches('\n')), remembered.display().to_string())
@@ -332,7 +337,7 @@ mod tests {
             fs::create_dir_all(&saves).unwrap();
             fs::write(saves.join(name), "{\"saveDisplayName\":\"x\"}").unwrap();
         };
-        assert!(ctx.game_dir(None).unwrap_err().contains(".var/app/com.valvesoftware.Steam"), "no list anywhere: all three named");
+        assert!(ctx.find_game_dir(None, None).unwrap_err().contains(".var/app/com.valvesoftware.Steam"), "no list anywhere: all three named");
 
         // A native Steam without the game, also reached through ~/.steam/steam; the game in the Flatpak's.
         let native = dir.join("home/.local/share/Steam");
@@ -353,7 +358,7 @@ mod tests {
         list(&native, &format!("228980\" \"1\" \"{APP_ID}"));
         manifest(&native);
 
-        assert_eq!(ctx.game_dir(None).unwrap(), game.canonicalize().unwrap());
+        assert_eq!(ctx.find_game_dir(None, None).unwrap(), game.canonicalize().unwrap());
         let mut names: Vec<String> = ctx.local_saves().iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
         names.sort();
         assert_eq!(names, ["Flatpak-1.json", "Native-1.json"], "each save once");
