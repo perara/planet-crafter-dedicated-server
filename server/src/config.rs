@@ -134,6 +134,8 @@ pub static KNOBS: &[Knob] = &[
     env("PCDS_RULES", Type::String, "", "", "The rules file; unset: rules.json next to the world."),
     env("PCDS_WEB", Type::String, "", "", "This web page's file; unset: web/index.html next to the server binary."),
     env("PCDS_TRACE", Type::String, "", "", "Set: log every incoming message and RPC."),
+    env("PCDS_AUTO_UPDATE", Type::Enum, "", "off", "on: install each new server release from GitHub as it comes out, into the standby bank, and hand the running world over to it (a hot update: players stay connected). A release that needs a front restart is not installed.").values(&["off", "on"]),
+    env("PCDS_UPDATE_CHECK_HOURS", Type::Int, "h", "24", "With PCDS_AUTO_UPDATE=on: hours between checks for a new release.").range(1.0, 8760.0),
 ];
 
 pub fn knob_for(key: &str) -> Option<&'static Knob> {
@@ -321,15 +323,28 @@ pub fn set(game: &mut Game, autosave: &mut u64, body: &Value) -> Result<(), Valu
     }
     let rules: Rules = serde_json::from_value(rules).map_err(|e| fail("", e.to_string()))?;
     let access: crate::access::Lists = serde_json::from_value(access).map_err(|e| fail("", e.to_string()))?;
-    if rules != game.rules {
-        crate::rules::set(game, rules).map_err(|e| {
-            let key = e.split_once(':').map(|(k, _)| k).filter(|k| leaves(&defaults).iter().any(|(l, _)| l == k)).unwrap_or_default();
-            fail(key, e.clone())
-        })?;
+    let rule_error = |e: String| {
+        let key = e.split_once(':').map(|(k, _)| k).filter(|k| leaves(&defaults).iter().any(|(l, _)| l == k)).unwrap_or_default();
+        fail(key, e.clone())
+    };
+    let rules_changed = rules != game.rules;
+    if rules_changed {
+        rules.validate(&game.data).map_err(rule_error)?;
+    }
+    // All or none: everything is checked above; then access.json, then rules.json is written,
+    // and a rules file that cannot be written puts the access lists back.
+    let old_access = game.access.lists.clone();
+    if access_changed {
+        game.access.set(access).map_err(|e| fail("", e))?;
+    }
+    if rules_changed && let Err(e) = crate::rules::set(game, rules) {
+        if access_changed {
+            let _ = game.access.set(old_access);
+        }
+        return Err(rule_error(e));
     }
     if access_changed {
-        game.access.set(access);
-        crate::enforce(game);
+        crate::bank::enforce(game);
     }
     if let Some(m) = minutes {
         *autosave = m;

@@ -63,18 +63,22 @@ impl Access {
         Access { lists, path }
     }
 
-    pub fn save(&self) {
+    /// The lists into their file. Err: not kept (they would be lost at the next start); the
+    /// lists in memory stay as they were.
+    fn save(&mut self, lists: Lists) -> Result<(), String> {
         if let Some(p) = &self.path {
             let tmp = format!("{p}.tmp");
-            if std::fs::write(&tmp, serde_json::to_string_pretty(&self.lists).unwrap_or_default()).and_then(|_| std::fs::rename(&tmp, p)).is_err() {
-                eprintln!("access: could not write {p}");
-            }
+            std::fs::write(&tmp, serde_json::to_string_pretty(&lists).unwrap_or_default()).and_then(|_| std::fs::rename(&tmp, p)).map_err(|e| {
+                eprintln!("access: could not write {p}: {e}");
+                format!("could not write the access lists ({p}: {e}); nothing changed")
+            })?;
         }
+        self.lists = lists;
+        Ok(())
     }
 
-    pub fn set(&mut self, lists: Lists) {
-        self.lists = Lists { allowed_ips: clean(lists.allowed_ips), whitelist: clean(lists.whitelist), banned_names: clean(lists.banned_names), banned_ips: clean(lists.banned_ips) };
-        self.save();
+    pub fn set(&mut self, lists: Lists) -> Result<(), String> {
+        self.save(Lists { allowed_ips: clean(lists.allowed_ips), whitelist: clean(lists.whitelist), banned_names: clean(lists.banned_names), banned_ips: clean(lists.banned_ips) })
     }
 
     pub fn ip_allowed(&self, ip: &str) -> bool {
@@ -100,7 +104,7 @@ impl Access {
     }
 
     /// Bans a name and, when the player is online, their verified SteamID or their IP.
-    pub fn ban(&mut self, name: &str, steam_id: Option<u64>, ip: Option<&str>) {
+    pub fn ban(&mut self, name: &str, steam_id: Option<u64>, ip: Option<&str>) -> Result<(), String> {
         let mut names = self.lists.banned_names.clone();
         names.push(name.to_string());
         if let Some(id) = steam_id {
@@ -110,15 +114,14 @@ impl Access {
         if let (None, Some(ip)) = (steam_id, ip) {
             ips.push(ip.to_string());
         }
-        self.lists.banned_names = clean(names);
-        self.lists.banned_ips = clean(ips);
-        self.save();
+        self.save(Lists { banned_names: clean(names), banned_ips: clean(ips), ..self.lists.clone() })
     }
 
-    pub fn unban(&mut self, value: &str) {
-        self.lists.banned_names.retain(|n| !n.eq_ignore_ascii_case(value));
-        self.lists.banned_ips.retain(|ip| ip != value);
-        self.save();
+    pub fn unban(&mut self, value: &str) -> Result<(), String> {
+        let mut lists = self.lists.clone();
+        lists.banned_names.retain(|n| !n.eq_ignore_ascii_case(value));
+        lists.banned_ips.retain(|ip| ip != value);
+        self.save(lists)
     }
 }
 
@@ -133,15 +136,23 @@ mod tests {
         assert!(ip_matches("10.0.0.1", "10.0.0.1"));
         let mut a = Access { lists: Lists::default(), path: None };
         assert!(a.ip_allowed("1.2.3.4") && a.name_allowed("Anyone", None));
-        a.set(Lists { allowed_ips: vec!["10.0.0.0/8".into()], whitelist: vec!["Alice".into(), "76561198000000042".into()], ..Default::default() });
+        a.set(Lists { allowed_ips: vec!["10.0.0.0/8".into()], whitelist: vec!["Alice".into(), "76561198000000042".into()], ..Default::default() }).unwrap();
         assert!(a.ip_allowed("10.1.2.3") && !a.ip_allowed("1.2.3.4"));
         assert!(a.name_allowed("alice", None));
         assert!(a.name_allowed("Someone", Some(76561198000000042)));
         assert!(!a.name_allowed("Someone", None));
-        a.ban("Alice", None, Some("10.1.2.3"));
+        a.ban("Alice", None, Some("10.1.2.3")).unwrap();
         assert!(!a.name_allowed("Alice", None) && !a.ip_allowed("10.1.2.3"));
-        a.unban("Alice");
-        a.unban("10.1.2.3");
+        a.unban("Alice").unwrap();
+        a.unban("10.1.2.3").unwrap();
         assert!(a.name_allowed("Alice", None) && a.ip_allowed("10.1.2.3"));
+    }
+
+    /// A ban that cannot be written is refused, not kept in memory only (and lost at restart).
+    #[test]
+    fn a_ban_that_cannot_be_kept_is_refused() {
+        let mut a = Access::load(Some("/nonexistent-dir-pcds/access.json".into()));
+        assert!(a.ban("Mallory", None, None).unwrap_err().contains("nothing changed"));
+        assert!(a.name_allowed("Mallory", None));
     }
 }

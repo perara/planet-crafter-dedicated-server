@@ -11,34 +11,82 @@ use std::time::Duration;
 
 use super::env::{build_id, parse_env};
 use super::{need, say, sleep, wait_for, Ctx, Result};
+use crate::updater;
 
 impl Ctx {
     /// The server runs from run/bin, so rebuilding or upgrading never touches a running server:
-    /// this program and what it loads beside it, as in a release.
+    /// run/bin/pcds (what the units run) with what it loads beside it, as in a release, and the
+    /// banks run/bin/a and run/bin/b, each a whole install, with run/bin/active naming the one
+    /// the front starts (docs/hot-update.md). This program goes into the standby bank and
+    /// becomes the active one when it is newer than the active bank's and in neither bank yet
+    /// (so a rollback stays rolled back); the running server moves to it at its next start, or
+    /// at once with `pcds upgrade --restart`.
     pub fn install_server(&self) -> Result {
         let lib = self.exe.with_file_name("libsteam_api.so");
         if !lib.is_file() {
             return Err(format!("no libsteam_api.so next to {} (make build puts it there)", self.exe.display()));
         }
         let bin = self.run.join("bin");
-        super::mkdir(&bin.join("web"))?;
-        super::install_file(&self.exe, &self.installed())?;
-        super::install_file(&lib, &bin.join("libsteam_api.so"))?;
-        super::install_file(&self.extractor_dll, &bin.join("PcdsExtractor.dll"))?;
-        super::install_file(&self.web, &bin.join("web/index.html"))
+        let launcher = self.installed();
+        if !super::same_file(&self.exe, &launcher) && (!launcher.is_file() || super::modified(&self.exe) > super::modified(&launcher)) {
+            super::mkdir(&bin.join("web"))?;
+            super::install_file(&self.exe, &launcher)?;
+            super::install_file(&lib, &bin.join("libsteam_api.so"))?;
+            if self.extractor_dll.is_file() {
+                super::install_file(&self.extractor_dll, &bin.join("PcdsExtractor.dll"))?;
+            }
+            super::install_file(&self.web, &bin.join("web/index.html"))?;
+        }
+        let banks = self.banks();
+        let active = updater::active(&banks);
+        let in_bank = |b: &str| program_equal(&self.exe, &banks.join(b).join("pcds"));
+        if updater::BANKS.iter().any(|b| in_bank(b)) {
+            return Ok(());
+        }
+        let target = match updater::info(&banks, &active) {
+            None => active.clone(),
+            Some(_) if super::modified(&self.exe) > super::modified(&banks.join(&active).join("pcds")) => updater::other(&active).to_string(),
+            Some(_) => return Ok(()),
+        };
+        self.install_bank(&target, &lib)?;
+        updater::set_active(&banks, &target)?;
+        say(format!("pcds {} installed in bank {target} ({}): the server runs it from its next start", env!("CARGO_PKG_VERSION"), banks.join(&target).display()));
+        Ok(())
+    }
+
+    /// This program as a bank: its files beside the bank, then moved over it (the files keep
+    /// their times: a later build is newer than the bank).
+    fn install_bank(&self, bank: &str, lib: &Path) -> Result {
+        let banks = self.banks();
+        let new = banks.join(format!(".{bank}.new"));
+        let _ = fs::remove_dir_all(&new);
+        super::mkdir(&new.join("web"))?;
+        let copy = |from: &Path, to: &Path| -> Result {
+            fs::copy(from, to).map_err(|e| format!("{} -> {}: {e}", from.display(), to.display()))?;
+            let time = fs::metadata(from).and_then(|m| m.modified()).map_err(|e| e.to_string())?;
+            fs::File::options().write(true).open(to).and_then(|f| f.set_modified(time)).map_err(|e| format!("{}: {e}", to.display()))
+        };
+        let result = (|| {
+            copy(&self.exe, &new.join("pcds"))?;
+            copy(lib, &new.join("libsteam_api.so"))?;
+            copy(&self.web, &new.join("web/index.html"))?;
+            let mut info = crate::bank::info();
+            info["installed"] = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).into();
+            info["from"] = self.exe.display().to_string().into();
+            updater::write_info(&new, &info)?;
+            updater::put(&banks, bank, &new)
+        })();
+        let _ = fs::remove_dir_all(&new);
+        result
     }
 
     /// After an upgrade (a new build or release), the newer program into run/bin.
     pub fn install_newer(&self) -> Result {
-        let installed = self.installed();
-        if !installed.is_file() || super::modified(&self.exe) > super::modified(&installed) {
-            self.install_server()?;
-        }
-        Ok(())
+        self.install_server()
     }
 
-    /// The server in the foreground, as the unit runs it: the installed game's tables, the
-    /// world, the settings. Returns only when it cannot start.
+    /// The server in the foreground, as the unit runs it: the front from the active bank, on
+    /// the installed game's tables, the world, the settings. Returns only when it cannot start.
     pub fn run_server(&self) -> Result {
         let data = self.data_dir()?;
         let world = self.world_file();
@@ -46,9 +94,10 @@ impl Ctx {
             return Err(format!("no world at {}: 'pcds worlds', 'pcds world use NAME' or 'pcds world new NAME'", world.display()));
         }
         self.install_newer()?;
-        let installed = self.installed();
-        let mut server = Command::new(&installed);
-        server.arg("serve").arg(&data).arg(&world);
+        let banks = self.banks();
+        let front = banks.join(updater::active(&banks)).join("pcds");
+        let mut server = Command::new(&front);
+        server.arg("serve").arg(&data).arg(&world).env("PCDS_BANKS", &banks);
         // Started by hand: the settings file (the unit has systemd read it).
         let mut settings = HashMap::new();
         if crate::env("PCDS_ADMIN_TOKEN").is_none() && self.env_file.is_file() {
@@ -59,7 +108,7 @@ impl Ctx {
         // Access lists and rules are the installation's, whichever world runs.
         server.env("PCDS_ACCESS", get("PCDS_ACCESS").unwrap_or_else(|| self.run.join("access.json").display().to_string()));
         server.env("PCDS_RULES", get("PCDS_RULES").unwrap_or_else(|| self.run.join("rules.json").display().to_string()));
-        Err(format!("{}: {}", installed.display(), server.exec()))
+        Err(format!("{}: {}", front.display(), server.exec()))
     }
 
     pub fn setup(&self, args: &[String]) -> Result {
@@ -289,6 +338,15 @@ impl Ctx {
         self.ensure_steamclient();
         say("manage it with: docker exec CONTAINER pcds worlds | players | rules | gui");
         self.run_server()
+    }
+}
+
+/// Whether two programs are the same build: the same size and modification time (a bank's
+/// copy keeps its source's time).
+fn program_equal(a: &Path, b: &Path) -> bool {
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.len() == b.len() && a.modified().ok() == b.modified().ok(),
+        _ => false,
     }
 }
 

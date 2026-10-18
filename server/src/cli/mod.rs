@@ -10,6 +10,7 @@ mod setup;
 mod sha256;
 mod steam;
 mod systemd;
+mod upgrade;
 mod worlds;
 
 use std::fs;
@@ -38,6 +39,11 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
   pcds new [--planet ID] [--start LOCATION] [--seed N] [--set KEY=VALUE]... [--force]
                          replace the current world with a new one (kept in backups/)
   pcds start | stop | restart | status | logs
+  pcds upgrade [VERSION] [--restart] | --rollback | --check
+                         a new server release from GitHub (the latest, or VERSION) into the
+                         standby bank, and the running world handed over to it with nobody
+                         disconnected; --rollback hands it back to the other bank; --restart
+                         installs it and restarts the server instead (everyone reconnects)
   pcds install-service | uninstall-service    start at login, check for game updates hourly
   pcds code | players | save | kick PLAYER | ban PLAYER | unban NAME_OR_IP
   pcds gui | token | config | api METHOD PATH [JSON]
@@ -59,7 +65,8 @@ The server and its tools:
 
 Everything the server keeps lives in run/ of the release or checkout folder (PCDS_HOME
 overrides it): worlds/ (one save per world, with their backups/), server.env, access.json,
-rules.json, data/<game version>/ and the extractor. The game folder is --game DIR,
+rules.json, data/<game version>/, the extractor, and bin/ (the program the units run, and the
+two banks a/ and b/ the server runs from, with bin/active). The game folder is --game DIR,
 PCDS_GAME_DIR, the one used last (run/game-dir), else the Steam library that lists the game.
 ";
 
@@ -160,12 +167,16 @@ impl Ctx {
                 if !self.unit_dir.join(self.unit()).is_file() {
                     return Err("run 'pcds setup' first".into());
                 }
+                // Another installation's unit of the same name is not ours to run.
+                self.check_owner()?;
                 // After `make build` or in a newer release folder: the unit runs the new program.
                 if *what != "stop" {
                     self.install_newer()?;
+                    self.refresh_unit()?;
                 }
                 return passthrough(&mut self.systemctl(&[what, &self.unit()]));
             }
+            ["upgrade", ..] => self.upgrade(&args[1..])?,
             ["status"] => self.status()?,
             ["logs"] => {
                 self.not_in_container("logs")?;
@@ -176,9 +187,9 @@ impl Ctx {
             ["code"] => self.code()?,
             ["players"] => self.players()?,
             ["save"] => println!("{}", self.api("POST", "/api/save", None)?),
-            ["kick", player] => println!("{}", self.api("POST", "/api/kick", Some(&serde_json::json!({"player": player}).to_string()))?),
+            ["kick", player] => println!("{}", self.api("POST", "/api/kick", Some(&serde_json::json!({"name": player}).to_string()))?),
             ["kick", ..] => return usage("pcds kick PLAYER"),
-            ["ban", player] => println!("{}", self.api("POST", "/api/ban", Some(&serde_json::json!({"player": player}).to_string()))?),
+            ["ban", player] => println!("{}", self.api("POST", "/api/ban", Some(&serde_json::json!({"name": player}).to_string()))?),
             ["ban", ..] => return usage("pcds ban PLAYER"),
             ["unban", value] => println!("{}", self.api("POST", "/api/unban", Some(&serde_json::json!({"value": value}).to_string()))?),
             ["unban", ..] => return usage("pcds unban NAME_OR_IP"),

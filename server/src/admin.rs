@@ -2,15 +2,16 @@
 //! (so its web GUI works unchanged): GET /api/status, POST /api/save, /api/stop, /api/kick,
 //! /api/ban, /api/unban, /api/access, /api/settings; and this server's own: GET and POST
 //! /api/rules and /api/config, POST /api/chat and /api/teleport, GET /api/chat/events,
-//! /api/worlds, /api/map and /api/logs (see admin_request in main.rs). Every /api call needs
-//! "Authorization: Bearer <token>". A thread serves HTTP; the game loop answers requests, but
-//! for the logs and the chat (chathooks.rs): a long poll must not hold the game loop.
+//! /api/worlds, /api/map and /api/logs, GET and POST /api/update (see admin_request in bank.rs
+//! and front.rs). Every /api call needs "Authorization: Bearer <token>". A thread in the front
+//! serves HTTP; the front's loop answers requests or passes them to the bank, but for the logs
+//! and the chat (chathooks.rs): a long poll must not hold the loop.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -31,11 +32,14 @@ pub struct Request {
     pub reply: Sender<(u16, String)>,
 }
 
-pub fn start(addr: &str, token: String, web_index: Option<String>, chat: Arc<Feed>) -> std::io::Result<Receiver<Request>> {
+/// The web page's file: the live bank's, so a flip brings its page along.
+pub type Web = Arc<RwLock<Option<String>>>;
+
+pub fn start(addr: &str, token: String, web_index: Web, chat: Arc<Feed>) -> std::io::Result<Receiver<Request>> {
     listen(TcpListener::bind(addr)?, token, web_index, chat)
 }
 
-pub fn listen(listener: TcpListener, token: String, web_index: Option<String>, chat: Arc<Feed>) -> std::io::Result<Receiver<Request>> {
+pub fn listen(listener: TcpListener, token: String, web_index: Web, chat: Arc<Feed>) -> std::io::Result<Receiver<Request>> {
     let (tx, rx) = channel();
     let open = Arc::new(AtomicUsize::new(0));
     std::thread::Builder::new().name("pcds-admin".into()).spawn(move || {
@@ -48,7 +52,8 @@ pub fn listen(listener: TcpListener, token: String, web_index: Option<String>, c
             let (slot, tx, token, web, chat) = (Slot(open.clone()), tx.clone(), token.clone(), web_index.clone(), chat.clone());
             std::thread::spawn(move || {
                 let _slot = slot;
-                let _ = serve(stream, &tx, &token, web.as_deref(), &chat);
+                let page = web.read().unwrap_or_else(|e| e.into_inner()).clone();
+                let _ = serve(stream, &tx, &token, page.as_deref(), &chat);
             });
         }
     })?;
@@ -89,10 +94,14 @@ fn respond(mut stream: TcpStream, status: u16, content_type: &str, body: &str) -
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
+        409 => "Conflict",
+        413 => "Content Too Large",
         503 => "Service Unavailable",
         _ => "Error",
     };
-    write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    // The page holds the token once logged in: no other site may frame it (clickjacking).
+    let frames = "X-Frame-Options: DENY\r\nContent-Security-Policy: frame-ancestors 'none'\r\n";
+    write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{frames}Connection: close\r\n\r\n{body}", body.len())
 }
 
 fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>, chat: &Feed) -> std::io::Result<()> {
@@ -105,7 +114,7 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
     let target = parts.next().unwrap_or("");
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let (path, query) = (path.to_string(), query.to_string());
-    let (mut auth, mut length) = (String::new(), 0usize);
+    let (mut auth, mut length) = (String::new(), Some(0usize));
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header)? == 0 || header.trim().is_empty() {
@@ -114,13 +123,17 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
         if let Some((k, v)) = header.split_once(':') {
             match k.trim().to_ascii_lowercase().as_str() {
                 "authorization" => auth = v.trim().to_string(),
-                "content-length" => length = v.trim().parse().unwrap_or(0),
+                "content-length" => length = v.trim().parse().ok(),
                 _ => {}
             }
         }
     }
-    // Past MAX_REQUEST the reader ends: a longer body fails here, unanswered.
-    let mut body = vec![0u8; length.min(MAX_REQUEST as usize)];
+    let Some(length) = length else { return respond(stream, 400, "application/json", "{\"error\":\"bad Content-Length\"}") };
+    if length as u64 > MAX_REQUEST {
+        return respond(stream, 413, "application/json", &format!("{{\"error\":\"a request body is at most {} KiB\"}}", MAX_REQUEST >> 10));
+    }
+    // Past MAX_REQUEST the reader ends: headers and body together over it fail here.
+    let mut body = vec![0u8; length];
     reader.read_exact(&mut body)?;
     if method == "GET" && (path == "/" || path == "/index.html") {
         return match web.and_then(|p| std::fs::read_to_string(p).ok()) {
@@ -184,7 +197,7 @@ mod tests {
     fn token_size_and_connection_limits() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let rx = listen(listener, "secret".into(), None, crate::chathooks::State::default().feed).unwrap();
+        let rx = listen(listener, "secret".into(), Default::default(), crate::chathooks::Hooks::default().feed).unwrap();
         let wrong = b"GET /api/status HTTP/1.1\r\nAuthorization: Bearer secreT\r\n\r\n";
         assert!(ask(addr, wrong).starts_with("HTTP/1.1 401"));
 
@@ -201,10 +214,15 @@ mod tests {
         assert!(ask(addr, b"GET /api/logs HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 401"));
         assert!(rx.try_recv().is_err());
 
-        // A body past the request limit: closed unanswered, never reaches the game loop.
+        // A body past the request limit, or a length that is no number: answered, never reaches
+        // the game loop.
         let big = [b"POST /api/save HTTP/1.1\r\nAuthorization: Bearer secret\r\nContent-Length: 100000\r\n\r\n".as_slice(), &[b' '; 100_000]].concat();
-        assert_eq!(ask(addr, &big), "");
+        assert!(ask(addr, &big).starts_with("HTTP/1.1 413"));
+        assert!(ask(addr, b"POST /api/save HTTP/1.1\r\nAuthorization: Bearer secret\r\nContent-Length: ten\r\n\r\n").starts_with("HTTP/1.1 400"));
         assert!(rx.try_recv().is_err());
+        // No other site may frame the page.
+        let page = ask(addr, b"GET / HTTP/1.1\r\n\r\n");
+        assert!(page.contains("X-Frame-Options: DENY\r\n") && page.contains("frame-ancestors 'none'"), "{page}");
 
         // MAX_CONNECTIONS idle connections hold every slot: the next is closed unanswered.
         let idle: Vec<TcpStream> = (0..MAX_CONNECTIONS).map(|_| TcpStream::connect(addr).unwrap()).collect();

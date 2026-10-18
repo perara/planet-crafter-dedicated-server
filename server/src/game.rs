@@ -542,6 +542,7 @@ impl Game {
             // Nobody in the game: the clock (game time and network ticks) holds, and every timer
             // with it; it goes on from here when a player is in. Clients still hear it each second.
             self.paused += clock - last;
+            crate::chathooks::drop_replies(self);
             if clock.floor() > last.floor() {
                 self.every_second();
             }

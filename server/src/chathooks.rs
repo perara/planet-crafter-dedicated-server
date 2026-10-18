@@ -1,11 +1,14 @@
 //! Chat hooks: every chat message players send becomes an event for tools outside the game.
-//! The game thread only adds it to a ring of the last KEPT events and returns; one worker
-//! thread POSTs each event to the rules' chat.webhooks (signed with chat.secret) and runs
-//! chat.exec with it, and the admin API's threads read the ring (GET /api/chat/events, a long
-//! poll). A hook more than KEPT events behind loses the oldest; they are counted (`dropped`).
-//! Replies (a webhook's {"reply": "..."}, the exec program's output, POST /api/chat) come back
-//! through a bounded channel and go to the chat at the next tick, from the server (client 0).
-//! Chat text is never a command line: the exec program gets it only as JSON on stdin.
+//! They live in the front (docs/hot-update.md), so they outlive a flip and their event ids go
+//! on. The game (a bank) only queues the event (`State::outbox`), which the bank sends to the
+//! front; the front adds it to a ring of the last KEPT events (`Feed`). One worker thread
+//! POSTs each event to the rules' chat.webhooks (signed with chat.secret) and runs chat.exec
+//! with it, and the admin API's threads read the ring (GET /api/chat/events, a long poll). A
+//! hook more than KEPT events behind loses the oldest; they are counted (`dropped`). Replies
+//! (a webhook's {"reply": "..."}, the exec program's output, POST /api/chat) come back through
+//! a bounded channel to the front, which sends them to the bank; they go to the chat at the
+//! next tick, from the server (client 0). Chat text is never a command line: the exec program
+//! gets it only as JSON on stdin, with an environment of PATH, HOME and LANG only.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -15,7 +18,7 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::game::Game;
@@ -34,7 +37,7 @@ const MAX_WAIT: u64 = 60;
 /// The webhook POST's signature header: "sha256=" and the body's HMAC-SHA256, hex.
 const SIGNATURE: &str = "X-PCDS-Signature";
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Event {
     /// 1, 2, 3... since the server started: a gap is events dropped before they were read.
@@ -58,7 +61,7 @@ struct Ring {
     next: u64,
 }
 
-/// What the game thread, the hooks' worker and the admin API's threads share.
+/// What the front's loop, the hooks' worker and the admin API's threads share.
 pub struct Feed {
     ring: Mutex<Ring>,
     added: Condvar,
@@ -75,7 +78,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Feed {
-    fn push(&self, mut event: Event) {
+    pub fn push(&self, mut event: Event) {
         let mut ring = lock(&self.ring);
         event.id = ring.next;
         ring.next += 1;
@@ -107,18 +110,77 @@ impl Feed {
     }
 }
 
-pub struct State {
+/// The front's side: the feed, and the replies for the bank.
+pub struct Hooks {
     pub feed: Arc<Feed>,
     replies: Receiver<String>,
     worker: bool,
 }
 
-impl Default for State {
+impl Default for Hooks {
     fn default() -> Self {
         let (tx, replies) = sync_channel(REPLIES);
         let ring = Mutex::new(Ring { events: VecDeque::with_capacity(KEPT), next: 1 });
         let feed = Feed { ring, added: Condvar::new(), dropped: AtomicU64::new(0), config: Mutex::new(Chat::default()), replies: tx };
-        State { feed: Arc::new(feed), replies, worker: false }
+        Hooks { feed: Arc::new(feed), replies, worker: false }
+    }
+}
+
+impl Hooks {
+    /// The rules' chat section (from the bank): the hooks use it from their next event on.
+    pub fn configure(&mut self, chat: Chat) {
+        let hooks = !chat.webhooks.is_empty() || !chat.exec.is_empty();
+        *lock(&self.feed.config) = chat;
+        if hooks && !self.worker {
+            // The hooks get what comes from now on.
+            let (feed, last) = (self.feed.clone(), lock(&self.feed.ring).next - 1);
+            match std::thread::Builder::new().name("pcds-chathooks".into()).spawn(move || deliver(&feed, last)) {
+                Ok(_) => self.worker = true,
+                Err(e) => eprintln!("chat hooks: no worker thread ({e}); the hooks are off until the next change of the chat rules"),
+            }
+        }
+    }
+
+    /// The replies waiting for the chat.
+    pub fn replies(&self) -> Vec<String> {
+        self.replies.try_iter().collect()
+    }
+}
+
+/// The game's side, in the bank: events for the front, and replies from it for the chat.
+#[derive(Default, Serialize, Deserialize)]
+pub struct State {
+    /// Events not sent to the front yet (the bank sends them every loop, and before a snapshot).
+    #[serde(skip)]
+    pub outbox: Vec<Event>,
+    /// Replies for the chat at the next tick.
+    #[serde(default)]
+    pub replies: VecDeque<String>,
+    /// The chat rules changed: the bank sends them to the front.
+    #[serde(skip)]
+    pub changed: bool,
+}
+
+/// A reply from the front, into the chat at the next tick (at most REPLIES wait).
+pub fn say(game: &mut Game, text: &str) {
+    let text: String = text.trim().chars().take(MAX_REPLY).collect();
+    if text.is_empty() {
+        return;
+    }
+    if game.ext.chat.replies.len() >= REPLIES {
+        eprintln!("chat: {REPLIES} replies are waiting for the chat; one more was dropped");
+        return;
+    }
+    game.ext.chat.replies.push_back(text);
+}
+
+/// While the world stands still (world.pauseWhenEmpty) nobody is in the game to read a reply:
+/// they are dropped, not kept for whoever joins next.
+pub fn drop_replies(game: &mut Game) {
+    let n = game.ext.chat.replies.len();
+    if n > 0 {
+        game.ext.chat.replies.clear();
+        println!("chat: nobody is in the game; {n} message(s) to the chat dropped");
     }
 }
 
@@ -148,26 +210,19 @@ pub fn chat(game: &mut Game, client: u64, text: &str) {
         command,
         args: args.unwrap_or_default(),
     };
-    game.ext.chat.feed.push(event);
+    game.ext.chat.outbox.push(event);
 }
 
 /// The replies that came in, to everyone, as the server's messages are.
 pub fn tick(game: &mut Game) {
-    while let Ok(text) = game.ext.chat.replies.try_recv() {
+    while let Some(text) = game.ext.chat.replies.pop_front() {
         game.net.rpc_scene(Target::All, "ChatHandler.ReceiveChatMessageClientRpc", &[json!(0), json!(text)]);
     }
 }
 
-/// The rules' chat section changed: the hooks use it from their next event on.
+/// The rules' chat section changed: the bank tells the front's hooks.
 pub fn configure(game: &mut Game) {
-    let chat = game.rules.chat.clone();
-    let hooks = !chat.webhooks.is_empty() || !chat.exec.is_empty();
-    *lock(&game.ext.chat.feed.config) = chat;
-    if hooks && !game.ext.chat.worker {
-        // The hooks get what comes from now on.
-        let (feed, last) = (game.ext.chat.feed.clone(), lock(&game.ext.chat.feed.ring).next - 1);
-        game.ext.chat.worker = std::thread::Builder::new().name("pcds-chathooks".into()).spawn(move || deliver(&feed, last)).is_ok();
-    }
+    game.ext.chat.changed = true;
 }
 
 /// The admin API's chat endpoints, served on its own threads (a long poll must not hold the
@@ -215,22 +270,24 @@ fn deliver(feed: &Feed, mut last: u64) {
             for (i, url) in chat.webhooks.iter().enumerate() {
                 // Never the URL in the log: it may hold a token (as Discord's do).
                 match post(http, url, &body, chat.secret.as_deref(), chat.retries) {
-                    Ok(Some(reply)) => {
-                        feed.say(&reply);
-                    }
+                    Ok(Some(reply)) => reply_or_log(feed, &reply),
                     Ok(None) => {}
                     Err(e) => eprintln!("chat hooks: webhook {} failed: {e}", i + 1),
                 }
             }
             if !chat.exec.is_empty() {
                 match exec(&chat.exec, &body, timeout) {
-                    Ok(reply) => {
-                        feed.say(&reply);
-                    }
+                    Ok(reply) => reply_or_log(feed, &reply),
                     Err(e) => eprintln!("chat hooks: exec failed: {e}"),
                 }
             }
         }
+    }
+}
+
+fn reply_or_log(feed: &Feed, reply: &str) {
+    if !feed.say(reply) {
+        eprintln!("chat hooks: {REPLIES} replies are waiting for the chat; a hook's reply was dropped");
     }
 }
 
@@ -285,29 +342,53 @@ fn post(agent: &ureq::Agent, url: &str, body: &str, secret: Option<&str>, retrie
     }
 }
 
-/// Runs the program (no shell) with the event's JSON and a newline on stdin; its output,
-/// trimmed, is the reply. Killed past the timeout.
+/// Runs the program (no shell, in a process group of its own, with PATH, HOME and LANG as its
+/// whole environment: the server's holds the admin and Steam tokens) with the event's JSON and
+/// a newline on stdin; its output, trimmed, is the reply. Past the timeout its whole group is
+/// killed, so a program that started others leaks none of them.
 fn exec(argv: &[String], body: &str, timeout: Duration) -> Result<String, String> {
-    let mut child = Command::new(&argv[0]).args(&argv[1..]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
-    let (pid, stdin, input) = (child.id(), child.stdin.take(), format!("{body}\n"));
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        // Closed after the write: the program sees the end of its input.
-        if let Some(mut s) = stdin {
-            let _ = s.write_all(input.as_bytes());
-        }
-        let _ = tx.send(child.wait_with_output());
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(out)) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
-        Ok(Ok(out)) => Err(out.status.to_string()),
-        Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => {
-            // SAFETY: a plain signal to our own child, not yet reaped (its waiter has not returned).
-            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-            Err(format!("no exit within {timeout:?}: killed"))
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    let mut command = Command::new(&argv[0]);
+    command.args(&argv[1..]).env_clear().process_group(0).stdin(Stdio::piped()).stdout(Stdio::piped());
+    for key in ["PATH", "HOME", "LANG"] {
+        if let Some(v) = std::env::var_os(key) {
+            command.env(key, v);
         }
     }
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let (stdin, stdout, input) = (child.stdin.take(), child.stdout.take(), format!("{body}\n"));
+    // Closed after the write: the program sees the end of its input.
+    std::thread::spawn(move || stdin.map(|mut s| s.write_all(input.as_bytes())));
+    let (tx, output) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        if let Some(s) = stdout {
+            let _ = s.take(MAX_ANSWER).read_to_end(&mut out);
+        }
+        let _ = tx.send(out);
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                // Not reaped yet (try_wait said so): its id is still its group's.
+                // SAFETY: a plain signal to our own child's process group.
+                unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) };
+                let _ = child.wait();
+                return Err(format!("no exit within {timeout:?}: killed"));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    // A program that exited but left a child holding its output: no answer.
+    let out = output.recv_timeout(deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(100))).map_err(|_| "exited, but its output stayed open (a child of it holds it)".to_string())?;
+    if !status.success() {
+        return Err(status.to_string());
+    }
+    Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
 #[cfg(test)]
@@ -335,10 +416,23 @@ pub mod tests {
         }).collect()
     }
 
+    /// What the bank and the front do with the chat each loop: events to the feed, a change of
+    /// the chat rules to the hooks, the replies back into the game.
+    fn pump(g: &mut Game, h: &mut Hooks) {
+        g.ext.chat.outbox.drain(..).for_each(|e| h.feed.push(e));
+        if std::mem::take(&mut g.ext.chat.changed) {
+            h.configure(g.rules.chat.clone());
+        }
+        for reply in h.replies() {
+            say(g, &reply);
+        }
+    }
+
     /// Ticks until a chat message from the server is queued (5 s at most).
-    fn wait_for_reply(g: &mut Game) -> Vec<String> {
+    fn wait_for_reply(g: &mut Game, h: &mut Hooks) -> Vec<String> {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
+            pump(g, h);
             tick(g);
             let replies: Vec<String> = chat_sent(g).into_iter().filter(|(from, _)| *from == 0).map(|(_, t)| t).collect();
             if !replies.is_empty() {
@@ -373,10 +467,13 @@ pub mod tests {
         let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
     }
 
-    /// As the admin API changes them: checked, then live.
-    fn hooked(g: &mut Game, chat: Chat) {
+    /// As the admin API changes them: checked, then live in the front's hooks.
+    fn hooked(g: &mut Game, chat: Chat) -> Hooks {
         let rules = crate::rules::Rules { chat, ..g.rules.clone() };
         crate::rules::set(g, rules).unwrap();
+        let mut h = Hooks::default();
+        pump(g, &mut h);
+        h
     }
 
     #[test]
@@ -387,7 +484,9 @@ pub mod tests {
         g.net.out.clear();
         send_chat(&mut g, 1, "hello there");
         send_chat(&mut g, 1, "!tp home base");
-        let (events, last) = g.ext.chat.feed.after(0, Duration::ZERO);
+        let mut h = Hooks::default();
+        pump(&mut g, &mut h);
+        let (events, last) = h.feed.after(0, Duration::ZERO);
         assert_eq!(last, 2);
         let e = &events[0];
         assert_eq!((e.id, e.client, e.name.as_deref(), e.steam_id.as_deref(), e.planet.as_str(), e.text.as_str()), (1, 1, Some("Ann"), None, "Prime", "hello there"));
@@ -411,7 +510,7 @@ pub mod tests {
 
     #[test]
     fn a_full_ring_drops_the_oldest_and_counts_them() {
-        let state = State::default();
+        let state = Hooks::default();
         let event = |n: usize| Event { id: 0, time: 0, client: 1, name: None, steam_id: None, planet: "Prime".into(), text: n.to_string(), command: None, args: vec![] };
         (1..=KEPT + 10).for_each(|n| state.feed.push(event(n)));
         let events = next_for_hooks(&state.feed, 0, Duration::ZERO);
@@ -438,10 +537,10 @@ pub mod tests {
             answer(&mut stream, "{\"reply\":\"pong\"}");
             request
         });
-        hooked(&mut g, Chat { webhooks: vec![url], secret: Some("s3cret".into()), ..Chat::default() });
+        let mut h = hooked(&mut g, Chat { webhooks: vec![url], secret: Some("s3cret".into()), ..Chat::default() });
         g.net.out.clear();
         send_chat(&mut g, 1, "ping");
-        assert_eq!(wait_for_reply(&mut g), ["pong"]);
+        assert_eq!(wait_for_reply(&mut g, &mut h), ["pong"]);
         let (headers, body) = server.join().unwrap();
         let header = |k: &str| headers.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"s3cret");
@@ -468,17 +567,19 @@ pub mod tests {
                 answer(&mut stream, "{}");
             }
         });
-        hooked(&mut g, Chat { webhooks: vec![url], timeout_seconds: 10.0, ..Chat::default() });
+        let mut h = hooked(&mut g, Chat { webhooks: vec![url], timeout_seconds: 10.0, ..Chat::default() });
         send_chat(&mut g, 1, "first");
+        pump(&mut g, &mut h);
         request.recv_timeout(Duration::from_secs(5)).expect("the webhook is called");
         // The worker now waits on the listener's 3 s: chat and ticks go on regardless.
         let start = Instant::now();
         for n in 0..20 {
             send_chat(&mut g, 1, &format!("message {n}"));
+            pump(&mut g, &mut h);
             g.tick();
         }
         assert!(start.elapsed() < Duration::from_millis(1000), "{:?} for 20 messages and ticks", start.elapsed());
-        assert_eq!(g.ext.chat.feed.after(0, Duration::ZERO).1, 21);
+        assert_eq!(h.feed.after(0, Duration::ZERO).1, 21);
     }
 
     #[test]
@@ -487,15 +588,46 @@ pub mod tests {
         join(&mut g, 1, "Ann");
         let marker = std::env::temp_dir().join(format!("pcds-chathooks-test-{}", std::process::id()));
         let text = format!("$(touch {}); `touch {}`", marker.display(), marker.display());
-        hooked(&mut g, Chat { exec: vec!["cat".into()], ..Chat::default() });
+        let mut h = hooked(&mut g, Chat { exec: vec!["cat".into()], ..Chat::default() });
         g.net.out.clear();
         send_chat(&mut g, 1, &text);
-        let replies = wait_for_reply(&mut g);
+        let replies = wait_for_reply(&mut g, &mut h);
         let echoed: Value = serde_json::from_str(&replies[0]).unwrap();
         assert_eq!(echoed["text"].as_str(), Some(text.as_str()));
         assert!(!marker.exists(), "chat text is never run");
         // Past the timeout the program is killed.
         assert!(exec(&["sleep".into(), "5".into()], "{}", Duration::from_millis(200)).unwrap_err().contains("killed"));
+    }
+
+    /// The program's environment holds no token of the server's, and past the timeout its
+    /// whole process group dies, children included.
+    #[test]
+    fn the_exec_hook_gets_no_secrets_and_leaks_no_processes() {
+        // SAFETY: a test's own variable; no other test reads it.
+        unsafe { std::env::set_var("PCDS_ADMIN_TOKEN_EXEC_TEST", "s3cret") };
+        let env = exec(&["env".into()], "{}", Duration::from_secs(5)).unwrap();
+        assert!(!env.contains("s3cret") && env.lines().all(|l| ["PATH=", "HOME=", "LANG="].iter().any(|k| l.starts_with(k))), "{env}");
+        let marker = std::env::temp_dir().join(format!("pcds-exec-group-{}", std::process::id()));
+        let script = format!("(sleep 1; touch {}) & sleep 5", marker.display());
+        let start = Instant::now();
+        assert!(exec(&["sh".into(), "-c".into(), script], "{}", Duration::from_millis(200)).unwrap_err().contains("killed"));
+        assert!(start.elapsed() < Duration::from_secs(1), "the timeout holds: {:?}", start.elapsed());
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(!marker.exists(), "the program's own child was killed too");
+    }
+
+    /// While nobody is in the game (world.pauseWhenEmpty), replies are dropped, not kept for
+    /// whoever joins next.
+    #[test]
+    fn replies_are_dropped_while_the_world_stands_still() {
+        let Some(mut g) = test_game(save()) else { return };
+        g.rules.world.pause_when_empty = true;
+        for n in 0..(REPLIES + 10) {
+            say(&mut g, &format!("reply {n}"));
+        }
+        assert_eq!(g.ext.chat.replies.len(), REPLIES, "bounded");
+        g.tick();
+        assert!(g.ext.chat.replies.is_empty());
     }
 
     fn ask(addr: std::net::SocketAddr, request: &str) -> Value {
@@ -512,13 +644,15 @@ pub mod tests {
         join(&mut g, 1, "Ann");
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let _rx = crate::admin::listen(listener, "t".into(), None, g.ext.chat.feed.clone()).unwrap();
+        let mut h = Hooks::default();
+        let _rx = crate::admin::listen(listener, "t".into(), Default::default(), h.feed.clone()).unwrap();
         let poll = std::thread::spawn(move || {
             let start = Instant::now();
             (ask(addr, "GET /api/chat/events?after=0&wait=20 HTTP/1.1\r\nAuthorization: Bearer t\r\n\r\n"), start.elapsed())
         });
         std::thread::sleep(Duration::from_millis(200));
         send_chat(&mut g, 1, "anyone there?");
+        pump(&mut g, &mut h);
         let (answer, waited) = poll.join().unwrap();
         assert!(waited < Duration::from_secs(10), "answered when the event came, not at the end of the wait: {waited:?}");
         assert_eq!((answer["events"][0]["text"].as_str(), answer["last"].as_u64(), answer["dropped"].as_u64()), (Some("anyone there?"), Some(1), Some(0)));
@@ -529,8 +663,10 @@ pub mod tests {
         let ok = ask(addr, &format!("POST /api/chat HTTP/1.1\r\nAuthorization: Bearer t\r\nContent-Length: {}\r\n\r\n{say}", say.len()));
         assert_eq!(ok["ok"], json!(true));
         g.net.out.clear();
+        pump(&mut g, &mut h);
         tick(&mut g);
         assert_eq!(chat_sent(&g), [(0, "Server restarts in 5 minutes".to_string())]);
-        assert!(g.ext.chat.feed.after(1, Duration::ZERO).0.is_empty(), "the server's own messages are not events");
+        pump(&mut g, &mut h);
+        assert!(h.feed.after(1, Duration::ZERO).0.is_empty(), "the server's own messages are not events");
     }
 }

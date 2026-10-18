@@ -1,6 +1,7 @@
-//! Hot-update spike: the game's whole runtime state as one JSON document, and a game rebuilt
-//! from it that goes on exactly as the old one would have (see docs/hot-update.md). The static
-//! tables (data/<version>/) are not in it: the new process loads its own.
+//! The game's whole runtime state as one versioned JSON document (the snapshot a flip carries
+//! from one bank to the next), and a game rebuilt from it that goes on exactly as the old one
+//! would have (docs/hot-update.md). The static tables (data/<version>/) are not in it: the new
+//! process loads its own.
 
 /// An Instant as the seconds since it, and back as that long before now: the clock goes on.
 pub mod instant {
@@ -57,12 +58,20 @@ struct Head {
     game_version: String,
 }
 
-/// The game's state at a tick boundary (main sent everything queued: net.out is empty). An
-/// error leaves the game as it was: it goes on, and the handoff is off.
-pub fn snapshot(g: &Game) -> Result<String, String> {
+/// The game's state at a tick boundary (the bank sent everything queued: net.out is empty),
+/// written to `w`. An error leaves the game as it was: it goes on, and the flip is off.
+pub fn snapshot_to(g: &Game, w: &mut impl std::io::Write) -> Result<(), String> {
     let head = Head { format: FORMAT, game_version: g.net_data.game_version.clone() };
-    let (head, state) = (serde_json::to_string(&head), serde_json::to_string(g));
-    Ok(format!("{}\n{}", head.map_err(|e| e.to_string())?, state.map_err(|e| e.to_string())?))
+    serde_json::to_writer(&mut *w, &head).map_err(|e| e.to_string())?;
+    w.write_all(b"\n").map_err(|e| e.to_string())?;
+    serde_json::to_writer(w, g).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+pub fn snapshot(g: &Game) -> Result<String, String> {
+    let mut out = Vec::new();
+    snapshot_to(g, &mut out)?;
+    String::from_utf8(out).map_err(|e| e.to_string())
 }
 
 /// The previous format's state brought to this one, as firmware migrates its data on boot.
@@ -77,15 +86,25 @@ fn migrate(from: u32, state: serde_json::Value) -> Result<serde_json::Value, Str
 }
 
 /// A game from a snapshot and this process's own tables.
+#[cfg(test)]
 pub fn restore(net_data: NetData, data: GameData, spec: Spec, snapshot: &str, scenes: crate::Scenes) -> Result<Game, String> {
-    let (head, state) = snapshot.split_once('\n').ok_or("not a snapshot")?;
-    let head: Head = serde_json::from_str(head).map_err(|e| e.to_string())?;
+    restore_bytes(net_data, data, spec, snapshot.as_bytes(), scenes)
+}
+
+fn split(snapshot: &[u8]) -> Result<(Head, &[u8]), String> {
+    let at = snapshot.iter().position(|b| *b == b'\n').ok_or("not a snapshot")?;
+    let head: Head = serde_json::from_slice(&snapshot[..at]).map_err(|e| e.to_string())?;
+    Ok((head, &snapshot[at + 1..]))
+}
+
+pub fn restore_bytes(net_data: NetData, data: GameData, spec: Spec, snapshot: &[u8], scenes: crate::Scenes) -> Result<Game, String> {
+    let (head, state) = split(snapshot)?;
     if head.game_version != net_data.game_version {
         return Err(format!("a snapshot on game {}'s tables, these are {}'s", head.game_version, net_data.game_version));
     }
     let mut g: Game = match head.format {
-        FORMAT => serde_json::from_str(state).map_err(|e| e.to_string())?,
-        f => serde_json::from_value(migrate(f, serde_json::from_str(state).map_err(|e| e.to_string())?)?).map_err(|e| e.to_string())?,
+        FORMAT => serde_json::from_slice(state).map_err(|e| e.to_string())?,
+        f => serde_json::from_value(migrate(f, serde_json::from_slice(state).map_err(|e| e.to_string())?)?).map_err(|e| e.to_string())?,
     };
     g.net_data = net_data;
     g.data = data;
@@ -96,6 +115,46 @@ pub fn restore(net_data: NetData, data: GameData, spec: Spec, snapshot: &str, sc
     // world's settings.
     g.change_generation_for_groups();
     Ok(g)
+}
+
+/// Whether a restored game holds exactly the state of the snapshot it came from: both written
+/// as text and read back, compared without the two clocks (seconds since an Instant, which go
+/// on) and without the order of sets and maps (a HashSet's order differs between processes).
+/// Err names the first part that differs. PCDS_FLIP_VERIFY runs it at every flip (tests).
+pub fn verify(g: &Game, snapshot: &[u8]) -> Result<(), String> {
+    use serde_json::Value;
+    fn canon(v: &mut Value) {
+        match v {
+            Value::Array(a) => {
+                a.iter_mut().for_each(canon);
+                a.sort_by_cached_key(|x| x.to_string());
+            }
+            Value::Object(o) => {
+                o.values_mut().for_each(canon);
+                o.sort_keys();
+            }
+            _ => {}
+        }
+    }
+    let state = |v: &mut Value| {
+        if let Some(o) = v.as_object_mut() {
+            o.remove("started");
+        }
+        for c in v["clients"].as_object_mut().into_iter().flat_map(|c| c.values_mut()) {
+            c.as_object_mut().map(|c| c.remove("since"));
+        }
+        canon(v);
+    };
+    let mut sent: Value = serde_json::from_slice(split(snapshot)?.1).map_err(|e| e.to_string())?;
+    let mut restored: Value = serde_json::from_str(&serde_json::to_string(g).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    state(&mut sent);
+    state(&mut restored);
+    if sent == restored {
+        return Ok(());
+    }
+    let keys = sent.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
+    let part = keys.iter().find(|k| sent[k.as_str()] != restored[k.as_str()]).cloned().unwrap_or_default();
+    Err(format!("the restored state differs from the snapshot in {part}"))
 }
 
 #[cfg(test)]
@@ -116,6 +175,11 @@ mod tests {
         let (n, d, s, scenes) = tables();
         let back = super::restore(n, d, s, &text, scenes).unwrap();
         assert_eq!(back.player_object(1), Some(player));
+        super::verify(&back, text.as_bytes()).unwrap();
+        let (n, d, s, scenes) = tables();
+        let mut other = super::restore(n, d, s, &text, scenes).unwrap();
+        other.tmp_inventory_id += 1;
+        assert!(super::verify(&other, text.as_bytes()).unwrap_err().contains("tmp_inventory_id"));
         for (from, to) in [("\"format\":1", "\"format\":99"), (&*format!("\"game_version\":\"{}\"", g.net_data.game_version), "\"game_version\":\"0.1\"")] {
             let (n, d, s, scenes) = tables();
             assert!(super::restore(n, d, s, &text.replacen(from, to, 1), scenes).is_err(), "{to} is refused");

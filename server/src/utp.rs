@@ -186,16 +186,6 @@ impl Utp {
         Ok(Utp { socket, connections: Default::default(), dropped: Vec::new(), outbox: Vec::new(), inbox: mmsg::Inbox::new() })
     }
 
-    /// Blocks until a datagram waits or `timeout` passes: the server's pause between loops, so
-    /// a packet is handled the moment it arrives instead of at the end of a fixed sleep.
-    pub fn wait(&self, timeout: Duration) {
-        use std::os::fd::AsRawFd;
-        let mut fd = libc::pollfd { fd: self.socket.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-        let ts = libc::timespec { tv_sec: timeout.as_secs() as libc::time_t, tv_nsec: timeout.subsec_nanos() as libc::c_long };
-        // SAFETY: one valid pollfd and a valid timespec for the call's duration; no signal mask.
-        unsafe { libc::ppoll(&mut fd, 1, &ts, std::ptr::null()) };
-    }
-
     fn transmit(&mut self, token: &Token, kind: u8, body: &[u8]) {
         let Some(c) = self.connections.get_mut(token) else { return };
         self.outbox.push((c.addr, packet(token, kind, &[body])));

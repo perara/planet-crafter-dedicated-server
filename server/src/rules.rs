@@ -151,6 +151,38 @@ impl Default for Chat {
 /// Rules shown only as set, never with their value (URLs and arguments may hold tokens).
 const HIDDEN: [&str; 3] = ["chat.webhooks", "chat.secret", "chat.exec"];
 
+/// The rules as the admin API shows them: the HIDDEN ones as "(set)" when set.
+pub fn shown(rules: &Rules) -> Value {
+    let (mut v, d) = (serde_json::to_value(rules).unwrap_or_default(), serde_json::to_value(Rules::default()).unwrap_or_default());
+    for key in HIDDEN {
+        let (section, field) = key.split_once('.').unwrap_or_default();
+        if v[section][field] != d[section][field] {
+            v[section][field] = "(set)".into();
+        }
+    }
+    v
+}
+
+/// What is wrong with a rules file serde could not read, naming the rule but never its value
+/// (the message is logged and served by /api/logs, and a value may hold a token).
+fn unreadable(text: &str, e: &serde_json::Error) -> String {
+    let Ok(file) = serde_json::from_str::<Value>(text) else { return format!("not JSON (line {}, column {})", e.line(), e.column()) };
+    let defaults = serde_json::to_value(Rules::default()).unwrap_or_default();
+    let Some(sections) = file.as_object() else { return "not a JSON object of sections".into() };
+    for (section, fields) in sections {
+        let Some(fields) = fields.as_object().filter(|_| defaults[section].is_object()) else { return format!("{section}: no such section") };
+        for (field, value) in fields {
+            if defaults[section].get(field).is_none() {
+                return format!("{section}.{field}: no such rule");
+            }
+            if Rules::default().patched(&serde_json::json!({ section: { field: value } })).is_err() {
+                return format!("{section}.{field}: not a value this rule takes");
+            }
+        }
+    }
+    format!("not the rules' format (line {}, column {})", e.line(), e.column())
+}
+
 pub const CONSEQUENCES: [&str; 4] = ["NoConsequences", "DropSomeItems", "DropAllItems", "DeleteSaveFile"];
 
 impl Rules {
@@ -196,7 +228,7 @@ impl Rules {
     pub fn load(path: &str) -> Result<Rules, String> {
         match std::fs::read_to_string(path) {
             Ok(text) if text.trim().is_empty() => Ok(Rules::default()),
-            Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{path}: {e}")),
+            Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{path}: {}", unreadable(&text, &e))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Rules::default()),
             Err(e) => Err(format!("{path}: {e}")),
         }
@@ -329,8 +361,30 @@ mod tests {
     }
 
     #[test]
+    fn a_bad_rules_file_is_named_without_its_values() {
+        let dir = std::env::temp_dir().join(format!("pcds-rules-load-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rules.json").to_string_lossy().to_string();
+        for (text, says) in [
+            (r#"{"chat": {"webhooks": "https://example.com/hook/t0ken"}}"#, "chat.webhooks: not a value this rule takes"),
+            (r#"{"chat": {"secret": 5}}"#, "chat.secret: not a value"),
+            (r#"{"sped": {}}"#, "sped: no such section"),
+            (r#"{"speed": {"grwoth": "t0ken"}}"#, "speed.grwoth: no such rule"),
+            (r#"{"chat": {"secret": "t0ken""#, "not JSON"),
+        ] {
+            std::fs::write(&path, text).unwrap();
+            let e = Rules::load(&path).unwrap_err();
+            assert!(e.contains(says) && !e.contains("t0ken"), "{text}: {e}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn chat_hook_targets_and_secrets_are_never_shown() {
         let r = Rules::default().patched(&serde_json::json!({"chat": {"webhooks": ["https://example.com/hook/t0ken"], "secret": "s3cret", "exec": ["on-chat", "--key=k3y"], "commandPrefix": "!"}})).unwrap();
+        let api = shown(&r);
+        assert_eq!((api["chat"]["webhooks"].as_str(), api["chat"]["secret"].as_str(), api["chat"]["exec"].as_str(), api["chat"]["commandPrefix"].as_str()), (Some("(set)"), Some("(set)"), Some("(set)"), Some("!")));
+        assert_eq!(shown(&Rules::default())["chat"]["webhooks"], serde_json::json!([]));
         let shown = changes(&r).join(" ");
         assert_eq!(shown, "chat.webhooks=(set) chat.secret=(set) chat.exec=(set) chat.commandPrefix=\"!\"");
     }
