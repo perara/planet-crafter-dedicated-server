@@ -1,6 +1,6 @@
 //! The game tables read from the game's own files, with no game running:
-//! `pcds-server read-game GAME_DIR OUT_DIR` writes what `pcds extract` gets from the running
-//! game (extractor/*.cs), table by table, so `tables-diff` can hold one against the other.
+//! `pcds read-game GAME_DIR OUT_DIR` writes every table the server loads (what the Wine-era
+//! extractor got from the running game), and `tables-diff` holds two such folders side by side.
 
 use std::path::Path;
 use std::rc::Rc;
@@ -11,6 +11,12 @@ use super::dotnet::{Assemblies, TypeName};
 use super::graph::Graph;
 use super::serial::{enum_name, read_fields, Layouts, Raw};
 use super::unity::{self, Data, Id};
+
+/// The format of what read_game writes, in its `tables-format` file: one more whenever any
+/// file it writes changes (a field, a section, a value read another way). A server loads only
+/// tables of its own format (main.rs), and `pcds update` reads them again with the active
+/// bank's program when the format differs.
+pub const TABLES_FORMAT: u32 = 1;
 
 /// GameData.MaxDepth.
 const MAX_DEPTH: usize = 6;
@@ -34,7 +40,7 @@ pub struct Ctx {
     graphed: std::collections::HashSet<usize>,
 }
 
-/// The shortest decimal that reads back as this float (as the extractor's JSON writes floats).
+/// The shortest decimal that reads back as this float (as the game's JSON writes floats).
 pub fn single(f: f32) -> Value {
     format!("{f}").parse::<f64>().map(|v| json!(v)).unwrap_or(Value::Null)
 }
@@ -96,7 +102,7 @@ impl Ctx {
         }))
     }
 
-    /// GameData.Value: the value as JSON, None when the extractor leaves the field out.
+    /// GameData.Value: the value as JSON, None when the field is left out (as the game's GameData.Value leaves it).
     pub fn value(&mut self, file: usize, v: &Raw, depth: usize) -> Result<Option<Value>, String> {
         Ok(Some(match v {
             Raw::Bool(b) => json!(b),
@@ -291,7 +297,8 @@ fn pretty(v: &Value) -> String {
 }
 
 /// Reads every table the server needs from the game's files into OUT (netdata.json,
-/// rpcs.json, gamedata.json, connection-request.hex, buildid); returns the game version.
+/// rpcs.json, gamedata.json, scenes/, wrecks.json, connection-request.hex, buildid); returns
+/// the game version.
 /// Anything it cannot read is an error.
 pub fn read_game(game: &Path, out: &Path) -> Result<String, String> {
     let mut ctx = Ctx::open(game).map_err(|e| e.to_string())?;
@@ -361,10 +368,11 @@ pub fn read_game(game: &Path, out: &Path) -> Result<String, String> {
     write(out, "wrecks.json", &pretty(&wrecks))?;
     write(out, "connection-request.hex", &request)?;
     write(out, "buildid", &build)?;
+    write(out, "tables-format", &TABLES_FORMAT.to_string())?;
     Ok(version)
 }
 
-/// Debug: a script class's serialized field layout (pcds-server native-layout GAME_DIR NS.CLASS).
+/// Debug: a script class's serialized field layout (pcds native-layout GAME_DIR NS.CLASS).
 pub fn layout(args: &[String]) {
     let ctx = Ctx::open(Path::new(&args[0])).expect("open game");
     let (ns, class) = args[1].rsplit_once('.').unwrap_or(("", &args[1]));
@@ -380,7 +388,7 @@ pub fn layout(args: &[String]) {
     }
 }
 
-/// Debug: a method's IL, every method's for `*` (pcds-server native-il GAME_DIR [ASSEMBLY!]NS.CLASS METHOD).
+/// Debug: a method's IL, every method's for `*` (pcds native-il GAME_DIR [ASSEMBLY!]NS.CLASS METHOD).
 pub fn il(args: &[String]) {
     let ctx = Ctx::open(Path::new(&args[0])).expect("open game");
     // ASSEMBLY!NS.CLASS: a class of that assembly (names several assemblies define).

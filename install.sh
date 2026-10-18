@@ -116,8 +116,10 @@ main() {
   url="https://github.com/$REPO/releases/download/$tag/pcds-$tag-linux-x86_64.tar.gz"
   say "downloading $tag"
   curl -fsSL -o "$tmp/pcds.tar.gz" "${PCDS_TARBALL_URL:-$url}"
-  # PCDS_TARBALL_URL (a test build) has no published checksum.
-  if [[ -z "${PCDS_TARBALL_URL:-}" ]] && curl -fsSL -o "$tmp/pcds.tar.gz.sha256" "$url.sha256" 2> /dev/null; then
+  # Every release publishes its checksum: without it nothing is installed. PCDS_TARBALL_URL (a
+  # test build) has none.
+  if [[ -z "${PCDS_TARBALL_URL:-}" ]]; then
+    curl -fsSL -o "$tmp/pcds.tar.gz.sha256" "$url.sha256" || die "no checksum for $tag at $url.sha256: nothing installed"
     (cd "$tmp" && sed "s|  .*|  pcds.tar.gz|" pcds.tar.gz.sha256 | sha256sum -c --quiet -) || die "the download does not match its checksum"
   fi
   mkdir -p "$dir"

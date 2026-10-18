@@ -1,10 +1,10 @@
 //! scenes/<planet>.json, the sections the server reads (GameData.WaterVolumes, GameData.OreVeins,
 //! Generation.InstanceScenes), from every scene the planet can load: its scene and all its
-//! sectors. The extractor saw only the sectors loaded around it, so this is a superset of its
-//! dump. Water volumes and veins are in the scenes' static state (what terraformation, story
+//! sectors. The Wine-era extractor saw only the sectors loaded around it, so this is a superset
+//! of what it dumped. Water volumes and veins are in the scenes' static state (what terraformation, story
 //! events and loaded sectors move or show at runtime is the server's to apply, from
 //! "activators"); instance scenes as they are once loaded (their Awakes run, before
-//! InitSceneVariables), as the extractor dumped them.
+//! InitSceneVariables), as they are in the running game.
 
 use std::collections::HashMap;
 

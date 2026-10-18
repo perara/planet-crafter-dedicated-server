@@ -115,6 +115,17 @@ pub fn compatible(info: &Value, live: &Value) -> Result<(), String> {
             info["tag"].as_str().unwrap_or("VERSION")
         ));
     }
+    // The tables on disk are the running bank's: a release that reads another format would
+    // refuse them (a live of Null: a HELLO checked on its own, nothing runs yet).
+    if !live.is_null() && info["tablesFormat"] != live["tablesFormat"] {
+        let theirs = |v: &Value| v.as_u64().map_or("none (a pcds from before table formats)".to_string(), |f| f.to_string());
+        return Err(format!(
+            "{what} reads game tables of format {}, the running server's are of format {}: it cannot take over the running world. pcds upgrade --restart {} installs it, reads the game tables again and restarts the server, which disconnects every player",
+            theirs(&info["tablesFormat"]),
+            theirs(&live["tablesFormat"]),
+            info["tag"].as_str().unwrap_or("VERSION")
+        ));
+    }
     let format = live["format"].as_u64().unwrap_or(0);
     if !info["reads"].as_array().is_some_and(|r| r.iter().any(|f| f.as_u64() == Some(format))) {
         return Err(format!(
@@ -335,6 +346,32 @@ pub fn clear_rolled_back(banks: &Path) -> Result<(), String> {
     }
 }
 
+/// A start that ran bank `to` because bank `from` could not start the world (the front's boot,
+/// or `pcds run` when the active bank's front could not): banks/fallback, {"from", "to",
+/// "reason", "at"}. Shown (describe, so /api/status and `pcds status`) while `to` is the active
+/// bank; `pcds upgrade` clears it.
+pub fn note_fallback(banks: &Path, from: &str, to: &str, reason: &str) -> Result<(), String> {
+    let at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let note = json!({"from": from, "to": to, "reason": reason, "at": at});
+    let _lock = lock(banks)?;
+    crate::cli::replace_file(&banks.join("fallback"), (note.to_string() + "\n").as_bytes(), 0o644)
+}
+
+/// The fallback note, while the bank it started is the active one.
+pub fn fallback(banks: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(banks.join("fallback")).ok()?;
+    serde_json::from_str(&text).ok().filter(|v: &Value| v["to"] == active(banks).as_str())
+}
+
+pub fn clear_fallback(banks: &Path) -> Result<(), String> {
+    let path = banks.join("fallback");
+    let _lock = lock(banks)?;
+    match std::fs::remove_file(&path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{}: {e}", path.display())),
+        _ => Ok(()),
+    }
+}
+
 /// What the automatic update does with the latest release `tag` after a rollback: skip it
 /// (Some: why) when it is the release rolled back from; a later one clears the note.
 pub fn auto_skips(banks: &Path, tag: &str) -> Result<Option<String>, String> {
@@ -352,16 +389,36 @@ pub fn other(bank: &str) -> &'static str {
     if bank == "a" { "b" } else { "a" }
 }
 
-/// Whether the tag is a later release than the version ("v0.6.0" after "0.5.0").
+/// Whether the tag is a later release than the version ("v0.6.0" after "0.5.0"), as semantic
+/// versions order them: a pre-release comes before its release ("1.0.0-rc.1" < "1.0.0").
 pub fn newer(tag: &str, version: &str) -> bool {
-    let numbers = |v: &str| v.trim_start_matches('v').split(['.', '-']).map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
-    numbers(tag) > numbers(version)
+    version_key(tag) > version_key(version)
+}
+
+/// A pre-release's part: numbers by value, and below words (semver 11.4).
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum Part<'a> {
+    Number(u64),
+    Word(&'a str),
+}
+
+/// What versions are ordered by: MAJOR.MINOR.PATCH, then whether it is a release (above its
+/// pre-releases), then the pre-release's parts in turn (fewer parts first when the rest are
+/// equal). Build metadata (+...) does not count.
+fn version_key(v: &str) -> (Vec<u64>, bool, Vec<Part<'_>>) {
+    let v = v.trim_start_matches('v');
+    let v = v.split_once('+').map_or(v, |(v, _)| v);
+    let (core, pre) = v.split_once('-').map_or((v, None), |(c, p)| (c, Some(p)));
+    let mut numbers: Vec<u64> = core.split('.').map(|p| p.parse().unwrap_or(0)).collect();
+    numbers.resize(numbers.len().max(3), 0);
+    let parts = pre.map(|p| p.split('.').map(|x| x.parse().map_or(Part::Word(x), Part::Number)).collect()).unwrap_or_default();
+    (numbers, pre.is_none(), parts)
 }
 
 /// The admin API's view of the banks.
 pub fn describe(banks: &Path) -> Value {
     let installed: Vec<Value> = BANKS.iter().map(|b| json!({"bank": b, "info": info(banks, b)})).collect();
-    json!({"dir": banks, "active": active(banks), "installed": installed})
+    json!({"dir": banks, "active": active(banks), "installed": installed, "fallback": fallback(banks)})
 }
 
 #[cfg(test)]
@@ -541,6 +598,12 @@ pub mod tests {
         // A release that cannot read the running world's snapshot format.
         let old: Value = serde_json::from_str(r#"{"protocol": 2, "format": 7}"#).unwrap();
         assert!(compatible(&super::info(&banks, "b").map(|mut i| { i["protocol"] = crate::ipc::PROTOCOL.into(); i }).unwrap(), &old).unwrap_err().contains("format 7"));
+        // A release that reads game tables of another format than the running bank's.
+        let tables = |f: u64| json!({"version": "9.9.9", "tag": "v9.9.9", "protocol": crate::ipc::PROTOCOL, "reads": [1], "tablesFormat": f});
+        let live = json!({"format": 1, "tablesFormat": 1});
+        assert!(compatible(&tables(1), &live).is_ok());
+        let e = compatible(&tables(2), &live).unwrap_err();
+        assert!(e.contains("tables of format 2") && e.contains("are of format 1") && e.contains("pcds upgrade --restart v9.9.9"), "{e}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -617,12 +680,36 @@ pub mod tests {
     }
 
     #[test]
+    fn a_fallback_is_noted_while_its_bank_is_active() {
+        let dir = test_dir("fallback");
+        set_active(&dir, "a").unwrap();
+        note_fallback(&dir, "b", "a", "could not start the world").unwrap();
+        let shown = describe(&dir)["fallback"].clone();
+        assert_eq!((shown["from"].as_str(), shown["to"].as_str(), shown["reason"].as_str()), (Some("b"), Some("a"), Some("could not start the world")));
+        // A flip or an upgrade to the other bank: no longer what runs.
+        set_active(&dir, "b").unwrap();
+        assert!(describe(&dir)["fallback"].is_null());
+        set_active(&dir, "a").unwrap();
+        clear_fallback(&dir).unwrap();
+        assert!(fallback(&dir).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn the_active_bank_and_versions() {
         let dir = test_dir("active");
         assert_eq!(active(&dir), "a");
         set_active(&dir, "b").unwrap();
         assert_eq!((active(&dir), other("b"), other("a")), ("b".to_string(), "a", "b"));
         assert!(newer("v0.6.0", "0.5.0") && newer("v0.10.0", "0.9.9") && !newer("v0.5.0", "0.5.0") && !newer("v0.4.9", "0.5.0"));
+        // Semantic version order: a pre-release before its release, its parts one by one.
+        let order = ["0.9.9", "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0", "v1.0.1", "1.1"];
+        for (i, a) in order.iter().enumerate() {
+            for (j, b) in order.iter().enumerate() {
+                assert_eq!(newer(b, a), j > i, "{b} after {a}");
+            }
+        }
+        assert!(!newer("1.0.0+build.2", "1.0.0") && !newer("v1.0", "1.0.0"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

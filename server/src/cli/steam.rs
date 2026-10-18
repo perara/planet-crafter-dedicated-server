@@ -252,12 +252,13 @@ impl Ctx {
         self.game_dir(Some(&game)).map(|_| ())
     }
 
-    /// A downloaded game follows updates with the remembered login (no prompt; skipped when
-    /// Steam wants the password again).
-    pub fn update_downloaded_game(&self) {
-        let Ok(user) = fs::read_to_string(self.run.join("steam-user")) else { return };
+    /// A downloaded game follows updates with the remembered login (no prompt: when Steam wants
+    /// the password again it fails). Err when steamcmd fails, so the update check's unit shows
+    /// it failed.
+    pub fn update_downloaded_game(&self) -> Result {
+        let Ok(user) = fs::read_to_string(self.run.join("steam-user")) else { return Ok(()) };
         if !self.steamcmd_sh().is_file() {
-            return;
+            return Err(format!("the game was downloaded with steamcmd, which is gone from {}: pcds setup --steam-user {} gets it again", self.steamcmd.display(), user.trim()));
         }
         let log = self.steamcmd.join("update.log");
         let ran = fs::File::create(&log).and_then(|out| {
@@ -271,8 +272,10 @@ impl Ctx {
                 .stderr(err)
                 .status()
         });
-        if !ran.is_ok_and(|s| s.success()) {
-            say(format!("the game update through steamcmd did not run (see {})", log.display()));
+        match ran {
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => Err(format!("the game update through steamcmd failed ({s}; see {}). If Steam wants the password again: pcds setup --steam-user {}", log.display(), user.trim())),
+            Err(e) => Err(format!("the game update through steamcmd did not run: {e} ({})", log.display())),
         }
     }
 }

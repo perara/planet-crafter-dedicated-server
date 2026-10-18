@@ -33,7 +33,7 @@ impl Ctx {
             self.print_banks(None);
             return Ok(());
         }
-        let running = self.active();
+        let running = self.active()?;
         if running && !restart {
             let body = if rollback { json!({"rollback": true}) } else { json!({"version": version}) };
             let answer: Value = serde_json::from_str(&self.api("POST", "/api/update", Some(&body.to_string()))?).map_err(|e| e.to_string())?;
@@ -49,6 +49,7 @@ impl Ctx {
             let info = updater::info(&banks, &target).ok_or_else(|| format!("bank {target} holds no release to go back to"))?;
             updater::set_active(&banks, &target)?;
             updater::set_rolled_back(&banks, &active)?;
+            updater::clear_fallback(&banks)?;
             say(format!("bank {target} ({}) is the active one now", describe(&info)));
         } else {
             let release = updater::lookup(&self.releases_url(), version.as_deref())?;
@@ -56,9 +57,13 @@ impl Ctx {
             let info = updater::install(&release, &banks, &target, None)?;
             updater::set_active(&banks, &target)?;
             updater::clear_rolled_back(&banks)?;
+            updater::clear_fallback(&banks)?;
             say(format!("{} installed in bank {target} (sha256 checked), the active one now: {}", release.tag, describe(&info)));
         }
         if running {
+            // The release now active may read another tables format (a stopped server gets
+            // them at 'pcds start').
+            self.ensure_tables(None)?;
             say("restarting the server: every player is disconnected and reconnects");
             return self.restart_if_running();
         }
@@ -73,7 +78,7 @@ impl Ctx {
     }
 
     /// The bank the running front runs the world in.
-    fn live_bank(&self) -> Option<String> {
+    pub fn live_bank(&self) -> Option<String> {
         let status: Value = serde_json::from_str(&self.api("GET", "/api/status", None).ok()?).ok()?;
         status["banks"]["live"]["bank"].as_str().map(str::to_string)
     }
@@ -121,7 +126,16 @@ impl Ctx {
                 None => println!("bank {bank}: empty{marks}"),
             }
         }
+        // The running front's view, else the note on disk.
+        let fallback = live.map(|l| l["fallback"].clone()).filter(|f| !f.is_null()).or_else(|| updater::fallback(&banks));
+        if let Some(f) = fallback {
+            println!("started from bank {} because bank {} {}", text(&f["to"]), text(&f["from"]), text(&f["reason"]));
+        }
     }
+}
+
+fn text(v: &Value) -> String {
+    v.as_str().map_or_else(|| v.to_string(), str::to_string)
 }
 
 /// "pcds 0.6.0 (v0.6.0), front protocol 2, snapshot format 1, installed 2026-10-18 15:00".

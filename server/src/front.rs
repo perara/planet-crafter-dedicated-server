@@ -53,6 +53,16 @@ const MAX_SPLIT: usize = 1 << 20;
 /// A client's frames waiting for the bank (a stalled or flipping world) past this: the client
 /// is dropped, not the world.
 const MAX_CLIENT_QUEUE: usize = 16 << 20;
+/// At a stop, the live bank gets this long to take STOP and save, then as long again to end,
+/// before it is killed: 60 s in all, under the supervisor's 20 s for orphans (cli/setup.rs
+/// BANKS_GRACE) and systemd's TimeoutStopSec=90 (and Docker's --stop-timeout 90), so
+/// systemd's or Docker's kill comes last.
+pub const STOP_GRACE: Duration = Duration::from_secs(30);
+
+/// The front's exit code when no bank could start the world at its boot: `pcds run` then
+/// starts the other bank's own front (a release whose front or bank cannot run, cli/setup.rs).
+pub const BOOT_FAILED: i32 = 75;
+
 /// A new bank's tables and world load in seconds; the restore must be READY within this.
 const LOAD_DEADLINE: Duration = Duration::from_secs(120);
 const READY_DEADLINE: Duration = Duration::from_secs(5);
@@ -183,6 +193,16 @@ pub fn run(args: &[String]) {
         eprintln!("usage: pcds serve DATA_DIR SAVE.json (settings: see the source header of main.rs)");
         std::process::exit(2);
     };
+    // Settings that are not what they should be stop the start, before anything is opened.
+    if let Err(e) = crate::config::check_env(crate::env) {
+        eprintln!("{e}");
+        std::process::exit(2);
+    }
+    // One server per world, for this front's life (released when the process ends).
+    let _world = crate::cli::hold(std::path::Path::new(&format!("{save}.lock")), "another server runs this world").unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1)
+    });
     // SAFETY: set before any other thread exists; the Steam API reads it during init.
     unsafe { std::env::set_var("SteamAppId", APP_ID) };
     let stop = Arc::new(AtomicBool::new(false));
@@ -211,7 +231,7 @@ impl Front {
     fn new(dir: &str, save: &str, banks: Option<PathBuf>, utp: Option<Utp>, port: u16, stop: Arc<AtomicBool>) -> Front {
         let (tx, rx) = std::sync::mpsc::channel();
         let auto = crate::env("PCDS_AUTO_UPDATE").as_deref() == Some("on");
-        let every = Duration::from_secs(crate::env("PCDS_UPDATE_CHECK_HOURS").and_then(|h| h.parse::<u64>().ok()).unwrap_or(24).clamp(1, 8760) * 3600);
+        let every = Duration::from_secs(crate::config::env_number("PCDS_UPDATE_CHECK_HOURS") * 3600);
         let autosave_minutes = crate::autosave_start();
         Front {
             dir: dir.to_string(),
@@ -323,7 +343,13 @@ impl Front {
                         self.last_snapshot = Some((fd, at));
                     }
                     if bank != first {
-                        eprintln!("bank {first} could not start the world ({}); running bank {bank}, which ran before", tried.join("; "));
+                        let reason = tried.join("; ");
+                        eprintln!("bank {first} could not start the world ({reason}); running bank {bank}, which ran before");
+                        if let Some(dir) = &self.banks
+                            && let Err(e) = updater::note_fallback(dir, &first, &bank, &format!("could not load the world: {reason}"))
+                        {
+                            eprintln!("banks: {e}");
+                        }
                     }
                     self.game_version = b.hello["gameVersion"].as_str().unwrap_or("").to_string();
                     *self.web.write().unwrap_or_else(|e| e.into_inner()) = self.web_page(&bank);
@@ -345,7 +371,7 @@ impl Front {
         if kept.is_some() {
             eprintln!("they were given the world kept in {} at the last stop; move it away to start from the save instead", snapshot_path(&self.save));
         }
-        std::process::exit(1);
+        std::process::exit(BOOT_FAILED);
     }
 
     /// The snapshot keep_snapshot() left beside the save, when it is newer than the save (an
@@ -446,7 +472,7 @@ impl Front {
         if crate::env("PCDS_STEAM").as_deref() == Some("off") {
             return;
         }
-        let session: u32 = crate::env("PCDS_SESSION").and_then(|s| s.parse().ok()).unwrap_or(4242);
+        let session = crate::config::env_number("PCDS_SESSION") as u32;
         match steam_login(&self.game_version, session) {
             Ok((steam, listen, code)) => {
                 self.invite_code = Some(code);
@@ -1295,7 +1321,7 @@ impl Front {
         }
         if let Some(mut b) = self.live.take() {
             b.link.queue(ipc::STOP, 0, &[], None, 0);
-            let deadline = Instant::now() + Duration::from_secs(60);
+            let deadline = Instant::now() + STOP_GRACE;
             loop {
                 if b.link.flush().is_err() || Instant::now() > deadline {
                     break;
@@ -1315,7 +1341,7 @@ impl Front {
                     end(&mut b);
                 }
                 _ => {
-                    let deadline = Instant::now() + Duration::from_secs(60);
+                    let deadline = Instant::now() + STOP_GRACE;
                     while Instant::now() < deadline && matches!(b.child.try_wait(), Ok(None)) {
                         std::thread::sleep(Duration::from_millis(50));
                     }
