@@ -673,7 +673,7 @@ pub fn refresh_generation_multiplier(game: &mut Game, machine: i32, item: i32, m
 /// DeconstructStatus.
 const OK: i32 = 0;
 const SOMETHING_INSIDE: i32 = 1;
-const INVENTORY_NOT_EMPTY: i32 = 2;
+pub(crate) const INVENTORY_NOT_EMPTY: i32 = 2;
 
 /// ActionDeconstructible.CheckDeconstructOnServer: 0 Ok, 1 SomethingInside, 2 InventoryNotEmpty.
 pub fn deconstruct_status(game: &Game, wo: i32) -> i32 {

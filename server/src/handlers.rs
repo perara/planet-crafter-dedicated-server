@@ -330,8 +330,195 @@ pub fn default_colors_tick(game: &mut Game) {
 #[cfg(test)]
 mod tests {
     use crate::game::Args;
-    use crate::net::VarValue;
-    use serde_json::json;
+    use crate::net::{enc, Target, VarValue};
+    use crate::testkit::*;
+    use serde_json::{json, Value};
+
+    /// Text and linked groups set on a container's proxies, colour and setting on a building's:
+    /// the variables everyone sees, the world object, the save, and the variables a reloaded
+    /// world spawns with.
+    #[test]
+    fn proxies_set_the_object_its_variables_and_the_save() {
+        let Some((mut g, _)) = world() else { return };
+        let container = group_with(&g, &["TextProxy", "LinkedGroupsProxy"], true);
+        let building = group_with(&g, &["ColorProxy", "SettingProxy"], true);
+        let (a, net_a) = place(&mut g, &container, [570.0, 3.0, 500.0]);
+        let (b, net_b) = place(&mut g, &building, [580.0, 3.0, 500.0]);
+        let iron = hash(&g, "Iron");
+        send_on(&mut g, 1, net_a, "TextProxy.SetTextServerRpc", &[json!("Ore@depot|1")]);
+        send_on(&mut g, 1, net_a, "LinkedGroupsProxy.SetLinkedGroupsServerRpc", &[json!([iron])]);
+        send_on(&mut g, 1, net_b, "ColorProxy.SetColorServerRpc", &[json!([0.25, 0.5, 0.75, 0.1])]);
+        send_on(&mut g, 1, net_b, "SettingProxy.SetSettingServerRpc", &[json!(3)]);
+        assert_eq!((g.wos[&a].text.as_str(), g.wos[&a].linked_groups.clone()), ("Ore depot 1", Some(vec![g.data.group("Iron").unwrap()])), "save delimiters cleaned");
+        assert_eq!((g.wos[&b].color, g.wos[&b].setting), ([0.25, 0.5, 0.75, 1.0], 3), "colour opaque");
+        assert_eq!(var(&g, net_a, "TextProxy", "_text"), enc::fixed_string("Ore depot 1", 128));
+        assert_eq!(list(&g, net_a, "LinkedGroupsProxy", "_linkedGroupsHash"), vec![enc::int(iron)]);
+        assert_eq!(var(&g, net_b, "SettingProxy", "_setting"), enc::int(3));
+        let saved = saved_object(&mut g, a).unwrap();
+        assert_eq!((&saved["text"], &saved["liGrps"]), (&json!("Ore depot 1"), &json!("Iron")));
+        assert_eq!(saved_object(&mut g, b).unwrap()["set"], json!(3));
+
+        let mut g = reload(&mut g);
+        join(&mut g, 1, "Ann");
+        let (net_a, net_b) = (g.wos[&a].net.unwrap(), g.wos[&b].net.unwrap());
+        assert_eq!(var(&g, net_a, "TextProxy", "_text"), enc::fixed_string("Ore depot 1", 128));
+        assert_eq!(list(&g, net_a, "LinkedGroupsProxy", "_linkedGroupsHash"), vec![enc::int(iron)]);
+        assert_eq!(var(&g, net_b, "ColorProxy", "_color"), enc::color([0.25, 0.5, 0.75, 1.0]));
+        assert_eq!(var(&g, net_b, "SettingProxy", "_setting"), enc::int(3));
+        // A text past the 128 bytes the variable holds (125 after its length) is cut there, on
+        // the object too.
+        send_on(&mut g, 1, net_a, "TextProxy.SetTextServerRpc", &[json!("y".repeat(300))]);
+        assert_eq!(g.wos[&a].text.len(), 125);
+    }
+
+    #[test]
+    fn exchange_platforms_keep_their_linked_planet() {
+        let Some((mut g, _)) = world() else { return };
+        let group = group_with(&g, &["LinkedPlanetProxy"], true);
+        let (id, net) = place(&mut g, &group, [570.0, 3.0, 500.0]);
+        let selenea = crate::data::stable_hash("Selenea");
+        send_on(&mut g, 1, net, "LinkedPlanetProxy.SetLinkedPlanetServerRpc", &[json!(selenea)]);
+        assert_eq!(var(&g, net, "LinkedPlanetProxy", "_linkedPlanet"), enc::int(selenea));
+        assert_eq!(saved_object(&mut g, id).unwrap()["liPlanet"], json!(selenea));
+        let g = reload(&mut g);
+        assert_eq!(var(&g, g.wos[&id].net.unwrap(), "LinkedPlanetProxy", "_linkedPlanet"), enc::int(selenea));
+    }
+
+    /// A habitat panel's look: the RPC's own Panel behaviour changes, the constructed panel
+    /// types count it, and with refresh the world object (and the save) keeps every panel's look.
+    #[test]
+    fn panels_change_their_look_count_it_and_keep_it() {
+        let Some((mut g, _)) = world() else { return };
+        let group = group_with(&g, &["Panel"], true);
+        let (id, net) = place(&mut g, &group, [570.0, 3.0, 500.0]);
+        let panels: Vec<u16> = g.net.objects[&net].behaviours.iter().filter(|b| b.class == "Panel").map(|b| b.index).collect();
+        let (handler, _) = g.net.find_class("WorldObjectsHandler").unwrap();
+        let counted = |g: &crate::game::Game, t: i32| list(g, handler, "WorldObjectsHandler", "_constructedPanelTypes").iter().find(|i| i32::from_le_bytes(i[0..4].try_into().unwrap()) == t).map(|i| i32::from_le_bytes(i[4..8].try_into().unwrap())).unwrap_or(0);
+        let before = counted(&g, 7);
+        let disolve = |g: &crate::game::Game| format!("{:?}", g.net.behaviour_var(net, panels[0], "_disolveOnSwitch"));
+        let was = disolve(&g);
+        send_rpc(&mut g, 1, net, panels[0], "Panel.ChangePanelServerRpc", &[json!(7), json!(true), json!(true)]);
+        assert!(matches!(g.net.behaviour_var(net, panels[0], "_currentSubPanelType"), Some(VarValue::Plain(b)) if *b == enc::enumeration(7)));
+        assert_eq!(counted(&g, 7), before + 1);
+        assert_ne!(disolve(&g), was, "disolve flips the switch");
+        let looks = g.wos[&id].panels.clone().unwrap();
+        assert_eq!((looks.len(), looks[0]), (panels.len(), 7));
+        assert_eq!(saved_object(&mut g, id).unwrap()["pnls"].as_str().unwrap().split(',').next(), Some("7"));
+        // The same look again: nothing.
+        send_rpc(&mut g, 1, net, panels[0], "Panel.ChangePanelServerRpc", &[json!(7), json!(true), json!(false)]);
+        assert_eq!(counted(&g, 7), before + 1);
+    }
+
+    /// Jumping, building, deconstructing and mining are shown to the players in range of the
+    /// sender (not to the sender, nor to one far away); stopping to mine to everyone else.
+    #[test]
+    fn shared_player_states_reach_the_players_in_range() {
+        let Some((mut g, ann)) = world() else { return };
+        join(&mut g, 2, "Bob");
+        let carl = join(&mut g, 3, "Carl");
+        g.net.move_object(carl, [5000.0, 3.0, 5000.0], None);
+        g.net.out.clear();
+        for name in ["PlayerShareState.InputOnJumpServerRpc", "PlayerShareState.StartConstructingServerRpc", "PlayerShareState.StartDeconstructingServerRpc"] {
+            send_on(&mut g, 1, ann, name, &[]);
+            let reply = name.replace("ServerRpc", "ClientRpc");
+            assert_eq!(sent(&g, &reply).into_iter().map(|s| (s.to, s.object)).collect::<Vec<_>>(), vec![(Target::Only(2), ann)], "{name}");
+        }
+        send_on(&mut g, 1, ann, "PlayerShareState.StartMiningServerRpc", &[json!(101_000_001), json!(1.5), json!(2)]);
+        assert_eq!(sent(&g, "PlayerShareState.StartMiningClientRpc").into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(Target::Only(2), vec![json!(101_000_001), json!(1.5), json!(2)])]);
+        send_on(&mut g, 1, ann, "PlayerShareState.StopMiningServerRpc", &[]);
+        assert_eq!(sent(&g, "PlayerShareState.StopMiningClientRpc").into_iter().map(|s| s.to).collect::<Vec<_>>(), vec![Target::Except(1)]);
+        // An interactive object (a door, a lamp) tells the others near the sender.
+        let group = group_with(&g, &["ActionnableInteractiveProxy"], true);
+        let (_, net) = place(&mut g, &group, [560.0, 3.0, 495.0]);
+        g.net.out.clear();
+        send_on(&mut g, 1, net, "ActionnableInteractiveProxy.BroadcastToAllClientsServerRpc", &[]);
+        assert_eq!(sent(&g, "ActionnableInteractiveProxy.BroadcastToAllClientsClientRpc").into_iter().map(|s| (s.to, s.object)).collect::<Vec<_>>(), vec![(Target::Only(2), net)]);
+    }
+
+    #[test]
+    fn chat_messages_go_to_everyone_with_the_sender() {
+        let Some((mut g, _)) = world() else { return };
+        send_scene(&mut g, 1, "ChatHandler.SendChatMessageServerRpc", &[json!("hello")]);
+        assert_eq!(sent(&g, "ChatHandler.ReceiveChatMessageClientRpc").into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(Target::All, vec![json!(1), json!("hello")])]);
+    }
+
+    /// Story messages: received once (an unknown one not at all), read, and both saved.
+    #[test]
+    fn messages_are_received_once_read_and_saved() {
+        let Some((mut g, _)) = world() else { return };
+        let id = g.data.assets.iter().find(|(k, _)| k.starts_with("MessageData:")).and_then(|(_, v)| v["stringId"].as_str()).unwrap().to_string();
+        let h = crate::data::stable_hash(&id);
+        for _ in 0..2 {
+            send_scene(&mut g, 1, "MessagesHandler.AddNewReceivedMessageServerRpc", &[json!(h), json!(true)]);
+        }
+        send_scene(&mut g, 1, "MessagesHandler.AddNewReceivedMessageServerRpc", &[json!(12345), json!(true)]);
+        assert_eq!(sent(&g, "MessagesHandler.AddNewReceivedMessageClientRpc").into_iter().map(|s| s.to).collect::<Vec<_>>(), vec![Target::All]);
+        let (handler, _) = g.net.find_class("MessagesHandler").unwrap();
+        let unread = [vec![0, 0, 0, 0], h.to_le_bytes().to_vec()].concat();
+        assert_eq!(list(&g, handler, "MessagesHandler", "_receivedMessages").last(), Some(&unread));
+        send_scene(&mut g, 1, "MessagesHandler.MarkAsReadServerRpc", &[json!([false, h])]);
+        let read = [vec![1, 0, 0, 0], h.to_le_bytes().to_vec()].concat();
+        assert_eq!(list(&g, handler, "MessagesHandler", "_receivedMessages").last(), Some(&read));
+        let g = reload(&mut g);
+        let saved: Vec<&Value> = g.save.messages.iter().filter(|m| m["stringId"] == json!(id)).collect();
+        assert_eq!(saved, vec![&json!({"stringId": id, "isRead": true})]);
+    }
+
+    /// Terra tokens: gained (told to all, counted all-time), spent (not counted), never below 0.
+    #[test]
+    fn tokens_are_gained_spent_and_counted_all_time() {
+        let Some((mut g, _)) = world() else { return };
+        let tokens = |g: &crate::game::Game| {
+            let (o, _) = g.net.find_class("TokensHandler").unwrap();
+            crate::wire::Reader::new(&var(g, o, "TokensHandler", "_tokensNumber")).packed_u64().unwrap()
+        };
+        send_scene(&mut g, 1, "TokensHandler.GainTokensServerRpc", &[json!(30)]);
+        send_scene(&mut g, 1, "TokensHandler.GainTokensServerRpc", &[json!(-12)]);
+        assert_eq!(tokens(&g), 18);
+        assert_eq!(sent(&g, "TokensHandler.GainTokensClientRpc").into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(Target::All, vec![json!(30)])]);
+        assert_eq!((g.save.world["allTimeTerraTokens"].as_u64(), g.all_time_tokens[&1]), (Some(30), 30));
+        send_scene(&mut g, 1, "TokensHandler.GainTokensServerRpc", &[json!(-1000)]);
+        assert_eq!(tokens(&g), 0);
+        send_scene(&mut g, 1, "TokensHandler.GainTokensServerRpc", &[json!(7)]);
+        let saved = g.snapshot();
+        assert_eq!(saved.world["terraTokens"], json!(7));
+        assert_eq!(saved.players.iter().find(|p| p["name"] == "Ann").unwrap()["totalTerraTokenEarned"], json!(37));
+    }
+
+    /// A world object's proxy tells the asking behaviour its id and group, and its details.
+    #[test]
+    fn world_object_proxies_answer_with_their_object() {
+        let Some((mut g, _)) = world() else { return };
+        let (id, net) = place(&mut g, "EnergyGenerator1", [570.0, 3.0, 500.0]);
+        let proxy = g.net.behaviour_index(net, "WorldObjectAssociatedProxy").unwrap();
+        send_rpc(&mut g, 1, net, proxy, "WorldObjectAssociatedProxy.GetWorldObjectIdServerRpc", &[]);
+        send_rpc(&mut g, 1, net, proxy, "WorldObjectAssociatedProxy.GetWorldObjectDetailsServerRpc", &[]);
+        let generator = hash(&g, "EnergyGenerator1");
+        let s = sent(&g, "WorldObjectAssociatedProxy.GetWorldObjectIdClientRpc");
+        assert_eq!(s.into_iter().map(|s| (s.to, s.behaviour, s.args)).collect::<Vec<_>>(), vec![(Target::Only(1), proxy, vec![json!(id), json!(generator)])]);
+        let d = one(&g, "WorldObjectAssociatedProxy.GetWorldObjectDetailsClientRpc");
+        assert_eq!((&d[0], &d[1], d[3].as_array().unwrap().len(), &d[5]), (&json!(id), &json!(generator), 10, &json!(g.wos[&id].linked_inventory)));
+        // An object that is no world object: no answer.
+        g.net.out.clear();
+        let (handler, _) = g.net.find_class("WorldObjectsHandler").unwrap();
+        send_rpc(&mut g, 1, handler, 0, "WorldObjectAssociatedProxy.GetWorldObjectIdServerRpc", &[]);
+        assert!(sent(&g, "WorldObjectAssociatedProxy.GetWorldObjectIdClientRpc").is_empty());
+    }
+
+    /// PlayStation Network RPCs come from consoles only: taken, nothing done.
+    #[test]
+    fn playstation_rpcs_do_nothing() {
+        let Some((mut g, _)) = world() else { return };
+        for (name, args) in [
+            ("PlaystationNetworkPlayersHandler.PlayerAllowedServerRpc", vec![json!(1)]),
+            ("PlaystationNetworkPlayersHandler.PlayerJoinedServerRpc", vec![json!(1)]),
+            ("PlaystationNetworkPlayersHandler.SendPlayerJoinedResponseServerRpc", vec![json!(1), json!(true)]),
+            ("PlaystationNetworkPlayersHandler.SendPlayerLeftServerRpc", vec![json!("x"), json!(0)]),
+        ] {
+            assert!(g.rpc(1, 0, 0, name, Args(args)), "{name}");
+        }
+        assert!(g.net.out.is_empty());
+    }
 
     #[test]
     fn containers_show_their_first_item() {

@@ -33,10 +33,12 @@ pub fn send_scene(g: &mut Game, client: u64, name: &str, args: &[Value]) {
     send_rpc(g, client, object, behaviour, name, args);
 }
 
-/// An RPC to the first behaviour of class `name`'s class on `object` (a world object's proxy).
+/// An RPC to the first behaviour of class `name`'s class on `object` (a world object's proxy);
+/// GroupNetworkBase's are on its subclass, ConstructibleProxy or GroupNetworkContainer.
 pub fn send_on(g: &mut Game, client: u64, object: u64, name: &str, args: &[Value]) {
     let class = name.split('.').next().unwrap();
-    let behaviour = g.net.behaviour_index(object, class).unwrap_or_else(|| panic!("object {object} has no {class}"));
+    let classes: &[&str] = if class == "GroupNetworkBase" { &["ConstructibleProxy", "GroupNetworkContainer"] } else { &[class] };
+    let behaviour = classes.iter().find_map(|c| g.net.behaviour_index(object, c)).unwrap_or_else(|| panic!("object {object} has no {class}"));
     send_rpc(g, client, object, behaviour, name, args);
 }
 
@@ -120,4 +122,19 @@ pub fn reload(g: &mut Game) -> Game {
 /// A saved world object of the snapshot, by id.
 pub fn saved_object(g: &mut Game, id: i32) -> Option<Value> {
     g.snapshot().objects.into_iter().find(|o| o["id"] == id)
+}
+
+/// The first group (by id) whose network object has a behaviour of every class, and is a
+/// building when `building`.
+pub fn group_with(g: &Game, classes: &[&str], building: bool) -> String {
+    let mut ids: Vec<&String> = g.data.layouts.keys().filter(|k| !k.contains('#')).collect();
+    ids.sort();
+    ids.into_iter()
+        .find(|id| {
+            let layout = &g.data.layouts[*id];
+            let group = g.data.group(id).map(|i| &g.data.groups[i]);
+            group.is_some_and(|gr| gr.has_prefab && gr.constructible == building) && classes.iter().all(|c| layout.behaviours.iter().any(|b| b.class == *c))
+        })
+        .unwrap_or_else(|| panic!("no group with {classes:?}"))
+        .clone()
 }
