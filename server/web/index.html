@@ -6,211 +6,557 @@
 <title>Planet Crafter Server</title>
 <style>
   :root {
-    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #677085; --line: #dfe3ea;
-    --accent: #2f7d5b; --danger: #b3412f; --chip: #eef1f5; --warn: #9a6a12;
+    --bg: #eef2f5; --panel: #ffffff; --panel2: #f6f8fa; --text: #17202b; --muted: #5f6b7d; --line: #dbe1e8;
+    --accent: #1f8a64; --accent2: #2d7fb8; --accent-soft: #e1f3eb; --danger: #c2412d; --danger-soft: #fbe7e3;
+    --warn: #a36a0a; --warn-soft: #fbf0d9; --chip: #edf1f5; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 4px 16px rgba(16,24,40,.06);
+    --c1: #1f8a64; --c2: #2d7fb8; --c3: #8a5cc2; --c4: #d0822a; --c5: #c2412d; --c6: #13a3a3;
+    --map-bg: #f3f6f8; --map-grid: rgba(80,100,120,.12); --map-building: rgba(70,85,105,.55);
+    color-scheme: light;
+  }
+  :root[data-theme=dark] {
+    --bg: #0d1117; --panel: #161b23; --panel2: #1c222c; --text: #e6eaf0; --muted: #94a0b2; --line: #29313d;
+    --accent: #45c98f; --accent2: #5aa9e6; --accent-soft: #163327; --danger: #ef7a66; --danger-soft: #3a1d18;
+    --warn: #e6b555; --warn-soft: #3a2d12; --chip: #232a35; --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.25);
+    --c1: #45c98f; --c2: #5aa9e6; --c3: #b18be8; --c4: #f0a54d; --c5: #ef7a66; --c6: #3fd0d0;
+    --map-bg: #10161d; --map-grid: rgba(150,170,190,.10); --map-building: rgba(160,175,195,.55);
+    color-scheme: dark;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #12151b; --panel: #1b2029; --text: #e6e9ef; --muted: #98a1b3; --line: #2b3240; --accent: #5cc595; --danger: #e5735f; --chip: #252b37; --warn: #e0b45a; }
+    :root:not([data-theme=light]) {
+      --bg: #0d1117; --panel: #161b23; --panel2: #1c222c; --text: #e6eaf0; --muted: #94a0b2; --line: #29313d;
+      --accent: #45c98f; --accent2: #5aa9e6; --accent-soft: #163327; --danger: #ef7a66; --danger-soft: #3a1d18;
+      --warn: #e6b555; --warn-soft: #3a2d12; --chip: #232a35; --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.25);
+      --c1: #45c98f; --c2: #5aa9e6; --c3: #b18be8; --c4: #f0a54d; --c5: #ef7a66; --c6: #3fd0d0;
+      --map-bg: #10161d; --map-grid: rgba(150,170,190,.10); --map-building: rgba(160,175,195,.55);
+      color-scheme: dark;
+    }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; }
-  main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 48px; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  h2 { font-size: 15px; margin: 0 0 12px; }
-  .sub { color: var(--muted); margin: 0 0 20px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
-  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; overflow-x: auto; }
-  .grid .panel { margin: 0; }
-  .stat .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
-  .stat .v { font-size: 20px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-  .n { color: var(--muted); font-size: 12px; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { color: var(--muted); font-weight: 500; font-size: 13px; }
-  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
-  dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
-  dt { color: var(--muted); }
-  dd { margin: 0; overflow-wrap: anywhere; }
-  button { font: inherit; border: 1px solid var(--line); background: var(--chip); color: var(--text); border-radius: 7px; padding: 6px 12px; cursor: pointer; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14.5px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .92em; }
+  h1, h2, h3 { margin: 0; font-weight: 600; }
+  h2 { font-size: 15px; }
+  h3 { font-size: 13px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: .05em; }
+  a { color: var(--accent2); }
+  [hidden] { display: none !important; }
+
+  /* ---- shell ---- */
+  .shell { display: grid; grid-template-columns: 224px 1fr; min-height: 100%; }
+  .side { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 4px; padding: 16px 12px; background: var(--panel); border-right: 1px solid var(--line); }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 16px; }
+  .brand .logo { width: 32px; height: 32px; border-radius: 10px; background: radial-gradient(circle at 30% 30%, #7ee2b8, var(--accent) 55%, #0b4d36); box-shadow: inset -4px -4px 8px rgba(0,0,0,.25); flex: none; }
+  .brand b { display: block; font-size: 14px; }
+  .brand span { color: var(--muted); font-size: 12px; }
+  .side nav { display: flex; flex-direction: column; gap: 2px; }
+  .side nav button { display: flex; align-items: center; gap: 10px; width: 100%; border: 0; background: none; color: var(--muted); padding: 9px 10px; border-radius: 9px; font: inherit; cursor: pointer; text-align: left; position: relative; transition: background .15s, color .15s; }
+  .side nav button svg { width: 18px; height: 18px; flex: none; }
+  .side nav button:hover { background: var(--chip); color: var(--text); }
+  .side nav button[aria-current=page] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .side nav .count { margin-left: auto; font-size: 11px; background: var(--accent); color: #fff; border-radius: 99px; padding: 0 7px; min-width: 20px; text-align: center; }
+  .side nav kbd { margin-left: auto; font-size: 10px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; opacity: .7; }
+  .side nav .count + kbd { margin-left: 6px; }
+  .side .foot { margin-top: auto; display: flex; flex-direction: column; gap: 8px; padding: 8px; font-size: 12px; color: var(--muted); }
+  .main { min-width: 0; display: flex; flex-direction: column; }
+  .top { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 14px 24px; background: color-mix(in srgb, var(--bg) 85%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+  .top .title { min-width: 0; }
+  .top .title h1 { font-size: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .top .title p { margin: 0; color: var(--muted); font-size: 13px; }
+  .top .quick { display: flex; gap: 18px; margin-left: auto; align-items: center; flex-wrap: wrap; }
+  .top .quick .q { font-size: 12px; color: var(--muted); }
+  .top .quick .q b { display: block; color: var(--text); font-size: 15px; font-variant-numeric: tabular-nums; }
+  .content { padding: 20px 24px 64px; max-width: 1480px; width: 100%; }
+  .view { animation: fadeUp .25s ease both; }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  /* ---- status pill ---- */
+  .pill { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; padding: 5px 12px 5px 10px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+  .pill .dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; position: relative; }
+  .pill .dot::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 2px solid currentColor; opacity: 0; animation: ping 2s ease-out infinite; }
+  .pill.warn { background: var(--warn-soft); color: var(--warn); }
+  .pill.down { background: var(--danger-soft); color: var(--danger); }
+  .pill.down .dot::after { animation: none; }
+  @keyframes ping { 0% { transform: scale(.6); opacity: .8; } 100% { transform: scale(1.8); opacity: 0; } }
+
+  /* ---- cards and grids ---- */
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; box-shadow: var(--shadow); min-width: 0; }
+  .card > .head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .card > .head .right { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+  .view > * + .card, .view > * + .grid, #knobs > .card + .card, .stack > * + * { margin-top: 16px; }
+  .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .grid { display: grid; gap: 16px; }
+  .kpis { grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); }
+  .cols { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); align-items: start; }
+  .cols2 { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); align-items: start; }
+  .kpi { position: relative; overflow: hidden; padding-bottom: 40px; }
+  .kpi .kl { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  .kpi .kv { font-size: 24px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 2px; transition: color .4s; }
+  .kpi .kv.flash { color: var(--c); }
+  .kpi .kn { color: var(--muted); font-size: 12px; min-height: 1.4em; }
+  .kpi .spark { position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 38px; }
+  .spark .line { fill: none; stroke: var(--c); stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+  .spark .area { fill: var(--c); opacity: .12; stroke: none; }
+  dl.info { display: grid; grid-template-columns: max-content 1fr; gap: 7px 18px; margin: 0; }
+  dl.info dt { color: var(--muted); }
+  dl.info dd { margin: 0; overflow-wrap: anywhere; }
+
+  /* ---- controls ---- */
+  button, .btn { font: inherit; font-size: 13.5px; border: 1px solid var(--line); background: var(--panel2); color: var(--text); border-radius: 9px; padding: 7px 13px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: background .15s, border-color .15s, transform .08s, box-shadow .15s; white-space: nowrap; }
+  button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+  button:active:not(:disabled) { transform: translateY(1px); }
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent2); outline-offset: 1px; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 35%, transparent); }
   button.danger { color: var(--danger); }
-  button.small { padding: 2px 8px; font-size: 13px; }
+  button.danger.solid { background: var(--danger); border-color: var(--danger); color: #fff; }
+  button.small { padding: 3px 9px; font-size: 12.5px; border-radius: 7px; }
+  button.ghost { background: none; border-color: transparent; }
   button:disabled { opacity: .5; cursor: default; }
-  label { display: block; color: var(--muted); font-size: 13px; margin-bottom: 4px; }
-  textarea, input, select { width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 8px; }
-  input[type=checkbox] { width: auto; transform: scale(1.3); margin: 6px 4px; }
+  button.busy { position: relative; color: transparent !important; }
+  button.busy::after { content: ""; position: absolute; left: 50%; top: 50%; width: 14px; height: 14px; margin: -7px; border-radius: 50%; border: 2px solid var(--muted); border-top-color: transparent; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  label.l { display: block; color: var(--muted); font-size: 12.5px; margin-bottom: 4px; }
+  input, select, textarea { font: inherit; font-size: 14px; color: var(--text); background: var(--panel2); border: 1px solid var(--line); border-radius: 9px; padding: 7px 10px; width: 100%; min-width: 0; }
+  input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); margin: 0; vertical-align: middle; }
   textarea { min-height: 72px; resize: vertical; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .row > input, .row > select { flex: 1 1 140px; width: auto; }
-  .msg { color: var(--muted); min-height: 1.4em; margin-top: 8px; }
-  .msg.err, .err { color: var(--danger); }
-  .empty { color: var(--muted); padding: 8px 6px; }
-  #login { max-width: 420px; }
-  nav.tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 16px; border-bottom: 1px solid var(--line); }
-  nav.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted); padding: 8px 12px; }
-  nav.tabs button[aria-selected=true] { color: var(--text); border-bottom-color: var(--accent); }
-  .knobs { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
-  .knob .head { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; margin-bottom: 4px; }
-  .knob .name { font-weight: 500; color: var(--text); font-size: 15px; margin: 0; }
-  .knob code { color: var(--muted); font-size: 12px; }
-  .knob .desc { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
-  .knob .ro { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; padding: 8px 0; }
-  .knob .with-unit { display: flex; gap: 6px; align-items: center; }
-  .badge { font-size: 11px; border-radius: 99px; padding: 1px 7px; background: var(--chip); color: var(--muted); }
-  .badge.live { color: var(--accent); }
-  .badge.restart { color: var(--warn); }
-  .badge.changed { color: var(--text); }
-  .savebar { position: sticky; bottom: 0; background: var(--bg); padding: 12px 0; border-top: 1px solid var(--line); }
-  .savebar .msg { margin: 0; }
-  pre.log { margin: 0; max-height: 480px; overflow: auto; font-size: 12px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
-  svg.map { width: 100%; height: 420px; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; }
-  svg.map .b { fill: var(--muted); opacity: .45; }
-  svg.map .p { fill: var(--accent); stroke: var(--panel); }
-  svg.map text { fill: var(--text); }
+  .toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; user-select: none; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; border-radius: 99px; padding: 2px 9px; background: var(--chip); color: var(--muted); white-space: nowrap; }
+  .chip.ok { background: var(--accent-soft); color: var(--accent); }
+  .chip.warn { background: var(--warn-soft); color: var(--warn); }
+  .chip.bad { background: var(--danger-soft); color: var(--danger); }
+  .empty { color: var(--muted); padding: 18px 8px; text-align: center; }
+  .err { color: var(--danger); font-size: 13px; }
+  .muted { color: var(--muted); }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* ---- tables ---- */
+  .tw { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12.5px; position: sticky; top: 0; background: var(--panel); }
+  tr:last-child td { border-bottom: 0; }
+  tbody tr { transition: background .15s; }
+  tbody tr:hover { background: var(--panel2); }
+  td.num { white-space: nowrap; }
+
+  /* ---- terraformation ---- */
+  .terra .big { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+  .terra .rate { color: var(--accent); font-weight: 600; font-size: 14px; }
+  .bar { height: 10px; border-radius: 99px; background: var(--chip); overflow: hidden; position: relative; }
+  .bar > i { display: block; height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg, var(--accent2), var(--accent)); transition: width .8s cubic-bezier(.2,.8,.2,1); position: relative; overflow: hidden; }
+  .bar > i::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.35), transparent); transform: translateX(-100%); animation: sheen 2.6s ease-in-out infinite; }
+  @keyframes sheen { 60%, 100% { transform: translateX(100%); } }
+  .stages { display: flex; align-items: center; gap: 0; margin: 18px 0 6px; overflow-x: auto; padding: 6px 2px 4px; }
+  .stages .s { flex: 1 0 14px; height: 4px; background: var(--chip); position: relative; min-width: 14px; }
+  .stages .s::before { content: ""; position: absolute; left: -5px; top: -4px; width: 12px; height: 12px; border-radius: 50%; background: var(--panel); border: 2px solid var(--line); transition: background .4s, border-color .4s, transform .3s; }
+  .stages .s.on { background: var(--accent); }
+  .stages .s.on::before { background: var(--accent); border-color: var(--accent); }
+  .stages .s.cur::before { transform: scale(1.35); box-shadow: 0 0 0 4px var(--accent-soft); }
+  .units { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-top: 16px; }
+  .unit { background: var(--panel2); border-radius: 10px; padding: 10px 12px; border: 1px solid var(--line); }
+  .unit .n { font-size: 12px; color: var(--muted); }
+  .unit .v { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .unit .r { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--accent); }
+  .unit .r.neg { color: var(--danger); }
+  .unit .r.zero { color: var(--muted); }
+
+  /* ---- players ---- */
+  .players { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+  .pc { transition: opacity .3s, transform .3s; animation: pop .3s ease both; }
+  .pc.leaving { opacity: 0; transform: scale(.96); }
+  @keyframes pop { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: none; } }
+  .pc .who { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+  .avatar { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; font-weight: 700; color: #fff; flex: none; font-size: 15px; }
+  .pc .who .nm { font-weight: 600; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pc .who .id { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pc .who > div:not(.avatar) { min-width: 0; flex: 1; }
+  .gauges { display: grid; gap: 7px; margin-bottom: 12px; }
+  .gauge { display: grid; grid-template-columns: 58px 1fr 52px; gap: 8px; align-items: center; font-size: 12px; }
+  .gauge .bar { height: 7px; }
+  .gauge .bar > i::after { display: none; }
+  .gauge.o2 .bar > i { background: var(--c2); }
+  .gauge.water .bar > i { background: var(--c6); }
+  .gauge.health .bar > i { background: var(--c1); }
+  .gauge.toxic .bar > i { background: var(--c4); }
+  .gauge.low .bar > i { background: var(--danger); animation: blink 1.2s ease-in-out infinite; }
+  @keyframes blink { 50% { opacity: .45; } }
+  .gauge .t { color: var(--muted); }
+  .gauge .val { text-align: right; font-variant-numeric: tabular-nums; }
+  .pc .meta { display: flex; justify-content: space-between; color: var(--muted); font-size: 12.5px; margin-bottom: 12px; gap: 8px; }
+  .compact .pr { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+  .compact .pr:last-child { border-bottom: 0; }
+  .compact .avatar { width: 28px; height: 28px; border-radius: 8px; font-size: 12px; }
+  .compact .pr .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mini { display: flex; gap: 3px; }
+  .mini i { width: 22px; height: 5px; border-radius: 3px; background: var(--chip); overflow: hidden; display: block; }
+  .mini i b { display: block; height: 100%; transition: width .6s; }
+
+  /* ---- map ---- */
+  .mapwrap { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
+  .mapbox { position: relative; height: calc(100vh - 170px); min-height: 420px; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); background: var(--map-bg); box-shadow: var(--shadow); touch-action: none; }
+  .mapbox canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+  .mapbox canvas.dragging { cursor: grabbing; }
+  .mapbox .tools { position: absolute; top: 10px; left: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .mapbox .tools button { width: 34px; height: 34px; padding: 0; justify-content: center; background: var(--panel); box-shadow: var(--shadow); font-size: 18px; }
+  .mapbox .readout { position: absolute; bottom: 10px; right: 10px; background: color-mix(in srgb, var(--panel) 88%, transparent); border: 1px solid var(--line); border-radius: 8px; padding: 4px 9px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; pointer-events: none; }
+  .mapbox .tip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); border-radius: 8px; padding: 6px 9px; font-size: 12px; transform: translate(12px, -50%); white-space: nowrap; }
+  .mapside .pl { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 8px; border-radius: 8px; border: 1px solid transparent; background: none; text-align: left; }
+  .mapside .pl:hover { background: var(--panel2); }
+  .mapside .pl.sel { border-color: var(--accent); background: var(--accent-soft); }
+  .mapside .pl .d { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .mapside .pl .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .mapside .pl .c { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .xyz { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+
+  /* ---- chat ---- */
+  .feed { display: flex; flex-direction: column; gap: 2px; max-height: calc(100vh - 290px); min-height: 240px; overflow-y: auto; padding-right: 4px; }
+  .feed.short { max-height: 280px; min-height: 0; }
+  .msg { display: grid; grid-template-columns: 52px 1fr; gap: 10px; padding: 6px 8px; border-radius: 8px; animation: fadeUp .25s ease both; }
+  .msg:hover { background: var(--panel2); }
+  .msg time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; padding-top: 1px; }
+  .msg .who { font-weight: 600; margin-right: 6px; }
+  .msg .txt { overflow-wrap: anywhere; }
+  .msg.server .who { color: var(--accent); }
+
+  /* ---- updates ---- */
+  .progress { height: 6px; border-radius: 99px; overflow: hidden; background: var(--chip); }
+  .progress > i { display: block; height: 100%; width: 40%; border-radius: inherit; background: var(--warn); animation: slide 1.3s ease-in-out infinite; }
+  @keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(260%); } }
+  .vers { display: flex; gap: 26px; flex-wrap: wrap; margin-bottom: 14px; }
+  .vers .k { color: var(--muted); font-size: 12px; }
+  .vers .v { font-size: 18px; font-weight: 650; }
+
+  /* ---- config ---- */
+  .knobs { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 18px 22px; }
+  .knob .kh { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; margin-bottom: 5px; }
+  .knob .kn { font-weight: 600; margin: 0; color: var(--text); font-size: 14px; }
+  .knob code { color: var(--muted); font-size: 11.5px; }
+  .knob .desc { color: var(--muted); font-size: 12.5px; margin: 5px 0 0; }
+  .knob .ro { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; padding: 7px 0; }
+  .knob .wu { display: flex; gap: 6px; align-items: center; }
+  .knob.dirty input, .knob.dirty select, .knob.dirty textarea { border-color: var(--accent2); }
+  .savebar { position: sticky; bottom: 0; z-index: 4; margin-top: 16px; padding: 12px 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); }
+  .groupnav { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+
+  /* ---- logs ---- */
+  pre.log { margin: 0; max-height: calc(100vh - 330px); min-height: 240px; overflow: auto; font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--panel2); border-radius: 10px; padding: 10px 12px; border: 1px solid var(--line); }
+  pre.log .e { color: var(--danger); }
+  pre.log .w { color: var(--warn); }
+
+  /* ---- banner, toasts, dialog, login ---- */
+  .banner { margin: 16px 24px 0; padding: 10px 14px; border-radius: 10px; background: var(--warn-soft); color: var(--warn); font-weight: 500; display: flex; gap: 10px; align-items: center; }
+  .banner.down { background: var(--danger-soft); color: var(--danger); }
+  #toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 50; max-width: min(420px, calc(100vw - 36px)); }
+  .toast { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 10px; padding: 10px 14px; box-shadow: var(--shadow); opacity: 0; transform: translateY(8px); transition: opacity .25s, transform .25s; overflow-wrap: anywhere; }
+  .toast.in { opacity: 1; transform: none; }
+  .toast.err { border-left-color: var(--danger); }
+  .toast.info { border-left-color: var(--accent2); }
+  dialog { border: 1px solid var(--line); border-radius: 16px; background: var(--panel); color: var(--text); padding: 0; width: min(460px, calc(100vw - 32px)); box-shadow: 0 20px 60px rgba(0,0,0,.3); }
+  dialog::backdrop { background: rgba(10,15,20,.45); backdrop-filter: blur(2px); }
+  dialog[open] { animation: pop .18s ease both; }
+  dialog form { padding: 20px; }
+  dialog h2 { font-size: 17px; margin-bottom: 8px; }
+  dialog .body { color: var(--muted); margin-bottom: 18px; }
+  dialog .body > * + * { margin-top: 10px; }
+  dialog .acts { display: flex; justify-content: flex-end; gap: 8px; }
+  .login { max-width: 440px; margin: 10vh auto; }
+  .skel { background: linear-gradient(90deg, var(--chip), var(--panel2), var(--chip)); background-size: 200% 100%; animation: shimmer 1.4s linear infinite; border-radius: 8px; color: transparent !important; }
+  @keyframes shimmer { to { background-position: -200% 0; } }
+
+  @media (max-width: 1100px) { .cols { grid-template-columns: 1fr; } .mapwrap { grid-template-columns: 1fr; } .mapbox { height: 62vh; } }
+  @media (max-width: 860px) {
+    .shell { grid-template-columns: 1fr; }
+    .side { position: sticky; top: 0; z-index: 6; height: auto; flex-direction: row; align-items: center; padding: 8px; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+    .brand { padding: 0 6px; } .brand div { display: none; }
+    .side nav { flex-direction: row; }
+    .side nav button { width: auto; padding: 8px 10px; }
+    .side nav button span.lbl, .side nav kbd { display: none; }
+    .side .foot { display: none; }
+    .top { position: static; padding: 12px 16px; }
+    .content { padding: 16px 16px 64px; }
+    .banner { margin: 12px 16px 0; }
+    .players { grid-template-columns: 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 </style>
 </head>
 <body>
-<main>
-  <h1>Planet Crafter Server</h1>
-  <p class="sub" id="subtitle">Connecting…</p>
-
-  <section class="panel" id="login" hidden>
-    <h2>Admin token</h2>
-    <p class="sub">Run <code>./pcds gui</code> to open this page with the token, or paste the one <code>./pcds token</code> prints.</p>
-    <div class="row"><input id="tokenInput" type="password" autocomplete="off" aria-label="Admin token"><button class="primary" id="tokenSave">Use token</button></div>
-  </section>
-
-  <div id="app" hidden>
-    <nav class="tabs" role="tablist">
-      <button role="tab" data-tab="overview" aria-selected="true">Overview</button>
-      <button role="tab" data-tab="players" aria-selected="false">Players</button>
-      <button role="tab" data-tab="world" aria-selected="false">World</button>
-      <button role="tab" data-tab="config" aria-selected="false">Config</button>
-      <button role="tab" data-tab="tools" aria-selected="false">Tools</button>
+<div class="shell">
+  <aside class="side">
+    <div class="brand"><div class="logo" aria-hidden="true"></div><div><b>Planet Crafter</b><span>Dedicated server</span></div></div>
+    <nav id="nav" aria-label="Sections">
+      <button data-view="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg><span class="lbl">Overview</span><kbd>1</kbd></button>
+      <button data-view="players"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="9" cy="8" r="4"/><path d="M2 21c0-4 3-6 7-6s7 2 7 6"/><path d="M16 4a4 4 0 0 1 0 8M22 21c0-3-1.5-5-4-5.6"/></svg><span class="lbl">Players</span><span class="count" id="navPlayers" hidden></span><kbd>2</kbd></button>
+      <button data-view="map"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg><span class="lbl">Map</span><kbd>3</kbd></button>
+      <button data-view="chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L3 21l1.9-6.4A8 8 0 1 1 21 12z"/></svg><span class="lbl">Chat</span><span class="count" id="navChat" hidden></span><kbd>4</kbd></button>
+      <button data-view="world"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/></svg><span class="lbl">World</span><kbd>5</kbd></button>
+      <button data-view="updates"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg><span class="lbl">Updates</span><span class="count" id="navUpdate" hidden>1</span><kbd>6</kbd></button>
+      <button data-view="config"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg><span class="lbl">Config</span><kbd>7</kbd></button>
+      <button data-view="tools"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0 5 5L21 13l-8 8-2-2 1.4-1.3a4 4 0 0 0-5-5L3 17V7l4-4h10l-2.3 3.3z"/></svg><span class="lbl">Tools</span><kbd>8</kbd></button>
     </nav>
-
-    <div id="tab-overview">
-      <div class="grid" id="stats"></div>
-      <section class="panel" id="invitePanel" hidden>
-        <h2>Invite code</h2>
-        <p class="sub">Enter this in Planet Crafter under <b>Join with invitation code</b>; it works for you and your friends. Without a Steam login token it changes whenever the server restarts.</p>
-        <div class="row"><code class="v" id="inviteCode"></code><button id="copyCode">Copy</button></div>
-        <div class="msg" id="inviteMsg"></div>
-      </section>
-      <section class="panel"><h2>Server</h2><dl id="info"></dl></section>
-      <section class="panel">
-        <h2>Server banks</h2>
-        <p class="sub">The server runs from one of two installed releases (banks). <code>pcds upgrade</code> installs a new release into the other bank and hands the running world over to it without disconnecting anyone; <code>pcds upgrade --rollback</code> hands it back.</p>
-        <div id="banks"></div>
-      </section>
-      <section class="panel"><h2>Terraformation</h2><div id="units"></div></section>
-      <section class="panel"><h2>World settings</h2><div id="worldSettings"></div></section>
+    <div class="foot">
+      <button class="small" id="themeBtn" title="Colour theme">Theme: auto</button>
+      <span id="footVersion"></span>
     </div>
+  </aside>
 
-    <div id="tab-players" hidden>
-      <section class="panel">
-        <h2>Players online</h2>
-        <div id="players"></div>
-        <div class="msg" id="playersMsg"></div>
-      </section>
-      <section class="panel">
-        <h2>Teleport</h2>
-        <p class="sub">Moves a player the way the game does when a world portal closes: their game respawns them at the position, with no dying consequences.</p>
-        <div class="row">
-          <select id="tpPlayer" aria-label="Player to move"></select>
-          <input id="tpX" type="number" step="any" placeholder="x" aria-label="x">
-          <input id="tpY" type="number" step="any" placeholder="y" aria-label="y">
-          <input id="tpZ" type="number" step="any" placeholder="z" aria-label="z">
-        </div>
-        <div class="row" style="margin-top: 8px">
-          <select id="tpTo" aria-label="Copy the position of"></select>
-          <button class="primary" id="tpGo">Teleport</button>
-        </div>
-        <div class="msg" id="tpMsg"></div>
-      </section>
-      <section class="panel">
-        <h2>Map</h2>
-        <p class="sub" id="mapNote">Seen from above: buildings in grey, players in green.</p>
-        <svg class="map" id="map" role="img" aria-label="Map of players and buildings"></svg>
-      </section>
-    </div>
-
-    <div id="tab-world" hidden>
-      <section class="panel">
-        <h2>This world</h2>
-        <dl id="worldInfo"></dl>
-        <div class="row" style="margin-top: 12px">
-          <button class="primary" id="saveWorld">Save world now</button>
-          <button class="danger" id="stopServer">Save and stop server</button>
-        </div>
-        <div class="msg" id="worldMsg"></div>
-      </section>
-      <section class="panel">
-        <h2>Worlds</h2>
-        <p class="sub">The worlds beside this one. Switch with <code>./pcds world use NAME</code> and <code>./pcds restart</code>; <code>./pcds world new NAME</code> makes one.</p>
-        <div id="worlds"></div>
-      </section>
-      <section class="panel">
-        <h2>Backups of this world</h2>
-        <div id="backups"></div>
-      </section>
-    </div>
-
-    <div id="tab-config" hidden>
-      <p class="sub">Every setting of this server. Live ones apply when saved; server.env ones show what this server started with and change with <code>./pcds config</code> and a restart. An empty field means the default.</p>
-      <div id="knobs"></div>
-      <div class="savebar row">
-        <button class="primary" id="saveConfig" disabled>Save changes</button>
-        <button id="discardConfig">Discard edits</button>
-        <span class="msg" id="configMsg"></span>
+  <div class="main">
+    <header class="top">
+      <div class="title"><h1 id="hdrTitle">Planet Crafter Server</h1><p id="hdrSub">Connecting…</p></div>
+      <span class="pill warn" id="pill"><span class="dot"></span><span id="pillText">Connecting</span></span>
+      <div class="quick">
+        <div class="q">Players<b id="qPlayers">–</b></div>
+        <div class="q">Uptime<b id="qUptime">–</b></div>
+        <div class="q">Loop<b id="qLoop">–</b></div>
+        <button class="primary small" id="qUpdate" hidden></button>
       </div>
-    </div>
+    </header>
+    <div class="banner" id="banner" hidden></div>
 
-    <div id="tab-tools" hidden>
-      <section class="panel">
-        <h2>Message everyone</h2>
-        <div class="row"><input id="chatText" maxlength="500" placeholder="Shown in every player's chat" aria-label="Message"><button class="primary" id="chatSend">Send</button></div>
-        <div class="msg" id="chatMsg"></div>
+    <section class="card login" id="login" hidden>
+      <h2>Admin token</h2>
+      <p class="sub" style="margin-top:6px">Run <code>pcds gui</code> to open this page with the token, or paste the one <code>pcds token</code> prints.</p>
+      <form class="row" id="tokenForm"><input id="tokenInput" type="password" autocomplete="off" aria-label="Admin token" placeholder="Token"><button class="primary">Sign in</button></form>
+    </section>
+
+    <div class="content" id="app" hidden>
+      <!-- overview -->
+      <section class="view" id="view-overview">
+        <div class="grid kpis" id="kpis"></div>
+        <div class="grid cols">
+          <div class="stack">
+            <div class="card terra">
+              <div class="head"><h2>Terraformation</h2><span class="chip ok" id="stageChip"></span><div class="right"><span class="muted" id="planetName"></span></div></div>
+              <div class="row" style="align-items:baseline;gap:12px"><span class="big" id="tiValue">–</span><span class="rate" id="tiRate"></span></div>
+              <div class="stages" id="stages" aria-label="Terraformation stages"></div>
+              <div class="bar" style="margin-top:6px"><i id="tiBar"></i></div>
+              <div class="row" style="justify-content:space-between;margin-top:6px;font-size:12.5px"><span class="muted" id="tiFrom"></span><span id="tiNext"></span></div>
+              <div class="units" id="units"></div>
+            </div>
+            <div class="card">
+              <div class="head"><h2>Server</h2><div class="right"><button class="small" id="ovSave">Save world now</button></div></div>
+              <dl class="info" id="info"></dl>
+            </div>
+          </div>
+          <div class="stack">
+            <div class="card" id="joinCard">
+              <div class="head"><h2>How to join</h2></div>
+              <div id="joinBody"></div>
+            </div>
+            <div class="card" id="ovUpdateCard">
+              <div class="head"><h2>Server version</h2><div class="right"><span id="ovUpdChip"></span></div></div>
+              <div id="ovUpdate"></div>
+            </div>
+            <div class="card">
+              <div class="head"><h2>Online now</h2><div class="right"><button class="small ghost" data-go="players">All players →</button></div></div>
+              <div class="compact" id="ovPlayers"></div>
+            </div>
+            <div class="card">
+              <div class="head"><h2>Recent chat</h2><div class="right"><button class="small ghost" data-go="chat">Open chat →</button></div></div>
+              <div class="feed short" id="ovChat"></div>
+            </div>
+          </div>
+        </div>
       </section>
-      <section class="panel">
-        <h2>Kick, ban, unban</h2>
-        <p class="sub">A name (any case) or client id. A ban also bans the SteamID (invite code) or IP (direct IP) of an online player; an offline name is banned as written. The access lists are under Config.</p>
-        <div class="row"><input id="modPlayer" placeholder="Player name" aria-label="Player name"><button id="modKick">Kick</button><button class="danger" id="modBan">Ban</button></div>
-        <div class="row" style="margin-top: 8px"><input id="modUnban" placeholder="Name, SteamID or IP" aria-label="Unban"><button id="modUnbanGo">Unban</button></div>
-        <div class="msg" id="modMsg"></div>
-        <h2 style="margin-top: 16px">Banned</h2>
-        <div id="bans"></div>
+
+      <!-- players -->
+      <section class="view" id="view-players" hidden>
+        <div class="row" style="margin-bottom:14px">
+          <input id="playerSearch" type="search" placeholder="Filter by name, SteamID, IP or client id" aria-label="Filter players" style="max-width:380px">
+          <span class="muted" id="playersCount"></span>
+        </div>
+        <div class="players" id="playerGrid"></div>
+        <div class="card empty" id="playersEmpty" hidden>Nobody online. Players appear here as they join.</div>
       </section>
-      <section class="panel">
-        <div class="row" style="justify-content: space-between"><h2>Server log</h2><button class="small" id="logsRefresh">Refresh</button></div>
-        <p class="sub" id="logsNote"></p>
-        <pre class="log" id="logs"></pre>
+
+      <!-- map -->
+      <section class="view" id="view-map" hidden>
+        <div class="mapwrap">
+          <div class="mapbox" id="mapbox">
+            <canvas id="mapCanvas" aria-label="Map of players and buildings seen from above; click to pick a teleport destination"></canvas>
+            <div class="tools">
+              <button id="mapIn" title="Zoom in" aria-label="Zoom in">+</button>
+              <button id="mapOut" title="Zoom out" aria-label="Zoom out">−</button>
+              <button id="mapFit" title="Fit everything" aria-label="Fit everything">⤢</button>
+            </div>
+            <div class="readout" id="mapReadout">Drag to pan · wheel to zoom · click to pick a spot</div>
+            <div class="tip" id="mapTip" hidden></div>
+          </div>
+          <div class="stack mapside">
+            <div class="card">
+              <div class="head"><h2 id="mapPlanet">Map</h2><div class="right"><label class="toggle"><input type="checkbox" id="mapFollow"> Follow</label></div></div>
+              <div id="mapPlayers"></div>
+            </div>
+            <div class="card">
+              <div class="head"><h2>Teleport</h2></div>
+              <label class="l" for="mapTpPlayer">Player</label>
+              <select id="mapTpPlayer"></select>
+              <label class="l" style="margin-top:10px">Destination (x, y, z)</label>
+              <div class="xyz"><input id="mapX" type="number" step="any" aria-label="x" placeholder="x"><input id="mapY" type="number" step="any" aria-label="y" placeholder="y"><input id="mapZ" type="number" step="any" aria-label="z" placeholder="z"></div>
+              <p class="sub" id="mapTpNote" style="margin:8px 0 10px">Click the map to pick a spot, or a player to go to them.</p>
+              <button class="primary" id="mapTpGo" style="width:100%;justify-content:center">Teleport</button>
+            </div>
+            <div class="card">
+              <div class="head"><h2>Layers</h2></div>
+              <div class="row" style="gap:14px">
+                <label class="toggle"><input type="checkbox" id="lyBuildings" checked> Buildings</label>
+                <label class="toggle"><input type="checkbox" id="lyTrails" checked> Trails</label>
+                <label class="toggle"><input type="checkbox" id="lyLabels" checked> Names</label>
+                <label class="toggle"><input type="checkbox" id="lyGrid" checked> Grid</label>
+              </div>
+              <p class="sub" id="mapNote" style="margin:10px 0 0"></p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- chat -->
+      <section class="view" id="view-chat" hidden>
+        <div class="card">
+          <div class="head"><h2>Chat</h2><div class="right"><span class="muted" id="chatInfo"></span></div></div>
+          <div class="feed" id="chatFeed"></div>
+          <form class="row" id="chatForm" style="margin-top:12px">
+            <input id="chatText" maxlength="500" placeholder="Message everyone as the server" aria-label="Message everyone" autocomplete="off">
+            <button class="primary" id="chatSend">Send</button>
+          </form>
+        </div>
+      </section>
+
+      <!-- world -->
+      <section class="view" id="view-world" hidden>
+        <div class="grid cols2">
+          <div class="card">
+            <div class="head"><h2>This world</h2></div>
+            <dl class="info" id="worldInfo"></dl>
+            <div class="row" style="margin-top:14px">
+              <button class="primary" id="saveWorld">Save world now</button>
+              <button class="danger" id="stopServer">Save and stop server</button>
+            </div>
+          </div>
+          <div class="card">
+            <div class="head"><h2>World settings</h2></div>
+            <div class="tw" id="worldSettings" style="max-height:420px;overflow:auto"></div>
+          </div>
+          <div class="card">
+            <div class="head"><h2>Worlds</h2><div class="right"><button class="small" id="worldsRefresh">Refresh</button></div></div>
+            <p class="sub">The worlds beside this one. Switch with <code>pcds world use NAME</code> and <code>pcds restart</code>; <code>pcds world new NAME</code> makes one.</p>
+            <div class="tw" id="worlds"></div>
+          </div>
+          <div class="card">
+            <div class="head"><h2>Backups of this world</h2></div>
+            <div class="tw" id="backups" style="max-height:420px;overflow:auto"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- updates -->
+      <section class="view" id="view-updates" hidden>
+        <div class="grid cols2">
+          <div class="card">
+            <div class="head"><h2>Server version</h2><div class="right"><span id="updChip"></span></div></div>
+            <div class="vers" id="updVers"></div>
+            <div id="updBusy" hidden><div class="progress"><i></i></div><p class="sub" id="updBusyText" style="margin:8px 0 0"></p></div>
+            <div class="row" style="margin-top:12px">
+              <button class="primary" id="updNow">Update now</button>
+              <button id="updCheck">Check for updates</button>
+              <button class="danger" id="updRollback">Roll back</button>
+            </div>
+            <div class="row" style="margin-top:10px">
+              <input id="updVersion" placeholder="A release tag, e.g. v0.6.0" aria-label="Release to install" style="max-width:240px">
+              <button id="updInstall">Install this release</button>
+            </div>
+            <p class="sub" id="updNote" style="margin:12px 0 0"></p>
+          </div>
+          <div class="card">
+            <div class="head"><h2>Server banks</h2></div>
+            <p class="sub">The server runs from one of two installed releases (banks). An update installs a release into the other bank and hands the running world over to it without disconnecting anyone; Roll back hands it back.</p>
+            <div class="tw" id="banks"></div>
+            <dl class="info" id="bankInfo" style="margin-top:12px"></dl>
+          </div>
+        </div>
+        <div class="card">
+          <div class="head"><h2>Update history</h2></div>
+          <div class="tw" id="updHistory"></div>
+        </div>
+      </section>
+
+      <!-- config -->
+      <section class="view" id="view-config" hidden>
+        <div class="row" style="margin-bottom:12px">
+          <input id="cfgSearch" type="search" placeholder="Search settings" aria-label="Search settings" style="max-width:380px">
+          <label class="toggle"><input type="checkbox" id="cfgChanged"> Only changed</label>
+        </div>
+        <p class="sub">Live settings apply when saved; <b>restart</b> ones show what the server started with and change with <code>pcds config</code> and a restart. An empty field means the default.</p>
+        <div class="groupnav" id="cfgGroups"></div>
+        <div id="knobs"></div>
+        <div class="savebar">
+          <button class="primary" id="saveConfig" disabled>Save changes</button>
+          <button id="discardConfig">Discard edits</button>
+          <span class="muted" id="configMsg"></span>
+        </div>
+      </section>
+
+      <!-- tools -->
+      <section class="view" id="view-tools" hidden>
+        <div class="grid cols2">
+          <div class="card">
+            <div class="head"><h2>Kick, ban, unban</h2></div>
+            <p class="sub">A name (any case) or client id. A ban also bans the SteamID (invite code) or IP (direct IP) of an online player; an offline name is banned as written. The access lists are under Config.</p>
+            <form class="row" id="modForm"><input id="modPlayer" placeholder="Player name" aria-label="Player name" list="playerNames"><button type="button" id="modKick">Kick</button><button type="button" class="danger" id="modBan">Ban</button></form>
+            <datalist id="playerNames"></datalist>
+            <form class="row" id="unbanForm" style="margin-top:8px"><input id="modUnban" placeholder="Name, SteamID or IP" aria-label="Unban"><button>Unban</button></form>
+          </div>
+          <div class="card">
+            <div class="head"><h2>Banned</h2></div>
+            <div class="tw" id="bans"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="head"><h2>Server log</h2><div class="right">
+            <input id="logFilter" type="search" placeholder="Filter" aria-label="Filter the log" style="width:180px">
+            <label class="toggle"><input type="checkbox" id="logAuto" checked> Live</label>
+            <button class="small" id="logsRefresh">Refresh</button>
+            <button class="small" id="logsDownload">Download</button>
+          </div></div>
+          <p class="sub" id="logsNote"></p>
+          <pre class="log" id="logs"></pre>
+        </div>
       </section>
     </div>
   </div>
-</main>
+</div>
+<div id="toasts" aria-live="polite"></div>
+<dialog id="dlg"><form method="dialog"><h2 id="dlgTitle"></h2><div class="body" id="dlgBody"></div><div class="acts"><button value="cancel" id="dlgCancel">Cancel</button><button value="ok" class="primary" id="dlgOk">OK</button></div></form></dialog>
 <script>
+'use strict';
 const $ = id => document.getElementById(id);
+const VIEWS = ['overview', 'players', 'map', 'chat', 'world', 'updates', 'config', 'tools'];
 let token = '';
 try {
   const m = location.hash.match(/token=([0-9A-Za-z]+)/);
-  if (m) { localStorage.setItem('pcdsToken', m[1]); history.replaceState(null, '', location.pathname); }
+  if (m) { localStorage.setItem('pcdsToken', m[1]); history.replaceState(null, '', location.pathname + '#/overview'); }
   token = localStorage.getItem('pcdsToken') || '';
 } catch (e) {}
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('pcds.' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem('pcds.' + k, JSON.stringify(v)); } catch (e) {} }
+};
 
-// Elements from data: text always goes in as text, never as HTML (names and chat are players').
+// ---- elements: text from data always goes in as text, never as HTML (names and chat are players') ----
 function h(tag, props, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {
-    if (k === 'class') el.className = v; else if (k in el) el[k] = v; else el.setAttribute(k, v);
+    if (v === undefined || v === null || v === false) continue;
+    if (k === 'class') el.className = v; else if (k === 'style') el.style.cssText = v; else if (k.startsWith('data-')) el.setAttribute(k, v); else if (k in el) el[k] = v; else el.setAttribute(k, v);
   }
   for (const kid of kids.flat()) if (kid !== null && kid !== undefined && kid !== false) el.append(kid instanceof Node ? kid : String(kid));
   return el;
 }
-function svg(tag, attrs, text) {
+function svgEl(tag, attrs) {
   const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
-  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
-  if (text !== undefined) el.textContent = text;
+  for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
   return el;
 }
 const cell = (text, cls) => h('td', { class: cls || '' }, text);
@@ -219,198 +565,850 @@ function table(headers, rows, emptyText) {
   return h('table', {}, h('thead', {}, h('tr', {}, headers.map(x => h('th', {}, x)))),
     h('tbody', {}, rows.map(r => h('tr', {}, r.map(c => c instanceof Node && c.tagName === 'TD' ? c : cell(c))))));
 }
+const pairs = list => list.filter(Boolean).flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
-async function api(method, path, body) {
-  const res = await fetch(path, {
-    method,
-    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined
-  });
-  const data = await res.json().catch(() => ({}));
-  if (res.status === 401) { showLogin(); throw new Error('token rejected'); }
-  if (!res.ok) { const e = new Error(data.error || res.statusText); e.key = data.key; throw e; }
-  return data;
-}
-
-function showLogin() { $('login').hidden = false; $('app').hidden = true; $('subtitle').textContent = 'Admin token needed'; }
-function note(id, text, isError) { const el = $(id); el.textContent = text; el.className = 'msg' + (isError ? ' err' : ''); }
-async function act(msgId, label, fn) {
-  try { await fn(); note(msgId, label); refresh(); } catch (e) { note(msgId, e.message, true); }
-}
-
+// ---- formatting ----
 function duration(s) {
+  s = Math.max(0, Math.floor(s || 0));
   const d = Math.floor(s / 86400), hr = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
-  return d ? `${d}d ${hr}h` : hr ? `${hr}h ${m}m` : `${m}m ${s % 60}s`;
+  return d ? `${d}d ${hr}h` : hr ? `${hr}h ${m}m` : m ? `${m}m ${s % 60}s` : `${s}s`;
 }
 function bytes(n) {
   if (n === null || n === undefined || !isFinite(n)) return '–';
-  const u = ['B', 'KB', 'MB', 'GB']; let i = 0;
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
   return `${n < 10 && i ? n.toFixed(1) : Math.round(n)} ${u[i]}`;
 }
 // The server's numbers are f32: seven digits say all they hold.
 function number(v) { return typeof v === 'number' ? String(+v.toPrecision(7)) : v; }
+const PREFIX = ['', 'k', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y'];
+function si(v, unit) {
+  if (v === null || v === undefined || !isFinite(v)) return '–';
+  let i = 0, a = Math.abs(v);
+  while (a >= 1000 && i < PREFIX.length - 1) { a /= 1000; i++; }
+  const x = v / 1000 ** i, ax = Math.abs(x);
+  const s = x.toLocaleString(undefined, { maximumFractionDigits: ax >= 100 ? 0 : ax >= 10 ? 1 : 2 });
+  return `${s} ${PREFIX[i]}${unit || ''}`.trim();
+}
 function when(unix) { return new Date(unix * 1000).toLocaleString(); }
-function pos(p) { return p ? p.map(v => v.toFixed(1)).join(', ') : '–'; }
-const pairs = list => list.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]);
-
-// ---- tabs ----
-function show(name) {
-  for (const b of document.querySelectorAll('nav.tabs button')) b.setAttribute('aria-selected', String(b.dataset.tab === name));
-  for (const t of ['overview', 'players', 'world', 'config', 'tools']) $('tab-' + t).hidden = t !== name;
-  if (name === 'players') loadMap();
-  if (name === 'world') loadWorlds();
-  if (name === 'config' && !Object.keys(edits).length) loadConfig();
-  if (name === 'tools') loadLogs();
+function ago(unix) {
+  const s = Date.now() / 1000 - unix;
+  return s < 60 ? 'just now' : s < 3600 ? `${Math.floor(s / 60)} min ago` : s < 86400 ? `${Math.floor(s / 3600)} h ago` : when(unix);
 }
-for (const b of document.querySelectorAll('nav.tabs button')) b.onclick = () => show(b.dataset.tab);
-
-// ---- overview and players, from GET /api/status every 2 s ----
-let status = null, last = null;
-const stat = (k, v, n) => h('div', { class: 'panel stat' }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v), n ? h('div', { class: 'n' }, n) : null);
-
-function renderOverview(s) {
-  const now = performance.now() / 1000, p = s.process || {}, t = s.traffic || {};
-  let cpu = '–', rateIn = '–', rateOut = '–';
-  if (last && now > last.t) {
-    const dt = now - last.t;
-    if (p.cpuSeconds != null && last.cpu != null) cpu = `${Math.round((p.cpuSeconds - last.cpu) / dt * 100)} %`;
-    rateIn = bytes((t.bytesIn - last.in) / dt) + '/s'; rateOut = bytes((t.bytesOut - last.out) / dt) + '/s';
-  }
-  last = { t: now, cpu: p.cpuSeconds, in: t.bytesIn, out: t.bytesOut };
-  const o = s.objects || {};
-  $('stats').replaceChildren(
-    stat('Players', s.players.length),
-    stat('Uptime', duration(s.uptimeSeconds)),
-    stat('Loops / s', s.fps, `game tick rate ${s.tickRate}`),
-    stat('Loop busy', `${s.busyPercent} %`, `longest ${(s.longestLoopMicros / 1000).toFixed(1)} ms`),
-    stat('CPU', cpu, p.cpuSeconds != null ? `${Math.round(p.cpuSeconds)} s in all` : null),
-    stat('Memory', bytes(p.memoryBytes)),
-    stat('Network in', rateIn, bytes(t.bytesIn) + ' in all'),
-    stat('Network out', rateOut, bytes(t.bytesOut) + ' in all'),
-    stat('World objects', o.world ?? '–', `${o.network ?? '–'} networked, ${o.inventories ?? '–'} inventories`)
-  );
-  const how = s.network === 'ip' ? `direct IP on UDP ${s.port}` : s.network === 'steam' ? 'Steam invite code' : `Steam invite code and direct IP on UDP ${s.port}`;
-  const tables = s.tables || {}, world = s.world || {};
-  const where = [['World', s.save], ['Planet', s.planet], ['World seed', world.seed ?? '–']];
-  $('info').replaceChildren(...pairs([
-    ['Server', `pcds-server ${s.serverVersion}`], ['Game version', s.gameVersion],
-    ['Game tables', `${tables.version}${tables.buildId ? `, game build ${tables.buildId}` : ''}`],
-    ...where, ['Network', how], ['Steam', s.steam ? 'on (DLC available)' : 'off'],
-    ['Autosave', s.autosaveMinutes ? `every ${s.autosaveMinutes} min` : 'off'],
-    ['Rules changed', s.rules.length ? s.rules.join(', ') : 'none: the game\'s own behaviour']
-  ]));
-  $('worldInfo').replaceChildren(...pairs(where));
-  $('units').replaceChildren(table(['Unit', 'Value', 'Per second'],
-    Object.entries(s.units || {}).map(([k, u]) => [k, cell(number(u.value), 'num'), cell(number(u.perSecond), 'num')]), 'No units'));
-  $('worldSettings').replaceChildren(table(['Setting', 'Value'],
-    Object.entries(world.settings || {}).map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v) : String(v)]), 'No settings'));
-  const b = s.banks || {}, u = s.update || {};
-  const installed = (b.installed || []).length ? b.installed : (b.live ? [{ bank: b.live.bank, info: b.live }] : []);
-  $('banks').replaceChildren(table(['Bank', 'Release', 'Front protocol', 'Snapshot format', 'State'], installed.map(x => {
-    const i = x.info || {}, running = b.live && b.live.bank === x.bank;
-    const state = [running ? `running the world (pid ${b.live.pid})` : null, b.active === x.bank ? 'active' : null].filter(Boolean).join(', ') || 'standby';
-    return [x.bank, i.version ? `pcds ${i.version}${i.tag ? ` (${i.tag})` : ''}` : 'empty', i.protocol ?? '–', i.format ?? '–', state];
-  }), 'No banks'), h('dl', { style: 'margin-top: 12px' }, ...pairs([
-    ['Front', `pcds ${b.frontVersion ?? '–'}, protocol ${b.frontProtocol ?? '–'}`],
-    ['Flips', `${b.flips ?? 0} since the start; ${b.crashes ?? 0} restarts after a crash`],
-    ['Automatic updates', u.auto ? `on, a check every ${u.checkHours} h` : 'off (PCDS_AUTO_UPDATE)'],
-    ['Latest release', u.latest || 'not checked yet'],
-    ['Last update or flip', u.doing ? `under way: ${u.doing}` : u.last ? `${u.last.ok ? 'done' : 'failed'}: ${u.last.message}` : 'none yet']
-  ])));
-  $('invitePanel').hidden = !s.inviteCode;
-  $('inviteCode').textContent = s.inviteCode || '';
+const clock = ms => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+function pos(p) { return p ? p.map(v => Math.round(v)).join(', ') : '–'; }
+const UNIT_SYMBOL = { Oxygen: 'ppq', Heat: 'pK', Pressure: 'nPa', Biomass: 'g', Plants: 'g', Insects: 'g', Animals: 'g', Terraformation: 'Ti' };
+// Energy is in kW already: no prefix on it.
+const unitValue = (name, v) => name === 'Energy' ? `${Math.round(v).toLocaleString()} kW` : si(v, UNIT_SYMBOL[name] || '');
+const UNIT_ORDER = ['Oxygen', 'Heat', 'Pressure', 'Biomass', 'Plants', 'Insects', 'Animals', 'Purification', 'Energy'];
+function stageName(key) {
+  const s = String(key || '').split(':').pop().replace(/^TerraformStage\d*-?/, '') || String(key);
+  return s.replace(/([a-z])([A-Z])/g, '$1 $2');
 }
-
+// A well-mixed hash: names that differ in one letter get far-apart colours.
+function hue(text) {
+  let x = 0x811c9dc5;
+  for (const c of String(text)) x = Math.imul(x ^ c.charCodeAt(0), 0x01000193);
+  x ^= x >>> 15; x = Math.imul(x, 0x2c1b3c6d); x ^= x >>> 12;
+  return (x >>> 0) % 360;
+}
+const playerColor = p => `hsl(${hue(p.steamId || p.name || p.id)} 62% 48%)`;
 const playerName = p => p.name || `(joining, client ${p.id})`;
-function renderPlayers(s) {
-  const rows = s.players.map(p => {
-    const g = p.gauges ? p.gauges.slice(0, 3).map(v => Math.round(v)).join(' / ') : '–';
-    const kick = h('button', { class: 'small', onclick: () => act('playersMsg', `Kicked ${playerName(p)}`, () => api('POST', '/api/kick', { id: p.id })) }, 'Kick');
-    const ban = h('button', { class: 'small danger', onclick: () => { if (confirm(`Ban ${playerName(p)}?`)) act('playersMsg', `Banned ${playerName(p)}`, () => api('POST', '/api/ban', { id: p.id })); } }, 'Ban');
-    return [playerName(p), p.steamId ? `Steam ${p.steamId}` : `client ${p.id}`, p.verified ? 'Steam' : p.ip, p.status,
-      cell(g, 'num'), cell(pos(p.position), 'num'), cell(duration(p.connectedSeconds), 'num'), h('td', { class: 'row' }, kick, ban)];
-  });
-  $('players').replaceChildren(table(['Name', 'ID', 'Joined via', 'Status', 'O₂ / water / health', 'Position (x, y, z)', 'Online', ''], rows, 'Nobody online'));
-  const ready = s.players.filter(p => p.status !== 'joining');
-  for (const [id, first] of [['tpPlayer', 'Player…'], ['tpTo', 'Copy the position of…']]) {
-    const sel = $(id), keep = sel.value;
-    sel.replaceChildren(h('option', { value: '' }, first), ...ready.map(p => h('option', { value: String(p.id) }, playerName(p))));
-    sel.value = ready.some(p => String(p.id) === keep) ? keep : '';
-  }
-  drawMap(ready);
-  const banned = [...s.access.bannedNames, ...s.access.bannedIPs];
-  $('bans').replaceChildren(table(['Entry', ''], banned.map(b => [b,
-    h('td', {}, h('button', { class: 'small', onclick: () => act('modMsg', `Unbanned ${b}`, () => api('POST', '/api/unban', { value: b })) }, 'Unban'))]), 'Nobody banned'));
+const initials = name => (String(name || '?').match(/[A-Za-z0-9]/g) || ['?']).slice(0, 2).join('').toUpperCase();
+
+// ---- API ----
+async function api(method, path, body, timeoutMs) {
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), timeoutMs || 10000);
+  let res;
+  try {
+    res = await fetch(path, { method, headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: ctl.signal });
+  } catch (e) {
+    throw new Error(e.name === 'AbortError' ? 'the server did not answer in time' : 'the server cannot be reached');
+  } finally { clearTimeout(timer); }
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401) { showLogin(); const e = new Error('token rejected'); e.auth = true; throw e; }
+  if (!res.ok) { const e = new Error(data.error || res.statusText || `HTTP ${res.status}`); e.key = data.key; e.status = res.status; throw e; }
+  return data;
 }
 
+// ---- toasts, dialog, busy buttons ----
+function toast(text, kind) {
+  const el = h('div', { class: 'toast ' + (kind || 'ok'), role: kind === 'err' ? 'alert' : 'status' }, text);
+  $('toasts').append(el);
+  requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add('in')));
+  setTimeout(() => { el.classList.remove('in'); setTimeout(() => el.remove(), 300); }, kind === 'err' ? 7000 : 3500);
+}
+async function act(label, fn, button) {
+  if (button) { button.classList.add('busy'); button.disabled = true; }
+  try { const r = await fn(); if (label) toast(typeof label === 'function' ? label(r) : label); refreshSoon(); return r; }
+  catch (e) { if (!e.auth) toast(e.message, 'err'); }
+  finally { if (button) { button.classList.remove('busy'); button.disabled = false; } }
+}
+// A modal question: resolves true for OK. `body` is text or nodes; `ok`, `danger` style the button.
+function ask({ title, body, ok, danger }) {
+  const dlg = $('dlg');
+  $('dlgTitle').textContent = title;
+  $('dlgBody').replaceChildren(...[].concat(body || []).map(x => x instanceof Node ? x : h('p', { style: 'margin:0' }, x)));
+  $('dlgOk').textContent = ok || 'OK';
+  $('dlgOk').className = danger ? 'danger solid' : 'primary';
+  return new Promise(resolve => {
+    dlg.onclose = () => resolve(dlg.returnValue === 'ok');
+    dlg.returnValue = 'cancel';
+    dlg.showModal();
+    const first = $('dlgBody').querySelector('input, select');
+    (first || $('dlgOk')).focus();
+  });
+}
+
+// ---- views ----
+let current = 'overview';
+const onShow = {};
+function show(name, replace) {
+  if (!VIEWS.includes(name)) name = 'overview';
+  current = name;
+  for (const v of VIEWS) $('view-' + v).hidden = v !== name;
+  for (const b of document.querySelectorAll('#nav button')) b.toggleAttribute('aria-current', b.dataset.view === name), b.dataset.view === name ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current');
+  const hash = '#/' + name;
+  if (location.hash !== hash) history[replace ? 'replaceState' : 'pushState'](null, '', hash);
+  if (onShow[name]) onShow[name]();
+  if (status) render(status);
+}
+for (const b of document.querySelectorAll('#nav button')) b.onclick = () => show(b.dataset.view);
+document.addEventListener('click', e => { const go = e.target.closest('[data-go]'); if (go) show(go.dataset.go); });
+window.addEventListener('popstate', () => show(location.hash.replace(/^#\/?/, ''), true));
+document.addEventListener('keydown', e => {
+  if (e.target.closest('input, textarea, select, dialog') || e.ctrlKey || e.metaKey || e.altKey) return;
+  const n = Number(e.key);
+  if (n >= 1 && n <= VIEWS.length) show(VIEWS[n - 1]);
+});
+
+// ---- theme ----
+const THEMES = ['auto', 'light', 'dark'];
+function applyTheme(t) {
+  if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.dataset.theme = t;
+  $('themeBtn').textContent = 'Theme: ' + t;
+  map.colors = null; requestDraw();
+}
+$('themeBtn').onclick = () => { const t = THEMES[(THEMES.indexOf(store.get('theme', 'auto')) + 1) % 3]; store.set('theme', t); applyTheme(t); };
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { map.colors = null; requestDraw(); });
+
+// ---- polling GET /api/status ----
+let status = null, failures = 0, pollTimer = 0, inflight = false;
+function showLogin() { $('login').hidden = false; $('app').hidden = true; setPill('down', 'Signed out'); $('hdrSub').textContent = 'Admin token needed'; }
 async function refresh() {
+  clearTimeout(pollTimer);
   if (!token) { showLogin(); return; }
+  if (inflight) return;
+  inflight = true;
   try {
     const s = await api('GET', '/api/status');
+    failures = 0;
     $('login').hidden = true; $('app').hidden = false;
-    if (s.state !== 'running') { $('subtitle').textContent = 'Server is starting…'; return; }
-    status = s;
-    $('subtitle').textContent = `World ${s.save} · planet ${s.planet} · ${s.players.length} online`;
-    renderOverview(s);
-    renderPlayers(s);
+    if (s.state !== 'running') { banner('The server is starting: the world is loading…', 'warn'); setPill('warn', 'Starting'); }
+    else { banner(null); status = s; sample(s); render(s); }
   } catch (e) {
-    if (e.message !== 'token rejected') $('subtitle').textContent = 'Server not responding: ' + e.message;
+    if (!e.auth) { failures++; banner(`Connection lost: ${e.message}. Retrying…`, 'down'); setPill('down', 'Offline'); }
+  } finally { inflight = false; }
+  schedule();
+}
+function schedule() {
+  clearTimeout(pollTimer);
+  if (!token) return;
+  const delay = document.hidden ? 15000 : failures ? Math.min(15000, 2000 * 2 ** Math.min(failures - 1, 3)) : 2000;
+  pollTimer = setTimeout(refresh, delay);
+}
+function refreshSoon() { clearTimeout(pollTimer); pollTimer = setTimeout(refresh, 300); }
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { refreshSoon(); requestDraw(); } });
+function banner(text, kind) { const b = $('banner'); b.hidden = !text; if (text) { b.textContent = text; b.className = 'banner ' + (kind || ''); } }
+function setPill(kind, text) { $('pill').className = 'pill ' + (kind || ''); $('pillText').textContent = text; }
+
+// ---- history for the sparklines (this page's own samples, 6 minutes) ----
+const HIST = 180;
+const hist = { players: [], cpu: [], mem: [], busy: [], in: [], out: [], fps: [], ti: [] };
+let lastSample = null;
+function push(k, v) { const a = hist[k]; a.push(v); if (a.length > HIST) a.shift(); }
+function sample(s) {
+  const now = performance.now() / 1000, p = s.process || {}, t = s.traffic || {};
+  let cpu = null, rin = null, rout = null;
+  if (lastSample && now > lastSample.t + 0.2) {
+    const dt = now - lastSample.t;
+    if (p.cpuSeconds != null && lastSample.cpu != null) cpu = Math.max(0, (p.cpuSeconds - lastSample.cpu) / dt * 100);
+    if (t.bytesIn != null && lastSample.in != null) { rin = Math.max(0, (t.bytesIn - lastSample.in) / dt); rout = Math.max(0, (t.bytesOut - lastSample.out) / dt); }
+  }
+  lastSample = { t: now, cpu: p.cpuSeconds, in: t.bytesIn, out: t.bytesOut };
+  push('players', s.players.length); push('cpu', cpu); push('mem', p.memoryBytes ?? null); push('busy', s.busyPercent);
+  push('in', rin); push('out', rout); push('fps', s.fps); push('ti', s.units?.Terraformation?.value ?? s.terraformation ?? null);
+}
+function sparkPaths(vals) {
+  const xs = vals.filter(v => v !== null && v !== undefined && isFinite(v));
+  if (xs.length < 2) return ['', ''];
+  const max = Math.max(...xs), min = Math.min(0, ...xs), span = max - min || 1, step = 100 / (HIST - 1);
+  let line = '', first = null, lastX = 0;
+  vals.forEach((v, i) => {
+    if (v === null || v === undefined || !isFinite(v)) return;
+    const x = 100 - (vals.length - 1 - i) * step, y = 29 - (v - min) / span * 25;
+    line += (line ? 'L' : 'M') + x.toFixed(2) + ' ' + y.toFixed(2);
+    if (first === null) first = x;
+    lastX = x;
+  });
+  return [line, `${line}L${lastX.toFixed(2)} 30L${first.toFixed(2)} 30Z`];
+}
+
+// ---- overview ----
+const kpis = {};
+function kpi(id, label, color) {
+  const v = h('div', { class: 'kv' }, '–'), n = h('div', { class: 'kn' }), line = svgEl('path', { class: 'line' }), area = svgEl('path', { class: 'area' });
+  const sv = svgEl('svg', { class: 'spark', viewBox: '0 0 100 30', preserveAspectRatio: 'none', 'aria-hidden': 'true' });
+  sv.append(area, line);
+  kpis[id] = { v, n, line, area };
+  return h('div', { class: 'card kpi', style: `--c: var(${color})` }, h('div', { class: 'kl' }, label), v, n, sv);
+}
+$('kpis').append(kpi('players', 'Players', '--c1'), kpi('cpu', 'CPU', '--c2'), kpi('mem', 'Memory', '--c3'), kpi('busy', 'Loop busy', '--c4'), kpi('in', 'Network in', '--c6'), kpi('out', 'Network out', '--c2'), kpi('fps', 'Loop rate', '--c1'));
+function setKpi(id, value, note, series) {
+  const k = kpis[id];
+  if (k.v.textContent !== value) { k.v.textContent = value; k.v.classList.add('flash'); setTimeout(() => k.v.classList.remove('flash'), 600); }
+  k.n.textContent = note || '';
+  const [line, area] = sparkPaths(series);
+  k.line.setAttribute('d', line); k.area.setAttribute('d', area);
+}
+const lastOf = a => { for (let i = a.length - 1; i >= 0; i--) if (a[i] !== null && a[i] !== undefined) return a[i]; return null; };
+const peak = a => Math.max(0, ...a.filter(v => v !== null && isFinite(v)));
+
+let uptimeBase = null;
+function renderHeader(s) {
+  const b = s.banks || {}, u = s.update || {};
+  $('hdrTitle').textContent = s.save || 'Planet Crafter Server';
+  $('hdrSub').textContent = `World on ${s.planet} · pcds ${s.serverVersion} · game ${s.gameVersion}`;
+  const flipping = b.phase && b.phase !== 'idle';
+  if (flipping) setPill('warn', `Handing over (${b.phase})`);
+  else if (u.state === 'busy') setPill('warn', 'Updating');
+  else setPill('', s.players.length ? `Online · ${s.players.length} playing` : 'Online · idle');
+  $('qPlayers').textContent = s.players.length;
+  $('qLoop').textContent = `${s.fps}/s · ${s.busyPercent}%`;
+  uptimeBase = { s: s.uptimeSeconds, at: performance.now() };
+  tickUptime();
+  $('footVersion').textContent = `pcds ${s.serverVersion}`;
+  const avail = u.available && u.latest;
+  $('qUpdate').hidden = !avail; $('navUpdate').hidden = !avail;
+  if (avail) $('qUpdate').textContent = `Update to ${u.latest}`;
+  const ready = s.players.filter(p => p.status !== 'joining').length;
+  $('navPlayers').hidden = !s.players.length; $('navPlayers').textContent = s.players.length;
+  document.title = `${ready ? `(${ready}) ` : ''}${s.save || 'Planet Crafter'} · Planet Crafter Server`;
+}
+function tickUptime() { if (uptimeBase) $('qUptime').textContent = duration(uptimeBase.s + (performance.now() - uptimeBase.at) / 1000); }
+setInterval(tickUptime, 1000);
+$('qUpdate').onclick = () => show('updates');
+
+function renderOverview(s) {
+  const p = s.process || {}, t = s.traffic || {}, o = s.objects || {};
+  setKpi('players', String(s.players.length), `${s.players.filter(x => x.status === 'joining').length} joining · peak ${peak(hist.players)}`, hist.players);
+  const cpu = lastOf(hist.cpu);
+  setKpi('cpu', cpu === null ? '–' : `${cpu.toFixed(cpu < 10 ? 1 : 0)} %`, p.cpuSeconds != null ? `${p.cpuSeconds < 60 ? p.cpuSeconds.toFixed(1) + ' s' : duration(p.cpuSeconds)} of CPU in all` : '', hist.cpu);
+  setKpi('mem', bytes(p.memoryBytes), 'front and game', hist.mem);
+  setKpi('busy', `${s.busyPercent} %`, `longest loop ${(s.longestLoopMicros / 1000).toFixed(1)} ms`, hist.busy);
+  setKpi('in', lastOf(hist.in) === null ? '–' : bytes(lastOf(hist.in)) + '/s', `${bytes(t.bytesIn)} in all`, hist.in);
+  setKpi('out', lastOf(hist.out) === null ? '–' : bytes(lastOf(hist.out)) + '/s', `${bytes(t.bytesOut)} in all`, hist.out);
+  setKpi('fps', `${s.fps} /s`, `game ticks at ${s.tickRate} /s`, hist.fps);
+  renderTerra(s);
+  const tables = s.tables || {}, world = s.world || {};
+  const how = s.network === 'ip' ? `direct IP on UDP ${s.port}` : s.network === 'steam' ? 'Steam invite code' : `Steam invite code and direct IP on UDP ${s.port}`;
+  $('info').replaceChildren(...pairs([
+    ['Server', `pcds ${s.serverVersion}`], ['Game version', s.gameVersion],
+    ['Game tables', `${tables.version}${tables.buildId ? `, build ${tables.buildId}` : ''}`],
+    ['World', s.save], ['Planet', s.planet], ['World seed', String(world.seed ?? '–')],
+    ['Network', how], ['Steam', s.steam ? 'on' : 'off'],
+    ['Autosave', s.autosaveMinutes ? `every ${s.autosaveMinutes} min` : 'off'],
+    ['Objects', `${(o.world ?? 0).toLocaleString()} world objects, ${(o.network ?? 0).toLocaleString()} networked, ${(o.inventories ?? 0).toLocaleString()} inventories`],
+    ['Rules changed', s.rules.length ? s.rules.join(', ') : 'none: the game\'s own behaviour']
+  ]));
+  renderJoin(s);
+  renderOvPlayers(s);
+  renderUpdateSummary(s, $('ovUpdate'), $('ovUpdChip'), true);
+}
+
+function renderTerra(s) {
+  const units = s.units || {}, ti = units.Terraformation?.value ?? s.terraformation ?? 0, rate = units.Terraformation?.perSecond ?? 0;
+  $('planetName').textContent = `Planet ${s.planet}`;
+  $('tiValue').textContent = si(ti, 'Ti');
+  $('tiRate').textContent = rate ? `${rate > 0 ? '+' : ''}${si(rate, 'Ti')}/s` : '';
+  const st = s.stages || { list: [] }, list = st.list || [];
+  const reached = x => { const u = units[x.unit]; return u ? u.value >= x.start : x.unit === 'Terraformation' && ti >= x.start; };
+  const sig = list.map(x => x.key).join() + '|' + st.current + '|' + list.map(reached).join();
+  if ($('stages').dataset.sig !== sig) {
+    $('stages').dataset.sig = sig;
+    $('stages').replaceChildren(...list.map(x => h('div', { class: 's' + (reached(x) ? ' on' : '') + (x.key === st.current ? ' cur' : ''), title: `${stageName(x.key)}: ${si(x.start, UNIT_SYMBOL[x.unit] || '')}${x.unit !== 'Terraformation' ? ` (${x.unit})` : ''}` })));
+  }
+  $('stageChip').textContent = st.current ? stageName(st.current) : 'No stage yet';
+  const tis = list.filter(x => x.unit === 'Terraformation');
+  const next = tis.find(x => x.start > ti), prev = [...tis].reverse().find(x => x.start <= ti);
+  const from = prev ? prev.start : 0;
+  $('tiBar').style.width = (next ? clamp((ti - from) / (next.start - from), 0, 1) * 100 : 100) + '%';
+  $('tiFrom').textContent = prev ? `${stageName(prev.key)} · ${si(prev.start, 'Ti')}` : 'Start';
+  if (next) {
+    const eta = rate > 0 ? ` · in ${duration((next.start - ti) / rate)}` : '';
+    $('tiNext').textContent = `Next: ${stageName(next.key)} at ${si(next.start, 'Ti')}${eta}`;
+  } else $('tiNext').textContent = list.length ? 'Every stage reached' : '';
+  // A unit the planet does not have reads -1.
+  const names = Object.keys(units).filter(k => k !== 'Terraformation' && units[k].value >= 0).sort((a, b) => (UNIT_ORDER.indexOf(a) + 1 || 99) - (UNIT_ORDER.indexOf(b) + 1 || 99));
+  const box = $('units');
+  if (box.dataset.sig !== names.join()) {
+    box.dataset.sig = names.join();
+    box.replaceChildren(...names.map(k => h('div', { class: 'unit', 'data-u': k }, h('div', { class: 'n' }, k), h('div', { class: 'v' }), h('div', { class: 'r' }))));
+  }
+  for (const el of box.children) {
+    const name = el.dataset.u, u = units[name];
+    el.children[1].textContent = unitValue(name, u.value);
+    el.children[2].textContent = u.perSecond ? `${u.perSecond > 0 ? '+' : ''}${unitValue(name, u.perSecond)}/s` : 'steady';
+    el.children[2].className = 'r' + (u.perSecond < 0 ? ' neg' : u.perSecond ? '' : ' zero');
   }
 }
 
-// ---- map: buildings from GET /api/map when the tab opens, players at every refresh ----
-let buildings = [];
-function drawMap(ready) {
-  const map = $('map');
-  const players = ready.filter(p => p.position).map(p => [p.position[0], p.position[2], playerName(p)]);
-  const points = [...buildings, ...players];
-  if (!points.length) { map.removeAttribute('viewBox'); map.replaceChildren(svg('text', { x: 12, y: 28, 'font-size': 14 }, 'No buildings or players to show')); return; }
-  let [x0, z0, x1, z1] = [Infinity, Infinity, -Infinity, -Infinity];
-  for (const [x, z] of points) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); }
-  const pad = Math.max(20, (x1 - x0) * 0.05, (z1 - z0) * 0.05);
-  [x0, z0, x1, z1] = [x0 - pad, z0 - pad, x1 + pad, z1 + pad];
-  const r = Math.max(x1 - x0, z1 - z0) / 300;
-  // North (+z) up: the SVG's y is -z.
-  map.setAttribute('viewBox', `${x0} ${-z1} ${x1 - x0} ${z1 - z0}`);
-  map.replaceChildren(
-    ...buildings.map(([x, z]) => svg('circle', { class: 'b', cx: x, cy: -z, r })),
-    ...players.flatMap(([x, z, name]) => [svg('circle', { class: 'p', cx: x, cy: -z, r: r * 3, 'stroke-width': r }),
-      svg('text', { x: x + r * 4, y: -z + r * 1.5, 'font-size': r * 10 }, name)]));
+function renderJoin(s) {
+  const body = [];
+  if (s.inviteCode) {
+    body.push(h('p', { class: 'sub' }, 'In Planet Crafter: Multiplayer, Join with invitation code. It works for you and your friends; without a Steam login token it changes when the server restarts.'),
+      h('div', { class: 'row' }, h('code', { style: 'font-size:18px;font-weight:600;letter-spacing:.04em' }, s.inviteCode),
+        h('button', { class: 'small', onclick: () => navigator.clipboard.writeText(s.inviteCode).then(() => toast('Invite code copied'), () => toast('Copy failed: select the code instead', 'err')) }, 'Copy')));
+  }
+  if (s.network !== 'steam') body.push(h('p', { class: 'sub', style: body.length ? 'margin:12px 0 0' : 'margin:0' }, `Direct IP: this host's address, UDP port ${s.port}.`));
+  const sig = (s.inviteCode || '') + s.network + s.port;
+  if ($('joinBody').dataset.sig !== sig) { $('joinBody').dataset.sig = sig; $('joinBody').replaceChildren(...body); }
 }
+
+function miniGauges(p) {
+  const v = p.gauges || [], m = p.gaugeMax || [];
+  return h('div', { class: 'mini', title: p.gauges ? `oxygen ${Math.round(v[0])}, water ${Math.round(v[1])}, health ${Math.round(v[2])}` : '' },
+    [0, 1, 2].map(i => h('i', {}, h('b', { style: `width:${p.gauges ? clamp(v[i] / (m[i] || 100), 0, 1) * 100 : 0}%;background:var(${['--c2', '--c6', '--c1'][i]})` }))));
+}
+function renderOvPlayers(s) {
+  const list = s.players.slice(0, 8);
+  if (!list.length) { $('ovPlayers').replaceChildren(h('div', { class: 'empty' }, 'Nobody online')); return; }
+  $('ovPlayers').replaceChildren(...list.map(p => h('div', { class: 'pr' },
+    h('div', { class: 'avatar', style: `background:${playerColor(p)}` }, initials(playerName(p))),
+    h('span', { class: 'nm' }, playerName(p)), p.status === 'ready' ? miniGauges(p) : h('span', { class: 'chip' + (p.status === 'dying' ? ' bad' : '') }, p.status),
+    h('span', { class: 'muted num', style: 'font-size:12px;width:56px;text-align:right' }, duration(p.connectedSeconds)))),
+    s.players.length > list.length ? h('div', { class: 'muted', style: 'padding-top:8px' }, `and ${s.players.length - list.length} more`) : '');
+}
+
+// ---- players ----
+const cards = new Map();
+const GAUGES = [['o2', 'Oxygen'], ['water', 'Water'], ['health', 'Health'], ['toxic', 'Toxicity']];
+function playerCard(p) {
+  const refs = {};
+  refs.avatar = h('div', { class: 'avatar' });
+  refs.name = h('div', { class: 'nm' }); refs.id = h('div', { class: 'id' }); refs.chip = h('span', { class: 'chip' });
+  refs.gauges = GAUGES.map(([cls, label]) => { const fill = h('i'), val = h('span', { class: 'val' }); return { el: h('div', { class: 'gauge ' + cls }, h('span', { class: 't' }, label), h('div', { class: 'bar' }, fill), val), fill, val, cls }; });
+  refs.pos = h('span', { class: 'num' }); refs.online = h('span');
+  const el = h('div', { class: 'card pc' },
+    h('div', { class: 'who' }, refs.avatar, h('div', {}, refs.name, refs.id), refs.chip),
+    h('div', { class: 'gauges' }, refs.gauges.map(g => g.el)),
+    h('div', { class: 'meta' }, h('span', {}, 'Position ', refs.pos), refs.online),
+    h('div', { class: 'row' },
+      h('button', { class: 'small', onclick: () => { show('map'); mapSelect(p.id, true); } }, 'Show on map'),
+      h('button', { class: 'small', onclick: () => teleportDialog(p.id) }, 'Teleport…'),
+      h('button', { class: 'small', style: 'margin-left:auto', onclick: () => kick(p.id) }, 'Kick'),
+      h('button', { class: 'small danger', onclick: () => ban(p.id) }, 'Ban')));
+  return { el, refs };
+}
+function updateCard(c, p) {
+  const r = c.refs, name = playerName(p);
+  r.avatar.textContent = initials(name); r.avatar.style.background = playerColor(p);
+  r.name.textContent = name;
+  r.id.textContent = [p.steamId ? `Steam ${p.steamId}` : `client ${p.id}`, p.verified ? 'invite code' : p.ip === 'steam' ? 'Steam' : p.ip].filter(Boolean).join(' · ');
+  r.chip.textContent = p.status; r.chip.className = 'chip ' + (p.status === 'ready' ? 'ok' : p.status === 'dying' ? 'bad' : 'warn');
+  const v = p.gauges || [], m = p.gaugeMax || [];
+  r.gauges.forEach((g, i) => {
+    const max = m[i] || 100, val = v[i], frac = p.gauges ? clamp(val / max, 0, 1) : 0;
+    g.fill.style.width = frac * 100 + '%';
+    g.val.textContent = p.gauges ? `${Math.round(val)}${i === 0 ? '' : ' %'}` : '–';
+    g.el.className = 'gauge ' + g.cls + (p.gauges && (i === 3 ? frac > 0.75 : frac < 0.2) ? ' low' : '');
+  });
+  r.pos.textContent = pos(p.position);
+  r.online.textContent = 'online ' + duration(p.connectedSeconds);
+}
+function renderPlayers(s) {
+  const q = $('playerSearch').value.trim().toLowerCase(), grid = $('playerGrid'), seen = new Set();
+  let shown = 0;
+  for (const p of s.players) {
+    seen.add(p.id);
+    let c = cards.get(p.id);
+    if (!c) { c = playerCard(p); cards.set(p.id, c); grid.append(c.el); }
+    updateCard(c, p);
+    const match = !q || `${p.name || ''} ${p.steamId || ''} ${p.ip || ''} ${p.id}`.toLowerCase().includes(q);
+    c.el.hidden = !match; if (match) shown++;
+  }
+  for (const [id, c] of cards) if (!seen.has(id)) { cards.delete(id); c.el.classList.add('leaving'); setTimeout(() => c.el.remove(), 300); }
+  $('playersEmpty').hidden = s.players.length > 0;
+  $('playersCount').textContent = s.players.length ? (q ? `${shown} of ${s.players.length} shown` : `${s.players.length} online`) : '';
+  $('playerNames').replaceChildren(...s.players.filter(p => p.name).map(p => h('option', { value: p.name })));
+}
+$('playerSearch').oninput = () => status && renderPlayers(status);
+const findPlayer = id => status && status.players.find(p => p.id === id);
+async function kick(id) {
+  const p = findPlayer(id); if (!p) return;
+  if (await ask({ title: `Kick ${playerName(p)}?`, body: 'They are disconnected and can join again.', ok: 'Kick' })) act(`Kicked ${playerName(p)}`, () => api('POST', '/api/kick', { id }));
+}
+async function ban(id) {
+  const p = findPlayer(id); if (!p) return;
+  if (await ask({ title: `Ban ${playerName(p)}?`, body: `They are kicked, and their name${p.steamId ? ', SteamID' : p.ip && p.ip !== 'steam' ? ' and IP' : ''} cannot join again until unbanned (Tools).`, ok: 'Ban', danger: true }))
+    act(`Banned ${playerName(p)}`, () => api('POST', '/api/ban', { id }));
+}
+async function teleportDialog(id) {
+  const p = findPlayer(id); if (!p || !p.position) return toast('That player is not in the world yet', 'err');
+  const others = status.players.filter(o => o.id !== id && o.position);
+  const sel = h('select', {}, h('option', { value: '' }, 'Coordinates…'), others.map(o => h('option', { value: String(o.id) }, `To ${playerName(o)}`)));
+  const xyz = p.position.map((v, i) => h('input', { type: 'number', step: 'any', value: String(Math.round(v * 10) / 10), 'aria-label': 'xyz'[i] }));
+  sel.onchange = () => { const o = others.find(o => String(o.id) === sel.value); if (o) o.position.forEach((v, i) => { xyz[i].value = String(Math.round(v * 10) / 10 + (i === 0 ? 1.5 : 0)); }); };
+  const go = await ask({ title: `Teleport ${playerName(p)}`, body: [h('p', { style: 'margin:0' }, 'The game respawns them at the position, as when a world portal closes: no dying consequences.'), sel, h('div', { class: 'xyz' }, xyz)], ok: 'Teleport' });
+  if (!go) return;
+  const position = xyz.map(i => Number(i.value));
+  if (xyz.some(i => i.value === '') || position.some(v => !isFinite(v))) return toast('Give x, y and z', 'err');
+  act(`${playerName(p)} sent to ${pos(position)}`, () => api('POST', '/api/teleport', { id, position }));
+}
+
+// ---- map: buildings from GET /api/map, players from every status ----
+const map = { cv: $('mapCanvas'), ctx: null, w: 0, h: 0, dpr: 1, cx: 0, cz: 0, scale: 0.4, fitted: false, buildings: [], planet: '', loadedAt: 0,
+  players: new Map(), selected: null, target: null, follow: false, hover: null, raf: 0, colors: null, last: 0,
+  layers: store.get('mapLayers', { buildings: true, trails: true, labels: true, grid: true }) };
+map.ctx = map.cv.getContext('2d');
+for (const [k, id] of [['buildings', 'lyBuildings'], ['trails', 'lyTrails'], ['labels', 'lyLabels'], ['grid', 'lyGrid']]) {
+  $(id).checked = map.layers[k] !== false;
+  $(id).onchange = () => { map.layers[k] = $(id).checked; store.set('mapLayers', map.layers); requestDraw(); };
+}
+function colors() {
+  if (!map.colors) {
+    const cs = getComputedStyle(document.documentElement), v = n => cs.getPropertyValue(n).trim();
+    map.colors = { bg: v('--map-bg'), grid: v('--map-grid'), building: v('--map-building'), text: v('--text'), muted: v('--muted'), panel: v('--panel'), accent: v('--accent'), warn: v('--warn') };
+  }
+  return map.colors;
+}
+new ResizeObserver(() => {
+  const r = map.cv.getBoundingClientRect();
+  map.w = r.width; map.h = r.height; map.dpr = window.devicePixelRatio || 1;
+  map.cv.width = Math.round(r.width * map.dpr); map.cv.height = Math.round(r.height * map.dpr);
+  if (!map.fitted && r.width) fitMap();
+  requestDraw();
+}).observe(map.cv);
+const toScreen = (x, z) => [(x - map.cx) * map.scale + map.w / 2, -(z - map.cz) * map.scale + map.h / 2];
+const toWorld = (sx, sy) => [map.cx + (sx - map.w / 2) / map.scale, map.cz - (sy - map.h / 2) / map.scale];
+function fitMap() {
+  const pts = [...map.buildings.map(b => [b[0], b[2]]), ...[...map.players.values()].map(p => [p.x, p.z])];
+  if (!map.w) return;
+  map.fitted = true;
+  if (!pts.length) { map.cx = 0; map.cz = 0; map.scale = 0.3; requestDraw(); return; }
+  let [x0, z0, x1, z1] = [Infinity, Infinity, -Infinity, -Infinity];
+  for (const [x, z] of pts) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); }
+  map.cx = (x0 + x1) / 2; map.cz = (z0 + z1) / 2;
+  map.scale = clamp(Math.min(map.w / Math.max(80, (x1 - x0) * 1.15), map.h / Math.max(80, (z1 - z0) * 1.15)), 0.02, 40);
+  requestDraw();
+}
+function zoomAt(f, sx, sy) {
+  const [wx, wz] = toWorld(sx, sy);
+  map.scale = clamp(map.scale * f, 0.02, 40);
+  map.cx = wx - (sx - map.w / 2) / map.scale; map.cz = wz + (sy - map.h / 2) / map.scale;
+  requestDraw();
+}
+$('mapIn').onclick = () => zoomAt(1.6, map.w / 2, map.h / 2);
+$('mapOut').onclick = () => zoomAt(1 / 1.6, map.w / 2, map.h / 2);
+$('mapFit').onclick = () => { map.follow = false; $('mapFollow').checked = false; fitMap(); };
+$('mapFollow').onchange = () => { map.follow = $('mapFollow').checked; if (map.follow && !map.selected) { const first = [...map.players.keys()][0]; if (first !== undefined) mapSelect(first, false); } requestDraw(); };
+
 async function loadMap() {
   try {
     const m = await api('GET', '/api/map');
-    buildings = m.buildings;
-    $('mapNote').textContent = `Planet ${m.planet} seen from above (x to the right, z up): ${m.buildings.length} buildings in grey, players in green.`;
-  } catch (e) { $('mapNote').textContent = e.message; }
-  if (status) drawMap(status.players.filter(p => p.status !== 'joining'));
+    map.buildings = m.buildings; map.planet = m.planet; map.loadedAt = performance.now();
+    $('mapPlanet').textContent = `Planet ${m.planet}`;
+    $('mapNote').textContent = `${m.buildings.length.toLocaleString()} buildings${m.buildings.length >= 4000 ? ' (a sample of them)' : ''}. North (+z) is up.`;
+    if (!map.fitted || map.fitPending) { map.fitPending = false; fitMap(); }
+    requestDraw();
+  } catch (e) { if (!e.auth) $('mapNote').textContent = e.message; }
 }
-$('tpTo').onchange = () => {
-  const p = status && status.players.find(p => String(p.id) === $('tpTo').value);
-  if (p && p.position) [$('tpX').value, $('tpY').value, $('tpZ').value] = p.position;
+onShow.map = () => { map.fitPending = !map.loadedAt; if (performance.now() - map.loadedAt > 30000 || !map.loadedAt) loadMap(); requestDraw(); };
+setInterval(() => { if (current === 'map' && !document.hidden) loadMap(); }, 30000);
+
+function updateMapPlayers(s) {
+  const seen = new Set();
+  for (const p of s.players) {
+    if (!p.position || p.status === 'joining') continue;
+    seen.add(p.id);
+    const [x, y, z] = p.position;
+    let m = map.players.get(p.id);
+    if (!m) { m = { x, y, z, dx: x, dz: z, trail: [[x, z]] }; map.players.set(p.id, m); }
+    if (Math.hypot(x - m.x, z - m.z) > 300) { m.dx = x; m.dz = z; m.trail = []; }
+    m.x = x; m.y = y; m.z = z; m.name = playerName(p); m.color = playerColor(p); m.status = p.status;
+    const last = m.trail[m.trail.length - 1];
+    if (!last || Math.hypot(x - last[0], z - last[1]) > 1) { m.trail.push([x, z]); if (m.trail.length > 150) m.trail.shift(); }
+  }
+  for (const id of [...map.players.keys()]) if (!seen.has(id)) map.players.delete(id);
+  if (map.selected !== null && !map.players.has(map.selected)) map.selected = null;
+  if (current === 'map') { renderMapSide(); requestDraw(); }
+}
+function renderMapSide() {
+  const list = [...map.players.entries()];
+  const sig = list.map(([id, m]) => id + m.name).join() + '|' + map.selected;
+  const box = $('mapPlayers');
+  if (box.dataset.sig !== sig) {
+    box.dataset.sig = sig;
+    box.replaceChildren(...(list.length ? list.map(([id, m]) => h('button', { class: 'pl' + (map.selected === id ? ' sel' : ''), 'data-id': id, onclick: () => mapSelect(id, true) },
+      h('span', { class: 'd', style: `background:${m.color}` }), h('span', { class: 'nm' }, m.name), h('span', { class: 'c' }))) : [h('div', { class: 'empty' }, 'Nobody in the world')]));
+    const sel = $('mapTpPlayer'), keep = sel.value;
+    sel.replaceChildren(h('option', { value: '' }, 'Pick a player…'), ...list.map(([id, m]) => h('option', { value: String(id) }, m.name)));
+    sel.value = map.selected !== null ? String(map.selected) : list.some(([id]) => String(id) === keep) ? keep : '';
+  }
+  for (const b of box.querySelectorAll('.pl')) { const m = map.players.get(Number(b.dataset.id)); if (m) b.querySelector('.c').textContent = `${Math.round(m.x)}, ${Math.round(m.z)}`; }
+}
+function mapSelect(id, center) {
+  map.selected = id;
+  const m = map.players.get(id);
+  if (m && center) { map.cx = m.x; map.cz = m.z; if (map.scale < 1) map.scale = 1.5; }
+  $('mapTpPlayer').value = String(id);
+  renderMapSide(); requestDraw();
+}
+$('mapTpPlayer').onchange = () => { const v = $('mapTpPlayer').value; map.selected = v ? Number(v) : null; renderMapSide(); requestDraw(); };
+function setTarget(x, z, y, note) {
+  map.target = { x, z };
+  $('mapX').value = String(Math.round(x * 10) / 10); $('mapZ').value = String(Math.round(z * 10) / 10);
+  if (y !== undefined) $('mapY').value = String(Math.round(y * 10) / 10);
+  $('mapTpNote').textContent = note;
+  requestDraw();
+}
+function pickSpot(x, z) {
+  // Height: the nearest building's (within 40 m) a little above it, else the selected player's.
+  let best = null, bd = 40;
+  for (const b of map.buildings) { const d = Math.hypot(b[0] - x, b[2] - z); if (d < bd) { bd = d; best = b; } }
+  const sel = map.selected !== null ? map.players.get(map.selected) : null;
+  if (best) setTarget(x, z, best[1] + 1.5, `Height from the building ${Math.round(bd)} m away. Check y before you teleport: a spot under the ground or in the air is where they land.`);
+  else if (sel) setTarget(x, z, sel.y + 2, `Height: ${sel.name}'s, as no building is near. Check y: they land exactly there.`);
+  else setTarget(x, z, undefined, 'No building near to take a height from: give y.');
+}
+$('mapTpGo').onclick = e => {
+  const id = $('mapTpPlayer').value, vals = ['mapX', 'mapY', 'mapZ'].map(i => $(i).value);
+  if (!id) return toast('Pick a player to teleport', 'err');
+  if (vals.some(v => v === '')) return toast('Give x, y and z (click the map)', 'err');
+  const position = vals.map(Number), name = $('mapTpPlayer').selectedOptions[0].textContent;
+  act(`${name} sent to ${pos(position)}`, () => api('POST', '/api/teleport', { id: Number(id), position }), e.currentTarget);
 };
-$('tpGo').onclick = () => {
-  const player = $('tpPlayer').value, ids = ['tpX', 'tpY', 'tpZ'];
-  if (!player) return note('tpMsg', 'Pick a player', true);
-  if (ids.some(id => $(id).value === '')) return note('tpMsg', 'Give x, y and z', true);
-  const position = ids.map(id => Number($(id).value)), name = $('tpPlayer').selectedOptions[0].textContent;
-  act('tpMsg', `${name} sent to ${pos(position)}`, () => api('POST', '/api/teleport', { id: Number(player), position }));
+for (const i of ['mapX', 'mapZ']) $(i).oninput = () => { const x = Number($('mapX').value), z = Number($('mapZ').value); if ($('mapX').value !== '' && $('mapZ').value !== '') { map.target = { x, z }; requestDraw(); } };
+
+// Pointer input: drag pans, wheel and pinch zoom, a click picks a player or a spot.
+const pointers = new Map();
+let drag = null;
+map.cv.addEventListener('pointerdown', e => {
+  map.cv.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, [e.offsetX, e.offsetY]);
+  drag = { x: e.offsetX, y: e.offsetY, cx: map.cx, cz: map.cz, moved: false, pinch: pointers.size === 2 ? pinchState() : null };
+});
+function pinchState() { const [a, b] = [...pointers.values()]; return { d: Math.hypot(a[0] - b[0], a[1] - b[1]), scale: map.scale, mid: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2] }; }
+map.cv.addEventListener('pointermove', e => {
+  if (pointers.has(e.pointerId)) pointers.set(e.pointerId, [e.offsetX, e.offsetY]);
+  if (drag && pointers.size === 2 && drag.pinch) {
+    const now = pinchState(), f = now.d / (drag.pinch.d || 1);
+    const [wx, wz] = toWorld(drag.pinch.mid[0], drag.pinch.mid[1]);
+    map.scale = clamp(drag.pinch.scale * f, 0.02, 40);
+    map.cx = wx - (now.mid[0] - map.w / 2) / map.scale; map.cz = wz + (now.mid[1] - map.h / 2) / map.scale;
+    drag.moved = true; requestDraw(); return;
+  }
+  if (drag && pointers.size === 1) {
+    const dx = e.offsetX - drag.x, dy = e.offsetY - drag.y;
+    if (drag.moved || Math.hypot(dx, dy) > 4) {
+      drag.moved = true; map.cv.classList.add('dragging');
+      map.cx = drag.cx - dx / map.scale; map.cz = drag.cz + dy / map.scale;
+      if (map.follow) { map.follow = false; $('mapFollow').checked = false; }
+      requestDraw();
+    }
+    return;
+  }
+  hoverAt(e.offsetX, e.offsetY);
+});
+function endPointer(e) {
+  pointers.delete(e.pointerId);
+  map.cv.classList.remove('dragging');
+  if (drag && !drag.moved && pointers.size === 0 && e.type === 'pointerup') {
+    const hit = playerAt(e.offsetX, e.offsetY);
+    if (hit !== null) { mapSelect(hit, false); const m = map.players.get(hit); if (m && $('mapTpPlayer').value && Number($('mapTpPlayer').value) !== hit) setTarget(m.x + 1.5, m.z, m.y, `Next to ${m.name}.`); }
+    else { const [x, z] = toWorld(e.offsetX, e.offsetY); pickSpot(x, z); }
+  }
+  if (pointers.size === 0) drag = null;
+}
+map.cv.addEventListener('pointerup', endPointer);
+map.cv.addEventListener('pointercancel', endPointer);
+map.cv.addEventListener('pointerleave', () => { $('mapTip').hidden = true; map.hover = null; });
+map.cv.addEventListener('wheel', e => { e.preventDefault(); zoomAt(Math.exp(-e.deltaY * (e.deltaMode ? 0.05 : 0.0015)), e.offsetX, e.offsetY); }, { passive: false });
+map.cv.addEventListener('dblclick', e => zoomAt(2, e.offsetX, e.offsetY));
+function playerAt(sx, sy) {
+  let best = null, bd = 14;
+  for (const [id, m] of map.players) { const [px, py] = toScreen(m.dx, m.dz), d = Math.hypot(px - sx, py - sy); if (d < bd) { bd = d; best = id; } }
+  return best;
+}
+function hoverAt(sx, sy) {
+  const [x, z] = toWorld(sx, sy), hit = playerAt(sx, sy), tip = $('mapTip');
+  $('mapReadout').textContent = `x ${Math.round(x)} · z ${Math.round(z)} · ${map.scale >= 1 ? `${map.scale.toFixed(1)} px/m` : `${(1 / map.scale).toFixed(1)} m/px`}`;
+  if (hit !== null) {
+    const m = map.players.get(hit);
+    tip.hidden = false; tip.style.left = sx + 'px'; tip.style.top = sy + 'px';
+    tip.replaceChildren(h('b', {}, m.name), h('div', { class: 'muted' }, `${Math.round(m.x)}, ${Math.round(m.y)}, ${Math.round(m.z)}`));
+  } else tip.hidden = true;
+}
+
+function requestDraw() { if (!map.raf && current === 'map' && !document.hidden) map.raf = requestAnimationFrame(frame); }
+function frame(ts) {
+  map.raf = 0;
+  if (current !== 'map' || document.hidden || !map.w) return;
+  const dt = Math.min(0.1, (ts - (map.last || ts)) / 1000); map.last = ts;
+  let moving = false;
+  const k = 1 - Math.exp(-dt / 0.35);
+  for (const m of map.players.values()) {
+    const ex = m.x - m.dx, ez = m.z - m.dz;
+    if (Math.abs(ex) > 0.02 || Math.abs(ez) > 0.02) { m.dx += ex * k; m.dz += ez * k; moving = true; } else { m.dx = m.x; m.dz = m.z; }
+  }
+  if (map.follow && map.selected !== null) { const m = map.players.get(map.selected); if (m) { map.cx += (m.dx - map.cx) * Math.min(1, k * 2); map.cz += (m.dz - map.cz) * Math.min(1, k * 2); if (Math.abs(m.dx - map.cx) > 0.05) moving = true; } }
+  draw(ts);
+  if (moving || map.target || map.selected !== null) map.raf = requestAnimationFrame(frame);
+}
+function niceStep(meters) { const p = 10 ** Math.floor(Math.log10(meters)), f = meters / p; return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * p; }
+function draw(ts) {
+  const { ctx, w, h: hh, dpr } = map, c = colors();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = c.bg; ctx.fillRect(0, 0, w, hh);
+  const [x0, z1] = toWorld(0, 0), [x1, z0] = toWorld(w, hh);
+  ctx.font = '11px system-ui, sans-serif';
+  if (map.layers.grid) {
+    const step = niceStep(90 / map.scale);
+    ctx.strokeStyle = c.grid; ctx.lineWidth = 1; ctx.fillStyle = c.muted; ctx.beginPath();
+    for (let x = Math.ceil(x0 / step) * step; x <= x1; x += step) { const [sx] = toScreen(x, 0); ctx.moveTo(Math.round(sx) + .5, 0); ctx.lineTo(Math.round(sx) + .5, hh); }
+    for (let z = Math.ceil(z0 / step) * step; z <= z1; z += step) { const [, sy] = toScreen(0, z); ctx.moveTo(0, Math.round(sy) + .5); ctx.lineTo(w, Math.round(sy) + .5); }
+    ctx.stroke();
+    ctx.globalAlpha = .8;
+    for (let x = Math.ceil(x0 / step) * step; x <= x1; x += step) { const [sx] = toScreen(x, 0); ctx.fillText(String(Math.round(x)), sx + 3, 14); }
+    for (let z = Math.ceil(z0 / step) * step; z <= z1; z += step) { const [, sy] = toScreen(0, z); ctx.fillText(String(Math.round(z)), 54, sy - 3); }
+    ctx.globalAlpha = 1;
+  }
+  if (map.layers.buildings) {
+    ctx.fillStyle = c.building;
+    const s = clamp(map.scale * 3, 2, 7), half = s / 2;
+    for (const b of map.buildings) {
+      if (b[0] < x0 - 5 || b[0] > x1 + 5 || b[2] < z0 - 5 || b[2] > z1 + 5) continue;
+      const [sx, sy] = toScreen(b[0], b[2]);
+      ctx.fillRect(sx - half, sy - half, s, s);
+    }
+  }
+  if (map.layers.trails) {
+    ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    for (const m of map.players.values()) {
+      const t = m.trail; if (t.length < 2) continue;
+      ctx.strokeStyle = m.color;
+      for (let i = 1; i < t.length; i++) {
+        ctx.globalAlpha = 0.08 + 0.5 * i / t.length;
+        const [ax, ay] = toScreen(t[i - 1][0], t[i - 1][1]), [bx, by] = toScreen(t[i][0], t[i][1]);
+        ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+  const pulse = (Math.sin(ts / 300) + 1) / 2;
+  if (map.target) {
+    const [sx, sy] = toScreen(map.target.x, map.target.z);
+    ctx.strokeStyle = c.warn; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(sx, sy, 8 + pulse * 6, 0, Math.PI * 2); ctx.globalAlpha = 1 - pulse * .6; ctx.stroke(); ctx.globalAlpha = 1;
+    ctx.beginPath(); ctx.moveTo(sx - 12, sy); ctx.lineTo(sx - 4, sy); ctx.moveTo(sx + 4, sy); ctx.lineTo(sx + 12, sy); ctx.moveTo(sx, sy - 12); ctx.lineTo(sx, sy - 4); ctx.moveTo(sx, sy + 4); ctx.lineTo(sx, sy + 12); ctx.stroke();
+  }
+  ctx.font = '600 12px system-ui, sans-serif';
+  for (const [id, m] of map.players) {
+    const [sx, sy] = toScreen(m.dx, m.dz);
+    if (id === map.selected) { ctx.beginPath(); ctx.arc(sx, sy, 12 + pulse * 4, 0, Math.PI * 2); ctx.strokeStyle = m.color; ctx.globalAlpha = .5; ctx.lineWidth = 3; ctx.stroke(); ctx.globalAlpha = 1; }
+    ctx.beginPath(); ctx.arc(sx, sy, 7, 0, Math.PI * 2); ctx.fillStyle = m.color; ctx.fill(); ctx.lineWidth = 2.5; ctx.strokeStyle = c.panel; ctx.stroke();
+    if (m.status === 'dying') { ctx.beginPath(); ctx.arc(sx, sy, 10, 0, Math.PI * 2); ctx.strokeStyle = '#e5533d'; ctx.lineWidth = 2; ctx.stroke(); }
+    if (map.layers.labels) {
+      const tw = ctx.measureText(m.name).width;
+      ctx.fillStyle = c.panel; ctx.globalAlpha = .85;
+      ctx.beginPath(); ctx.roundRect ? ctx.roundRect(sx + 11, sy - 9, tw + 10, 18, 5) : ctx.rect(sx + 11, sy - 9, tw + 10, 18); ctx.fill();
+      ctx.globalAlpha = 1; ctx.fillStyle = c.text; ctx.fillText(m.name, sx + 16, sy + 4);
+    }
+  }
+  // Scale bar and north.
+  const meters = niceStep(110 / map.scale), px = meters * map.scale;
+  ctx.fillStyle = c.text; ctx.strokeStyle = c.text; ctx.lineWidth = 2; ctx.font = '11px system-ui, sans-serif';
+  ctx.beginPath(); ctx.moveTo(16, hh - 26); ctx.lineTo(16 + px, hh - 26); ctx.moveTo(16, hh - 30); ctx.lineTo(16, hh - 22); ctx.moveTo(16 + px, hh - 30); ctx.lineTo(16 + px, hh - 22); ctx.stroke();
+  ctx.fillText(meters >= 1000 ? `${meters / 1000} km` : `${meters} m`, 16, hh - 34);
+  ctx.beginPath(); ctx.moveTo(w - 24, 18); ctx.lineTo(w - 30, 34); ctx.lineTo(w - 18, 34); ctx.closePath(); ctx.fill();
+  ctx.fillText('N', w - 28, 48);
+}
+
+// ---- chat: GET /api/chat/events long poll, all the time (the overview shows it too) ----
+const chat = { last: 0, events: [], unread: 0, running: false, sent: [] };
+async function chatLoop() {
+  if (chat.running) return;
+  chat.running = true;
+  let wait = 0;
+  while (token) {
+    try {
+      const r = await api('GET', `/api/chat/events?after=${chat.last}&wait=${document.hidden ? 0 : wait}`, undefined, 40000);
+      if (r.last < chat.last) { chat.last = 0; chat.events = []; continue; }
+      if (r.events.length) {
+        chat.events.push(...r.events.map(e => ({ ...e, kind: 'player' })));
+        if (chat.events.length > 400) chat.events = chat.events.slice(-400);
+        if (current !== 'chat' && wait) chat.unread += r.events.length;
+        renderChat();
+      }
+      chat.last = r.last ?? chat.last;
+      $('chatInfo').textContent = r.dropped ? `${r.dropped} events dropped by slow hooks` : '';
+      wait = 25;
+      // Coalesce a busy chat into fewer requests; a hidden page asks rarely.
+      await sleep(document.hidden ? 10000 : r.events.length ? 700 : 0);
+    } catch (e) { if (e.auth) break; await sleep(5000); }
+  }
+  chat.running = false;
+}
+function chatLine(e) {
+  return h('div', { class: 'msg' + (e.kind === 'server' ? ' server' : '') }, h('time', {}, clock(e.time)),
+    h('div', { class: 'txt' }, h('span', { class: 'who', style: e.kind === 'server' ? '' : `color:hsl(${hue(e.steamId || e.name || e.client)} 55% 45%)` }, e.kind === 'server' ? 'Server' : (e.name || `client ${e.client}`)),
+      e.command ? h('span', { class: 'chip', style: 'margin-right:6px' }, '!' + e.command) : null, e.text));
+}
+// Lines are added, never redrawn: only new ones animate in.
+function syncFeed(feed, lines, emptyText) {
+  const stick = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
+  if (!lines.length) { feed.replaceChildren(h('div', { class: 'empty' }, emptyText)); return; }
+  const shown = [...feed.children].filter(el => el.line);
+  if (shown.length !== feed.children.length) {
+    feed.replaceChildren(...lines.map(l => { const el = chatLine(l); el.line = l; el.style.animation = 'none'; return el; }));
+  } else {
+    for (const el of shown) if (!lines.includes(el.line)) el.remove();
+    const have = new Set([...feed.children].map(el => el.line));
+    for (const l of lines) if (!have.has(l)) { const el = chatLine(l); el.line = l; feed.append(el); }
+  }
+  if (stick) feed.scrollTop = feed.scrollHeight;
+}
+function renderChat() {
+  const all = [...chat.events, ...chat.sent].sort((a, b) => a.time - b.time);
+  syncFeed($('chatFeed'), all, 'No chat since the server started');
+  syncFeed($('ovChat'), all.slice(-6), 'Quiet so far');
+  $('navChat').hidden = !chat.unread; $('navChat').textContent = chat.unread > 99 ? '99+' : chat.unread;
+}
+onShow.chat = () => { chat.unread = 0; renderChat(); const f = $('chatFeed'); f.scrollTop = f.scrollHeight; setTimeout(() => $('chatText').focus(), 50); };
+$('chatForm').onsubmit = e => {
+  e.preventDefault();
+  const text = $('chatText').value.trim();
+  if (!text) return;
+  act(null, async () => {
+    await api('POST', '/api/chat', { text });
+    $('chatText').value = '';
+    chat.sent.push({ kind: 'server', time: Date.now(), text });
+    if (chat.sent.length > 100) chat.sent.shift();
+    renderChat();
+  }, $('chatSend'));
 };
 
 // ---- world ----
+function renderWorld(s) {
+  const world = s.world || {};
+  $('worldInfo').replaceChildren(...pairs([['World', s.save], ['Planet', s.planet], ['World seed', String(world.seed ?? '–')],
+    ['Game time', duration(s.gameTime || 0)], ['Autosave', s.autosaveMinutes ? `every ${s.autosaveMinutes} min` : 'off'],
+    ['World objects', (s.objects?.world ?? 0).toLocaleString()]]));
+  const settings = Object.entries(world.settings || {});
+  const sig = JSON.stringify(settings);
+  if ($('worldSettings').dataset.sig !== sig) {
+    $('worldSettings').dataset.sig = sig;
+    $('worldSettings').replaceChildren(table(['Setting', 'Value'], settings.map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v) : String(v)]), 'No settings'));
+  }
+}
 async function loadWorlds() {
   try {
     const w = await api('GET', '/api/worlds');
-    $('worlds').replaceChildren(table(['World', 'Size', 'Saved'], w.worlds.map(x => [x.name === w.current ? `${x.name} (running)` : x.name, cell(bytes(x.bytes), 'num'), when(x.modified)]), 'No worlds found'));
-    $('backups').replaceChildren(table(['Backup', 'Size', 'Made'], w.backups.slice().reverse().map(x => [x.name, cell(bytes(x.bytes), 'num'), when(x.modified)]), 'No backups yet'));
-  } catch (e) { note('worldMsg', e.message, true); }
+    $('worlds').replaceChildren(table(['World', 'Size', 'Saved'], w.worlds.map(x => [x.name === w.current ? h('td', {}, x.name, ' ', h('span', { class: 'chip ok' }, 'running')) : x.name, cell(bytes(x.bytes), 'num'), ago(x.modified)]), 'No worlds found'));
+    $('backups').replaceChildren(table(['Backup', 'Size', 'Made'], w.backups.slice().reverse().map(x => [h('td', { class: 'mono' }, x.name), cell(bytes(x.bytes), 'num'), ago(x.modified)]), 'No backups yet'));
+  } catch (e) { if (!e.auth) toast(e.message, 'err'); }
 }
-$('saveWorld').onclick = () => act('worldMsg', 'Save started', () => api('POST', '/api/save'));
-$('stopServer').onclick = () => { if (confirm('Save the world and stop the server?')) act('worldMsg', 'Stopping: the server saves, then quits', () => api('POST', '/api/stop')); };
+onShow.world = loadWorlds;
+$('worldsRefresh').onclick = loadWorlds;
+const save = btn => act('World saved', () => api('POST', '/api/save'), btn).then(() => current === 'world' && loadWorlds());
+$('saveWorld').onclick = e => save(e.currentTarget);
+$('ovSave').onclick = e => save(e.currentTarget);
+$('stopServer').onclick = async () => {
+  if (await ask({ title: 'Stop the server?', body: 'The world is saved, then the server quits and every player is disconnected. Start it again with pcds start (or systemd restarts it if set to).', ok: 'Save and stop', danger: true }))
+    act('Stopping: the server saves, then quits', () => api('POST', '/api/stop'));
+};
+
+// ---- updates ----
+let pendingUpdate = null;
+function updateBusy(s) { const b = s.banks || {}, u = s.update || {}; return u.state === 'busy' ? (u.doing || 'working') : b.phase && b.phase !== 'idle' ? `handing the world over (${b.phase})` : null; }
+function renderUpdateSummary(s, box, chipBox, compact) {
+  const u = s.update || {}, b = s.banks || {}, busy = updateBusy(s);
+  const chip = busy ? h('span', { class: 'chip warn' }, 'updating') : u.available ? h('span', { class: 'chip warn' }, `${u.latest} available`) : u.latest ? h('span', { class: 'chip ok' }, 'up to date') : h('span', { class: 'chip' }, 'not checked');
+  chipBox.replaceChildren(chip);
+  if (!compact) return;
+  const sig = [s.serverVersion, u.latest, u.available, busy, u.checkedAt, !!b.dir].join('|');
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.replaceChildren(...[
+    h('div', { class: 'vers' }, h('div', {}, h('div', { class: 'k' }, 'Running'), h('div', { class: 'v' }, `pcds ${s.serverVersion}`)),
+      h('div', {}, h('div', { class: 'k' }, 'Latest release'), h('div', { class: 'v' }, u.latest || '–'))),
+    busy ? h('div', {}, h('div', { class: 'progress' }, h('i')), h('p', { class: 'sub', style: 'margin:8px 0 0' }, busy)) : null,
+    h('div', { class: 'row', style: 'margin-top:8px' },
+      h('button', { class: 'primary small', disabled: !!busy || !b.dir, title: b.dir ? '' : 'This server does not run from banks (pcds run)', onclick: e => updateNow(e.currentTarget) }, u.available ? `Update to ${u.latest}` : 'Update now'),
+      h('button', { class: 'small', disabled: !!busy || !b.dir, onclick: e => checkUpdate(e.currentTarget) }, 'Check'),
+      h('span', { class: 'muted', style: 'font-size:12px' }, u.checkedAt ? `checked ${ago(u.checkedAt)}` : ''))].filter(Boolean));
+}
+function renderUpdates(s) {
+  const u = s.update || {}, b = s.banks || {}, busy = updateBusy(s);
+  renderUpdateSummary(s, null, $('updChip'), false);
+  $('updVers').replaceChildren(
+    h('div', {}, h('div', { class: 'k' }, 'Running'), h('div', { class: 'v' }, `pcds ${s.serverVersion}`)),
+    h('div', {}, h('div', { class: 'k' }, 'Latest release'), h('div', { class: 'v' }, u.latest || '–')),
+    h('div', {}, h('div', { class: 'k' }, 'Last checked'), h('div', { class: 'v', style: 'font-size:14px;padding-top:4px' }, u.checkedAt ? ago(u.checkedAt) : 'never')));
+  $('updBusy').hidden = !busy; $('updBusyText').textContent = busy || '';
+  const noBanks = !b.dir;
+  for (const id of ['updNow', 'updCheck', 'updInstall']) $(id).disabled = !!busy || noBanks;
+  $('updRollback').disabled = !!busy;
+  $('updNow').textContent = u.available ? `Update to ${u.latest}` : 'Update now';
+  $('updNote').textContent = noBanks ? 'This server runs from a build, not from installed banks (pcds run): updates need pcds run; Roll back flips between two copies of this build.'
+    : `Automatic updates: ${u.auto ? `on, a check every ${u.checkHours} h` : 'off (PCDS_AUTO_UPDATE in Config)'}. Releases from ${u.releases || 'GitHub'}.`;
+  const installed = (b.installed || []).length ? b.installed : (b.live ? [{ bank: b.live.bank, info: b.live }] : []);
+  $('banks').replaceChildren(table(['Bank', 'Release', 'Protocol', 'Format', 'State'], installed.map(x => {
+    const i = x.info || {}, running = b.live && b.live.bank === x.bank;
+    const chips = [running ? h('span', { class: 'chip ok' }, `running · pid ${b.live.pid}`) : null, b.active === x.bank ? h('span', { class: 'chip' }, 'active') : null, b.next && b.next.bank === x.bank ? h('span', { class: 'chip warn' }, 'starting') : null].filter(Boolean);
+    return [h('td', { class: 'mono' }, x.bank), i.version ? `pcds ${i.version}${i.tag ? ` (${i.tag})` : ''}` : 'empty', String(i.protocol ?? '–'), String(i.format ?? '–'), h('td', { class: 'row' }, chips.length ? chips : h('span', { class: 'chip' }, 'standby'))];
+  }), 'No banks'));
+  $('bankInfo').replaceChildren(...pairs([
+    ['Front', `pcds ${b.frontVersion ?? '–'}, protocol ${b.frontProtocol ?? '–'}`],
+    ['Game process', b.live ? `bank ${b.live.bank}, up ${duration(b.live.runningSeconds)}` : '–'],
+    ['Hand-overs', `${b.flips ?? 0} since the start`],
+    ['Crash restarts', `${b.crashes ?? 0} in the last 10 minutes`]
+  ]));
+  const hist2 = (u.history || []).slice().reverse();
+  const sig = JSON.stringify(hist2.map(x => [x.seq, x.ok]));
+  if ($('updHistory').dataset.sig !== sig) {
+    $('updHistory').dataset.sig = sig;
+    $('updHistory').replaceChildren(table(['When', 'Result', 'What happened'], hist2.map(x => [cell(x.at ? ago(x.at) : '–', 'num'), h('td', {}, h('span', { class: 'chip ' + (x.ok ? 'ok' : 'bad') }, x.ok ? 'done' : 'failed')), x.message]), 'Nothing yet'));
+  }
+  if (pendingUpdate !== null) {
+    const done = (u.history || []).find(x => x.seq === pendingUpdate);
+    if (done) { pendingUpdate = null; toast(done.ok ? done.message : `Failed: ${done.message}`, done.ok ? 'ok' : 'err'); }
+  }
+}
+async function updateCall(body, label, btn) {
+  const r = await act(label, () => api('POST', '/api/update', body), btn);
+  if (r && r.seq !== undefined) pendingUpdate = r.seq;
+}
+const checkUpdate = btn => updateCall({ check: true }, 'Looking for a new release…', btn);
+async function updateNow(btn) {
+  const u = status?.update || {};
+  const ok = await ask({ title: u.available ? `Update to ${u.latest}?` : 'Update to the latest release?', body: 'The release is downloaded and checked, installed into the standby bank, and the running world is handed over to it. Players stay connected; the world pauses for a moment. If anything fails, the current version keeps running.', ok: 'Update now' });
+  if (ok) updateCall({ onlyNewer: true }, 'Update started', btn);
+}
+$('updNow').onclick = e => updateNow(e.currentTarget);
+$('updCheck').onclick = e => checkUpdate(e.currentTarget);
+$('updInstall').onclick = async e => {
+  const v = $('updVersion').value.trim(); if (!v) return toast('Give a release tag, e.g. v0.6.0', 'err');
+  if (await ask({ title: `Install ${v}?`, body: 'It replaces the standby bank and the world is handed over to it, also when it is older than the running release.', ok: 'Install' })) updateCall({ version: v }, `Installing ${v}…`, e.currentTarget);
+};
+$('updRollback').onclick = async e => {
+  if (await ask({ title: 'Roll back?', body: 'The world is handed back to the other bank\'s release. Players stay connected.', ok: 'Roll back', danger: true })) updateCall({ rollback: true }, 'Rolling back…', e.currentTarget);
+};
 
 // ---- config: drawn from the schema GET /api/config serves; no setting is named here ----
-let edits = {}, inputs = new Map(), errors = new Map();
+let edits = {}, inputs = new Map(), errors = new Map(), knobEls = [];
 function label(key) {
   const s = key.split('.').pop().replace(/([a-z])([A-Z])(?=[a-z])/g, (_, a, b) => a + ' ' + b.toLowerCase()).replace(/([a-z])([A-Z])/g, '$1 $2');
   return s[0].toUpperCase() + s.slice(1);
@@ -433,19 +1431,19 @@ function read(el, k) {
   if (s === '') return null;
   return k.type === 'int' || k.type === 'float' ? Number(s) : s;
 }
-function control(k) {
+function control(k, card) {
   let el;
   if (k.type === 'bool') el = h('input', { type: 'checkbox' });
   else if (k.type === 'enum') el = h('select', {}, k.default === null ? h('option', { value: '' }, '(default)') : null, k.values.map(v => h('option', { value: v }, v)));
   else if (k.type === 'list' || k.type === 'map') el = h('textarea', { placeholder: k.type === 'map' ? 'name = number, one per line' : 'one per line' });
   else {
     const numeric = k.type === 'int' || k.type === 'float';
-    el = h('input', { type: numeric ? 'number' : 'text', placeholder: k.default === null ? 'unset' : shown(k, k.default) });
+    el = h('input', { type: numeric ? 'number' : (k.secret ? 'password' : 'text'), placeholder: k.default === null ? 'unset' : shown(k, k.default), autocomplete: 'off' });
     if (numeric) { el.step = k.type === 'int' ? '1' : 'any'; if (k.min !== undefined) { el.min = k.min; el.max = k.max; } }
   }
   el.id = 'knob-' + k.key;
   put(el, k, k.value);
-  el.addEventListener(k.type === 'bool' || k.type === 'enum' ? 'change' : 'input', () => { edits[k.key] = read(el, k); dirty(); });
+  el.addEventListener(k.type === 'bool' || k.type === 'enum' ? 'change' : 'input', () => { edits[k.key] = read(el, k); card.classList.add('dirty'); dirty(); });
   return el;
 }
 function knobCard(k) {
@@ -454,71 +1452,129 @@ function knobCard(k) {
   if (k.secret && !k.readOnly) k = { ...k, value: null, description: k.description + (secretSet ? ' Set: type a new value to replace it, Reset to clear it.' : ' Not set.') };
   // An unset value (null) is the default; a secret that is set is not.
   const same = !secretSet && (k.value === null || JSON.stringify(k.value) === JSON.stringify(k.default));
+  const card = h('div', { class: 'knob' });
   const err = h('div', { class: 'err' });
   errors.set(k.key, err);
   let body;
   if (k.readOnly) {
     body = h('div', { class: 'ro' }, k.value === null ? '(not set)' : shown(k, k.value), k.unit ? ' ' + k.unit : '');
   } else {
-    const el = control(k);
+    const el = control(k, card);
     inputs.set(k.key, el);
-    const reset = h('button', { class: 'small', title: 'Back to the default (Save applies it)', disabled: same, onclick: () => { put(el, k, k.default); edits[k.key] = null; dirty(); } }, 'Reset');
+    const reset = h('button', { class: 'small', title: 'Back to the default (Save applies it)', disabled: same, onclick: () => { put(el, k, k.default); edits[k.key] = null; card.classList.add('dirty'); dirty(); } }, 'Reset');
     for (const ev of ['input', 'change']) el.addEventListener(ev, () => { reset.disabled = false; });
-    body = h('div', { class: 'with-unit' }, el, k.unit ? h('span', { class: 'n' }, k.unit) : null, reset);
+    body = h('div', { class: 'wu' }, el, k.unit ? h('span', { class: 'muted' }, k.unit) : null, reset);
   }
   const range = k.min !== undefined && k.type !== 'map' ? `, ${number(k.min)} to ${number(k.max)}` : '';
   const def = `Default ${k.default === null ? 'unset' : shown(k, k.default).replace(/\n/g, ', ') || 'empty'}${range}.`;
-  return h('div', { class: 'knob' },
-    h('div', { class: 'head' }, h('label', { class: 'name', htmlFor: 'knob-' + k.key }, label(k.key)), label(k.key) === k.key ? null : h('code', {}, k.key),
-      h('span', { class: 'badge ' + (k.live ? 'live' : 'restart') }, k.live ? 'live' : 'restart'), same ? null : h('span', { class: 'badge changed' }, 'changed')),
+  card.append(h('div', { class: 'kh' }, h('label', { class: 'kn', htmlFor: 'knob-' + k.key }, label(k.key)), label(k.key) === k.key ? null : h('code', {}, k.key),
+      h('span', { class: 'chip ' + (k.live ? 'ok' : 'warn') }, k.live ? 'live' : 'restart'), same ? null : h('span', { class: 'chip' }, 'changed')),
     body, err, h('p', { class: 'desc' }, k.description), h('p', { class: 'desc' }, def, k.readOnly ? ' ' + k.readOnly : null));
+  card.dataset.search = `${k.key} ${label(k.key)} ${k.description} ${k.group}`.toLowerCase();
+  card.dataset.changed = String(!same);
+  knobEls.push(card);
+  return card;
 }
 function renderConfig(list) {
-  edits = {}; inputs = new Map(); errors = new Map();
+  edits = {}; inputs = new Map(); errors = new Map(); knobEls = [];
   const groups = new Map();
   for (const k of list) groups.set(k.group, [...(groups.get(k.group) || []), k]);
-  $('knobs').replaceChildren(...[...groups].map(([g, ks]) => h('section', { class: 'panel' }, h('h2', {}, g), h('div', { class: 'knobs' }, ks.map(knobCard)))));
-  dirty();
+  $('knobs').replaceChildren(...[...groups].map(([g, ks], i) => h('section', { class: 'card', id: 'cfg-g' + i }, h('div', { class: 'head' }, h('h2', {}, g), h('span', { class: 'muted' }, `${ks.length}`)), h('div', { class: 'knobs' }, ks.map(knobCard)))));
+  $('cfgGroups').replaceChildren(...[...groups.keys()].map((g, i) => h('button', { class: 'small', onclick: () => $('cfg-g' + i).scrollIntoView({ behavior: 'smooth', block: 'start' }) }, g)));
+  filterConfig(); dirty();
 }
-function dirty() { const n = Object.keys(edits).length; $('saveConfig').disabled = !n; $('saveConfig').textContent = n ? `Save ${n} change${n > 1 ? 's' : ''}` : 'Save changes'; }
+function filterConfig() {
+  const q = $('cfgSearch').value.trim().toLowerCase(), only = $('cfgChanged').checked;
+  for (const el of knobEls) el.hidden = (q && !el.dataset.search.includes(q)) || (only && el.dataset.changed !== 'true' && !el.classList.contains('dirty'));
+  for (const sec of $('knobs').children) sec.hidden = ![...sec.querySelectorAll('.knob')].some(k => !k.hidden);
+}
+$('cfgSearch').oninput = filterConfig; $('cfgChanged').onchange = filterConfig;
+function dirty() { const n = Object.keys(edits).length; $('saveConfig').disabled = !n; $('saveConfig').textContent = n ? `Save ${n} change${n > 1 ? 's' : ''}` : 'Save changes'; $('configMsg').textContent = n ? 'Unsaved changes' : ''; }
 async function loadConfig() {
-  try { renderConfig((await api('GET', '/api/config')).knobs); note('configMsg', ''); } catch (e) { note('configMsg', e.message, true); }
+  try { renderConfig((await api('GET', '/api/config')).knobs); } catch (e) { if (!e.auth) toast(e.message, 'err'); }
 }
-$('saveConfig').onclick = async () => {
-  for (const e of errors.values()) e.textContent = '';
-  try { renderConfig((await api('POST', '/api/config', edits)).knobs); note('configMsg', 'Saved'); refresh(); }
-  catch (e) {
-    note('configMsg', e.message, true);
-    if (errors.has(e.key)) { errors.get(e.key).textContent = e.message; inputs.get(e.key)?.focus(); }
-  }
+onShow.config = () => { if (!Object.keys(edits).length) loadConfig(); };
+$('saveConfig').onclick = async e => {
+  for (const x of errors.values()) x.textContent = '';
+  const btn = e.currentTarget; btn.classList.add('busy');
+  try { renderConfig((await api('POST', '/api/config', edits)).knobs); toast('Settings saved'); refreshSoon(); }
+  catch (err) {
+    if (err.auth) return;
+    toast(err.message, 'err');
+    if (errors.has(err.key)) { errors.get(err.key).textContent = err.message; const i = inputs.get(err.key); if (i) { i.scrollIntoView({ block: 'center', behavior: 'smooth' }); i.focus(); } }
+  } finally { btn.classList.remove('busy'); }
 };
 $('discardConfig').onclick = loadConfig;
+window.addEventListener('beforeunload', e => { if (Object.keys(edits).length) { e.preventDefault(); e.returnValue = ''; } });
 
 // ---- tools ----
+function renderTools(s) {
+  const banned = [...s.access.bannedNames.map(b => [b, 'name']), ...s.access.bannedIPs.map(b => [b, 'IP or SteamID'])];
+  const sig = JSON.stringify(banned);
+  if ($('bans').dataset.sig === sig) return;
+  $('bans').dataset.sig = sig;
+  $('bans').replaceChildren(table(['Entry', 'Kind', ''], banned.map(([b, kind]) => [h('td', { class: 'mono' }, b), kind,
+    h('td', {}, h('button', { class: 'small', onclick: e => act(`Unbanned ${b}`, () => api('POST', '/api/unban', { value: b }), e.currentTarget) }, 'Unban'))]), 'Nobody banned'));
+}
+let logLines = [];
 async function loadLogs() {
   try {
-    const l = await api('GET', '/api/logs'), pre = $('logs');
-    $('logsNote').textContent = l.note || `The last ${l.lines.length} lines (${l.source}).`;
-    pre.textContent = l.lines.join('\n');
-    pre.scrollTop = pre.scrollHeight;
-  } catch (e) { $('logsNote').textContent = e.message; }
+    const l = await api('GET', '/api/logs');
+    logLines = l.lines || [];
+    $('logsNote').textContent = l.note || `The last ${logLines.length} lines (${l.source}).`;
+    drawLogs();
+  } catch (e) { if (!e.auth) $('logsNote').textContent = e.message; }
 }
+function drawLogs() {
+  const pre = $('logs'), q = $('logFilter').value.trim().toLowerCase(), stick = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+  const lines = q ? logLines.filter(l => l.toLowerCase().includes(q)) : logLines;
+  if (!lines.length) { pre.replaceChildren(h('span', { class: 'muted' }, q ? 'No line matches the filter.' : 'No log lines to show.')); return; }
+  pre.replaceChildren(...lines.map(l => { const low = l.toLowerCase(); return h('span', { class: /error|panic|failed|refused/.test(low) ? 'e' : /warn|dropped|lost/.test(low) ? 'w' : '' }, l + '\n'); }));
+  if (stick) pre.scrollTop = pre.scrollHeight;
+}
+onShow.tools = () => { loadLogs(); setTimeout(() => { const p = $('logs'); p.scrollTop = p.scrollHeight; }, 50); };
+setInterval(() => { if (current === 'tools' && $('logAuto').checked && !document.hidden) loadLogs(); }, 5000);
+$('logFilter').oninput = drawLogs;
 $('logsRefresh').onclick = loadLogs;
-$('chatSend').onclick = () => act('chatMsg', 'Sent', async () => { await api('POST', '/api/chat', { text: $('chatText').value }); $('chatText').value = ''; });
-$('chatText').onkeydown = e => { if (e.key === 'Enter') $('chatSend').click(); };
-$('modKick').onclick = () => act('modMsg', `Kicked ${$('modPlayer').value}`, () => api('POST', '/api/kick', { name: $('modPlayer').value }));
-$('modBan').onclick = () => { if (confirm(`Ban ${$('modPlayer').value}?`)) act('modMsg', `Banned ${$('modPlayer').value}`, () => api('POST', '/api/ban', { name: $('modPlayer').value })); };
-$('modUnbanGo').onclick = () => act('modMsg', `Unbanned ${$('modUnban').value}`, () => api('POST', '/api/unban', { value: $('modUnban').value }));
+$('logsDownload').onclick = () => {
+  const url = URL.createObjectURL(new Blob([logLines.join('\n') + '\n'], { type: 'text/plain' }));
+  const a = h('a', { href: url, download: `pcds-log-${new Date().toISOString().slice(0, 19).replace(/:/g, '')}.txt` });
+  document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+const who = () => { const v = $('modPlayer').value.trim(); return /^\d+$/.test(v) && findPlayer(Number(v)) ? { id: Number(v) } : { name: v }; };
+$('modForm').onsubmit = e => { e.preventDefault(); $('modKick').click(); };
+$('modKick').onclick = e => { if (!$('modPlayer').value.trim()) return toast('Give a name or client id', 'err'); act(`Kicked ${$('modPlayer').value}`, () => api('POST', '/api/kick', who()), e.currentTarget); };
+$('modBan').onclick = async e => {
+  const v = $('modPlayer').value.trim(); if (!v) return toast('Give a name or client id', 'err');
+  const btn = e.currentTarget;
+  if (await ask({ title: `Ban ${v}?`, body: 'An online player is kicked; the name (and the SteamID or IP of an online player) cannot join until unbanned.', ok: 'Ban', danger: true })) act(`Banned ${v}`, () => api('POST', '/api/ban', who()), btn);
+};
+$('unbanForm').onsubmit = e => { e.preventDefault(); const v = $('modUnban').value.trim(); if (!v) return; act(`Unbanned ${v}`, async () => { await api('POST', '/api/unban', { value: v }); $('modUnban').value = ''; }, e.submitter); };
 
-$('copyCode').onclick = () => navigator.clipboard.writeText($('inviteCode').textContent).then(() => note('inviteMsg', 'Invite code copied'), () => note('inviteMsg', 'Copy failed; select the code instead', true));
-$('tokenSave').onclick = () => {
+// ---- everything from one status ----
+function render(s) {
+  renderHeader(s);
+  updateMapPlayers(s);
+  if (current === 'overview') renderOverview(s);
+  if (current === 'players') renderPlayers(s);
+  if (current === 'world') renderWorld(s);
+  if (current === 'updates') renderUpdates(s);
+  else if (pendingUpdate !== null) { const done = (s.update?.history || []).find(x => x.seq === pendingUpdate); if (done) { pendingUpdate = null; toast(done.message, done.ok ? 'ok' : 'err'); } }
+  if (current === 'tools') renderTools(s);
+}
+
+$('tokenForm').onsubmit = e => {
+  e.preventDefault();
   token = $('tokenInput').value.trim();
-  try { localStorage.setItem('pcdsToken', token); } catch (e) {}
-  refresh();
+  try { localStorage.setItem('pcdsToken', token); } catch (x) {}
+  $('tokenInput').value = '';
+  refresh(); chatLoop();
 };
 
+applyTheme(store.get('theme', 'auto'));
+show(location.hash.replace(/^#\/?/, '') || 'overview', true);
 refresh();
-setInterval(refresh, 2000);
+chatLoop();
 </script>
 </body>
 </html>
