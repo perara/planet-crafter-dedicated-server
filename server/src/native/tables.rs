@@ -301,7 +301,7 @@ pub fn read_game(game: &Path, out: &Path) -> Result<String, String> {
     let group_prefabs = ctx.group_prefabs()?;
     let planets = ctx.planets(&assets)?;
     let groups = ctx.group_table()?;
-    let versions = ctx.message_versions();
+    let versions = ctx.message_versions()?;
     let (config_file, config) = ctx.network_config()?;
     let tick_rate = super::netdata::field(&config, "TickRate").cloned().ok_or("no NetworkConfig.TickRate")?;
     let tick_rate = ctx.value(config_file, &tick_rate, 1)?.ok_or("NetworkConfig.TickRate left out")?;

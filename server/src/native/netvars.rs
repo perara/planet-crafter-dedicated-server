@@ -424,3 +424,8 @@ fn variable(asm: &Assemblies, class: &TypeName, name: &str, sig: &TypeSig, value
     let hex = bytes.map(|b| b.iter().map(|x| format!("{x:02x}")).collect::<String>());
     Ok(json!({"name": name, "type": ty, "bytes": hex}))
 }
+
+/// An IL body's instructions as (opcode, operand), 0xFExx for two-byte opcodes.
+pub fn instructions(il: &[u8]) -> Result<Vec<(u16, i64)>, String> {
+    Ok(decode(il)?.into_iter().map(|op| (op.code, op.arg)).collect())
+}

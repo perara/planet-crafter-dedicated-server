@@ -6,7 +6,7 @@ use serde_json::{json, Map, Value};
 
 use super::serial::Raw;
 use super::tables::Ctx;
-use super::dotnet::{TypeName, TypeSig};
+use super::dotnet::{Member, TypeName, TypeSig};
 use super::unity::{self, Id};
 
 /// A field of a read object by name (the first one: a class's own field hides its base's).
@@ -84,32 +84,49 @@ impl Ctx {
     /// The message table as ConnectionRequestMessage sends it: slot i is the message
     /// NetworkMessageTypes numbers i, as (XXHash32 of its full name, version); the slots up to
     /// the next power of two stay (0, 0).
-    pub fn message_versions(&self) -> Vec<Value> {
+    /// Every NetworkMessageTypes member must name a message type with a get_Version read.
+    pub fn message_versions(&self) -> Result<Vec<Value>, String> {
         let asm = &self.layouts.asm;
-        let Some(netcode) = asm.0.iter().find(|a| a.name == "Unity.Netcode.Runtime") else { return Vec::new() };
-        let Some(numbers) = netcode.find("Unity.Netcode", "NetworkMessageTypes").map(|i| &netcode.types()[i]) else { return Vec::new() };
-        let slots: Vec<(i64, &str)> = numbers.fields.iter().filter_map(|f| Some((f.constant?, f.name.as_str()))).collect();
-        let count = slots.iter().map(|(n, _)| *n + 1).max().unwrap_or(0).max(0) as usize;
+        let netcode = asm.0.iter().find(|a| a.name == "Unity.Netcode.Runtime").ok_or("no Unity.Netcode.Runtime assembly")?;
+        let numbers = netcode.find("Unity.Netcode", "NetworkMessageTypes").map(|i| &netcode.types()[i]).ok_or("no Unity.Netcode.NetworkMessageTypes")?;
+        let mut slots: Vec<(usize, &str)> = Vec::new();
+        for f in numbers.fields.iter().filter(|f| f.name != "value__") {
+            let n = f.constant.ok_or_else(|| format!("NetworkMessageTypes.{}: no constant", f.name))?;
+            slots.push((usize::try_from(n).ok().filter(|n| *n < 4096).ok_or_else(|| format!("NetworkMessageTypes.{} = {n}: not a message slot", f.name))?, f.name.as_str()));
+        }
+        let count = slots.iter().map(|(n, _)| *n + 1).max().ok_or("NetworkMessageTypes has no members")?;
         let mut out = vec![json!([0, 0]); count.next_power_of_two()];
         for (n, member) in slots {
-            let message = netcode.types().iter().find(|t| t.namespace == "Unity.Netcode" && (t.name == member || t.name == format!("{member}Message")));
-            let Some(t) = message else { continue };
-            let full = format!("{}.{}", t.namespace, t.name);
-            let version = t.methods.iter().find(|m| m.name == "get_Version").and_then(|m| netcode.il(m)).and_then(constant).unwrap_or(0);
-            out[n as usize] = json!([xxhash_rust::xxh32::xxh32(full.as_bytes(), 0), version]);
+            let message = netcode.types().iter().position(|t| t.namespace == "Unity.Netcode" && (t.name == member || t.name == format!("{member}Message")));
+            let t = message.ok_or_else(|| format!("NetworkMessageTypes.{member}: no message type {member} or {member}Message"))?;
+            let def = &netcode.types()[t];
+            let full = format!("{}.{}", def.namespace, def.name);
+            out[n] = json!([xxhash_rust::xxh32::xxh32(full.as_bytes(), 0), message_version(netcode, t, 0)?]);
         }
-        out
+        Ok(out)
     }
 }
 
-/// The int32 an IL body returns as its first instruction (ldc.i4.*).
-fn constant(il: &[u8]) -> Option<i64> {
-    match *il.first()? {
-        0x15 => Some(-1),
-        op @ 0x16..=0x1e => Some(op as i64 - 0x16),
-        0x1f => Some(*il.get(1)? as i8 as i64),
-        0x20 => Some(i32::from_le_bytes(il.get(1..5)?.try_into().ok()?) as i64),
-        _ => None,
+/// INetworkMessage.Version of a message type: get_Version returns an int32 constant, or another
+/// message's get_Version (ProxyMessage returns RpcMessage's).
+fn message_version(netcode: &super::dotnet::Assembly, t: usize, depth: usize) -> Result<i64, String> {
+    let def = &netcode.types()[t];
+    let get = def.methods.iter().find(|m| m.name == "get_Version").ok_or_else(|| format!("{}: no get_Version", def.name))?;
+    let il = netcode.il(get).ok_or_else(|| format!("{}.get_Version: no IL body", def.name))?;
+    let ops = super::netvars::instructions(il)?;
+    let unread = || format!("{}.get_Version: neither a constant nor another message's version ({ops:x?})", def.name);
+    match ops[..] {
+        [(code @ 0x15..=0x1E, _), (0x2A, _)] => Ok(code as i64 - 0x16),
+        [(0x1F | 0x20, v), (0x2A, _)] => Ok(v),
+        // ldloca; initobj; ldloca; call Other.get_Version; ret
+        [.., (0x28, token), (0x2A, _)] if depth < 4 => match netcode.member(token as u32) {
+            Some(Member::Method { owner: TypeSig::ValueType(o) | TypeSig::Class(o), name, .. }) if name == "get_Version" && o.scope.as_ref().is_none_or(|s| *s == netcode.name) => {
+                let other = netcode.find(&o.namespace, &o.name).ok_or_else(unread)?;
+                message_version(netcode, other, depth + 1)
+            }
+            _ => Err(unread()),
+        },
+        _ => Err(unread()),
     }
 }
 
@@ -146,7 +163,7 @@ impl Ctx {
         let t = TypeName { scope: Some("Unity.Netcode.Runtime".into()), namespace: "Unity.Netcode".into(), name: "NetworkObject/SceneObject".into() };
         let get = asm.def(&t).and_then(|d| d.methods.iter().find(|m| m.name == format!("get_{property}")));
         let bit = get.and_then(|m| asm.assembly_of(&t)?.il(m)).and_then(super::netvars::first_int);
-        bit.map(|b| 1 << b).ok_or_else(|| format!("SceneObject.{property}: no flag bit"))
+        bit.and_then(|b| u32::try_from(b).ok()).and_then(|b| 1u16.checked_shl(b)).ok_or_else(|| format!("SceneObject.{property}: no flag bit of 16 ({bit:?})"))
     }
 
     /// A NetworkTransformState constant (k_*).
@@ -166,8 +183,8 @@ impl Ctx {
                 return Err(format!("{}: NetworkTransform.{unsupported} is not supported", b.class));
             }
         }
-        if node != root && !yes(f, "InLocalSpace") {
-            return Err(format!("{} below the root syncs in world space: not supported", b.class));
+        if (node != root || self.graph.parent(node).is_some()) && !yes(f, "InLocalSpace") {
+            return Err(format!("{} below the root or on a parented root syncs in world space: not supported (the local values are read)", b.class));
         }
         let mut flags = self.transform_bit("k_TeleportingBit")? | self.transform_bit("k_Synchronization")? | self.transform_bit("k_ReliableSequenced")?;
         if yes(f, "InLocalSpace") {
@@ -483,8 +500,26 @@ impl Ctx {
         let asm = self.layouts.asm.clone();
         let t = TypeName { scope: Some("Unity.Netcode.Runtime".into()), namespace: "Unity.Netcode".into(), name: "NetworkConfig".into() };
         let get = asm.def(&t).and_then(|d| d.methods.iter().find(|m| m.name == "GetConfig")).ok_or("no NetworkConfig.GetConfig")?;
-        let a = asm.assembly_of(&t).unwrap();
-        let version = super::netvars::first_string(a, a.il(get).unwrap_or_default()).ok_or("GetConfig: no version string")?;
+        let a = asm.assembly_of(&t).ok_or("no Unity.Netcode.Runtime assembly")?;
+        let writes = config_writes(a, a.il(get).ok_or("GetConfig: no IL body")?)?;
+        // What this hash writes, in order, with each WriteValueSafe<T>'s T (None: the string).
+        let hash_size_type = TypeSig::ValueType(TypeName { scope: None, namespace: "Unity.Netcode".into(), name: "HashSize".into() });
+        let expected: [(&str, Option<TypeSig>); 9] = [
+            ("ProtocolVersion", Some(TypeSig::U2)),
+            ("string", None),
+            ("key", Some(TypeSig::U4)),
+            ("TickRate", Some(TypeSig::U4)),
+            ("ConnectionApproval", Some(TypeSig::Bool)),
+            ("ForceSamePrefabs", Some(TypeSig::Bool)),
+            ("EnableSceneManagement", Some(TypeSig::Bool)),
+            ("EnsureNetworkVariableLengthSafety", Some(TypeSig::Bool)),
+            ("RpcHashSize", Some(hash_size_type)),
+        ];
+        let same = writes.len() == expected.len() && writes.iter().zip(&expected).all(|((what, ty), (e, et))| what.starts_with('"') == (*e == "string") && (what.starts_with('"') || what == e) && unscoped(ty) == *et);
+        if !same {
+            return Err(format!("GetConfig writes {writes:?}, not the {expected:?} this hash is computed from (update config_hash)"));
+        }
+        let version = writes[1].0.trim_matches('"').to_string();
         let int = |n: &str| match field(config, n) {
             Some(Raw::UInt(v)) => Ok(*v),
             Some(Raw::Int(v)) => Ok(*v as u64),
@@ -496,7 +531,7 @@ impl Ctx {
             other => Err(format!("NetworkConfig.{n}: {other:?}")),
         };
         let mut w = Vec::new();
-        w.extend((int("ProtocolVersion")? as u16).to_le_bytes());
+        w.extend(u16::try_from(int("ProtocolVersion")?).map_err(|e| format!("NetworkConfig.ProtocolVersion: {e}"))?.to_le_bytes());
         // WriteValueSafe(string, oneByteChars: false): the length, then UTF-16 units.
         let units: Vec<u16> = version.encode_utf16().collect();
         w.extend((units.len() as u32).to_le_bytes());
@@ -508,7 +543,7 @@ impl Ctx {
             hashes.dedup();
             hashes.iter().for_each(|h| w.extend(h.to_le_bytes()));
         }
-        w.extend((int("TickRate")? as u32).to_le_bytes());
+        w.extend(u32::try_from(int("TickRate")?).map_err(|e| format!("NetworkConfig.TickRate: {e}"))?.to_le_bytes());
         for n in ["ConnectionApproval", "ForceSamePrefabs", "EnableSceneManagement", "EnsureNetworkVariableLengthSafety"] {
             w.push(flag(n)?);
         }
@@ -516,11 +551,67 @@ impl Ctx {
         let size = match asm.enum_base(&hash_size) {
             Some(TypeSig::U1 | TypeSig::I1) => 1,
             Some(TypeSig::U2 | TypeSig::I2) => 2,
+            Some(TypeSig::U4 | TypeSig::I4) => 4,
             Some(TypeSig::U8 | TypeSig::I8) => 8,
-            Some(_) => 4,
-            None => return Err("no Unity.Netcode.HashSize enum".into()),
+            other => return Err(format!("Unity.Netcode.HashSize: base type {other:?}")),
         };
-        w.extend(&int("RpcHashSize")?.to_le_bytes()[..size]);
+        let rpc_hash_size = int("RpcHashSize")?;
+        if size < 8 && rpc_hash_size >> (8 * size) != 0 {
+            return Err(format!("NetworkConfig.RpcHashSize {rpc_hash_size} does not fit {size} bytes"));
+        }
+        w.extend(&rpc_hash_size.to_le_bytes()[..size]);
         Ok(xxhash_rust::xxh64::xxh64(&w, 0))
+    }
+}
+
+/// A type without its assembly scope (to compare a signature's type with a name).
+fn unscoped(t: &Option<TypeSig>) -> Option<TypeSig> {
+    match t {
+        Some(TypeSig::ValueType(n)) => Some(TypeSig::ValueType(TypeName { scope: None, ..n.clone() })),
+        other => other.clone(),
+    }
+}
+
+/// What NetworkConfig.GetConfig writes, in order: per WriteValueSafe call, what it writes (the
+/// NetworkConfig field last loaded, a string literal in quotes, or "key" for a prefab override
+/// link's key) and its generic argument.
+fn config_writes(a: &super::dotnet::Assembly, il: &[u8]) -> Result<Vec<(String, Option<TypeSig>)>, String> {
+    let mut last: Option<String> = None;
+    let mut out = Vec::new();
+    for (code, arg) in super::netvars::instructions(il)? {
+        if code == 0x72 {
+            last = Some(format!("\"{}\"", a.user_string(arg as u32).ok_or("GetConfig: an unreadable string literal")?));
+            continue;
+        }
+        match (code, a.member(arg as u32)) {
+            (0x7B | 0x7C, Some(Member::Field { owner: TypeSig::Class(o), name })) if o.namespace == "Unity.Netcode" && o.name == "NetworkConfig" => last = Some(name),
+            (0x28 | 0x6F, Some(Member::Method { name, .. })) if name == "get_Key" => last = Some("key".into()),
+            (0x28 | 0x6F, Some(Member::Method { name, generic, .. })) if name == "WriteValueSafe" => {
+                let what = last.take().ok_or("GetConfig: a WriteValueSafe of something other than a field, string or key")?;
+                out.push((what, generic.first().cloned()));
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tables::Ctx;
+
+    /// ProxyMessage's version is RpcMessage's (its get_Version calls that one), and GetConfig
+    /// writes what config_hash hashes.
+    #[test]
+    fn message_versions_follow_calls_and_the_config_writes_are_checked() {
+        let Some(dir) = super::super::unity::tests::game_data() else { return };
+        let mut ctx = Ctx::open(dir.parent().unwrap()).unwrap();
+        let versions = ctx.message_versions().unwrap();
+        let netcode = ctx.layouts.asm.0.iter().find(|a| a.name == "Unity.Netcode.Runtime").unwrap();
+        let slot = |name: &str| netcode.types()[netcode.find("Unity.Netcode", "NetworkMessageTypes").unwrap()].fields.iter().find(|f| f.name == name).unwrap().constant.unwrap() as usize;
+        assert_eq!(versions[slot("Proxy")][1], versions[slot("Rpc")][1]);
+        assert!(versions.iter().filter(|v| v[0] != 0).count() == 25, "{versions:?}");
+        let (file, config) = ctx.network_config().unwrap();
+        ctx.config_hash(file, &config).unwrap();
     }
 }
