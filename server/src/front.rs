@@ -1200,22 +1200,19 @@ impl Front {
         let live = self.live.as_ref().map(|b| b.hello.clone()).unwrap_or_default();
         let tx = self.updates.tx.clone();
         self.updates.busy = Some((seq, format!("downloading {} into bank {bank}", version.as_deref().unwrap_or("the latest release"))));
-        std::thread::spawn(move || {
-            let done = (|| {
-                let release = updater::lookup(&updater::releases_url(), version.as_deref())?;
-                if only_newer && !updater::newer(&release.tag, live["version"].as_str().unwrap_or("")) {
-                    return Ok(UpdateDone::UpToDate { seq, tag: release.tag });
-                }
-                if auto && let Some(why) = updater::auto_skips(&dir, &release.tag)? {
-                    return Ok(UpdateDone::Skipped { seq, message: why });
-                }
-                let info = updater::install(&release, &dir, &bank, Some(&live))?;
-                if !auto {
-                    updater::clear_rolled_back(&dir)?;
-                }
-                Ok(UpdateDone::Installed { seq, bank, info })
-            })();
-            let _ = tx.send(done.unwrap_or_else(|message: String| UpdateDone::Failed { seq, message }));
+        answer_on_thread(tx, seq, move || {
+            let release = updater::lookup(&updater::releases_url(), version.as_deref())?;
+            if only_newer && !updater::newer(&release.tag, live["version"].as_str().unwrap_or("")) {
+                return Ok(UpdateDone::UpToDate { seq, tag: release.tag });
+            }
+            if auto && let Some(why) = updater::auto_skips(&dir, &release.tag)? {
+                return Ok(UpdateDone::Skipped { seq, message: why });
+            }
+            let info = updater::install(&release, &dir, &bank, Some(&live))?;
+            if !auto {
+                updater::clear_rolled_back(&dir)?;
+            }
+            Ok(UpdateDone::Installed { seq, bank, info })
         });
     }
 
@@ -1224,13 +1221,7 @@ impl Front {
         let live = self.live.as_ref().map(|b| b.hello["version"].as_str().unwrap_or("").to_string()).unwrap_or_default();
         let tx = self.updates.tx.clone();
         self.updates.busy = Some((seq, "checking for a new release".into()));
-        std::thread::spawn(move || {
-            let done = match updater::lookup(&updater::releases_url(), None) {
-                Ok(release) => UpdateDone::Checked { seq, newer: updater::newer(&release.tag, &live), tag: release.tag },
-                Err(message) => UpdateDone::Failed { seq, message },
-            };
-            let _ = tx.send(done);
-        });
+        answer_on_thread(tx, seq, move || updater::lookup(&updater::releases_url(), None).map(|release| UpdateDone::Checked { seq, newer: updater::newer(&release.tag, &live), tag: release.tag }));
     }
 
     fn updates(&mut self) {
@@ -1340,6 +1331,15 @@ impl Front {
         }
         std::process::exit(code)
     }
+}
+
+/// An update's work on a thread of its own, whose outcome always comes: a panic in it is a
+/// Failed one, so the update is never busy for ever.
+fn answer_on_thread(tx: Sender<UpdateDone>, seq: u64, work: impl FnOnce() -> Result<UpdateDone, String> + Send + 'static) {
+    std::thread::spawn(move || {
+        let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|_| Err("the update's thread panicked (see above)".into()));
+        let _ = tx.send(done.unwrap_or_else(|message| UpdateDone::Failed { seq, message }));
+    });
 }
 
 /// Where the front keeps the last flip's snapshot when it stops with the world in no bank.
@@ -1512,6 +1512,14 @@ mod tests {
 
     fn snapshot_fd(text: &str) -> OwnedFd {
         ipc::memfd("test", |w| std::io::Write::write_all(w, text.as_bytes()).map_err(|e| e.to_string())).unwrap()
+    }
+
+    /// A panic in an update's thread is that update's failure, not a busy update for ever.
+    #[test]
+    fn a_panicking_update_thread_fails_its_update() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        answer_on_thread(tx, 3, || panic!("test panic"));
+        assert!(matches!(rx.recv_timeout(Duration::from_secs(10)), Ok(UpdateDone::Failed { seq: 3, message }) if message.contains("panicked")));
     }
 
     /// A kept snapshot of other tables, of a format the bank does not read, or none at all can
