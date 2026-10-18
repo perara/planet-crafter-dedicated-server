@@ -289,12 +289,19 @@ impl Game {
         self.net.rpc_scene(Target::Only(client), "InventoriesHandler.AddOrRemoveItemClientRpc", &[json!(ok)]);
     }
 
-    /// AddExistingItemToInventoryServerRpc without its reply.
+    /// AddExistingItemToInventoryServerRpc without its reply. The game leaves the item where it
+    /// was as well (a client removes it first), so two inventories would hold it and a save
+    /// keep both; here it leaves its old inventory once the new one took it, as a removal does.
     pub fn add_existing_item(&mut self, wo: i32, inventory: i32, reset: bool, client: u64) -> bool {
+        let old = self.holder(wo).filter(|h| *h != inventory);
         let ok = self.wos.contains_key(&wo) && self.inventory_add(inventory, wo, reset);
         if ok {
             self.propagate(inventory, wo, true);
             self.dirty_inventory(inventory, client, false);
+            if let Some(old) = old.filter(|old| self.inventory_remove(*old, wo)) {
+                self.propagate(old, wo, false);
+                self.dirty_inventory(old, client, false);
+            }
         }
         ok
     }

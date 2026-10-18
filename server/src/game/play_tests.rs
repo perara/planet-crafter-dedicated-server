@@ -187,3 +187,19 @@ fn the_holder_index_follows_the_inventories() {
     let restored = crate::handoff::restore(net_data, data, spec, &text, scenes).unwrap();
     assert_eq!(restored.holders, g.holders);
 }
+
+/// L3: an item added to an inventory leaves the one it was in; it is never in two.
+#[test]
+fn an_added_existing_item_leaves_its_old_inventory() {
+    let Some(mut g) = test_game(save()) else { return };
+    join(&mut g, 1, "Ann");
+    let iron = g.data.group("Iron").unwrap();
+    let a = g.create_inventory(10, 0, 0, &[iron], &[]);
+    let b = g.create_inventory(10, 0, 0, &[], &[]);
+    let wo = g.inventories[&a].items[0];
+    rpc(&mut g, 1, 0, "InventoriesHandler.AddExistingItemToInventoryServerRpc", vec![json!(wo), json!(b), json!(true)]);
+    assert_eq!((g.inventories[&a].items.clone(), g.inventories[&b].items.clone()), (vec![], vec![wo]));
+    assert_eq!(holders_mismatch(&g), None);
+    let saved = g.snapshot().inventories;
+    assert_eq!(saved.iter().filter(|i| i["woIds"].as_str().is_some_and(|s| s.split(',').any(|x| x == wo.to_string()))).count(), 1);
+}
