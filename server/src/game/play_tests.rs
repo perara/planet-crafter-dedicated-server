@@ -416,3 +416,106 @@ fn a_panic_in_admin_work_does_not_end_the_bank() {
     assert_eq!(crate::bank::contained("a test request", || -> u16 { panic!("test panic") }), None);
     assert_eq!(crate::bank::contained("a test request", || { crate::chathooks::say(&mut g, "hello"); 200 }), Some(200));
 }
+
+/// What a world must keep whatever clients send: every item in one inventory at most, held items
+/// exist, saved players' inventories exist, and the holder index matches.
+fn invariants(g: &Game) -> Vec<String> {
+    let mut bad = Vec::new();
+    let mut holder: HashMap<i32, i32> = HashMap::new();
+    for inv in g.inventories.values() {
+        for wo in &inv.items {
+            if let Some(prev) = holder.insert(*wo, inv.id).filter(|p| *p != inv.id) {
+                bad.push(format!("wo {wo} in inventories {prev} and {}", inv.id));
+            }
+            if !g.wos.contains_key(wo) {
+                bad.push(format!("inventory {} holds missing wo {wo}", inv.id));
+            }
+        }
+    }
+    let ready = g.clients.values().filter_map(|c| c.ready.as_ref()).flat_map(|s| [s.inventory, s.equipment]);
+    let saved = g.saved_players.iter().flat_map(|p| ["inventoryId", "equipmentId"].map(|k| p[k].as_i64().unwrap_or(-1) as i32));
+    for id in ready.chain(saved) {
+        if !g.inventories.contains_key(&id) {
+            bad.push(format!("player inventory {id} missing"));
+        }
+    }
+    bad.extend(holders_mismatch(g));
+    bad
+}
+
+/// Hostile RPCs on the bench's real world (buildings, machines, drones), two players, ticks in
+/// between: no panic, and the invariants hold, also in the world loaded from its save.
+/// PCDS_BENCH_SAVE=world.json [PCDS_FUZZ_ROUNDS=20000] [PCDS_FUZZ_SEED=7].
+#[test]
+#[ignore]
+fn hostile_rpcs_on_a_real_world_keep_it_whole() {
+    let Some(path) = std::env::var("PCDS_BENCH_SAVE").ok() else { return };
+    let Some((net_data, data, spec, scenes)) = test_tables() else { return };
+    let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (rounds, mut seed) = (env("PCDS_FUZZ_ROUNDS", 20000), env("PCDS_FUZZ_SEED", 7));
+    let mut next = move || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed >> 33
+    };
+    let mut g = Game::new(net_data, data, spec, SaveFile::load(&path).unwrap(), scenes);
+    g.sim_time = Some(10.0);
+    g.tick();
+    join(&mut g, 1, "Ann");
+    join(&mut g, 2, "Bob");
+    let table: Value = serde_json::from_str(&std::fs::read_to_string(format!("{}/rpcs.json", crate::test_data().unwrap())).unwrap()).unwrap();
+    let mut names: Vec<String> = table.as_object().unwrap().values().filter(|r| r["to"] == "server").filter_map(|r| r["name"].as_str().map(String::from)).filter(|n| n != "PlayerMainController.PlayerReadyServerRpc").collect();
+    names.sort();
+    let (mut t, mut sent) = (10.0, 0);
+    for round in 0..rounds {
+        let name = names[(next() % names.len() as u64) as usize].clone();
+        let pools: [Vec<i64>; 4] = [
+            g.wos.keys().map(|k| *k as i64).collect(),
+            g.inventories.keys().map(|k| *k as i64).collect(),
+            g.data.groups.iter().map(|gr| gr.hash as i64).collect(),
+            g.clients.values().filter_map(|c| c.ready.as_ref()).flat_map(|s| [s.inventory as i64, s.equipment as i64]).collect(),
+        ];
+        let pick = |next: &mut dyn FnMut() -> u64| -> Value {
+            let pool = &pools[(next() % 4) as usize];
+            let any = |n: u64| pool.get((n % pool.len().max(1) as u64) as usize).copied().unwrap_or(0);
+            match next() % 12 {
+                0 => json!(-1),
+                1 => json!(0),
+                2 => json!(i32::MAX),
+                3 => json!(-1000),
+                4 => json!(true),
+                5 => json!((0..next() % 4).map(|_| any(next())).collect::<Vec<_>>()),
+                6 => json!([any(next()) as f32, 3.0, 2.0, 1.0]),
+                _ => json!(any(next())),
+            }
+        };
+        let n = 1 + next() % 7;
+        let args: Vec<Value> = (0..n).map(|_| pick(&mut next)).collect();
+        let client = 1 + next() % 2;
+        let class = name.split('.').next().unwrap();
+        let carriers: Vec<u64> = g.net.objects.keys().copied().filter(|o| g.net.carries(*o, class)).collect();
+        let Some(&object) = carriers.get((next() % carriers.len().max(1) as u64) as usize) else { continue };
+        let behaviour = g.net.behaviour_index(object, class).unwrap_or(0);
+        let (hash, body) = g.net.spec.encode(&name, &args);
+        let mut w = Writer::new();
+        w.packed_u64(client).packed_u64(object).packed_u16(behaviour).packed_u32(hash).bytes(&body);
+        let line = format!("{round} c{client} {name} {}", Value::Array(args));
+        sent += 1;
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            g.incoming_rpc(client, &w.0);
+            if round % 7 == 0 {
+                t += 0.25;
+                g.sim_time = Some(t);
+                g.tick();
+            }
+        }));
+        assert!(r.is_ok(), "panicked at {line}");
+        g.net.out.clear();
+        g.kicks.clear();
+        let bad = invariants(&g);
+        assert!(bad.is_empty(), "after {line}: {:?}", &bad[..bad.len().min(5)]);
+    }
+    println!("{sent} RPCs sent; world objects {}, inventories {}", g.wos.len(), g.inventories.len());
+    let (net_data, data, spec, scenes) = test_tables().unwrap();
+    let h = Game::new(net_data, data, spec, SaveFile::from_text(&g.snapshot().to_text()), scenes);
+    assert_eq!(invariants(&h), Vec::<String>::new(), "the world loaded from its save");
+}
