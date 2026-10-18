@@ -24,6 +24,8 @@ struct Volume {
     activators: Value,
     /// WaterVolume.ignoreForEnergyDetection: not water for IsUnderWater, still on the Water layer.
     ignored: bool,
+    /// Moved by a SceneInterpolationFromStoryEvent: its world object, starting offset, eased.
+    story: Option<(i32, [f32; 3], bool)>,
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -60,6 +62,7 @@ fn load(game: &Game, planet: &str) -> Vec<Volume> {
             active: shown_at_load(game, v),
             activators: v["activators"].clone(),
             ignored: v["ignoreForEnergyDetection"].as_bool() == Some(true),
+            story: v["storyInterpolation"].as_object().map(|s| (s["worldObject"].as_i64().unwrap_or(0) as i32, v3(&s["offset"]), s["ease"].as_bool() == Some(true))),
         });
     }
     out
@@ -140,9 +143,30 @@ fn volumes(game: &mut Game) -> &[Volume] {
     &game.ext.water.planets[game.planet_id()]
 }
 
+/// SceneInterpolationFromStoryEvent.InOutQuad.
+fn in_out_quad(t: f32) -> f32 {
+    if (t as f64) < 0.5 {
+        (t * 2.0) * (t * 2.0) / 2.0
+    } else {
+        1.0 - ((1.0 - t) * 2.0) * ((1.0 - t) * 2.0) / 2.0
+    }
+}
+
+/// How far a story interpolation still holds the volume from its scene position: the
+/// starting offset at progress 0 (also before the story event made its world object), none
+/// at 1 (UpdateInterpolation: lerp(start, destination, progress)).
+fn story_shift(game: &Game, v: &Volume) -> [f32; 3] {
+    let Some((wo, offset, ease)) = v.story else { return [0.0; 3] };
+    let t = game.wos.get(&wo).map_or(0.0, |w| (w.growth / 100.0).clamp(0.0, 1.0));
+    let t = if ease { in_out_quad(t) } else { t };
+    offset.map(|o| o * (1.0 - t))
+}
+
 /// A volume's box now: world center and rotation; None while the volume is hidden.
 fn box_now(game: &Game, v: &Volume) -> Option<([f32; 3], [f32; 4])> {
     let root = root_now(game, v)?;
+    let shift = story_shift(game, v);
+    let root = [root[0] + shift[0], root[1] + shift[1], root[2] + shift[2]];
     let c = rotate(v.root_rotation, v.local_center);
     Some(([root[0] + c[0], root[1] + c[1], root[2] + c[2]], mul(v.root_rotation, v.local_rotation)))
 }
@@ -202,6 +226,20 @@ pub fn surface_below(game: &mut Game, origin: [f32; 3], distance: f32) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn story_interpolated_water_starts_offset_and_ends_at_its_scene_position() {
+        let Some(mut g) = crate::game::test_game(crate::game::tests::save()) else { return };
+        let v = Volume { local_center: [0.0; 3], half: [1.0; 3], local_rotation: [0.0, 0.0, 0.0, 1.0], root_position: [10.0, 20.0, 30.0], root_rotation: [0.0, 0.0, 0.0, 1.0], positioning: Value::Null, active: true, activators: Value::Null, ignored: false, story: Some((123, [0.0, -400.0, 0.0], true)) };
+        // Before the story event made its world object: the starting offset.
+        assert_eq!(box_now(&g, &v).unwrap().0, [10.0, -380.0, 30.0]);
+        let group = g.data.singletons["SceneInterpolationHandler"]["_interpolationGroup"].as_str().and_then(|r| g.data.group_of_ref(r)).unwrap();
+        g.create_world_object(group, 123, true);
+        for (growth, y) in [(0.0, -380.0), (25.0, -380.0 + 400.0 * 0.125), (50.0, -180.0), (100.0, 20.0)] {
+            g.wos.get_mut(&123).unwrap().growth = growth;
+            assert_eq!(box_now(&g, &v).unwrap().0, [10.0, y, 30.0], "progress {growth}");
+        }
+    }
 
     #[test]
     fn rotation_round_trip() {

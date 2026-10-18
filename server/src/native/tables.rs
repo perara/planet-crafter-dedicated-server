@@ -339,10 +339,20 @@ pub fn read_game(game: &Path, out: &Path) -> Result<String, String> {
     let resources = ctx.find_in_scenes(&["BootScene", "GameMainScene", &prime], "SpaceCraft", "PanelsResources")?.ok_or("no PanelsResources")?;
     let panels = ctx.panels(resources).map_err(|e| format!("panels: {e}"))?;
     let gamedata = json!({"assets": assets, "groupPrefabs": group_prefabs, "layouts": layouts, "singletons": singletons, "panels": panels});
-    std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    // scenes/<planet>.json for the planets anyone can play (no DLC app id).
+    let mut scenes = Vec::new();
+    for planet in planets.iter().filter(|p| p["steamAppId"] == 0) {
+        let id = planet["id"].as_str().unwrap_or_default();
+        let data = assets.get(&format!("PlanetData:PlanetData-{id}")).ok_or(format!("no PlanetData-{id}"))?;
+        scenes.push((id.to_string(), ctx.planet_scenes(&assets, data).map_err(|e| format!("scenes/{id}.json: {e}"))?));
+    }
+    std::fs::create_dir_all(out.join("scenes")).map_err(|e| format!("{}: {e}", out.display()))?;
     write(out, "netdata.json", &pretty(&netdata))?;
     write(out, "rpcs.json", &pretty(&Value::Object(rpcs)))?;
     write(out, "gamedata.json", &pretty(&gamedata))?;
+    for (id, scene) in &scenes {
+        write(out, &format!("scenes/{id}.json"), &pretty(scene))?;
+    }
     write(out, "connection-request.hex", &request)?;
     write(out, "buildid", &build)?;
     Ok(version)
