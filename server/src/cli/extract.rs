@@ -322,11 +322,7 @@ impl Ctx {
         }
         say(format!("game build {build} has no tables yet"));
         self.extract(Some(&game))?;
-        if self.active() {
-            check(&mut self.systemctl(&["restart", &self.unit()]))?;
-            say("server restarted on the new tables");
-        }
-        Ok(())
+        self.restart_after_update()
     }
 }
 

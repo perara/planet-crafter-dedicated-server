@@ -86,15 +86,26 @@ pub fn libraries(vdf: &Vdf) -> Vec<(PathBuf, bool)> {
 }
 
 impl Ctx {
-    /// Steam's library list (~/.steam/steam is Steam's own link to its installation).
-    fn library_list(&self) -> PathBuf {
-        self.home.join(".steam/steam/steamapps/libraryfolders.vdf")
+    /// Steam's library lists: a native Steam's (~/.steam/steam is Steam's own link to its
+    /// folder, which is not always ~/.local/share/Steam) and the Flatpak's.
+    fn library_lists(&self) -> Vec<PathBuf> {
+        let roots = [".local/share/Steam", ".steam/steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam"];
+        roots.iter().map(|root| self.home.join(root).join("steamapps/libraryfolders.vdf")).collect()
     }
 
-    fn steam_libraries(&self) -> Result<Vec<(PathBuf, bool)>> {
-        let path = self.library_list();
-        let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(libraries(&parse_vdf(&text).map_err(|e| format!("{}: {e}", path.display()))?))
+    /// The libraries in the library lists there are: each one's folder, whether it has the game,
+    /// and the list that says so.
+    fn steam_libraries(&self) -> Result<Vec<(PathBuf, bool, PathBuf)>> {
+        let mut out = Vec::new();
+        for list in self.library_lists() {
+            let text = match fs::read_to_string(&list) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                text => text.map_err(|e| format!("{}: {e}", list.display()))?,
+            };
+            let vdf = parse_vdf(&text).map_err(|e| format!("{}: {e}", list.display()))?;
+            out.extend(libraries(&vdf).into_iter().map(|(folder, has)| (folder, has, list.clone())));
+        }
+        Ok(out)
     }
 
     /// The game folder: --game DIR, PCDS_GAME_DIR, the one used last (run/game-dir), else the
@@ -109,9 +120,10 @@ impl Ctx {
             (PathBuf::from(text.trim_end_matches('\n')), remembered.display().to_string())
         } else {
             let not_found = |why: String| format!("game not found: pass --game DIR (the folder with 'Planet Crafter.exe', e.g. copied from a PC) or set PCDS_GAME_DIR ({why})");
+            let lists = || self.library_lists().iter().map(|l| l.display().to_string()).collect::<Vec<_>>().join(", ");
             let libraries = self.steam_libraries().map_err(not_found)?;
-            let library = libraries.into_iter().find(|(_, has)| *has).ok_or_else(|| not_found(format!("no Steam library in {} lists app {APP_ID}", self.library_list().display())))?;
-            (library.0.join("steamapps/common/The Planet Crafter"), self.library_list().display().to_string())
+            let (folder, _, list) = libraries.into_iter().find(|(_, has, _)| *has).ok_or_else(|| not_found(format!("no Steam library list ({}) lists app {APP_ID}", lists())))?;
+            (folder.join("steamapps/common/The Planet Crafter"), list.display().to_string())
         };
         if !dir.join("Planet Crafter.exe").is_file() || !dir.join("Planet Crafter_Data").is_dir() {
             return Err(format!("no game in {} (from {from}): the game folder holds 'Planet Crafter.exe' and 'Planet Crafter_Data'", dir.display()));
@@ -126,11 +138,13 @@ impl Ctx {
 
     /// The game's own saves on this machine (Proton), newest first.
     pub fn local_saves(&self) -> Vec<PathBuf> {
-        let mut saves: Vec<PathBuf> = self
-            .steam_libraries()
-            .unwrap_or_default()
+        // Each library once: ~/.steam/steam's list is usually ~/.local/share/Steam's.
+        let mut libraries: Vec<PathBuf> = self.steam_libraries().unwrap_or_default().into_iter().filter_map(|(folder, ..)| folder.canonicalize().ok()).collect();
+        libraries.sort();
+        libraries.dedup();
+        let mut saves: Vec<PathBuf> = libraries
             .into_iter()
-            .map(|(lib, _)| lib.join(format!("steamapps/compatdata/{APP_ID}/pfx/drive_c/users/steamuser/AppData/LocalLow/MijuGames/Planet Crafter")))
+            .map(|lib| lib.join(format!("steamapps/compatdata/{APP_ID}/pfx/drive_c/users/steamuser/AppData/LocalLow/MijuGames/Planet Crafter")))
             .flat_map(|dir| fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()))
             .filter(|p| p.extension().is_some_and(|e| e == "json") && super::is_save(p))
             .collect();
@@ -264,5 +278,41 @@ mod tests {
         for bad in ["\"libraryfolders\" {", "\"a\" \"b", "\"a\" }", "x"] {
             assert!(parse_vdf(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn every_steam_root_is_looked_in() {
+        let dir = super::super::test_dir("steam-roots");
+        let ctx = super::super::test_ctx(&dir);
+        let list = |root: &Path, apps: &str| {
+            fs::create_dir_all(root.join("steamapps")).unwrap();
+            let text = format!("\"libraryfolders\" {{ \"0\" {{ \"path\" \"{}\" \"apps\" {{ \"{apps}\" \"1\" }} }} }}", root.display());
+            fs::write(root.join("steamapps/libraryfolders.vdf"), text).unwrap();
+        };
+        let save_in = |root: &Path, name: &str| {
+            let saves = root.join(format!("steamapps/compatdata/{APP_ID}/pfx/drive_c/users/steamuser/AppData/LocalLow/MijuGames/Planet Crafter"));
+            fs::create_dir_all(&saves).unwrap();
+            fs::write(saves.join(name), "{\"saveDisplayName\":\"x\"}").unwrap();
+        };
+        assert!(ctx.game_dir(None).unwrap_err().contains(".var/app/com.valvesoftware.Steam"), "no list anywhere: all three named");
+
+        // A native Steam without the game, also reached through ~/.steam/steam; the game in the Flatpak's.
+        let native = dir.join("home/.local/share/Steam");
+        list(&native, "228980");
+        fs::create_dir_all(dir.join("home/.steam")).unwrap();
+        std::os::unix::fs::symlink(&native, dir.join("home/.steam/steam")).unwrap();
+        save_in(&native, "Native-1.json");
+        let flatpak = dir.join("home/.var/app/com.valvesoftware.Steam/.local/share/Steam");
+        list(&flatpak, APP_ID);
+        save_in(&flatpak, "Flatpak-1.json");
+        let game = flatpak.join("steamapps/common/The Planet Crafter");
+        fs::create_dir_all(game.join("Planet Crafter_Data")).unwrap();
+        fs::write(game.join("Planet Crafter.exe"), "").unwrap();
+
+        assert_eq!(ctx.game_dir(None).unwrap(), game.canonicalize().unwrap());
+        let mut names: Vec<String> = ctx.local_saves().iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["Flatpak-1.json", "Native-1.json"], "each save once");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

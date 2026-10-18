@@ -73,9 +73,20 @@ impl Ctx {
         parse_env(&text).into_iter().rev().find(|(k, _)| k == key).map(|(_, v)| v).filter(|v| !v.is_empty())
     }
 
+    /// One setting changed: the new file is written beside (only this user reads it, as it holds
+    /// the admin token) and moved over, so a crash leaves the old one or the new one.
     pub fn set_env(&self, key: &str, value: &str) -> Result {
         let text = fs::read_to_string(&self.env_file).map_err(|e| format!("{}: {e}", self.env_file.display()))?;
-        super::write(&self.env_file, set_env_text(&text, key, value))
+        let new = self.env_file.with_extension("env.new");
+        let _ = fs::remove_file(&new);
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&new)
+            .and_then(|mut f| f.write_all(set_env_text(&text, key, value).as_bytes()).and_then(|_| f.sync_all()))
+            .and_then(|_| fs::rename(&new, &self.env_file))
+            .map_err(|e| format!("{}: {e}", self.env_file.display()))
     }
 
     /// The direct-IP port (PCDS_LISTEN's).
@@ -189,6 +200,24 @@ mod tests {
         assert!(edited.contains("# PCDS_WORLD=commented") && edited.contains("PCDS_LISTEN=0.0.0.0:7777\n"));
         assert_eq!(set_env_text("A=1\n", "B", "2"), "A=1\nB=2\n");
         assert_eq!(set_env_text("", "B", "2"), "B=2\n");
+    }
+
+    #[test]
+    fn a_setting_is_changed_by_replacing_the_file() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = super::super::test_dir("set-env");
+        let ctx = super::super::test_ctx(&dir);
+        fs::create_dir_all(&ctx.run).unwrap();
+        fs::write(&ctx.env_file, "# settings\nPCDS_ADMIN_TOKEN=secret\nPCDS_WORLD=world\n").unwrap();
+        fs::set_permissions(&ctx.env_file, fs::Permissions::from_mode(0o644)).unwrap();
+        let before = fs::metadata(&ctx.env_file).unwrap().ino();
+        ctx.set_env("PCDS_WORLD", "other").unwrap();
+        assert_eq!(fs::read_to_string(&ctx.env_file).unwrap(), "# settings\nPCDS_ADMIN_TOKEN=secret\nPCDS_WORLD=other\n");
+        let after = fs::metadata(&ctx.env_file).unwrap();
+        assert_ne!(after.ino(), before, "moved over, not rewritten in place");
+        assert_eq!(after.mode() & 0o777, 0o600);
+        assert!(!dir.join("run/server.env.new").exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

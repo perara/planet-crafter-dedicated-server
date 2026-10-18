@@ -13,7 +13,9 @@ use super::{Ctx, Result};
 /// no limit, as curl gave it none: laying out the wrecks takes it minutes.
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// An HTTP/1.1 answer: its status and its body (Content-Length long, else to the end).
+/// An HTTP/1.1 answer: its status and its body (Content-Length long, else to the end). Both
+/// servers send a Content-Length (admin.rs; the extractor's HttpListener has ContentLength64
+/// set): a chunked answer is refused rather than read as its body.
 pub fn read_response(r: &mut impl BufRead) -> Result<(u16, String)> {
     let mut line = String::new();
     r.read_line(&mut line).map_err(|e| e.to_string())?;
@@ -25,7 +27,11 @@ pub fn read_response(r: &mut impl BufRead) -> Result<(u16, String)> {
         if r.read_line(&mut header).map_err(|e| e.to_string())? == 0 || header.trim().is_empty() {
             break;
         }
-        if let Some((k, v)) = header.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case("content-length")) {
+        let Some((k, v)) = header.split_once(':') else { continue };
+        if k.trim().eq_ignore_ascii_case("transfer-encoding") {
+            return Err(format!("unexpected Transfer-Encoding: {} (pcds reads answers with a Content-Length)", v.trim()));
+        }
+        if k.trim().eq_ignore_ascii_case("content-length") {
             length = Some(v.trim().parse::<usize>().map_err(|_| format!("bad {k}: {}", v.trim()))?);
         }
     }
@@ -194,6 +200,7 @@ mod tests {
         // No length: to the end.
         assert_eq!(parse("HTTP/1.0 404 Not Found\r\n\r\nno such page").unwrap(), (404, "no such page".into()));
         assert!(parse("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort").is_err());
+        assert!(parse("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\npong\r\n0\r\n\r\n").unwrap_err().contains("chunked"));
         assert!(parse("SSH-2.0-OpenSSH\r\n").is_err());
         assert!(parse("").is_err());
     }

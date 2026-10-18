@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, Write};
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -13,17 +13,28 @@ use super::env::{build_id, parse_env};
 use super::{need, say, sleep, wait_for, Ctx, Result};
 
 impl Ctx {
-    /// The server runs from run/bin, so rebuilding or upgrading never touches a running server.
-    fn install_server(&self) -> Result {
+    /// The server runs from run/bin, so rebuilding or upgrading never touches a running server:
+    /// this program and what it loads beside it, as in a release.
+    pub fn install_server(&self) -> Result {
         let lib = self.exe.with_file_name("libsteam_api.so");
         if !lib.is_file() {
             return Err(format!("no libsteam_api.so next to {} (make build puts it there)", self.exe.display()));
         }
         let bin = self.run.join("bin");
         super::mkdir(&bin.join("web"))?;
-        super::install_file(&self.exe, &bin.join("pcds"))?;
+        super::install_file(&self.exe, &self.installed())?;
         super::install_file(&lib, &bin.join("libsteam_api.so"))?;
+        super::install_file(&self.extractor_dll, &bin.join("PcdsExtractor.dll"))?;
         super::install_file(&self.web, &bin.join("web/index.html"))
+    }
+
+    /// After an upgrade (a new build or release), the newer program into run/bin.
+    pub fn install_newer(&self) -> Result {
+        let installed = self.installed();
+        if !installed.is_file() || super::modified(&self.exe) > super::modified(&installed) {
+            self.install_server()?;
+        }
+        Ok(())
     }
 
     /// The server in the foreground, as the unit runs it: the installed game's tables, the
@@ -34,11 +45,8 @@ impl Ctx {
         if !world.is_file() {
             return Err(format!("no world at {}: 'pcds worlds', 'pcds world use NAME' or 'pcds world new NAME'", world.display()));
         }
-        // After an upgrade (a new build or release), the newer binary.
-        let installed = self.run.join("bin/pcds");
-        if !installed.is_file() || super::modified(&self.exe) > super::modified(&installed) {
-            self.install_server()?;
-        }
+        self.install_newer()?;
+        let installed = self.installed();
         let mut server = Command::new(&installed);
         server.arg("serve").arg(&data).arg(&world);
         // Started by hand: the settings file (the unit has systemd read it).
@@ -88,21 +96,7 @@ impl Ctx {
         let current = self.world_file();
         let name = self.world_name();
         if let Some(world) = world {
-            if !world.is_file() {
-                return Err(format!("no save at {}", world.display()));
-            }
-            if !super::is_save(&world) {
-                return Err(format!("{} is not a Planet Crafter save", world.display()));
-            }
-            if self.active() {
-                return Err("stop the server first (pcds stop): it would save over the imported world".into());
-            }
-            if current.is_file() {
-                self.keep_copy(&name, "replaced")?;
-            }
-            super::mkdir(&self.worlds)?;
-            fs::copy(&world, &current).map_err(|e| format!("{}: {e}", current.display()))?;
-            say(format!("world {name} copied from {}", world.display()));
+            self.replace_world(&world)?;
         } else if new {
             if current.is_file() {
                 say(format!("keeping the world {name} ('pcds world new NAME' makes another)"));
@@ -117,6 +111,31 @@ impl Ctx {
         }
         self.ensure_steamclient();
         say("ready: 'pcds start' runs it now, 'pcds install-service' starts it at login");
+        Ok(())
+    }
+
+    /// `setup --world`: a save becomes the current world (the one it replaces is kept in
+    /// backups/), copied beside it and then moved over it.
+    fn replace_world(&self, save: &Path) -> Result {
+        let (current, name) = (self.world_file(), self.world_name());
+        if !save.is_file() {
+            return Err(format!("no save at {}", save.display()));
+        }
+        if !super::is_save(save) {
+            return Err(format!("{} is not a Planet Crafter save", save.display()));
+        }
+        if super::same_file(save, &current) {
+            return Err(format!("{} is the world {name} already: leave out --world", save.display()));
+        }
+        if self.active() {
+            return Err("stop the server first (pcds stop): it would save over the imported world".into());
+        }
+        if current.is_file() {
+            self.keep_copy(&name, "replaced")?;
+        }
+        super::mkdir(&self.worlds)?;
+        super::install_file(save, &current)?;
+        say(format!("world {name} copied from {}", save.display()));
         Ok(())
     }
 
@@ -270,5 +289,35 @@ impl Ctx {
         self.ensure_steamclient();
         say("manage it with: docker exec CONTAINER pcds worlds | players | rules | gui");
         self.run_server()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_current_world_is_not_copied_over_itself() {
+        let dir = super::super::test_dir("replace-world");
+        let ctx = super::super::test_ctx(&dir);
+        let current = ctx.world_file();
+        fs::create_dir_all(current.parent().unwrap()).unwrap();
+        fs::write(&current, "{\"saveDisplayName\":\"live\"}").unwrap();
+        let link = dir.join("link.json");
+        std::os::unix::fs::symlink(&current, &link).unwrap();
+        for same in [&current, &link] {
+            assert!(ctx.replace_world(same).unwrap_err().contains("already"), "{}", same.display());
+        }
+        assert_eq!(fs::read_to_string(&current).unwrap(), "{\"saveDisplayName\":\"live\"}");
+        assert!(!dir.join("run/worlds/backups").exists());
+
+        let other = dir.join("other.json");
+        fs::write(&other, "{\"saveDisplayName\":\"other\"}").unwrap();
+        ctx.replace_world(&other).unwrap();
+        assert_eq!(fs::read_to_string(&current).unwrap(), "{\"saveDisplayName\":\"other\"}");
+        let backups: Vec<_> = fs::read_dir(dir.join("run/worlds/backups")).unwrap().flatten().map(|e| fs::read_to_string(e.path()).unwrap()).collect();
+        assert_eq!(backups, ["{\"saveDisplayName\":\"live\"}"]);
+        assert!(!dir.join("run/worlds/world.new").exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

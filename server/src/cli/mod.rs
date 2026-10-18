@@ -159,6 +159,10 @@ impl Ctx {
                 if !self.unit_dir.join(self.unit()).is_file() {
                     return Err("run 'pcds setup' first".into());
                 }
+                // After `make build` or in a newer release folder: the unit runs the new program.
+                if *what != "stop" {
+                    self.install_newer()?;
+                }
                 return passthrough(&mut self.systemctl(&[what, &self.unit()]));
             }
             ["status"] => self.status()?,
@@ -345,9 +349,51 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
+/// Whether two paths are one file (through symbolic or hard links too).
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
 /// Whether a file is a save of the game (the bash pcds grepped for this).
 fn is_save(path: &Path) -> bool {
     fs::read(path).is_ok_and(|b| b.windows(15).any(|w| w == b"saveDisplayName"))
+}
+
+/// An installation in `dir` for tests: the program in build/, the home in home/, run/, and a
+/// unit name no server uses.
+#[cfg(test)]
+fn test_ctx(dir: &Path) -> Ctx {
+    let run = dir.join("run");
+    let ext = run.join("extractor");
+    Ctx {
+        exe: dir.join("build/pcds"),
+        web: dir.join("build/web/index.html"),
+        extractor_dll: dir.join("build/PcdsExtractor.dll"),
+        env_file: run.join("server.env"),
+        worlds: run.join("worlds"),
+        steamcmd: run.join("steamcmd"),
+        ext_log: ext.join("game/BepInEx/LogOutput.log"),
+        ext_game: ext.join("game"),
+        ext,
+        cache: run.join("cache"),
+        run,
+        unit_dir: dir.join("systemd"),
+        unit_name: "pcds-cli-test".into(),
+        container: false,
+        home: dir.join("home"),
+    }
+}
+
+/// A new empty folder for one test.
+#[cfg(test)]
+fn test_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("pcds-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 #[cfg(test)]

@@ -96,11 +96,13 @@ loginctl enable-linger $USER   # keep it running while you are logged out
 ```
 
 `setup` takes the game folder from `--game DIR` or `PCDS_GAME_DIR`, else the one it used last
-(`run/game-dir`), else the Steam library whose `libraryfolders.vdf` lists the game. It reads the
+(`run/game-dir`), else the Steam library that lists the game in a `steamapps/libraryfolders.vdf`
+of `~/.local/share/Steam`, `~/.steam/steam` or the Flatpak's
+`~/.var/app/com.valvesoftware.Steam/.local/share/Steam`. It reads the
 game tables from it, puts the world in place, and writes the settings and a systemd user unit. Your
 game folder is never modified, and a modded one works too: the extraction leaves the game's own
 BepInEx, doorstop and `steam_appid.txt` out of its copy and brings its own. `setup --world`
-refuses while the server runs. The selftest does not become a player, so nothing is saved for it.
+refuses while the server runs, and when the save is the current world already. The selftest does not become a player, so nothing is saved for it.
 
 Where the game keeps its saves:
 - Windows: `%USERPROFILE%\AppData\LocalLow\MijuGames\Planet Crafter\`
@@ -114,14 +116,22 @@ Where the game keeps its saves:
 
 ### Upgrading
 
-- Run the installer again, or `./pcds up` in a newer release folder (`up` points the systemd
-  unit at it; move the old folder's `run/` into it first).
+- Run the installer again, or `./pcds up` in a newer release folder (move the old folder's `run/`
+  into it first).
 - From source: `git pull`, `make build`, then `pcds restart`.
 
-The server installs the newer binary into `run/bin/` by itself when it starts. A game build is
-recognised by a hash of its code now: the first `up` or `update` after upgrading from 0.5 or
-older extracts the game tables once more. A world still in `run/world.json` (before 0.5) is not
-moved any more: move it to `run/worlds/world.json` yourself.
+The systemd units run `run/bin/pcds`, a copy of the program with `libsteam_api.so`,
+`PcdsExtractor.dll` and `web/` beside it, so `make clean` or a removed release folder does not
+take the server down. `setup`, `up` and `install-service` install the program there, and `start`
+and `restart` install a newer build or release first.
+
+From 0.5 or older (the bash `pcds`):
+- The units ran the bash `pcds`, which is gone: the server does not start until
+  `pcds install-service` (or `pcds up`) has written the units again.
+- A game build is recognised by a hash of its code now: the server stops with "the game changed"
+  until `pcds update` has extracted the game tables once more.
+- A world still in `run/world.json` (before 0.5) is not moved any more: move it to
+  `run/worlds/world.json` yourself.
 
 ## Docker
 
@@ -263,7 +273,9 @@ reason in `./pcds logs`.
 
 Players and the server must run the same game version; players with another version are
 refused with the game's version-mismatch message. After a game update, `./pcds update` reads the
-new tables from the updated game and restarts the server (`install-service` runs it every hour).
+new tables from the updated game and restarts the server, unless you stopped it; a server that
+stopped on the old tables is started (`install-service` runs it every hour; in Docker, restart the
+container).
 On a machine without Steam, copy the updated game folder over and run
 `./pcds update --game DIR`. Every game folder, from Steam or copied, is recognised by a hash of
 its code (`Planet Crafter_Data/Managed/Assembly-CSharp.dll`). The server runs only on the tables
