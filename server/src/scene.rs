@@ -94,6 +94,12 @@ pub fn init(game: &mut Game) {
     for list in ["_allWorldObjectsGroups", "_constructedWorldObjectsGroups", "_constructedPanelTypes"] {
         set(game, "WorldObjectsHandler", list, VarValue::List(Vec::new()));
     }
+    // Types with their own serializer start as the handlers create them: no planets' units yet,
+    // no instance opened, no choices.
+    let sys = crate::units::system_terraformation(game);
+    set(game, "WorldUnitsHandler", "_unitSysTerraformation", VarValue::Plain(sys));
+    set(game, "WorldInstanceHandler", "_openedWorldInstanceData", VarValue::Plain(crate::instances::encode_instance(None)));
+    set(game, "WorldInstanceHandler", "_currentChoices", VarValue::Plain(crate::instances::encode_choices(&[])));
     crate::units::init(game);
     crate::meteo::init(game);
     crate::logistics::init(game);

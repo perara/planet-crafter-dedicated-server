@@ -130,7 +130,7 @@ impl Ctx {
     /// GameData.Fields: each field's value one level deeper; fields of derived classes win.
     pub fn fields(&mut self, file: usize, fields: &[(String, Raw)], depth: usize) -> Map<String, Value> {
         let mut out = Map::new();
-        for (name, v) in fields.iter().rev() {
+        for (name, v) in fields {
             if out.contains_key(name) {
                 continue;
             }
@@ -221,7 +221,7 @@ impl Ctx {
         let (rp, rr, rs) = self.graph.world(root);
         let inverse = crate::geometry::conj(rr);
         let mut poses = Map::new();
-        for (name, v) in fields.iter().rev() {
+        for (name, v) in fields {
             let Raw::Ref(p, t) = v else { continue };
             if t.namespace != "UnityEngine" || t.name != "Transform" || poses.contains_key(name) {
                 continue;

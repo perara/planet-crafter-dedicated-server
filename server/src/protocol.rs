@@ -16,7 +16,7 @@ pub const NETWORK_VARIABLE_DELTA: u32 = 13;
 pub const TIME_SYNC: u32 = 21;
 
 /// NetworkObject.SceneObject flag bits.
-const HAS_PARENT: u16 = 1 << 1;
+pub const HAS_PARENT: u16 = 1 << 1;
 const HAS_TRANSFORM: u16 = 1 << 3;
 
 
@@ -26,6 +26,7 @@ pub struct SceneObjectInfo {
     pub hash: u32,
     pub id: u64,
     pub owner: u64,
+    #[cfg_attr(not(test), allow(dead_code))] // the spawn tests check it
     pub parent: Option<u64>,
     pub position: Option<[f32; 3]>,
     pub rotation: Option<[f32; 4]>,

@@ -1,15 +1,13 @@
-//! The game's static data for one version (data/<version>/gamedata.json, dumped from the game by
-//! the plugin's GET /api/gamedata): groups (items and buildings) with their parameters, every
+//! The game's static data for one version (data/<version>/gamedata.json, read from the game's
+//! files by `pcds-server read-game`): groups (items and buildings) with their parameters, every
 //! other game asset, and the network layout of each world object the server can spawn.
 
 use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::data::{stable_hash, BehaviourDef, VarDef};
-use crate::protocol::read_scene_object;
-use crate::wire::Reader;
-use crate::world::hex;
+use crate::data::{stable_hash, BehaviourDef, ObjectDef};
+use crate::wire::Writer;
 
 /// DataConfig.WorldUnitType, in the game's order.
 pub const UNIT_TYPES: [&str; 8] = ["Oxygen", "Pressure", "Heat", "Energy", "Plants", "Insects", "Animals", "Purification"];
@@ -49,13 +47,12 @@ impl Group {
 /// their variables (defaults), and the custom sync data after the variables.
 #[derive(Clone)]
 pub struct Layout {
-    pub prefab: String,
     pub hash: u32,
     pub flags: u16,
     pub scale: [f32; 3],
     pub behaviours: Vec<BehaviourDef>,
     pub tail: Vec<u8>,
-    /// Offset in `tail` of the transform state's position (the dump spawned at 0,-5000,0).
+    /// Offset in `tail` of the root transform state's position, filled in at each send.
     pub tail_position: Option<usize>,
 }
 
@@ -64,7 +61,8 @@ pub struct GameData {
     by_id: HashMap<String, usize>,
     by_hash: HashMap<i32, usize>,
     /// Keyed by group id; "<id>#static" is the container variant for objects loaded from the save.
-    pub layouts: HashMap<String, Layout>,
+    /// Per group id (and "<id>#static"): the network object its world objects spawn as.
+    pub layouts: HashMap<String, ObjectDef>,
     /// Every game asset, keyed "Type:name".
     pub assets: serde_json::Map<String, Value>,
     pub group_prefabs: Value,
@@ -74,36 +72,32 @@ pub struct GameData {
     pub singletons: Value,
 }
 
-const DUMP_POSITION: [u8; 12] = [0, 0, 0, 0, 0x00, 0x40, 0x9c, 0xc5, 0, 0, 0, 0];
+/// NetworkTransformState's position bits (x, y, z).
+const POSITION_BITS: u32 = 0b1110;
 
-fn layout(entry: &Value) -> Option<Layout> {
-    let bytes = hex(entry["sceneObject"].as_str()?);
-    let o = read_scene_object(&mut Reader::new(&bytes))?;
-    let mut r = Reader::new(&bytes);
-    r.skip(2 + 4)?;
-    r.packed_u64()?;
-    r.packed_u64()?;
-    let behaviours: Vec<BehaviourDef> = entry["behaviours"]
-        .as_array()?
-        .iter()
-        .map(|b| BehaviourDef {
-            class: b["class"].as_str().unwrap_or("").rsplit('.').next().unwrap_or("").to_string(),
-            behaviour_id: b["behaviourId"].as_u64().unwrap_or(0) as u16,
-            vars: b["variables"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|v| VarDef { name: v["name"].as_str().unwrap_or("").into(), ty: v["type"].as_str().unwrap_or("").into(), bytes: v["bytes"].as_str().unwrap_or("").into() })
-                .collect(),
-        })
-        .collect();
-    let vars_len: usize = behaviours.iter().flat_map(|b| &b.vars).map(|v| v.bytes.len() / 2).sum();
-    let tail = o.sync.get(vars_len..)?.to_vec();
-    let tail_position = tail.windows(12).position(|w| w == DUMP_POSITION);
-    // Scale follows position (12) and rotation (16) in the transform.
-    let at = bytes.len() - o.sync.len() - 8 - 12;
-    let scale = [0, 4, 8].map(|i| f32::from_le_bytes(bytes[at + i..at + i + 4].try_into().unwrap()));
-    Some(Layout { prefab: entry["prefab"].as_str()?.into(), hash: o.hash, flags: o.flags, scale, behaviours, tail, tail_position })
+impl ObjectDef {
+    /// The layout a spawn at `tick` sends: the custom sync data after the variables is each
+    /// NetworkTransform's state (u8 count; per transform its behaviour, length, flags, tick and
+    /// values), with the offset of the root's position for the spawn to fill in.
+    pub fn layout(&self, tick: i32) -> Layout {
+        let mut w = Writer::new();
+        w.u8(self.transforms.len() as u8);
+        let mut tail_position = None;
+        for t in &self.transforms {
+            let mut state = Writer::new();
+            state.packed_u32(t.flags).packed_i32(tick);
+            let at = state.len();
+            t.values.iter().for_each(|v| {
+                state.f32(*v);
+            });
+            w.u16(t.behaviour).i32(state.len() as i32);
+            if t.root && t.flags & POSITION_BITS == POSITION_BITS && tail_position.is_none() {
+                tail_position = Some(w.len() + at);
+            }
+            w.bytes(&state.0);
+        }
+        Layout { hash: self.hash, flags: self.flags, scale: self.scale.unwrap_or([1.0; 3]), behaviours: self.behaviours.clone(), tail: w.0, tail_position }
+    }
 }
 
 impl GameData {
@@ -149,7 +143,7 @@ impl GameData {
                 .collect();
         }
         let by_hash = groups.iter().enumerate().map(|(i, g)| (g.hash, i)).collect();
-        let layouts = root["layouts"].as_object().into_iter().flatten().filter_map(|(k, v)| Some((k.clone(), layout(v)?))).collect();
+        let layouts = serde_json::from_value(root["layouts"].take()).map_err(|e| format!("{path}: layouts: {e}"))?;
         Ok(GameData {
             groups,
             by_id,
@@ -201,8 +195,8 @@ mod tests {
         assert_eq!(air.recipe.len(), 6);
         let container = &d.layouts["Container1"];
         assert_eq!(container.behaviours[0].class, "ConstructibleProxy");
-        let dropped = &d.layouts["Iron"];
+        let dropped = d.layouts["Iron"].layout(7);
         assert!(dropped.tail_position.is_some(), "dynamic containers carry their transform state");
-        assert!(d.layouts["Iron#static"].tail_position.is_none());
+        assert!(d.layouts["Iron#static"].layout(7).tail_position.is_none());
     }
 }

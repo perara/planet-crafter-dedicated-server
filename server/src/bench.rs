@@ -2,7 +2,9 @@
 //! the server sends and saves (an optimization must leave the fingerprint unchanged):
 //!
 //!   PCDS_BENCH_SAVE=world.json PCDS_RNG_SEED=1 [PCDS_BENCH_SECONDS=300] [PCDS_BENCH_PLAYERS=4] \
-//!     cargo test --release bench -- --ignored --nocapture
+//!     [PCDS_BENCH_DUMP=messages.txt] cargo test --release bench -- --ignored --nocapture
+//!
+//! PCDS_BENCH_DUMP writes every message (per tick, sorted) to compare two runs line by line.
 //!
 //! The loop steps like the server's (a tick every 5 ms); players walk in circles, sending a
 //! transform every network tick. "cpu at real time" is the share of one core the ticks would
@@ -16,11 +18,17 @@ use crate::protocol::NETWORK_TRANSFORM;
 use crate::save::SaveFile;
 use crate::wire::Writer;
 
-fn fingerprint(h: &mut impl Hasher, out: &mut Vec<(crate::net::Target, u32, Vec<u8>)>) -> usize {
+fn fingerprint(h: &mut impl Hasher, out: &mut Vec<(crate::net::Target, u32, Vec<u8>)>, dump: &mut Option<std::io::BufWriter<std::fs::File>>) -> usize {
     // Within one tick the order of independent messages may follow hash-map order: sorted.
     let mut tick: Vec<String> = out.drain(..).map(|(to, kind, body)| format!("{to:?} {kind} {body:02x?}")).collect();
     tick.sort();
     tick.hash(h);
+    if let Some(f) = dump {
+        use std::io::Write;
+        for line in &tick {
+            writeln!(f, "{line}").unwrap();
+        }
+    }
     tick.len()
 }
 
@@ -37,8 +45,9 @@ fn bench() {
     println!("bench: load {:?}, {} world objects, {} network objects", loaded.elapsed(), g.wos.len(), g.net.objects.len());
     g.sim_time = Some(0.0);
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut dump = std::env::var("PCDS_BENCH_DUMP").ok().map(|p| std::io::BufWriter::new(std::fs::File::create(p).unwrap()));
     let objects: Vec<u64> = (1..=players).map(|c| join(&mut g, c, &format!("Bench{c}"))).collect();
-    let mut messages = fingerprint(&mut h, &mut g.net.out);
+    let mut messages = fingerprint(&mut h, &mut g.net.out, &mut dump);
     let (step, net_tick) = (0.005, 1.0 / g.net_data.tick_rate as f64);
     let (mut t, mut next_move, mut ticks, mut busy) = (0.0, 0.0, 0u64, Duration::ZERO);
     while t < seconds {
@@ -61,7 +70,7 @@ fn bench() {
         g.tick();
         busy += started.elapsed();
         ticks += 1;
-        messages += fingerprint(&mut h, &mut g.net.out);
+        messages += fingerprint(&mut h, &mut g.net.out, &mut dump);
         g.kicks.clear();
     }
     let save = g.snapshot().to_text();

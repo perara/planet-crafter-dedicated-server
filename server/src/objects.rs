@@ -153,11 +153,11 @@ impl Game {
             return None;
         }
         let key = if !own_prefab && g.inventory_size <= 0 && from_db { format!("{}#static", g.id) } else { g.id.clone() };
-        let Some(layout) = self.data.layouts.get(&key) else {
+        let Some(def) = self.data.layouts.get(&key) else {
             eprintln!("no network layout for {key}");
             return None;
         };
-        let mut o = NetObj::from_layout(layout);
+        let mut o = NetObj::from_layout(&def.layout(self.tick_number()));
         let (inventory_size, secondary, hash) = (g.inventory_size, g.secondary_inventories.clone(), g.hash);
         let constructible = g.constructible;
         let energy = g.unit("Energy");

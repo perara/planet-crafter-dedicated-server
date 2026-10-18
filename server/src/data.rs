@@ -1,5 +1,5 @@
-//! Static per-game-version tables (data/<version>/netdata.json, built by tools/extract_netdata.py)
-//! and the game's string hash.
+//! Static per-game-version tables (data/<version>/netdata.json, read from the game's files by
+//! `pcds-server read-game`) and the game's string hash.
 
 use std::collections::HashMap;
 
@@ -10,7 +10,6 @@ use serde::Deserialize;
 pub struct NetData {
     pub game_version: String,
     pub tick_rate: u32,
-    pub scene_handle: i32,
     /// (type-name hash, version) of every Netcode message, in the server's id order.
     pub message_versions: Vec<(u32, i32)>,
     pub scene_objects: Vec<ObjectDef>,
@@ -18,23 +17,36 @@ pub struct NetData {
     pub planets: Vec<PlanetDef>,
 }
 
+/// A network object as a spawn describes it (an in-scene object, a prefab, a world object's
+/// layout).
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectDef {
+    /// In-scene objects: their network object id.
     #[serde(default)]
     pub id: u64,
+    /// World object layouts: the prefab's name.
+    #[serde(default)]
+    pub prefab: String,
     pub hash: u32,
     pub flags: u16,
     pub parent: Option<u64>,
     pub behaviours: Vec<BehaviourDef>,
-    /// Custom synchronization blocks after the variables (e.g. NetworkTransform state).
-    #[serde(default)]
-    pub sync_tail: String,
-    #[serde(default)]
+    /// Its NetworkTransforms' spawn states (NetworkTransform.OnSynchronize).
+    pub transforms: Vec<TransformDef>,
     pub scale: Option<[f32; 3]>,
-    /// Complete sync data of a freshly spawned instance (player objects).
-    #[serde(default)]
-    pub spawn_sync: String,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct TransformDef {
+    /// The NetworkBehaviour index.
+    pub behaviour: u16,
+    /// NetworkTransformState flags of a synchronization.
+    pub flags: u32,
+    /// On the object's root: its position is the object's.
+    pub root: bool,
+    /// The synchronized axes' values: positions, then angles.
+    pub values: Vec<f32>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -51,8 +63,9 @@ pub struct VarDef {
     /// Netcode type, e.g. "NetworkVariable<Int32>".
     #[serde(rename = "type", default)]
     pub ty: String,
-    /// Value observed when the table was extracted (hex); the default for this variable.
-    pub bytes: String,
+    /// The value it starts with (hex), as the game's constructor gives it; None when the server
+    /// must set it (types with their own serializer).
+    pub bytes: Option<String>,
 }
 
 #[derive(Deserialize)]

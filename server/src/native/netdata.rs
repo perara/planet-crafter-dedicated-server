@@ -9,9 +9,9 @@ use super::tables::Ctx;
 use super::dotnet::TypeName;
 use super::unity::{self, Id};
 
-/// A field of a read object by name (the last one: derived classes win).
+/// A field of a read object by name (the first one: a class's own field hides its base's).
 pub fn field<'a>(fields: &'a [(String, Raw)], name: &str) -> Option<&'a Raw> {
-    fields.iter().rev().find(|(n, _)| n == name).map(|(_, v)| v)
+    fields.iter().find(|(n, _)| n == name).map(|(_, v)| v)
 }
 
 impl Ctx {
@@ -320,7 +320,7 @@ impl Ctx {
             v["flags"] = json!(v["flags"].as_u64().unwrap_or(0) | with_scene as u64);
             v
         };
-        let mut container = |ctx: &mut Ctx, name: &str| -> Result<Value, String> {
+        let container = |ctx: &mut Ctx, name: &str| -> Result<Value, String> {
             let root = match field(&fields, name) {
                 Some(Raw::Ref(p, _)) => ctx.data.resolve(handler.0, *p),
                 _ => None,

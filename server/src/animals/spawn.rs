@@ -416,7 +416,7 @@ fn sequence_trait(game: &mut Game, sequence: i32, ty: i32) -> (i32, [f32; 4]) {
 }
 
 fn animal_layout(hash: u32, tick: i32) -> Layout {
-    let var = |name: &str, ty: &str, bytes: Vec<u8>| VarDef { name: name.into(), ty: ty.into(), bytes: bytes.iter().map(|b| format!("{b:02x}")).collect() };
+    let var = |name: &str, ty: &str, bytes: Vec<u8>| VarDef { name: name.into(), ty: ty.into(), bytes: Some(bytes.iter().map(|b| format!("{b:02x}")).collect()) };
     let behaviour = |class: &str, id: u16, vars: Vec<VarDef>| BehaviourDef { class: class.into(), behaviour_id: id, vars };
     let behaviours = vec![
         behaviour(
@@ -450,7 +450,7 @@ fn animal_layout(hash: u32, tick: i32) -> Layout {
     tail.bytes(&state.0);
     let animator = crate::world::hex(ANIMATOR_SYNC);
     tail.u16(ANIMATOR).i32(animator.len() as i32).bytes(&animator);
-    Layout { prefab: String::new(), hash, flags: FLAGS, scale: [1.0; 3], behaviours, tail: tail.0, tail_position: Some(tail_position) }
+    Layout { hash, flags: FLAGS, scale: [1.0; 3], behaviours, tail: tail.0, tail_position: Some(tail_position) }
 }
 
 /// SpawnWorldObject: the sequence's animal, owned by `owner` (0: the first animal's owner, or

@@ -62,6 +62,8 @@ pub enum Builtin {
 pub struct Field {
     pub name: String,
     pub kind: Kind,
+    /// How far down the class hierarchy it is declared (the root base class's fields are 0).
+    pub level: usize,
 }
 
 /// Unity's limit on nested serializable classes.
@@ -149,6 +151,7 @@ impl Layouts {
             }
             _ => Vec::new(),
         };
+        let level = out.iter().map(|f| f.level + 1).max().unwrap_or(0);
         let fields: Vec<(String, TypeSig, u16, bool, bool)> = def
             .fields
             .iter()
@@ -169,13 +172,13 @@ impl Layouts {
             if serialize_reference {
                 // ponytail: [SerializeReference] fields (a managed reference id, the objects in
                 // a registry after the fields) are not read; none of the tables need one so far.
-                out.push(Field { name, kind: Kind::I64 });
+                out.push(Field { name, kind: Kind::I64, level });
                 continue;
             }
             match stored.then(|| self.kind(&sig, depth)).flatten() {
-                Some(kind) => out.push(Field { name, kind }),
+                Some(kind) => out.push(Field { name, kind, level }),
                 // A written field Unity cannot store keeps its default: null for a reference type.
-                None if written && !is_value_type(&sig) => out.push(Field { name, kind: Kind::Runtime }),
+                None if written && !is_value_type(&sig) => out.push(Field { name, kind: Kind::Runtime, level }),
                 None => {}
             }
         }
@@ -346,13 +349,16 @@ fn read_builtin(b: Builtin, r: &mut Reader) -> Option<Raw> {
 }
 
 /// Reads a field list (an object's script fields, or a nested struct's).
+/// The fields' values, read in Unity's order (base class first) and returned in .NET's
+/// (Type.GetFields: the class's own fields, then each base class's).
 pub fn read_fields(fields: &[Field], r: &mut Reader) -> Option<Vec<(String, Raw)>> {
     let mut out = Vec::with_capacity(fields.len());
     for f in fields {
         let v = read_kind(&f.kind, r)?;
-        out.push((f.name.clone(), v));
+        out.push((f.level, f.name.clone(), v));
     }
-    Some(out)
+    out.sort_by_key(|(level, ..)| std::cmp::Reverse(*level));
+    Some(out.into_iter().map(|(_, n, v)| (n, v)).collect())
 }
 
 fn read_kind(kind: &Kind, r: &mut Reader) -> Option<Raw> {

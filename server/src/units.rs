@@ -188,7 +188,10 @@ pub fn create(game: &mut Game, planet_id: &str, state: Option<&Value>) {
     let terra = [o, h, p, pl, i, a].iter().map(|v| *v as f64).sum::<f64>() + (level(&s, "unitPurificationLevel") as f64).max(0.0);
     let totals = [o, h, p, 0.0, if state.is_some() { terra as f32 } else { 0.0 }, pl + i + a, pl, i, a, purification];
     let units: Vec<Unit> = KINDS.iter().zip(totals).map(|(k, t)| Unit::new(*k, t)).collect();
-    let mut o = crate::net::NetObj::from_layout(&crate::game::layout_of(&game.net_data.prefabs["WorldUnitsPlanet"].clone()));
+    let mut o = crate::net::NetObj::from_layout(&game.net_data.prefabs["WorldUnitsPlanet"].layout(game.tick_number()));
+    // WorldUnitsHandler.CreateUnits spawns it below the handler.
+    o.parent = game.net.find_class("WorldUnitsHandler").map(|(object, _)| object);
+    o.flags |= crate::protocol::HAS_PARENT;
     o.init("WorldUnitsPlanet", "_planetIdHash", enc::int(hash));
     for u in &units {
         o.init("WorldUnitsPlanet", u.kind.var(), u.bytes());
@@ -371,7 +374,7 @@ pub fn tick(game: &mut Game) {
 }
 
 /// WorldUnitSystemTerraformation: the planets' terraformation multiplied together.
-fn system_terraformation(game: &Game) -> Vec<u8> {
+pub fn system_terraformation(game: &Game) -> Vec<u8> {
     let mut total = 0.0f64;
     for p in &game.units.planets {
         let v = p.get(Kind::Terraformation).total as f64;

@@ -119,7 +119,7 @@ pub fn encode_instance(data: Option<&WorldInstance>) -> Vec<u8> {
 }
 
 /// WorldInstanceHandler.InstanceChoices.NetworkSerialize.
-fn encode_choices(choices: &[(i32, i32)]) -> Vec<u8> {
+pub fn encode_choices(choices: &[(i32, i32)]) -> Vec<u8> {
     let mut w = Writer::new();
     w.i32_array(&choices.iter().map(|c| c.0).collect::<Vec<_>>()).i32_array(&choices.iter().map(|c| c.1).collect::<Vec<_>>());
     w.0
@@ -163,9 +163,8 @@ pub fn instance_via_seed(game: &Game, seed: i32, time_left: i32, loaded_from_db:
 // ---- generators ----------------------------------------------------------------------------
 
 fn spawn_generator(game: &mut Game, index: usize, position: [f32; 3], rotation: [f32; 4]) -> u64 {
-    let var = |name: &str, ty: &str, bytes: &str| crate::data::VarDef { name: name.into(), ty: ty.into(), bytes: bytes.into() };
+    let var = |name: &str, ty: &str, bytes: &str| crate::data::VarDef { name: name.into(), ty: ty.into(), bytes: Some(bytes.into()) };
     let layout = Layout {
-        prefab: String::new(),
         hash: GENERATORS[index].0,
         flags: GENERATOR_FLAGS,
         scale: [1.0; 3],

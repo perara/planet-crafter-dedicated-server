@@ -253,27 +253,6 @@ pub fn apply_delta(net: &mut Net, client: u64, body: &[u8]) -> bool {
 }
 
 impl NetObj {
-    /// Splits a complete sync block (as a fresh spawn sends it) into variables and tail.
-    pub fn set_spawn_sync(&mut self, sync: &[u8]) {
-        let mut r = crate::wire::Reader::new(sync);
-        let mut values = Vec::new();
-        for b in &self.behaviours {
-            for v in &b.vars {
-                match read_value(&v.ty, &mut r) {
-                    Some(bytes) => values.push(bytes),
-                    None => return,
-                }
-            }
-        }
-        let mut values = values.into_iter();
-        for b in &mut self.behaviours {
-            for v in &mut b.vars {
-                v.value = value_of(&v.ty, values.next().unwrap_or_default());
-            }
-        }
-        self.tail = r.rest().to_vec();
-    }
-
     pub fn from_layout(layout: &Layout) -> NetObj {
         NetObj {
             id: 0,
@@ -310,6 +289,18 @@ impl NetObj {
     pub fn init_list(&mut self, class: &str, name: &str, items: Vec<Vec<u8>>) {
         if let Some(v) = self.var_mut(class, name) {
             v.value = VarValue::List(items);
+        }
+    }
+
+    /// Panics on a variable without a value: one the tables leave to the server (its type has
+    /// its own serializer) that the server did not set before the object went out.
+    pub fn check(&self) {
+        for b in &self.behaviours {
+            for v in &b.vars {
+                if matches!(&v.value, VarValue::Plain(bytes) if bytes.is_empty()) {
+                    panic!("{}.{} ({}) has no value: the server must set it before the object is sent", b.class, v.name, v.ty);
+                }
+            }
         }
     }
 
@@ -360,12 +351,19 @@ pub fn behaviours(defs: &[BehaviourDef]) -> Vec<NetBehaviour> {
                 .vars
                 .iter()
                 .map(|v| {
-                    NetVar { name: v.name.clone(), ty: v.ty.clone(), value: value_of(&v.ty, hex(&v.bytes)), dirty: None }
+                    // No bytes: the server sets the value (an empty value is none, see check).
+                    let bytes = v.bytes.as_deref().map(hex).unwrap_or_default();
+                    NetVar { name: v.name.clone(), ty: v.ty.clone(), value: value_of(&v.ty, bytes), dirty: None }
                 })
                 .collect(),
         })
         .collect()
 }
+
+/// The scene handle every object goes out with: none (NetworkSceneHandle.IsEmpty), so clients
+/// look objects up in the scene they are synchronizing (NetworkSceneManager
+/// .GetSceneRelativeInSceneNetworkObject); this server sends no scene events to map one.
+const SCENE_HANDLE: i32 = 0;
 
 pub struct Net {
     pub objects: crate::idmap::IdMap<u64, NetObj>,
@@ -379,8 +377,8 @@ pub struct Net {
 }
 
 impl Net {
-    pub fn new(spec: Spec, scene_handle: i32, first_dynamic_id: u64) -> Net {
-        Net { objects: Default::default(), next_id: first_dynamic_id, out: Vec::new(), spec, scene_handle, dirty: Vec::new() }
+    pub fn new(spec: Spec, first_dynamic_id: u64) -> Net {
+        Net { objects: Default::default(), next_id: first_dynamic_id, out: Vec::new(), spec, scene_handle: SCENE_HANDLE, dirty: Vec::new() }
     }
 
     /// Adds an in-scene object (fixed id, part of every join, never sent as a spawn).
@@ -391,6 +389,7 @@ impl Net {
 
     /// Spawns an object for everyone; returns its network object id.
     pub fn spawn(&mut self, mut o: NetObj) -> u64 {
+        o.check();
         o.id = self.next_id;
         self.next_id += 1;
         let mut w = Writer::new();

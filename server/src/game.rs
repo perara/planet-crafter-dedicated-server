@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Value};
 
-use crate::data::{stable_hash, NetData, ObjectDef};
-use crate::gamedata::{GameData, Layout};
+use crate::data::{stable_hash, NetData};
+use crate::gamedata::GameData;
 use crate::idmap::{IdMap, IdSet};
 use crate::model::{Inventory, WorldObject};
 use crate::net::{self, ListEvent, Net, NetObj, Target};
@@ -200,20 +200,6 @@ fn convert_old_format_to_new(settings: &mut Value) {
     settings["startLocationLabel"] = json!("");
 }
 
-/// The netdata player and planet-units prefabs as layouts.
-pub fn layout_of(def: &ObjectDef) -> Layout {
-    Layout {
-        prefab: String::new(),
-        hash: def.hash,
-        flags: def.flags,
-        scale: def.scale.unwrap_or([1.0; 3]),
-        behaviours: def.behaviours.clone(),
-        tail: crate::world::hex(&def.sync_tail),
-        // Player tail: behaviour count, u16 index, i32 length, 3-byte flags, 2-byte tick, position.
-        tail_position: if def.sync_tail.is_empty() { None } else { Some(12) },
-    }
-}
-
 /// A game on a save with the test tables; None (the test skips) without them.
 #[cfg(test)]
 pub fn test_game(save: SaveFile) -> Option<Game> {
@@ -225,7 +211,6 @@ pub fn test_game(save: SaveFile) -> Option<Game> {
 impl Game {
     pub fn new(net_data: NetData, data: GameData, spec: Spec, mut save: SaveFile, data_dir: &str) -> Game {
         convert_old_format_to_new(&mut save.settings);
-        let scene_handle = net_data.scene_handle;
         // SavedDataHandler.InitSavedData loads the host's planet. This server has no host, so it
         // keeps the planet it travelled to in the world state (pcdsCurrentPlanet; the game
         // ignores unknown fields) and marks a saved player host for the game (mark_host).
@@ -235,7 +220,7 @@ impl Game {
         let mut game = Game {
             data,
             net_data,
-            net: Net::new(spec, scene_handle, FIRST_DYNAMIC_ID),
+            net: Net::new(spec, FIRST_DYNAMIC_ID),
             save,
             wos: IdMap::default(),
             inventories: IdMap::default(),
@@ -336,12 +321,15 @@ impl Game {
     /// The in-scene network objects (handlers and managers) and one WorldUnitsPlanet per planet.
     fn spawn_scene(&mut self) {
         for def in self.net_data.scene_objects.clone() {
-            let mut o = NetObj::from_layout(&layout_of(&def));
+            let mut o = NetObj::from_layout(&def.layout(0));
             o.id = def.id;
             o.parent = def.parent;
             self.net.add_scene_object(o);
         }
         crate::scene::init(self);
+        // Every variable has its value before anyone joins (players: from their prefab).
+        self.net.objects.values().for_each(NetObj::check);
+        NetObj::from_layout(&self.net_data.prefabs["Player"].layout(0)).check();
     }
 
     // ---- clients -------------------------------------------------------------------------
@@ -399,12 +387,8 @@ impl Game {
             self.kick(client, "MULTIPLAYER_Game_Session_Full");
             return;
         }
-        let def = self.net_data.prefabs["Player"].clone();
-        let mut o = NetObj::from_layout(&layout_of(&def));
+        let mut o = NetObj::from_layout(&self.net_data.prefabs["Player"].layout(self.tick_number()));
         o.owner = client;
-        if !def.spawn_sync.is_empty() {
-            o.set_spawn_sync(&crate::world::hex(&def.spawn_sync));
-        }
         let object = self.net.spawn(o);
         // The spawn above went to everyone already approved; the joiner gets it in the list.
         let mut connected = vec![0];
@@ -641,6 +625,26 @@ pub mod tests {
         w.packed_i32(0).u64(0).i32(data.len() as i32).bytes(data.as_bytes());
         game.approve(client, &w.0);
         game.player_object(client).unwrap()
+    }
+
+    #[test]
+    fn planet_units_and_players_spawn_as_the_game_spawns_them() {
+        let Some(mut g) = test_game(save()) else { return };
+        g.sim_time = Some(12.0);
+        approve(&mut g, 1);
+        let body = g.net.out.iter().find(|(to, kind, _)| *to == Target::Only(1) && *kind == CONNECTION_APPROVED).map(|m| m.2.clone()).unwrap();
+        let (_, objects) = protocol::read_approved(&body).unwrap();
+        // WorldUnitsHandler.CreateUnits spawns the planet's units below the handler.
+        let handler = g.net.find_class("WorldUnitsHandler").unwrap().0;
+        let units = objects.iter().find(|o| o.hash == g.net_data.prefabs["WorldUnitsPlanet"].hash).unwrap();
+        assert_eq!((units.parent, units.flags & protocol::HAS_PARENT != 0), (Some(handler), true));
+        // The player's NetworkTransform states carry the tick it spawned at.
+        let player = objects.iter().find(|o| o.hash == g.net_data.prefabs["Player"].hash).unwrap();
+        let vars: usize = g.net_data.prefabs["Player"].behaviours.iter().flat_map(|b| &b.vars).map(|v| v.bytes.as_ref().unwrap().len() / 2).sum();
+        // The variables, then: transform count (u8), behaviour (u16), length (i32), flags, tick.
+        let mut r = crate::wire::Reader::new(&player.sync[vars + 1 + 2 + 4..]);
+        r.packed_u32().unwrap();
+        assert_eq!(r.packed_i32(), Some(g.tick_number()));
     }
 
     /// Connects a client and readies its player (PlayerReadyServerRpc); returns the player object.
