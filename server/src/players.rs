@@ -148,6 +148,16 @@ impl Game {
         if !self.inventories.contains_key(&state.equipment) {
             state.equipment = self.create_inventory(START_EQUIPMENT_SIZE, state.equipment, 0, &[], &[]);
         }
+        // PlayerEquipment.InitEquipment, run by the server for everyone who joins: the equipment
+        // takes items of the Equipment category only (AddAuthorizedGroup, so not _isEquipment).
+        let equipment: Vec<usize> = (0..self.data.groups.len()).filter(|g| !self.data.groups[*g].constructible && self.data.groups[*g].str("itemCategory") == "Equipment").collect();
+        if let Some(inv) = self.inventories.get_mut(&state.equipment) {
+            for g in equipment {
+                if !inv.authorized.contains(&g) {
+                    inv.authorized.push(g);
+                }
+            }
+        }
         let me = Target::Only(client);
         self.net.move_object(object, state.position, Some(state.rotation));
         self.net.rpc(me, object, "PlayerMainController.InitPlayerClientRpc", &[json!(state.inventory), json!(state.equipment), json!(state.position), json!(state.rotation), json!(state.camera_view)]);
@@ -467,6 +477,22 @@ mod tests {
         assert_eq!(saved(&mut g), 1);
         g.net.objects.get_mut(&ann).unwrap().rotation = crate::geometry::from_euler_y(90.0);
         assert_eq!(saved(&mut g), 0);
+    }
+
+    /// PlayerEquipment.InitEquipment on the server: a joined player's equipment takes
+    /// Equipment items only (sweep_use: Iron into the equipment is refused by the game).
+    #[test]
+    fn equipment_takes_equipment_items_only() {
+        let Some((mut g, _)) = world() else { return };
+        let (inventory, equipment) = { let s = g.clients[&1].ready.as_ref().unwrap(); (s.inventory, s.equipment) };
+        let item = |g: &mut crate::game::Game, id: &str| g.add_new_item(g.data.group_by_hash(stable_hash(id)).unwrap(), inventory, 0).1;
+        let (iron, tank) = (item(&mut g, "Iron"), item(&mut g, "OxygenTank1"));
+        g.net.out.clear();
+        send_scene(&mut g, 1, "InventoriesHandler.TransferItemServerRpc", &[json!(inventory), json!(equipment), json!(iron)]);
+        assert_eq!(one(&g, "InventoriesHandler.AddOrRemoveItemClientRpc"), vec![json!(false)]);
+        g.net.out.clear();
+        send_scene(&mut g, 1, "InventoriesHandler.TransferItemServerRpc", &[json!(inventory), json!(equipment), json!(tank)]);
+        assert_eq!(one(&g, "InventoriesHandler.AddOrRemoveItemClientRpc"), vec![json!(true)]);
     }
 
     #[test]
