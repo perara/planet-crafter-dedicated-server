@@ -357,7 +357,16 @@ pub fn reason_batch(reason: &str) -> Vec<u8> {
 fn send(link: &mut Link, mail: &mut crate::idmap::FxHashMap<u64, wire::Batch>, clients: &[u64]) {
     for c in clients {
         if let Some(b) = mail.remove(c).filter(|b| !b.is_empty()) {
-            link.send(ipc::DATA, *c, &b.finish());
+            let b = b.finish();
+            // Over the frame limit the front would end the link: that client goes instead (it
+            // cannot go on without the batch). A join batch is ~14 bytes per world object.
+            if !ipc::fits(&b) {
+                eprintln!("client {c}: a batch of {} bytes is over the {} bytes a frame holds; it is dropped", b.len(), ipc::MAX_FRAME);
+                link.send(ipc::DATA, *c, &reason_batch("The world is too large for this server to send"));
+                link.send(ipc::KICK, *c, &[]);
+                continue;
+            }
+            link.send(ipc::DATA, *c, &b);
         }
     }
 }
@@ -682,6 +691,31 @@ mod tests {
         assert_eq!(serde_json::from_str::<Value>(&s).unwrap()["lastSave"]["ok"], true);
         assert_eq!(final_save(&mut game, &path), 0);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A batch over the frame limit never reaches the socket (the front would end the link and
+    /// the bank with it): its client is told why and dropped; the link goes on.
+    #[test]
+    fn a_batch_over_the_frame_limit_drops_its_client_not_the_bank() {
+        let (a, b) = UnixStream::pair().unwrap();
+        a.set_nonblocking(true).unwrap();
+        let (mut front, mut bank) = (Link::new(a), Link::new(b));
+        let mut mail: crate::idmap::FxHashMap<u64, wire::Batch> = Default::default();
+        mail.entry(4).or_default().push(protocol::RPC, &vec![0; ipc::MAX_FRAME]);
+        mail.entry(5).or_default().push(protocol::RPC, b"small");
+        send(&mut bank, &mut mail, &[4, 5]);
+        // Any frame over the limit, whoever sends it: not sent.
+        bank.send(ipc::DATA, 6, &vec![0; ipc::MAX_FRAME]);
+        bank.send(ipc::GONE, 0, &[]);
+        let mut frames = Vec::new();
+        while frames.last() != Some(&(ipc::GONE, 0)) {
+            assert!(front.fill(usize::MAX));
+            while let Some(f) = front.next() {
+                frames.push((f.kind, f.n));
+            }
+        }
+        assert!(front.broken.is_none());
+        assert_eq!(frames, [(ipc::DATA, 4), (ipc::KICK, 4), (ipc::DATA, 5), (ipc::GONE, 0)]);
     }
 
     /// An admin API call as the bank answers it: (status, JSON answer).
