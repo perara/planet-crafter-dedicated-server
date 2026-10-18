@@ -9,7 +9,7 @@
 //! others. Everything this server sends goes over the reliable pipeline.
 
 use std::collections::{HashMap, VecDeque};
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 const SIGNATURE: [u8; 4] = [b'U', b'T', b'P', 1];
@@ -26,6 +26,14 @@ const WINDOW: usize = 64;
 /// Reliable bytes per datagram, well under the default 1400-byte maximum message size.
 const CHUNK: usize = 1200;
 const RESEND: Duration = Duration::from_millis(200);
+/// Nothing a client could not have sent proves it receives at its address (the token is its
+/// own, the server's sequence starts at 0), so a spoofed source must get little: the window
+/// starts at INITIAL_WINDOW packets and grows by what is acknowledged; resends back off up to
+/// RESEND << MAX_BACKOFF; data unacknowledged for STALL drops the session. STALL is long
+/// enough for a game client that stops acking while it builds a large world on join.
+const INITIAL_WINDOW: usize = 4;
+const MAX_BACKOFF: u32 = 4;
+const STALL: Duration = Duration::from_secs(15);
 const HEARTBEAT_AFTER: Duration = Duration::from_millis(500);
 const TIMEOUT: Duration = Duration::from_secs(30);
 const FIRST: u16 = 0x8000;
@@ -41,6 +49,15 @@ const MAX_DATAGRAMS: usize = 4096;
 const MAX_CONNECTIONS: usize = 128;
 const MAX_PER_IP: usize = 8;
 const DATA_WITHIN: Duration = Duration::from_secs(10);
+/// New sessions per IP within HANDSHAKE_WINDOW. Loopback addresses are exempt from the per-IP
+/// limits: nobody outside can forge them, and behind a UDP relay every player has one.
+const MAX_HANDSHAKES: u32 = 4;
+const HANDSHAKE_WINDOW: Duration = Duration::from_secs(10);
+
+/// Loopback, also as an IPv4-mapped IPv6 address.
+pub fn is_loopback(ip: IpAddr) -> bool {
+    ip.to_canonical().is_loopback()
+}
 
 pub type Token = [u8; 8];
 
@@ -78,6 +95,11 @@ struct Connection {
     in_flight: VecDeque<(u16, Vec<u8>, Instant)>,
     queued: Vec<u8>,
     fragments: [Fragments; 2],
+    /// Packets allowed in flight, when the in-flight ones were last acknowledged (or the first
+    /// of them sent), and resend rounds since.
+    window: usize,
+    progress: Instant,
+    backoff: u32,
 }
 
 impl Connection {
@@ -98,6 +120,9 @@ impl Connection {
             in_flight: VecDeque::new(),
             queued: Vec::new(),
             fragments: Default::default(),
+            window: INITIAL_WINDOW,
+            progress: now,
+            backoff: 0,
         }
     }
 
@@ -142,11 +167,22 @@ impl Connection {
         }
     }
 
-    fn acknowledge(&mut self, acked: u16, mask: u64) {
+    /// False for an ack of a packet not sent yet: no client sends one, a blind spoofer may.
+    fn acknowledge(&mut self, acked: u16, mask: u64, now: Instant) -> bool {
+        if acked.wrapping_sub(self.sequence.wrapping_sub(1)) as i16 > 0 {
+            return false;
+        }
+        let before = self.in_flight.len();
         self.in_flight.retain(|(s, _, _)| {
             let back = acked.wrapping_sub(*s) as i16;
             !((0..64).contains(&back) && mask & (1 << back) != 0)
         });
+        if self.in_flight.len() < before {
+            self.window = (self.window + before - self.in_flight.len()).min(WINDOW);
+            self.progress = now;
+            self.backoff = 0;
+        }
+        true
     }
 }
 
@@ -177,13 +213,15 @@ pub struct Utp {
     /// Datagrams to send, all in one system call at the end of flush.
     outbox: Vec<(SocketAddr, Vec<u8>)>,
     inbox: mmsg::Inbox,
+    /// New sessions per IP: since when, how many.
+    handshakes: HashMap<IpAddr, (Instant, u32)>,
 }
 
 impl Utp {
     pub fn bind(addr: SocketAddr) -> std::io::Result<Utp> {
         let socket = UdpSocket::bind(addr)?;
         socket.set_nonblocking(true)?;
-        Ok(Utp { socket, connections: Default::default(), dropped: Vec::new(), outbox: Vec::new(), inbox: mmsg::Inbox::new() })
+        Ok(Utp { socket, connections: Default::default(), dropped: Vec::new(), outbox: Vec::new(), inbox: mmsg::Inbox::new(), handshakes: HashMap::new() })
     }
 
     fn transmit(&mut self, token: &Token, kind: u8, body: &[u8]) {
@@ -240,9 +278,14 @@ impl Utp {
             }
         }
         self.inbox = inbox;
-        let silent = |c: &Connection| now - c.last_receive > TIMEOUT || (!c.data_seen && now - c.opened > DATA_WITHIN);
+        let stalled = |c: &Connection| !c.in_flight.is_empty() && now - c.progress > STALL;
+        let silent = |c: &Connection| now - c.last_receive > TIMEOUT || (!c.data_seen && now - c.opened > DATA_WITHIN) || stalled(c);
         let silent: Vec<Token> = if self.connections.values().any(silent) { self.connections.iter().filter(|(_, c)| silent(c)).map(|(t, _)| *t).collect() } else { Vec::new() };
         for token in silent {
+            if self.connections.get(&token).is_some_and(stalled) {
+                eprintln!("utp: {}: nothing acknowledged for {} s, dropped", self.connections[&token].addr, STALL.as_secs());
+                self.disconnect(&token);
+            }
             self.connections.remove(&token);
             events.push(Event::Disconnected(token));
         }
@@ -259,9 +302,24 @@ impl Utp {
                 Some(c) if c.addr != from => return,
                 Some(_) => {}
                 None => {
+                    let local = is_loopback(from.ip());
                     let same_ip = self.connections.values().filter(|c| c.addr.ip() == from.ip()).count();
-                    if self.connections.len() >= MAX_CONNECTIONS || same_ip >= MAX_PER_IP {
+                    if self.connections.len() >= MAX_CONNECTIONS || (!local && same_ip >= MAX_PER_IP) {
                         return;
+                    }
+                    if !local {
+                        let (since, n) = self.handshakes.entry(from.ip()).or_insert((now, 0));
+                        if now - *since > HANDSHAKE_WINDOW {
+                            (*since, *n) = (now, 0);
+                        }
+                        if *n >= MAX_HANDSHAKES {
+                            return;
+                        }
+                        *n += 1;
+                        // Sessions are capped, so this holds at most the addresses of the last window.
+                        if self.handshakes.len() > 4 * MAX_CONNECTIONS {
+                            self.handshakes.retain(|_, (t, _)| now - *t <= HANDSHAKE_WINDOW);
+                        }
                     }
                     self.connections.insert(token, Connection::new(from, now));
                     events.push(Event::Connected(token, from));
@@ -292,7 +350,12 @@ impl Utp {
                     RELIABLE if body.len() >= 16 => {
                         let sequence = u16::from_le_bytes([body[4], body[5]]);
                         let acked = u16::from_le_bytes([body[6], body[7]]);
-                        c.acknowledge(acked, u64::from_le_bytes(body[8..16].try_into().unwrap()));
+                        if !c.acknowledge(acked, u64::from_le_bytes(body[8..16].try_into().unwrap()), now) {
+                            eprintln!("utp: {from}: acknowledged sequence {acked}, which was never sent; dropped");
+                            self.disconnect(&token);
+                            events.push(Event::Disconnected(token));
+                            return;
+                        }
                         if body[0] == PAYLOAD {
                             c.receive_reliable(sequence, &body[16..]);
                             c.ack_due = true;
@@ -360,14 +423,21 @@ impl Utp {
                 continue;
             }
             let before = self.outbox.len();
+            let resend = RESEND * (1 << c.backoff.min(MAX_BACKOFF));
             for i in 0..c.in_flight.len() {
-                if now - c.in_flight[i].2 >= RESEND {
+                if now - c.in_flight[i].2 >= resend {
                     c.in_flight[i].2 = now;
                     let header = c.reliable_header(PAYLOAD, c.in_flight[i].0);
                     self.outbox.push((c.addr, packet(token, DATA, &[&[RELIABLE], &header, &c.in_flight[i].1])));
                 }
             }
-            while c.in_flight.len() < WINDOW && !c.queued.is_empty() {
+            if self.outbox.len() > before {
+                c.backoff += 1;
+            }
+            while c.in_flight.len() < c.window && !c.queued.is_empty() {
+                if c.in_flight.is_empty() {
+                    c.progress = now;
+                }
                 let payload: Vec<u8> = c.queued.drain(..CHUNK.min(c.queued.len())).collect();
                 let sequence = c.sequence;
                 c.sequence = c.sequence.wrapping_add(1);
@@ -698,14 +768,90 @@ mod tests {
     #[test]
     fn connection_limits() {
         let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        // One address opens MAX_HANDSHAKES sessions per window, MAX_PER_IP at once.
+        let remote = |i: u8| SocketAddr::from(([10, 0, 0, 2], 1000 + i as u16));
         for i in 0..=MAX_PER_IP as u8 {
-            handshake(&mut server, SocketAddr::from(([127, 0, 0, 2], 1000 + i as u16)), [i, 1, 0, 0, 0, 0, 0, 0]);
+            handshake(&mut server, remote(i), [i, 1, 0, 0, 0, 0, 0, 0]);
+            if server.connections.len() as u32 == MAX_HANDSHAKES {
+                assert!(handshake(&mut server, remote(100 + i), [i, 9, 0, 0, 0, 0, 0, 0]).is_empty(), "over the handshake rate");
+                server.handshakes.values_mut().for_each(|(since, _)| *since -= HANDSHAKE_WINDOW + Duration::from_secs(1));
+            }
         }
         assert_eq!(server.connections.len(), MAX_PER_IP);
+        // Loopback is exempt from both (behind a relay every player is 127.0.0.1); the total holds.
+        for i in 0..20u8 {
+            handshake(&mut server, SocketAddr::from(([127, 0, 0, 1], 2000 + i as u16)), [i, 3, 0, 0, 0, 0, 0, 0]);
+        }
+        assert_eq!(server.connections.len(), MAX_PER_IP + 20);
         for i in 0..200u8 {
             handshake(&mut server, SocketAddr::from(([127, 1, 0, i], 9)), [i, 2, 0, 0, 0, 0, 0, 0]);
         }
         assert_eq!(server.connections.len(), MAX_CONNECTIONS);
+        assert!(is_loopback("::ffff:127.0.0.1".parse().unwrap()) && !is_loopback("10.0.0.2".parse().unwrap()));
+    }
+
+    /// The reflection attack: a forged source sends a handshake, data and heartbeats, never
+    /// acks. It gets the first window of 4 packets, resent ever less often, then the session
+    /// goes. A client that acks gets a window that grows to the full 64.
+    #[test]
+    fn a_session_that_never_acks_gets_little_and_is_dropped() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let (from, token) = ("127.0.0.1:9".parse().unwrap(), [11; 8]);
+        handshake(&mut server, from, token);
+        server.datagram(&[[DATA].as_slice(), &token].concat(), from, Instant::now(), &mut Vec::new());
+        server.send(&token, &vec![0; 1 << 20]);
+        let mut sent = 0;
+        for round in 0..6 {
+            server.flush();
+            let c = server.connections.get_mut(&token).unwrap();
+            assert_eq!(c.in_flight.len(), INITIAL_WINDOW, "round {round}");
+            // Each resend round waits twice as long as the one before, up to the cap.
+            let wait = RESEND * (1 << c.backoff.min(MAX_BACKOFF));
+            assert_eq!(wait, RESEND * (1 << (round as u32).min(MAX_BACKOFF)));
+            c.in_flight.iter_mut().for_each(|p| p.2 -= wait);
+            sent += c.in_flight.len();
+        }
+        assert_eq!(sent, 6 * INITIAL_WINDOW);
+        let c = server.connections.get_mut(&token).unwrap();
+        c.progress -= STALL + Duration::from_secs(1);
+        assert!(matches!(server.poll().as_slice(), [Event::Disconnected(t)] if *t == token));
+        assert!(server.connections.is_empty());
+
+        // An ack of the 4 in flight lets 8 go; acks keep it growing to the full window.
+        let token = [12; 8];
+        handshake(&mut server, from, token);
+        server.datagram(&[[DATA].as_slice(), &token].concat(), from, Instant::now(), &mut Vec::new());
+        server.send(&token, &vec![0; 1 << 20]);
+        let mut window = INITIAL_WINDOW;
+        while window < WINDOW {
+            server.flush();
+            let c = &server.connections[&token];
+            assert_eq!(c.in_flight.len(), window);
+            let last = c.sequence.wrapping_sub(1);
+            let ack = [[DATA].as_slice(), &token, &[RELIABLE, ACK, 0, 0, 0, 0, 0], &last.to_le_bytes(), &u64::MAX.to_le_bytes()].concat();
+            server.datagram(&ack, from, Instant::now(), &mut Vec::new());
+            window = (window * 2).min(WINDOW);
+            assert_eq!(server.connections[&token].window, window);
+        }
+    }
+
+    /// No client acks what was never sent: a blind spoofer guessing ahead loses its session.
+    #[test]
+    fn an_ack_of_a_packet_never_sent_drops_the_session() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let (from, token) = ("127.0.0.1:9".parse().unwrap(), [13; 8]);
+        handshake(&mut server, from, token);
+        let ack = |acked: u16| [[DATA].as_slice(), &token, &[RELIABLE, ACK, 0, 0, 0, 0, 0], &acked.to_le_bytes(), &u64::MAX.to_le_bytes()].concat();
+        let mut events = Vec::new();
+        // Before anything is sent the client names sequence -1, as Unity Transport starts.
+        server.datagram(&ack(u16::MAX), from, Instant::now(), &mut events);
+        server.send(&token, b"world");
+        server.flush();
+        server.datagram(&ack(0), from, Instant::now(), &mut events);
+        assert!(events.is_empty() && server.connections[&token].in_flight.is_empty());
+        server.datagram(&ack(5), from, Instant::now(), &mut events);
+        assert!(matches!(events.as_slice(), [Event::Disconnected(t)] if *t == token));
+        assert!(server.connections.is_empty());
     }
 
     /// A handshake alone gets nothing but its accept (spoofed ones reflect nothing more), and

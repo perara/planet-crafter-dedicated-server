@@ -23,6 +23,8 @@ const FIRST_DYNAMIC_ID: u64 = 22;
 /// GameConfig.startPlayerInventorySize / startPlayerEquipmentSize.
 pub const START_INVENTORY_SIZE: i32 = 12;
 pub const START_EQUIPMENT_SIZE: i32 = 4;
+/// Approved clients from one address that are not players yet (see approve).
+const MAX_JOINING_PER_IP: usize = 2;
 
 /// RPC arguments in signature order, with typed accessors.
 pub struct Args(pub Vec<Value>);
@@ -397,6 +399,17 @@ impl Game {
             self.kick(client, crate::access::REFUSED);
             return;
         }
+        // A forged source address gets a session without seeing what it is sent: at most
+        // MAX_JOINING_PER_IP worlds go to one address before its players are in (loopback is
+        // exempt: nobody outside can forge it, and behind a UDP relay every player has it).
+        if let Some(ip) = self.clients.get(&client).and_then(|c| c.ip.clone()).filter(|ip| !ip.parse().is_ok_and(crate::utp::is_loopback)) {
+            let joining = self.clients.values().filter(|c| c.id != client && c.approved && c.ready.is_none() && c.ip.as_deref() == Some(ip.as_str())).count();
+            if joining >= MAX_JOINING_PER_IP {
+                println!("client {client}: refused ({joining} others from {ip} are still joining)");
+                self.kick(client, "Another player from your address is still joining: try again in a moment");
+                return;
+            }
+        }
         let max = self.rules.max_players();
         if self.clients.values().filter(|c| c.approved).count() >= max {
             println!("client {client}: refused (server full, {max} players)");
@@ -757,6 +770,32 @@ pub mod tests {
         assert_eq!(w.position, [561.0, 3.0, 500.0]);
         let e = crate::transform::euler_angles(w.rotation);
         assert!((e[0] - 10.0).abs() < 0.01 && (e[1] - 20.0).abs() < 0.01 && (e[2] - 30.0).abs() < 0.01, "{e:?}");
+    }
+
+    /// Two sessions from one address may be joining at once; a third waits until one is in.
+    /// Loopback is exempt.
+    #[test]
+    fn at_most_two_clients_from_one_address_are_joining() {
+        let Some(mut g) = test_game(save()) else { return };
+        let request = |g: &Game| {
+            let data = format!("{}|0", g.net_data.game_version);
+            let mut w = Writer::new();
+            w.packed_i32(0).u64(0).i32(data.len() as i32).bytes(data.as_bytes());
+            w.0
+        };
+        for (client, ip) in [(1, "10.0.0.5"), (2, "10.0.0.5"), (3, "10.0.0.5"), (4, "10.0.0.6"), (5, "127.0.0.1"), (6, "127.0.0.1"), (7, "127.0.0.1")] {
+            g.connect(client, None, false, Some(ip.into()));
+            let r = request(&g);
+            g.approve(client, &r);
+        }
+        let approved: Vec<u64> = g.clients.values().filter(|c| c.approved).map(|c| c.id).collect();
+        assert_eq!(approved, [1, 2, 4, 5, 6, 7]);
+        assert_eq!(g.kicks.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [3]);
+        g.players_rpc(1, "PlayerMainController.PlayerReadyServerRpc", &Args(vec![json!(0), json!("Ann")]));
+        g.connect(8, None, false, Some("10.0.0.5".into()));
+        let r = request(&g);
+        g.approve(8, &r);
+        assert!(g.clients[&8].approved, "Ann is in: one joining from her address");
     }
 
     #[test]
