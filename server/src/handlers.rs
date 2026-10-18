@@ -113,12 +113,23 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
         }
         "InventoryAssociatedProxy.GetInventoryIdServerRpc" => {
             // The RPC's own proxy: a building can have one per inventory (growers, farms, the truck).
-            let nth = game.net.objects.get(&object).and_then(|o| o.behaviours.iter().filter(|b| b.class == "InventoryAssociatedProxy").position(|b| b.index == behaviour)).unwrap_or(0);
-            let group = wo.and_then(|w| game.wos.get(&w)).map(|w| game.data.groups[w.group].id.clone()).unwrap_or_default();
-            let index = game.data.prefab_components(&group, "InventoryAssociatedProxy").get(nth).and_then(|c| c["_secondaryInventoryIndex"].as_i64()).unwrap_or(-1);
+            // The proxy keeps the id it is sent for good: when its inventory cannot be told, no
+            // answer (and a log line) rather than a wrong one.
+            let Some(w) = wo.and_then(|w| game.wos.get(&w)) else { return true };
+            let group = game.data.groups[w.group].id.clone();
+            let nth = game.net.objects.get(&object).and_then(|o| o.behaviours.iter().filter(|b| b.class == "InventoryAssociatedProxy").position(|b| b.index == behaviour));
+            let index = nth.and_then(|n| game.data.prefab_components(&group, "InventoryAssociatedProxy").get(n).and_then(|c| c["_secondaryInventoryIndex"].as_i64()));
             // GetRequestedInventoryData: (world object, its linked or n-th secondary inventory).
-            if let Some(w) = wo.and_then(|w| game.wos.get(&w)) {
-                let inventory = if index < 0 { w.linked_inventory } else { w.secondary_inventories.get(index as usize).copied().unwrap_or(0) };
+            let inventory = match index {
+                Some(i) if i < 0 => Some(w.linked_inventory),
+                Some(i) => w.secondary_inventories.get(i as usize).copied(),
+                None => None,
+            };
+            let Some(inventory) = inventory else {
+                eprintln!("{group} (world object {}): behaviour {behaviour} asked for an inventory it has no data for (proxy {nth:?}, secondary index {index:?})", w.id);
+                return true;
+            };
+            {
                 let args = [json!(w.id), json!(game.data.groups[w.group].hash), json!(inventory)];
                 // To the proxy that asked: a proxy takes the id it is sent as its own, for good.
                 game.net.rpc_on(Target::Only(client), object, behaviour, "InventoryAssociatedProxy.GetInventoryIdClientRpc", &args);

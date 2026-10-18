@@ -1,8 +1,6 @@
 //! The settings (run/server.env), the world names, and which game tables go with the game.
 
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use super::{say, Ctx, Result, APP_ID};
@@ -77,16 +75,7 @@ impl Ctx {
     /// the admin token) and moved over, so a crash leaves the old one or the new one.
     pub fn set_env(&self, key: &str, value: &str) -> Result {
         let text = fs::read_to_string(&self.env_file).map_err(|e| format!("{}: {e}", self.env_file.display()))?;
-        let new = self.env_file.with_extension("env.new");
-        let _ = fs::remove_file(&new);
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&new)
-            .and_then(|mut f| f.write_all(set_env_text(&text, key, value).as_bytes()).and_then(|_| f.sync_all()))
-            .and_then(|_| fs::rename(&new, &self.env_file))
-            .map_err(|e| format!("{}: {e}", self.env_file.display()))
+        super::replace_file(&self.env_file, set_env_text(&text, key, value).as_bytes(), 0o600)
     }
 
     /// The direct-IP port (PCDS_LISTEN's).
@@ -131,13 +120,7 @@ PCDS_ADMIN_TOKEN={token}
 PCDS_WORLD=world
 "
         );
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&self.env_file)
-            .and_then(|mut f| f.write_all(text.as_bytes()))
-            .map_err(|e| format!("{}: {e}", self.env_file.display()))?;
+        super::replace_file(&self.env_file, text.as_bytes(), 0o600)?;
         say(format!("settings written to {}", self.env_file.display()));
         Ok(())
     }

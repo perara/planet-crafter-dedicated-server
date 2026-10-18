@@ -171,16 +171,47 @@ fn scene_tables(dir: &str, net: &NetData, data: &GameData) -> Scenes {
         for planet in net.planets.iter().filter(|p| p.steam_app_id == 0) {
             let path = format!("{dir}/scenes/{}.json", planet.id);
             let dump: Dump = serde_json::from_str(&read(&path)?).map_err(|e| format!("{path}: {e}"))?;
-            let names = data.asset(&format!("PlanetData:PlanetData-{}", planet.id)).and_then(|p| data.asset(p["instanceScenesData"].as_str()?)).and_then(|d| d["instanceSceneNames"].as_array());
-            if let Some(missing) = names.into_iter().flatten().filter_map(|n| n.as_str()).find(|n| !dump.instance_scenes.contains_key(*n)) {
+            let asset = format!("PlanetData:PlanetData-{}", planet.id);
+            let planet_data = data.asset(&asset).ok_or(format!("gamedata.json: no {asset}"))?;
+            // A planet without portals has no instance data (null); one with it lists its scenes.
+            let names: Vec<&str> = match &planet_data["instanceScenesData"] {
+                serde_json::Value::Null => Vec::new(),
+                r => {
+                    let names = r.as_str().and_then(|r| data.asset(r)).and_then(|d| d["instanceSceneNames"].as_array());
+                    let names = names.ok_or(format!("gamedata.json: {asset}.instanceScenesData {r} has no instanceSceneNames"))?;
+                    names.iter().map(|n| n.as_str().ok_or(format!("gamedata.json: {asset}: an instance scene name that is not text"))).collect::<Result<_, _>>()?
+                }
+            };
+            if let Some(missing) = names.iter().find(|n| !dump.instance_scenes.contains_key(**n)) {
                 return Err(format!("{path}: no world instance scene {missing}"));
             }
+            check_scene(&dump.water_volumes, &dump.ore_veins, data).map_err(|e| format!("{path}: {e}"))?;
             let instance_scenes = dump.instance_scenes.into_iter().map(|(k, v)| (k, Rc::new(v))).collect();
             planets.insert(planet.id.clone(), PlanetScene { water_volumes: dump.water_volumes, ore_veins: dump.ore_veins, instance_scenes });
         }
         Ok(Scenes { wrecks: Rc::new(wrecks), planets })
     };
     load().unwrap_or_else(|e| no_tables(dir, e))
+}
+
+/// What water.rs and veins.rs read from a scene dump is complete: story interpolations with
+/// their world object, offset and easing; ore vein groups that name groups.
+fn check_scene(water: &[serde_json::Value], veins: &[serde_json::Value], data: &GameData) -> Result<(), String> {
+    for (i, v) in water.iter().enumerate() {
+        let s = &v["storyInterpolation"];
+        let offset = s["offset"].as_array().is_some_and(|o| o.len() == 3 && o.iter().all(|x| x.is_number()));
+        if !s.is_null() && !(s["worldObject"].is_i64() && offset && s["ease"].is_boolean()) {
+            return Err(format!("waterVolumes[{i}].storyInterpolation: {s}"));
+        }
+    }
+    for (i, v) in veins.iter().enumerate() {
+        for r in v["fields"]["groups"].as_array().into_iter().flatten() {
+            if r.as_str().and_then(|r| data.group_of_ref(r)).is_none() {
+                return Err(format!("oreVeins[{i}]: group {r} is not in gamedata.json"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The tables tests run on: PCDS_TEST_DATA, else data/2.103. Each user extracts them from their
@@ -217,6 +248,8 @@ fn main() {
         Some("tables-diff") => native::diff::run(&args[2..]),
         Some("native-layout") => native::tables::layout(&args[2..]),
         Some("native-il") => native::tables::il(&args[2..]),
+        Some("native-wrecks") => native::wrecks::debug(&args[2..]),
+        Some("native-reach") => native::wrecks::reach(&args[2..]),
         Some("new-save") => newworld::run(&args[2..]),
         Some("--version") => {
             println!("pcds {}", env!("CARGO_PKG_VERSION"));

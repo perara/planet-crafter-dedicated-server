@@ -49,7 +49,7 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
   pcds gui | token | config | api METHOD PATH [JSON]
   pcds rules [set SECTION.RULE=VALUE ... | reset]
                          show or change the server rules (rules.json; README \"Server rules\")
-  pcds extract [--game DIR]   extract the game tables again (needs Wine)
+  pcds extract [--game DIR]   read the game tables again (Wine runs the game for the wreck layouts)
   pcds update [--game DIR]    after a game update: extract and restart when the game changed
   pcds selftest               a scripted player joins over direct IP and checks the answers
   pcds run                    run the server in the foreground (what the service runs)
@@ -60,7 +60,7 @@ The server and its tools:
   pcds new-save SAVE.json DATA_DIR [NEW OPTIONS]
   pcds probe HOST:PORT DATA_DIR SCRIPT.json
   pcds load HOST:PORT DATA_DIR [PLAYERS] [SECONDS] [ACTION_MS]
-  pcds extract-raw RAW.json OUT_DIR
+  pcds read-game GAME_DIR OUT_DIR        the game tables, read from its files
   pcds --version [DATA_DIR]
 
 Everything the server keeps lives in run/ of the release or checkout folder (PCDS_HOME
@@ -194,8 +194,14 @@ impl Ctx {
             ["unban", value] => println!("{}", self.api("POST", "/api/unban", Some(&serde_json::json!({"value": value}).to_string()))?),
             ["unban", ..] => return usage("pcds unban NAME_OR_IP"),
             ["gui"] => println!("{}", self.gui_url()),
-            ["token"] => println!("{}", self.env_get("PCDS_ADMIN_TOKEN").unwrap_or_default()),
-            ["config"] => return passthrough(Command::new(crate::env("EDITOR").unwrap_or_else(|| "nano".into())).arg(&self.env_file)),
+            ["token"] => println!("{}", self.env_get("PCDS_ADMIN_TOKEN").ok_or(format!("no PCDS_ADMIN_TOKEN in {}", self.env_file.display()))?),
+            ["config"] => {
+                // EDITOR may carry arguments ("code -w").
+                let editor = crate::env("EDITOR").unwrap_or_else(|| "nano".into());
+                let mut words = editor.split_whitespace();
+                let program = words.next().ok_or("EDITOR is empty")?;
+                return passthrough(Command::new(program).args(words).arg(&self.env_file));
+            }
             ["api", method, path] => println!("{}", self.api(method, path, None)?),
             ["api", method, path, body] => println!("{}", self.api(method, path, Some(body))?),
             ["api", ..] => return usage("pcds api METHOD PATH [JSON]"),
@@ -303,8 +309,42 @@ fn download(url: &str, path: &Path) -> Result {
 
 /// Copy then rename, so a running server keeps its mapped copy.
 fn install_file(from: &Path, to: &Path) -> Result {
-    let new = to.with_extension("new");
-    fs::copy(from, &new).and_then(|_| fs::rename(&new, to)).map(|_| ()).map_err(|e| format!("{} -> {}: {e}", from.display(), to.display()))
+    let bytes = fs::read(from).map_err(|e| format!("{}: {e}", from.display()))?;
+    let mode = fs::metadata(from).map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions())).map_err(|e| format!("{}: {e}", from.display()))?;
+    replace_file(to, &bytes, mode)
+}
+
+/// A file written whole or not at all: beside it, flushed to disk, then moved over it (and the
+/// move flushed), so a crash or a full disk leaves the old file or the new one, never part.
+pub fn replace_file(path: &Path, bytes: &[u8], mode: u32) -> Result {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let new = path.with_file_name(format!(".{name}.new"));
+    let _ = fs::remove_file(&new);
+    let err = |e: std::io::Error| format!("{}: {e}", path.display());
+    let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(&new).map_err(err)?;
+    let written = f.write_all(bytes).and_then(|_| f.sync_all()).and_then(|_| fs::rename(&new, path));
+    if let Err(e) = written {
+        let _ = fs::remove_file(&new);
+        return Err(err(e));
+    }
+    if let Some(dir) = path.parent() {
+        fs::File::open(dir).and_then(|d| d.sync_all()).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    Ok(())
+}
+
+/// A path in `dir` for "<base>.json" that does not exist yet (a counter when one does), so
+/// two backups in the same second never replace each other.
+pub fn free_path(dir: &Path, base: &str) -> PathBuf {
+    let mut path = dir.join(format!("{base}.json"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{base}-{n}.json"));
+        n += 1;
+    }
+    path
 }
 
 fn write(path: &Path, text: impl AsRef<[u8]>) -> Result {

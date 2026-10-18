@@ -95,17 +95,36 @@ impl Ctx {
 
     /// The libraries in the library lists there are: each one's folder, whether it has the game,
     /// and the list that says so.
-    fn steam_libraries(&self) -> Result<Vec<(PathBuf, bool, PathBuf)>> {
-        let mut out = Vec::new();
+    /// The libraries in the library lists there are, with the lists that could not be read
+    /// (named in the error when no library has the game).
+    fn steam_libraries(&self) -> (Vec<(PathBuf, bool, PathBuf)>, Vec<String>) {
+        let (mut out, mut broken) = (Vec::new(), Vec::new());
         for list in self.library_lists() {
             let text = match fs::read_to_string(&list) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                text => text.map_err(|e| format!("{}: {e}", list.display()))?,
+                text => text.map_err(|e| format!("{}: {e}", list.display())),
             };
-            let vdf = parse_vdf(&text).map_err(|e| format!("{}: {e}", list.display()))?;
-            out.extend(libraries(&vdf).into_iter().map(|(folder, has)| (folder, has, list.clone())));
+            match text.and_then(|t| parse_vdf(&t).map_err(|e| format!("{}: {e}", list.display()))) {
+                Ok(vdf) => out.extend(libraries(&vdf).into_iter().map(|(folder, has)| (folder, has, list.clone()))),
+                Err(e) => broken.push(e),
+            }
         }
-        Ok(out)
+        (out, broken)
+    }
+
+    /// The game's folder in a library: its app manifest's installdir.
+    fn installed_in(library: &Path) -> Result<PathBuf> {
+        let manifest = library.join(format!("steamapps/appmanifest_{APP_ID}.acf"));
+        let text = fs::read_to_string(&manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
+        let vdf = parse_vdf(&text).map_err(|e| format!("{}: {e}", manifest.display()))?;
+        let dir = match vdf.get("AppState") {
+            Some(Vdf::Keys(state)) => state.iter().find_map(|(k, v)| match v {
+                Vdf::Text(dir) if k.eq_ignore_ascii_case("installdir") => Some(dir.clone()),
+                _ => None,
+            }),
+            _ => None,
+        };
+        Ok(library.join("steamapps/common").join(dir.ok_or(format!("{}: no installdir", manifest.display()))?))
     }
 
     /// The game folder: --game DIR, PCDS_GAME_DIR, the one used last (run/game-dir), else the
@@ -121,9 +140,23 @@ impl Ctx {
         } else {
             let not_found = |why: String| format!("game not found: pass --game DIR (the folder with 'Planet Crafter.exe', e.g. copied from a PC) or set PCDS_GAME_DIR ({why})");
             let lists = || self.library_lists().iter().map(|l| l.display().to_string()).collect::<Vec<_>>().join(", ");
-            let libraries = self.steam_libraries().map_err(not_found)?;
-            let (folder, _, list) = libraries.into_iter().find(|(_, has, _)| *has).ok_or_else(|| not_found(format!("no Steam library list ({}) lists app {APP_ID}", lists())))?;
-            (folder.join("steamapps/common/The Planet Crafter"), list.display().to_string())
+            let (libraries, broken) = self.steam_libraries();
+            // Every library that lists the game, until one has its files.
+            let mut tried = broken;
+            let found = libraries.into_iter().filter(|(_, has, _)| *has).find_map(|(folder, _, list)| match Self::installed_in(&folder) {
+                Ok(dir) if dir.join("Planet Crafter.exe").is_file() => Some((dir, list)),
+                Ok(dir) => {
+                    tried.push(format!("{} has no 'Planet Crafter.exe'", dir.display()));
+                    None
+                }
+                Err(e) => {
+                    tried.push(e);
+                    None
+                }
+            });
+            let why = if tried.is_empty() { format!("no Steam library list ({}) lists app {APP_ID}", lists()) } else { tried.join("; ") };
+            let (dir, list) = found.ok_or_else(|| not_found(why))?;
+            (dir, list.display().to_string())
         };
         if !dir.join("Planet Crafter.exe").is_file() || !dir.join("Planet Crafter_Data").is_dir() {
             return Err(format!("no game in {} (from {from}): the game folder holds 'Planet Crafter.exe' and 'Planet Crafter_Data'", dir.display()));
@@ -139,7 +172,7 @@ impl Ctx {
     /// The game's own saves on this machine (Proton), newest first.
     pub fn local_saves(&self) -> Vec<PathBuf> {
         // Each library once: ~/.steam/steam's list is usually ~/.local/share/Steam's.
-        let mut libraries: Vec<PathBuf> = self.steam_libraries().unwrap_or_default().into_iter().filter_map(|(folder, ..)| folder.canonicalize().ok()).collect();
+        let mut libraries: Vec<PathBuf> = self.steam_libraries().0.into_iter().filter_map(|(folder, ..)| folder.canonicalize().ok()).collect();
         libraries.sort();
         libraries.dedup();
         let mut saves: Vec<PathBuf> = libraries
@@ -179,11 +212,13 @@ impl Ctx {
         }
         say("getting steamclient.so for invite codes (steamcmd's first run updates itself; a minute or two)");
         let log = self.steamcmd.join("first-run.log");
-        let _ = self.fetch_steamcmd().and_then(|_| {
+        if let Err(e) = self.fetch_steamcmd().and_then(|_| {
             let out = fs::File::create(&log).map_err(|e| e.to_string())?;
             let err = out.try_clone().map_err(|e| e.to_string())?;
             check(Command::new(self.steamcmd_sh()).arg("+quit").stdin(Stdio::null()).stdout(out).stderr(err))
-        });
+        }) {
+            say(format!("steamcmd: {e}"));
+        }
         let theirs = self.steamcmd.join("linux64/steamclient.so");
         if theirs.is_file() {
             let _ = fs::create_dir_all(sdk.parent().unwrap_or(&sdk));
@@ -305,9 +340,15 @@ mod tests {
         let flatpak = dir.join("home/.var/app/com.valvesoftware.Steam/.local/share/Steam");
         list(&flatpak, APP_ID);
         save_in(&flatpak, "Flatpak-1.json");
+        // Its manifest names the folder (installdir); the native one lists the game too, but
+        // its folder lacks the files: the next library is tried.
+        let manifest = |root: &Path| fs::write(root.join(format!("steamapps/appmanifest_{APP_ID}.acf")), "\"AppState\" { \"appid\" \"1284190\" \"installdir\" \"The Planet Crafter\" }").unwrap();
+        manifest(&flatpak);
         let game = flatpak.join("steamapps/common/The Planet Crafter");
         fs::create_dir_all(game.join("Planet Crafter_Data")).unwrap();
         fs::write(game.join("Planet Crafter.exe"), "").unwrap();
+        list(&native, &format!("228980\" \"1\" \"{APP_ID}"));
+        manifest(&native);
 
         assert_eq!(ctx.game_dir(None).unwrap(), game.canonicalize().unwrap());
         let mut names: Vec<String> = ctx.local_saves().iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();

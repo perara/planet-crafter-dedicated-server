@@ -59,7 +59,7 @@ impl Ctx {
             .collect()
     }
 
-    /// Manifest groups (as extract-raw keeps them): id -> hash, prefab name and prefab hash.
+    /// Manifest groups: id -> hash, prefab name and prefab hash.
     pub fn group_table(&mut self) -> Map<String, Value> {
         let mut out = Map::new();
         for (gid, prefab) in self.groups.clone() {
