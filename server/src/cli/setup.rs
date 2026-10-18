@@ -23,6 +23,18 @@ impl Ctx {
     /// is bank_for()'s rule; the running server moves to it at its next start, or at once with
     /// `pcds upgrade --restart`.
     pub fn install_server(&self) -> Result {
+        let running = self.active()?;
+        let live = if running { self.live_bank() } else { None };
+        if running && live.is_none() {
+            say(format!("pcds {} is not put into a bank now: the server runs and its admin API does not say which bank runs the world (stop it, then 'pcds start')", env!("CARGO_PKG_VERSION")));
+            return Ok(());
+        }
+        self.install_beside(live.as_deref())
+    }
+
+    /// install_server() beside the bank `live` runs the world in (None: no server runs, or
+    /// `pcds run`, which starts one); never into that bank.
+    fn install_beside(&self, live: Option<&str>) -> Result {
         let lib = self.exe.with_file_name("libsteam_api.so");
         if !lib.is_file() {
             return Err(format!("no libsteam_api.so next to {} (make build puts it there)", self.exe.display()));
@@ -37,7 +49,7 @@ impl Ctx {
             super::install_file(&self.web, &bin.join("web/index.html"))?;
         }
         let banks = self.banks();
-        let target = match self.bank_for(&banks)? {
+        let target = match self.bank_for(&banks, live)? {
             Ok(target) => target,
             Err(Some(why)) => {
                 say(why);
@@ -55,15 +67,18 @@ impl Ctx {
     /// start all ask), or Err with why not (None: nothing to say). The rule:
     /// - a bank that holds this very program (the same bytes) is enough: nothing;
     /// - both banks are empty: the active one (the first install);
-    /// - else the standby bank (the active one while it is empty), and only when this program
-    ///   is newer than what each bank holds: a later version, or the same version built later (the program file's time; a
-    ///   bank's copy keeps the time of what it was copied from). So an older launcher never
-    ///   replaces or downgrades a release `pcds upgrade` installed, and a bank that holds a
+    /// - else the standby bank (the one beside the bank that runs the world, `live`, else
+    ///   beside the active one; the active one while it is empty), and only when this program
+    ///   is newer than what each bank holds: a later version, or the same version built later
+    ///   (the program file's time; a bank's copy keeps the time of what it was copied from).
+    ///   So an older launcher never replaces or downgrades a release `pcds upgrade` installed
+    ///   (it says so: a downgrade is `pcds upgrade VERSION --restart`), and a bank that holds a
     ///   rollback target keeps it;
     /// - never the bank the owner rolled back from (updater::rolled_back): an explicit
-    ///   `pcds upgrade` or the next rollback lifts that.
-    fn bank_for(&self, banks: &Path) -> Result<std::result::Result<String, Option<String>>> {
-        let active = updater::active(banks);
+    ///   `pcds upgrade` or the next rollback lifts that;
+    /// - never the bank that runs the world.
+    fn bank_for(&self, banks: &Path, live: Option<&str>) -> Result<std::result::Result<String, Option<String>>> {
+        let active = live.map_or_else(|| updater::active(banks), str::to_string);
         let program = |b: &str| banks.join(b).join("pcds");
         for b in updater::BANKS {
             if program(b).is_file() && program_equal(&self.exe, &program(b))? {
@@ -82,10 +97,14 @@ impl Ctx {
             }
         };
         if !updater::BANKS.iter().all(|b| newer_than(b)) {
-            return Ok(Err(None));
+            let newer = updater::BANKS.iter().find_map(|b| updater::info(banks, b).and_then(|i| i["version"].as_str().filter(|held| updater::newer(held, version)).map(|held| (*b, held.to_string()))));
+            return Ok(Err(newer.map(|(b, held)| {
+                format!("pcds {version} is not installed: bank {b} holds pcds {held}, which is newer, and the server goes on with what the banks hold. To go back to {version}: pcds upgrade v{version} --restart")
+            })));
         }
-        // The standby bank, or the active one while it is empty.
-        let target = if updater::info(banks, &active).is_none() { active } else { updater::other(&active).to_string() };
+        // The standby bank, or the active one while it is empty (never the live one, which
+        // holds the world and so is not empty).
+        let target = if updater::info(banks, &active).is_none() && live.is_none() { active } else { updater::other(&active).to_string() };
         if updater::rolled_back(banks).is_some_and(|r| r["bank"] == target.as_str()) {
             return Ok(Err(Some(format!("pcds {version} is newer than both banks, but bank {target} is the one the server was rolled back from: it is kept ('pcds upgrade' installs a release there)"))));
         }
@@ -131,7 +150,11 @@ impl Ctx {
         if !world.is_file() {
             return Err(format!("no world at {}: 'pcds worlds', 'pcds world use NAME' or 'pcds world new NAME'", world.display()));
         }
-        self.install_newer()?;
+        // A newer build into a bank is not what the start needs: when it fails (a full disk),
+        // the server starts from the banks as they are.
+        if let Err(e) = self.install_beside(None) {
+            eprintln!("pcds: {} was not put into a bank ({e}); starting the server from bank {}", self.exe.display(), updater::active(&self.banks()));
+        }
         // The tables of the bank that runs (installing may have changed which one).
         let game = self.game_dir(None)?;
         let data = self.tables(&build_id(&game)?)?;
@@ -573,39 +596,47 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
             fs::write(dir.join("build/pcds"), text).unwrap();
         };
-        ctx.install_server().unwrap();
+        ctx.install_beside(None).unwrap();
         assert_eq!((updater::active(&banks), program("a"), program("b")), ("a".into(), Some("build 1".into()), None));
         assert_eq!(updater::info(&banks, "a").unwrap()["protocol"], crate::ipc::PROTOCOL);
         assert!(banks.join("a/libsteam_api.so").is_file() && banks.join("a/web/index.html").is_file() && ctx.installed().is_file());
-        ctx.install_server().unwrap();
+        ctx.install_beside(None).unwrap();
         assert!(!banks.join("b").exists(), "the same build again: nothing");
         // pcds run is the launcher, run/bin/pcds: a copy of build 1, in bank a already.
         let launcher = Ctx { exe: ctx.installed(), ..ctx.clone() };
-        launcher.install_server().unwrap();
+        launcher.install_beside(None).unwrap();
         assert!(!banks.join("b").exists(), "the launcher's own build: nothing");
         // A later build.
         build("build 2");
-        ctx.install_server().unwrap();
+        ctx.install_beside(None).unwrap();
         assert_eq!((updater::active(&banks), program("a"), program("b")), ("b".into(), Some("build 1".into()), Some("build 2".into())));
         // Rolled back to a: neither the build in b nor the launcher go over a or b again.
         updater::set_active(&banks, "a").unwrap();
         updater::set_rolled_back(&banks, "b").unwrap();
-        ctx.install_server().unwrap();
-        launcher.install_server().unwrap();
+        ctx.install_beside(None).unwrap();
+        launcher.install_beside(None).unwrap();
         assert_eq!((updater::active(&banks), program("a"), program("b")), ("a".into(), Some("build 1".into()), Some("build 2".into())));
         // A later build still leaves alone the bank rolled back from.
         build("build 3");
-        ctx.install_server().unwrap();
+        ctx.install_beside(None).unwrap();
         assert_eq!((updater::active(&banks), program("b")), ("a".into(), Some("build 2".into())));
         updater::clear_rolled_back(&banks).unwrap();
-        ctx.install_server().unwrap();
+        ctx.install_beside(None).unwrap();
         assert_eq!((updater::active(&banks), program("b")), ("b".into(), Some("build 3".into())));
         // A release of a later version in the standby bank (pcds upgrade): an older build never
         // goes over it, however new its file.
         updater::write_info(&banks.join("a"), &serde_json::json!({"version": "99.0.0", "tag": "v99.0.0", "protocol": crate::ipc::PROTOCOL})).unwrap();
         build("build 4");
-        ctx.install_server().unwrap();
+        ctx.install_beside(None).unwrap();
         assert_eq!((updater::active(&banks), program("a"), program("b")), ("b".into(), Some("build 1".into()), Some("build 3".into())));
+        // That downgrade is said, with how to make it.
+        let why = ctx.bank_for(&banks, None).unwrap().unwrap_err().unwrap();
+        assert!(why.contains("bank a holds pcds 99.0.0, which is newer") && why.contains(&format!("pcds upgrade v{} --restart", env!("CARGO_PKG_VERSION"))), "{why}");
+        // A later build while bank a runs the world (the active file says b): into b, never a.
+        updater::write_info(&banks.join("a"), &serde_json::json!({"version": "0.0.1", "protocol": crate::ipc::PROTOCOL})).unwrap();
+        build("build 5");
+        assert_eq!(ctx.bank_for(&banks, Some("a")).unwrap(), Ok("b".to_string()));
+        assert_eq!(ctx.bank_for(&banks, Some("b")).unwrap(), Ok("a".to_string()));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

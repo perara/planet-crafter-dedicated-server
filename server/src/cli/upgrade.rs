@@ -76,7 +76,7 @@ impl Ctx {
     }
 
     /// The bank the running front runs the world in.
-    fn live_bank(&self) -> Option<String> {
+    pub fn live_bank(&self) -> Option<String> {
         let status: Value = serde_json::from_str(&self.api("GET", "/api/status", None).ok()?).ok()?;
         status["banks"]["live"]["bank"].as_str().map(str::to_string)
     }
