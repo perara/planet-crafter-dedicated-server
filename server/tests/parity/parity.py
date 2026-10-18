@@ -396,6 +396,7 @@ class Transcript:
 
     def _run(self):
         step = 0
+        net_ids = {}
         for l in self.lines:
             m = l['msg']
             if m == 'approved object':
@@ -414,11 +415,18 @@ class Transcript:
                     self.events.append((step, {'msg': 'call', 'name': l['name'], 'object': self.label(l['object']), 'args': self.norm(l['args']), 'tag': l.get('tag')}))
             elif m == 'rpc':
                 args = l['args']
+                # A network object id the server allocated (Netcode reuses freed ones): its label.
+                if l['name'] == 'WorldObjectsHandler.CreateAndInstantiateWorldObjectClientRpc' and args and args[0]:
+                    net_ids[args[0]] = self.label(args[0])
+                    args = [net_ids[args[0]]]
                 self.events.append((step, {'msg': 'rpc', 'name': l['name'], 'object': self.label(l['object']), 'args': self.norm(args)}))
             elif m == 'delta':
                 self._delta(l)
             elif m in ('captured', 'capture failed', 'disconnected'):
-                self.events.append((step, {k: self.norm(v) for k, v in l.items() if k != 't'}))
+                e = {k: self.norm(v) for k, v in l.items() if k != 't'}
+                if m == 'captured' and l['value'] in net_ids:
+                    e['value'] = net_ids[l['value']]
+                self.events.append((step, e))
 
 
 # Per-group counts of world objects: the save's machines produced for longer on the reference
