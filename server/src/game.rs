@@ -721,6 +721,43 @@ pub mod tests {
         object
     }
 
+    /// ConnectionRequest: another game version, another session's invite code, a refused
+    /// address, a banned SteamID or a full server are each told why and dropped; the rest get
+    /// the world and everyone hears they came; leaving, everyone hears they went.
+    #[test]
+    fn connections_are_refused_as_the_game_and_the_access_lists_say() {
+        let Some(mut g) = test_game(save()) else { return };
+        let request = |data: &str| {
+            let mut w = Writer::new();
+            w.packed_i32(0).u64(0).i32(data.len() as i32).bytes(data.as_bytes());
+            w.0
+        };
+        let version = g.net_data.game_version.clone();
+        g.access.lists.banned_ips.push("10.6.6.6".into());
+        g.access.lists.banned_names.push("76561198000000066".into());
+        let cases: [(u64, Option<u64>, Option<&str>, String, &str); 4] = [
+            (1, None, None, "0.9|0".to_string(), "MENU_Network_Error_version_mismatch"),
+            (2, None, None, format!("{version}|{}", g.session_number.wrapping_add(1)), "MENU_Network_Error_version_mismatch"),
+            (3, None, Some("10.6.6.6"), format!("{version}|0"), crate::access::REFUSED),
+            (4, Some(76561198000000066), None, format!("{version}|0"), crate::access::REFUSED),
+        ];
+        for (client, steam, ip, data, why) in cases {
+            g.connect(client, steam, false, ip.map(String::from));
+            g.approve(client, &request(&data));
+            assert!(!g.clients[&client].approved && g.kicks.contains(&(client, why.to_string())), "client {client}");
+        }
+        g.rules.limits.max_players = Some(1);
+        join(&mut g, 5, "Ann");
+        g.connect(6, None, false, None);
+        g.approve(6, &request(&format!("{version}|{}", g.session_number)));
+        assert!(g.kicks.contains(&(6, "MULTIPLAYER_Game_Session_Full".to_string())));
+        g.net.out.clear();
+        g.disconnect(5);
+        assert!(g.net.out.iter().any(|(to, kind, _)| *to == Target::Except(5) && *kind == protocol::client_disconnected(5).0));
+        g.disconnect(6);
+        g.disconnect(99);
+    }
+
     /// Every animator ServerRpc an owner sends goes out as its ClientRpc.
     #[test]
     fn every_animator_server_rpc_is_relayed() {
