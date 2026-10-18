@@ -4,6 +4,13 @@
 //! the front protocol it speaks and the snapshot formats it reads. The front then flips to it;
 //! with the server stopped, `pcds upgrade` only points run/bin/active at it.
 //!
+//! Trust: the sha256 is published with the release, so it guards against a broken or cut
+//! download, not against a release that is not the project's (a GitHub account or a mirror
+//! taken over). Checking a signature on the release is out of scope here. What is done: https
+//! only (http only for an explicit PCDS_RELEASES of http://127.0.0.1, the tests' release
+//! server), tags of version characters only, a tarball of plain files and folders only, and
+//! the new program asked what it is with none of the server's secrets in its environment.
+//!
 //! run/bin/a/ and run/bin/b/ are the banks, each a whole release (pcds, libsteam_api.so, web/) with its bank.json (what bank-info said, the tag, the tarball's
 //! sha256); run/bin/active names the one the front starts.
 
@@ -28,10 +35,18 @@ pub struct Release {
     pub tag: String,
     tarball: String,
     checksum: String,
+    /// The releases URL is http://127.0.0.1 (a test's server): its assets may be http too.
+    local: bool,
 }
 
-fn agent() -> ureq::Agent {
+/// Whether a releases URL is the one place plain http is taken: this machine's 127.0.0.1.
+fn local(base: &str) -> bool {
+    base.strip_prefix("http://127.0.0.1").is_some_and(|rest| rest.starts_with([':', '/']))
+}
+
+fn agent(local: bool) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
+        .https_only(!local)
         .timeout_global(Some(Duration::from_secs(600)))
         .timeout_connect(Some(Duration::from_secs(20)))
         .http_status_as_error(false)
@@ -53,21 +68,35 @@ pub fn tag(version: &str) -> String {
     if version.starts_with('v') { version.to_string() } else { format!("v{version}") }
 }
 
+/// A version or tag as it may go into a URL and a file name: v?[0-9A-Za-z._-]+, without "..".
+pub fn check_tag(tag: &str) -> Result<(), String> {
+    let rest = tag.strip_prefix('v').unwrap_or(tag);
+    if rest.is_empty() || tag.contains("..") || !rest.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)) {
+        return Err(format!("{tag:?} is not a release version (v?[0-9A-Za-z._-]+)"));
+    }
+    Ok(())
+}
+
 /// The release `version` (None: the latest) and its two assets.
 pub fn lookup(base: &str, version: Option<&str>) -> Result<Release, String> {
+    if let Some(v) = version {
+        check_tag(v)?;
+    }
     let url = match version {
         None => format!("{base}/latest"),
         Some(v) => format!("{base}/tags/{}", tag(v)),
     };
-    let release: Value = serde_json::from_slice(&get(&agent(), &url)?).map_err(|e| format!("{url}: {e}"))?;
+    let local = local(base);
+    let release: Value = serde_json::from_slice(&get(&agent(local), &url)?).map_err(|e| format!("{url}: {e}"))?;
     let tag = release["tag_name"].as_str().ok_or_else(|| format!("{url}: no tag_name"))?.to_string();
+    check_tag(&tag).map_err(|e| format!("{url}: tag_name {e}"))?;
     let asset = |name: &str| {
         let assets = release["assets"].as_array().into_iter().flatten();
         let found = assets.into_iter().find(|a| a["name"] == name).and_then(|a| a["browser_download_url"].as_str());
         found.map(str::to_string).ok_or_else(|| format!("release {tag} has no {name}"))
     };
     let name = format!("pcds-{tag}-linux-x86_64.tar.gz");
-    Ok(Release { tarball: asset(&name)?, checksum: asset(&format!("{name}.sha256"))?, tag })
+    Ok(Release { tarball: asset(&name)?, checksum: asset(&format!("{name}.sha256"))?, tag, local })
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -97,9 +126,18 @@ pub fn compatible(info: &Value, live: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// What a bank's program says it is (`pcds bank-info`), within 20 s.
+/// What a bank's program says it is (`pcds bank-info`), within 20 s. A downloaded program, so
+/// it runs with PATH, HOME and LANG only, as the chat exec hook does: never with the admin or
+/// Steam token.
 fn ask(program: &Path) -> Result<Value, String> {
-    let mut child = Command::new(program).arg("bank-info").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("{}: {e}", program.display()))?;
+    let mut command = Command::new(program);
+    command.arg("bank-info").env_clear().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    for key in ["PATH", "HOME", "LANG"] {
+        if let Some(v) = std::env::var_os(key) {
+            command.env(key, v);
+        }
+    }
+    let mut child = command.spawn().map_err(|e| format!("{}: {e}", program.display()))?;
     let deadline = Instant::now() + Duration::from_secs(20);
     while child.try_wait().map_err(|e| e.to_string())?.is_none() {
         if Instant::now() > deadline {
@@ -122,8 +160,10 @@ pub fn install(release: &Release, banks: &Path, bank: &str, live: Option<&Value>
     if !BANKS.contains(&bank) {
         return Err(format!("no bank {bank}"));
     }
-    let new = banks.join(format!(".{bank}.new"));
-    let result = unpack(release, banks, &new).and_then(|info| {
+    std::fs::create_dir_all(banks).map_err(|e| format!("{}: {e}", banks.display()))?;
+    sweep(banks);
+    let new = staging(banks, bank);
+    let result = unpack(release, &new).and_then(|info| {
         if let Some(live) = live {
             compatible(&info, live)?;
         }
@@ -134,23 +174,71 @@ pub fn install(release: &Release, banks: &Path, bank: &str, live: Option<&Value>
     result
 }
 
-/// A bank's new folder, complete beside it, moved over it. A running program of the old one
-/// keeps its files (they are renamed away, not overwritten).
+/// The banks folder's lock (banks/.lock, flock), held while a bank or `active` is replaced:
+/// the front's updater and the command line (`pcds upgrade --restart`, `pcds setup`) may
+/// install at once. Released when the file is dropped. Only renames and small writes happen
+/// under it (the front takes it on its loop at a flip): downloads and unpacking go beside the
+/// banks under names of their own process (staging).
+pub fn lock(banks: &Path) -> Result<std::fs::File, String> {
+    use std::os::fd::AsRawFd;
+    let path = banks.join(".lock");
+    let err = |e: std::io::Error| format!("{}: {e}", path.display());
+    std::fs::create_dir_all(banks).map_err(err)?;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).map_err(err)?;
+    // SAFETY: flock on a descriptor this function owns.
+    while unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err(e));
+        }
+    }
+    Ok(file)
+}
+
+/// Where this process unpacks a release for `bank`: .<bank>.new.<pid>, nobody else's.
+pub fn staging(banks: &Path, bank: &str) -> std::path::PathBuf {
+    banks.join(format!(".{bank}.new.{}", std::process::id()))
+}
+
+/// What an install of a process that is gone left beside the banks (it crashed mid-way).
+fn sweep(banks: &Path) {
+    for entry in std::fs::read_dir(banks).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // .<bank>.new.<pid> and its .tar.gz
+        let Some((_, rest)) = name.strip_prefix('.').and_then(|n| n.split_once(".new.")) else { continue };
+        let Ok(pid) = rest.split('.').next().unwrap_or("").parse::<i32>() else { continue };
+        // SAFETY: signal 0 only asks whether the process exists.
+        if pid > 0 && unsafe { libc::kill(pid, 0) } != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            let _ = std::fs::remove_dir_all(entry.path()).or_else(|_| std::fs::remove_file(entry.path()));
+        }
+    }
+}
+
+/// A bank's new folder, complete beside it, moved over it (under the banks' lock). A running
+/// program of the old one keeps its files (they are renamed away, not overwritten). Err leaves
+/// the bank as it was.
 pub fn put(banks: &Path, bank: &str, new: &Path) -> Result<(), String> {
+    let _lock = lock(banks)?;
     let path = banks.join(bank);
     let old = banks.join(format!(".{bank}.old"));
     let _ = std::fs::remove_dir_all(&old);
-    if std::fs::symlink_metadata(&path).is_ok() {
+    let had = std::fs::symlink_metadata(&path).is_ok();
+    if had {
         std::fs::rename(&path, &old).map_err(|e| format!("{}: {e}", path.display()))?;
     }
-    std::fs::rename(new, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if let Err(e) = std::fs::rename(new, &path) {
+        if had && let Err(back) = std::fs::rename(&old, &path) {
+            return Err(format!("{}: {e}; and the bank could not be put back from {}: {back}", path.display(), old.display()));
+        }
+        return Err(format!("{}: {e}", path.display()));
+    }
     let _ = std::fs::remove_dir_all(&old);
     Ok(())
 }
 
-fn unpack(release: &Release, banks: &Path, new: &Path) -> Result<Value, String> {
+fn unpack(release: &Release, new: &Path) -> Result<Value, String> {
     let tag = &release.tag;
-    let http = agent();
+    let http = agent(release.local);
     let tarball = get(&http, &release.tarball)?;
     let published = String::from_utf8_lossy(&get(&http, &release.checksum)?).split_whitespace().next().unwrap_or("").to_ascii_lowercase();
     let downloaded = hex(ring::digest::digest(&ring::digest::SHA256, &tarball).as_ref());
@@ -159,7 +247,7 @@ fn unpack(release: &Release, banks: &Path, new: &Path) -> Result<Value, String> 
     }
     let _ = std::fs::remove_dir_all(new);
     std::fs::create_dir_all(new).map_err(|e| format!("{}: {e}", new.display()))?;
-    let file = banks.join(format!(".{tag}.tar.gz"));
+    let file = std::path::PathBuf::from(format!("{}.tar.gz", new.display()));
     std::fs::write(&file, &tarball).map_err(|e| format!("{}: {e}", file.display()))?;
     let tar = Command::new("tar").arg("-xzf").arg(&file).arg("-C").arg(new).arg("--strip-components=1").status();
     let _ = std::fs::remove_file(&file);
@@ -168,6 +256,7 @@ fn unpack(release: &Release, banks: &Path, new: &Path) -> Result<Value, String> 
         Ok(s) => return Err(format!("{tag}: tar could not unpack it ({s})")),
         Err(e) => return Err(format!("tar: {e} (install tar with your package manager)")),
     }
+    plain_files(new, new).map_err(|e| format!("{tag}: the tarball holds {e}, which is not a file or a folder; nothing installed"))?;
     let program = new.join("pcds");
     if !program.is_file() {
         return Err(format!("{tag}: no pcds in the tarball"));
@@ -178,6 +267,22 @@ fn unpack(release: &Release, banks: &Path, new: &Path) -> Result<Value, String> 
     info["installed"] = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).into();
     write_info(new, &info)?;
     Ok(info)
+}
+
+/// Err names the first thing under `dir` that is neither a plain file nor a folder (a link, a
+/// device, a fifo): a link in a bank could point the server anywhere.
+fn plain_files(root: &Path, dir: &Path) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if kind.is_dir() {
+            plain_files(root, &path)?;
+        } else if !kind.is_file() {
+            return Err(path.strip_prefix(root).unwrap_or(&path).display().to_string());
+        }
+    }
+    Ok(())
 }
 
 pub fn write_info(bank: &Path, info: &Value) -> Result<(), String> {
@@ -197,10 +302,11 @@ pub fn active(banks: &Path) -> String {
     BANKS.iter().find(|b| **b == text.trim()).unwrap_or(&"a").to_string()
 }
 
-/// Points run/bin/active at a bank: written beside and moved over, so it is one or the other.
+/// Points run/bin/active at a bank: written beside, flushed, and moved over (under the banks'
+/// lock), so it is one or the other, also after a crash.
 pub fn set_active(banks: &Path, bank: &str) -> Result<(), String> {
-    let new = banks.join(".active.new");
-    std::fs::write(&new, format!("{bank}\n")).and_then(|_| std::fs::rename(&new, banks.join("active"))).map_err(|e| format!("{}: {e}", banks.join("active").display()))
+    let _lock = lock(banks)?;
+    crate::cli::replace_file(&banks.join("active"), format!("{bank}\n").as_bytes(), 0o644)
 }
 
 pub fn other(bank: &str) -> &'static str {
@@ -298,7 +404,50 @@ pub mod tests {
         dir
     }
 
-    const LIVE: &str = r#"{"protocol": 2, "format": 1}"#;
+    /// What is in the banks folder, but its lock.
+    fn names(banks: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(banks).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n != ".lock").collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_bank_is_replaced_whole_or_not_at_all() {
+        let dir = test_dir("put");
+        let banks = dir.join("bin");
+        std::fs::create_dir_all(banks.join("b")).unwrap();
+        std::fs::write(banks.join("b/pcds"), "old").unwrap();
+        // The second rename fails (nothing to move): the bank is put back.
+        assert!(put(&banks, "b", &banks.join(".b.new.0")).is_err());
+        assert_eq!((std::fs::read_to_string(banks.join("b/pcds")).unwrap(), names(&banks)), ("old".into(), vec!["b".to_string()]));
+        // Two installs at once, each from its own staging folder: one whole bank after both.
+        let installs: Vec<_> = (0..2)
+            .map(|i| {
+                let banks = banks.clone();
+                std::thread::spawn(move || {
+                    for n in 0..20 {
+                        let new = banks.join(format!(".b.new.{i}-{n}"));
+                        std::fs::create_dir_all(&new).unwrap();
+                        std::fs::write(new.join("pcds"), format!("install {i}")).unwrap();
+                        put(&banks, "b", &new).unwrap();
+                        set_active(&banks, if i == 0 { "a" } else { "b" }).unwrap();
+                    }
+                })
+            })
+            .collect();
+        installs.into_iter().for_each(|t| t.join().unwrap());
+        assert!(std::fs::read_to_string(banks.join("b/pcds")).unwrap().starts_with("install "));
+        assert_eq!(names(&banks), ["active", "b"]);
+        // What an install that crashed left: removed by the next one; a live process's stays.
+        std::fs::create_dir_all(banks.join(".a.new.999999999")).unwrap();
+        std::fs::write(banks.join(".a.new.999999999.tar.gz"), "").unwrap();
+        std::fs::create_dir_all(banks.join(format!(".a.new.{}", std::process::id()))).unwrap();
+        sweep(&banks);
+        assert_eq!(names(&banks), [format!(".a.new.{}", std::process::id()), "active".into(), "b".into()]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    const LIVE: &str = r#"{"format": 1}"#;
 
     #[test]
     fn a_good_release_is_installed_into_the_bank() {
@@ -314,7 +463,7 @@ pub mod tests {
         assert_eq!((info["tag"].as_str(), info["protocol"].as_u64()), (Some("v9.9.9"), Some(crate::ipc::PROTOCOL)));
         assert!(banks.join("b/pcds").is_file() && banks.join("b/web/index.html").is_file() && !banks.join("b/old").exists());
         assert_eq!(super::info(&banks, "b").unwrap()["tag"], "v9.9.9");
-        assert_eq!(std::fs::read_dir(&banks).unwrap().count(), 1, "nothing left beside the bank");
+        assert_eq!(names(&banks), ["b"], "nothing left beside the bank");
         // A given version, as v-less as people write it.
         assert_eq!(lookup(&base, Some("9.9.9")).unwrap().tag, "v9.9.9");
         assert!(lookup(&base, Some("v1.0.0")).unwrap_err().contains("404"));
@@ -331,7 +480,7 @@ pub mod tests {
         let e = install(&lookup(&base, None).unwrap(), &banks, "b", None).unwrap_err();
         assert!(e.contains("does not match its published sha256") && e.contains("nothing installed"), "{e}");
         assert_eq!(std::fs::read_to_string(banks.join("b/pcds")).unwrap(), "the old one", "the bank is as it was");
-        assert_eq!(std::fs::read_dir(&banks).unwrap().count(), 1);
+        assert_eq!(names(&banks), ["b"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -353,6 +502,53 @@ pub mod tests {
         // A release that cannot read the running world's snapshot format.
         let old: Value = serde_json::from_str(r#"{"protocol": 2, "format": 7}"#).unwrap();
         assert!(compatible(&super::info(&banks, "b").map(|mut i| { i["protocol"] = crate::ipc::PROTOCOL.into(); i }).unwrap(), &old).unwrap_err().contains("format 7"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn releases_come_over_https_with_plain_tags_and_files() {
+        // http only from 127.0.0.1, which only a test's PCDS_RELEASES names.
+        assert!(local("http://127.0.0.1:8080/releases") && !local("http://127.0.0.1.evil.example/releases") && !local("http://example.com/releases") && !local(RELEASES));
+        let e = get(&agent(false), "http://127.0.0.1:9/releases/latest").unwrap_err();
+        assert!(e.to_lowercase().contains("https"), "{e}");
+        for good in ["v0.6.0", "0.6.0", "v1.0.0-rc.1", "v2_b"] {
+            check_tag(good).unwrap();
+        }
+        for bad in ["", "v", "v1/../../x", "v1..2", "v1 2", "v1;rm", "../x", "v1/2"] {
+            assert!(check_tag(bad).is_err(), "{bad:?}");
+        }
+        assert!(lookup("http://127.0.0.1:9/releases", Some("../../x")).unwrap_err().contains("not a release version"));
+        // A tarball with a link in it: nothing installed.
+        let dir = test_dir("links");
+        let tar = {
+            let name = "pcds-v9.9.9-linux-x86_64";
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+            std::fs::write(dir.join(name).join("pcds"), script(crate::ipc::PROTOCOL)).unwrap();
+            std::os::unix::fs::symlink("/etc/passwd", dir.join(name).join("web")).unwrap();
+            assert!(Command::new("tar").arg("-czf").arg(dir.join("t.tar.gz")).arg("-C").arg(&dir).arg(name).status().unwrap().success());
+            std::fs::remove_dir_all(dir.join(name)).unwrap();
+            std::fs::read(dir.join("t.tar.gz")).unwrap()
+        };
+        let sum = hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
+        let base = format!("{}/releases", serve(release("BASE", "v9.9.9", tar, sum)));
+        let banks = dir.join("bin");
+        let e = install(&lookup(&base, None).unwrap(), &banks, "b", None).unwrap_err();
+        assert!(e.contains("web, which is not a file or a folder"), "{e}");
+        assert!(!banks.join("b").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// bank-info runs with PATH, HOME and LANG only: no token of the server reaches it.
+    #[test]
+    fn bank_info_sees_no_more_than_path_home_and_lang() {
+        let dir = test_dir("env");
+        let program = dir.join("pcds");
+        std::fs::write(&program, "#!/bin/sh\nprintf '{\"protocol\":1,\"env\":\"%s\"}\\n' \"$(env | cut -d= -f1 | sort | tr '\\n' ' ')\"\n").unwrap();
+        std::fs::set_permissions(&program, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let info = ask(&program).unwrap();
+        let seen: Vec<&str> = info["env"].as_str().unwrap().split_whitespace().collect();
+        // What the shell sets itself (PWD, SHLVL, _) aside.
+        assert!(seen.contains(&"PATH") && seen.iter().all(|k| ["PATH", "HOME", "LANG", "PWD", "OLDPWD", "SHLVL", "_"].contains(k)), "{seen:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

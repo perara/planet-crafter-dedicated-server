@@ -56,7 +56,7 @@ impl Ctx {
     /// their times: a later build is newer than the bank).
     fn install_bank(&self, bank: &str, lib: &Path) -> Result {
         let banks = self.banks();
-        let new = banks.join(format!(".{bank}.new"));
+        let new = updater::staging(&banks, bank);
         let _ = fs::remove_dir_all(&new);
         super::mkdir(&new.join("web"))?;
         let copy = |from: &Path, to: &Path| -> Result {
