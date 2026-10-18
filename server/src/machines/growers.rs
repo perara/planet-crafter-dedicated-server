@@ -148,6 +148,7 @@ pub fn tick(game: &mut Game, wo: i32, now: f32) {
 
 // ---- MachineGrowerIfLinkedGroup and MachineConvertRecipe ----------------------------------
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LinkedGrower {
     next: f32,
     rate: f32,
@@ -205,7 +206,7 @@ fn convert_if_fully_grown(game: &mut Game, wo: i32) {
 // ---- MachineGrowerVegetationStatic -------------------------------------------------------
 
 /// The static grower's running coroutine.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Coroutine {
     None,
     /// WaitForInitBeforeGrowing, until then.
@@ -214,6 +215,7 @@ pub enum Coroutine {
     Growing(f32),
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Vegetation {
     random: MathRandom,
     original: Vec<String>,
@@ -314,6 +316,7 @@ pub fn outside_grower_state(game: &Game, wo: i32) -> Option<(u32, f32)> {
 
 // ---- MachineGrowerVegetationHarvestable --------------------------------------------------
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Harvestable {
     /// The second inventory (secondInventoryAssociatedProxy: the first secondary inventory).
     pub second: Option<i32>,

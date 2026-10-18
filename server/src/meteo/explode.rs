@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use crate::game::Game;
 use crate::idmap::{FxHashMap, FxHashSet};
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Explode {
     /// Explode / Exploded parameters by group.
     explosives: FxHashMap<usize, Explosive>,
@@ -29,7 +29,7 @@ pub struct Explode {
     next_scan: f32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct Explosive {
     at_state: i32,
     wait: f32,
@@ -38,13 +38,14 @@ struct Explosive {
     ty: u8,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct Explodable {
     lifetime: f32,
     ty: u8,
     drop: bool,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 enum Step {
     /// The explosive goes off, if this network object still stands for it (not picked up).
     GoOff(i32, u64),

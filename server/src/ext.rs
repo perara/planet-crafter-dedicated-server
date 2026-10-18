@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Ext {
     pub creative_mode: bool,
     pub gauges: crate::gauges::Gauges,
@@ -21,5 +21,9 @@ pub struct Ext {
     pub animals: crate::animals::State,
     pub first_item_linked: crate::handlers::FirstItemLinked,
     pub default_colors: crate::handlers::DefaultColors,
+    /// Not state but plumbing (the admin API's and the hooks' threads share it): made anew by
+    /// a restored game. ponytail: hooks restart their event ids at a flip; they belong in the
+    /// long-lived front (docs/hot-update.md), where they outlive it.
+    #[serde(skip)]
     pub chat: crate::chathooks::State,
 }

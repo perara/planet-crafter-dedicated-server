@@ -12,7 +12,7 @@ const INSIDE_OXYGEN: f32 = 60.0;
 const UNDERWATER_OXYGEN: f32 = -3.6;
 const TICK: f32 = 0.2;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct State {
     pub client: u64,
     pub next_tick: f32,
@@ -20,7 +20,7 @@ pub struct State {
     pub outside_oxygen: f32,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Gauges(pub HashMap<u64, State>);
 
 fn drain(game: &Game) -> f32 {

@@ -24,7 +24,7 @@ use crate::game::{Args, Game};
 use crate::model::WorldObject;
 use crate::net::{enc, Target};
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct State {
     pub instances: crate::instances::State,
 }

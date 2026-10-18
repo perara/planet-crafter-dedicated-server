@@ -14,12 +14,13 @@ use crate::net::{ListEvent, VarValue};
 const CLASS: &str = "LogisticInterplanetaryManager";
 const LIST: &str = "_itemsInPlanetaryLogisticsGroups";
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct State {
     /// _worldObjectsWithInventoriesInPlanetaryLogistics: watched inventory -> its building.
     inventories: IndexMap<i32, i32>,
     /// The group of each item in a watched inventory, for items destroyed before their removal
     /// is propagated.
+    #[serde(with = "crate::handoff::pairs")]
     items: HashMap<(i32, i32), usize>,
     reset: bool,
 }

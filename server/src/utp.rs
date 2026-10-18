@@ -409,6 +409,12 @@ impl Utp {
         self.outbox.clear();
     }
 
+    /// The socket, for a caller that waits on it together with other descriptors.
+    pub fn fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.socket.as_raw_fd()
+    }
+
     pub fn tokens(&self) -> Vec<Token> {
         self.connections.keys().copied().collect()
     }

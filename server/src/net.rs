@@ -12,7 +12,7 @@ use crate::wire::Writer;
 use crate::world::hex;
 
 /// Who a message goes to (among approved clients).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Target {
     All,
     Only(u64),
@@ -73,7 +73,7 @@ pub mod enc {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ListEvent {
     Add(Vec<u8>),
     RemoveAt(i32),
@@ -95,13 +95,13 @@ fn encode_events(events: &[ListEvent]) -> Vec<u8> {
     w.0
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum VarValue {
     Plain(Vec<u8>),
     List(Vec<Vec<u8>>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NetVar {
     pub name: String,
     pub ty: String,
@@ -126,14 +126,14 @@ impl NetVar {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NetBehaviour {
     pub class: String,
     pub index: u16,
     pub vars: Vec<NetVar>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NetObj {
     pub id: u64,
     /// The layout this object was made from (group id, "#static" variant, or prefab name).
@@ -365,11 +365,13 @@ pub fn behaviours(defs: &[BehaviourDef]) -> Vec<NetBehaviour> {
 /// .GetSceneRelativeInSceneNetworkObject); this server sends no scene events to map one.
 const SCENE_HANDLE: i32 = 0;
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Net {
     pub objects: crate::idmap::IdMap<u64, NetObj>,
     next_id: u64,
     /// Messages queued this tick, in order.
     pub out: Vec<(Target, u32, Vec<u8>)>,
+    #[serde(skip)]
     pub spec: Spec,
     pub scene_handle: i32,
     /// Objects with a variable changed since the last flush (the only ones flush looks at).

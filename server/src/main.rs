@@ -9,7 +9,8 @@
 //!        pcds --version [DATA_DIR]
 //!        pcds probe HOST:PORT DATA_DIR SCRIPT.json   (a scripted test player)
 //!        pcds load HOST:PORT DATA_DIR [PLAYERS] [SECONDS]   (a load test, see load.rs)
-//!        pcds extract-raw RAW.json OUT_DIR   (a new game version's tables, see extract.rs)
+//!        pcds read-game GAME_DIR OUT_DIR   (a game version's tables, see native/)
+//!        pcds split DATA_DIR SAVE.json   (hot-update spike: front and game processes, see split.rs)
 //!        pcds COMMAND ...   (installing and running a server: cli/)
 //! Environment:
 //!   PCDS_LISTEN       direct-IP address, default 0.0.0.0:7777; "off" disables
@@ -49,6 +50,7 @@ mod genetics;
 mod geometry;
 mod handlers;
 mod idmap;
+mod handoff;
 mod hooks;
 mod instances;
 mod inventories;
@@ -71,6 +73,7 @@ mod rockets;
 mod rpcspec;
 mod save;
 mod scene;
+mod split;
 mod status;
 mod toxic;
 mod transform;
@@ -146,6 +149,8 @@ fn no_tables(dir: &str, e: String) -> ! {
 
 /// What a world needs besides tables(): the wreck layouts and every free planet's scene dump,
 /// read at start, so a missing or broken file stops the server there and not in the game.
+/// (Default: none, the stand-in a restored game holds until handoff::restore gives it its own.)
+#[derive(Default)]
 pub struct Scenes {
     pub wrecks: Rc<instances::generate::Wrecks>,
     /// Free planet id -> its scene dump. DLC planets have none: the extractor dumps only the
@@ -262,6 +267,8 @@ fn main() {
         Some("native-layout") => native::tables::layout(&args[2..]),
         Some("native-il") => native::tables::il(&args[2..]),
         Some("new-save") => newworld::run(&args[2..]),
+        Some("split") => split::front(&args[2..]),
+        Some("split-game") => split::game(&args[2..]),
         Some("--version") => {
             println!("pcds {}", env!("CARGO_PKG_VERSION"));
             if let Some(dir) = args.get(2) {

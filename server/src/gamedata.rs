@@ -56,6 +56,7 @@ pub struct Layout {
     pub tail_position: Option<usize>,
 }
 
+#[derive(Default)]
 pub struct GameData {
     pub groups: Vec<Group>,
     by_id: HashMap<String, usize>,

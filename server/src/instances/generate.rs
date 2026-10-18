@@ -22,7 +22,7 @@ type RandomData = (i32, bool, Option<String>, Option<String>);
 /// A RandomizePropData: the key of its list and its index there.
 type PropId = (String, usize);
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct Wrecks {
     seeds: u32,
     generators: Vec<GeneratorData>,
@@ -111,7 +111,7 @@ struct Entry {
 }
 
 /// A box collider in world space.
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, serde::Serialize)]
 pub struct Shape {
     position: [f32; 3],
     rotation: [f32; 4],

@@ -12,7 +12,7 @@ pub fn is_from_scene(id: i32) -> bool {
     id < FIRST_PLAYER_MADE_ID
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct WorldObject {
     pub id: i32,
     pub group: usize,
@@ -156,14 +156,14 @@ impl WorldObject {
 }
 
 /// Inventory.LogisticEntity: what the inventory offers and asks drones for.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Logistic {
     pub supply: Vec<usize>,
     pub demand: Vec<usize>,
     pub priority: i32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Inventory {
     pub id: i32,
     pub size: i32,

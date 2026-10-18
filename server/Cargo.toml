@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 ctrlc = { version = "3.5.2", features = ["termination"] }
-indexmap = "2"
+indexmap = { version = "2", features = ["serde"] }
 libc = "0.2"
 # ring is rustls' own crypto (no new crate): HMAC-SHA256 for signed chat webhooks.
 ring = "0.17"

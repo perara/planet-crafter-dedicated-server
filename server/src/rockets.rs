@@ -52,7 +52,7 @@ const INTERPLANETARY_TRAVEL: i32 = 9;
 /// ponytail: nearest-rocket match; dump the CraftSpawn local transforms to match exactly.
 const ROCKET_ON_PLATFORM_RANGE: f32 = 8.0;
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct State {
     /// MachineRocketBackAndForth components, by world object.
     machines: IndexMap<i32, back_and_forth::Machine>,
@@ -67,7 +67,7 @@ pub struct State {
     last_tick: f32,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Departure {
     /// _sequenceStarted.
     started: bool,

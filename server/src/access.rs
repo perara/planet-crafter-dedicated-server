@@ -20,6 +20,7 @@ pub struct Lists {
     pub banned_ips: Vec<String>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Access {
     pub lists: Lists,
     path: Option<String>,

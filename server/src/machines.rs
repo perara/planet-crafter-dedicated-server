@@ -22,7 +22,7 @@ use crate::game::{Args, Game};
 use crate::model::WorldObject;
 use crate::net::Target;
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Machines {
     /// World object -> has energy (machines with a RequireEnergy component).
     pub energy: crate::idmap::IdMap<i32, bool>,
@@ -44,6 +44,7 @@ pub struct Machines {
     ids: Vec<i32>,
     /// No machine has anything due before this (a lower bound; every change to a machine
     /// resets it, and tick skips its walk until then).
+    #[serde(with = "crate::handoff::f32_bits")]
     next_due: f32,
 }
 
@@ -60,6 +61,7 @@ impl Machines {
 }
 
 /// One world object's machine components.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Machine {
     /// The inventory InventoryAssociated.SetInventory gave the machines (0: none).
     linked: i32,
@@ -77,8 +79,10 @@ struct Machine {
     optimizer: Option<production::Optimizer>,
     destruct_if_full: bool,
     /// WorldUnitGenerationViaInventory unit indices.
+    #[serde(with = "unit_names")]
     unit_generation: Vec<&'static str>,
     /// WorldUnitMultiplierViaInventory: (unit, influencedByHunger).
+    #[serde(with = "unit_names")]
     unit_multipliers: Vec<(&'static str, bool)>,
     /// MachineFloater on water: (updateWaterSurfaceInterval, next update).
     floater: Option<(f32, f32)>,
@@ -93,6 +97,38 @@ fn unit_name(name: &str) -> Option<&'static str> {
         "Biomass" => Some("Biomass"),
         _ => None,
     })
+}
+
+/// Unit names in a snapshot: back to the static names (an unknown one is dropped).
+mod unit_names {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub trait Names: Sized {
+        fn to_strings(&self) -> Vec<(String, bool)>;
+        fn from_strings(v: Vec<(String, bool)>) -> Self;
+    }
+    impl Names for Vec<&'static str> {
+        fn to_strings(&self) -> Vec<(String, bool)> {
+            self.iter().map(|u| (u.to_string(), false)).collect()
+        }
+        fn from_strings(v: Vec<(String, bool)>) -> Self {
+            v.into_iter().filter_map(|(u, _)| super::unit_name(&u)).collect()
+        }
+    }
+    impl Names for Vec<(&'static str, bool)> {
+        fn to_strings(&self) -> Vec<(String, bool)> {
+            self.iter().map(|(u, h)| (u.to_string(), *h)).collect()
+        }
+        fn from_strings(v: Vec<(String, bool)>) -> Self {
+            v.into_iter().filter_map(|(u, h)| super::unit_name(&u).map(|u| (u, h))).collect()
+        }
+    }
+    pub fn serialize<T: Names, S: Serializer>(v: &T, s: S) -> Result<S::Ok, S::Error> {
+        v.to_strings().serialize(s)
+    }
+    pub fn deserialize<'de, T: Names, D: Deserializer<'de>>(d: D) -> Result<T, D::Error> {
+        Ok(T::from_strings(Deserialize::deserialize(d)?))
+    }
 }
 
 /// Serialized fields of a group's prefab components of one type; `root` keeps those on the

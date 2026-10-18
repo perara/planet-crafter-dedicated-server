@@ -51,6 +51,7 @@ pub fn q(v: &serde_json::Value) -> [f32; 4] {
 }
 
 /// Unity.Mathematics.Random (xorshift32), the deterministic generator the game seeds itself.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MathRandom {
     pub state: u32,
 }
