@@ -1,8 +1,10 @@
 # Hot update: a new server release without disconnecting players
 
-Status: design plus a spike on branch `hot-update-spike`. The spike proves the risky parts
-with measurements; the refactor itself is not done. Numbers below come from this host (shared,
-32 cores) on a copy of the live world (2551 world objects, 402 network objects, 165 KB save).
+Status: built (branch `hot-update`). The server always runs as a front and a bank; there is no
+single-process mode. Sections (a) to (e) are the design and the spike's measurements; "As built"
+says what the code does now, what it measured, and what is not verified. Numbers come from this
+host (shared, 32 cores) on a copy of the live world (2551 world objects, 402 network objects,
+165 KB save).
 
 The model is dual-bank firmware. Two game binaries are installed side by side (bank A and
 bank B) with a pointer to the active one. An update writes the inactive bank, checks it, and
@@ -13,7 +15,147 @@ crosses the flip as a serialized snapshot of a separate state module, in a versi
 that each release reads in its own version and the previous one, as firmware migrates its
 data sector on boot.
 
-## The answer in short
+## As built
+
+```
+ run/bin/pcds      what the systemd unit runs (`pcds run`): it execs the active bank's
+                   `pcds serve`, the front, with PCDS_BANKS=run/bin
+ run/bin/a/, b/    the banks: pcds, libsteam_api.so, web/, and bank.json (version, front
+                   protocol, snapshot formats, the release tag and its sha256)
+ run/bin/active    "a" or "b": the bank the front starts (written beside, renamed over)
+```
+
+**Modules.** `front.rs` (the front), `bank.rs` (the game process), `ipc.rs` (frames, the
+non-blocking queue, SCM_RIGHTS, the memfd), `updater.rs` (releases into a bank),
+`cli/upgrade.rs` (`pcds upgrade`, the banks in `pcds status`). `split.rs` is gone. The state
+module of (e) is not split out: the state types stay where they are, and `handoff.rs` holds the
+snapshot format, `migrate` and `verify`. `main.rs` dispatches.
+
+**The front** owns the UDP socket and the utp.rs sessions, the Steam game server login, its
+listen socket, every `NetConnection` with its `Split<n>` reassembly, the invite code, the client
+ids, the 300 ms delayed close of kicked clients, the admin HTTP listener (it serves the live
+bank's `web/index.html`), the chat hooks (`chathooks::Hooks`: the event ring, the webhook and
+exec worker, `/api/chat`), and the autosave timer (it sends SAVE; the bank saves only if the
+world advanced). Admin requests other than `/api/stop` and `/api/update` go to the bank as ADMIN
+frames with the autosave setting; the answer comes back as ANSWER, and the front adds its part to
+`/api/status` (invite code, network, uptime, traffic, CPU and memory of front and banks,
+`banks`, `update`). Writes to a bank never block: frames wait in a queue per bank, and a client
+with more than 16 MiB waiting for the game (held during a flip, or a stalled bank) is dropped.
+The bank writes blocking: a front that stopped reading stalls the world, which loses nothing.
+
+**The bank** is the server loop's game half: it builds and parses batches, decides what goes
+out when (the immediate answers, the 16 ms movement batches), kicks (the reason as DATA, then
+KICK; the front closes the connection 300 ms later and says GONE), saves, and keeps the panic
+guard. It ignores SIGINT and SIGTERM: the front tells it to save and stop (STOP), and a bank
+whose front is gone saves and ends. Chat events go to the front as CHAT frames; the chat rules
+go as CHATCFG; replies come back as SAY. Replies that arrive while the world stands still
+(`world.pauseWhenEmpty`) are dropped with a log line.
+
+**Frames** (PROTOCOL 2): HELLO, START, RESTORE, READY, CONNECTED (JSON: ip, steamId, trusted),
+DATA, GONE, KICK, HANDOFF, SNAPSHOT, EXIT, RESUME, ADMIN, ANSWER, SAVE, STOP, CHAT, SAY, CHATCFG
+(`ipc.rs` lists what each carries). RESTORE and SNAPSHOT carry a memfd: the old bank serializes
+straight into it (`handoff::snapshot_to`), seals it, and sends the descriptor; the front passes
+the same descriptor on, and keeps one as the last snapshot. The snapshot never crosses the
+socket.
+
+**A flip** (`POST /api/update`, `pcds upgrade`): the front starts the other bank; its HELLO is
+checked (front protocol, game tables, and that it reads the running world's snapshot format;
+a refusal names `pcds upgrade --restart VERSION` and says a restart disconnects every player,
+Steam players with a new invite code unless PCDS_STEAM_TOKEN is set); HANDOFF; the old bank
+sends what is queued, snapshots and waits; RESTORE; the new bank restores and says READY within
+5 s (the health check); the front sends EXIT, gives the new bank the held frames and writes
+`run/bin/active`. Any failure before READY kills the new bank and sends RESUME. With
+`PCDS_FLIP_VERIFY` the new bank also checks that its restored state, written and read back, is
+the snapshot (without the two clocks and the order of sets); the tests run with it.
+
+**A crash** (the live bank ends outside a flip): the front starts the same bank again from the
+last snapshot when it is newer than the save, else from the save, tells its players "The server
+restarted after an error: join again" and closes their connections; the Steam login and the
+invite code stay. A snapshot restored this way drops every client in it. More than 5 crashes in
+10 minutes and the front exits (systemd's restart and start limit take over). At the first
+start, a bank that cannot load the world makes the front try the other bank once (a broken
+update falls back to the release that ran before).
+
+**The updater** (`updater.rs`, in a thread of the front, or in the CLI when the server is
+stopped): the release from `PCDS_RELEASES` (default GitHub's API for
+perara/planet-crafter-dedicated-server), `pcds-<tag>-linux-x86_64.tar.gz` and its `.sha256` as
+the release workflow publishes them; the tarball's SHA-256 (ring) against the published one;
+`tar -xzf --strip-components=1` into `run/bin/.<bank>.new`; `pcds bank-info` of the unpacked
+program (front protocol and snapshot formats; a release from before hot updates has none and is
+refused); the compatibility check; `bank.json`; then the folder is renamed over the bank. Any
+failure leaves the bank as it was. `PCDS_AUTO_UPDATE=on` checks every
+`PCDS_UPDATE_CHECK_HOURS` (default 24, the first check 10 minutes after the start) and installs
+and flips to a release later than the live bank's; it is off by default, and with it off the
+server never contacts GitHub on its own.
+
+**The CLI.** `pcds upgrade [VERSION] [--restart] | --rollback | --check`. Running: through the
+admin API (`POST /api/update`, then `GET /api/update` until its outcome). `--restart` installs
+into the standby bank without the protocol check, makes it active and restarts the unit (the
+path for a release that changes the front protocol). Stopped: the release becomes the active
+bank for the next start; `--rollback` points `active` at the other bank. `pcds status` lists
+both banks (version, tag, front protocol, snapshot format, which is active and which runs).
+`setup`, `start`, `restart` and `container` install this program into the standby bank and make
+it active when it is a newer build than the active bank's and in neither bank yet (a bank's copy
+keeps the program's modification time), so a rollback is not undone by the next start. The
+unit has `KillMode=mixed` (SIGTERM to the front only, which stops the bank). The dashboard's
+Overview has a "Server banks" panel; the Config tab shows PCDS_AUTO_UPDATE and
+PCDS_UPDATE_CHECK_HOURS (server.env, read-only there).
+
+### Measured
+
+The live world's copy, 8 load-test players (60 s, an action every 200 ms each), a flip every
+5 s between two banks of the same build, without the state check: the world stood **12.6 to
+16.9 ms** over 10 flips (snapshot 2.2 to 2.6 MB written into the memfd in 4.3 to 6.7 ms,
+restored in 8.0 to 9.9 ms, 3 to 5 client frames held). The spike's 10.5 to 29 ms included two
+socket copies of the snapshot (about 12 ms); what is left is the write plus the restore, about
+0.3 ms besides. No player was dropped; the load test's round trips: craft p50 0.59 / p95 0.73 /
+p99 1.44 ms, build 0.59 / 1.13 / 1.19, chat 0.59 / 0.67 / 1.20, the same as without flips (see
+(b)).
+
+The memfd's share (`ipc::tests::ipc`, two runs): 4 MiB written into a memfd, its descriptor
+passed there and back and the content read, 2.0 to 2.2 ms, against 11.6 to 12.1 ms for the same
+bytes through the socket twice in the spike. Frames: a 120-byte round trip p50 4.1 to 4.5 µs,
+p99 11 to 14 µs, back to back.
+
+With `PCDS_FLIP_VERIFY` on the same world: all 10 restored states equal to their snapshots; the
+check takes 65 to 115 ms and is inside the stand (77 to 128 ms), which is why it is a test
+setting.
+
+`bench::handoff` stays EQUAL: 4 players walking, 2 handoffs (`7d6661aa81067690`; serialize
+3.6 ms, restore 7.4 ms), and 4 players acting every 200 ms with 42 handoffs
+(`8a0f77419ee78444`; serialize p50 2.9 ms max 4.1, restore p50 6.7 max 9.4).
+
+`tests/hot_update.rs` (the full suite runs it): a new world, 8 players for 40 s through 6 flips,
+a flip whose new bank dies on its restore (the old one resumed after 2 ms), a flip refused at
+the HELLO (another protocol: the old bank never stopped), every restored state checked; a bank
+killed with SIGKILL, restarted from the last flip's snapshot, its players dropped, a new player
+in; then a release server on 127.0.0.1: a tarball whose sha256 does not match (refused, bank
+untouched), a release of front protocol 999 (refused with the restart message), a good release
+installed and flipped to under 4 players, and a rollback; `pcds upgrade`, `status` and
+`upgrade --rollback` with the server stopped; and `/api/stop` saving the world. On the test's
+small world the stand is 6 to 11 ms with the check (1 to 2 ms without it).
+
+### Not verified
+
+- **Steam.** Steam connections, their `Split<n>` handling and the invite code live in the
+  front, by the same code the single process had (moved, not changed), and pass through the
+  same paths as direct-IP clients (CONNECTED with the verified SteamID, DATA, GONE). No test
+  runs Steam: every run above had `PCDS_STEAM=off`. That a Steam player stays connected through a
+  flip, and that the invite code survives a bank crash, follows from the design and is not
+  measured.
+- **A real GitHub release.** The updater ran only against the release server on 127.0.0.1
+  (the same JSON fields and asset names as GitHub's API and `make dist`); GitHub was not
+  contacted. Its redirects to the asset storage go through ureq's default redirect handling,
+  untested here.
+- **Across releases.** Every flip ran between two banks of the same build; `migrate` has no
+  step yet, and a release from before this one has no `bank-info`, so the first hot update
+  possible is from this release to a later one.
+- **Front restarts.** Updating the front is a restart (`pcds upgrade --restart`): every player
+  reconnects. Keeping the UDP socket and the sessions across it (see (d)) is not built.
+- **The systemd unit** with the front and bank (KillMode=mixed, the stop through the front)
+  was checked by reading, not by running the unit: the tests start the front directly.
+
+## The answer in short (the spike)
 
 - **Front and banks.** A long-lived front (UDP socket, Unity Transport sessions, Steam API and
   connections, the admin listener, the supervisor) and a game process started from the active
@@ -388,7 +530,7 @@ Tools, unchanged, in the same binary: `load.rs`, `probe.rs` (both use `utp.rs` a
 `main.rs` keeps only the subcommand dispatch. The `pcds` script's `run` starts `pcds-server
 front`, which starts the active bank's `pcds-server game`.
 
-## Not proven by the spike
+## Not proven by the spike (at the time; see "As built")
 
 - **Steam.** The spike's front speaks direct IP only. That Steam connections and the invite
   code stay up across flips follows from them living in the front; nothing measured it. What a
@@ -411,17 +553,19 @@ front`, which starts the active bank's `pcds-server game`.
   status through the socket, kicks with their 300 ms delay, restarting a crashed bank: designed
   above, not built.
 
-## Running the spike
+## Running it
 
 ```
 cd server && cargo test --release --no-run     # then, with LD_LIBRARY_PATH set as in the README:
 PCDS_BENCH_SAVE=<copy of world.json> PCDS_RNG_SEED=1 PCDS_BENCH_SECONDS=300 PCDS_BENCH_PLAYERS=4 \
   [PCDS_BENCH_ACTION_MS=200] [PCDS_BENCH_HANDOFF=<seconds between handoffs>] \
-  target/release/deps/pcds_server-* bench::handoff --ignored --nocapture
-target/release/deps/pcds_server-* split::tests::ipc --ignored --exact --nocapture
+  target/release/deps/pcds-* bench::handoff --ignored --nocapture
+target/release/deps/pcds-* ipc::tests::ipc --ignored --exact --nocapture
+PCDS_TEST_DATA=<tables> target/release/deps/hot_update-* --nocapture   # the end-to-end test
 
-# a split server with a flip every 10 s, the 3rd failing on purpose, on a scratch save:
-PCDS_LISTEN=127.0.0.1:47777 PCDS_SPLIT_SECONDS=70 PCDS_SPLIT_SWAP=10 PCDS_SPLIT_FAIL=3 \
-  target/release/pcds-server split DATA_DIR scratch-world.json &
-target/release/pcds-server load 127.0.0.1:47777 DATA_DIR 8 60
+# a server on a scratch save, flipped by hand (both banks are this build without PCDS_BANKS):
+PCDS_LISTEN=127.0.0.1:47777 PCDS_ADMIN=127.0.0.1:47778 PCDS_ADMIN_TOKEN=t PCDS_STEAM=off \
+  target/release/pcds serve DATA_DIR scratch-world.json &
+target/release/pcds load 127.0.0.1:47777 DATA_DIR 8 60 &
+curl -X POST -H 'Authorization: Bearer t' -d '{"rollback": true}' http://127.0.0.1:47778/api/update
 ```

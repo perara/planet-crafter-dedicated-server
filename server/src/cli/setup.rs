@@ -381,4 +381,35 @@ mod tests {
         assert!(!dir.join("run/worlds/world.new").exists());
         fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// This program goes into a bank once: the first install into a, a newer build into the
+    /// standby bank (then the active one), the same build never again (a rollback to the
+    /// other bank stays).
+    #[test]
+    fn builds_go_into_the_standby_bank_once() {
+        let dir = super::super::test_dir("install-bank");
+        let ctx = super::super::test_ctx(&dir);
+        fs::create_dir_all(dir.join("build/web")).unwrap();
+        for (f, text) in [("pcds", "build 1"), ("libsteam_api.so", "lib"), ("web/index.html", "page")] {
+            fs::write(dir.join("build").join(f), text).unwrap();
+        }
+        let banks = ctx.banks();
+        let program = |b: &str| fs::read_to_string(banks.join(b).join("pcds")).ok();
+        ctx.install_server().unwrap();
+        assert_eq!((updater::active(&banks), program("a"), program("b")), ("a".into(), Some("build 1".into()), None));
+        assert_eq!(updater::info(&banks, "a").unwrap()["protocol"], crate::ipc::PROTOCOL);
+        assert!(banks.join("a/libsteam_api.so").is_file() && banks.join("a/web/index.html").is_file() && ctx.installed().is_file());
+        ctx.install_server().unwrap();
+        assert!(!banks.join("b").exists(), "the same build again: nothing");
+        // A later build.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(dir.join("build/pcds"), "build 2").unwrap();
+        ctx.install_server().unwrap();
+        assert_eq!((updater::active(&banks), program("a"), program("b")), ("b".into(), Some("build 1".into()), Some("build 2".into())));
+        // Rolled back to a: the build in b is not installed over it again.
+        updater::set_active(&banks, "a").unwrap();
+        ctx.install_server().unwrap();
+        assert_eq!((updater::active(&banks), program("a")), ("a".into(), Some("build 1".into())));
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

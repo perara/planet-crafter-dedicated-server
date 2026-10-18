@@ -761,15 +761,15 @@ impl Front {
         }
         *self.web.write().unwrap_or_else(|e| e.into_inner()) = self.web_page(&to);
         if recovered {
-            println!("bank {to} (pid {}) runs the world again ({} players were in it)", self.live.as_ref().map_or(0, |b| b.child.id()), ready["players"]);
+            println!("bank {to} (pid {}) runs the world again", self.live.as_ref().map_or(0, |b| b.child.id()));
             return;
         }
         let Some(flip) = self.flip.take() else { return };
         let stood = flip.stopped.map(|t| t.elapsed()).unwrap_or_default();
         self.flips += 1;
         let verified = match ready["verified"].as_bool() {
-            Some(true) => "; the restored state is the snapshot's, checked",
-            _ => "",
+            Some(true) => format!("; the restored state is the snapshot's, checked in {:.1} ms (in the stand)", ready["verifyMs"].as_f64().unwrap_or(0.0)),
+            _ => String::new(),
         };
         let message = format!(
             "flip {from} -> {to} ({}): the world stood {:.1} ms (snapshot {} bytes written in {:.1} ms, restored in {:.1} ms; {held} client frames held){verified}",
@@ -781,7 +781,7 @@ impl Front {
         );
         println!("{message}");
         let version = self.live.as_ref().map(|b| b.hello["version"].clone()).unwrap_or_default();
-        self.record(flip.seq, true, &message, json!({"from": from, "to": to, "stoodMs": ms(stood), "snapshotBytes": flip.snapshot["bytes"], "held": held, "verified": ready["verified"], "version": version}));
+        self.record(flip.seq, true, &message, json!({"from": from, "to": to, "stoodMs": ms(stood), "snapshotBytes": flip.snapshot["bytes"], "snapshotMs": flip.snapshot["ms"], "restoreMs": ready["restoreMs"], "held": held, "verified": ready["verified"], "version": version}));
     }
 
     /// A flip that did not work: the new bank is killed, the old one goes on with the frames

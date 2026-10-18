@@ -54,7 +54,7 @@ impl Ctx {
             say(format!("downloading {} into bank {target}", release.tag));
             let info = updater::install(&release, &banks, &target, None)?;
             updater::set_active(&banks, &target)?;
-            say(format!("{} installed (sha256 checked) in bank {target}, the active one now", describe(&info)));
+            say(format!("{} installed in bank {target} (sha256 checked), the active one now: {}", release.tag, describe(&info)));
         }
         if running {
             say("restarting the server: every player is disconnected and reconnects");

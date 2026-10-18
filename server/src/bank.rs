@@ -58,11 +58,12 @@ pub fn run(args: &[String]) {
     hello["gameVersion"] = net_data.game_version.clone().into();
     let protocol = if fail_for_test("protocol") { 999 } else { ipc::PROTOCOL };
     link.send(ipc::HELLO, protocol, hello.to_string().as_bytes());
-    let mut verified = Value::Null;
-    let started = Instant::now();
+    let (mut verified, mut verify_ms) = (Value::Null, 0.0);
+    let mut started = Instant::now();
     let game = match link.recv() {
         Some(f) if f.kind == ipc::START => load(dir, save_path, net_data, data, spec, scenes),
         Some(f) if f.kind == ipc::RESTORE => {
+            started = Instant::now();
             if fail_for_test("restore") {
                 eprintln!("bank: dying on the restore (PCDS_BANK_FAIL=restore)");
                 std::process::exit(3);
@@ -73,11 +74,13 @@ pub fn run(args: &[String]) {
             match restored {
                 Ok((mut g, snapshot)) => {
                     if std::env::var_os("PCDS_FLIP_VERIFY").is_some() {
+                        let t = Instant::now();
                         if let Err(e) = crate::handoff::verify(&g, &snapshot) {
                             eprintln!("bank: {e}");
                             std::process::exit(3);
                         }
                         verified = true.into();
+                        verify_ms = t.elapsed().as_secs_f64() * 1000.0;
                     }
                     if recover {
                         // After a crash: the clients in it are gone (the front dropped them).
@@ -94,7 +97,7 @@ pub fn run(args: &[String]) {
         }
         _ => return,
     };
-    let ready = json!({"restoreMs": started.elapsed().as_secs_f64() * 1000.0, "verified": verified, "players": game.clients.len()});
+    let ready = json!({"restoreMs": started.elapsed().as_secs_f64() * 1000.0 - verify_ms, "verifyMs": verify_ms, "verified": verified});
     link.send(ipc::READY, 0, ready.to_string().as_bytes());
     Bank { game, link, save_path: save_path.clone(), build_id }.serve();
 }

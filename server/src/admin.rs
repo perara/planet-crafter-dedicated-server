@@ -130,7 +130,12 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
     }
     let Some(length) = length else { return respond(stream, 400, "application/json", "{\"error\":\"bad Content-Length\"}") };
     if length as u64 > MAX_REQUEST {
-        return respond(stream, 413, "application/json", &format!("{{\"error\":\"a request body is at most {} KiB\"}}", MAX_REQUEST >> 10));
+        let answered = respond(stream.try_clone()?, 413, "application/json", &format!("{{\"error\":\"a request body is at most {} KiB\"}}", MAX_REQUEST >> 10));
+        // A lingering close: read (up to 1 MiB, 2 s) what the client still sends, so the kernel
+        // does not reset the connection over unread bytes before the answer is read.
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        let _ = std::io::copy(&mut Deadline(stream, Instant::now() + Duration::from_secs(2)).take(1 << 20), &mut std::io::sink());
+        return answered;
     }
     // Past MAX_REQUEST the reader ends: headers and body together over it fail here.
     let mut body = vec![0u8; length];

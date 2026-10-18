@@ -98,6 +98,11 @@
         <div class="msg" id="inviteMsg"></div>
       </section>
       <section class="panel"><h2>Server</h2><dl id="info"></dl></section>
+      <section class="panel">
+        <h2>Server banks</h2>
+        <p class="sub">The server runs from one of two installed releases (banks). <code>pcds upgrade</code> installs a new release into the other bank and hands the running world over to it without disconnecting anyone; <code>pcds upgrade --rollback</code> hands it back.</p>
+        <div id="banks"></div>
+      </section>
       <section class="panel"><h2>Terraformation</h2><div id="units"></div></section>
       <section class="panel"><h2>World settings</h2><div id="worldSettings"></div></section>
     </div>
@@ -170,7 +175,7 @@
       <section class="panel">
         <h2>Kick, ban, unban</h2>
         <p class="sub">A name (any case) or client id. A ban also bans the SteamID (invite code) or IP (direct IP) of an online player; an offline name is banned as written. The access lists are under Config.</p>
-        <div class="row"><input id="modPlayer" placeholder="Player" aria-label="Player"><button id="modKick">Kick</button><button class="danger" id="modBan">Ban</button></div>
+        <div class="row"><input id="modPlayer" placeholder="Player name" aria-label="Player name"><button id="modKick">Kick</button><button class="danger" id="modBan">Ban</button></div>
         <div class="row" style="margin-top: 8px"><input id="modUnban" placeholder="Name, SteamID or IP" aria-label="Unban"><button id="modUnbanGo">Unban</button></div>
         <div class="msg" id="modMsg"></div>
         <h2 style="margin-top: 16px">Banned</h2>
@@ -300,6 +305,19 @@ function renderOverview(s) {
     Object.entries(s.units || {}).map(([k, u]) => [k, cell(number(u.value), 'num'), cell(number(u.perSecond), 'num')]), 'No units'));
   $('worldSettings').replaceChildren(table(['Setting', 'Value'],
     Object.entries(world.settings || {}).map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v) : String(v)]), 'No settings'));
+  const b = s.banks || {}, u = s.update || {};
+  const installed = (b.installed || []).length ? b.installed : (b.live ? [{ bank: b.live.bank, info: b.live }] : []);
+  $('banks').replaceChildren(table(['Bank', 'Release', 'Front protocol', 'Snapshot format', 'State'], installed.map(x => {
+    const i = x.info || {}, running = b.live && b.live.bank === x.bank;
+    const state = [running ? `running the world (pid ${b.live.pid})` : null, b.active === x.bank ? 'active' : null].filter(Boolean).join(', ') || 'standby';
+    return [x.bank, i.version ? `pcds ${i.version}${i.tag ? ` (${i.tag})` : ''}` : 'empty', i.protocol ?? '–', i.format ?? '–', state];
+  }), 'No banks'), h('dl', { style: 'margin-top: 12px' }, ...pairs([
+    ['Front', `pcds ${b.frontVersion ?? '–'}, protocol ${b.frontProtocol ?? '–'}`],
+    ['Flips', `${b.flips ?? 0} since the start; ${b.crashes ?? 0} restarts after a crash`],
+    ['Automatic updates', u.auto ? `on, a check every ${u.checkHours} h` : 'off (PCDS_AUTO_UPDATE)'],
+    ['Latest release', u.latest || 'not checked yet'],
+    ['Last update or flip', u.doing ? `under way: ${u.doing}` : u.last ? `${u.last.ok ? 'done' : 'failed'}: ${u.last.message}` : 'none yet']
+  ])));
   $('invitePanel').hidden = !s.inviteCode;
   $('inviteCode').textContent = s.inviteCode || '';
 }
@@ -308,8 +326,8 @@ const playerName = p => p.name || `(joining, client ${p.id})`;
 function renderPlayers(s) {
   const rows = s.players.map(p => {
     const g = p.gauges ? p.gauges.slice(0, 3).map(v => Math.round(v)).join(' / ') : '–';
-    const kick = h('button', { class: 'small', onclick: () => act('playersMsg', `Kicked ${playerName(p)}`, () => api('POST', '/api/kick', { player: String(p.id) })) }, 'Kick');
-    const ban = h('button', { class: 'small danger', onclick: () => { if (confirm(`Ban ${playerName(p)}?`)) act('playersMsg', `Banned ${playerName(p)}`, () => api('POST', '/api/ban', { player: String(p.id) })); } }, 'Ban');
+    const kick = h('button', { class: 'small', onclick: () => act('playersMsg', `Kicked ${playerName(p)}`, () => api('POST', '/api/kick', { id: p.id })) }, 'Kick');
+    const ban = h('button', { class: 'small danger', onclick: () => { if (confirm(`Ban ${playerName(p)}?`)) act('playersMsg', `Banned ${playerName(p)}`, () => api('POST', '/api/ban', { id: p.id })); } }, 'Ban');
     return [playerName(p), p.steamId ? `Steam ${p.steamId}` : `client ${p.id}`, p.verified ? 'Steam' : p.ip, p.status,
       cell(g, 'num'), cell(pos(p.position), 'num'), cell(duration(p.connectedSeconds), 'num'), h('td', { class: 'row' }, kick, ban)];
   });
@@ -377,7 +395,7 @@ $('tpGo').onclick = () => {
   if (!player) return note('tpMsg', 'Pick a player', true);
   if (ids.some(id => $(id).value === '')) return note('tpMsg', 'Give x, y and z', true);
   const position = ids.map(id => Number($(id).value)), name = $('tpPlayer').selectedOptions[0].textContent;
-  act('tpMsg', `${name} sent to ${pos(position)}`, () => api('POST', '/api/teleport', { player, position }));
+  act('tpMsg', `${name} sent to ${pos(position)}`, () => api('POST', '/api/teleport', { id: Number(player), position }));
 };
 
 // ---- world ----
@@ -408,7 +426,8 @@ function put(el, k, v) { if (k.type === 'bool') el.checked = !!v; else el.value 
 function read(el, k) {
   if (k.type === 'bool') return el.checked;
   const s = el.value.trim();
-  if (k.type === 'list') return s.split(/[\n,]/).map(x => x.trim()).filter(Boolean);
+  // One per line: a program's argument or a URL may hold a comma.
+  if (k.type === 'list') return s.split('\n').map(x => x.trim()).filter(Boolean);
   // A line that is not "name = number" goes as null: the server names the setting it refuses.
   if (k.type === 'map') return Object.fromEntries(s.split('\n').map(x => x.trim()).filter(Boolean).map(x => { const m = x.match(/^(\S+?)\s*[=:]\s*(\S+)$/); return m ? [m[1], Number(m[2])] : [x, null]; }));
   if (s === '') return null;
@@ -433,8 +452,8 @@ function knobCard(k) {
   // A secret is never shown: an empty field, whose value replaces it.
   const secretSet = k.secret && k.value === '(set)';
   if (k.secret && !k.readOnly) k = { ...k, value: null, description: k.description + (secretSet ? ' Set: type a new value to replace it, Reset to clear it.' : ' Not set.') };
-  // An unset value (null) is the default.
-  const same = k.value === null || JSON.stringify(k.value) === JSON.stringify(k.default);
+  // An unset value (null) is the default; a secret that is set is not.
+  const same = !secretSet && (k.value === null || JSON.stringify(k.value) === JSON.stringify(k.default));
   const err = h('div', { class: 'err' });
   errors.set(k.key, err);
   let body;
@@ -487,8 +506,8 @@ async function loadLogs() {
 $('logsRefresh').onclick = loadLogs;
 $('chatSend').onclick = () => act('chatMsg', 'Sent', async () => { await api('POST', '/api/chat', { text: $('chatText').value }); $('chatText').value = ''; });
 $('chatText').onkeydown = e => { if (e.key === 'Enter') $('chatSend').click(); };
-$('modKick').onclick = () => act('modMsg', `Kicked ${$('modPlayer').value}`, () => api('POST', '/api/kick', { player: $('modPlayer').value }));
-$('modBan').onclick = () => { if (confirm(`Ban ${$('modPlayer').value}?`)) act('modMsg', `Banned ${$('modPlayer').value}`, () => api('POST', '/api/ban', { player: $('modPlayer').value })); };
+$('modKick').onclick = () => act('modMsg', `Kicked ${$('modPlayer').value}`, () => api('POST', '/api/kick', { name: $('modPlayer').value }));
+$('modBan').onclick = () => { if (confirm(`Ban ${$('modPlayer').value}?`)) act('modMsg', `Banned ${$('modPlayer').value}`, () => api('POST', '/api/ban', { name: $('modPlayer').value })); };
 $('modUnbanGo').onclick = () => act('modMsg', `Unbanned ${$('modUnban').value}`, () => api('POST', '/api/unban', { value: $('modUnban').value }));
 
 $('copyCode').onclick = () => navigator.clipboard.writeText($('inviteCode').textContent).then(() => note('inviteMsg', 'Invite code copied'), () => note('inviteMsg', 'Copy failed; select the code instead', true));
