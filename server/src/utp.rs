@@ -34,6 +34,9 @@ const RESEND: Duration = Duration::from_millis(200);
 const INITIAL_WINDOW: usize = 4;
 const MAX_BACKOFF: u32 = 4;
 const STALL: Duration = Duration::from_secs(15);
+/// How long a session closed from this side may take to deliver what was queued (a kick's
+/// reason) before its disconnect goes out.
+const LINGER: Duration = Duration::from_secs(2);
 const HEARTBEAT_AFTER: Duration = Duration::from_millis(500);
 const TIMEOUT: Duration = Duration::from_secs(30);
 const FIRST: u16 = 0x8000;
@@ -100,6 +103,8 @@ struct Connection {
     window: usize,
     progress: Instant,
     backoff: u32,
+    /// Closed from this side: the disconnect goes out once everything is acknowledged, or then.
+    closing: Option<Instant>,
 }
 
 impl Connection {
@@ -123,6 +128,7 @@ impl Connection {
             window: INITIAL_WINDOW,
             progress: now,
             backoff: 0,
+            closing: None,
         }
     }
 
@@ -281,7 +287,7 @@ impl Utp {
             }
         }
         self.inbox = inbox;
-        let stalled = |c: &Connection| !c.in_flight.is_empty() && now - c.progress > STALL;
+        let stalled = |c: &Connection| c.closing.is_none() && !c.in_flight.is_empty() && now - c.progress > STALL;
         let silent = |c: &Connection| now - c.last_receive > TIMEOUT || (!c.data_seen && now - c.opened > DATA_WITHIN) || stalled(c);
         let silent: Vec<Token> = if self.connections.values().any(silent) { self.connections.iter().filter(|(_, c)| silent(c)).map(|(t, _)| *t).collect() } else { Vec::new() };
         for token in silent {
@@ -421,8 +427,13 @@ impl Utp {
     /// Sends what fits in the window, resends what was not acknowledged, acks, heartbeats.
     pub fn flush(&mut self) {
         let now = Instant::now();
+        let mut done = Vec::new();
         for (token, c) in self.connections.iter_mut() {
             if !c.data_seen {
+                continue;
+            }
+            if c.closing.is_some_and(|deadline| now >= deadline || (c.queued.is_empty() && c.in_flight.is_empty())) {
+                done.push(*token);
                 continue;
             }
             let before = self.outbox.len();
@@ -462,6 +473,17 @@ impl Utp {
         }
         mmsg::send(&self.socket, &self.outbox);
         self.outbox.clear();
+        for token in done {
+            self.disconnect(&token);
+        }
+    }
+
+    /// Closes a session from this side once what is queued for it (a kick's reason) is
+    /// delivered, or after LINGER; nothing more is reported for it.
+    pub fn close(&mut self, token: &Token) {
+        if let Some(c) = self.connections.get_mut(token) {
+            c.closing = Some(Instant::now() + LINGER);
+        }
     }
 
     /// Tells the client it is disconnected and forgets it.
@@ -710,6 +732,46 @@ mod tests {
 
     fn reliable(token: &Token, sequence: u16, bytes: &[u8]) -> Vec<u8> {
         [[DATA].as_slice(), token, &[RELIABLE, PAYLOAD, 0, 0, 0], &sequence.to_le_bytes(), &u16::MAX.to_le_bytes(), &u64::MAX.to_le_bytes(), bytes].concat()
+    }
+
+    /// A closed session first delivers what was queued (the kick's reason), then disconnects;
+    /// one that never acks is disconnected after LINGER.
+    #[test]
+    fn a_closed_session_delivers_its_last_words_first() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = server.socket.local_addr().unwrap();
+        let c = client(0);
+        c.connect(addr).unwrap();
+        let token = [14; 8];
+        c.send(&[[b'U', b'T', b'P', 1, REQUEST].as_slice(), &token].concat()).unwrap();
+        c.send(&[[DATA].as_slice(), &token].concat()).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        server.poll();
+        recv(&c);
+        server.send(&token, b"you are kicked");
+        server.close(&token);
+        server.flush();
+        let reason = recv(&c);
+        assert_eq!((reason[0], &reason[26..30]), (DATA, 14i32.to_le_bytes().as_slice()), "the reason first");
+        server.flush();
+        assert!(server.connections.contains_key(&token), "waits for the ack");
+        let ack = [[DATA].as_slice(), &token, &[RELIABLE, ACK, 0, 0, 0, 0, 0, 0, 0], &u64::MAX.to_le_bytes()].concat();
+        c.send(&ack).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(server.poll().is_empty());
+        server.flush();
+        assert_eq!(recv(&c), [[DISCONNECT].as_slice(), &token].concat());
+        assert!(server.connections.is_empty());
+        // Never acknowledged: gone after LINGER all the same.
+        let mute = [15; 8];
+        handshake(&mut server, "127.0.0.1:9".parse().unwrap(), mute);
+        server.datagram(&[[DATA].as_slice(), &mute].concat(), "127.0.0.1:9".parse().unwrap(), Instant::now(), &mut Vec::new());
+        server.send(&mute, b"bye");
+        server.close(&mute);
+        server.flush();
+        server.connections.get_mut(&mute).unwrap().closing = Some(Instant::now());
+        server.flush();
+        assert!(server.connections.is_empty());
     }
 
     /// Lengths of 0 or below are skipped, not passed on as empty batches.

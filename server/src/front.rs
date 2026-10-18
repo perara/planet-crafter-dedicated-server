@@ -35,7 +35,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use steamworks::networking_sockets::{ListenSocket, NetConnection};
-use steamworks::networking_types::{ListenSocketEvent, SendFlags};
+use steamworks::networking_types::{AppNetConnectionEnd, ListenSocketEvent, NetConnectionEnd, SendFlags};
 use steamworks::{Server, ServerMode, SteamServersConnected};
 
 use crate::admin;
@@ -602,12 +602,14 @@ impl Front {
     /// Closes a connection from this side.
     fn close(&mut self, client: u64) {
         match self.conns.remove(&client) {
-            Some(Conn::Steam { connection, .. }) => drop(connection),
+            // Lingering: what was sent (a kick's reason) is delivered before the close.
+            Some(Conn::Steam { connection, .. }) => {
+                connection.close(NetConnectionEnd::App(AppNetConnectionEnd::generic_normal()), Some("closed by the server"), true);
+            }
             Some(Conn::Ip(token)) => {
                 self.ip_clients.remove(&token);
                 if let Some(utp) = self.utp.as_mut() {
-                    utp.flush();
-                    utp.disconnect(&token);
+                    utp.close(&token);
                 }
             }
             None => return,
