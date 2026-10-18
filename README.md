@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/perara/planet-crafter-dedicated-ser
 It checks the machine and offers to install what is missing (curl, 32-bit libraries for
 steamcmd) with your package manager. Then it downloads the latest release into
 `~/planet-crafter-server` and sets everything up. It reads the game tables from your game's
-files, which takes about half a minute. It asks
+files, which takes under a minute. It asks
 whether to play one of your saves or a new world, and starts the server as a service that
 survives reboots. It checks that players can get in, and prints the invite code and the address
 to join. Run the same command again to upgrade; your worlds and settings stay.
@@ -40,7 +40,7 @@ Options go after `bash -s --`, for example
 Or with Docker, on any Linux with Docker:
 
 ```bash
-docker run -d --name pcds --restart unless-stopped \
+docker run -d --name pcds --restart unless-stopped --stop-timeout 90 \
   -p 7777:7777/udp -p 127.0.0.1:7782:7782 \
   -v "$PWD/pcds-data:/data" \
   -v "$HOME/.local/share/Steam/steamapps/common/The Planet Crafter:/game:ro" \
@@ -65,7 +65,7 @@ See [Docker](#docker) for the data folder, managing worlds and Compose.
 
 **No Wine.** The server is native Linux code, and so is reading the game: once per game version
 `pcds` reads the tables the server needs (network registrations, items, buildings, every
-planet's scene, the wrecks' layouts) straight from the game's files, about half a minute.
+planet's scene, the wrecks' layouts) straight from the game's files, in under a minute.
 
 Tested with game version 2.103.
 
@@ -140,18 +140,32 @@ Other ways:
 - From source: `git pull`, `make build`, then `pcds restart`.
 
 The systemd units run `run/bin/pcds`, a copy of the program with `libsteam_api.so` and `web/`
-beside it, so `make clean` or a removed release folder does not take the server down; it starts
-the active bank. `setup`, `up`, `install-service`, `start` and `restart` put a newer build or
-release into the standby bank and make it the active one, unless a bank holds that build already
-(so a rollback stays rolled back).
+beside it, so `make clean` or a removed release folder does not take the server down. It hands
+every command to the active bank's program, so the server, `pcds run` (which starts and watches
+it), the hourly game update check and the game tables' reader are always the release that runs,
+however it was installed. `setup`, `up`, `install-service`, `start` and `restart` put a newer
+build or release into the standby bank (never the one that runs the world) and make it the active
+one, unless a bank holds that build already (so a rollback stays rolled back); an older one is
+not installed, and says so (`pcds upgrade vX.Y.Z --restart` goes back on purpose). A release
+whose server cannot start the world falls back to the other bank, which ran before (unless you
+rolled back from it); `pcds status` then says which bank started and why.
 
 From 0.5 or older (the bash `pcds`):
-- The units ran the bash `pcds`, which is gone: the server does not start until
+- A release folder (the installer's): its `pcds` is the new program now, so the old units still
+  start the server. `pcds run` writes this version's units in their place (the stop handling
+  changed: `KillMode=mixed`, `TimeoutStopSec=90`); systemd uses them from the next start, so
+  run `pcds restart` once.
+- A checkout: the units ran the bash `pcds`, which is gone, so the server does not start until
   `pcds install-service` (or `pcds up`) has written the units again.
 - A game build is recognised by a hash of its code now: the server stops with "the game changed"
   until `pcds update` has extracted the game tables once more.
 - A world still in `run/world.json` (before 0.5) is not moved any more: move it to
   `run/worlds/world.json` yourself.
+- What the Wine-era table extraction left (`run/extractor/`, a Wine prefix with copies of the
+  game's files; `/data/extractor` in Docker; `run/bin/pcds-server`; a 0.5 release folder's
+  `bin/pcds-server` and `bin/PcdsExtractor.dll`; unfinished `run/data/.<version>.new/`) is
+  removed by the first `pcds update`, `pcds up`, `pcds setup` or container start, which says
+  so.
 
 ## Docker
 
@@ -168,8 +182,8 @@ data/
   data/<game version>/   the game tables, extracted on the first start
 ```
 
-Mount your game folder read-only at `/game`. The first start extracts its tables, which takes a
-few minutes (`docker logs -f pcds`); later starts only extract again after a game update. Without
+Mount your game folder read-only at `/game`. The first start extracts its tables, which takes
+under a minute (`docker logs -f pcds`); later starts only extract again after a game update. Without
 the game on the machine, start once interactively and download it with your Steam login:
 `docker run -it -e STEAM_USER=yourname -v "$PWD/pcds-data:/data" ... ghcr.io/perara/planet-crafter-dedicated-server`.
 From then on the container runs that download (`data/game`, updated at each start). The game
@@ -187,7 +201,10 @@ docker exec pcds pcds players | rules | gui
 ```
 
 The admin page listens on port 7782 inside the container; publish it on 127.0.0.1 only, as
-above. `PUID`/`PGID` (default 1000) set who owns `data/` on the host. On the first start without
+above. The image's health check asks the admin API for the server's status (`docker ps` shows
+it healthy once the world runs), so it needs `PCDS_ADMIN` on, as it is by default.
+`--stop-timeout 90` gives the server time to save the world at `docker stop` (Docker's default
+of 10 s would kill it during the save); Compose has `stop_grace_period: 90s`. `PUID`/`PGID` (default 1000) set who owns `data/` on the host. On the first start without
 a world, the newest save in `data/worlds/` runs, or a new world is made (`PCDS_NEW_WORLD`, for
 example `--planet Aqualis`, chooses its options). [compose.yaml](compose.yaml) does the same with
 `docker compose up -d`.
@@ -219,6 +236,18 @@ example `--planet Aqualis`, chooses its options). [compose.yaml](compose.yaml) d
 | `PCDS_RULES` | `run/rules.json` | the server rules file (see [Server rules](#server-rules)) |
 | `PCDS_AUTO_UPDATE` | `off` | `on`: install each new server release and hand the world over to it (see [Upgrading](#upgrading)) |
 | `PCDS_UPDATE_CHECK_HOURS` | `24` | hours between those checks |
+| `PCDS_ACCESS` | `run/access.json` | the access lists file (see [Administration](#administration)) |
+| `PCDS_WEB` | the bank's `web/index.html` | the admin web page's file (for a page of your own) |
+| `PCDS_TRACE` | empty | set: log every incoming message and RPC (debugging; a lot of output) |
+| `PCDS_RELEASES` | GitHub's API for this project | where `pcds upgrade` and `PCDS_AUTO_UPDATE` look up releases (a mirror) |
+
+A value that is not what the setting takes (`PCDS_AUTOSAVE=five`, a port out of range) stops
+the server at start, with the setting named in `./pcds logs`.
+
+Two more are read only when `pcds setup` first writes `run/server.env`, from the environment:
+`PCDS_PORT` (default `7777`, the port of `PCDS_LISTEN`) and `PCDS_ADMIN_BIND` (default
+`127.0.0.1:7782`, the first `PCDS_ADMIN`; the Docker image sets `0.0.0.0:7782`). For example
+`PCDS_PORT=7778 ./pcds setup ...` for a second server.
 
 `run/server.env` holds the admin token and is readable by your user only.
 
@@ -378,9 +407,16 @@ On a machine without Steam, copy the updated game folder over and run
 `./pcds update --game DIR`. Every game folder, from Steam or copied, is recognised by a hash of
 its code (`Planet Crafter_Data/Managed/Assembly-CSharp.dll`). The server runs only on the tables
 that match the installed game: after a game update it does not start until `pcds update` has
-read the new ones, and it stops at start when a table file is missing. One extraction runs at a
-time (it locks `run/.extract.lock`): it uses ports 7791 and 7781 on 127.0.0.1, which a second
-server on the same machine shares.
+read the new ones, and it stops at start when a table file is missing. `pcds status` (and
+`/api/status`'s `tables.warning`) says when the installed game has no tables yet. One extraction
+runs at a time (it locks `run/.extract.lock`).
+
+The tables are read by the release the server runs (the active bank's `pcds read-game`), and
+each folder says which tables format wrote it (`tables-format`). A release that reads the tables
+another way has another format: the server refuses tables of another format at start, `pcds
+update` (and `pcds start`, `pcds restart` and `pcds upgrade --restart`) read them again, and a
+hot update to such a release is refused with what to do instead. A game update that steamcmd
+cannot download (`--steam-user` installs) fails `pcds update`, so the hourly unit shows it.
 
 ## Worlds and backups
 
@@ -455,8 +491,10 @@ make build      # server/target/release/pcds (make install links it as ~/.local/
 make test       # also: make lint, make docker, make dist (the release tarball), make clean
 ```
 
-Tests that need game tables use `run/data/2.103` (or `PCDS_TEST_DATA`) and skip themselves
-without them, as in CI. `pcds probe HOST:PORT DATA_DIR SCRIPT.json` is a scripted player
+Tests that need game tables use `run/data/2.103` (or `PCDS_TEST_DATA`) and fail without
+them; `PCDS_TEST_DATA=none` skips them, as CI does (the tables are not in the repository).
+`src/coverage.txt` names the tests of every server RPC and every module; a test fails when an
+RPC or a module is missing from it. `pcds probe HOST:PORT DATA_DIR SCRIPT.json` is a scripted player
 that prints everything a server sends; `tools/probe_diff.py` compares two such runs (against a
 real game host and this server, for instance). `pcds tables-diff EXPECTED ACTUAL` compares two
 table folders section by section.

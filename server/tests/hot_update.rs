@@ -3,7 +3,7 @@
 //! flip whose new bank dies, a flip refused at its HELLO, a bank killed outside a flip, and
 //! the updater against a release server on 127.0.0.1 (a good release, one whose sha256 does
 //! not match, one of another front protocol) and a rollback. Needs game tables
-//! (PCDS_TEST_DATA, else run/data/2.103): skipped without them, as the unit tests are.
+//! (PCDS_TEST_DATA, else run/data/2.103; PCDS_TEST_DATA=none skips it, as the unit tests).
 //! Steam is off: nothing here touches Steam.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -16,13 +16,15 @@ use serde_json::{json, Value};
 
 const PCDS: &str = env!("CARGO_BIN_EXE_pcds");
 
+/// As the unit tests' (main.rs test_data): PCDS_TEST_DATA=none skips, tables not found fail.
 fn tables() -> Option<String> {
-    let dirs = [std::env::var("PCDS_TEST_DATA").ok(), Some(concat!(env!("CARGO_MANIFEST_DIR"), "/../run/data/2.103").into())];
-    let found = dirs.into_iter().flatten().find(|d| Path::new(d).join("netdata.json").is_file());
-    if found.is_none() {
-        eprintln!("skipped: no game tables");
-    }
-    found
+    let dir = match std::env::var("PCDS_TEST_DATA").ok().filter(|v| !v.is_empty()) {
+        Some(v) if v == "none" => return None,
+        Some(dir) => dir,
+        None => concat!(env!("CARGO_MANIFEST_DIR"), "/../run/data/2.103").into(),
+    };
+    assert!(Path::new(&dir).join("netdata.json").is_file(), "no game tables in {dir}: set PCDS_TEST_DATA to a tables directory, or to none to skip");
+    Some(dir)
 }
 
 fn free_port() -> u16 {
@@ -118,6 +120,7 @@ fn start(dir: &Path, data: &str, banks: &Path, releases: &str) -> Server {
         .env("PCDS_RELEASES", releases)
         .env("PCDS_FLIP_VERIFY", "1")
         .env("PCDS_TEST_FAULTS", "1")
+        .env("PCDS_ENV_FILE", dir.join("server.env"))
         .env("PCDS_ACCESS", dir.join("access.json"))
         .env("PCDS_RULES", dir.join("rules.json"))
         .stdout(out.try_clone().unwrap())
@@ -431,6 +434,54 @@ fn a_kept_snapshot_that_can_never_run_is_set_aside() {
     assert!(server.log().contains("can never run (it is on game \"0.0.1\"'s tables"), "{}", server.log());
     let names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
     assert!(!names.contains(&"world.json.snapshot".to_string()) && names.iter().any(|n| n.starts_with("world.json.snapshot.unusable-")), "{names:?}");
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The admin stops the world: players are let go, joins refused, the page stays. Another world
+/// runs, is remembered in server.env, and a start runs it.
+#[test]
+fn the_world_stops_starts_and_another_one_runs() {
+    let Some(data) = tables() else { return };
+    let dir = std::env::temp_dir().join(format!("pcds-worlds-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for w in ["world", "other"] {
+        assert!(Command::new(PCDS).arg("new-save").arg(dir.join(format!("{w}.json"))).arg(&data).stdout(Stdio::null()).status().unwrap().success());
+    }
+    std::fs::write(dir.join("server.env"), "PCDS_WORLD=world\n").unwrap();
+    let banks = banks(&dir);
+    let server = start(&dir, &data, &banks, "http://127.0.0.1:9/releases");
+    let players = load(&server, &data, 2, 20);
+    std::thread::sleep(Duration::from_secs(3));
+    let (status, answer) = server.api("POST", "/api/world/stop", json!({}));
+    assert_eq!(status, 200, "{answer}");
+    let (ok, said) = finish(players);
+    assert!(!ok && said.contains("dropped"), "the stop let its players go: {said}");
+    let (_, s) = server.api("GET", "/api/status", json!({}));
+    assert_eq!((s["state"].as_str(), s["save"].as_str()), (Some("stopped"), Some("world")), "{s}");
+    assert_eq!(server.api("POST", "/api/save", json!({})).0, 409, "nothing to save while stopped");
+    let (ok, said) = finish(load(&server, &data, 1, 3));
+    assert!(!ok, "a join is refused while stopped: {said}");
+    // Another world, from the stopped state; then back, from a running one.
+    let (status, answer) = server.api("POST", "/api/world/start", json!({"world": "other"}));
+    assert_eq!((status, answer["world"].as_str()), (200, Some("other")), "{answer}\n{}", server.log());
+    assert!(std::fs::read_to_string(dir.join("server.env")).unwrap().contains("PCDS_WORLD=other"));
+    let (_, s) = server.api("GET", "/api/status", json!({}));
+    assert_eq!((s["state"].as_str(), s["save"].as_str()), (Some("running"), Some("other")));
+    let players = load(&server, &data, 2, 12);
+    std::thread::sleep(Duration::from_secs(3));
+    let (status, answer) = server.api("POST", "/api/world/switch", json!({"world": "world"}));
+    assert_eq!((status, answer["world"].as_str()), (200, Some("world")), "{answer}\n{}", server.log());
+    let (ok, said) = finish(players);
+    assert!(!ok, "the switch let the other world's players go: {said}");
+    assert_eq!(server.api("POST", "/api/world/switch", json!({"world": "nowhere"})).0, 400);
+    assert_eq!(server.api("POST", "/api/world/switch", json!({"world": "world"})).0, 409, "it runs already");
+    let (ok, said) = finish(load(&server, &data, 1, 3));
+    assert!(ok, "players join the world that runs now: {said}");
     assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
     let mut server = server;
     assert!(server.child.wait().unwrap().success(), "{}", server.log());

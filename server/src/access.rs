@@ -189,6 +189,28 @@ mod tests {
         assert!(a.name_allowed("Alice", None) && a.ip_allowed("10.1.2.3"));
     }
 
+    /// The lists are kept in their file and read back at the next start; a Steam player's ban
+    /// takes their SteamID (not an IP); malformed ranges match nothing.
+    #[test]
+    fn the_lists_survive_a_restart_and_steam_bans_take_the_steam_id() {
+        let dir = std::env::temp_dir().join(format!("pcds-access-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("access.json").to_string_lossy().into_owned();
+        let mut a = Access::load(Some(path.clone()));
+        assert_eq!(a.lists.banned_names.len(), 0, "no file: empty lists");
+        a.ban("Mallory", Some(76561198000000099), Some("10.9.9.9")).unwrap();
+        assert!(a.steam_id_banned(76561198000000099) && a.ip_allowed("10.9.9.9"), "the SteamID, not the IP");
+        a.set(Lists { banned_names: vec![" Eve ".into(), "Eve".into(), "".into()], ..a.lists.clone() }).unwrap();
+        let back = Access::load(Some(path));
+        assert_eq!(back.lists.banned_names, vec!["Eve".to_string()], "trimmed, once, kept");
+        assert!(!back.name_allowed("eve", None));
+        for rule in ["10.0.0.0/33", "10.0.0.0/x", "nonsense/8"] {
+            assert!(!ip_matches("10.0.0.1", rule), "{rule}");
+        }
+        assert!(ip_matches("1.2.3.4", "0.0.0.0/0"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// A ban that cannot be written is refused, not kept in memory only (and lost at restart).
     #[test]
     fn a_ban_that_cannot_be_kept_is_refused() {

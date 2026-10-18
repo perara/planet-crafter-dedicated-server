@@ -416,3 +416,74 @@ pub fn planet_states(game: &Game) -> Vec<Value> {
 pub fn constructed_changed(game: &mut Game) {
     game.units.constructed_index += 1.0;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::*;
+
+    fn unit(g: &Game, kind: Kind) -> Unit {
+        g.units.planet(g.planet_hash()).unwrap().get(kind).clone()
+    }
+
+    /// Every second the rates come from the planet's powered buildings (scaled by the world's
+    /// pace); every tenth the totals grow, slower for each extra player as the world's
+    /// multiplayer factor says. The units' variables follow, the save keeps the levels.
+    #[test]
+    fn units_grow_from_powered_buildings_and_slow_down_for_more_players() {
+        let mut save = save();
+        save.settings["modifierMultiplayerTerraformationFactor"] = json!(0.5);
+        let Some(mut g) = crate::game::test_game(save) else { return };
+        join(&mut g, 1, "Ann");
+        place(&mut g, "Heater1", [570.0, 3.0, 500.0]);
+        place(&mut g, "EnergyGenerator1", [575.0, 3.0, 500.0]);
+        let heater = g.data.groups[g.data.group("Heater1").unwrap()].unit("Heat");
+        let run = |g: &mut Game, seconds: f32| {
+            let end = g.time + seconds;
+            while g.time < end {
+                g.time += 0.05;
+                tick(g);
+            }
+        };
+        run(&mut g, 1.2);
+        assert!((unit(&g, Kind::Heat).per_sec - heater).abs() < 1e-6, "{} per s", unit(&g, Kind::Heat).per_sec);
+        assert!(unit(&g, Kind::Energy).is_increasing());
+        let before = unit(&g, Kind::Heat).total;
+        run(&mut g, 10.0);
+        let alone = unit(&g, Kind::Heat).total - before;
+        assert!((alone - 10.0 * heater).abs() < 0.2 * heater, "{alone}");
+        let t = unit(&g, Kind::Terraformation);
+        assert!(t.total >= unit(&g, Kind::Heat).total && t.per_sec >= heater);
+        // Two players: 1 / (1 + 0.5) as fast. Energy is not scaled.
+        join(&mut g, 2, "Bob");
+        let before = unit(&g, Kind::Heat).total;
+        run(&mut g, 10.0);
+        let together = unit(&g, Kind::Heat).total - before;
+        assert!((together / alone - 1.0 / 1.5).abs() < 0.05, "{together} vs {alone}");
+        assert_eq!(multiplayer_factor(&g, Kind::Energy), 1.0);
+        // The planet's variable and the save.
+        let object = g.units.planet(g.planet_hash()).unwrap().object;
+        assert_eq!(var(&g, object, "WorldUnitsPlanet", "_unitHeat"), unit(&g, Kind::Heat).bytes());
+        let level = g.snapshot().planets.into_iter().find(|p| p["planetId"] == "Prime").unwrap()["unitHeatLevel"].as_f64().unwrap();
+        assert!((level as f32 - unit(&g, Kind::Heat).total).abs() < 1e-3);
+        let (handler, _) = g.net.find_class("WorldUnitsHandler").unwrap();
+        assert_eq!(var(&g, handler, "WorldUnitsHandler", "_unitSysTerraformation"), system_terraformation(&g));
+    }
+
+    /// Unpowered, oxygen, heat and pressure stop; a planet's levels load from the save, with
+    /// terraformation their sum.
+    #[test]
+    fn unpowered_planets_stand_still_and_levels_load_from_the_save() {
+        let mut save = save();
+        save.planets = vec![json!({"planetId": "Prime", "unitOxygenLevel": 100.0, "unitHeatLevel": 20.0, "unitPressureLevel": 3.0, "unitPlantsLevel": 7.0})];
+        let Some(mut g) = crate::game::test_game(save) else { return };
+        assert_eq!((unit(&g, Kind::Oxygen).total, unit(&g, Kind::Biomass).total, unit(&g, Kind::Terraformation).total), (100.0, 7.0, 130.0));
+        place(&mut g, "Heater1", [570.0, 3.0, 500.0]);
+        for _ in 0..40 {
+            g.time += 0.05;
+            tick(&mut g);
+        }
+        assert_eq!((unit(&g, Kind::Heat).per_sec, unit(&g, Kind::Heat).total), (0.0, 20.0));
+        assert_eq!(unit(&g, Kind::Energy).per_sec, unit(&g, Kind::Energy).decrease, "the heater only uses energy");
+    }
+}

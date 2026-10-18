@@ -435,7 +435,8 @@
               <button class="primary" id="pauseWorld">Pause world</button>
               <button id="saveWorld">Save now</button>
               <button id="backupNow">Back up now</button>
-              <button class="danger" id="stopServer">Save and stop server</button>
+              <button class="danger" id="stopWorld">Stop world</button>
+              <button class="danger ghost" id="stopServer">Shut down server</button>
             </div>
             <p class="sub" style="margin:10px 0 0">Pause stops the world's clock: machines, growth, terraformation, day and night, meteo and the players' gauges hold. Players stay in and can still move, build and chat.</p>
           </div>
@@ -691,7 +692,17 @@ function show(name, replace) {
 }
 for (const b of document.querySelectorAll('#nav button')) b.onclick = () => show(b.dataset.view);
 document.addEventListener('click', e => { const go = e.target.closest('[data-go]'); if (go) show(go.dataset.go); });
-window.addEventListener('popstate', () => show(location.hash.replace(/^#\/?/, ''), true));
+window.addEventListener('popstate', () => {
+  // A pcds gui link opened on a page already open: its token is taken, as at a load.
+  const m = location.hash.match(/token=([^&]+)/);
+  if (m) {
+    try { localStorage.setItem('pcdsToken', decodeURIComponent(m[1])); } catch (e) {}
+    location.replace(location.pathname + '#/overview');
+    location.reload();
+    return;
+  }
+  show(location.hash.replace(/^#\/?/, ''), true);
+});
 document.addEventListener('keydown', e => {
   if (e.target.closest('input, textarea, select, dialog') || e.ctrlKey || e.metaKey || e.altKey) return;
   const n = Number(e.key);
@@ -720,7 +731,8 @@ async function refresh() {
     const s = await api('GET', '/api/status');
     failures = 0;
     $('login').hidden = true; $('app').hidden = false;
-    if (s.state !== 'running') { banner('The server is starting: the world is loading…', 'warn'); setPill('warn', 'Starting'); }
+    if (s.state === 'stopped') { status = s; renderStopped(s); }
+    else if (s.state !== 'running') { banner('The server is starting: the world is loading…', 'warn'); setPill('warn', 'Starting'); }
     else { banner(null); status = s; sample(s); render(s); }
   } catch (e) {
     if (!e.auth) { failures++; banner(`Connection lost: ${e.message}. Retrying…`, 'down'); setPill('down', 'Offline'); }
@@ -1318,6 +1330,8 @@ $('chatForm').onsubmit = e => {
 // ---- world ----
 function renderPauseButtons(s) {
   for (const id of ['pauseWorld', 'ovPause']) $(id).textContent = s.held ? 'Resume world' : 'Pause world';
+  $('stopWorld').textContent = 'Stop world'; $('stopWorld').className = 'danger';
+  for (const id of ['pauseWorld', 'saveWorld', 'ovPause', 'ovSave', 'newWorld']) $(id).disabled = false;
 }
 function renderWorld(s) {
   const world = s.world || {};
@@ -1336,26 +1350,36 @@ function renderWorld(s) {
 let worldsData = null;
 async function loadWorlds() {
   try {
-    const w = worldsData = await api('GET', '/api/worlds');
-    const switching = !!(status && status.worldSwitch);
+    worldsData = await api('GET', '/api/worlds');
+    renderWorlds();
+  } catch (e) { if (!e.auth) toast(e.message, 'err'); }
+}
+let worldsSig = '';
+function renderWorlds() {
+  const w = worldsData;
+  if (!w) return;
+  worldsSig = [status && status.worldControl, status && status.state, w.current].join('|');
+  {
+    const switching = !!(status && status.worldControl);
     $('worldsNote').textContent = switching ? 'Every world beside this one: one save file each in worlds/. Run another one here; players are moved to it.' : 'Every world beside this one: one save file each in worlds/. To run another one: pcds world use NAME, then pcds restart.';
     $('worlds').replaceChildren(table(['World', 'Size', 'Saved', ''], w.worlds.map(x => {
       const isRunning = x.name === w.current;
-      return [isRunning ? h('td', {}, h('b', {}, x.name), ' ', h('span', { class: 'chip ok' }, 'running')) : h('td', {}, x.name), cell(bytes(x.bytes), 'num'), ago(x.modified),
+      const stopped = status && status.state === 'stopped';
+      return [isRunning ? h('td', {}, h('b', {}, x.name), ' ', stopped ? h('span', { class: 'chip bad' }, 'stopped') : h('span', { class: 'chip ok' }, 'running')) : h('td', {}, x.name), cell(bytes(x.bytes), 'num'), ago(x.modified),
         h('td', { class: 'row', style: 'justify-content:flex-end' },
-          !isRunning && switching ? h('button', { class: 'small primary', onclick: e => runWorld(x.name, e.currentTarget) }, 'Run this world') : null,
+          switching && (!isRunning || (status && status.state === 'stopped')) ? h('button', { class: 'small primary', onclick: e => isRunning ? startWorld(null, e.currentTarget) : runWorld(x.name, e.currentTarget) }, isRunning ? 'Start' : 'Run this world') : null,
           h('button', { class: 'small', onclick: e => download(x.name, false, e.currentTarget) }, 'Download'),
           isRunning ? null : h('button', { class: 'small danger', onclick: () => removeWorld(x.name) }, 'Remove'))];
     }), 'No worlds found'));
     const kept = w.backupsKept;
-    $('backupsNote').textContent = kept ? `The newest ${kept} are kept (PCDS_BACKUPS)` : 'Backups are off (PCDS_BACKUPS=0)';
+    $('backupsNote').textContent = kept === undefined ? '' : kept ? `The newest ${kept} are kept (PCDS_BACKUPS)` : 'Backups are off (PCDS_BACKUPS=0)';
     $('backupNow').disabled = !kept;
     $('backups').replaceChildren(table(['Backup', 'Size', 'Made', ''], w.backups.slice().reverse().map(x => [h('td', { class: 'mono' }, x.name), cell(bytes(x.bytes), 'num'), ago(x.modified),
       h('td', { class: 'row', style: 'justify-content:flex-end' },
         h('button', { class: 'small', onclick: e => download(x.name, true, e.currentTarget) }, 'Download'),
         h('button', { class: 'small', onclick: () => restoreBackup(x.name) }, 'Restore as a world'))]), 'No backups yet'));
     renderS3(w.s3);
-  } catch (e) { if (!e.auth) toast(e.message, 'err'); }
+  }
 }
 function renderS3(s3) {
   if (!s3) return;
@@ -1411,6 +1435,41 @@ $('saveWorld').onclick = e => save(e.currentTarget);
 $('ovSave').onclick = e => save(e.currentTarget);
 $('backupNow').onclick = e => act(r => r.s3 ? `Backup ${r.backup} made; copying it to S3` : r.s3Error ? `Backup ${r.backup} made; S3: ${r.s3Error}` : `Backup ${r.backup} made`, () => api('POST', '/api/backup'), e.currentTarget).then(loadWorlds);
 $('s3Now').onclick = e => act(r => `Copying ${r.key} to S3`, () => api('POST', '/api/backup/s3'), e.currentTarget).then(() => setTimeout(loadWorlds, 1500));
+// ---- the world: stop, start, another one (the front does it; the page stays) ----
+function renderStopped(s) {
+  setPill('down', 'World stopped');
+  $('hdrTitle').textContent = s.save || 'Planet Crafter Server';
+  $('hdrSub').textContent = `The world is stopped · pcds ${s.serverVersion}`;
+  $('qPlayers').textContent = '0'; $('qLoop').textContent = '–';
+  $('navPlayers').hidden = true;
+  document.title = `${s.save} (stopped) · Planet Crafter Server`;
+  const b = $('banner');
+  b.hidden = false; b.className = 'banner down';
+  b.replaceChildren(h('span', {}, `World ${s.save} is stopped: players cannot join.`),
+    h('button', { class: 'small primary', onclick: e => startWorld(null, e.currentTarget) }, `Start ${s.save}`),
+    h('button', { class: 'small', onclick: () => show('world') }, 'Run another world…'));
+  $('stopWorld').textContent = `Start ${s.save}`; $('stopWorld').className = 'primary';
+  for (const id of ['pauseWorld', 'saveWorld', 'backupNow', 'ovPause', 'ovSave', 'newWorld', 's3Now']) $(id).disabled = true;
+  $('worldState').replaceChildren(h('span', { class: 'chip bad' }, 'stopped'));
+  if (current === 'world' && worldsSig !== [s.worldControl, s.state, worldsData && worldsData.current].join('|')) loadWorlds();
+}
+async function startWorld(name, btn) {
+  const r = await act(r => `World ${r.world} is running`, () => api('POST', '/api/world/start', name ? { world: name } : {}, 150000), btn);
+  if (r) { banner(null); worldsData = null; refreshSoon(); if (current === 'world') loadWorlds(); }
+}
+async function runWorld(name, btn) {
+  const stopped = status && status.state === 'stopped';
+  if (!stopped && !await ask({ title: `Run world ${name}?`, body: `This world is saved and stopped, and ${name} starts. Players online are told and disconnected; they join again into ${name}. The server runs ${name} from now on, also after a restart.`, ok: `Run ${name}`, danger: true })) return;
+  const r = await act(r => `World ${r.world} is running`, () => api('POST', stopped ? '/api/world/start' : '/api/world/switch', { world: name }, 150000), btn);
+  if (r) { banner(null); refreshSoon(); loadWorlds(); }
+}
+$('stopWorld').onclick = async e => {
+  const btn = e.currentTarget;
+  if (status && status.state === 'stopped') return startWorld(null, btn);
+  if (!await ask({ title: 'Stop the world?', body: 'It is saved and players are disconnected. The server and this page stay up: start it, or another world, from here.', ok: 'Stop world', danger: true })) return;
+  const r = await act('World stopped', () => api('POST', '/api/world/stop', {}, 150000), btn);
+  if (r) refreshSoon();
+};
 async function setPaused(paused, btn) {
   if (paused && !await ask({ title: 'Pause the world?', body: 'Its clock stops until you resume it: machines, growth, terraformation, day and night, meteo and gauges hold. Players stay in and are told in the chat.', ok: 'Pause' })) return;
   act(paused ? 'World paused' : 'World resumed', () => api('POST', '/api/pause', { paused }), btn);
@@ -1418,7 +1477,7 @@ async function setPaused(paused, btn) {
 $('pauseWorld').onclick = e => setPaused(!(status && status.held), e.currentTarget);
 $('ovPause').onclick = e => setPaused(!(status && status.held), e.currentTarget);
 $('stopServer').onclick = async () => {
-  if (await ask({ title: 'Stop the server?', body: 'The world is saved, then the server quits and every player is disconnected. Start it again with pcds start (or systemd restarts it if set to).', ok: 'Save and stop', danger: true }))
+  if (await ask({ title: 'Shut down the server?', body: 'The world is saved, then the whole server quits, this page with it. Start it again with pcds start on the host. To stop only the world and keep this page, use Stop world.', ok: 'Shut down', danger: true }))
     act('Stopping: the server saves, then quits', () => api('POST', '/api/stop'));
 };
 
@@ -1655,6 +1714,7 @@ $('unbanForm').onsubmit = e => { e.preventDefault(); const v = $('modUnban').val
 function render(s) {
   renderHeader(s);
   renderPauseButtons(s);
+  if (current === 'world' && worldsData && worldsSig !== [s.worldControl, s.state, worldsData.current].join('|')) loadWorlds();
   updateMapPlayers(s);
   if (current === 'overview') renderOverview(s);
   if (current === 'players') renderPlayers(s);

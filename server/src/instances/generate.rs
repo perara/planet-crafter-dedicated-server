@@ -8,7 +8,7 @@
 //! that port here, off the tick, would give every wreck its own seed as the game does.
 
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use serde::Deserialize;
@@ -175,12 +175,12 @@ impl Wrecks {
 }
 
 /// wrecks.json, loaded at start.
-pub fn wrecks(game: &Game) -> Rc<Wrecks> {
+pub fn wrecks(game: &Game) -> Arc<Wrecks> {
     game.scenes.wrecks.clone()
 }
 
 /// A world instance scene of the current planet; None for a name the planet has none of.
-pub fn instance_scene(game: &Game, name: &str) -> Option<Rc<InstanceScene>> {
+pub fn instance_scene(game: &Game, name: &str) -> Option<Arc<InstanceScene>> {
     game.scenes.planets.get(game.planet_id())?.instance_scenes.get(name).cloned()
 }
 

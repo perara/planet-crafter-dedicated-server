@@ -34,7 +34,7 @@ impl Ctx {
         super::mkdir(&self.worlds)?;
         super::mkdir(&beside)?;
         let made = beside.join("world.json");
-        check(Command::new(&self.exe).arg("new-save").arg(&made).arg(&data).args(options))?;
+        check(Command::new(self.program()).arg("new-save").arg(&made).arg(&data).args(options))?;
         fs::rename(&made, path).map_err(|e| format!("{}: {e}", path.display()))?;
         let _ = fs::remove_dir(&beside);
         Ok(())
@@ -48,7 +48,7 @@ impl Ctx {
             if !force {
                 return Err(format!("a world exists at {}; pass --force to replace it (it is kept in backups/), or make another: pcds world new NAME", world.display()));
             }
-            if self.active() {
+            if self.active()? {
                 return Err("stop the server first (pcds stop)".into());
             }
             self.keep_copy(&self.world_name(), "replaced")?;
@@ -98,7 +98,7 @@ impl Ctx {
                     if !force {
                         return Err(format!("world {name} exists (--force replaces it; the old one is kept in backups/)"));
                     }
-                    if name == self.world_name() && self.active() {
+                    if name == self.world_name() && self.active()? {
                         return Err(format!("stop the server first: it runs {name}"));
                     }
                     self.keep_copy(&name, "replaced")?;

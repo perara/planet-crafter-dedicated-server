@@ -14,11 +14,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
-      # Tests that need game tables skip themselves here: the tables are not in the repository.
       - run: cargo build --release --locked
         working-directory: server
+      # Neither the game tables nor the game are here: the tests that need them skip, by these.
       - run: cargo test --release --locked
         working-directory: server
+        env:
+          PCDS_TEST_DATA: none
+          PCDS_GAME_DIR: none
 
   script:
     runs-on: ubuntu-22.04

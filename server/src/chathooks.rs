@@ -655,17 +655,18 @@ pub mod tests {
         let env = exec(&["env".into()], "{}", Duration::from_secs(5)).unwrap();
         assert!(!env.contains("s3cret") && env.lines().all(|l| ["PATH=", "HOME=", "LANG="].iter().any(|k| l.starts_with(k))), "{env}");
         let marker = std::env::temp_dir().join(format!("pcds-exec-group-{}", std::process::id()));
-        let script = format!("(sleep 1; touch {}) & sleep 5", marker.display());
+        let script = format!("(sleep 0.3; touch {}) & sleep 5", marker.display());
         let start = Instant::now();
         assert!(exec(&["sh".into(), "-c".into(), script], "{}", Duration::from_millis(200)).unwrap_err().contains("killed"));
         assert!(start.elapsed() < Duration::from_secs(1), "the timeout holds: {:?}", start.elapsed());
-        std::thread::sleep(Duration::from_millis(1500));
+        // Past the child's 0.3 s, with room for a busy host.
+        std::thread::sleep(Duration::from_millis(800));
         assert!(!marker.exists(), "the program's own child was killed too");
         // A program that exits at once but leaves a child holding its output: the child dies too.
         let marker = std::env::temp_dir().join(format!("pcds-exec-left-{}", std::process::id()));
-        let script = format!("(sleep 1; touch {}) & echo hi", marker.display());
+        let script = format!("(sleep 0.3; touch {}) & echo hi", marker.display());
         assert!(exec(&["sh".into(), "-c".into(), script], "{}", Duration::from_millis(300)).unwrap_err().contains("killed"));
-        std::thread::sleep(Duration::from_millis(1500));
+        std::thread::sleep(Duration::from_millis(800));
         assert!(!marker.exists(), "the child left behind was killed");
     }
 

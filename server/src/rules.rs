@@ -288,7 +288,7 @@ impl Rules {
 
     /// limits.maxPlayers, else PCDS_MAX_PLAYERS, else 16.
     pub fn max_players(&self) -> usize {
-        self.limits.max_players.or_else(|| std::env::var("PCDS_MAX_PLAYERS").ok().and_then(|v| v.parse().ok())).unwrap_or(16)
+        self.limits.max_players.unwrap_or_else(|| crate::config::env_number("PCDS_MAX_PLAYERS") as usize)
     }
 }
 
@@ -383,6 +383,26 @@ mod tests {
         for big in [serde_json::json!({"speed": {"growth": 1e39}}), serde_json::json!({"chat": {"timeoutSeconds": 1e39}}), serde_json::json!({"death": {"dropChance": 1e39}})] {
             assert!(Rules::default().patched(&big).is_err(), "{big}");
         }
+    }
+
+    /// No rules file, or an empty one: the game's behaviour; a saved one reads back the same; an
+    /// unreadable path is an error.
+    #[test]
+    fn rules_files_load_save_and_default() {
+        let dir = std::env::temp_dir().join(format!("pcds-rules-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rules.json").to_string_lossy().into_owned();
+        assert!(Rules::load(&path).unwrap() == Rules::default(), "missing");
+        std::fs::write(&path, "  \n").unwrap();
+        assert!(Rules::load(&path).unwrap() == Rules::default(), "empty");
+        let mut r = Rules::default();
+        r.limits.max_players = Some(3);
+        r.save(&path).unwrap();
+        let back = Rules::load(&path).unwrap();
+        assert!(back == r);
+        assert_eq!(back.max_players(), 3);
+        assert!(Rules::load(dir.to_str().unwrap()).is_err(), "a directory");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

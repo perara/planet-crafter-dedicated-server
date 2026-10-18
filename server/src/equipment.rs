@@ -27,3 +27,31 @@ pub fn equipment_value(game: &Game, client: u64, ty: &str) -> i64 {
 /// Equipment changes are applied by the owning client (it asks for the inventory size and
 /// gauge maxima through RPCs); nothing to do here.
 pub fn inventory_changed(_game: &mut Game, _inventory: i32, _wo: i32, _added: bool) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::*;
+
+    /// The tiers the player list shows (the id's last digit), the skin's value, and the
+    /// equipment values gauges read (a toxins filter).
+    #[test]
+    fn equipment_tiers_and_values_come_from_what_is_equipped() {
+        let Some((mut g, _)) = world() else { return };
+        let (_, equipment) = backpack(&g, 1);
+        assert_eq!(tiers(&g, equipment), (0, 0, 0));
+        give(&mut g, "Backpack3", equipment);
+        give(&mut g, "Jetpack2", equipment);
+        assert_eq!(tiers(&g, equipment), (3, 2, 0));
+        let (id, value) = g.data.groups.iter().find(|gr| !gr.constructible && gr.str("equipableType") == "ToxinsFilter").map(|gr| (gr.id.clone(), gr.fields["value"].as_i64().unwrap_or(0))).expect("a toxins filter");
+        give(&mut g, &id, equipment);
+        assert_eq!(equipment_value(&g, 1, "ToxinsFilter"), value);
+        assert_eq!(equipment_value(&g, 9, "BackpackIncrease"), 0, "no such player");
+        // Joining, the player list shows the tiers.
+        let g2 = &mut g;
+        g2.disconnect(1);
+        join(g2, 1, "Ann");
+        let (_, equipment) = backpack(g2, 1);
+        assert_eq!(tiers(g2, equipment).0, 3);
+    }
+}

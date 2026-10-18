@@ -4,7 +4,7 @@
 //!   PCDS_BENCH_SAVE=world.json PCDS_RNG_SEED=1 [PCDS_BENCH_SECONDS=300] [PCDS_BENCH_PLAYERS=4] \
 //!     [PCDS_BENCH_ACTION_MS=200] [PCDS_BENCH_DUMP=messages.txt] cargo test --release bench -- --ignored --nocapture
 //!
-//! PCDS_BENCH_DUMP writes every message (per tick, sorted) and the final save, to compare two
+//! PCDS_BENCH_DUMP writes every message (the joins', then per tick, sorted) and the final save, to compare two
 //! runs (two builds, two table sets) line by line.
 //!
 //! The loop steps like the server's (a tick every 5 ms); players walk in circles, sending a
@@ -50,10 +50,7 @@ struct Env {
 }
 
 fn env() -> Option<Env> {
-    let Some(path) = std::env::var("PCDS_BENCH_SAVE").ok() else {
-        eprintln!("bench: set PCDS_BENCH_SAVE");
-        return None;
-    };
+    let path = std::env::var("PCDS_BENCH_SAVE").expect("bench: set PCDS_BENCH_SAVE");
     let dir = crate::test_data()?;
     let var = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok());
     Some(Env { path, dir, seconds: var("PCDS_BENCH_SECONDS").unwrap_or(300.0), players: var("PCDS_BENCH_PLAYERS").unwrap_or(0.0) as u64, action_ms: var("PCDS_BENCH_ACTION_MS").unwrap_or(0.0) as u64, dump: std::env::var("PCDS_BENCH_DUMP").ok() })
@@ -62,7 +59,7 @@ fn env() -> Option<Env> {
 fn load(e: &Env) -> Game {
     let (net_data, data, spec) = crate::tables(e.dir);
     let scenes = crate::scene_tables(e.dir, &net_data, &data);
-    Game::new(net_data, data, spec, SaveFile::load(&e.path).unwrap(), scenes)
+    Game::with_clock(net_data, data, spec, SaveFile::load(&e.path).unwrap(), scenes, Some(0.0))
 }
 
 /// A bench player's own bookkeeping (what load.rs's bot learns from the server's answers).
@@ -134,6 +131,8 @@ struct Run {
     save: usize,
     /// The sorted messages of the tick asked for.
     dumped: Vec<String>,
+    /// The game at the end.
+    game: Game,
 }
 
 /// The bench loop; `swap` may replace the game after a tick, every `swap_every` seconds.
@@ -142,11 +141,15 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
     let mut h = std::collections::hash_map::DefaultHasher::new();
     let objects: Vec<u64> = (1..=e.players).map(|c| join(&mut g, c, &format!("Bench{c}"))).collect();
     let mut players: Vec<Player> = (1..=e.players).map(|c| Player { rng: 0x9e37_79b9_7f4a_7c15 ^ c.wrapping_mul(0x2545_f491_4f6c_dd1d), ..Default::default() }).collect();
-    let mut messages = fingerprint(&mut h, &mut g.net.out).0;
+    let (mut messages, _, joined) = fingerprint(&mut h, &mut g.net.out);
     let (step, net_tick, act_every) = (0.005, 1.0 / g.net_data.tick_rate as f64, e.action_ms as f64 / 1000.0);
     let (mut t, mut next_move, mut next_act, mut next_swap, mut busy, mut seq) = (0.0, 0.0, act_every, swap_every, Duration::ZERO, 0);
     let (mut ticks, mut dumped) = (Vec::new(), Vec::new());
     let mut file = e.dump.as_ref().map(|p| std::io::BufWriter::new(std::fs::File::create(p).unwrap()));
+    if let Some(f) = &mut file {
+        use std::io::Write;
+        joined.iter().for_each(|line| writeln!(f, "join {line}").unwrap());
+    }
     while t < e.seconds {
         t += step;
         g.sim_time = Some(t);
@@ -196,7 +199,28 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
         use std::io::Write;
         writeln!(f, "save {save}").unwrap();
     }
-    Run { fingerprint: h.finish(), ticks, messages, busy, save: save.len(), dumped }
+    Run { fingerprint: h.finish(), ticks, messages, busy, save: save.len(), dumped, game: g }
+}
+
+/// The load test's players (three, acting every 200 ms) for 20 s on the test world, played
+/// straight and with the game handed off (snapshot, restore) every 5 s: everything sent and
+/// the final save are the same. The bench and handoff runs below do this on a real save.
+#[test]
+fn a_played_session_ends_the_same_through_handoffs() {
+    let Some(start) = crate::game::test_game(crate::game::tests::save()) else { return };
+    let e = Env { path: String::new(), dir: crate::test_data().unwrap(), seconds: 20.0, players: 3, action_ms: 200, dump: None };
+    // A copy of a game as a new bank makes it (one start for both runs: the same random state).
+    let copy = |g: &Game| {
+        let (net_data, data, spec, scenes) = crate::game::test_tables().unwrap();
+        crate::handoff::restore(net_data, data, spec, &crate::handoff::snapshot(g).unwrap(), scenes).unwrap()
+    };
+    let a = run(copy(&start), &e, f64::INFINITY, |g| g, None);
+    let b = run(copy(&start), &e, 5.0, |old| copy(&old), None);
+    // They played: built, crafted, chatted.
+    let containers = a.game.wos.values().filter(|w| a.game.data.groups[w.group].id == "Container1").count();
+    assert!(containers >= 3, "{containers} containers built");
+    assert!(a.game.inventories.values().any(|i| i.items.len() >= 2), "crafted items in a backpack");
+    assert_eq!(a.fingerprint, b.fingerprint, "{}", divergence(&a, &b, |d| (run(copy(&start), &e, f64::INFINITY, |g| g, d), run(copy(&start), &e, 5.0, |old| copy(&old), d))));
 }
 
 #[test]

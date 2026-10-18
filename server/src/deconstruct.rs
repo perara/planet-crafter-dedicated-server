@@ -44,3 +44,44 @@ pub fn finish(game: &mut Game, wo: i32, client: u64) {
     game.retrieve_resources_from_deconstruction(wo, hash, backpack, position, client);
     game.destroy_world_object(wo, true);
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::net::Target;
+    use crate::testkit::*;
+
+    /// Deconstructing: everyone sees the animation, the deconstructor starts it, a second
+    /// request while it runs is ignored, and when it ends the building is gone and its recipe
+    /// in the deconstructor's backpack. A container with something inside says why it cannot.
+    #[test]
+    fn deconstruction_takes_the_animations_time_then_gives_the_recipe_back() {
+        let Some((mut g, _)) = world() else { return };
+        let (bag, _) = backpack(&g, 1);
+        let had = g.inventories[&bag].items.len();
+        let (id, net) = place(&mut g, "EnergyGenerator1", [570.0, 3.0, 500.0]);
+        g.net.out.clear();
+        send_on(&mut g, 1, net, "GroupNetworkBase.DeconstructServerRpc", &[json!(2.0)]);
+        send_on(&mut g, 1, net, "GroupNetworkBase.DeconstructServerRpc", &[json!(2.0)]);
+        assert_eq!(sent(&g, "GroupNetworkBase.DeconstructClientRpc").into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(Target::All, vec![json!(2.0)])], "once");
+        assert_eq!(sent(&g, "GroupNetworkBase.StartDeconstructClientRpc").into_iter().map(|s| s.to).collect::<Vec<_>>(), vec![Target::Only(1)]);
+        g.time += 1.0;
+        crate::scene::tick(&mut g);
+        assert!(g.wos.contains_key(&id), "still taking it apart");
+        g.time += 1.5;
+        crate::scene::tick(&mut g);
+        assert!(!g.wos.contains_key(&id) && !g.net.objects.contains_key(&net));
+        let recipe = g.data.groups[g.data.group("EnergyGenerator1").unwrap()].recipe.clone();
+        assert_eq!(g.inventories[&bag].items[had..].iter().map(|i| g.wos[i].group).collect::<Vec<_>>(), recipe);
+        assert!(saved_object(&mut g, id).is_none());
+
+        let (chest, net) = place(&mut g, "Container1", [575.0, 3.0, 500.0]);
+        let inside = g.wos[&chest].linked_inventory;
+        give(&mut g, "Iron", inside);
+        g.net.out.clear();
+        send_on(&mut g, 1, net, "GroupNetworkBase.DeconstructServerRpc", &[json!(2.0)]);
+        assert_eq!(sent(&g, "GroupNetworkBase.DeconstructErrorClientRpc").into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(Target::Only(1), vec![json!(crate::machines::INVENTORY_NOT_EMPTY)])]);
+        assert!(sent(&g, "GroupNetworkBase.DeconstructClientRpc").is_empty());
+    }
+}

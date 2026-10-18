@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{say, Ctx, Result, APP_ID};
+use crate::updater;
 
 /// The KEY=VALUE lines of a settings file, in order; comments and blank lines left out, quotes
 /// around a value taken off (as systemd's EnvironmentFile= reads it).
@@ -41,6 +42,13 @@ pub fn set_env_text(text: &str, key: &str, value: &str) -> String {
         out.push(format!("{key}={value}"));
     }
     out.join("\n") + "\n"
+}
+
+/// One setting of a settings file changed (written beside and moved over, mode 600: it holds
+/// the admin token).
+pub fn set_env_file(path: &Path, key: &str, value: &str) -> Result {
+    let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    super::replace_file(path, set_env_text(&text, key, value).as_bytes(), 0o600)
 }
 
 /// A world name from an argument (a save's file name works too).
@@ -134,25 +142,35 @@ PCDS_WORLD=world
         self.worlds.join(format!("{}.json", self.world_name()))
     }
 
-    /// The tables extracted from this game build: run/data/<version>/ whose buildid is it.
+    /// The tables of this game build for the program that runs the server: run/data/<version>/
+    /// whose buildid is the build and whose tables-format is that program's.
     pub fn tables(&self, build: &str) -> Result<PathBuf> {
-        let data = self.run.join("data");
-        let mut any = false;
-        for entry in fs::read_dir(&data).into_iter().flatten().flatten() {
-            let dir = entry.path();
-            // Hidden: an extraction not finished yet.
-            if entry.file_name().to_string_lossy().starts_with('.') || !dir.is_dir() {
-                continue;
-            }
-            any = true;
-            if fs::read_to_string(dir.join("buildid")).is_ok_and(|id| id.trim() == build) {
-                return Ok(dir);
-            }
+        find_tables(&self.run.join("data"), build, self.tables_format()?)
+    }
+
+    /// The program that runs the server and reads its tables: the active bank's, else (no
+    /// bank installed yet) this one.
+    pub fn program(&self) -> PathBuf {
+        let banks = self.banks();
+        let program = banks.join(updater::active(&banks)).join("pcds");
+        if program.is_file() { program } else { self.exe.clone() }
+    }
+
+    /// The format of the game tables program() reads and writes (its bank.json says).
+    pub fn tables_format(&self) -> Result<u32> {
+        let banks = self.banks();
+        let active = updater::active(&banks);
+        if !banks.join(&active).join("pcds").is_file() {
+            return Ok(crate::native::tables::TABLES_FORMAT);
         }
-        if !any {
-            return Err(format!("no game tables in {}: run 'pcds extract' (see README)", data.display()));
-        }
-        Err(format!("the game changed: run `pcds update` (no tables in {} for game build {build})", data.display()))
+        let info = updater::info(&banks, &active).ok_or_else(|| format!("bank {active} has no readable bank.json in {}", banks.display()))?;
+        let format = info["tablesFormat"].as_u64().and_then(|f| u32::try_from(f).ok());
+        format.ok_or_else(|| {
+            format!(
+                "bank {active} (pcds {}) does not say which game tables it reads (a build from before table formats): put a newer one in its place (make build and pcds restart, or pcds upgrade --restart)",
+                info["version"].as_str().unwrap_or("?")
+            )
+        })
     }
 
     /// The tables of the installed game.
@@ -160,6 +178,34 @@ PCDS_WORLD=world
         let game = self.game_dir(None)?;
         self.tables(&build_id(&game)?)
     }
+}
+
+/// The tables in `data` (run/data) for a game build in a tables format. Folders whose name
+/// starts with "." are extractions not finished yet.
+pub fn find_tables(data: &Path, build: &str, format: u32) -> Result<PathBuf> {
+    let (mut any, mut other_format) = (false, None);
+    for entry in fs::read_dir(data).into_iter().flatten().flatten() {
+        let dir = entry.path();
+        if entry.file_name().to_string_lossy().starts_with('.') || !dir.is_dir() {
+            continue;
+        }
+        any = true;
+        if !fs::read_to_string(dir.join("buildid")).is_ok_and(|id| id.trim() == build) {
+            continue;
+        }
+        let theirs = fs::read_to_string(dir.join("tables-format")).map_or_else(|_| "none".to_string(), |f| f.trim().to_string());
+        if theirs == format.to_string() {
+            return Ok(dir);
+        }
+        other_format = Some((dir, theirs));
+    }
+    if let Some((dir, theirs)) = other_format {
+        return Err(format!("the tables in {} are of tables format {theirs}, the server reads format {format}: run `pcds update`, which reads them again", dir.display()));
+    }
+    if !any {
+        return Err(format!("no game tables in {}: run `pcds update` (see README)", data.display()));
+    }
+    Err(format!("the game changed: run `pcds update` (no tables in {} for game build {build})", data.display()))
 }
 
 #[cfg(test)]
@@ -212,6 +258,41 @@ mod tests {
         for bad in ["", ".hidden", "-x", "two words", "ünï", "a/", &"a".repeat(65)] {
             assert!(world_arg(bad).is_err(), "{bad}");
         }
+    }
+
+    /// The tables of a game build in the active bank's tables format; another format or build
+    /// is named in the error.
+    #[test]
+    fn tables_are_found_by_build_and_format() {
+        let dir = super::super::test_dir("find-tables");
+        let ctx = super::super::test_ctx(&dir);
+        let data = dir.join("run/data");
+        let tables = |name: &str, build: &str, format: Option<&str>| {
+            fs::create_dir_all(data.join(name)).unwrap();
+            fs::write(data.join(name).join("buildid"), build).unwrap();
+            if let Some(f) = format {
+                fs::write(data.join(name).join("tables-format"), f).unwrap();
+            }
+        };
+        assert!(ctx.tables("b1").unwrap_err().contains("no game tables"));
+        let ours = crate::native::tables::TABLES_FORMAT;
+        tables("2.103", "b1", None);
+        tables(".new-1", "b1", Some(&ours.to_string()));
+        let e = ctx.tables("b1").unwrap_err();
+        assert!(e.contains("tables format none") && e.contains("pcds update"), "{e}");
+        assert!(ctx.tables("b2").unwrap_err().contains("game build b2"));
+        fs::write(data.join("2.103/tables-format"), format!("{ours}\n")).unwrap();
+        assert_eq!(ctx.tables("b1").unwrap(), data.join("2.103"));
+        // The active bank's program reads another format: its bank.json says which.
+        let bank = dir.join("run/bin/a");
+        fs::create_dir_all(&bank).unwrap();
+        fs::write(bank.join("pcds"), "").unwrap();
+        updater::write_info(&bank, &serde_json::json!({"version": "9.0.0", "tablesFormat": ours + 1})).unwrap();
+        assert_eq!(ctx.program(), bank.join("pcds"));
+        assert!(ctx.tables("b1").unwrap_err().contains(&format!("the server reads format {}", ours + 1)));
+        updater::write_info(&bank, &serde_json::json!({"version": "0.5.9"})).unwrap();
+        assert!(ctx.tables("b1").unwrap_err().contains("from before table formats"));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

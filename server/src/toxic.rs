@@ -26,3 +26,26 @@ pub fn rpc(game: &mut Game, client: u64, name: &str, _a: &Args) -> bool {
     }
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::net::Target;
+    use crate::testkit::*;
+
+    /// No toxic areas on the planets the server offers: the progress is all zeros (as the game
+    /// answers on Prime), registrations have nothing to report, and nobody is in an area.
+    #[test]
+    fn planets_without_toxic_areas_answer_zero_progress() {
+        let Some((mut g, _)) = world() else { return };
+        send_scene(&mut g, 1, "ToxicAreaHandler.GetCurrentPlanetToxicProgressServerRpc", &[]);
+        assert_eq!(sent(&g, "ToxicAreaHandler.GetCurrentPlanetToxicProgressClientRpc").into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(Target::Only(1), vec![json!(0), json!(0), json!(0), json!(0)])]);
+        g.net.out.clear();
+        for name in ["ToxicAreaHandler.RegisterToAreaToxicProgressServerRpc", "ToxicAreaHandler.UnregisterToAreaToxicProgressServerRpc", "ToxicAreaHandler.RegisterToAreaToxicFinishedServerRpc", "ToxicAreaHandler.UnregisterToAreaToxicFinishedServerRpc"] {
+            send_scene(&mut g, 1, name, &[json!(5)]);
+        }
+        assert!(g.net.out.is_empty());
+        assert_eq!(super::tracked_area_progress(&g, 1), None);
+    }
+}

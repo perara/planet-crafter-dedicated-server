@@ -181,9 +181,7 @@ fn the_holder_index_follows_the_inventories() {
     assert_eq!(holders_mismatch(&g), None);
     // A handoff restores it.
     let text = crate::handoff::snapshot(&g).unwrap();
-    let dir = crate::test_data().unwrap();
-    let (net_data, data, spec) = crate::tables(dir);
-    let scenes = crate::scene_tables(dir, &net_data, &data);
+    let (net_data, data, spec, scenes) = test_tables().unwrap();
     let restored = crate::handoff::restore(net_data, data, spec, &text, scenes).unwrap();
     assert_eq!(restored.holders, g.holders);
 }
@@ -220,9 +218,7 @@ fn world_objects_keep_the_dictionary_order() {
     // A handoff keeps the free places: the next one created goes where the next would have.
     g.destroy_world_object(a, true);
     let text = crate::handoff::snapshot(&g).unwrap();
-    let dir = crate::test_data().unwrap();
-    let (net_data, data, spec) = crate::tables(dir);
-    let scenes = crate::scene_tables(dir, &net_data, &data);
+    let (net_data, data, spec, scenes) = test_tables().unwrap();
     let mut h = crate::handoff::restore(net_data, data, spec, &text, scenes).unwrap();
     let e = h.create_world_object(iron, 0, true);
     assert_eq!(h.wos.keys().copied().filter(|id| [c, d, e].contains(id)).collect::<Vec<_>>(), vec![e, d, c]);
@@ -244,9 +240,7 @@ fn a_format_1_snapshot_restores() {
         state[set] = Value::Array(pairs(&state[set]).into_iter().map(|(k, _)| k).collect());
     }
     let old = format!("{{\"format\":1,\"game_version\":\"{}\"}}\n{state}", g.net_data.game_version);
-    let dir = crate::test_data().unwrap();
-    let (net_data, data, spec) = crate::tables(dir);
-    let scenes = crate::scene_tables(dir, &net_data, &data);
+    let (net_data, data, spec, scenes) = test_tables().unwrap();
     let h = crate::handoff::restore(net_data, data, spec, &old, scenes).unwrap();
     crate::handoff::verify(&h, text.as_bytes()).unwrap();
 }

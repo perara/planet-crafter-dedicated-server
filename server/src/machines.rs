@@ -251,8 +251,8 @@ pub fn init(game: &mut Game) {
 
 pub fn rpc(game: &mut Game, client: u64, object: u64, _behaviour: u16, name: &str, a: &Args) -> bool {
     let wo = game.net.objects.get(&object).and_then(|o| o.wo);
-    // The back-and-forth rocket platforms' growth is the rockets port's.
-    if name.starts_with("GrowthProxy.") && wo.and_then(|w| game.wos.get(&w)).is_some_and(|w| is_rocket_platform(game, w.group)) {
+    // The back-and-forth rocket platforms' growth is the rockets port's, an animal's the animals'.
+    if name.starts_with("GrowthProxy.") && (wo.and_then(|w| game.wos.get(&w)).is_some_and(|w| is_rocket_platform(game, w.group)) || crate::animals::spawn::is_animal(game, object)) {
         return false;
     }
     match name {
@@ -673,7 +673,7 @@ pub fn refresh_generation_multiplier(game: &mut Game, machine: i32, item: i32, m
 /// DeconstructStatus.
 const OK: i32 = 0;
 const SOMETHING_INSIDE: i32 = 1;
-const INVENTORY_NOT_EMPTY: i32 = 2;
+pub(crate) const INVENTORY_NOT_EMPTY: i32 = 2;
 
 /// GroupNetworkBase.DeconstructServerRpc: GetComponentInChildren<ActionDeconstructible>(); without
 /// one (wreck safes, effigies, space multipliers, Warden objects) the game does nothing at all.
@@ -911,6 +911,31 @@ pub(crate) mod tests {
         rpc(&mut game, 1, net, 0, "ConstructibleProxy.MachineOutsideGrowerUpdateStartServerRpc", &Args(vec![]));
         let state = growers::outside_grower_state(&game, tube).unwrap().0;
         assert_eq!(sent(&game)[2], ("ConstructibleProxy.MachineOutsideGrowerUpdateStartClientRpc".to_string(), vec![json!(state), json!(12.5)]));
+    }
+
+    /// A crafting machine's animation goes to everyone but the crafter; a recycler breaks the
+    /// item it holds when a client asks (here a full backpack: its content drops out first).
+    #[test]
+    fn crafting_animations_and_recycling_by_rpc() {
+        use crate::testkit::*;
+        let Some((mut game, _)) = world() else { return };
+        join(&mut game, 2, "Bob");
+        let (_, station) = place(&mut game, "CraftStation1", [570.0, 3.0, 500.0]);
+        let iron = hash(&game, "Iron");
+        game.net.out.clear();
+        send_on(&mut game, 1, station, "ConstructibleProxy.StartCraftAnimationServerRpc", &[json!(iron)]);
+        let s = crate::testkit::sent(&game, "ConstructibleProxy.StartCraftAnimationClientRpc");
+        assert_eq!(s.into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(Target::Except(1), vec![json!(iron)])]);
+
+        let (recycler, net) = place(&mut game, "RecyclingMachine", [580.0, 3.0, 500.0]);
+        let inside = game.wos[&recycler].linked_inventory;
+        let chest = give(&mut game, "Container1", inside);
+        let chest_inventory = game.create_inventory(5, 0, chest, &[], &[]);
+        let iron = give(&mut game, "Iron", chest_inventory);
+        send_on(&mut game, 1, net, "ConstructibleProxy.RecycleContentServerRpc", &[json!([580.0, 4.0, 500.0]), json!([1.0, 1.0, 1.0])]);
+        assert!(!game.wos.contains_key(&chest), "the holder goes");
+        assert_eq!(game.wos[&iron].position, [580.0, 4.0, 500.0], "its content drops at the spot");
+        assert!(game.inventories[&inside].items.is_empty());
     }
 
     #[test]
