@@ -203,3 +203,50 @@ fn an_added_existing_item_leaves_its_old_inventory() {
     let saved = g.snapshot().inventories;
     assert_eq!(saved.iter().filter(|i| i["woIds"].as_str().is_some_and(|s| s.split(',').any(|x| x == wo.to_string()))).count(), 1);
 }
+
+/// H3: world objects keep the order of the game's Dictionary: a destroyed one's place goes to
+/// the next one created, and the save lists them so.
+#[test]
+fn world_objects_keep_the_dictionary_order() {
+    let Some(mut g) = test_game(save()) else { return };
+    let iron = g.data.group("Iron").unwrap();
+    let [a, b, c] = [0; 3].map(|_| g.create_world_object(iron, 0, true));
+    g.destroy_world_object(b, true);
+    let d = g.create_world_object(iron, 0, true);
+    let order: Vec<i32> = g.wos.keys().copied().filter(|id| [a, c, d].contains(id)).collect();
+    assert_eq!(order, vec![a, d, c]);
+    let saved: Vec<i64> = g.snapshot().objects.iter().filter_map(|o| o["id"].as_i64()).filter(|id| [a, c, d].contains(&(*id as i32))).collect();
+    assert_eq!(saved, vec![a as i64, d as i64, c as i64]);
+    // A handoff keeps the free places: the next one created goes where the next would have.
+    g.destroy_world_object(a, true);
+    let text = crate::handoff::snapshot(&g).unwrap();
+    let dir = crate::test_data().unwrap();
+    let (net_data, data, spec) = crate::tables(dir);
+    let scenes = crate::scene_tables(dir, &net_data, &data);
+    let mut h = crate::handoff::restore(net_data, data, spec, &text, scenes).unwrap();
+    let e = h.create_world_object(iron, 0, true);
+    assert_eq!(h.wos.keys().copied().filter(|id| [c, d, e].contains(id)).collect::<Vec<_>>(), vec![e, d, c]);
+}
+
+/// H3: a snapshot of the previous format (world objects as a map, the sets as lists) restores.
+#[test]
+fn a_format_1_snapshot_restores() {
+    let Some(mut g) = test_game(save()) else { return };
+    join(&mut g, 1, "Ann");
+    g.disconnect(1);
+    let text = crate::handoff::snapshot(&g).unwrap();
+    let (_, state) = text.split_once('\n').unwrap();
+    let mut state: Value = serde_json::from_str(state).unwrap();
+    let pairs = |v: &Value| v["slots"].as_array().unwrap().iter().filter(|s| !s.is_null()).map(|s| (s[0].clone(), s[1].clone())).collect::<Vec<_>>();
+    let wos: serde_json::Map<String, Value> = pairs(&state["wos"]).into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    state["wos"] = Value::Object(wos);
+    for set in ["constructed", "pickables"] {
+        state[set] = Value::Array(pairs(&state[set]).into_iter().map(|(k, _)| k).collect());
+    }
+    let old = format!("{{\"format\":1,\"game_version\":\"{}\"}}\n{state}", g.net_data.game_version);
+    let dir = crate::test_data().unwrap();
+    let (net_data, data, spec) = crate::tables(dir);
+    let scenes = crate::scene_tables(dir, &net_data, &data);
+    let h = crate::handoff::restore(net_data, data, spec, &old, scenes).unwrap();
+    crate::handoff::verify(&h, text.as_bytes()).unwrap();
+}

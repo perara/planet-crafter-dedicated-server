@@ -127,7 +127,7 @@ impl Game {
                 self.net.rpc(Target::All, net, "GroupNetworkBase.StartDisolveAnimationClientRpc", &[]);
             }
             if icon {
-                self.constructed.shift_remove(&id);
+                self.constructed.remove(&id);
                 self.net.rpc(Target::All, net, "GroupNetworkBase.AddDeconstructIconClientRpc", &[]);
             }
         }
@@ -223,9 +223,9 @@ impl Game {
             return;
         }
         self.change_state_index(id);
-        let Some(wo) = self.wos.shift_remove(&id) else { return };
-        self.constructed.shift_remove(&id);
-        self.pickables.shift_remove(&id);
+        let Some(wo) = self.wos.remove(&id) else { return };
+        self.constructed.remove(&id);
+        self.pickables.remove(&id);
         let hash = self.data.groups[wo.group].hash;
         if !wo.dont_save {
             self.count_list(false, "_constructedWorldObjectsGroups", hash);

@@ -48,7 +48,7 @@ use crate::rpcspec::Spec;
 /// The snapshot's format. A release that changes the state's shape (a field renamed, removed
 /// or meaning something else; a new field only needs `#[serde(default)]`) bumps it and adds
 /// the step from the previous format to `migrate`: each build reads its own and the previous.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 /// The snapshot's first line: its format, and the tables it is for (state holds indices into
 /// them, so it is only valid on the same game version).
@@ -76,12 +76,21 @@ pub fn snapshot(g: &Game) -> Result<String, String> {
 
 /// The previous format's state brought to this one, as firmware migrates its data on boot.
 fn migrate(from: u32, state: serde_json::Value) -> Result<serde_json::Value, String> {
+    let mut state = state;
     match from {
-        // FORMAT - 1 => { state["ext"]["meteo"]["renamed"] = state["ext"]["meteo"]["old"].take(); Ok(state) }
-        _ => {
-            let _ = state;
-            Err(format!("snapshot format {from}: this build reads format {FORMAT} and the one before"))
+        // 2: the world objects (an id -> object map) and the constructed and pickable sets (id
+        // lists) became Slots, in their order and with no slot free yet.
+        1 => {
+            let wos = std::mem::take(&mut state["wos"]);
+            let slots: Vec<serde_json::Value> = wos.as_object().into_iter().flatten().map(|(id, wo)| serde_json::json!([id.parse::<i32>().unwrap_or(0), wo])).collect();
+            state["wos"] = serde_json::json!({"slots": slots, "free": []});
+            for set in ["constructed", "pickables"] {
+                let ids: Vec<serde_json::Value> = state[set].as_array().into_iter().flatten().map(|id| serde_json::json!([id, null])).collect();
+                state[set] = serde_json::json!({"slots": ids, "free": []});
+            }
+            Ok(state)
         }
+        _ => Err(format!("snapshot format {from}: this build reads format {FORMAT} and the one before")),
     }
 }
 
@@ -181,7 +190,7 @@ mod tests {
         let mut other = super::restore(n, d, s, &text, scenes).unwrap();
         other.tmp_inventory_id += 1;
         assert!(super::verify(&other, text.as_bytes()).unwrap_err().contains("tmp_inventory_id"));
-        for (from, to) in [("\"format\":1", "\"format\":99"), (&*format!("\"game_version\":\"{}\"", g.net_data.game_version), "\"game_version\":\"0.1\"")] {
+        for (from, to) in [(&*format!("\"format\":{}", super::FORMAT), "\"format\":99"), (&*format!("\"game_version\":\"{}\"", g.net_data.game_version), "\"game_version\":\"0.1\"")] {
             let (n, d, s, scenes) = tables();
             assert!(super::restore(n, d, s, &text.replacen(from, to, 1), scenes).is_err(), "{to} is refused");
         }

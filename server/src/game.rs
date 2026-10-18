@@ -5,12 +5,12 @@
 
 use std::collections::HashMap;
 
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use serde_json::{json, Value};
 
 use crate::data::{stable_hash, NetData};
 use crate::gamedata::GameData;
-use crate::idmap::{IdMap, IdSet};
+use crate::idmap::{IdMap, SlotSet, Slots};
 use crate::model::{Inventory, WorldObject};
 use crate::net::{self, ListEvent, Net, NetObj, Target};
 use crate::protocol::{self, CONNECTION_APPROVED, CONNECTION_REQUEST, NETWORK_TRANSFORM, NETWORK_VARIABLE_DELTA};
@@ -132,11 +132,11 @@ pub struct Game {
     pub net: Net,
     /// The save's sections the handlers below keep as JSON (world state, planets, players...).
     pub save: SaveFile,
-    pub wos: IdMap<i32, WorldObject>,
+    pub wos: Slots<i32, WorldObject>,
     pub inventories: IdMap<i32, Inventory>,
     /// WorldObjectsHandler._constructedWorldObjects / _itemsPickablesWorldObjects.
-    pub constructed: IdSet<i32>,
-    pub pickables: IndexSet<i32>,
+    pub constructed: SlotSet<i32>,
+    pub pickables: SlotSet<i32>,
     /// World object -> (the inventory holding it, in how many inventories it is): the
     /// inventories' content indexed (inventories.rs hold/release), rebuilt from them on load.
     #[serde(skip)]
@@ -242,10 +242,10 @@ impl Game {
             net_data,
             net: Net::new(spec, FIRST_DYNAMIC_ID),
             save,
-            wos: IdMap::default(),
+            wos: Slots::default(),
             inventories: IdMap::default(),
-            constructed: IdSet::default(),
-            pickables: IndexSet::new(),
+            constructed: SlotSet::default(),
+            pickables: SlotSet::default(),
             holders: Default::default(),
             watchers: HashMap::new(),
             tmp_inventory_id: -2,

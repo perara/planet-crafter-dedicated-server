@@ -529,7 +529,7 @@ fn deserialize(game: &mut Game, instance_seed: i32) -> bool {
         for id in &generated_ids {
             // GroupNetworkBase.SetWorldObjectFromGeneratedWreck: wreck buildings do not count.
             if game.wos.get(id).is_some_and(|w| w.net.is_some() && game.data.groups[w.group].constructible) {
-                game.constructed.shift_remove(id);
+                game.constructed.remove(id);
             }
         }
         for p in game.units.planets.iter().map(|p| p.hash).collect::<Vec<_>>() {

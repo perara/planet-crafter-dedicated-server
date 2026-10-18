@@ -11,13 +11,13 @@
 mod motion;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::hash::Hash;
 
 use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Value};
 
 use crate::data::stable_hash;
 use crate::game::{Args, Game};
+use crate::idmap::Slots;
 use crate::model::WorldObject;
 use crate::net::{enc, NetObj, Target};
 use crate::protocol::{CREATE_OBJECT, DESTROY_OBJECT, NETWORK_TRANSFORM};
@@ -30,59 +30,6 @@ const TASKS_EVERY: f32 = 1.0;
 const UP: f32 = 2.0;
 /// NetworkObject.SceneObject flag.
 const DESTROY_WITH_SCENE: u16 = 1 << 6;
-
-/// Dictionary / HashSet enumeration order in .NET: entries in slot order, and a removed entry's
-/// slot is taken by the next insertion (the most recently freed first). Which task a drone
-/// gets and which station answers first depend on it.
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(bound(deserialize = "K: serde::Deserialize<'de> + Eq + std::hash::Hash, V: serde::Deserialize<'de>"))]
-struct Slots<K, V> {
-    slots: Vec<Option<(K, V)>>,
-    free: Vec<usize>,
-    index: HashMap<K, usize>,
-}
-
-impl<K, V> Default for Slots<K, V> {
-    fn default() -> Self {
-        Slots { slots: Vec::new(), free: Vec::new(), index: HashMap::new() }
-    }
-}
-
-impl<K: Copy + Eq + Hash, V> Slots<K, V> {
-    fn get(&self, k: &K) -> Option<&V> {
-        self.index.get(k).and_then(|i| self.slots[*i].as_ref()).map(|(_, v)| v)
-    }
-    fn get_mut(&mut self, k: &K) -> Option<&mut V> {
-        let i = *self.index.get(k)?;
-        self.slots[i].as_mut().map(|(_, v)| v)
-    }
-    fn contains_key(&self, k: &K) -> bool {
-        self.index.contains_key(k)
-    }
-    fn insert(&mut self, k: K, v: V) {
-        if let Some(i) = self.index.get(&k) {
-            self.slots[*i] = Some((k, v));
-            return;
-        }
-        let i = match self.free.pop() {
-            Some(i) => i,
-            None => {
-                self.slots.push(None);
-                self.slots.len() - 1
-            }
-        };
-        self.slots[i] = Some((k, v));
-        self.index.insert(k, i);
-    }
-    fn remove(&mut self, k: &K) -> Option<V> {
-        let i = self.index.remove(k)?;
-        self.free.push(i);
-        self.slots[i].take().map(|(_, v)| v)
-    }
-    fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
-        self.slots.iter().flatten().map(|(k, v)| (k, v))
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 enum State {
@@ -178,7 +125,8 @@ pub struct Logistics {
     entities: HashMap<i32, Entity>,
     /// _taskPriorities: planet -> group hash -> priority.
     priorities: HashMap<i32, HashMap<i32, i32>>,
-    /// _allLogisticTasks: world object to move -> task.
+    /// _allLogisticTasks: world object to move -> task. (Slots: which task a drone gets and
+    /// which station answers first depend on .NET's Dictionary order.)
     all_tasks: Slots<i32, u32>,
     tasks: HashMap<u32, Task>,
     next_task: u32,
