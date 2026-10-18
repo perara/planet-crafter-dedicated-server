@@ -251,8 +251,8 @@ pub fn init(game: &mut Game) {
 
 pub fn rpc(game: &mut Game, client: u64, object: u64, _behaviour: u16, name: &str, a: &Args) -> bool {
     let wo = game.net.objects.get(&object).and_then(|o| o.wo);
-    // The back-and-forth rocket platforms' growth is the rockets port's.
-    if name.starts_with("GrowthProxy.") && wo.and_then(|w| game.wos.get(&w)).is_some_and(|w| is_rocket_platform(game, w.group)) {
+    // The back-and-forth rocket platforms' growth is the rockets port's, an animal's the animals'.
+    if name.starts_with("GrowthProxy.") && (wo.and_then(|w| game.wos.get(&w)).is_some_and(|w| is_rocket_platform(game, w.group)) || crate::animals::spawn::is_animal(game, object)) {
         return false;
     }
     match name {

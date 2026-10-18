@@ -222,6 +222,11 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, name: &str, a: &Args) -> b
     true
 }
 
+/// A spawned animal's network object.
+pub fn is_animal(game: &Game, object: u64) -> bool {
+    game.ext.animals.spawn.animals.contains_key(&object)
+}
+
 fn spawner_unregistered(game: &mut Game, wo: i32) {
     let s = &mut game.ext.animals.spawn;
     // The game's dictionary throws on an id it never counted.
@@ -843,6 +848,42 @@ mod tests {
         game.inventory_remove(inventory, sequence);
         game.propagate(inventory, sequence, false);
         assert!(!game.net.objects.contains_key(&net) && game.ext.animals.spawn.animals.is_empty());
+    }
+
+    /// Petting a shelter animal gives a genetic trait (into the backpack) once per 30 s; its
+    /// growth proxy answers and resets.
+    #[test]
+    fn petted_animals_give_a_trait_and_tell_their_growth() {
+        use crate::testkit::*;
+        let Some((mut game, _)) = world() else { return };
+        let (shelter, _) = place(&mut game, "AnimalShelter1", [560.0, 3.0, 500.0]);
+        let sequence = game.create_world_object(game.data.group("DNASequence").unwrap(), 0, true);
+        let traits = game.create_inventory(TRAIT_TYPES, 0, sequence, &[], &[]);
+        let species = game.create_world_object(game.data.group(crate::genetics::TRAIT_GROUP).unwrap(), 0, true);
+        crate::genetics::set_trait_serialized(game.wos.get_mut(&species).unwrap(), &json!([SPECIES, [0, 0, 0, 0], 3]));
+        game.inventory_add(traits, species, true);
+        assert!(game.add_existing_item(sequence, game.wos[&shelter].linked_inventory, true, 0));
+        let (&net, _) = game.ext.animals.spawn.animals.iter().next().unwrap();
+        let (bag, _) = backpack(&game, 1);
+        let had = game.inventories[&bag].items.len();
+        game.time = 100.0;
+        game.net.out.clear();
+        send_on(&mut game, 1, net, "PetProxy.ActionPetServerRpc", &[]);
+        let trait_hash = hash(&game, crate::genetics::TRAIT_GROUP);
+        assert_eq!(one(&game, "PetProxy.ActionPetClientRpc"), vec![json!(false), json!(trait_hash)]);
+        assert_eq!(game.inventories[&bag].items.len(), had + 1);
+        game.time = 120.0;
+        send_on(&mut game, 1, net, "PetProxy.ActionPetServerRpc", &[]);
+        assert_eq!(game.inventories[&bag].items.len(), had + 1, "not again within 30 s");
+
+        game.net.out.clear();
+        send_on(&mut game, 1, net, "GrowthProxy.GetCurrentGrowthServerRpc", &[]);
+        assert_eq!(sent(&game, "GrowthProxy.SetCurrentGrowthClientRpc").into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(Target::Only(1), vec![json!(30.0)])]);
+        send_on(&mut game, 1, net, "GrowthProxy.ResetCurrentGrowthServerRpc", &[json!(80.0)]);
+        assert_eq!(game.wos[&sequence].growth, 80.0);
+        assert_eq!(sent(&game, "GrowthProxy.SetCurrentGrowthClientRpc").last().map(|s| (s.to, s.args.clone())), Some((Target::All, vec![json!(80.0)])));
+        // PetProxy on something that is no animal: nobody takes it.
+        assert!(!game.rpc(1, game.wos[&shelter].net.unwrap(), 0, "PetProxy.ActionPetServerRpc", crate::game::Args(vec![])));
     }
 
     #[test]

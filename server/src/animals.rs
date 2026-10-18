@@ -11,7 +11,7 @@
 //! near anything).
 
 mod interpolation;
-mod spawn;
+pub mod spawn;
 mod vehicles;
 
 use std::collections::HashSet;
