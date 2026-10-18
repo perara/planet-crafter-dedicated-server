@@ -1270,7 +1270,7 @@ impl Front {
     // ---- the end --------------------------------------------------------------------------
 
     /// Saves the world, ends the bank, disconnects everyone, exits.
-    fn shutdown(&mut self, code: i32) -> ! {
+    fn shutdown(&mut self, mut code: i32) -> ! {
         if self.live.is_some() && matches!(self.phase, Phase::Snapshotting | Phase::Restoring | Phase::Starting) {
             self.fail_flip("the server is stopping");
         }
@@ -1311,7 +1311,13 @@ impl Front {
                     let _ = b.child.kill();
                 }
             }
-            let _ = b.child.wait();
+            // Its save failed (it says where the world is kept), or it was killed before it saved.
+            if let Ok(s) = b.child.wait()
+                && !s.success()
+            {
+                eprintln!("bank {} ended ({s}) at the stop: the world may not be saved (see above)", b.name);
+                code = code.max(1);
+            }
         }
         for (mut child, _) in self.exiting.drain(..) {
             let _ = child.kill();
@@ -1325,7 +1331,7 @@ impl Front {
 }
 
 /// Where the front keeps the last flip's snapshot when it stops with the world in no bank.
-fn snapshot_path(save: &str) -> String {
+pub fn snapshot_path(save: &str) -> String {
     format!("{save}.snapshot")
 }
 

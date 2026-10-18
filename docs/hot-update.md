@@ -82,7 +82,11 @@ checked the same way; a recovering bank of another protocol stops the front (exi
 front stops while no bank holds the world (a stop during a recovery, the crash limit), the last
 snapshot, if newer than the save, is written to `world.json.snapshot` and the next start
 restores from it; a start whose save is newer deletes it. If a start cannot restore it, move it
-away.
+away. A save that fails is never silent: `POST /api/save` answers 500 with the error, `GET
+/api/status` has `lastSave` (`ok`, `at` in Unix seconds, `error`), and a failed autosave is tried
+again at the next one. When the last save (at a stop, or when the front is gone) fails, the bank
+writes its snapshot to `world.json.snapshot` (else to the temporary folder, and says where) and
+ends with 1; the front says so and ends with 1 too.
 
 **The updater** (`updater.rs`, in a thread of the front, or in the CLI when the server is
 stopped): the release from `PCDS_RELEASES` (default GitHub's API for
