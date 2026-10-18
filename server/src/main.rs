@@ -49,6 +49,7 @@ mod instances;
 mod inventories;
 mod load;
 mod logistics;
+mod native;
 mod machines;
 mod meteo;
 mod model;
@@ -193,6 +194,9 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("probe") => return probe::run(&args[2..]),
         Some("load") => return load::run(&args[2..]),
+        Some("native-scan") => return native::unity::scan(&args[2..]),
+        Some("tables-diff") => return native::diff::run(&args[2..]),
+        Some("read-game") => return native::tables::run(&args[2..]),
         Some("extract") => return extract::run(&args[2..]),
         Some("new") => return newworld::run(&args[2..]),
         Some("--version") => {
