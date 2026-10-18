@@ -348,6 +348,14 @@ pub fn run(args: &[String]) {
     eprintln!("read-game: {} layouts", layouts.len());
     let gamedata = json!({"assets": assets, "groupPrefabs": group_prefabs, "layouts": layouts, "singletons": singletons, "panels": panels});
     std::fs::write(Path::new(out).join("gamedata.json"), serde_json::to_string_pretty(&gamedata).unwrap()).expect("write gamedata.json");
+    // scenes/<planet>.json for the planets anyone can play (no DLC app id).
+    std::fs::create_dir_all(Path::new(out).join("scenes")).expect("create OUT_DIR/scenes");
+    for planet in planets.iter().filter(|p| p["steamAppId"] == 0) {
+        let id = planet["id"].as_str().unwrap_or_default();
+        let data = assets.get(&format!("PlanetData:PlanetData-{id}")).unwrap_or_else(|| fail(format!("no PlanetData-{id}")));
+        let scenes = ctx.planet_scenes(&assets, data).unwrap_or_else(|e| fail(format!("scenes/{id}.json: {e}")));
+        std::fs::write(Path::new(out).join(format!("scenes/{id}.json")), serde_json::to_string_pretty(&scenes).unwrap()).expect("write scenes");
+    }
 }
 
 /// Debug: a script class's serialized field layout (pcds-server native-layout GAME_DIR NS.CLASS).

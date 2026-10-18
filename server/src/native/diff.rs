@@ -1,7 +1,8 @@
 //! `pcds-server tables-diff EXPECTED_DIR ACTUAL_DIR [SECTION]`: compares two game table folders
 //! (data/<version>/) section by section, floats within 1e-5 (relative above 1, absolute below), and prints how much of
-//! each section matches with the first differences by JSON path. The native reader is checked
-//! against the tables the game itself produced this way.
+//! each section matches with the first differences by JSON path; the scenes' water volumes and
+//! ore veins, listed in no order, item by item. The native reader is checked against the tables
+//! the game itself produced this way.
 
 use serde_json::Value;
 
@@ -71,6 +72,35 @@ fn section(name: &str, a: &Value, b: &Value, show: usize) {
     }
 }
 
+/// A list in no particular order (FindObjectsByType): each expected item paired with an actual
+/// one, equal ones first, then the closest; the actual ones left over are extra.
+fn unordered(name: &str, a: &[Value], b: &[Value], show: usize) {
+    let mut partner: Vec<Option<usize>> = vec![None; a.len()];
+    let mut used = vec![false; b.len()];
+    for (i, v) in a.iter().enumerate() {
+        if let Some(j) = (0..b.len()).find(|&j| !used[j] && walk("", v, &b[j], &mut Vec::new(), 0) == 0) {
+            (partner[i], used[j]) = (Some(j), true);
+        }
+    }
+    let equal = partner.iter().flatten().count();
+    let mut out = Vec::new();
+    let mut differences = 0;
+    for (i, v) in a.iter().enumerate().filter(|(i, _)| partner[*i].is_none()) {
+        let Some(j) = (0..b.len()).filter(|&j| !used[j]).min_by_key(|&j| walk("", v, &b[j], &mut Vec::new(), 0)) else {
+            differences += 1;
+            out.push(format!("{name}[{i}]: no item left in actual"));
+            continue;
+        };
+        used[j] = true;
+        differences += walk(&format!("{name}[{i}~{j}]"), v, &b[j], &mut out, show);
+    }
+    let extra = used.iter().filter(|u| !**u).count();
+    println!("{name}: {equal}/{} equal, {differences} differences in the others (paired with the closest), {extra} extra in actual", a.len());
+    for d in out.iter().take(show) {
+        println!("    {d}");
+    }
+}
+
 fn load(dir: &str, file: &str) -> Option<Value> {
     serde_json::from_str(&std::fs::read_to_string(format!("{dir}/{file}")).ok()?).ok()
 }
@@ -101,9 +131,10 @@ pub fn run(args: &[String]) {
                     if only.is_some_and(|o| !name.contains(o)) {
                         continue;
                     }
-                    match y.get(k) {
-                        Some(w) => section(&name, v, w, show),
-                        None => println!("{name}: missing"),
+                    match (v, y.get(k)) {
+                        (Value::Array(x), Some(Value::Array(w))) if file.starts_with("scenes/") && (k == "waterVolumes" || k == "oreVeins") => unordered(&name, x, w, show),
+                        (_, Some(w)) => section(&name, v, w, show),
+                        (_, None) => println!("{name}: missing"),
                     }
                 }
             }
