@@ -255,7 +255,7 @@ mod tests {
         for (name, arg, want) in cases {
             set(&mut g, ann, [50.0, 50.0, 50.0, 40.0]);
             set(&mut g, bob, [50.0, 50.0, 50.0, 40.0]);
-            send_on(&mut g, 1, ann, name, &[arg.clone()]);
+            send_on(&mut g, 1, ann, name, std::slice::from_ref(&arg));
             assert_eq!(values(&g, ann), want, "{name}");
             send_on(&mut g, 1, bob, name, &[arg]);
             assert_eq!(values(&g, bob), [50.0, 50.0, 50.0, 40.0], "{name} on another player");
@@ -303,7 +303,7 @@ mod tests {
         set(&mut g, ann, [50.0, 50.0, 50.0, 0.0]);
         let v = step(&mut g);
         assert!((v[0] - (50.0 - 1.9 * TICK)).abs() < 1e-4 && v[1] < 50.0 && v[2] < 50.0, "{v:?}");
-        assert!(get_b(&g, ann, "_oxygenInfinityStatus") == false && get_f(&g, ann, "_currentOutsideOxygenChangeValuePerSec") == -1.9);
+        assert!(!get_b(&g, ann, "_oxygenInfinityStatus") && get_f(&g, ann, "_currentOutsideOxygenChangeValuePerSec") == -1.9);
         g.net.set(ann, CLASS, "_playerCanBreath", enc::bool(true));
         let before = values(&g, ann)[0];
         assert!((step(&mut g)[0] - (before + INSIDE_OXYGEN * TICK)).abs() < 1e-4);
