@@ -1012,7 +1012,7 @@ pub mod tests {
             // and then to any.
             let class = name.split('.').next().unwrap_or("");
             let carriers: Vec<u64> = g.net.objects.keys().copied().filter(|o| g.net.carries(*o, class)).collect();
-            let objects: Vec<u64> = if carriers.is_empty() || r.next() % 4 == 0 { g.net.objects.keys().copied().collect() } else { carriers };
+            let objects: Vec<u64> = if carriers.is_empty() || r.next().is_multiple_of(4) { g.net.objects.keys().copied().collect() } else { carriers };
             let object = objects[(r.next() % objects.len() as u64) as usize];
             let behaviour = (r.next() % 6) as u16;
             let (hash, mut body) = g.net.spec.encode(&name, &args);

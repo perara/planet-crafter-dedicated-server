@@ -101,11 +101,11 @@ impl<K: Copy + Eq + Hash, V> Slots<K, V> {
     /// Removes, in slot order, what `keep` refuses.
     pub fn retain(&mut self, mut keep: impl FnMut(&K, &mut V) -> bool) {
         for i in 0..self.slots.len() {
-            if let Some((k, v)) = self.slots[i].as_mut() {
-                if !keep(k, v) {
-                    let k = *k;
-                    self.remove(&k);
-                }
+            if let Some((k, v)) = self.slots[i].as_mut()
+                && !keep(k, v)
+            {
+                let k = *k;
+                self.remove(&k);
             }
         }
     }
