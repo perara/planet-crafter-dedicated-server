@@ -4,7 +4,7 @@
 //! drinks, mines, chats, sorts or throws an item away. At the end it prints the round trip of
 //! each call the server answers (craft, build, chat) as percentiles, and what players received.
 //!
-//! Usage: pcds-server load HOST:PORT DATA_DIR [PLAYERS=8] [SECONDS=60] [ACTION_MS=200]
+//! Usage: pcds load HOST:PORT DATA_DIR [PLAYERS=8] [SECONDS=60] [ACTION_MS=200]
 //! Each player connects from its own 127.0.0.N address (the server allows 8 per address), so
 //! HOST must be a loopback address of this machine.
 
@@ -281,7 +281,7 @@ fn percentiles(mut v: Vec<f64>) -> String {
 
 pub fn run(args: &[String]) {
     let (Some(addr), Some(dir)) = (args.first(), args.get(1)) else {
-        eprintln!("usage: pcds-server load HOST:PORT DATA_DIR [PLAYERS] [SECONDS] [ACTION_MS]");
+        eprintln!("usage: pcds load HOST:PORT DATA_DIR [PLAYERS] [SECONDS] [ACTION_MS]");
         std::process::exit(2);
     };
     let number = |i: usize, default: u64| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(default);

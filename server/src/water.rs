@@ -31,12 +31,10 @@ pub struct Water {
     planets: HashMap<String, Vec<Volume>>,
 }
 
+/// A planet's water volumes, from its scene dump (none on a DLC planet, which has no dump).
 fn load(game: &Game, planet: &str) -> Vec<Volume> {
-    let path = format!("{}/scenes/{planet}.json", game.data_dir);
-    let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
-    let Ok(scene) = serde_json::from_str::<Value>(&text) else { return Vec::new() };
     let mut out = Vec::new();
-    for v in scene["waterVolumes"].as_array().into_iter().flatten() {
+    for v in game.scenes.planets.get(planet).into_iter().flat_map(|s| &s.water_volumes) {
         // ponytail: volumes without a BoxCollider (Aqualis' sea) are left out; their water does not move.
         if v["box"].is_null() {
             continue;

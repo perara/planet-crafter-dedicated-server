@@ -26,7 +26,7 @@ pub struct Vein {
 /// The current planet's veins.
 pub struct State {
     planet: usize,
-    /// None: the planet's scene dump has no veins (an older dump).
+    /// None: the planet has no scene dump (a DLC planet), or a test without veins.
     veins: Option<Vec<Vein>>,
     next_check: f32,
 }
@@ -46,11 +46,9 @@ fn q(v: &Value) -> [f32; 4] {
     [0, 1, 2, 3].map(|i| v[i].as_f64().unwrap_or(if i == 3 { 1.0 } else { 0.0 }) as f32)
 }
 
-/// The current planet's veins; None when its scene dump has none (an older dump).
+/// The current planet's veins; None on a planet without a scene dump (a DLC planet).
 fn load(game: &Game) -> Option<Vec<Vein>> {
-    let text = std::fs::read_to_string(format!("{}/scenes/{}.json", game.data_dir, game.planet_id())).ok()?;
-    let scene: Value = serde_json::from_str(&text).ok()?;
-    let veins = scene["oreVeins"].as_array()?.iter().map(|v| {
+    let veins = game.scenes.planets.get(game.planet_id())?.ore_veins.iter().map(|v| {
         let f = &v["fields"];
         // WorldRandomizer.ReplaceOreVein, in Start.
         let groups = f["groups"].as_array().into_iter().flatten().filter_map(|r| game.data.group_of_ref(r.as_str()?)).map(|g| crate::planets::randomized_group(game, g).unwrap_or(g)).collect();
@@ -180,7 +178,7 @@ pub fn cast(game: &mut Game, wo: i32, f: &Value) {
     }
 }
 
-/// For tests of the rays' bookkeeping: the planet as with an older dump, without veins.
+/// For tests of the rays' bookkeeping: the planet without veins.
 #[cfg(test)]
 pub fn without_veins(game: &mut Game) {
     game.ext.machines.veins = Some(State { planet: game.planet, veins: None, next_check: f32::MAX });

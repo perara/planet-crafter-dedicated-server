@@ -1,0 +1,268 @@
+//! Steam: the game folder (from Steam's library list), the game's own saves, and steamcmd
+//! (Valve's command-line client, in run/steamcmd: steamclient.so for invite codes, and the
+//! game for a machine without it).
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use super::{check, say, Ctx, Result, APP_ID};
+
+/// A Valve KeyValues (.vdf) value: text, or keys with values.
+#[derive(Debug, PartialEq)]
+pub enum Vdf {
+    Text(String),
+    Keys(Vec<(String, Vdf)>),
+}
+
+impl Vdf {
+    fn get(&self, key: &str) -> Option<&Vdf> {
+        match self {
+            Vdf::Keys(keys) => keys.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v),
+            Vdf::Text(_) => None,
+        }
+    }
+}
+
+/// Parses KeyValues text: "key" "value" and "key" { ... }, with // comments.
+pub fn parse_vdf(text: &str) -> Result<Vdf> {
+    fn token(chars: &mut std::iter::Peekable<std::str::Chars>) -> Result<Option<String>> {
+        loop {
+            match chars.next() {
+                None => return Ok(None),
+                Some(c) if c.is_whitespace() => {}
+                Some('/') if chars.peek() == Some(&'/') => {
+                    chars.by_ref().find(|c| *c == '\n');
+                }
+                Some(c @ ('{' | '}')) => return Ok(Some(c.to_string())),
+                Some('"') => {
+                    let mut s = String::from("\"");
+                    loop {
+                        match chars.next().ok_or("unterminated string")? {
+                            '"' => return Ok(Some(s)),
+                            '\\' => s.push(match chars.next().ok_or("unterminated string")? {
+                                'n' => '\n',
+                                't' => '\t',
+                                c => c,
+                            }),
+                            c => s.push(c),
+                        }
+                    }
+                }
+                Some(c) => return Err(format!("unexpected {c:?}")),
+            }
+        }
+    }
+    fn keys(chars: &mut std::iter::Peekable<std::str::Chars>, nested: bool) -> Result<Vdf> {
+        let mut out = Vec::new();
+        loop {
+            let key = match token(chars)? {
+                None if !nested => return Ok(Vdf::Keys(out)),
+                Some(t) if t == "}" && nested => return Ok(Vdf::Keys(out)),
+                Some(t) if t.starts_with('"') => t[1..].to_string(),
+                other => return Err(format!("expected a key, not {other:?}")),
+            };
+            let value = match token(chars)?.as_deref() {
+                Some("{") => keys(chars, true)?,
+                Some(t) if t.starts_with('"') => Vdf::Text(t[1..].to_string()),
+                other => return Err(format!("{key}: expected a value, not {other:?}")),
+            };
+            out.push((key, value));
+        }
+    }
+    keys(&mut text.chars().peekable(), false)
+}
+
+/// The libraries in libraryfolders.vdf: each one's folder and whether its "apps" lists the game.
+pub fn libraries(vdf: &Vdf) -> Vec<(PathBuf, bool)> {
+    let Some(Vdf::Keys(folders)) = vdf.get("libraryfolders") else { return Vec::new() };
+    folders
+        .iter()
+        .filter_map(|(_, f)| match f.get("path")? {
+            Vdf::Text(path) => Some((PathBuf::from(path), f.get("apps").is_some_and(|apps| apps.get(APP_ID).is_some()))),
+            Vdf::Keys(_) => None,
+        })
+        .collect()
+}
+
+impl Ctx {
+    /// Steam's library list (~/.steam/steam is Steam's own link to its installation).
+    fn library_list(&self) -> PathBuf {
+        self.home.join(".steam/steam/steamapps/libraryfolders.vdf")
+    }
+
+    fn steam_libraries(&self) -> Result<Vec<(PathBuf, bool)>> {
+        let path = self.library_list();
+        let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(libraries(&parse_vdf(&text).map_err(|e| format!("{}: {e}", path.display()))?))
+    }
+
+    /// The game folder: --game DIR, PCDS_GAME_DIR, the one used last (run/game-dir), else the
+    /// Steam library that lists the game. The one chosen is remembered.
+    pub fn game_dir(&self, arg: Option<&Path>) -> Result<PathBuf> {
+        let remembered = self.run.join("game-dir");
+        let (dir, from) = if let Some(dir) = arg {
+            (dir.to_path_buf(), "--game".to_string())
+        } else if let Some(dir) = crate::env("PCDS_GAME_DIR") {
+            (PathBuf::from(dir), "PCDS_GAME_DIR".to_string())
+        } else if let Ok(text) = fs::read_to_string(&remembered) {
+            (PathBuf::from(text.trim_end_matches('\n')), remembered.display().to_string())
+        } else {
+            let not_found = |why: String| format!("game not found: pass --game DIR (the folder with 'Planet Crafter.exe', e.g. copied from a PC) or set PCDS_GAME_DIR ({why})");
+            let libraries = self.steam_libraries().map_err(not_found)?;
+            let library = libraries.into_iter().find(|(_, has)| *has).ok_or_else(|| not_found(format!("no Steam library in {} lists app {APP_ID}", self.library_list().display())))?;
+            (library.0.join("steamapps/common/The Planet Crafter"), self.library_list().display().to_string())
+        };
+        if !dir.join("Planet Crafter.exe").is_file() || !dir.join("Planet Crafter_Data").is_dir() {
+            return Err(format!("no game in {} (from {from}): the game folder holds 'Planet Crafter.exe' and 'Planet Crafter_Data'", dir.display()));
+        }
+        let dir = dir.canonicalize().map_err(|e| format!("{}: {e}", dir.display()))?;
+        if fs::read_to_string(&remembered).ok().as_deref() != Some(&format!("{}\n", dir.display())) {
+            super::mkdir(&self.run)?;
+            super::write(&remembered, format!("{}\n", dir.display()))?;
+        }
+        Ok(dir)
+    }
+
+    /// The game's own saves on this machine (Proton), newest first.
+    pub fn local_saves(&self) -> Vec<PathBuf> {
+        let mut saves: Vec<PathBuf> = self
+            .steam_libraries()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(lib, _)| lib.join(format!("steamapps/compatdata/{APP_ID}/pfx/drive_c/users/steamuser/AppData/LocalLow/MijuGames/Planet Crafter")))
+            .flat_map(|dir| fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "json") && super::is_save(p))
+            .collect();
+        saves.sort_by_key(|p| std::cmp::Reverse(super::modified(p)));
+        saves.truncate(9);
+        saves
+    }
+
+    fn steamcmd_sh(&self) -> PathBuf {
+        self.steamcmd.join("steamcmd.sh")
+    }
+
+    pub fn fetch_steamcmd(&self) -> Result {
+        if self.steamcmd_sh().is_file() {
+            return Ok(());
+        }
+        say("downloading steamcmd (Valve's command-line Steam client)");
+        super::mkdir(&self.steamcmd)?;
+        let tarball = self.steamcmd.join("steamcmd_linux.tar.gz");
+        super::download("https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz", &tarball)?;
+        check(Command::new("tar").arg("-xzf").arg(&tarball).arg("-C").arg(&self.steamcmd))?;
+        let _ = fs::remove_file(&tarball);
+        Ok(())
+    }
+
+    /// Invite codes need Valve's steamclient.so where the Steam API looks for it,
+    /// ~/.steam/sdk64: the Steam client puts it there, else steamcmd's copy is linked there.
+    pub fn ensure_steamclient(&self) {
+        let sdk = self.home.join(".steam/sdk64/steamclient.so");
+        if self.env_get("PCDS_STEAM").as_deref() == Some("off") || sdk.is_file() {
+            return;
+        }
+        say("getting steamclient.so for invite codes (steamcmd's first run updates itself; a minute or two)");
+        let log = self.steamcmd.join("first-run.log");
+        let _ = self.fetch_steamcmd().and_then(|_| {
+            let out = fs::File::create(&log).map_err(|e| e.to_string())?;
+            let err = out.try_clone().map_err(|e| e.to_string())?;
+            check(Command::new(self.steamcmd_sh()).arg("+quit").stdin(Stdio::null()).stdout(out).stderr(err))
+        });
+        let theirs = self.steamcmd.join("linux64/steamclient.so");
+        if theirs.is_file() {
+            let _ = fs::create_dir_all(sdk.parent().unwrap_or(&sdk));
+            let _ = fs::remove_file(&sdk);
+            let _ = std::os::unix::fs::symlink(&theirs, &sdk);
+        }
+        if !sdk.is_file() {
+            eprintln!(
+                "pcds: no steamclient.so: steamcmd did not run (see {}; it needs 32-bit libraries such as lib32gcc-s1). Direct IP works; invite codes come once steamcmd runs",
+                log.display()
+            );
+        }
+    }
+
+    /// The game (Windows build) with the owner's Steam account; steamcmd asks for the password
+    /// and the Steam Guard code once and remembers the login for updates.
+    pub fn download_game(&self, user: &str) -> Result {
+        self.fetch_steamcmd()?;
+        say(format!("downloading The Planet Crafter as Steam user {user} (steamcmd asks for your password and Steam Guard code)"));
+        let game = self.run.join("game");
+        let done = Command::new(self.steamcmd_sh())
+            .args(["+@sSteamCmdForcePlatformType", "windows", "+force_install_dir"])
+            .arg(&game)
+            .args(["+login", user, "+app_update", APP_ID, "validate", "+quit"])
+            .status()
+            .is_ok_and(|s| s.success());
+        if !done || !game.join("Planet Crafter.exe").is_file() {
+            return Err("the game download did not finish (see above)".into());
+        }
+        super::write(&self.run.join("steam-user"), format!("{user}\n"))?;
+        self.game_dir(Some(&game)).map(|_| ())
+    }
+
+    /// A downloaded game follows updates with the remembered login (no prompt; skipped when
+    /// Steam wants the password again).
+    pub fn update_downloaded_game(&self) {
+        let Ok(user) = fs::read_to_string(self.run.join("steam-user")) else { return };
+        if !self.steamcmd_sh().is_file() {
+            return;
+        }
+        let log = self.steamcmd.join("update.log");
+        let ran = fs::File::create(&log).and_then(|out| {
+            let err = out.try_clone()?;
+            Command::new(self.steamcmd_sh())
+                .args(["+@sSteamCmdForcePlatformType", "windows", "+@NoPromptForPassword", "1", "+force_install_dir"])
+                .arg(self.run.join("game"))
+                .args(["+login", user.trim(), "+app_update", APP_ID, "+quit"])
+                .stdin(Stdio::null())
+                .stdout(out)
+                .stderr(err)
+                .status()
+        });
+        if !ran.is_ok_and(|s| s.success()) {
+            say(format!("the game update through steamcmd did not run (see {})", log.display()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_library_that_lists_the_game() {
+        let text = r#"
+"libraryfolders"
+{
+	"0"
+	{
+		"path"		"/home/me/.local/share/Steam"
+		"label"		""
+		"apps"
+		{
+			"228980"		"128606066"
+		}
+	}
+	// a second drive
+	"1"
+	{
+		"path"		"/mnt/games/Steam \"Library\""
+		"apps"
+		{
+			"1284190"		"5341207582"
+			"294100"		"577359346"
+		}
+	}
+}
+"#;
+        let vdf = parse_vdf(text).unwrap();
+        assert_eq!(libraries(&vdf), vec![(PathBuf::from("/home/me/.local/share/Steam"), false), (PathBuf::from("/mnt/games/Steam \"Library\""), true)]);
+        assert_eq!(libraries(&parse_vdf("\"other\" { }").unwrap()), vec![]);
+        for bad in ["\"libraryfolders\" {", "\"a\" \"b", "\"a\" }", "x"] {
+            assert!(parse_vdf(bad).is_err(), "{bad}");
+        }
+    }
+}

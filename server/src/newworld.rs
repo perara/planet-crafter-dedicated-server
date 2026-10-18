@@ -1,4 +1,4 @@
-//! `pcds-server new SAVE.json DATA_DIR [--planet ID] [--start LOCATION] [--seed N] [--set KEY=VALUE ...]`:
+//! `pcds new-save SAVE.json DATA_DIR [--planet ID] [--start LOCATION] [--seed N] [--set KEY=VALUE ...]`:
 //! a new world, as the game's new-save screen makes one (SaveFilesCreateNew.CreateNewFile and
 //! JSONExport.CreateNewSaveFile) with the Standard settings preset. Only the free starting
 //! planets can be chosen.
@@ -26,7 +26,7 @@ pub struct Options {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: pcds-server new SAVE.json DATA_DIR [--planet ID] [--start LOCATION] [--seed N] [--set KEY=VALUE ...]");
+    eprintln!("usage: pcds new-save SAVE.json DATA_DIR [--planet ID] [--start LOCATION] [--seed N] [--set KEY=VALUE ...]");
     std::process::exit(2)
 }
 

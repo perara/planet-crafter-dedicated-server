@@ -123,7 +123,7 @@ impl Generator {
     }
 
     /// What SetMiningRayGeneration adds to groupDatas: every vein group the rays found
-    /// (miningRays times), which veins::cast made the linked groups (with an older scene dump,
+    /// (miningRays times), which veins::cast made the linked groups (on a planet without veins,
     /// the ones the save kept). The game never takes them out of groupDatas again.
     fn vein_groups(&self, game: &Game, wo: i32) -> Vec<usize> {
         if self.via_linked || self.when_vein_empty {

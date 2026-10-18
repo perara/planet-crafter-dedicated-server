@@ -33,7 +33,8 @@ fn bench() {
     let players: u64 = std::env::var("PCDS_BENCH_PLAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     let (net_data, data, spec) = crate::tables(dir);
     let loaded = Instant::now();
-    let mut g = Game::new(net_data, data, spec, SaveFile::load(&path).unwrap(), dir);
+    let scenes = crate::scene_tables(dir, &net_data, &data);
+    let mut g = Game::new(net_data, data, spec, SaveFile::load(&path).unwrap(), scenes);
     println!("bench: load {:?}, {} world objects, {} network objects", loaded.elapsed(), g.wos.len(), g.net.objects.len());
     g.sim_time = Some(0.0);
     let mut h = std::collections::hash_map::DefaultHasher::new();

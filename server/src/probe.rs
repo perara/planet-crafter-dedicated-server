@@ -2,7 +2,7 @@
 //! sends the RPCs a script lists, and prints everything the server sends back as JSON lines.
 //! Run the same script against the real game (the plugin server) and this server, then compare.
 //!
-//! Usage: pcds-server probe HOST:PORT DATA_DIR SCRIPT.json   (PROBE_NAME=... renames the player)
+//! Usage: pcds probe HOST:PORT DATA_DIR SCRIPT.json   (PROBE_NAME=... renames the player)
 //! Script: {"name": "Probe", "steps": [{"wait": MS}, {"rpc": "Class.MethodServerRpc",
 //! "on": TARGET, "args": [...]}]}. TARGET is a scene behaviour class ("InventoriesHandler"),
 //! "player:Class" for a behaviour on our own player, or [object id, behaviour index].
@@ -161,7 +161,7 @@ fn substitute(v: &Value, s: &Session) -> Value {
 
 pub fn run(args: &[String]) {
     let [addr, dir, script] = args else {
-        eprintln!("usage: pcds-server probe HOST:PORT DATA_DIR SCRIPT.json");
+        eprintln!("usage: pcds probe HOST:PORT DATA_DIR SCRIPT.json");
         std::process::exit(2);
     };
     let (data, spec) = crate::network_tables(dir);

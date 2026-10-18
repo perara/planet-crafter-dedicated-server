@@ -7,6 +7,11 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/perara/planet-crafter-dedicated-server"
 publish = false
 
+# One program: the server (pcds serve) and the command line that installs and runs it.
+[[bin]]
+name = "pcds"
+path = "src/main.rs"
+
 [dependencies]
 ctrlc = { version = "3.5.2", features = ["termination"] }
 indexmap = "2"

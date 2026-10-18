@@ -1,0 +1,274 @@
+//! From nothing to a running server: setup, up, the Docker container's start, the selftest,
+//! and `pcds run`, the server as the service runs it.
+
+use std::collections::HashMap;
+use std::fs;
+use std::io::{BufRead, Write};
+use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use super::env::{build_id, parse_env};
+use super::{need, say, sleep, wait_for, Ctx, Result};
+
+impl Ctx {
+    /// The server runs from run/bin, so rebuilding or upgrading never touches a running server.
+    fn install_server(&self) -> Result {
+        let lib = self.exe.with_file_name("libsteam_api.so");
+        if !lib.is_file() {
+            return Err(format!("no libsteam_api.so next to {} (make build puts it there)", self.exe.display()));
+        }
+        let bin = self.run.join("bin");
+        super::mkdir(&bin.join("web"))?;
+        super::install_file(&self.exe, &bin.join("pcds"))?;
+        super::install_file(&lib, &bin.join("libsteam_api.so"))?;
+        super::install_file(&self.web, &bin.join("web/index.html"))
+    }
+
+    /// The server in the foreground, as the unit runs it: the installed game's tables, the
+    /// world, the settings. Returns only when it cannot start.
+    pub fn run_server(&self) -> Result {
+        let data = self.data_dir()?;
+        let world = self.world_file();
+        if !world.is_file() {
+            return Err(format!("no world at {}: 'pcds worlds', 'pcds world use NAME' or 'pcds world new NAME'", world.display()));
+        }
+        // After an upgrade (a new build or release), the newer binary.
+        let installed = self.run.join("bin/pcds");
+        if !installed.is_file() || super::modified(&self.exe) > super::modified(&installed) {
+            self.install_server()?;
+        }
+        let mut server = Command::new(&installed);
+        server.arg("serve").arg(&data).arg(&world);
+        // Started by hand: the settings file (the unit has systemd read it).
+        let mut settings = HashMap::new();
+        if crate::env("PCDS_ADMIN_TOKEN").is_none() && self.env_file.is_file() {
+            settings.extend(parse_env(&fs::read_to_string(&self.env_file).map_err(|e| format!("{}: {e}", self.env_file.display()))?));
+        }
+        server.envs(&settings);
+        let get = |key: &str| settings.get(key).filter(|v| !v.is_empty()).cloned().or_else(|| crate::env(key));
+        // Access lists and rules are the installation's, whichever world runs.
+        server.env("PCDS_ACCESS", get("PCDS_ACCESS").unwrap_or_else(|| self.run.join("access.json").display().to_string()));
+        server.env("PCDS_RULES", get("PCDS_RULES").unwrap_or_else(|| self.run.join("rules.json").display().to_string()));
+        Err(format!("{}: {}", installed.display(), server.exec()))
+    }
+
+    pub fn setup(&self, args: &[String]) -> Result {
+        let (mut game, mut world, mut steam_user, mut new, mut options) = (None, None, None, false, Vec::new());
+        let mut it = args.iter();
+        while let Some(arg) = it.next() {
+            let mut value = |what: &str| it.next().cloned().ok_or_else(|| what.to_string());
+            match arg.as_str() {
+                "--game" => game = Some(PathBuf::from(value("--game DIR")?)),
+                "--world" => world = Some(PathBuf::from(value("--world SAVE.json")?)),
+                "--steam-user" => steam_user = Some(value("--steam-user NAME")?),
+                "--new" => new = true,
+                _ if new => options.push(arg.clone()),
+                other => return Err(format!("unknown option {other}")),
+            }
+        }
+        for tool in ["curl", "unzip", "tar"] {
+            need(tool, "install it with your package manager")?;
+        }
+        if !self.container {
+            need("systemctl", "pcds runs the server as a systemd user service (or use the Docker image)")?;
+        }
+        super::mkdir(&self.run)?;
+        self.write_env()?;
+        self.install_server()?;
+        if let Some(user) = steam_user {
+            self.download_game(&user)?;
+            game = Some(self.run.join("game"));
+        }
+        let game = self.game_dir(game.as_deref())?;
+        if self.tables(&build_id(&game)?).is_err() {
+            self.extract(Some(&game))?;
+        }
+        let current = self.world_file();
+        let name = self.world_name();
+        if let Some(world) = world {
+            if !world.is_file() {
+                return Err(format!("no save at {}", world.display()));
+            }
+            if !super::is_save(&world) {
+                return Err(format!("{} is not a Planet Crafter save", world.display()));
+            }
+            if self.active() {
+                return Err("stop the server first (pcds stop): it would save over the imported world".into());
+            }
+            if current.is_file() {
+                self.keep_copy(&name, "replaced")?;
+            }
+            super::mkdir(&self.worlds)?;
+            fs::copy(&world, &current).map_err(|e| format!("{}: {e}", current.display()))?;
+            say(format!("world {name} copied from {}", world.display()));
+        } else if new {
+            if current.is_file() {
+                say(format!("keeping the world {name} ('pcds world new NAME' makes another)"));
+            } else {
+                self.new_world(&current, &options)?;
+            }
+        } else if !current.is_file() {
+            return Err("no world yet: pass --world SAVE.json (a save from your game) or --new".into());
+        }
+        if !self.container {
+            self.write_unit()?;
+        }
+        self.ensure_steamclient();
+        say("ready: 'pcds start' runs it now, 'pcds install-service' starts it at login");
+        Ok(())
+    }
+
+    /// From nothing to a running server: setup (game tables, a world, settings), the service,
+    /// a check that players get in, and how to join.
+    pub fn up(&self, args: &[String]) -> Result {
+        let mut args = args.to_vec();
+        if !args.iter().any(|a| a == "--world" || a == "--new") && !self.world_file().is_file() {
+            match self.pick_save() {
+                Some(save) => args.extend(["--world".to_string(), save.display().to_string()]),
+                None => args.push("--new".into()),
+            }
+        }
+        self.setup(&args)?;
+        if !self.start_service()? {
+            say("no systemd user session here: start the server with 'pcds run'");
+            return Ok(());
+        }
+        for _ in 0..60 {
+            if self.api("GET", "/api/status", None).is_ok() {
+                break;
+            }
+            sleep(1);
+        }
+        self.selftest()?;
+        self.summary();
+        Ok(())
+    }
+
+    /// On a terminal with saves of the game around: which one becomes the world (or a new one).
+    fn pick_save(&self) -> Option<PathBuf> {
+        if !super::is_tty() {
+            return None;
+        }
+        let saves = self.local_saves();
+        if saves.is_empty() {
+            return None;
+        }
+        eprintln!("Your saves of The Planet Crafter on this machine:");
+        for (i, save) in saves.iter().enumerate() {
+            eprintln!("  {}) {}  ({})", i + 1, save.file_stem().unwrap_or_default().to_string_lossy(), super::local_time(super::modified(save)));
+        }
+        eprint!("Play one of them on the server (1-{}), or Enter for a new world: ", saves.len());
+        let _ = std::io::stderr().flush();
+        let mut choice = String::new();
+        std::io::stdin().lock().read_line(&mut choice).ok()?;
+        let n: usize = choice.trim().parse().ok().filter(|n| (1..=saves.len()).contains(n))?;
+        Some(saves[n - 1].clone())
+    }
+
+    /// How players get in, once the server answers.
+    fn summary(&self) {
+        let steam_off = self.env_get("PCDS_STEAM").as_deref() == Some("off");
+        let mut code = None;
+        for _ in 0..30 {
+            code = self.invite_code();
+            if code.is_some() || steam_off {
+                break;
+            }
+            sleep(2);
+        }
+        // The address this machine reaches the internet from (a UDP connect sends nothing).
+        let ip = std::net::UdpSocket::bind("0.0.0.0:0").and_then(|s| s.connect("1.1.1.1:80").and_then(|_| s.local_addr())).map(|a| a.ip().to_string());
+        let code = match code {
+            Some(c) => format!("{c}   (it changes at every start unless PCDS_STEAM_TOKEN is set)"),
+            None => "none yet (see pcds logs; pcds code prints it)".into(),
+        };
+        println!();
+        println!("  The server is running the world \"{}\".", self.world_name());
+        println!("    Invite code: {code}");
+        println!("    Direct IP:   {}:{} (UDP; forward it on your router for players outside your network)", ip.unwrap_or_else(|_| "this machine".into()), self.port());
+        println!("    Admin page:  {}", self.gui_url());
+        println!("    Manage it:   {} status | players | worlds | rules | logs", self.exe.display());
+        println!();
+    }
+
+    /// A scripted player joins over direct IP and gets the world, without becoming a player
+    /// (nothing is saved for it).
+    pub fn selftest(&self) -> Result {
+        if !self.active() {
+            return Err("start the server first (pcds start)".into());
+        }
+        let data = self.data_dir()?;
+        let listen = self.env_get("PCDS_LISTEN").unwrap_or_default();
+        if listen == "off" {
+            return Err("direct IP is off (PCDS_LISTEN=off): nothing to test".into());
+        }
+        let host = listen.rsplit_once(':').map_or(listen.as_str(), |(h, _)| h);
+        let host = if ["0.0.0.0", "[::]", ""].contains(&host) { "127.0.0.1" } else { host };
+        let address = format!("{host}:{}", self.port());
+        let (script, log) = (self.run.join(".selftest.json"), self.run.join(".selftest.log"));
+        super::write(&script, r#"{"name":"PcdsSelftest","ready":false,"steps":[{"wait":2000}]}"#)?;
+        let out = fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
+        let err = out.try_clone().map_err(|e| e.to_string())?;
+        let probe = Command::new(&self.exe).arg("probe").arg(&address).arg(&data).arg(&script).stdin(Stdio::null()).stdout(out).stderr(err).spawn();
+        if let Ok(mut probe) = probe {
+            wait_for(&mut probe, Duration::from_secs(60));
+        }
+        let said = fs::read_to_string(&log).unwrap_or_default();
+        let _ = fs::remove_file(&script);
+        let _ = fs::remove_file(&log);
+        if said.contains("\"approved\"") && said.contains("\"joined\"") {
+            say(format!("selftest PASS: a connection over direct IP on {address} was approved and got the world"));
+            return Ok(());
+        }
+        let lines: Vec<&str> = said.lines().collect();
+        eprintln!("{}", lines[lines.len().saturating_sub(5)..].join("\n"));
+        Err("selftest FAIL (see above and pcds logs)".into())
+    }
+
+    /// The Docker image's start: the game tables (from the game mounted at /game, or downloaded
+    /// with STEAM_USER), a world, steamclient for invite codes, then the server as this process.
+    pub fn container(&self) -> Result {
+        super::mkdir(&self.worlds)?;
+        self.write_env()?;
+        self.install_server()?;
+        let downloaded = self.run.join("game");
+        let steam_user = crate::env("STEAM_USER");
+        if let Some(user) = &steam_user
+            && !downloaded.join("Planet Crafter.exe").is_file()
+        {
+            if !super::is_tty() {
+                return Err("STEAM_USER: the first download needs a terminal for the Steam login (docker run -it ...)".into());
+            }
+            self.download_game(user)?;
+        }
+        self.update_downloaded_game();
+        // The game steamcmd downloaded, else the one mounted at /game.
+        let game = if steam_user.is_some() || self.run.join("steam-user").is_file() { downloaded } else { PathBuf::from("/game") };
+        let game = self.game_dir(Some(&game)).map_err(|e| {
+            format!("{e}: mount your game folder at /game (-v '/path/to/The Planet Crafter:/game:ro'), or start once with 'docker run -it -e STEAM_USER=yourname ...' to download the game")
+        })?;
+        // The first start, or a game update: this game build's tables.
+        if self.tables(&build_id(&game)?).is_err() {
+            self.extract(Some(&game))?;
+        }
+        if !self.world_file().is_file() {
+            let newest = fs::read_dir(&self.worlds).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "json")).max_by_key(|p| super::modified(p));
+            match newest {
+                Some(newest) if crate::env("PCDS_WORLD").is_none() => {
+                    self.set_env("PCDS_WORLD", &newest.file_stem().unwrap_or_default().to_string_lossy())?;
+                    say(format!("running the world {} (the newest in {})", self.world_name(), self.worlds.display()));
+                }
+                _ => {
+                    say(format!("no world yet: making a new one, {}", self.world_name()));
+                    let options: Vec<String> = crate::env("PCDS_NEW_WORLD").unwrap_or_default().split_whitespace().map(str::to_string).collect();
+                    self.new_world(&self.world_file(), &options)?;
+                }
+            }
+        }
+        self.ensure_steamclient();
+        say("manage it with: docker exec CONTAINER pcds worlds | players | rules | gui");
+        self.run_server()
+    }
+}

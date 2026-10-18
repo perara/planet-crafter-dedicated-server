@@ -158,7 +158,7 @@ impl SaveFile {
 }
 
 /// UTC "YYYYMMDD-HHMMSS" (days to civil date: Howard Hinnant's algorithm).
-fn stamp(t: SystemTime) -> String {
+pub fn stamp(t: SystemTime) -> String {
     let s = t.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let (z, secs) = (s.div_euclid(86_400) + 719_468, s.rem_euclid(86_400));
     let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));

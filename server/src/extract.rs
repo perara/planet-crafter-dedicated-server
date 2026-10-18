@@ -1,7 +1,7 @@
-//! `pcds-server extract RAW.json OUT_DIR`: turns the plugin's GET /api/netdata export (taken
+//! `pcds extract-raw RAW.json OUT_DIR`: turns the plugin's GET /api/netdata export (taken
 //! from the real game running as a server) into this version's netdata.json, rpcs.json and
-//! connection-request.hex. With GET /api/gamedata and /api/scenedata (see `pcds standalone
-//! update`), that is everything a new game version needs.
+//! connection-request.hex. With GET /api/gamedata, /api/wreckdata and /api/scenedata (see
+//! cli/extract.rs), that is everything a new game version needs.
 
 use serde_json::{json, Map, Value};
 
@@ -46,7 +46,7 @@ fn object(o: &Value, prefab: bool) -> Option<Value> {
 
 pub fn run(args: &[String]) {
     let [raw, out] = args else {
-        eprintln!("usage: pcds-server extract RAW.json OUT_DIR");
+        eprintln!("usage: pcds extract-raw RAW.json OUT_DIR");
         std::process::exit(2);
     };
     let raw: Value = serde_json::from_str(&std::fs::read_to_string(raw).expect("read raw export")).expect("parse raw export");
