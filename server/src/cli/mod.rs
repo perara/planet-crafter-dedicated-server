@@ -4,7 +4,7 @@
 
 mod api;
 mod env;
-pub use env::{build_id, find_tables};
+pub use env::{build_id, find_tables, set_env_file};
 mod extract;
 mod setup;
 mod steam;

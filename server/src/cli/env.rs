@@ -44,6 +44,13 @@ pub fn set_env_text(text: &str, key: &str, value: &str) -> String {
     out.join("\n") + "\n"
 }
 
+/// One setting of a settings file changed (written beside and moved over, mode 600: it holds
+/// the admin token).
+pub fn set_env_file(path: &Path, key: &str, value: &str) -> Result {
+    let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    super::replace_file(path, set_env_text(&text, key, value).as_bytes(), 0o600)
+}
+
 /// A world name from an argument (a save's file name works too).
 pub fn world_arg(arg: &str) -> Result<String> {
     let name = arg.strip_suffix(".json").unwrap_or(arg);

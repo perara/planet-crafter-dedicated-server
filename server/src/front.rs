@@ -72,6 +72,7 @@ const KICK_DELAY: Duration = Duration::from_millis(300);
 const MAX_CRASHES: usize = 5;
 const CRASH_WINDOW: Duration = Duration::from_secs(600);
 const RESTARTED: &str = "The server restarted after an error: join again";
+const STOPPED: &str = "The world is stopped: join again later";
 
 enum Conn {
     /// Steam networking: the connection carries the verified SteamID.
@@ -100,6 +101,9 @@ enum Phase {
     Restoring,
     /// The live bank died: the next one starts from the last snapshot or the save.
     Recovering,
+    /// The admin stopped the world (POST /api/world/stop): no bank; joins are refused; the
+    /// admin page and API stay, to start it or another world again.
+    Stopped,
 }
 
 /// The flip under way.
@@ -178,6 +182,8 @@ struct Front {
     stop: Arc<AtomicBool>,
     game_version: String,
     flips: u64,
+    /// The lock that makes this the one server of its world (released by a switch).
+    world_lock: Option<std::fs::File>,
 }
 
 fn now_secs() -> u64 {
@@ -199,7 +205,7 @@ pub fn run(args: &[String]) {
         std::process::exit(2);
     }
     // One server per world, for this front's life (released when the process ends).
-    let _world = crate::cli::hold(std::path::Path::new(&format!("{save}.lock")), "another server runs this world").unwrap_or_else(|e| {
+    let world = crate::cli::hold(std::path::Path::new(&format!("{save}.lock")), "another server runs this world").unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1)
     });
@@ -221,6 +227,7 @@ pub fn run(args: &[String]) {
     };
     let port = listen.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
     let mut front = Front::new(dir, save, crate::env("PCDS_BANKS").map(PathBuf::from), utp, port, stop);
+    front.world_lock = Some(world);
     front.boot();
     front.start_admin();
     front.start_steam();
@@ -269,6 +276,7 @@ impl Front {
             stop,
             game_version: String::new(),
             flips: 0,
+            world_lock: None,
         }
     }
 
@@ -508,7 +516,7 @@ impl Front {
             for reply in self.hooks.replies() {
                 self.to_bank(ipc::SAY, 0, reply.as_bytes(), 0);
             }
-            if self.autosave_minutes > 0 && Instant::now() >= self.next_save {
+            if self.autosave_minutes > 0 && Instant::now() >= self.next_save && self.live.is_some() {
                 self.next_save += Duration::from_secs(self.autosave_minutes * 60);
                 self.to_bank(ipc::SAVE, 0, &[], 0);
             }
@@ -688,6 +696,16 @@ impl Front {
     /// A frame for the live bank, or held while the world stands. `client`: a client's own
     /// frame, counted against its bound.
     fn to_bank(&mut self, kind: u8, n: u64, body: &[u8], client: u64) {
+        // No world: a joining player is told so and let go; nothing else has a game to go to.
+        if self.phase == Phase::Stopped {
+            if kind == ipc::CONNECTED {
+                self.to_client(n, &crate::bank::reason_batch(STOPPED));
+                if self.kicked.insert(n) {
+                    self.pending_drop.push((n, Instant::now() + KICK_DELAY));
+                }
+            }
+            return;
+        }
         let holding = matches!(self.phase, Phase::Snapshotting | Phase::Restoring | Phase::Recovering);
         let queued = if client == 0 {
             0
@@ -1034,7 +1052,7 @@ impl Front {
             let late = match self.phase {
                 Phase::Starting | Phase::Recovering => b.started.elapsed() > LOAD_DEADLINE,
                 Phase::Snapshotting | Phase::Restoring => self.flip.as_ref().and_then(|f| f.stopped).is_some_and(|t| t.elapsed() > READY_DEADLINE),
-                Phase::Idle => false,
+                Phase::Idle | Phase::Stopped => false,
             };
             if late {
                 match self.phase {
@@ -1077,6 +1095,50 @@ impl Front {
                 ("POST", "/api/update") => {
                     let answer = self.update_request(&r.body);
                     let _ = r.reply.send(answer);
+                }
+                ("POST", "/api/world/stop") => {
+                    let answer = match self.stop_world(STOPPED) {
+                        Ok(()) => (200, json!({"ok": true, "world": self.world_name()}).to_string()),
+                        Err(e) if self.phase == Phase::Stopped => (500, json!({"error": e, "stopped": true}).to_string()),
+                        Err(e) => (409, json!({"error": e}).to_string()),
+                    };
+                    let _ = r.reply.send(answer);
+                }
+                ("POST", "/api/world/start") => {
+                    let name = r.body["world"].as_str().map(str::to_string);
+                    let answer = match self.start_world(name.as_deref()) {
+                        Ok(w) => (200, json!({"ok": true, "world": w}).to_string()),
+                        Err(e) => (409, json!({"error": e}).to_string()),
+                    };
+                    let _ = r.reply.send(answer);
+                }
+                // Another world: the players told and let go, this one saved, that one started.
+                ("POST", "/api/world/switch") => {
+                    let Some(name) = r.body["world"].as_str().map(str::to_string) else {
+                        let _ = r.reply.send((400, "{\"error\":\"'world' is required\"}".into()));
+                        continue;
+                    };
+                    let answer = if name == self.world_name() && self.phase != Phase::Stopped {
+                        (409, json!({"error": format!("{name} is the world that runs")}).to_string())
+                    } else if !std::path::Path::new(&self.save).with_file_name(format!("{name}.json")).is_file() || crate::dashboard::world_name(&name).is_err() {
+                        (400, json!({"error": format!("no world {name}")}).to_string())
+                    } else {
+                        let stopped = if self.phase == Phase::Stopped { Ok(()) } else { self.stop_world(&format!("The server moves to another world ({name}): join again")) };
+                        match stopped.and_then(|()| self.start_world(Some(&name))) {
+                            Ok(w) => (200, json!({"ok": true, "world": w}).to_string()),
+                            Err(e) => (500, json!({"error": e, "stopped": self.phase == Phase::Stopped}).to_string()),
+                        }
+                    };
+                    let _ = r.reply.send(answer);
+                }
+                ("GET", "/api/status") if self.phase == Phase::Stopped => {
+                    let _ = r.reply.send((200, self.stopped_status().to_string()));
+                }
+                ("GET", "/api/worlds") if self.phase == Phase::Stopped => {
+                    let _ = r.reply.send((200, crate::dashboard::worlds(&self.save).to_string()));
+                }
+                _ if self.phase == Phase::Stopped => {
+                    let _ = r.reply.send((409, "{\"error\":\"the world is stopped: start it first\"}".into()));
                 }
                 _ => {
                     let id = self.next_request;
@@ -1136,6 +1198,7 @@ impl Front {
         s["process"] = json!({"cpuSeconds": cpu, "memoryBytes": memory});
         s["traffic"] = crate::dashboard::traffic();
         s["banks"] = self.banks_status();
+        s["worldControl"] = true.into();
         s["update"] = self.update_status();
     }
 
@@ -1307,6 +1370,130 @@ impl Front {
     // ---- the end --------------------------------------------------------------------------
 
     /// Saves the world, ends the bank, disconnects everyone, exits.
+    /// The live bank told to save and stop, and waited for (within STOP_GRACE twice). Err: it
+    /// ended without saving (it says where the world is kept), or was killed before it saved.
+    fn stop_live(&mut self) -> Result<(), String> {
+        let Some(mut b) = self.live.take() else { return Ok(()) };
+        b.link.queue(ipc::STOP, 0, &[], None, 0);
+        let deadline = Instant::now() + STOP_GRACE;
+        loop {
+            if b.link.flush().is_err() || Instant::now() > deadline {
+                break;
+            }
+            if let Ok(Some(_)) = b.child.try_wait() {
+                break;
+            }
+            // Its last batches still drain, so its writes never block its save.
+            if ipc::wait(&[b.link.fd()], &[b.link.pending()], Duration::from_millis(50))[0] && !b.link.fill(usize::MAX) {
+                break;
+            }
+            while b.link.next().is_some() {}
+        }
+        match b.child.try_wait() {
+            Ok(Some(_)) => {}
+            _ if b.link.broken.is_some() => {
+                end(&mut b);
+            }
+            _ => {
+                let deadline = Instant::now() + STOP_GRACE;
+                while Instant::now() < deadline && matches!(b.child.try_wait(), Ok(None)) {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                let _ = b.child.kill();
+            }
+        }
+        match b.child.wait() {
+            Ok(s) if !s.success() => Err(format!("bank {} ended ({s}) at the stop: the world may not be saved (see above)", b.name)),
+            _ => Ok(()),
+        }
+    }
+
+    // ---- the world: stop, start, another one ------------------------------------------------
+
+    /// Every player told `why` and let go, the world saved and its bank ended: Stopped.
+    fn stop_world(&mut self, why: &str) -> Result<(), String> {
+        if let Some((_, doing)) = &self.updates.busy {
+            return Err(format!("an update is under way ({doing}): wait for it"));
+        }
+        if self.phase != Phase::Idle || self.live.is_none() {
+            return Err(format!("the world cannot stop now ({})", if self.live.is_none() { "it is not running".to_string() } else { format!("{:?}", self.phase).to_lowercase() }));
+        }
+        let reason = crate::bank::reason_batch(why);
+        let now = Instant::now();
+        for c in self.conns.keys().copied().collect::<Vec<_>>() {
+            self.to_client(c, &reason);
+            if self.kicked.insert(c) {
+                self.pending_drop.push((c, now + KICK_DELAY));
+            }
+        }
+        if let Some(utp) = self.utp.as_mut() {
+            utp.flush();
+        }
+        self.held.clear();
+        self.held_bytes.clear();
+        for (_, (reply, _)) in self.answers.drain() {
+            let _ = reply.send((503, "{\"error\":\"the world stopped\"}".into()));
+        }
+        let saved = self.stop_live();
+        // The save has the world now (or the bank kept it beside the save): the last flip's
+        // snapshot is older.
+        self.last_snapshot = None;
+        self.recover_from = None;
+        self.phase = Phase::Stopped;
+        println!("world {}: stopped by the admin", self.world_name());
+        saved
+    }
+
+    fn world_name(&self) -> String {
+        std::path::Path::new(&self.save).file_stem().unwrap_or_default().to_string_lossy().to_string()
+    }
+
+    /// The world (`name`, else the one it ran) started in the active bank: Idle. A world other
+    /// than the last one takes this server's lock of it and is remembered in server.env
+    /// (PCDS_WORLD), so the next start runs it too.
+    fn start_world(&mut self, name: Option<&str>) -> Result<String, String> {
+        if self.phase != Phase::Stopped {
+            return Err("the world runs: stop it first, or run another one".into());
+        }
+        if let Some(name) = name.filter(|n| *n != self.world_name()) {
+            let name = crate::dashboard::world_name(name)?;
+            let save = std::path::Path::new(&self.save).with_file_name(format!("{name}.json")).to_string_lossy().to_string();
+            if !std::path::Path::new(&save).is_file() {
+                return Err(format!("no world {name}"));
+            }
+            let lock = crate::cli::hold(std::path::Path::new(&format!("{save}.lock")), "another server runs that world")?;
+            self.world_lock = Some(lock);
+            self.save = save;
+            if let Some(env) = crate::env("PCDS_ENV_FILE")
+                && let Err(e) = crate::cli::set_env_file(std::path::Path::new(&env), "PCDS_WORLD", &name)
+            {
+                eprintln!("world {name}: not remembered for the next start ({e})");
+            }
+        }
+        let bank = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
+        let mut kept = self.kept_snapshot()?;
+        let snapshot = kept.as_ref().map(|(fd, _)| fd.try_clone()).transpose().map_err(|e| e.to_string())?;
+        let b = self.boot_bank(&bank, snapshot, &mut kept)?;
+        if let Some((fd, at)) = kept {
+            self.last_snapshot = Some((fd, at));
+        }
+        self.game_version = b.hello["gameVersion"].as_str().unwrap_or("").to_string();
+        *self.web.write().unwrap_or_else(|e| e.into_inner()) = self.web_page(&bank);
+        self.live = Some(b);
+        self.phase = Phase::Idle;
+        self.next_save = Instant::now() + Duration::from_secs(self.autosave_minutes.max(1) * 60);
+        let name = self.world_name();
+        println!("world {name}: running (bank {bank}), started by the admin");
+        Ok(name)
+    }
+
+    /// GET /api/status while the world is stopped: the front's part, and which world it was.
+    fn stopped_status(&self) -> Value {
+        let mut s = json!({"state": "stopped", "save": self.world_name(), "players": [], "serverVersion": env!("CARGO_PKG_VERSION"), "gameVersion": self.game_version});
+        self.overlay(&mut s);
+        s
+    }
+
     fn shutdown(&mut self, mut code: i32) -> ! {
         if self.live.is_some() && matches!(self.phase, Phase::Snapshotting | Phase::Restoring | Phase::Starting) {
             self.fail_flip("the server is stopping");
@@ -1319,42 +1506,9 @@ impl Front {
         if self.live.is_none() {
             self.keep_snapshot();
         }
-        if let Some(mut b) = self.live.take() {
-            b.link.queue(ipc::STOP, 0, &[], None, 0);
-            let deadline = Instant::now() + STOP_GRACE;
-            loop {
-                if b.link.flush().is_err() || Instant::now() > deadline {
-                    break;
-                }
-                if let Ok(Some(_)) = b.child.try_wait() {
-                    break;
-                }
-                // Its last batches still drain, so its writes never block its save.
-                if ipc::wait(&[b.link.fd()], &[b.link.pending()], Duration::from_millis(50))[0] && !b.link.fill(usize::MAX) {
-                    break;
-                }
-                while b.link.next().is_some() {}
-            }
-            match b.child.try_wait() {
-                Ok(Some(_)) => {}
-                _ if b.link.broken.is_some() => {
-                    end(&mut b);
-                }
-                _ => {
-                    let deadline = Instant::now() + STOP_GRACE;
-                    while Instant::now() < deadline && matches!(b.child.try_wait(), Ok(None)) {
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                    let _ = b.child.kill();
-                }
-            }
-            // Its save failed (it says where the world is kept), or it was killed before it saved.
-            if let Ok(s) = b.child.wait()
-                && !s.success()
-            {
-                eprintln!("bank {} ended ({s}) at the stop: the world may not be saved (see above)", b.name);
-                code = code.max(1);
-            }
+        if let Err(e) = self.stop_live() {
+            eprintln!("{e}");
+            code = code.max(1);
         }
         for (mut child, _) in self.exiting.drain(..) {
             let _ = child.kill();
