@@ -126,7 +126,7 @@ impl Ctx {
         let config = self.ext_game.join("BepInEx/config/pcds.extractor.cfg");
         let text = fs::read_to_string(&config).map_err(|e| format!("{}: {e}", config.display()))?;
         let token = text.lines().find_map(|l| l.strip_prefix("ApiToken = ")).unwrap_or_default().trim();
-        super::api::request(EXT_API, token, method, path, if method == "GET" { "" } else { "{}" })
+        super::api::request(EXT_API, token, method, path, if method == "GET" { "" } else { "{}" }, None)
     }
 
     /// The planet the extractor's game is on.
