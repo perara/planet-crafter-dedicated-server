@@ -713,6 +713,10 @@ impl Game {
 
     /// Hands an RPC to the ported handler that owns it.
     pub(crate) fn rpc(&mut self, client: u64, object: u64, behaviour: u16, name: &str, a: Args) -> bool {
+        // A plugin that may refuse this RPC did: it does not run (and is not "unhandled").
+        if crate::events::rpc_before(self, client, object, name, &a.0) {
+            return true;
+        }
         let handled = self.world_objects_rpc(client, name, &a)
             || self.inventories_rpc(client, name, &a)
             || self.players_rpc(client, name, &a)
@@ -720,6 +724,9 @@ impl Game {
             || crate::unlocks::rpc(self, client, name, &a)
             || crate::handlers::rpc(self, client, object, behaviour, name, &a)
             || crate::hooks::rpc(self, client, object, behaviour, name, &a);
+        if handled {
+            crate::events::rpc_after(self, client, object, name, &a.0);
+        }
         if !handled && self.unhandled.insert(name.to_string()) {
             eprintln!("rpc {name} is not handled");
         }

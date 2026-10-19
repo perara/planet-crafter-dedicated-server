@@ -1,0 +1,36 @@
+# A plugin that is only data: no code runs. The texts may use {name} {client} {players} {planet}
+# {time} {args} {arg1} {arg2} {arg3}, and your own [vars].
+
+[vars]
+discord = "https://discord.gg/your-invite"
+
+[[command]]
+name = "rules"
+reply = "1. Be kind. 2. Do not take what others built. 3. Ask an admin when unsure. Chat: {discord}"
+cooldown_seconds = 5
+
+[[command]]
+name = "discord"
+reply = "{discord}"
+
+[[command]]
+name = "online"
+say = "{name} asks: {players} players on {planet} after {time}"
+cooldown_seconds = 30
+
+[[on_join]]
+say = "Welcome, {name}! {players} online."
+tell = "Type !rules for the rules."
+
+[[on_leave]]
+say = "{name} left."
+
+[[every]]
+seconds = 900
+say = "Join the community: {discord}"
+
+# From 6 players on, plants grow twice as fast; below, the game's own speed.
+[[when_players]]
+at_least = 6
+set_rules = { speed = { growth = 2.0 } }
+otherwise_rules = { speed = { growth = 1.0 } }

@@ -5,6 +5,8 @@ FROM rust:1-trixie AS build
 WORKDIR /src/server
 # .cargo/config.toml: the binary finds libsteam_api.so next to itself.
 COPY .cargo/ /src/.cargo/
+# The plugin API crate the server builds against (server/Cargo.toml: path = "../plugin-api").
+COPY plugin-api/ /src/plugin-api/
 COPY server/ ./
 RUN cargo build --release --locked \
   && cp "$(ls -t target/release/build/steamworks-sys-*/out/libsteam_api.so | head -1)" target/release/

@@ -8,6 +8,7 @@
 #                    (PCDS_BENCH_SECONDS: the game time it runs, default 300)
 #   make gate        the flip gate: the last release's world taken over by this build (before every tag;
 #                    needs PCDS_TEST_DATA, see docs/hot-update.md)
+#   make plugin-bench  what plugins cost (needs the game tables; PCDS_BENCH_SAVE adds the tick cost on a world)
 #   make lint        clippy and shellcheck
 #   make docker      the Docker image (IMAGE=...)
 #   make docker-test the image's hot update, end to end (docker/test.sh; needs game tables:
@@ -28,7 +29,7 @@ IMAGE ?= planet-crafter-dedicated-server
 SAVE ?= run/worlds/world.json
 PLAYERS ?= 4
 
-.PHONY: build install test bench gate lint docker docker-test dist clean
+.PHONY: build install test bench gate plugin-bench lint docker docker-test dist clean
 
 # The program finds libsteam_api.so next to itself; copied then renamed, so a running copy keeps its own.
 build:
@@ -52,6 +53,10 @@ bench: build
 gate: build
 	$(LIMIT) tools/flip-gate.sh
 
+plugin-bench: build
+	LD_LIBRARY_PATH="$(STEAM_LIB_DIR)" PCDS_BENCH_SAVE=$(abspath $(SAVE)) PCDS_RNG_SEED=1 \
+	  $(LIMIT) cargo test $(MANIFEST) --release --locked plugins::cost -- --ignored --nocapture --test-threads=1
+
 lint:
 	$(LIMIT) cargo clippy $(MANIFEST) --release --locked
 	shellcheck install.sh docker/entrypoint.sh docker/test.sh tools/flip-gate.sh
@@ -66,6 +71,7 @@ dist: build
 	rm -rf dist/$(DIST) && mkdir -p dist/$(DIST)/web
 	cp $(RELEASE)/pcds $(RELEASE)/libsteam_api.so install.sh README.md LICENSE dist/$(DIST)/
 	cp server/web/index.html dist/$(DIST)/web/
+	cp -r docs dist/$(DIST)/docs
 	tar -C dist -czf dist/$(DIST).tar.gz $(DIST)
 	cd dist && sha256sum $(DIST).tar.gz > $(DIST).tar.gz.sha256
 

@@ -1,0 +1,15 @@
+[package]
+name = "engine-bench"
+version = "0.0.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+wasmi = "2.0.0"
+rhai = "1.26.1"
+libloading = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

@@ -9,3 +9,9 @@
 __pycache__/
 # Coverage reports and other rebuildable output.
 /out/
+# The plugin API crate and the example plugins build into their own folders when built by hand.
+/plugin-api/target/
+/examples/plugins/*/target/
+/tools/plugin-engine-bench/*/target/
+/tools/plugin-engine-bench/engine-bench/guest/guest.wasm
+/tools/plugin-engine-bench/engine-bench/guest/libnative.so

@@ -6,6 +6,7 @@ mod api;
 mod env;
 pub use env::{build_id, find_tables, set_env_file};
 mod extract;
+mod plugin;
 mod setup;
 mod steam;
 mod systemd;
@@ -50,6 +51,9 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
   pcds gui | token | config | api METHOD PATH [JSON]
   pcds rules [set SECTION.RULE=VALUE ... | reset]
                          show or change the server rules (rules.json; README \"Server rules\")
+  pcds plugin list | check PATH | install PATH | enable ID | disable ID | reload | new ID
+                         plugins: commands, rules and reactions added without changing the server
+                         (docs/plugins-guide.md); run pcds plugin for the details
   pcds extract [--game DIR]   read the game tables again (from the game's files, no Wine)
   pcds update [--game DIR]    after a game update, or for a release that reads another tables
                          format: read the tables and restart when they changed
@@ -216,6 +220,7 @@ impl Ctx {
             ["api", method, path, body] => println!("{}", self.api(method, path, Some(body))?),
             ["api", ..] => return usage("pcds api METHOD PATH [JSON]"),
             ["rules", ..] => self.rules(&args[1..])?,
+            ["plugin", ..] => self.plugin(&args[1..])?,
             ["extract", ..] => self.extract(game_option(&a[1..])?.as_deref())?,
             ["update", ..] => self.update(game_option(&a[1..])?.as_deref())?,
             ["selftest"] => self.selftest()?,

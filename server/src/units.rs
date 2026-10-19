@@ -482,19 +482,19 @@ mod tests {
     /// adds 0.1 stops moving at 2^21 s (24 days), and tick then looped for ever.
     #[test]
     fn units_keep_growing_at_their_rate_after_a_month_of_uptime() {
-        let Some(mut g) = crate::game::test_game(save()) else { return };
-        join(&mut g, 1, "Ann");
-        place(&mut g, "Heater1", [570.0, 3.0, 500.0]);
-        place(&mut g, "EnergyGenerator1", [575.0, 3.0, 500.0]);
-        let heater = g.data.groups[g.data.group("Heater1").unwrap()].unit("Heat");
-        let start = 2_600_000.0f32;
-        g.time = start;
-        g.units.next_define = start as _;
-        g.units.next_compute = start as _;
         let (tx, rx) = std::sync::mpsc::channel();
-        // A thread: with the bug tick never returns, and this test must fail, not hang.
+        // A thread: with the bug tick never returns, and this test must fail, not hang. The game
+        // is made inside it (it holds the plugin runtimes, which are not Send).
         std::thread::spawn(move || {
-            let mut g = g;
+            let Some(mut g) = crate::game::test_game(save()) else { return };
+            join(&mut g, 1, "Ann");
+            place(&mut g, "Heater1", [570.0, 3.0, 500.0]);
+            place(&mut g, "EnergyGenerator1", [575.0, 3.0, 500.0]);
+            let heater = g.data.groups[g.data.group("Heater1").unwrap()].unit("Heat");
+            let start = 2_600_000.0f32;
+            g.time = start;
+            g.units.next_define = start as _;
+            g.units.next_compute = start as _;
             for _ in 0..100 {
                 g.time += 0.5;
                 tick(&mut g);
@@ -504,10 +504,14 @@ mod tests {
                 g.time += 0.5;
                 tick(&mut g);
             }
-            let _ = tx.send(unit(&g, Kind::Heat).total - before);
+            let _ = tx.send((unit(&g, Kind::Heat).total - before, heater));
         });
-        let grown = rx.recv_timeout(std::time::Duration::from_secs(60)).expect("tick did not return");
-        assert!((grown - 200.0 * heater).abs() < 0.02 * 200.0 * heater, "{grown} in 200 s at {heater} per s");
+        // Without tables the thread ends having sent nothing.
+        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok((grown, heater)) => assert!((grown - 200.0 * heater).abs() < 0.02 * 200.0 * heater, "{grown} in 200 s at {heater} per s"),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+            Err(e) => panic!("tick did not return: {e}"),
+        }
     }
 
     /// Unpowered, oxygen, heat and pressure stop; a planet's levels load from the save, with

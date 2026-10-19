@@ -1,0 +1,9 @@
+# A plugin that is only data. Texts may use {name} {client} {players} {planet} {time} {args}
+# {arg1} {arg2} {arg3} and your own [vars]; {{ and }} are braces.
+
+[[command]]
+name = "hello"
+reply = "Hello {name}!"
+
+[[on_join]]
+say = "Welcome, {name}!"

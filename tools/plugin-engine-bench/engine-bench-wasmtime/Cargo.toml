@@ -1,0 +1,13 @@
+[package]
+name = "engine-bench-wasmtime"
+version = "0.0.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+wasmtime = { version = "49.0.3", default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"

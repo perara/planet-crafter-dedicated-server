@@ -305,7 +305,7 @@ file and the name.
 ./pcds gui                     # the admin web page's address, with its token
 ```
 
-The admin web page has eight sections (keys 1 to 8 switch between them). **Overview**: players,
+The admin web page has nine sections (keys 1 to 9 switch between them). **Overview**: players,
 CPU, memory, loop load, loop rate and network traffic with live graphs of the last minutes, the
 terraformation total with its stages and the time to the next one, every planet unit with its
 rate, how to join (invite code, direct IP port), the server version with **Update now**, who is
@@ -320,7 +320,9 @@ now, install a given release or roll back (each a hand-over without disconnectin
 two banks and the update history. **Config**: every setting (rules, access lists; the
 `server.env` settings read-only), drawn from the server's configuration schema, with search.
 **Tools**: kick, ban and unban by name, the ban list, and the server log, live and filterable
-(from the journal when it runs as the `pcds` unit). The page uses the admin API: `GET /api/config` lists every setting with its type, range,
+(from the journal when it runs as the `pcds` unit). **Plugins**: the plugins installed, their
+state, what each asks for and what it was granted, what it costs, and buttons to approve, switch
+off or start one again. The page uses the admin API: `GET /api/config` lists every setting with its type, range,
 unit, default, value and whether it applies live; `POST /api/config` with
 `{"speed.growth": 2, "access.whitelist": ["Ann"]}` changes any of them (`null`: back to the
 default), all or none.
@@ -446,6 +448,43 @@ and logged. Webhook URLs, the secret and the program's arguments are never logge
 `/api/status` show them as `(set)`). Webhooks get no redirects and no proxy, so events go only
 to the URLs you set. Messages the server sends itself are not events.
 
+## Plugins
+
+Plugins add chat commands, reactions to players and the world, rule changes and integrations to
+the server without changing it. A plugin is a folder in `run/plugins/`; it is one of three kinds:
+
+- **a rules file** (TOML, no code): `!rules` answers with a text, a welcome message, an
+  announcement every 15 minutes, faster growth while six or more play;
+- **a WebAssembly module** (Rust, C, Zig...): logic that runs in the game, sandboxed, with a work
+  limit per event, a memory limit and its state kept across restarts and hot updates;
+- **a program of its own** that reads the server's events and uses the admin API: a Discord
+  bridge, a database, a web page.
+
+```bash
+pcds plugin new greeter               # a Rust plugin from a template (--kind data: a TOML file)
+pcds plugin check .                   # checks it and runs it on sample events
+pcds plugin install .                 # copies it to run/plugins/ (it does nothing yet)
+pcds plugin enable greeter            # shows what it asks for; you approve it
+pcds plugin list                      # state, capabilities, calls, faults
+pcds plugin disable greeter
+```
+
+Plugins are loaded, switched off, replaced and removed with the server running: a folder put in
+`run/plugins/` is found within a few seconds, and an approved plugin starts without a restart or a
+hot update.
+
+A plugin asks for **capabilities** (read chat, read the world, say in the chat, kick, move
+players, change gameplay rules, refuse an RPC) and does nothing until you grant them; it is
+approved for the files as they are, so a changed plugin waits for you again. It can never write the
+world: it reads a copy and queues actions the server applies through the same code the admin API
+uses. A plugin that crashes or runs too long is stopped in that call and restarted from its last
+saved state, and switched off after five faults in a minute. With no plugin installed the server does
+what it did before, and an event nobody listens to costs a fraction of a nanosecond.
+
+docs/plugins-guide.md makes a first plugin in ten steps; docs/plugins-api.md is the reference;
+docs/plugins.md says why it is built this way (with measurements, and what it will not do);
+docs/architecture.md is the module map. Three examples are in `examples/plugins/`.
+
 ## Game updates
 
 Players and the server must run the same game version; players with another version are
@@ -568,6 +607,9 @@ platform, landing spots, seats, machine ranges), the code says so in a `ponytail
   serve DATA_DIR SAVE.json`: the sockets, Steam and the invite code, the admin page, the chat
   hooks) and a bank (`pcds bank`: the world), started from the active release and replaced by a
   new one with the world handed over, while the front keeps every player connected.
+- `server/src/plugins/` is the plugin host and `server/src/events.rs` the one place the game says
+  what happened; the host lives in the bank, and a plugin's state goes through a hot update in the
+  snapshot (docs/plugins.md). `plugin-api/` is the small library plugins are built with.
 - `server/src/cli/` is the command line that ties them together, in the same program: `pcds
   serve` is the server, the other commands set it up and run it. It needs no
   Python; curl downloads and tar unpacks steamcmd, systemd runs the service.
@@ -576,7 +618,7 @@ platform, landing spots, seats, machine ranges), the code says so in a `ponytail
 
 ```bash
 make build      # server/target/release/pcds (make install links it as ~/.local/bin/pcds)
-make test       # also: make lint, make docker, make docker-test, make dist (the release tarball), make clean
+make test       # also: make lint, make plugin-bench, make gate, make docker, make docker-test, make dist (the release tarball), make clean
 ```
 
 Tests that need game tables use `run/data/2.103` (or `PCDS_TEST_DATA`) and fail without
@@ -645,6 +687,11 @@ they walk, craft, drop and pick up items, build, eat, drink, mine, chat and sort
 round trip of every call the server answers. `GET /api/status` shows the server's
 `busyPercent` and `longestLoopMicros` over the last second.
 
+`server/layers.txt` puts every module in a layer and `scripts/check-layers` (also part of `make
+test`) fails on a module that uses what its layer must not (docs/architecture.md). `make
+plugin-bench` measures what plugins cost; `scripts/build-plugin-examples` rebuilds the example
+modules (`--check` fails when a committed `plugin.wasm` is not what its source builds).
+
 To add a server rule: a field in `src/rules.rs` with its default, its entry in `config::KNOBS`
 (`src/config.rs`: type, range, unit, description; the rules are checked against it and the admin
 page shows it with no page code), read where the game decides that value, and a line in
@@ -657,5 +704,9 @@ GPL-3.0-or-later; see [LICENSE](LICENSE).
 As an additional permission under section 7 of the GNU GPL version 3, you may link this program
 with the Steamworks SDK (`libsteam_api`) and convey the result, without that part being
 covered by this license.
+
+Plugins: the `plugin-api/` library is licensed MIT or Apache-2.0 so that a plugin that includes it
+keeps its own licence; what that means for closed-source plugins, and where the line to the GPL is
+drawn, is in docs/plugins.md ("Licensing").
 
 The Planet Crafter is a trademark of Miju Games. Steam and the Steamworks SDK belong to Valve.

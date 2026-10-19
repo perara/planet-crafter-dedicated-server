@@ -1,0 +1,6 @@
+#!/bin/sh
+# Fails when a module uses another it must not (server/layers.txt, docs/architecture.md): the same
+# test `cargo test` runs, on its own.
+set -eu
+cd "$(dirname "$0")/../server"
+exec cargo test --release --locked --test layers "$@"
