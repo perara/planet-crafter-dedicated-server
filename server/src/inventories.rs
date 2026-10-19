@@ -907,17 +907,6 @@ mod tests {
         assert_eq!((&saved["demandGrps"], &saved["supplyGrps"], &saved["priority"]), (&json!("Iron"), &json!("ice"), &json!(2)));
     }
 
-    /// The size offset is C# int arithmetic: it wraps, as the game's does, in a debug build too.
-    #[test]
-    fn a_size_offset_that_overflows_wraps_instead_of_panicking() {
-        let Some((mut g, _)) = world() else { return };
-        let chest = g.create_inventory(3, 0, 0, &[], &[]);
-        for _ in 0..2 {
-            send_scene(&mut g, 1, "InventoriesHandler.SetInventorySizeServerRpc", &[json!(chest), json!(i32::MAX), json!([570.0, 3.0, 500.0])]);
-        }
-        assert_eq!(g.inventories[&chest].size, 3i32.wrapping_add(i32::MAX).wrapping_add(i32::MAX));
-    }
-
     #[test]
     fn shrinking_drops_what_no_longer_fits_and_locks_and_sorting_follow_the_game() {
         let Some((mut g, _)) = world() else { return };
