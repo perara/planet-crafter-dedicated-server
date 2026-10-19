@@ -77,6 +77,11 @@ pub struct GameData {
 
 /// NetworkTransformState's position bits (x, y, z).
 const POSITION_BITS: u32 = 0b1110;
+/// UseUnreliableDeltas and UnreliableFrameSync: set on the states a moving owner sends between
+/// its reliable ones. The host's synchronization state of an object that has not moved since it
+/// spawned has neither (the real host sends the same flags as for every other object), but the
+/// extracted state of a moving vehicle (the rover) carries them.
+const UNRELIABLE_BITS: u32 = 3 << 20;
 
 impl ObjectDef {
     /// The layout a spawn at `tick` sends: the custom sync data after the variables is each
@@ -88,7 +93,7 @@ impl ObjectDef {
         let mut tail_position = None;
         for t in &self.transforms {
             let mut state = Writer::new();
-            state.packed_u32(t.flags).packed_i32(tick);
+            state.packed_u32(t.flags & !UNRELIABLE_BITS).packed_i32(tick);
             let at = state.len();
             t.values.iter().for_each(|v| {
                 state.f32(*v);
@@ -201,5 +206,20 @@ mod tests {
         let dropped = d.layouts["Iron"].layout(7);
         assert!(dropped.tail_position.is_some(), "dynamic containers carry their transform state");
         assert!(d.layouts["Iron#static"].layout(7).tail_position.is_none());
+    }
+
+    /// The rover's extracted transform state was taken while it moved, with the unreliable-delta
+    /// flags; its late-join state is the one of any resting object (the real host's).
+    #[test]
+    fn a_resting_vehicle_synchronizes_like_any_object() {
+        let Some(dir) = crate::test_data() else { return };
+        let d = GameData::load(&format!("{dir}/gamedata.json")).unwrap();
+        let state = |group: &str| {
+            let tail = d.layouts[group].layout(7).tail;
+            // u8 count, then per state its behaviour (u16), length (i32) and the packed flags.
+            let mut r = crate::wire::Reader::new(&tail[7..]);
+            r.packed_u32().unwrap()
+        };
+        assert_eq!(state("VehicleTruck"), state("FloorAngleGlass"));
     }
 }
