@@ -23,6 +23,26 @@ jobs:
           PCDS_TEST_DATA: none
           PCDS_GAME_DIR: none
 
+  # The plugin API crate (no dependencies, builds offline) and the example plugins: the modules are
+  # built for WebAssembly, and the Rust one is tested on the PC with a mock host. The committed
+  # plugin.wasm files are built by the maintainer's toolchain (scripts/build-plugin-examples
+  # --check compares them there, not here: another compiler version may give other bytes).
+  plugins:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: cargo test --locked
+        working-directory: plugin-api
+      - run: cargo test --locked
+        working-directory: examples/plugins/hello-stats
+      - run: scripts/build-plugin-examples
+      - run: python3 examples/plugins/webhook-relay/relay.py --self-test
+      - run: cargo test --release --locked --test layers
+        working-directory: server
+
   script:
     runs-on: ubuntu-22.04
     steps:
