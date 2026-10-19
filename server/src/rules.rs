@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::config::{Knob, Source, KNOBS};
 use crate::game::Game;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -170,14 +171,21 @@ impl Default for Chat {
     }
 }
 
-/// Rules shown only as set, never with their value (URLs and arguments may hold tokens).
-const HIDDEN: [&str; 5] = ["chat.webhooks", "chat.secret", "chat.exec", "backup.s3AccessKey", "backup.s3SecretKey"];
+/// The rules shown only as set, never with their value (URLs and arguments may hold tokens):
+/// the entries of `knobs` marked secret, so KNOBS is the only list.
+fn secret_rules(knobs: &[Knob]) -> impl Iterator<Item = &Knob> {
+    knobs.iter().filter(|k| k.secret && k.source == Source::Rules)
+}
 
-/// The rules as the admin API shows them: the HIDDEN ones as "(set)" when set.
+/// The rules as the admin API shows them: the secret ones as "(set)" when set.
 pub fn shown(rules: &Rules) -> Value {
+    shown_in(KNOBS, rules)
+}
+
+fn shown_in(knobs: &[Knob], rules: &Rules) -> Value {
     let (mut v, d) = (serde_json::to_value(rules).unwrap_or_default(), serde_json::to_value(Rules::default()).unwrap_or_default());
-    for key in HIDDEN {
-        let (section, field) = key.split_once('.').unwrap_or_default();
+    for k in secret_rules(knobs) {
+        let (section, field) = k.key.split_once('.').unwrap_or_default();
         if v[section][field] != d[section][field] {
             v[section][field] = "(set)".into();
         }
@@ -324,21 +332,25 @@ pub fn start(game: &mut Game, rules: Rules, path: String) {
 
 /// The rules that differ from the game's behaviour, as "section.rule=value".
 pub fn changes(rules: &Rules) -> Vec<String> {
-    fn walk(path: &str, v: &Value, d: &Value, out: &mut Vec<String>) {
+    changes_in(KNOBS, rules)
+}
+
+fn changes_in(knobs: &[Knob], rules: &Rules) -> Vec<String> {
+    fn walk(knobs: &[Knob], path: &str, v: &Value, d: &Value, out: &mut Vec<String>) {
         match (v, d) {
             (Value::Object(o), Value::Object(defaults)) if !path.contains('.') => {
                 for (k, x) in o {
                     let p = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
-                    walk(&p, x, defaults.get(k).unwrap_or(&Value::Null), out);
+                    walk(knobs, &p, x, defaults.get(k).unwrap_or(&Value::Null), out);
                 }
             }
-            _ if v != d && HIDDEN.contains(&path) => out.push(format!("{path}=(set)")),
+            _ if v != d && secret_rules(knobs).any(|k| k.key == path) => out.push(format!("{path}=(set)")),
             _ if v != d => out.push(format!("{path}={v}")),
             _ => {}
         }
     }
     let mut out = Vec::new();
-    walk("", &serde_json::to_value(rules).unwrap_or_default(), &serde_json::to_value(Rules::default()).unwrap_or_default(), &mut out);
+    walk(knobs, "", &serde_json::to_value(rules).unwrap_or_default(), &serde_json::to_value(Rules::default()).unwrap_or_default(), &mut out);
     out
 }
 
@@ -370,6 +382,38 @@ fn changed(game: &mut Game, old: &Rules) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Type;
+
+    /// A rule with a value that shows `tok3n` when it is set.
+    fn with(k: &Knob) -> Rules {
+        let v = match k.kind {
+            Type::Bool => serde_json::json!(true),
+            Type::List => serde_json::json!(["tok3n"]),
+            _ => serde_json::json!("tok3n"),
+        };
+        let (section, field) = k.key.split_once('.').unwrap();
+        Rules::default().patched(&serde_json::json!({ section: { field: v } })).unwrap()
+    }
+
+    /// What KNOBS marks secret is hidden by both the rules endpoint and the log line, and a
+    /// rule marked secret later is hidden too, with no change to this file.
+    #[test]
+    fn every_secret_rule_is_hidden_from_the_endpoints_and_the_log() {
+        let secrets: Vec<&Knob> = secret_rules(KNOBS).collect();
+        assert!(!secrets.is_empty());
+        for k in secrets {
+            let r = with(k);
+            let (section, field) = k.key.split_once('.').unwrap();
+            assert_eq!(shown(&r)[section][field], "(set)", "{}", k.key);
+            assert_eq!(changes(&r), vec![format!("{}=(set)", k.key)], "{}", k.key);
+        }
+        let later = Knob { key: "gauges.noDeath", source: Source::Rules, kind: Type::Bool, range: None, values: &[], unit: "", description: "", live: true, default: "", secret: true };
+        let r = with(&later);
+        assert_eq!(shown(&r)["gauges"]["noDeath"], true, "KNOBS has it public");
+        let later = [later];
+        assert_eq!(shown_in(&later, &r)["gauges"]["noDeath"], "(set)");
+        assert_eq!(changes_in(&later, &r), vec!["gauges.noDeath=(set)"]);
+    }
 
     #[test]
     fn defaults_round_trip_and_patches_merge() {
