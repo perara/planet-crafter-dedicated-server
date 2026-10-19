@@ -136,11 +136,23 @@ fn authorization(method: &str, path: &str, headers: &[(&str, String)], payload_h
     format!("AWS4-HMAC-SHA256 Credential={access}/{scope}, SignedHeaders={signed}, Signature={}", hex(&hmac(&key, &to_sign)))
 }
 
+/// The Host header the request goes out with, which the signature must cover as sent: the host
+/// and the port unless it is the scheme's own (ureq leaves that one out), never a user:password@.
+fn host_header(uri: &ureq::http::Uri) -> Option<String> {
+    let host = uri.host()?;
+    let default = if uri.scheme_str() == Some("http") { 80 } else { 443 };
+    Some(match uri.port_u16() {
+        Some(port) if port != default => format!("{host}:{port}"),
+        _ => host.to_string(),
+    })
+}
+
 /// PUT one object (path-style: <endpoint>/<bucket>/<key>, which every S3-compatible service takes).
 fn put(b: &Backup, key: &str, body: &[u8], now: SystemTime) -> Result<(), String> {
     let (Some(endpoint), Some(bucket), Some(access), Some(secret)) = (&b.s3_endpoint, &b.s3_bucket, &b.s3_access_key, &b.s3_secret_key) else { return Err("not configured".into()) };
     let uri: ureq::http::Uri = endpoint.parse().map_err(|_| "backup.s3Endpoint is not a URL".to_string())?;
-    let host = uri.authority().map(|a| a.as_str().to_string()).ok_or("backup.s3Endpoint has no host")?;
+    let scheme = uri.scheme_str().unwrap_or("https");
+    let host = host_header(&uri).ok_or("backup.s3Endpoint has no host")?;
     let path = format!("/{bucket}/{key}");
     let stamp = crate::save::stamp(now);
     let amz_date = format!("{}T{}Z", &stamp[..8], &stamp[9..]);
@@ -149,7 +161,7 @@ fn put(b: &Backup, key: &str, body: &[u8], now: SystemTime) -> Result<(), String
     let auth = authorization("PUT", &path, &headers, &hash, &b.s3_region, access, secret, &amz_date);
     let config = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(300))).http_status_as_error(false).max_redirects(0).build();
     let agent = ureq::Agent::new_with_config(config);
-    let url = format!("{}://{host}{}", uri.scheme_str().unwrap_or("https"), encode(&path, true));
+    let url = format!("{scheme}://{host}{}", encode(&path, true));
     let mut answer = agent
         .put(&url)
         .header("x-amz-content-sha256", &hash)
@@ -182,6 +194,33 @@ mod tests {
             "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;range;x-amz-content-sha256;x-amz-date, Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41"
         );
         assert_eq!(encode("pcds/world 1+2.json", true), "pcds/world%201%2B2.json");
+    }
+
+    /// The signature covers the Host header that goes out: not the default port ureq leaves off,
+    /// and not a user:password@ in the endpoint.
+    #[test]
+    fn the_signed_host_is_the_host_sent() {
+        let host = |url: &str| host_header(&url.parse().unwrap());
+        assert_eq!(host("https://s3.example.com:443").as_deref(), Some("s3.example.com"));
+        assert_eq!(host("http://minio:80/").as_deref(), Some("minio"));
+        assert_eq!(host("http://minio:9000").as_deref(), Some("minio:9000"));
+        assert_eq!(host("https://u:p@s3.example.com:8443").as_deref(), Some("s3.example.com:8443"));
+        assert_eq!(host("https://s3.example.com").as_deref(), Some("s3.example.com"));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let seen = crate::chathooks::tests::read_request(&mut stream);
+            std::io::Write::write_all(&mut stream, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            seen
+        });
+        let b = Backup { s3_endpoint: Some(format!("http://u:p@127.0.0.1:{port}")), s3_bucket: Some("saves".into()), s3_access_key: Some("AKIAEXAMPLE".into()), s3_secret_key: Some("secret".into()), ..Backup::default() };
+        put(&b, "pcds/world.json", b"{}", SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)).unwrap();
+        let (headers, _) = server.join().unwrap();
+        let get = |k: &str| headers.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap();
+        let sent = [("host", get("host")), ("x-amz-content-sha256", get("x-amz-content-sha256")), ("x-amz-date", get("x-amz-date"))];
+        let again = authorization("PUT", "/saves/pcds/world.json", &sent, &get("x-amz-content-sha256"), "us-east-1", "AKIAEXAMPLE", "secret", &get("x-amz-date"));
+        assert_eq!(get("authorization"), again);
     }
 
     #[test]
