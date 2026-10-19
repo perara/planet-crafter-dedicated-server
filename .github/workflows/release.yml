@@ -60,6 +60,18 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
+      # The image is built and tried before it is published: docker/test.sh runs the updater of
+      # the image on a read-only root and checks the start without a game. Its second part, the
+      # hot update of a running server with players, needs the game's tables, which CI does not
+      # have: run it where they are before tagging (make docker-test).
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: pcds-test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: docker/test.sh pcds-test
       - uses: docker/build-push-action@v6
         with:
           context: .

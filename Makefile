@@ -8,6 +8,8 @@
 #                    (PCDS_BENCH_SECONDS: the game time it runs, default 300)
 #   make lint        clippy and shellcheck
 #   make docker      the Docker image (IMAGE=...)
+#   make docker-test the image's hot update, end to end (docker/test.sh; needs game tables:
+#                    PCDS_TEST_DATA=DIR, else run/data/2.103)
 #   make dist        the release tarball, as the release workflow makes it (VERSION=vX.Y.Z)
 #   make clean
 
@@ -24,7 +26,7 @@ IMAGE ?= planet-crafter-dedicated-server
 SAVE ?= run/worlds/world.json
 PLAYERS ?= 4
 
-.PHONY: build install test bench lint docker dist clean
+.PHONY: build install test bench lint docker docker-test dist clean
 
 # The program finds libsteam_api.so next to itself; copied then renamed, so a running copy keeps its own.
 build:
@@ -46,10 +48,13 @@ bench: build
 
 lint:
 	$(LIMIT) cargo clippy $(MANIFEST) --release --locked
-	shellcheck install.sh docker/entrypoint.sh
+	shellcheck install.sh docker/entrypoint.sh docker/test.sh
 
 docker:
 	$(LIMIT) docker build -t $(IMAGE) .
+
+docker-test: docker
+	PCDS_TEST_DATA="$${PCDS_TEST_DATA:-run/data/2.103}" docker/test.sh $(IMAGE)
 
 dist: build
 	rm -rf dist/$(DIST) && mkdir -p dist/$(DIST)/web
