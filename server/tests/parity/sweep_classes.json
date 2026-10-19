@@ -170,6 +170,12 @@
   "why": "the saved world objects come in the order they were made, and savediff pairs the new ones by group and place, else by rank: machines that make a random group (ore extractors and breakers, a built wreck's loot, a disintegrator's ingredients) and crops that grow on random spots reorder them (EXPECTED: randomness; the record counts are compared on their own line)"
  },
  {
+  "class": "d",
+  "script": "^sweep_autocraft_",
+  "line": "^inventories\\[\\d+\\] \\(\\d+\\)\\.woIds: ref \"NEW#[0-9,NEW#]*\" ours \"NEW#[0-9,NEW#]*\"$",
+  "why": "two items of one group at one place are paired in the order of the world object list, which the random ids decide, while the inventory lists them as they arrived; the pairing can cross (EXPECTED: randomness)"
+ },
+ {
   "class": "e",
   "script": "^sweep_water$",
   "tag": "^AlgaeGenerator[12]\\|",
