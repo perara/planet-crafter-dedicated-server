@@ -164,7 +164,9 @@ fn reload_keeps_a_plugin_that_did_not_change_and_restarts_one_that_did_with_its_
     bytes.extend_from_slice(&[0, 6, 4, b'n', b'o', b't', b'e', 0]);
     std::fs::write(&wasm, bytes).unwrap();
     reload(&mut g).unwrap();
-    assert_eq!(g.ext.plugins.host.as_ref().unwrap().plugins[0].status, Status::Changed);
+    // The files wait for approval; the approved version, in memory, goes on and the listing says so.
+    let p = &g.ext.plugins.host.as_ref().unwrap().plugins[0];
+    assert!(p.running() && p.notice.as_deref().unwrap().contains("wait for approval"), "{:?} {:?}", p.status, p.notice);
     approve(&dir, "hello-stats", None).unwrap();
     reload(&mut g).unwrap();
     send_scene(&mut g, 1, "ChatHandler.SendChatMessageServerRpc", &[json!("!uses")]);
@@ -202,4 +204,122 @@ fn the_admin_api_lists_enables_and_disables_plugins() {
     assert_eq!(admin::request(&mut g, "GET", "/api/plugins/nope", &json!({})).0, 404);
     let status = crate::plugins::admin::summary(&g);
     assert_eq!(status["loaded"], 1);
+}
+
+fn ask(g: &mut Game, client: u64, text: &str) -> Vec<String> {
+    g.net.out.clear();
+    // The game's own chat rate limit (a burst of 10, then one a second) is not what is tested here.
+    // Nor is the RPC budget of a tick: two seconds of game time and a tick between asks.
+    g.sim_time = Some(g.sim_time.unwrap_or(0.0) + 2.0);
+    g.tick();
+    send_scene(g, client, "ChatHandler.SendChatMessageServerRpc", &[json!(text)]);
+    chat_out(g).into_iter().filter(|(to, _)| *to == crate::net::Target::Only(client)).map(|(_, t)| t).collect()
+}
+
+#[test]
+fn plugins_appear_change_and_go_while_the_game_runs_without_being_asked() {
+    let Some((mut g, _)) = world() else { return };
+    let dir = fresh_dir("live");
+    // The server runs with an empty plugins folder: no host, nobody listening.
+    start(&mut g, &dir);
+    assert!(g.ext.plugins.host.is_none() && g.ext.plugins.interest == 0);
+    poll_now(&mut g);
+    assert!(ask(&mut g, 1, "!uses").is_empty());
+
+    // A plugin is dropped into the folder, and approved (as `pcds plugin enable` does with the server
+    // not asked): the scan sees it, two looks in a row, and it starts.
+    let from = example("hello-stats");
+    let to = dir.join("hello-stats");
+    std::fs::create_dir_all(&to).unwrap();
+    for f in ["plugin.toml", "plugin.wasm"] {
+        std::fs::copy(from.join(f), to.join(f)).unwrap();
+    }
+    poll_now(&mut g);
+    assert!(g.ext.plugins.host.is_none(), "one look is not enough: the files may still be arriving");
+    poll_now(&mut g);
+    let status = || g.ext.plugins.host.as_ref().map(|h| h.plugins[0].status.name());
+    assert_eq!(status(), Some("pending"), "discovered, waiting for approval");
+    assert!(ask(&mut g, 1, "!uses").is_empty(), "and doing nothing");
+    approve(&dir, "hello-stats", None).unwrap();
+    poll_now(&mut g);
+    poll_now(&mut g);
+    assert_eq!(g.ext.plugins.host.as_ref().unwrap().plugins[0].status, Status::Running);
+    assert_eq!(ask(&mut g, 1, "!uses"), vec!["!stats was used 0 times, !uses 1 times on this world"]);
+
+    // Idle: the scan does nothing (no rescan, the same instance).
+    let calls = g.ext.plugins.host.as_ref().unwrap().plugins[0].stats.calls;
+    for _ in 0..5 {
+        poll_now(&mut g);
+    }
+    assert_eq!(g.ext.plugins.host.as_ref().unwrap().plugins[0].stats.calls, calls);
+
+    // Switched off while players chat: the command is gone at once, the state kept.
+    disable(&dir, "hello-stats").unwrap();
+    for _ in 0..2 {
+        assert!(g.ext.plugins.host.as_ref().is_some_and(|h| h.plugins[0].running()), "until the second look");
+        ask(&mut g, 1, "!stats");
+        poll_now(&mut g);
+    }
+    assert!(ask(&mut g, 1, "!uses").is_empty());
+    assert_eq!(g.ext.plugins.interest, 0);
+    assert_eq!(g.ext.plugins.host.as_ref().unwrap().gauge.live(), (0, 0));
+    assert!(state::path(&to, "world").is_file());
+
+    // And on again, then 20 quick toggles with chat between: it never answers wrongly, nothing piles up.
+    for i in 0..20 {
+        approve(&dir, "hello-stats", None).unwrap();
+        reload(&mut g).unwrap();
+        assert!(!ask(&mut g, 1, "!stats").is_empty(), "cycle {i}");
+        disable(&dir, "hello-stats").unwrap();
+        reload(&mut g).unwrap();
+        let answer = ask(&mut g, 1, "!stats");
+        assert!(answer.is_empty(), "cycle {i}: {answer:?} {:?}", g.ext.plugins.host.as_ref().map(|h| h.plugins.iter().map(|p| (p.id.clone(), p.status.clone(), p.rt.is_some())).collect::<Vec<_>>()));
+    }
+    assert_eq!(g.ext.plugins.host.as_ref().unwrap().gauge.live(), (0, 0));
+
+    // The folder removed: the plugin and its host are gone, nothing is written back.
+    approve(&dir, "hello-stats", None).unwrap();
+    reload(&mut g).unwrap();
+    std::fs::remove_dir_all(&to).unwrap();
+    poll_now(&mut g);
+    poll_now(&mut g);
+    assert!(g.ext.plugins.host.is_none() && g.ext.plugins.interest == 0 && !to.exists());
+    assert!(ask(&mut g, 1, "!uses").is_empty());
+}
+
+#[test]
+fn the_plugin_set_after_a_flip_is_the_folders_at_that_moment() {
+    let Some((mut g, _)) = world() else { return };
+    let dir = fresh_dir("flipset");
+    install_example(&dir, "hello-stats", None);
+    install_example(&dir, "welcome-rules", None);
+    // The next bank has read and compiled the folder (before its hello)...
+    let prepared = prepare(&dir, "world");
+    // ...and while the world is being handed over the admin switches one off.
+    disable(&dir, "welcome-rules").unwrap();
+    attach(&mut g, prepared);
+    let host = g.ext.plugins.host.as_ref().unwrap();
+    let by = |id: &str| host.plugins.iter().find(|p| p.id == id).unwrap().status.name();
+    assert_eq!((by("hello-stats"), by("welcome-rules")), ("running", "disabled"), "the folder's set, at once, not the compile's");
+    assert_eq!(host.gauge.live().0, 1);
+}
+
+#[test]
+fn stream_consumers_register_through_the_api_and_leave_cleanly() {
+    let Some((mut g, _)) = world() else { return };
+    start(&mut g, &fresh_dir("consumers"));
+    let poll = |g: &mut Game, body: Value| admin::request(g, "POST", "/api/plugins/events", &body);
+    assert_eq!(poll(&mut g, json!({"consumer": "bad name!"})).0, 400);
+    assert_eq!(poll(&mut g, json!({"consumer": "relay", "types": ["chat"]})).0, 200);
+    assert_eq!(poll(&mut g, json!({"consumer": "metrics", "types": ["player_join"]})).0, 200);
+    assert!(g.ext.plugins.interest & Kind::Chat.bit() != 0 && g.ext.plugins.interest & Kind::PlayerJoin.bit() != 0);
+    let list: Value = serde_json::from_str(&admin::request(&mut g, "GET", "/api/plugins", &json!({})).1).unwrap();
+    let names: Vec<&str> = list["stream"]["consumers"].as_array().unwrap().iter().filter_map(|c| c["name"].as_str()).collect();
+    assert_eq!(names, vec!["metrics", "relay"]);
+    // One leaves: its kinds are no longer recorded; the other goes on.
+    let (status, body) = poll(&mut g, json!({"consumer": "relay", "unregister": true}));
+    assert_eq!((status, serde_json::from_str::<Value>(&body).unwrap()["was"].as_bool()), (200, Some(true)));
+    assert!(g.ext.plugins.interest & Kind::Chat.bit() == 0 && g.ext.plugins.interest & Kind::PlayerJoin.bit() != 0);
+    poll(&mut g, json!({"consumer": "metrics", "unregister": true}));
+    assert_eq!(g.ext.plugins.interest, 0);
 }

@@ -62,6 +62,21 @@ pub fn compile(engine: &Engine, bytes: &[u8]) -> Result<(Module, Inspected), Str
     Ok((module, Inspected { imports, bytes: bytes.len() }))
 }
 
+/// What the instances of one host hold, for counting: a test (and the listing) can tell that an
+/// unloaded plugin left nothing behind.
+#[derive(Debug, Default)]
+pub struct Gauge {
+    pub instances: std::sync::atomic::AtomicUsize,
+    /// 64 KiB pages of linear memory held.
+    pub pages: std::sync::atomic::AtomicUsize,
+}
+
+impl Gauge {
+    pub fn live(&self) -> (usize, usize) {
+        (self.instances.load(std::sync::atomic::Ordering::SeqCst), self.pages.load(std::sync::atomic::Ordering::SeqCst))
+    }
+}
+
 struct Inner {
     ctx: Ctx,
     memory: Option<Memory>,
@@ -74,6 +89,7 @@ struct Funcs {
     free: Option<TypedFunc<(u32, u32), ()>>,
     load: Option<TypedFunc<(u32, u32, u32), i32>>,
     save: Option<TypedFunc<(), u64>>,
+    unload: Option<TypedFunc<(), i32>>,
     state_version: Option<TypedFunc<(), u32>>,
     memory: Memory,
 }
@@ -84,6 +100,16 @@ pub struct Wasm {
     store: Store<Inner>,
     funcs: Funcs,
     limits: Limits,
+    gauge: std::sync::Arc<Gauge>,
+    pages: usize,
+}
+
+impl Drop for Wasm {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.gauge.instances.fetch_sub(1, SeqCst);
+        self.gauge.pages.fetch_sub(self.pages, SeqCst);
+    }
 }
 
 fn trap(msg: &str) -> Error {
@@ -171,9 +197,25 @@ fn fault(e: Error) -> Fault {
 impl Wasm {
     /// An instance of the module, not started yet. The module's start function runs here (with the
     /// load budget); `pcds_load` runs in `start`.
-    pub fn new(engine: &Engine, module: &Module, ctx: Ctx, limits: Limits) -> Result<Wasm, String> {
+    pub fn new(engine: &Engine, module: &Module, ctx: Ctx, limits: Limits, gauge: std::sync::Arc<Gauge>) -> Result<Wasm, String> {
+        use std::sync::atomic::Ordering::SeqCst;
         let (store, funcs) = instantiate(engine, module, ctx, limits)?;
-        Ok(Wasm { engine: engine.clone(), module: module.clone(), store, funcs, limits })
+        gauge.instances.fetch_add(1, SeqCst);
+        let mut w = Wasm { engine: engine.clone(), module: module.clone(), store, funcs, limits, gauge, pages: 0 };
+        w.account();
+        Ok(w)
+    }
+
+    /// The memory held now, in the gauge.
+    fn account(&mut self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let now = self.funcs.memory.size(&self.store) as usize;
+        if now >= self.pages {
+            self.gauge.pages.fetch_add(now - self.pages, SeqCst);
+        } else {
+            self.gauge.pages.fetch_sub(self.pages - now, SeqCst);
+        }
+        self.pages = now;
     }
 
     /// Calls an export with the fuel of this call; the fuel it used.
@@ -218,6 +260,7 @@ fn instantiate(engine: &Engine, module: &Module, ctx: Ctx, limits: Limits) -> Re
         free: instance.get_typed_func(&store, "pcds_free").ok(),
         load: instance.get_typed_func(&store, "pcds_load").ok(),
         save: instance.get_typed_func(&store, "pcds_save").ok(),
+        unload: instance.get_typed_func(&store, "pcds_unload").ok(),
         state_version: instance.get_typed_func(&store, "pcds_state_version").ok(),
         memory,
     };
@@ -253,6 +296,7 @@ impl Runtime for Wasm {
         let code = self.funcs.event.call(&mut self.store, (event.kind() as u32, ptr, payload.len() as u32)).map_err(fault)?;
         self.release(ptr, payload.len())?;
         let cost = Cost { fuel: self.used(budget) };
+        self.account();
         match code {
             0 => Ok((Verdict::Continue, cost)),
             1 => Ok((Verdict::Veto, cost)),
@@ -282,11 +326,22 @@ impl Runtime for Wasm {
         Ok(Some(Blob { version, bytes }))
     }
 
+    fn unload(&mut self) -> Result<(), Fault> {
+        let Some(unload) = self.funcs.unload else { return Ok(()) };
+        self.store.set_fuel(self.limits.fuel_per_save).map_err(|e| Fault::Trap(e.to_string()))?;
+        let code = unload.call(&mut self.store, ()).map_err(fault)?;
+        if code < 0 {
+            return Err(Fault::Bad(format!("pcds_unload returned {code}")));
+        }
+        Ok(())
+    }
+
     fn restart(&mut self, state: Option<&Blob>) -> Result<(), Fault> {
         let ctx = Ctx::new(&self.store.data().ctx.id.clone(), self.store.data().ctx.grant);
         let (store, funcs) = instantiate(&self.engine, &self.module, ctx, self.limits).map_err(Fault::Trap)?;
         self.store = store;
         self.funcs = funcs;
+        self.account();
         self.start(state)
     }
 }

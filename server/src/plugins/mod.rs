@@ -23,6 +23,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pcds_plugin_api::{Event, Kind, Verdict, Writer, caps};
@@ -89,9 +90,25 @@ pub struct Slot {
     /// Where plugins are looked for and under which world's state: set once the host has started.
     #[serde(skip)]
     pub place: Option<(PathBuf, String)>,
+    /// What the timer scan of the folder has seen.
+    #[serde(skip)]
+    pub scan: Scan,
     #[serde(default)]
     pub saved: state::Saved,
 }
+
+/// The timer scan: the folder is looked at every `POLL_EVERY` (a few `stat`s when nothing
+/// changes); a change is acted on when two scans in a row see the same new state, so a plugin
+/// that is still being copied in is not read half written.
+#[derive(Default)]
+pub struct Scan {
+    next: Option<Instant>,
+    seen: Sig,
+    settling: Option<Sig>,
+}
+
+/// How often the folder is looked at.
+pub const POLL_EVERY: Duration = Duration::from_secs(2);
 
 impl Slot {
     /// The union of what the running plugins and the stream want.
@@ -115,6 +132,9 @@ pub enum Status {
     Incompatible(String),
     /// Started and failed, or switched off for faults.
     Failed(String),
+    /// Being switched off: its last call and its last save are running (it is never seen so by a
+    /// request: the host is single-threaded and does this between two events; it is in the log).
+    Unloading,
 }
 
 impl Status {
@@ -127,12 +147,13 @@ impl Status {
             Status::Invalid(_) => "invalid",
             Status::Incompatible(_) => "incompatible",
             Status::Failed(_) => "failed",
+            Status::Unloading => "unloading",
         }
     }
     pub fn detail(&self) -> Option<&str> {
         match self {
             Status::Invalid(s) | Status::Incompatible(s) | Status::Failed(s) => Some(s),
-            Status::Pending => Some("installed, not approved: pcds plugin enable ID"),
+            Status::Pending => Some("discovered, awaiting approval: pcds plugin enable ID"),
             Status::Changed => Some("its files changed since they were approved: pcds plugin enable ID again"),
             _ => None,
         }
@@ -185,6 +206,13 @@ pub struct Loaded {
     faults: VecDeque<Instant>,
     last_slow_log: Option<Instant>,
     pub stats: Stats,
+    /// The entry file's path in its folder, for the scan that notices a change.
+    entry_rel: Option<String>,
+    /// What the host wants the admin to know about a plugin that keeps running: its files changed
+    /// and wait for approval, or a reload of them failed and the old version goes on.
+    pub notice: Option<String>,
+    /// Switched off for faults but its instance is still held for the final call (`Host::settle`).
+    retire_due: bool,
 }
 
 impl Loaded {
@@ -210,6 +238,9 @@ impl Loaded {
             faults: VecDeque::new(),
             last_slow_log: None,
             stats: Stats::default(),
+            entry_rel: None,
+            notice: None,
+            retire_due: false,
         }
     }
 
@@ -239,6 +270,7 @@ impl Loaded {
             }
         };
         p.id = m.id().to_string();
+        p.entry_rel = Some(m.plugin.entry.clone());
         p.requested = m.plugin.capabilities.clone();
         p.commands = m.commands.iter().map(|c| c.name.to_lowercase()).collect();
         p.limits = Limits::resolve(&m.budget, &approval.map(|a| a.limits.clone()).unwrap_or_default());
@@ -337,12 +369,12 @@ impl Loaded {
     }
 
     /// Instantiates and starts what `inspect` prepared. On failure the plugin is `Failed`.
-    fn start(&mut self, engine: &wasmi::Engine, saved: &state::Saved, world: &str) {
+    fn start(&mut self, engine: &wasmi::Engine, gauge: &Arc<wasm::Gauge>, saved: &state::Saved, world: &str) {
         let Some(pending) = self.pending.take() else { return };
         let state = self.starting_state(saved, world);
         let ctx = Ctx::new(&self.id, self.grant);
         let made: Result<Box<dyn Runtime>, String> = match pending {
-            Pending::Wasm(module) => wasm::Wasm::new(engine, &module, ctx, self.limits).map(|w| Box::new(w) as Box<dyn Runtime>),
+            Pending::Wasm(module) => wasm::Wasm::new(engine, &module, ctx, self.limits, gauge.clone()).map(|w| Box::new(w) as Box<dyn Runtime>),
             Pending::Data(rules) => Ok(Box::new(data::Data::new(rules, ctx))),
         };
         let started = made.and_then(|mut rt| rt.start(state.as_ref()).map(|()| rt).map_err(|f| format!("start failed: {f}")));
@@ -355,9 +387,49 @@ impl Loaded {
         }
     }
 
-    /// Whether the same plugin, approved the same way, would be the same: a reload keeps it running.
-    fn same_as(&self, other: &Loaded) -> bool {
-        self.running() && other.status == Status::Running && self.digest == other.digest && self.grant == other.grant && self.limits == other.limits
+    /// Whether the same files, approved the same way, were meant: a reload leaves it as it is.
+    fn same_files(&self, other: &Loaded) -> bool {
+        self.digest == other.digest && self.grant == other.grant && self.limits == other.limits
+    }
+
+    /// The last call, the last save, then the instance goes (its memory, its capabilities, what
+    /// it had queued, its timers): the plugin is being switched off or has been removed. Both calls
+    /// are bounded by the fuel of a save; a fault in either is logged, never counted against the
+    /// plugin, and the state of its last save is kept instead. `folder_stays`: the plugin's state
+    /// is written beside it (not when its folder is gone).
+    fn retire(&mut self, saved: &mut state::Saved, world: &str, why: &str, folder_stays: bool) -> Status {
+        self.retire_due = false;
+        let Some(mut rt) = self.rt.take() else { return self.status.clone() };
+        let was = std::mem::replace(&mut self.status, Status::Unloading);
+        println!("plugin {}: unloading ({why})", self.id);
+        match rt.unload() {
+            Ok(()) => match rt.save() {
+                Ok(blob) => self.checkpoint = blob,
+                Err(f) => eprintln!("plugin {}: its final save failed ({f}); the state of its last save is kept", self.id),
+            },
+            Err(f) => eprintln!("plugin {}: its unload call failed ({f}); the state of its last save is kept", self.id),
+        }
+        // Instance and memory go here; whatever it queued in the unload call is never applied.
+        drop(rt);
+        match &self.checkpoint {
+            Some(b) => {
+                saved.states.insert(self.id.clone(), b.clone());
+            }
+            None => {
+                saved.states.remove(&self.id);
+            }
+        }
+        if folder_stays {
+            let file = state::path(&self.dir, world);
+            let result = match &self.checkpoint {
+                Some(b) => state::write(&file, b),
+                None => std::fs::remove_file(&file).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }).map_err(|e| format!("{}: {e}", file.display())),
+            };
+            if let Err(e) = result {
+                eprintln!("plugin {}: its state was not written: {e}", self.id);
+            }
+        }
+        was
     }
 
     /// A fault: counted, logged, the instance restarted from the last checkpoint; five in a
@@ -375,8 +447,10 @@ impl Loaded {
         if self.faults.len() >= limits::MAX_FAULTS {
             let why = format!("switched off after {} faults in {} s; the last, in {during}: {fault}", self.faults.len(), limits::FAULT_WINDOW.as_secs());
             eprintln!("plugin {}: {why} (pcds plugin reload {} starts it again)", self.id, self.id);
-            self.rt = None;
+            // No more events from now on; the instance is held until the host has made its last
+            // call and saved its state (`Host::settle`, between events).
             self.status = Status::Failed(why);
+            self.retire_due = self.rt.is_some();
             return;
         }
         self.stats.restarts += 1;
@@ -418,44 +492,231 @@ pub struct Host {
     rotate: usize,
     /// approved.json did not read: nothing runs.
     pub approvals_error: Option<String>,
+    /// What the instances hold, counted (docs/plugins.md, "Loading and unloading while the world runs").
+    pub gauge: Arc<wasm::Gauge>,
+    /// The folder as it was when the plugins were read (`signature`).
+    pub sig: Sig,
+}
+
+/// Size and modification time of the files that decide what plugins there are: a change in any is
+/// a reason to read the folder again.
+pub type Sig = Vec<(PathBuf, u128, u64)>;
+
+fn stat(p: &Path) -> (u128, u64) {
+    std::fs::metadata(p).map(|m| (m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos()), m.len())).unwrap_or((0, 0))
+}
+
+/// The signature of `dir`, given each known plugin's entry file.
+fn signature_of(dir: &Path, entry_of: &HashMap<String, String>) -> Sig {
+    let mut sig = vec![(dir.to_path_buf(), stat(dir)), (dir.join(approvals::FILE), stat(&dir.join(approvals::FILE)))];
+    for folder in folders_of(dir) {
+        let name = folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        sig.push((folder.join(manifest::FILE), stat(&folder.join(manifest::FILE))));
+        if let Some(entry) = entry_of.get(&name) {
+            sig.push((folder.join(entry), stat(&folder.join(entry))));
+        }
+        sig.push((folder.clone(), stat(&folder)));
+    }
+    sig.into_iter().map(|(p, (m, l))| (p, m, l)).collect()
+}
+
+/// The folders of `dir` that can hold plugins, by name.
+fn folders_of(dir: &Path) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir() && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'))).collect();
+    folders.sort();
+    folders
+}
+
+/// Reads every folder of `dir` as a plugin: manifests, approvals, modules compiled, nothing started.
+fn scan(engine: &wasmi::Engine, dir: &Path) -> (Vec<Loaded>, Option<String>) {
+    let approvals = match Approvals::load(dir) {
+        Ok(a) => (a, None),
+        Err(e) => {
+            eprintln!("plugins: {e}: no plugin runs until that is fixed");
+            (Approvals::default(), Some(e))
+        }
+    };
+    let (approvals, error) = approvals;
+    let mut folders = folders_of(dir);
+    if folders.len() > limits::MAX_PLUGINS {
+        eprintln!("plugins: {} folders in {}; only the first {} (by name) are read", folders.len(), dir.display(), limits::MAX_PLUGINS);
+    }
+    folders.truncate(limits::MAX_PLUGINS);
+    let mut found = Vec::new();
+    for folder in folders {
+        let id = folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let approval = approvals.0.get(&id).filter(|_| error.is_none());
+        let mut p = Loaded::inspect(engine, &folder, approval);
+        // Installed plugins live in a folder named for their id: it is how a command or a state file
+        // finds its owner, and what `pcds plugin enable ID` names.
+        if p.manifest.as_ref().is_some_and(|m| m.id() != id) {
+            let why = format!("the folder is {id} but the manifest's id is {}: the folder's name is the id", p.id);
+            (p.id, p.status, p.pending, p.kinds, p.grant) = (id, Status::Invalid(why), None, 0, Grant::default());
+        }
+        found.push(p);
+    }
+    (found, error)
 }
 
 /// Reads the plugin folder and prepares every plugin: manifests, approvals, modules compiled.
 /// Nothing of a plugin runs yet, and the game is not needed, so a new bank does this while the
 /// old one still plays: a hot update stops the world for the `attach` that follows, not for this.
 pub fn prepare(dir: &Path, world: &str) -> Host {
-    let engine = wasm::engine();
-    let mut host = Host { dir: dir.to_path_buf(), world: world.to_string(), engine: engine.clone(), plugins: Vec::new(), commands: HashMap::new(), interest: 0, rotate: 0, approvals_error: None };
-    let approvals = match Approvals::load(dir) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("plugins: {e}: no plugin runs until that is fixed");
-            host.approvals_error = Some(e);
-            Approvals::default()
-        }
-    };
-    let mut folders: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir() && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'))).collect();
-    folders.sort();
-    if folders.len() > limits::MAX_PLUGINS {
-        eprintln!("plugins: {} folders in {}; only the first {} (by name) are read", folders.len(), dir.display(), limits::MAX_PLUGINS);
-    }
-    for folder in folders.into_iter().take(limits::MAX_PLUGINS) {
-        let id = folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let approval = approvals.0.get(&id).filter(|_| host.approvals_error.is_none());
-        let mut found = Loaded::inspect(&engine, &folder, approval);
-        // Installed plugins live in a folder named for their id: it is how a command or a state file
-        // finds its owner, and what `pcds plugin enable ID` names.
-        if found.manifest.as_ref().is_some_and(|m| m.id() != id) {
-            let why = format!("the folder is {id} but the manifest's id is {}: the folder's name is the id", found.id);
-            (found.id, found.status, found.pending, found.kinds, found.grant) = (id, Status::Invalid(why), None, 0, Grant::default());
-        }
-        host.plugins.push(found);
-    }
+    let mut host = Host::empty(dir, world);
+    let (found, error) = scan(&host.engine, dir);
+    host.plugins = found;
+    host.approvals_error = error;
     host.index_commands();
+    host.sig = host.signature();
     host
 }
 
 impl Host {
+    /// A host with no plugin.
+    pub fn empty(dir: &Path, world: &str) -> Host {
+        Host { dir: dir.to_path_buf(), world: world.to_string(), engine: wasm::engine(), plugins: Vec::new(), commands: HashMap::new(), interest: 0, rotate: 0, approvals_error: None, gauge: Arc::default(), sig: Vec::new() }
+    }
+
+    /// The folder's files that matter, as they are now.
+    pub fn signature(&self) -> Sig {
+        signature_of(&self.dir, &self.plugins.iter().filter_map(|p| Some((p.id.clone(), p.entry_rel.clone()?))).collect())
+    }
+
+    /// The final call and save of a plugin switched off for faults, now that no event is running
+    /// (the instance was held for it); and nothing else.
+    pub fn settle(&mut self, saved: &mut state::Saved) {
+        let world = self.world.clone();
+        for p in self.plugins.iter_mut().filter(|p| p.retire_due) {
+            let was = p.retire(saved, &world, "switched off for faults", true);
+            p.status = was;
+        }
+        self.index_commands();
+        self.recompute();
+    }
+
+    /// What each plugin's state is called, for `announce`.
+    fn states(&self) -> HashMap<String, String> {
+        self.plugins.iter().map(|p| (p.id.clone(), format!("{}{}", p.status.name(), p.notice.as_deref().map_or(String::new(), |n| format!(" ({n})"))))).collect()
+    }
+
+    /// One line in the log for each plugin whose state differs from `before`, and for each that is
+    /// gone: a transition is said once.
+    fn announce(&self, before: &HashMap<String, String>) {
+        for p in &self.plugins {
+            let now = format!("{}{}", p.status.name(), p.notice.as_deref().map_or(String::new(), |n| format!(" ({n})")));
+            if before.get(&p.id) != Some(&now) {
+                match p.status.detail() {
+                    Some(d) if !matches!(p.status, Status::Running) => println!("plugin {}: {} ({d})", p.id, p.status.name()),
+                    _ => println!("plugin {}: {now}", p.id),
+                }
+            }
+        }
+        for id in before.keys().filter(|id| !self.plugins.iter().any(|p| &p.id == *id)) {
+            println!("plugin {id}: removed");
+        }
+    }
+
+    /// Reads the folder again and makes the plugins what it says, between two events: a new folder
+    /// is discovered (and starts when it is approved), a changed one is replaced with its state
+    /// handed over (`save` of the old, `load` of the new, which reads the version), a disabled or
+    /// removed one gets its last call and save and is dropped. A new version that does not start,
+    /// or whose files wait for approval, leaves the old one running, and says so (`notice`). A plugin
+    /// switched off for faults starts again only on an explicit reload (`explicit`), not when the
+    /// folder merely changed elsewhere. Returns the summary line.
+    pub fn rescan(&mut self, saved: &mut state::Saved, explicit: bool) -> String {
+        let before = self.states();
+        let (fresh, error) = scan(&self.engine, &self.dir);
+        self.approvals_error = error;
+        let mut old = std::mem::take(&mut self.plugins);
+        let world = self.world.clone();
+        let mut next: Vec<Loaded> = Vec::new();
+        for mut p in fresh {
+            let Some(i) = old.iter().position(|q| q.id == p.id) else {
+                p.start(&self.engine, &self.gauge, saved, &world);
+                next.push(p);
+                continue;
+            };
+            let mut prev = old.swap_remove(i);
+            if prev.same_files(&p) && (prev.running() || (!explicit && matches!(prev.status, Status::Failed(_)))) {
+                // Nothing changed for it: the running one stays, with its counters.
+                prev.notice = None;
+                next.push(prev);
+                continue;
+            }
+            if prev.running() && p.pending.is_some() && p.status == Status::Running {
+                // A new version, approved: its state from the old one's save.
+                let handed = match prev.rt.as_mut().map(|rt| rt.save()) {
+                    Some(Ok(blob)) => blob,
+                    Some(Err(f)) => {
+                        eprintln!("plugin {}: its save for the reload failed ({f}); the state of its last save is used", p.id);
+                        prev.checkpoint.clone()
+                    }
+                    None => prev.checkpoint.clone(),
+                };
+                p.checkpoint = handed;
+                p.start(&self.engine, &self.gauge, saved, &world);
+                if p.rt.is_some() {
+                    p.stats.restarts = prev.stats.restarts;
+                    if let Some(b) = &p.checkpoint {
+                        saved.states.insert(p.id.clone(), b.clone());
+                    }
+                    next.push(p);
+                } else {
+                    // The new version did not start: the old goes on.
+                    let why = match &p.status {
+                        Status::Failed(w) => w.clone(),
+                        other => other.detail().unwrap_or("it did not start").to_string(),
+                    };
+                    eprintln!("plugin {}: the reload failed ({why}); the old version keeps running", p.id);
+                    prev.notice = Some(format!("a reload failed: {why}; the old version keeps running"));
+                    next.push(prev);
+                }
+                continue;
+            }
+            if prev.running() && matches!(p.status, Status::Changed | Status::Invalid(_) | Status::Incompatible(_)) {
+                // Files that cannot be loaded (or are not approved yet): the approved version, in
+                // memory, goes on until the admin disables it or approves the new one.
+                let why = match &p.status {
+                    Status::Changed => "its files changed and wait for approval".to_string(),
+                    other => format!("its new files do not hold up: {}", other.detail().unwrap_or("")),
+                };
+                prev.notice = Some(format!("{why}; the old version keeps running"));
+                next.push(prev);
+                continue;
+            }
+            if prev.rt.is_some() {
+                // Disabled, approval gone: the last call and save, then it goes.
+                let why = match &p.status {
+                    Status::Disabled => "disabled",
+                    Status::Pending => "no longer approved",
+                    _ => "switched off",
+                };
+                prev.retire(saved, &world, why, true);
+            }
+            if p.checkpoint.is_none() {
+                p.checkpoint = prev.checkpoint.take();
+            }
+            // A plugin that is to run starts (an explicit reload of a failed one, or an enable).
+            if p.pending.is_some() && p.status == Status::Running {
+                p.start(&self.engine, &self.gauge, saved, &world);
+            }
+            next.push(p);
+        }
+        // Folders that are gone: the plugin gets its last call, its state is not written (nowhere to).
+        for mut gone in old {
+            gone.retire(saved, &world, "its folder was removed", false);
+            saved.states.remove(&gone.id);
+        }
+        self.plugins = next;
+        self.index_commands();
+        self.recompute();
+        let ids: HashSet<&str> = self.plugins.iter().map(|p| p.id.as_str()).collect();
+        saved.states.retain(|id, _| ids.contains(id.as_str()));
+        self.sig = self.signature();
+        self.announce(&before);
+        self.summary_line()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.plugins.is_empty()
     }
@@ -493,8 +754,9 @@ impl Host {
     /// Starts every approved plugin with its state (from `saved`, else from disk).
     fn start_all(&mut self, saved: &state::Saved) {
         let (engine, world) = (self.engine.clone(), self.world.clone());
+        let gauge = self.gauge.clone();
         for p in &mut self.plugins {
-            p.start(&engine, saved, &world);
+            p.start(&engine, &gauge, saved, &world);
         }
         self.index_commands();
         self.recompute();
@@ -630,7 +892,7 @@ impl Host {
                 Err(f) => p.faulted(&f, "saving its state"),
             }
         }
-        self.recompute();
+        self.settle(saved);
     }
 
     /// Writes the state of each running plugin beside it (so a restart or a crash keeps it).
@@ -651,21 +913,26 @@ impl Host {
 // ---- the game's entry points -------------------------------------------------------------------
 
 /// Starts the prepared plugins in a game that is ready (a started world or a restored one). With
-/// no plugin there is no host at all, and the game pays nothing.
+/// no plugin there is no host at all, and the game pays nothing. The folder may have changed since
+/// the plugins were prepared (an approval given during a hot update, say): it is looked at once
+/// more here, so the set that runs is the folder's at this moment, not at the compile.
 pub fn attach(game: &mut crate::game::Game, mut host: Host) {
     let slot = &mut game.ext.plugins;
     slot.place = Some((host.dir.clone(), host.world.clone()));
-    if host.is_empty() {
-        slot.host = None;
-        slot.refresh();
-        return;
+    let changed = host.signature() != host.sig;
+    if !host.is_empty() {
+        host.start_all(&slot.saved);
+        // State of plugins that are gone is not carried on.
+        let ids: HashSet<&str> = host.plugins.iter().map(|p| p.id.as_str()).collect();
+        slot.saved.states.retain(|id, _| ids.contains(id.as_str()));
+        println!("{}", host.summary_line());
+        host.announce(&HashMap::new());
     }
-    host.start_all(&slot.saved);
-    // State of plugins that are gone is not carried on.
-    let ids: HashSet<&str> = host.plugins.iter().map(|p| p.id.as_str()).collect();
-    slot.saved.states.retain(|id, _| ids.contains(id.as_str()));
-    println!("{}", host.summary_line());
-    slot.host = Some(Box::new(host));
+    if changed {
+        host.rescan(&mut slot.saved, false);
+    }
+    slot.scan = Scan { next: Some(Instant::now() + POLL_EVERY), seen: host.sig.clone(), settling: None };
+    slot.host = (!host.is_empty()).then(|| Box::new(host));
     slot.refresh();
 }
 
@@ -692,6 +959,9 @@ pub fn dispatch(game: &mut crate::game::Game, event: &Event<'_>) -> Verdict {
             host.run(game, &command, game_ms);
         }
     }
+    if host.plugins.iter().any(|p| p.retire_due) {
+        host.settle(&mut game.ext.plugins.saved);
+    }
     game.ext.plugins.host = Some(host);
     game.ext.plugins.refresh();
     verdict
@@ -715,38 +985,55 @@ pub fn saved(game: &mut crate::game::Game) {
     }
 }
 
-/// Reads the folder again and starts what changed (the admin changed an approval, installed or
-/// removed a plugin). A plugin whose files and approval are as they were keeps running; one that
-/// changed is saved, replaced and started with its state.
+/// Reads the folder again now (the admin asked: the command line, the admin API, the dashboard):
+/// see `Host::rescan`. A plugin switched off for faults starts again.
 pub fn reload(game: &mut crate::game::Game) -> Result<String, String> {
+    rescan_game(game, true)
+}
+
+fn rescan_game(game: &mut crate::game::Game, explicit: bool) -> Result<String, String> {
     let (dir, world) = game.ext.plugins.place.clone().ok_or("the plugin host has not started")?;
-    let mut fresh = prepare(&dir, &world);
-    let mut old = game.ext.plugins.host.take().map(|h| *h);
-    if let Some(old) = old.as_mut() {
-        old.checkpoint(&mut game.ext.plugins.saved, Some(limits::FLIP_BUDGET));
-    }
-    let engine = fresh.engine.clone();
-    for p in &mut fresh.plugins {
-        if let Some(prev) = old.as_mut().and_then(|o| o.plugins.iter().position(|q| q.id == p.id).map(|i| o.plugins.swap_remove(i))) {
-            if prev.same_as(p) {
-                // Unchanged: the running one stays (its counters too).
-                *p = prev;
-                continue;
-            }
-            p.checkpoint = prev.checkpoint;
-            p.stats.restarts = prev.stats.restarts;
-        }
-        p.start(&engine, &game.ext.plugins.saved, &world);
-    }
-    fresh.index_commands();
-    fresh.recompute();
-    let line = fresh.summary_line();
-    let ids: HashSet<&str> = fresh.plugins.iter().map(|p| p.id.as_str()).collect();
-    game.ext.plugins.saved.states.retain(|id, _| ids.contains(id.as_str()));
-    game.ext.plugins.host = (!fresh.is_empty()).then(|| Box::new(fresh));
+    let mut host = game.ext.plugins.host.take().map(|h| *h).unwrap_or_else(|| Host::empty(&dir, &world));
+    let line = host.rescan(&mut game.ext.plugins.saved, explicit);
+    game.ext.plugins.scan.seen = host.sig.clone();
+    game.ext.plugins.scan.settling = None;
+    game.ext.plugins.host = (!host.is_empty()).then(|| Box::new(host));
     game.ext.plugins.refresh();
-    println!("{line}");
     Ok(line)
+}
+
+/// Called by the bank's loop, between two events, as often as it likes: every `POLL_EVERY` it
+/// looks at the folder, and reads it again when two looks in a row saw the same change (a new
+/// folder, an approval, a file replaced, a folder removed). It also lets stream consumers that
+/// stopped asking go. With nothing changed it is a few `stat`s.
+pub fn poll(game: &mut crate::game::Game) {
+    let slot = &mut game.ext.plugins;
+    let now = Instant::now();
+    if slot.place.is_none() || slot.scan.next.is_some_and(|t| now < t) {
+        return;
+    }
+    slot.scan.next = Some(now + POLL_EVERY);
+    poll_now(game);
+}
+
+/// `poll` without the timer.
+pub(crate) fn poll_now(game: &mut crate::game::Game) {
+    let slot = &mut game.ext.plugins;
+    let Some((dir, _)) = slot.place.clone() else { return };
+    slot.refresh();
+    let current = match slot.host.as_ref() {
+        Some(h) => h.signature(),
+        None => signature_of(&dir, &HashMap::new()),
+    };
+    if current == slot.scan.seen {
+        slot.scan.settling = None;
+        return;
+    }
+    if slot.scan.settling.as_ref() != Some(&current) {
+        slot.scan.settling = Some(current);
+        return;
+    }
+    let _ = rescan_game(game, false);
 }
 
 // ---- approving, for the admin API and `pcds plugin` ---------------------------------------------

@@ -201,7 +201,7 @@ fn a_module_with_imports_the_server_does_not_have_is_refused_by_name() {
 fn a_module_built_for_another_abi_does_not_run() {
     let dir = fresh_dir("abi");
     install(&dir, "future", &module("(i32.const 0)", "").replace("(i32.const 65536)", "(i32.const 131072)"), &CHAT_SAY, SUBSCRIBE_CHAT, None);
-    install(&dir, "newer-minor", &module("(i32.const 0)", "").replace("(i32.const 65536)", "(i32.const 65537)"), &CHAT_SAY, SUBSCRIBE_CHAT, None);
+    install(&dir, "newer-minor", &module("(i32.const 0)", "").replace("(i32.const 65536)", "(i32.const 65538)"), &CHAT_SAY, SUBSCRIBE_CHAT, None);
     let host = boot(&dir);
     for id in ["future", "newer-minor"] {
         assert!(matches!(&plugin(&host, id).status, Status::Failed(why) if why.contains("plugin ABI")), "{id}: {:?}", plugin(&host, id).status);
@@ -340,15 +340,24 @@ fn commands_go_to_their_owner_only_and_a_second_claim_is_told() {
 
 /// A counter: every event adds one and says it as a digit; its state is the count.
 fn counter() -> String {
-    module(
-        "(global.set $count (i32.add (global.get $count) (i32.const 1))) (i32.store8 (i32.const 0) (i32.add (i32.const 48) (global.get $count))) (drop (call $say (i32.const 0) (i32.const 1))) (i32.const 0)",
+    counter_with("")
+}
+
+/// The counter with more functions (an unload hook).
+fn counter_with(more: &str) -> String {
+    let extra = format!(
+        "{}{more}",
         r#"(global $count (mut i32) (i32.const 0))
            (func (export "pcds_save") (result i64) (i32.store (i32.const 2048) (global.get $count)) (i64.or (i64.shl (i64.const 2048) (i64.const 32)) (i64.const 4)))
            (func (export "pcds_state_version") (result i32) (i32.const 3))
            (func (export "pcds_load") (param i32 i32 i32) (result i32)
              (if (i32.ne (local.get 1) (i32.const 0))
                (then (if (i32.ne (local.get 2) (i32.const 3)) (then unreachable)) (global.set $count (i32.load (local.get 0)))))
-             (i32.const 0))"#,
+             (i32.const 0))"#
+    );
+    module(
+        "(global.set $count (i32.add (global.get $count) (i32.const 1))) (i32.store8 (i32.const 0) (i32.add (i32.const 48) (global.get $count))) (drop (call $say (i32.const 0) (i32.const 1))) (i32.const 0)",
+        &extra,
     )
 }
 
@@ -468,7 +477,7 @@ fn the_api_document_matches_the_code() {
         assert!(super::wasm::IMPORTS.contains(&import));
     }
     assert_eq!(super::wasm::IMPORTS.len(), 7);
-    for export in ["memory", "pcds_abi", "pcds_alloc", "pcds_free", "pcds_event", "pcds_load", "pcds_save", "pcds_state_version"] {
+    for export in ["memory", "pcds_abi", "pcds_alloc", "pcds_free", "pcds_event", "pcds_load", "pcds_save", "pcds_state_version", "pcds_unload"] {
         assert!(has_row(&format!("| `{export}` |")), "export {export}");
     }
     assert!(doc.contains(&format!("`ABI {}.{}`", pcds_plugin_api::ABI_MAJOR, pcds_plugin_api::ABI_MINOR)), "the ABI version");
@@ -527,4 +536,191 @@ fn the_api_document_matches_the_code() {
     for cmd in ["list", "check", "install", "enable", "disable", "reload", "new"] {
         assert!(include_str!("../cli/plugin.rs").contains(&format!("[\"{cmd}\"")) || include_str!("../cli/plugin.rs").contains(&format!("[\"{cmd}\",")), "pcds plugin {cmd}");
     }
+}
+
+// ---- loading and unloading while the world runs ----------------------------------------------------
+
+fn rescan(host: &mut Host, saved: &mut Saved) -> String {
+    host.rescan(saved, true)
+}
+
+const UNLOAD_ADDS_40: &str = "(func (export \"pcds_unload\") (result i32) (global.set $count (i32.add (global.get $count) (i32.const 40))) (i32.const 0))";
+
+fn live(host: &Host) -> (usize, usize, usize, u32) {
+    let (instances, pages) = host.gauge.live();
+    (instances, pages, host.commands.len(), host.interest)
+}
+
+#[test]
+fn switching_a_plugin_off_gives_it_a_last_call_and_save_and_leaves_nothing() {
+    let dir = fresh_dir("unload");
+    install(&dir, "counter", &counter_with(UNLOAD_ADDS_40), &CHAT_SAY, "[events]\nsubscribe = [\"chat\"]\n[[command]]\nname = \"c\"", None);
+    let mut host = boot(&dir);
+    let mut saved = Saved::default();
+    let mut world = Mock::default();
+    assert_eq!(host.gauge.live().0, 1);
+    assert!(host.gauge.live().1 >= 1 && host.commands.len() == 1 && host.interest != 0);
+    host.run(&mut world, &chat("a"), 0);
+    // The admin switches it off: the folder is read again, between two events.
+    disable(&dir, "counter").unwrap();
+    rescan(&mut host, &mut saved);
+    let p = plugin(&host, "counter");
+    assert_eq!(p.status, Status::Disabled);
+    // Nothing is left: no instance, no memory, no command, no subscription, no queued action.
+    assert_eq!(live(&host), (0, 0, 0, 0));
+    assert!(p.rt.is_none());
+    // Its last call ran (40 added to the 1), then its state was saved: in the snapshot's part and beside it.
+    let blob = saved.states.get("counter").expect("the state is kept");
+    assert_eq!(blob.bytes, 41u32.to_le_bytes());
+    assert_eq!(state::read(&state::path(&dir.join("counter"), "world")).unwrap().unwrap(), *blob);
+    // No event reaches it any more.
+    host.run(&mut world, &chat("b"), 0);
+    assert_eq!(said(&world), vec!["1"]);
+    // Switched on again: a new instance, started with that state.
+    approve(&dir, "counter", None).unwrap();
+    rescan(&mut host, &mut saved);
+    assert_eq!(live(&host).0, 1);
+    host.run(&mut world, &chat("c"), 0);
+    assert_eq!(said(&world), vec!["1", "Z"], "41 + 1 = 42, as the character 48 + 42");
+}
+
+#[test]
+fn a_removed_folder_is_unloaded_without_writing_anything_back() {
+    let dir = fresh_dir("removed");
+    install(&dir, "counter", &counter_with(UNLOAD_ADDS_40), &CHAT_SAY, "[events]\nsubscribe = [\"chat\"]", None);
+    let mut host = boot(&dir);
+    let mut saved = Saved::default();
+    host.run(&mut Mock::default(), &chat("a"), 0);
+    std::fs::remove_dir_all(dir.join("counter")).unwrap();
+    rescan(&mut host, &mut saved);
+    assert!(host.plugins.is_empty() && live(&host) == (0, 0, 0, 0));
+    assert!(saved.states.is_empty(), "its state is not carried on");
+    assert!(!dir.join("counter").exists(), "and its folder was not made again to hold the state");
+}
+
+#[test]
+fn a_hostile_unload_cannot_stop_the_unloading() {
+    let dir = fresh_dir("hostile-unload");
+    let traps = "(func (export \"pcds_unload\") (result i32) unreachable)";
+    let hangs = "(func (export \"pcds_unload\") (result i32) (loop $l (br $l)) (i32.const 0))";
+    install(&dir, "traps", &counter_with(traps), &CHAT_SAY, "[events]\nsubscribe = [\"chat\"]", None);
+    install(&dir, "hangs", &counter_with(hangs), &CHAT_SAY, "[events]\nsubscribe = [\"chat\"]", None);
+    let mut host = boot(&dir);
+    let mut saved = Saved::default();
+    let mut world = Mock::default();
+    host.run(&mut world, &chat("a"), 0);
+    host.checkpoint(&mut saved, None);
+    host.run(&mut world, &chat("b"), 0);
+    disable(&dir, "traps").unwrap();
+    disable(&dir, "hangs").unwrap();
+    let t = Instant::now();
+    rescan(&mut host, &mut saved);
+    // The hang is cut by fuel (a save's: a few ms), the trap is a line in the log.
+    assert!(t.elapsed() < Duration::from_millis(500), "{:?}", t.elapsed());
+    assert_eq!(live(&host), (0, 0, 0, 0));
+    for id in ["traps", "hangs"] {
+        assert_eq!(plugin(&host, id).status, Status::Disabled);
+        // The state is the one of the last save (1), not what the failed call may have left.
+        assert_eq!(saved.states[id].bytes, 1u32.to_le_bytes(), "{id}");
+        assert_eq!(plugin(&host, id).stats.faults, 0, "an unload that fails is not a fault of the running plugin");
+    }
+}
+
+#[test]
+fn a_plugin_switched_off_for_faults_is_unloaded_too() {
+    let dir = fresh_dir("faultoff");
+    install(&dir, "trapper", &module("unreachable", ""), &CHAT_SAY, SUBSCRIBE_CHAT, None);
+    let mut host = boot(&dir);
+    let mut saved = Saved::default();
+    let mut world = Mock::default();
+    for _ in 0..limits::MAX_FAULTS {
+        host.run(&mut world, &chat("x"), 0);
+    }
+    assert!(matches!(plugin(&host, "trapper").status, Status::Failed(_)));
+    assert!(plugin(&host, "trapper").rt.is_some(), "held for the last call, between events");
+    host.settle(&mut saved);
+    assert!(matches!(plugin(&host, "trapper").status, Status::Failed(_)));
+    assert!(plugin(&host, "trapper").rt.is_none());
+    assert_eq!(live(&host), (0, 0, 0, 0));
+    // A folder scan that changes nothing for it does not bring it back; an explicit reload does.
+    assert!(matches!(
+        {
+            host.rescan(&mut saved, false);
+            plugin(&host, "trapper").status.clone()
+        },
+        Status::Failed(_)
+    ));
+    host.rescan(&mut saved, true);
+    assert!(plugin(&host, "trapper").running());
+}
+
+#[test]
+fn a_reload_hands_the_state_over_and_a_failed_one_keeps_the_old_version_running() {
+    let dir = fresh_dir("reload-host");
+    install(&dir, "counter", &counter(), &CHAT_SAY, SUBSCRIBE_CHAT, None);
+    let mut host = boot(&dir);
+    let mut saved = Saved::default();
+    let mut world = Mock::default();
+    host.run(&mut world, &chat("a"), 0);
+    host.run(&mut world, &chat("b"), 0);
+    // New files, not approved: the approved version goes on, and the listing says why.
+    let wasm = dir.join("counter/plugin.wasm");
+    std::fs::write(&wasm, wat::parse_str(counter().replace("(i32.const 48)", "(i32.const 65)")).unwrap()).unwrap();
+    rescan(&mut host, &mut saved);
+    assert!(plugin(&host, "counter").running() && plugin(&host, "counter").notice.as_deref().unwrap().contains("wait for approval"));
+    host.run(&mut world, &chat("c"), 0);
+    assert_eq!(said(&world), vec!["1", "2", "3"], "still the old version");
+    // Approved, but the new version cannot start (its load traps on the state it is given): the old one goes on.
+    std::fs::write(&wasm, wat::parse_str(counter().replace("(if (i32.ne (local.get 2) (i32.const 3))", "(if (i32.eq (local.get 2) (i32.const 3))")).unwrap()).unwrap();
+    approve(&dir, "counter", None).unwrap();
+    rescan(&mut host, &mut saved);
+    let p = plugin(&host, "counter");
+    assert!(p.running() && p.notice.as_deref().unwrap().contains("a reload failed"), "{:?}", p.notice);
+    assert_eq!(live(&host).0, 1, "the failed new instance was dropped");
+    host.run(&mut world, &chat("d"), 0);
+    assert_eq!(said(&world).last().unwrap(), "4");
+    // A good new version: its state is the old one's, and its behaviour is new (letters, not digits).
+    std::fs::write(&wasm, wat::parse_str(counter().replace("(i32.const 48)", "(i32.const 65)")).unwrap()).unwrap();
+    approve(&dir, "counter", None).unwrap();
+    rescan(&mut host, &mut saved);
+    assert!(plugin(&host, "counter").notice.is_none());
+    assert_eq!(live(&host).0, 1, "the old instance was dropped");
+    host.run(&mut world, &chat("e"), 0);
+    assert_eq!(said(&world).last().unwrap(), "F", "'A' + 5: the new code, with the count (4) it was handed");
+}
+
+#[test]
+fn a_hundred_loads_and_unloads_leave_nothing_and_cost_no_tick_time() {
+    let dir = fresh_dir("cycles");
+    install(&dir, "steady", &module("(i32.const 0)", ""), &["event.tick"], "[events]\nsubscribe = [\"tick\"]\n[budget]\ntick_every_ms = 5", None);
+    install(&dir, "cycler", &counter_with(UNLOAD_ADDS_40), &CHAT_SAY, "[events]\nsubscribe = [\"chat\"]\n[[command]]\nname = \"c\"", None);
+    let mut host = boot(&dir);
+    let mut saved = Saved::default();
+    let mut world = Mock::default();
+    let tick = |ms: i64| Event::Tick { game_ms: ms, tick: 0, players: 0, since_ms: 5 };
+    let mut clock = 0i64;
+    let measure = |host: &mut Host, world: &mut Mock, clock: &mut i64| {
+        let t = Instant::now();
+        for _ in 0..20_000 {
+            *clock += 5;
+            host.run(world, &tick(*clock), *clock);
+        }
+        t.elapsed().as_nanos() as f64 / 20_000.0
+    };
+    let before = (0..3).map(|_| measure(&mut host, &mut world, &mut clock)).fold(f64::MAX, f64::min);
+    let baseline = live(&host);
+    for i in 0..100 {
+        disable(&dir, "cycler").unwrap();
+        rescan(&mut host, &mut saved);
+        assert_eq!(live(&host).0, 1, "cycle {i}: only the steady plugin is left");
+        approve(&dir, "cycler", None).unwrap();
+        rescan(&mut host, &mut saved);
+        host.run(&mut world, &chat("x"), clock);
+    }
+    assert_eq!(live(&host), baseline, "100 cycles: the same instances, pages, commands and subscriptions");
+    assert_eq!(host.plugins.len(), 2);
+    let after = (0..3).map(|_| measure(&mut host, &mut world, &mut clock)).fold(f64::MAX, f64::min);
+    // Noise on a busy machine is large; a leak of subscriptions or instances would be a multiple.
+    assert!(after < before * 2.0 + 500.0, "tick cost before {before:.0} ns, after {after:.0} ns");
+    println!("100 cycles: tick cost {before:.0} ns before, {after:.0} ns after");
 }

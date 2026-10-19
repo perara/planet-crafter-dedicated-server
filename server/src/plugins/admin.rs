@@ -37,6 +37,7 @@ pub fn plugin_json(p: &Loaded) -> Value {
         "commands": p.commands.iter().map(|c| json!({"name": c, "help": m.and_then(|m| m.commands.iter().find(|x| x.name.eq_ignore_ascii_case(c))).map(|x| x.help.as_str())})).collect::<Vec<_>>(),
         "events": Kind::ALL.iter().filter(|k| p.kinds & k.bit() != 0).map(|k| k.name()).collect::<Vec<_>>(),
         "warnings": p.warnings,
+        "notice": p.notice,
         "limits": {"fuelPerEvent": p.limits.fuel_per_event, "fuelPerSave": p.limits.fuel_per_save, "memoryPages": p.limits.memory_pages, "tickEveryMs": p.limits.tick_every_ms},
         "stats": {
             "calls": p.stats.calls, "faults": p.stats.faults, "restarts": p.stats.restarts, "slow": p.stats.slow, "shed": p.stats.shed,
@@ -73,7 +74,9 @@ pub fn request(game: &mut Game, method: &str, path: &str, body: &Value) -> (u16,
                 "approvalsError": host.and_then(|h| h.approvals_error.clone()),
                 "capabilities": caps::ALL.iter().map(|(n, d)| json!({"name": n, "allows": d})).collect::<Vec<_>>(),
                 "abi": {"major": pcds_plugin_api::ABI_MAJOR, "minor": pcds_plugin_api::ABI_MINOR},
-                "stream": {"epoch": game.ext.plugins.saved.stream.epoch},
+                "stream": {"epoch": game.ext.plugins.saved.stream.epoch, "consumers": game.ext.plugins.saved.stream.consumers_json()},
+                "scanEverySeconds": super::POLL_EVERY.as_secs(),
+                "runtime": host.map(|h| h.gauge.live()).map(|(instances, pages)| json!({"instances": instances, "memoryPages": pages})).unwrap_or_else(|| json!({"instances": 0, "memoryPages": 0})),
             });
             (200, body.to_string())
         }
@@ -132,10 +135,19 @@ fn events(game: &mut Game, body: &Value) -> (u16, String) {
             }
         }
     }
+    let name = body["consumer"].as_str().unwrap_or("anonymous");
+    if name.is_empty() || name.len() > 32 || !name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+        return error(400, "consumer: 1 to 32 letters, digits, . _ or -");
+    }
+    let ring = &mut game.ext.plugins.saved.stream;
+    if body["unregister"] == true {
+        let was = ring.unregister(name);
+        game.ext.plugins.refresh();
+        return (200, json!({"ok": true, "registered": false, "was": was}).to_string());
+    }
     let after = body["after"].as_u64().unwrap_or(0);
     let limit = body["limit"].as_u64().unwrap_or(200).clamp(1, 500) as usize;
-    let ring = &mut game.ext.plugins.saved.stream;
-    ring.ask(kinds);
+    ring.ask(name, kinds, after);
     let answer = ring.read(after, kinds, limit);
     game.ext.plugins.refresh();
     (200, answer.to_string())

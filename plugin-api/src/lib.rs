@@ -51,7 +51,7 @@ pub use host::Wasm;
 /// the server's own. Additive changes (a new event kind, a new host function, a field at the end
 /// of an event) raise the minor; anything else raises the major.
 pub const ABI_MAJOR: u32 = 1;
-pub const ABI_MINOR: u32 = 0;
+pub const ABI_MINOR: u32 = 1;
 pub const ABI: u32 = ABI_MAJOR << 16 | ABI_MINOR;
 
 /// What a plugin keeps across a restart, a reload and a hot update: opaque bytes the server
@@ -81,6 +81,12 @@ pub trait Plugin: Sized {
     fn save(&mut self) -> Option<SavedState> {
         None
     }
+
+    /// Once when the plugin is switched off, removed, or switched off for faults: the last call,
+    /// with a budget (as `save`'s), after which the instance and its memory are dropped and `save`
+    /// is asked one more time. Nothing queued during it is applied. A reload (a new version taking
+    /// over) does not call it: `save` and the new version's `load` hand the state over. (ABI 1.1.)
+    fn unload(&mut self) {}
 }
 
 #[doc(hidden)]
@@ -123,7 +129,7 @@ pub mod rt {
 }
 
 /// The module's exports for a `Plugin`: `pcds_abi`, `pcds_alloc`, `pcds_free`, `pcds_event`,
-/// `pcds_load`, `pcds_save` and `pcds_state_version`.
+/// `pcds_load`, `pcds_save`, `pcds_state_version` and `pcds_unload`.
 #[macro_export]
 macro_rules! export {
     ($plugin:ty) => {
@@ -190,6 +196,15 @@ macro_rules! export {
                 }
                 _ => 0,
             }
+        }
+
+        /// The last call before the instance is dropped (ABI 1.1). 0 or more: fine.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn pcds_unload() -> i32 {
+            if let Some(plugin) = __PCDS_PLUGIN.get().as_mut() {
+                $crate::Plugin::unload(plugin);
+            }
+            0
         }
 
         /// The version of the state the last pcds_save wrote.

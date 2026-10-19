@@ -121,7 +121,7 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
                     report.warnings.push(format!("the manifest asks for {cap}, but the module imports nothing that needs it"));
                 }
                 let limits = super::limits::Limits::resolve(&m.budget, &Default::default());
-                match super::wasm::Wasm::new(&engine, &module, Ctx::new(&p.id, grant), limits) {
+                match super::wasm::Wasm::new(&engine, &module, Ctx::new(&p.id, grant), limits, Default::default()) {
                     Ok(w) => runtime = Some(Box::new(w)),
                     Err(e) => report.errors.push(format!("the module does not start: {e}")),
                 }

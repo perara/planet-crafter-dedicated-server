@@ -10,7 +10,7 @@ Versions in this release:
 
 | What | Version |
 |---|---|
-| plugin ABI | 1.0 (`ABI 1.0`; `pcds_plugin_api::ABI`, `0x0001_0000`) |
+| plugin ABI | 1.1 (`ABI 1.1`; `pcds_plugin_api::ABI`, `0x0001_0001`) |
 | `pcds-plugin-api` crate | 0.1.0 |
 | manifest (`plugin.toml`) | the keys below; unknown keys are refused |
 | snapshot | `handoff::FORMAT` 3, with the `ext.plugins` part (docs/plugins.md, "The compatibility rule") |
@@ -40,12 +40,13 @@ installation). The folder's name is the plugin's id. It holds `plugin.toml`, the
 | `pcds_load` | `(ptr: i32, len: i32, version: i32) -> i32` | no | once, after the start; `ptr` is 0 when there is no state. Returns 0, or a negative code: a fault, the plugin does not start |
 | `pcds_save` | `() -> i64` | no | at every world save and before a hot update: the state as `ptr << 32 | len` in memory (0: none). The host copies it, then calls `pcds_free` |
 | `pcds_state_version` | `() -> i32` | no | after `pcds_save`: the version of the bytes it gave |
+| `pcds_unload` | `() -> i32` | no | ABI 1.1: the last call before the instance is dropped (the plugin is switched off, its folder removed, or it is switched off for faults); then `pcds_save` is asked once more. Not called at a reload (a new version takes over with the state from `pcds_save`). It has the fuel of a save; a trap or a loop in it is logged and the state of the last save is kept. What it queues is never applied |
 
 The `export!` macro of `pcds-plugin-api` makes all of these from a type that implements `Plugin`.
 A module for another language implements them by hand; the table is the whole contract.
 
 The host accepts a module whose `pcds_abi` has the same major and a minor no newer than the
-server's (`ABI 1.0` today). It refuses a module that imports anything but the seven functions
+server's (`ABI 1.1` today). It refuses a module that imports anything but the seven functions
 below, with the name of the import in the message.
 
 ## The module's imports (module `pcds`)
@@ -258,17 +259,26 @@ All answer JSON; the bearer token is the admin token (docs/hot-update.md, README
 | `POST /api/plugins/reload` | | `{"ok": true, "message"}`: the folder is read again; a plugin whose files and approval did not change keeps running |
 | `POST /api/plugins/enable` | `{"id", "grant": [...]}` (grant optional: everything asked) | `{"ok": true, "plugin": {...}}`; 400 for an unknown plugin, a grant above what is asked, or a plugin that does not hold up |
 | `POST /api/plugins/disable` | `{"id"}` | `{"ok": true, "plugin": {...}}` |
-| `POST /api/plugins/events` | `{"after": 0, "types": ["chat","player_join"], "limit": 200}` | `{"epoch", "events": [...], "last", "dropped"}` |
+| `POST /api/plugins/events` | `{"consumer": "relay", "after": 0, "types": ["chat","player_join"], "limit": 200}` or `{"consumer": "relay", "unregister": true}` | `{"epoch", "events": [...], "last", "dropped"}`, or `{"ok", "registered": false, "was"}` |
 
-Status values: `running`, `pending` (never approved), `disabled`, `changed` (files differ from the
-approved ones), `invalid`, `incompatible`, `failed` (did not start, or switched off for faults).
+Status values: `running`, `pending` (discovered, never approved), `disabled`, `changed` (files differ
+from the approved ones, and nothing is running), `unloading` (its last call and save are running;
+seen in the log, a request never finds it so), `invalid`, `incompatible`, `failed` (did not start,
+or switched off for faults). Each change of state is one log line, `plugin ID: STATE`.
+A `running` plugin may have a `notice`: its files changed and wait for approval, or a reload of
+them failed and the old version goes on. `runtime` is `{"instances", "memoryPages"}`: what the
+running modules hold; it is zero once they are all unloaded. `scanEverySeconds` is how often the
+bank looks at the folder by itself (2); a change is acted on when two looks in a row see it.
 
 `GET /api/status` has a `plugins` object: `loaded`, `running`, `faults`.
 
 ### The event stream
 
-`POST /api/plugins/events` records the kinds you ask for from the first call on, for the minute
-after each call; with nobody asking, nothing is recorded. Streamable kinds: `player_join`,
+`POST /api/plugins/events` registers you as a *consumer* (`consumer`: 1 to 32 letters, digits, `.`
+`_` or `-`; default `anonymous`) and records the kinds you ask for from the first call on, for the
+minute after each call; you leave with `unregister`, or by not polling for a minute. The listing
+(`stream.consumers`) shows each consumer, its kinds and its last poll; arrival and departure are one
+log line each. With nobody registered, nothing is recorded. Streamable kinds: `player_join`,
 `player_leave`, `chat`, `object_placed`, `object_destroyed`, `world_saved`, `rule_change` (default:
 all but the objects). The ring keeps the last 512 events; `dropped` counts the ones lost. Each
 event is `{"id", "time" (Unix ms), "type", ...}`:
@@ -309,6 +319,10 @@ it runs on (`min_server`). Changes to the API are listed in the release notes un
 `pcds plugin check` on the new server tells an admin which installed plugins still hold up. A
 release with another ABI major starts its plugins that do not fit as `incompatible` or `failed`;
 the world and the other plugins go on.
+
+**Loading and unloading** are not versioned: a plugin of the right ABI major is loaded and unloaded
+at any time, with the folder scanned every 2 seconds (docs/plugins.md, "Loading and unloading while
+the world runs"). `pcds_unload` is ABI 1.1; a module built for 1.0 has none and loses nothing.
 
 **The snapshot.** The plugins' state is part of the current snapshot format (`ext.plugins`). A
 change to its shape that an older reader cannot read bumps `handoff::FORMAT`, which means the

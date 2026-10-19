@@ -47,6 +47,12 @@ pub trait Runtime {
     /// The state to keep, if the plugin has any.
     fn save(&mut self) -> Result<Option<Blob>, Fault>;
 
+    /// The last call before the instance is dropped (the plugin is switched off, removed or faulted
+    /// off), within the budget of a save. A plugin without one has nothing to do.
+    fn unload(&mut self) -> Result<(), Fault> {
+        Ok(())
+    }
+
     /// A fresh instance after a fault, started with the state it last gave.
     fn restart(&mut self, state: Option<&Blob>) -> Result<(), Fault>;
 }

@@ -119,7 +119,7 @@ fn start_cost() {
         let limits = limits::Limits::resolve(&Default::default(), &Default::default());
         let t = Instant::now();
         for _ in 0..200 {
-            black_box(wasm::Wasm::new(&engine, &module, Ctx::new("t", Grant::default()), limits).unwrap());
+            black_box(wasm::Wasm::new(&engine, &module, Ctx::new("t", Grant::default()), limits, Default::default()).unwrap());
         }
         let instantiate = t.elapsed() / 200;
         println!("\nplugin start: {label}: compile and validate {compile:?}, new instance {instantiate:?}");
@@ -203,4 +203,22 @@ fn tick_cost_on_a_real_world() {
         let base_ns = *base.get_or_insert(ns);
         println!("  {label:<52} {:>9.1} us/tick  ({:+.2} us, {:.3}% of the 5 ms tick)", ns / 1000.0, (ns - base_ns) / 1000.0, (ns - base_ns) / 5e6 * 100.0);
     }
+}
+
+/// What the timer scan costs when nothing changed: a few `stat`s.
+#[test]
+#[ignore]
+fn idle_scan_cost() {
+    let dir = fresh_dir("cost-scan");
+    for i in 0..10 {
+        install(&dir, &format!("p{i}"), &noop(), &["event.tick"], TICK_EVERY_TICK, None);
+    }
+    let host = boot(&dir);
+    let n = 20_000u64;
+    let ns = best(5, n, || {
+        for _ in 0..n {
+            black_box(host.signature());
+        }
+    });
+    println!("\nidle scan of a folder with 10 plugins: {:.1} us (every {} s)", ns / 1000.0, POLL_EVERY.as_secs());
 }

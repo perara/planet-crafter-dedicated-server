@@ -329,6 +329,10 @@ impl Bank {
                 let _ = persist(game, &self.save_path);
                 std::process::exit(1);
             }
+            // Plugins appear, change and go while the world runs: the folder is looked at between ticks.
+            if frame {
+                contained("the plugin folder's scan", || plugins::poll(game));
+            }
             if std::mem::take(&mut game.save_requested) {
                 let _ = persist(game, &self.save_path);
             }
