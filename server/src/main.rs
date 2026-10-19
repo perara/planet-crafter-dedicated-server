@@ -17,25 +17,9 @@
 //!        pcds load HOST:PORT DATA_DIR [PLAYERS] [SECONDS]   (a load test, see load.rs)
 //!        pcds read-game GAME_DIR OUT_DIR   (a game version's tables, see native/)
 //!        pcds COMMAND ...   (installing and running a server: cli/)
-//! Environment:
-//!   PCDS_LISTEN       direct-IP address, default 0.0.0.0:7777; "off" disables
-//!   PCDS_STEAM        "off" disables invite codes (Steam game server)
-//!   PCDS_STEAM_TOKEN  game server login token: a stable invite code (default: anonymous,
-//!                     the code changes every start)
-//!   PCDS_SESSION      the 4-digit session number at the end of the invite code, default 4242
-//!   PCDS_AUTOSAVE     minutes between saves, default 5 (0: only on stop and through the API)
-//!   PCDS_BACKUPS      copies of the save kept in backups/ next to it, default 24 (0: none)
-//!   PCDS_BACKUP_MINUTES  minutes between those copies, default 60
-//!   PCDS_ADMIN        admin API and web GUI address, default 127.0.0.1:7782; "off" disables
-//!   PCDS_ADMIN_TOKEN  the admin API's bearer token (the API is off without one)
-//!   PCDS_ACCESS       access lists file, default access.json next to the save
-//!   PCDS_RULES        server rules file, default rules.json next to the save (rules.rs)
-//!   PCDS_WEB          the web GUI page, default web/index.html next to the live bank's binary
-//!   PCDS_TRACE        log every incoming message and RPC
-//!   PCDS_UNIT         the systemd user unit pcds runs it as (the admin page's log)
-//!   PCDS_BANKS        the banks' folder (run/bin; pcds run sets it), see updater.rs
-//!   PCDS_AUTO_UPDATE  "on": install new releases and flip to them; PCDS_UPDATE_CHECK_HOURS
-//!   PCDS_RELEASES     where releases are looked up, default GitHub's API for this project
+//! Environment: the PCDS_* settings are in config.rs (KNOBS: type, range, default, what each does;
+//! the README's Settings table repeats them, and a test keeps the two equal). The other PCDS_*
+//! names the program reads or sets (installation, internal, test) are listed there too.
 
 mod animals;
 #[cfg(test)]

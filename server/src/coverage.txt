@@ -146,14 +146,14 @@ module bank  bank::tests::a_ban_that_cannot_be_kept_answers_500 bank::tests::a_b
 module chathooks  chathooks::tests::a_chat_rpc_becomes_an_event_and_still_reaches_everyone chathooks::tests::a_full_ring_drops_the_oldest_and_counts_them chathooks::tests::a_webhook_gets_the_event_signed_and_its_reply_reaches_the_chat chathooks::tests::command_prefixes_parse chathooks::tests::hmac_matches_rfc_4231 chathooks::tests::replies_are_dropped_while_the_world_stands_still chathooks::tests::the_admin_api_long_polls_events_and_says_into_the_chat chathooks::tests::the_exec_hook_gets_no_secrets_and_leaks_no_processes chathooks::tests::the_exec_hook_gets_the_event_as_json_on_stdin_and_its_output_is_the_reply chathooks::tests::the_tick_is_not_delayed_by_a_slow_webhook  # chat hooks
 module cli  cli::tests::options_of_extract_and_update cli::tests::sizes_read_like_du
 module cli::api  cli::api::tests::http_answers_are_read_by_their_length cli::api::tests::requests_go_to_127_0_0_1_with_the_token cli::api::tests::rule_arguments_become_a_merge_patch cli::api::tests::status_reads_as_a_few_lines
-module cli::env  cli::env::tests::a_setting_is_changed_by_replacing_the_file cli::env::tests::settings_are_read_and_edited_line_by_line cli::env::tests::the_build_id_is_a_hash_of_the_game_code cli::env::tests::world_names
+module cli::env  cli::env::tests::a_setting_is_changed_by_replacing_the_file cli::env::tests::settings_are_read_and_edited_line_by_line cli::env::tests::the_build_id_is_a_hash_of_the_game_code cli::env::tests::world_names cli::env::tests::the_first_settings_file_has_the_defaults_of_the_schema
 untested cli::extract  pcds extract: native::tables::read_game into run/data/<version> under a lock; the reading itself is checked by native::tables::tests::read_game_writes_the_test_tables (by hand)
 module cli::setup  cli::setup::tests::builds_go_into_the_standby_bank_once cli::setup::tests::the_banks_of_a_front_that_ended_get_to_save_first cli::setup::tests::the_current_world_is_not_copied_over_itself
 module cli::steam  cli::steam::tests::every_steam_root_is_looked_in cli::steam::tests::the_library_that_lists_the_game
 module cli::systemd  cli::systemd::tests::a_stopped_server_stays_stopped_after_an_update cli::systemd::tests::starting_and_stopping_count_as_running cli::systemd::tests::the_units_run_the_installed_program cli::systemd::tests::unit_values_are_escaped cli::systemd::tests::units_of_another_installation_are_left_alone
 module cli::upgrade  cli::upgrade::tests::options
 untested cli::worlds  the CLI world-file commands (pcds world, worlds, new-world: copy, back up, link files in run/worlds); no game logic
-module config  config::tests::each_rule_validates_as_its_schema_entry_says config::tests::the_schema_covers_every_rule_and_nothing_else  # config
+module config  config::tests::each_rule_validates_as_its_schema_entry_says config::tests::the_schema_covers_every_rule_and_nothing_else config::tests::every_environment_name_in_the_source_is_in_the_schema_or_the_list config::tests::the_readme_settings_are_the_server_env_knobs config::tests::the_readme_rules_are_the_rule_knobs  # config
 module dashboard  dashboard::tests::worlds_lists_saves_and_this_worlds_backups
 module data  data::tests::stable_hash_matches_the_game
 module deconstruct  deconstruct::tests::deconstruction_takes_the_animations_time_then_gives_the_recipe_back

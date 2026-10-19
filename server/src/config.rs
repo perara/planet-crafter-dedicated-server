@@ -143,6 +143,7 @@ pub static KNOBS: &[Knob] = &[
     env("PCDS_TRUST_LOOPBACK", Type::Enum, "", "0", "1: believe the SteamID a direct-IP client from 127.0.0.1 claims (tests, the load and probe tools). Never behind a UDP relay, where every player comes from 127.0.0.1.").values(&["0", "1"]),
     env("PCDS_AUTO_UPDATE", Type::Enum, "", "off", "on: install each new server release from GitHub as it comes out, into the standby bank, and hand the running world over to it (a hot update: players stay connected). A release that needs a front restart is not installed.").values(&["off", "on"]),
     env("PCDS_UPDATE_CHECK_HOURS", Type::Int, "h", "24", "With PCDS_AUTO_UPDATE=on: hours between checks for a new release.").range(1.0, 8760.0),
+    env("PCDS_RELEASES", Type::String, "", "", "Where pcds upgrade and PCDS_AUTO_UPDATE look up releases; unset: GitHub's API for this project. A mirror, or a test's server (plain http only for 127.0.0.1)."),
 ];
 
 pub fn knob_for(key: &str) -> Option<&'static Knob> {
@@ -387,6 +388,128 @@ pub fn set(game: &mut Game, autosave: &mut u64, body: &Value) -> Result<(), Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The PCDS_* names the source uses that are not KNOBS, so not server.env settings read at
+    /// start: install (the installer and the commands read or set them), internal (the
+    /// processes of this program talk through them, or a diagnostic of the table reader) and
+    /// test (hooks and fixtures; some are honoured by the production binary because the end-to-end
+    /// tests run it).
+    const OTHER_ENV: &[(&str, &str)] = &[
+        ("PCDS_ADMIN_BIND", "install"),
+        ("PCDS_CONTAINER", "install"),
+        ("PCDS_ENV_FILE", "install"),
+        ("PCDS_GAME_DIR", "install"),
+        ("PCDS_HOME", "install"),
+        ("PCDS_NEW_WORLD", "install"),
+        ("PCDS_PORT", "install"),
+        ("PCDS_UNIT", "install"),
+        ("PCDS_BANKS", "internal"),
+        ("PCDS_DIFF_SHOW", "internal"),
+        ("PCDS_IPC_FD", "internal"),
+        ("PCDS_REACH_IL", "internal"),
+        ("PCDS_WRECKS_TRACE", "internal"),
+        ("PCDS_BANK_FAIL", "test"),
+        ("PCDS_FLIP_VERIFY", "test"),
+        ("PCDS_RNG_SEED", "test"),
+        ("PCDS_TEST_DATA", "test"),
+        ("PCDS_TEST_FAULTS", "test"),
+    ];
+
+    /// (file, text) of every source file's non-test part: up to its `#[cfg(test)] mod ...tests`,
+    /// without the files that are test code only and without this one (which names them all).
+    fn sources() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if name.ends_with(".rs") && !["bench.rs", "coverage.rs", "scenario.rs", "testkit.rs", "tests.rs", "play_tests.rs", "config.rs"].contains(&name.as_str()) {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    let lines: Vec<&str> = text.lines().collect();
+                    let end = (0..lines.len()).find(|&i| lines[i] == "#[cfg(test)]" && lines.get(i + 1).is_some_and(|l| l.contains("mod ") && l.contains("tests"))).unwrap_or(lines.len());
+                    out.push((path.display().to_string(), lines[..end].join("\n")));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut out);
+        out
+    }
+
+    /// Every PCDS_NAME in a text.
+    fn names(text: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        for (at, _) in text.match_indices("PCDS_") {
+            let len = text[at..].find(|c: char| !(c.is_ascii_uppercase() || c == '_')).unwrap_or(text.len() - at);
+            if len > 5 {
+                out.push(&text[at..at + len]);
+            }
+        }
+        out
+    }
+
+    /// A PCDS_ name in the program is a KNOBS entry or on the list above with its scope, and
+    /// the list holds no name that is gone.
+    #[test]
+    fn every_environment_name_in_the_source_is_in_the_schema_or_the_list() {
+        let sources = sources();
+        assert!(sources.len() > 40);
+        for (file, text) in &sources {
+            for name in names(text) {
+                assert!(knob_for(name).is_some() || OTHER_ENV.iter().any(|(n, _)| *n == name), "{file} uses {name}: a KNOBS entry (config.rs) if it is a setting, else OTHER_ENV with its scope");
+            }
+        }
+        for (name, scope) in OTHER_ENV {
+            assert!(["install", "internal", "test"].contains(scope), "{name}: scope {scope}");
+            assert!(knob_for(name).is_none(), "{name} is a KNOBS entry");
+            assert!(sources.iter().any(|(_, text)| names(text).contains(name)), "{name} is in no source file any more: remove it from OTHER_ENV");
+        }
+    }
+
+    /// The table rows of the README whose first cell is `x`: (x, the second cell).
+    fn rows(readme: &str) -> Vec<(String, String)> {
+        let cells = |line: &str| -> Vec<String> { line.trim().trim_matches('|').split(" | ").map(|c| c.trim().to_string()).collect() };
+        readme.lines().filter(|l| l.starts_with("| `")).map(cells).filter(|c| c.len() >= 2).filter_map(|c| Some((c[0].strip_prefix('`')?.strip_suffix('`')?.to_string(), c[1].clone()))).collect()
+    }
+
+    /// The README's Settings table lists the server.env knobs and nothing else; where it gives
+    /// a default and the knob has one, they are the same.
+    #[test]
+    fn the_readme_settings_are_the_server_env_knobs() {
+        let readme = include_str!("../../README.md");
+        let section = readme.split("\n## Settings\n").nth(1).unwrap().split("\n## ").next().unwrap();
+        let documented = rows(section);
+        let mut keys: Vec<&str> = documented.iter().map(|(k, _)| k.as_str()).collect();
+        let mut wanted: Vec<&str> = KNOBS.iter().filter(|k| k.read_only()).map(|k| k.key).collect();
+        (keys.sort(), wanted.sort());
+        assert_eq!(keys, wanted, "README Settings table and config::KNOBS");
+        for (key, default) in &documented {
+            let knob = knob_for(key).unwrap();
+            assert!(knob.default.is_empty() || *default == format!("`{}`", knob.default), "{key}: README says {default}, KNOBS {:?}", knob.default);
+        }
+    }
+
+    /// The README's rule tables list the rules of KNOBS and nothing else; where they give a
+    /// plain default, it is the rule's.
+    #[test]
+    fn the_readme_rules_are_the_rule_knobs() {
+        let documented: Vec<(String, String)> = rows(include_str!("../../README.md")).into_iter().filter(|(k, _)| !k.starts_with("PCDS_")).collect();
+        let mut keys: Vec<&str> = documented.iter().map(|(k, _)| k.as_str()).collect();
+        let mut wanted: Vec<&str> = KNOBS.iter().filter(|k| k.source == Source::Rules).map(|k| k.key).collect();
+        (keys.sort(), wanted.sort());
+        assert_eq!(keys, wanted, "README rule tables and config::KNOBS");
+        let defaults = serde_json::to_value(Rules::default()).unwrap();
+        for (key, shown) in &documented {
+            let text = match at(&defaults, key) {
+                Value::Bool(b) => b.to_string(),
+                Value::Number(n) => n.as_f64().map(|f| f.to_string()).unwrap_or_default(),
+                Value::String(s) => s,
+                _ => continue,
+            };
+            assert_eq!(*shown, format!("`{text}`"), "{key}: README and Rules::default()");
+        }
+    }
 
     #[test]
     fn server_env_settings_are_checked_at_start() {

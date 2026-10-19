@@ -439,6 +439,31 @@ cannot download (`--steam-user` installs) fails `pcds update`, so the hourly uni
 - Access lists (`access.json`) and rules (`rules.json`) belong to the installation and apply to
   whichever world runs.
 
+### Off-site copies (S3)
+
+Every backup of the running world can also be copied to an S3-compatible bucket (AWS S3,
+Cloudflare R2, Backblaze B2, MinIO...), so a lost disk does not take the backups with it. It is
+off until `backup.s3Bucket` is set; the rules are set like any other (`./pcds rules set
+backup.s3Bucket=my-bucket ...`, or the Config tab of the web page):
+
+| Rule | Default | |
+|---|---|---|
+| `backup.s3Endpoint` | none | the service's address: `https://s3.<region>.amazonaws.com`, `https://<account>.r2.cloudflarestorage.com`, a MinIO address. Required |
+| `backup.s3Bucket` | none | the bucket the backups go to. Unset: off |
+| `backup.s3Region` | `us-east-1` | the bucket's region (`auto` for Cloudflare R2) |
+| `backup.s3Prefix` | `pcds/` | put before each backup's file name in the bucket |
+| `backup.s3AccessKey` | none | the access key id of a key that may write to the bucket. Required |
+| `backup.s3SecretKey` | none | its secret access key. Required |
+
+After each backup the newest one is uploaded from a thread of its own, so the game never waits
+for the network; one upload runs at a time, and a backup made meanwhile follows it. The keys are
+never logged, and `/api/rules` and `/api/status` show them as `(set)`. `GET /api/status` has an
+`s3` part (whether it is on, what is still to set, whether an upload is running, the last
+outcome). `POST /api/backup` saves the world and makes a backup now (answers 400 when
+`PCDS_BACKUPS` is `0`) and copies it to the bucket; `POST /api/backup/s3` copies the newest
+backup again (answers 400 when S3 is off or incomplete, or there is no backup yet). The web
+page's World tab has both as buttons.
+
 ## Differences from hosting in the game
 
 - **Free planets only.** DLC planets need DLC ownership, which only the game itself has.

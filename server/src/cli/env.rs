@@ -212,6 +212,21 @@ pub fn find_tables(data: &Path, build: &str, format: u32) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    /// The settings file a first setup writes holds the defaults of config::KNOBS (nothing in
+    /// the environment changes the port or the admin address here).
+    #[test]
+    fn the_first_settings_file_has_the_defaults_of_the_schema() {
+        let dir = super::super::test_dir("env-defaults");
+        let ctx = super::super::test_ctx(&dir);
+        ctx.write_env().unwrap();
+        let env = parse_env(&fs::read_to_string(&ctx.env_file).unwrap());
+        for key in ["PCDS_LISTEN", "PCDS_SESSION", "PCDS_AUTOSAVE", "PCDS_BACKUPS", "PCDS_BACKUP_MINUTES", "PCDS_WORLD", "PCDS_STEAM", "PCDS_ADMIN"] {
+            let written = env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+            assert_eq!(written, Some(crate::config::knob_for(key).unwrap().default), "{key}");
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn settings_are_read_and_edited_line_by_line() {
         let text = "# PCDS_WORLD=commented\nPCDS_LISTEN=0.0.0.0:7777\nPCDS_STEAM_TOKEN=\nPCDS_WORLD=\"base\"\n  PCDS_SESSION = 1234 \nnot a setting\nPCDS_WORLD=second\n";
