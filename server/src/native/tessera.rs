@@ -59,7 +59,7 @@ pub enum ConstraintDef {
 /// TesseraPalette.matchOverrides.
 #[derive(Clone, Debug, Default)]
 pub struct Palette {
-    pub overrides: HashMap<(i32, i32), bool>,
+    pub overrides: crate::idmap::FxHashMap<(i32, i32), bool>,
 }
 
 /// A TesseraGenerator.
