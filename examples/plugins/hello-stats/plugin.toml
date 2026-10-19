@@ -1,0 +1,25 @@
+[plugin]
+id = "hello-stats"
+name = "Hello stats"
+version = "0.1.0"
+description = "!stats tells the world's numbers; !uses counts the commands used, across restarts and hot updates"
+authors = ["Planet Crafter dedicated server contributors"]
+license = "MIT"
+kind = "wasm"
+entry = "plugin.wasm"
+abi = 1
+capabilities = ["event.chat", "event.player", "world.read", "chat.say"]
+
+[budget]
+fuel_per_event = 500000
+
+[events]
+subscribe = ["player_join"]
+
+[[command]]
+name = "stats"
+help = "the world's numbers"
+
+[[command]]
+name = "uses"
+help = "how often the commands were used"

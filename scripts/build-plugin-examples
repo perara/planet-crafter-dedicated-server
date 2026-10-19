@@ -1,0 +1,25 @@
+#!/bin/sh
+# Builds the example plugins that are WebAssembly modules (examples/plugins/*/Cargo.toml) and puts
+# each module next to its plugin.toml as plugin.wasm, which is what the tests and `pcds plugin
+# install` use. One time: rustup target add wasm32-unknown-unknown
+#
+#   scripts/build-plugin-examples          build and copy
+#   scripts/build-plugin-examples --check  build and fail if a plugin.wasm in the repository is not what the source builds
+set -eu
+cd "$(dirname "$0")/.."
+check=no
+[ "${1:-}" = "--check" ] && check=yes
+status=0
+for dir in examples/plugins/*/; do
+  [ -f "$dir/Cargo.toml" ] || continue
+  name=$(sed -n 's/^name = "\(.*\)"/\1/p' "$dir/Cargo.toml" | head -1 | tr - _)
+  (cd "$dir" && cargo build --release --locked --target wasm32-unknown-unknown --target-dir target)
+  built="$dir/target/wasm32-unknown-unknown/release/$name.wasm"
+  if [ "$check" = yes ]; then
+    cmp -s "$built" "$dir/plugin.wasm" || { echo "$dir/plugin.wasm is not what the source builds: run scripts/build-plugin-examples" >&2; status=1; }
+  else
+    cp "$built" "$dir/plugin.wasm"
+    echo "$dir/plugin.wasm: $(wc -c < "$dir/plugin.wasm") bytes"
+  fi
+done
+exit $status
