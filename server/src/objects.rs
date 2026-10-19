@@ -263,10 +263,12 @@ impl Game {
         if self.data.groups[wo.group].constructible && self.data.groups[wo.group].unit("Energy") != 0.0 {
             crate::energy::update_all_energy_requesters(self);
         }
-        if destroy_go {
-            if let Some(net) = wo.net {
-                self.net.despawn(net);
-            }
+        // The game destroys an object's GameObject before its world object (Explode alone keeps it,
+        // see meteo::explode go_off); a client that asks for the world object only, or destroys one
+        // it dropped without taking it out of its inventory, would leave a network object that
+        // stands for nothing, in every client's scene and in every join.
+        if let Some(net) = wo.net {
+            self.net.despawn(net);
         }
         if wo.linked_inventory > 0 {
             self.destroy_inventory(wo.linked_inventory, destroy_go);
@@ -362,7 +364,10 @@ impl Game {
     /// be built first returns the materials whatever the client took for it.)
     fn over_building_limit(&mut self, client: u64, id: i32, group: usize) {
         let Some(&max) = self.rules.limits.buildings.get(&self.data.groups[group].id) else { return };
-        if !self.wos.contains_key(&id) || self.group_count(true, group) <= max as i32 {
+        // The buildings that stand: the game's count of them (group_count) stays one too high for good
+        // for each one made without being saved, and so would block the limit for everyone.
+        let standing = self.wos.values().filter(|w| w.group == group && w.is_placed() && !is_from_scene(w.id)).count();
+        if !self.wos.contains_key(&id) || standing <= max as usize {
             return;
         }
         if let Some(inventory) = self.clients.get(&client).and_then(|c| c.ready.as_ref()).map(|s| s.inventory) {
@@ -692,6 +697,27 @@ mod tests {
         let mut r = crate::wire::Reader::new(body);
         r.u8().unwrap();
         crate::protocol::read_scene_object(&mut r).unwrap().flags
+    }
+
+    /// A destroyed world object leaves no network object behind, whatever the destroy flag says:
+    /// an item dropped and destroyed with RemoveItemFromInventory (it was never taken out), or
+    /// destroyed with DestroyWorldObject(false).
+    #[test]
+    fn a_destroyed_world_object_takes_its_network_object_along() {
+        let Some((mut g, _)) = world() else { return };
+        let (bag, _) = backpack(&g, 1);
+        let before = g.net.objects.len();
+        let item = give(&mut g, "Iron", bag);
+        send_scene(&mut g, 1, "WorldObjectsHandler.DropOnFloorServerRpc", &[json!(item), json!([561.0, 3.0, 497.0]), json!(0.0), json!(false), json!(false), json!(0), json!(0.0)]);
+        assert_eq!(g.net.objects.len(), before + 1, "dropped: it has a network object");
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveItemFromInventoryServerRpc", &[json!(item), json!(bag), json!(true)]);
+        assert!(!g.wos.contains_key(&item));
+        assert_eq!(g.net.objects.len(), before, "no network object of a gone item");
+        let other = g.create_world_object(g.data.group("Iron").unwrap(), 0, true);
+        g.drop_on_floor(other, [561.0, 3.0, 497.0], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 0.0, false, 1);
+        assert_eq!(g.net.objects.len(), before + 1);
+        send_scene(&mut g, 1, "WorldObjectsHandler.DestroyWorldObjectServerRpc", &[json!(other), json!(false)]);
+        assert_eq!(g.net.objects.len(), before);
     }
 
     /// SpawnWithOwnership sends the spawn without DontDestroyWithOwner, which the game sets right

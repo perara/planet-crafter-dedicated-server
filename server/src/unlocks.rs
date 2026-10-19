@@ -79,6 +79,8 @@ pub fn rpc(game: &mut Game, client: u64, name: &str, a: &Args) -> bool {
         // then gets and the save keeps.
         "UnlockedGroupsHandler.UnlockGroupGloballyServerRpc" if game.data.group_by_hash(a.i(0)).is_none() => {}
         "UnlockedGroupsHandler.UnlockGroupGloballyServerRpc" => unlock_globally(game, a.i(0), a.b(1), a.b(2)),
+        // The chip is used up: not one in another player's backpack or equipment.
+        "UnlockedGroupsHandler.DecodeBlueprintServerRpc" if game.others_item(client, a.i(0)) => {}
         "UnlockedGroupsHandler.DecodeBlueprintServerRpc" => {
             let Some(chip) = game.wos.get(&a.i(0)).cloned() else { return true };
             let target = chip.linked_groups.as_ref().and_then(|l| l.first().copied()).or_else(|| {

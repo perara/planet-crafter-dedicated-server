@@ -280,6 +280,17 @@ pub fn check_save_format(settings: &Value) -> Result<(), String> {
     }
 }
 
+/// World objects the tables cannot place are dropped when the world loads, and gone from the
+/// next save: a save from a newer game than these tables (or with mods), or an entry edited by
+/// hand. The start stops instead, saying which.
+pub fn check_save_content(save: &SaveFile, data: &GameData) -> Result<(), String> {
+    let unknown: Vec<&str> = save.objects.iter().filter(|o| WorldObject::from_json(o, data, 0).is_none()).map(|o| o["gId"].as_str().unwrap_or("(no group)")).collect();
+    match unknown.first() {
+        None => Ok(()),
+        Some(first) => Err(format!("{} world objects of groups these game tables do not know (the first: {first}): a save from a newer game version, or edited? Update the server or its game data (`pcds update`), then try again", unknown.len())),
+    }
+}
+
 /// A game on a save with the test tables; None (the test skips) without them.
 #[cfg(test)]
 pub fn test_game(save: SaveFile) -> Option<Game> {
@@ -1338,6 +1349,19 @@ pub mod tests {
         assert!(check_save_format(&json!({"mode": "Chill", "dyingConsequencesLabel": "DropAllItems"})).is_ok());
         assert!(check_save_format(&json!({"planetId": "Prime"})).is_ok());
         assert!(check_save_format(&Value::Null).unwrap_err().contains("cut short"));
+    }
+
+    /// World objects of a group the tables do not know would be dropped at load and gone from the
+    /// next save: the start is refused, naming the group.
+    #[test]
+    fn a_save_with_objects_the_tables_do_not_know_is_refused() {
+        let Some(g) = test_game(save()) else { return };
+        let mut s = save();
+        assert!(check_save_content(&s, &g.data).is_ok());
+        s.objects.push(json!({"id": 205_000_001, "gId": "NoSuchThingInThisGame"}));
+        s.objects.push(json!({"gId": "Iron"}));
+        let err = check_save_content(&s, &g.data).unwrap_err();
+        assert!(err.contains("2 world objects") && err.contains("NoSuchThingInThisGame"), "{err}");
     }
 
     /// Hostile input from joined clients never crashes the server: every server RPC with

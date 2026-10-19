@@ -152,8 +152,10 @@ pub struct Units {
     /// The game's is a float, which stops counting at 2^24 changes (the units would then never
     /// be recounted); a u64 does not.
     pub constructed_index: u64,
-    next_compute: f32,
-    next_define: f32,
+    /// When the next 0.1 s growth and 1 s rate step are due. f64: a clock that adds 0.1 to an f32
+    /// stops moving at 2^21 s (24 days of uptime), and the loop in `tick` then never ends.
+    next_compute: f64,
+    next_define: f64,
     /// The terraformation totals _unitSysTerraformation was last made from (bits).
     sys_from: Option<Vec<u32>>,
 }
@@ -340,7 +342,7 @@ fn multiplayer_factor(game: &Game, kind: Kind) -> f32 {
 }
 
 pub fn tick(game: &mut Game) {
-    let now = game.time;
+    let now = game.time as f64;
     while now >= game.units.next_define {
         game.units.next_define += 1.0;
         for i in 0..game.units.planets.len() {
@@ -474,6 +476,38 @@ mod tests {
         assert_eq!(var(&g, handler, "WorldUnitsHandler", "_unitSysTerraformation"), system_terraformation(&g));
         // As the real host sends it: no value, only the label of the product.
         assert_eq!(system_terraformation(&g)[..16], [0; 16]);
+    }
+
+    /// After weeks of uptime the clock is still counted in steps of 0.1 s: an f32 "next due" that
+    /// adds 0.1 stops moving at 2^21 s (24 days), and tick then looped for ever.
+    #[test]
+    fn units_keep_growing_at_their_rate_after_a_month_of_uptime() {
+        let Some(mut g) = crate::game::test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        place(&mut g, "Heater1", [570.0, 3.0, 500.0]);
+        place(&mut g, "EnergyGenerator1", [575.0, 3.0, 500.0]);
+        let heater = g.data.groups[g.data.group("Heater1").unwrap()].unit("Heat");
+        let start = 2_600_000.0f32;
+        g.time = start;
+        g.units.next_define = start as _;
+        g.units.next_compute = start as _;
+        let (tx, rx) = std::sync::mpsc::channel();
+        // A thread: with the bug tick never returns, and this test must fail, not hang.
+        std::thread::spawn(move || {
+            let mut g = g;
+            for _ in 0..100 {
+                g.time += 0.5;
+                tick(&mut g);
+            }
+            let before = unit(&g, Kind::Heat).total;
+            for _ in 0..400 {
+                g.time += 0.5;
+                tick(&mut g);
+            }
+            let _ = tx.send(unit(&g, Kind::Heat).total - before);
+        });
+        let grown = rx.recv_timeout(std::time::Duration::from_secs(60)).expect("tick did not return");
+        assert!((grown - 200.0 * heater).abs() < 0.02 * 200.0 * heater, "{grown} in 200 s at {heater} per s");
     }
 
     /// Unpowered, oxygen, heat and pressure stop; a planet's levels load from the save, with

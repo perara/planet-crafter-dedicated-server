@@ -675,6 +675,27 @@ mod tests {
         assert!(crate::planets::tests::rpcs_sent(&g).iter().any(|r| r == "ChatHandler.ReceiveChatMessageClientRpc"));
     }
 
+    /// The limit counts the buildings that stand, not the game's counter of them, which a
+    /// building made without being saved leaves one too high for good.
+    #[test]
+    fn a_building_limit_counts_the_buildings_standing() {
+        let Some(mut g) = test_game(save()) else { return };
+        g.rules.limits.buildings.insert("Vegetube1".into(), 1);
+        join(&mut g, 1, "Ann");
+        let group = g.data.group("Vegetube1").unwrap();
+        let hash = g.data.groups[group].hash;
+        let build = |g: &mut Game, x: f32, save: bool| {
+            g.world_objects_rpc(1, "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc", &Args(vec![json!(hash), json!([x, 3.0, 500.0]), json!([0.0, 0.0, 0.0, 1.0]), json!(false), json!(false), json!(save), json!(false)]));
+            g.wos.values().filter(|w| w.group == group && w.is_placed()).map(|w| w.id).collect::<Vec<_>>()
+        };
+        let first = build(&mut g, 560.0, true);
+        assert_eq!(first.len(), 1);
+        // A second, unsaved, is over the limit and comes down.
+        assert_eq!(build(&mut g, 570.0, false), first);
+        g.destroy_world_object(first[0], true);
+        assert!(build(&mut g, 580.0, true).len() == 1, "nothing stands: one may");
+    }
+
     #[test]
     fn max_players_and_loot_amount_come_from_the_rules() {
         let Some(mut g) = test_game(save()) else { return };

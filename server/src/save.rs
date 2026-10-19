@@ -43,8 +43,15 @@ fn split_outside_strings(text: &str, delimiter: char) -> Vec<&str> {
     parts
 }
 
-fn entries(section: &str) -> Vec<Value> {
-    split_outside_strings(section, '|').into_iter().map(str::trim).filter(|s| !s.is_empty()).filter_map(|s| serde_json::from_str(s).ok()).collect()
+/// The entries of a section; one that is not JSON (a save cut short, edited by hand) is an error:
+/// dropped quietly it would be gone from the next save.
+fn entries(section: &str) -> Result<Vec<Value>, String> {
+    split_outside_strings(section, '|')
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| serde_json::from_str(s).map_err(|e| format!("{e} in {}", s.chars().take(80).collect::<String>())))
+        .collect()
 }
 
 /// What JSONExport.SaveStringsInFile removes after serializing.
@@ -86,26 +93,34 @@ impl SaveFile {
     }
 
     pub fn load(path: &str) -> std::io::Result<SaveFile> {
-        Ok(SaveFile::from_text(&std::fs::read_to_string(path)?))
+        SaveFile::parse(&std::fs::read_to_string(path)?).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
+    /// A save that was written by this server or the game; panics on one that is not (tests,
+    /// the bench: `parse` and `load` say why).
+    #[cfg(test)]
     pub fn from_text(text: &str) -> SaveFile {
+        SaveFile::parse(text).unwrap_or_else(|e| panic!("not a save: {e}"))
+    }
+
+    pub fn parse(text: &str) -> Result<SaveFile, String> {
         let text = text.trim_start_matches('\u{feff}');
         let sections = split_outside_strings(text, '@');
         let section = |i: usize| sections.get(i).copied().unwrap_or("");
-        let first = |i: usize| entries(section(i)).into_iter().next().unwrap_or(Value::Null);
-        SaveFile {
-            world: first(0),
-            planets: entries(section(1)),
-            players: entries(section(2)),
-            objects: entries(section(3)),
-            inventories: entries(section(4)),
-            stats: first(5),
-            messages: entries(section(6)),
-            story_events: entries(section(7)),
-            settings: first(8),
-            procedural: entries(section(9)),
-        }
+        let list = |i: usize| entries(section(i)).map_err(|e| format!("section {i}: {e}"));
+        let first = |i: usize| list(i).map(|v| v.into_iter().next().unwrap_or(Value::Null));
+        Ok(SaveFile {
+            world: first(0)?,
+            planets: list(1)?,
+            players: list(2)?,
+            objects: list(3)?,
+            inventories: list(4)?,
+            stats: first(5)?,
+            messages: list(6)?,
+            story_events: list(7)?,
+            settings: first(8)?,
+            procedural: list(9)?,
+        })
     }
 
     pub fn to_text(&self) -> String {
@@ -129,18 +144,28 @@ impl SaveFile {
             text.push_str(&s);
             text.push_str("\r@");
         }
-        // Only whole fields: ",\"hunger\":0.0" must not cut ",\"hunger\":0.07".
+        // Only whole fields: ",\"hunger\":0.0" must not cut ",\"hunger\":0.07". Found in the text as
+        // it is, cut in one pass: removing them one by one moved the rest of the text each time
+        // (40 000 objects took half a minute).
+        let mut cuts: Vec<(usize, usize)> = Vec::new();
         for d in DEFAULTS {
             let mut from = 0;
             while let Some(at) = text[from..].find(d).map(|i| i + from) {
-                if text[at + d.len()..].starts_with([',', '}']) {
-                    text.replace_range(at..at + d.len(), "");
-                    from = at;
-                } else {
-                    from = at + d.len();
+                from = at + d.len();
+                if text[from..].starts_with([',', '}']) {
+                    cuts.push((at, from));
                 }
             }
         }
+        cuts.sort_unstable();
+        let mut kept = String::with_capacity(text.len());
+        let mut last = 0;
+        for (from, to) in cuts {
+            kept.push_str(&text[last..from]);
+            last = to;
+        }
+        kept.push_str(&text[last..]);
+        text = kept;
         for key in ["gameMode", "gameDyingConsequences", "gameStartLocation"] {
             // JsonableGameState.CleanSaveStringOfVariables: ,"key":<digit>
             let pattern = format!(",\"{key}\":");
@@ -165,16 +190,26 @@ impl SaveFile {
 pub fn write_atomic(path: &str, bytes: &[u8]) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = format!("{path}.{}-{n}.tmp", std::process::id());
     let mode = std::fs::metadata(path).map(|m| m.permissions().mode() & 0o7777).unwrap_or(0o600);
-    let written = std::fs::File::create_new(&tmp).and_then(|mut file| {
+    // A name of its own: a leftover of an earlier process with this pid (a container's pids repeat)
+    // and this counter is not ours to overwrite, nor a reason to fail the save: the next name.
+    let (mut tmp, mut created) = (String::new(), Err(std::io::ErrorKind::AlreadyExists.into()));
+    for _ in 0..1000 {
+        tmp = format!("{path}.{}-{}.tmp", std::process::id(), WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        created = std::fs::File::create_new(&tmp);
+        if created.as_ref().is_err_and(|e| e.kind() != std::io::ErrorKind::AlreadyExists) || created.is_ok() {
+            break;
+        }
+    }
+    // Only a file this call made is removed again if the write fails.
+    let ours = created.is_ok();
+    let written = created.and_then(|mut file| {
         file.set_permissions(std::fs::Permissions::from_mode(mode))?;
         file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(&tmp, path)
     });
-    if written.is_err() {
+    if written.is_err() && ours {
         let _ = std::fs::remove_file(&tmp);
     }
     written?;
@@ -271,6 +306,23 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A leftover of an earlier process with this pid and a counter value is not a reason to
+    /// fail a write (containers start with the same pid every time), and it is not overwritten.
+    #[test]
+    fn a_leftover_temporary_file_of_the_same_pid_does_not_fail_the_write() {
+        let dir = std::env::temp_dir().join(format!("pcds-write-leftover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("world.json").to_string_lossy().to_string();
+        for n in 0..300 {
+            std::fs::write(format!("{path}.{}-{n}.tmp", std::process::id()), "left over").unwrap();
+        }
+        write_atomic(&path, b"{}").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
+        assert_eq!(std::fs::read_to_string(format!("{path}.{}-0.tmp", std::process::id())).unwrap(), "left over");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// A file keeps its mode across writes, a new one is 0600, and the sweep removes only what
     /// writers that ended left.
     #[test]
@@ -336,6 +388,82 @@ mod tests {
         assert_eq!(save.objects.len(), 2);
         assert_eq!(save.to_text(), original);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The old way of cutting the defaults (each one cut in place, the rest of the text moved
+    /// each time): the new one makes the same text.
+    fn cut_one_by_one(mut text: String) -> String {
+        for d in DEFAULTS {
+            let mut from = 0;
+            while let Some(at) = text[from..].find(d).map(|i| i + from) {
+                if text[at + d.len()..].starts_with([',', '}']) {
+                    text.replace_range(at..at + d.len(), "");
+                    from = at;
+                } else {
+                    from = at + d.len();
+                }
+            }
+        }
+        text
+    }
+
+    fn many_objects(n: usize) -> SaveFile {
+        let mut save = SaveFile::empty();
+        save.world = json!({"terraTokens": 1});
+        save.objects = (0..n)
+            .map(|i| {
+                let mut o = json!({"id": 200_000_000 + i as i32, "gId": "Iron", "liId": 0, "siIds": "", "liGrps": "", "pos": "0,0,0", "rot": "0,0,0,0", "planet": 0, "liPlanet": 0, "pnls": "", "color": "", "text": "", "grwth": 0, "set": 0, "trtInd": 0, "trtVal": 0, "hunger": 0.0, "count": "0,0", "linkedWo": 0});
+                match i % 4 {
+                    1 => o["hunger"] = json!(0.07),
+                    2 => o["text"] = json!("a,\"set\":0}"),
+                    3 => (o["set"], o["pos"], o["count"]) = (json!(3), json!("1,2,3"), json!("0,5")),
+                    _ => {}
+                }
+                o
+            })
+            .collect();
+        save
+    }
+
+    #[test]
+    fn the_defaults_are_cut_as_they_were_cut_one_by_one() {
+        let save = many_objects(400);
+        let text = save.to_text();
+        let mut uncut = save;
+        // The same text without the cuts: the other steps of to_text are the same.
+        let all = uncut.objects.iter().map(|o| serde_json::to_string(o).unwrap()).collect::<Vec<_>>().join("|\n");
+        uncut.objects.clear();
+        let expected = cut_one_by_one(all);
+        let cut = text.split("\r@").nth(3).unwrap().trim_start_matches('\r');
+        assert_eq!(cut, cut_one_by_one(cut.to_string()), "nothing left to cut");
+        assert_eq!(cut, expected);
+    }
+
+    /// A big world saves in time: the cuts were quadratic in the size of the save (40 000 objects
+    /// took 50 s in a release build). In a thread: the old way would not end within the test.
+    #[test]
+    fn a_big_save_is_written_in_time() {
+        let save = many_objects(50_000);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(save.to_text().len());
+        });
+        rx.recv_timeout(Duration::from_secs(60)).expect("the text of 50 000 objects in under a minute");
+    }
+
+    /// An entry that is not JSON (a save cut short) stops the load, naming it: it would
+    /// otherwise be dropped, and gone from the next save.
+    #[test]
+    fn a_save_with_a_damaged_entry_is_refused() {
+        let good = "\u{feff}\r{\"terraTokens\":0}\r@\r\r@\r\r@\r{\"id\":5,\"gId\":\"Iron\"}|\n{\"id\":6,\"gId\":\"Ir";
+        let err = SaveFile::parse(good).err().expect("refused");
+        assert!(err.contains("section 3") && err.contains("\"gId\":\"Ir"), "{err}");
+        let dir = std::env::temp_dir().join(format!("pcds-damaged-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("w.json");
+        std::fs::write(&path, good).unwrap();
+        assert_eq!(SaveFile::load(path.to_str().unwrap()).err().map(|e| e.kind()), Some(std::io::ErrorKind::InvalidData));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

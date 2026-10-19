@@ -42,7 +42,8 @@ struct Vehicle {
     /// UpdateNetworkRigidBodyState._rbEnabled.
     rb_enabled: bool,
     last_position: [f32; 3],
-    next_check: f32,
+    /// f64: adding 0.15 to an f32 stops changing it at 2^22 s (48 days).
+    next_check: f64,
     disable_distance: f32,
 }
 
@@ -99,7 +100,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     if has(game, object, "OwnershipSwitcher") {
         let disable_distance = component(game, w, "UpdateNetworkRigidBodyState").first().and_then(|c| c["_disableDistance"].as_f64()).unwrap_or(30.0) as f32;
         let (owner, p) = (game.net.objects[&object].owner, w.position);
-        let next_check = game.time + FIRST_CHECK;
+        let next_check = (game.time + FIRST_CHECK) as f64;
         game.ext.animals.vehicles.vehicles.insert(object, Vehicle { owner, kinematic: false, rb_enabled: true, last_position: p, next_check, disable_distance });
         // OnNetworkSpawn in behaviour order: OwnershipSwitcher hands a server-owned vehicle to
         // the nearest client, then UpdateNetworkRigidBodyState reads the body's state.
@@ -261,7 +262,7 @@ fn move_vehicle_to_position(game: &mut Game, garage: u64, vehicle: u64, position
 
 pub fn inventory_changed(game: &mut Game, inventory: i32, wo: i32, added: bool) {
     let Some(vehicle) = game.ext.animals.vehicles.equipment.get(&inventory).copied() else { return };
-    // ponytail: an item destroyed out of the equipment is gone before this runs; its type is lost.
+    // An item destroyed out of the equipment is still there: removals propagate before they destroy.
     let (Some(item), Some(v)) = (game.wos.get(&wo), game.wos.get(&vehicle)) else { return };
     let g = &game.data.groups[item.group];
     let value = g.fields["value"].as_i64().unwrap_or(0) as i32;
@@ -298,8 +299,8 @@ pub fn frame(game: &mut Game) {
     }
     let vehicles: Vec<u64> = game.ext.animals.vehicles.vehicles.keys().copied().collect();
     for object in vehicles {
-        if game.time >= game.ext.animals.vehicles.vehicles[&object].next_check {
-            game.ext.animals.vehicles.vehicles.get_mut(&object).unwrap().next_check += CHECK;
+        if game.time as f64 >= game.ext.animals.vehicles.vehicles[&object].next_check {
+            game.ext.animals.vehicles.vehicles.get_mut(&object).unwrap().next_check += CHECK as f64;
             rigidbody_check(game, object);
         }
         // LockNetworkPlayerPosition.LateUpdate: a seated player is where the seat is.
@@ -647,6 +648,23 @@ mod tests {
         g.inventory_remove(equipment, chip);
         g.propagate(equipment, chip, false);
         assert!(g.inventories[&storage].logistic.supply.is_empty());
+    }
+
+    /// A module taken out of the equipment and destroyed in one request (the trash) still gives
+    /// back what it gave: the storage shrinks again.
+    #[test]
+    fn a_vehicle_module_destroyed_out_of_its_equipment_resizes_the_vehicle_back() {
+        use crate::testkit::*;
+        let Some((mut g, _)) = world() else { return };
+        let (truck, _) = place(&mut g, "VehicleTruck", [600.0, 3.0, 494.0]);
+        let (storage, equipment) = (g.wos[&truck].linked_inventory, g.wos[&truck].secondary_inventories[0]);
+        let storage_size = g.inventories[&storage].size;
+        let module = give(&mut g, "VehicleInventorySize1", equipment);
+        g.propagate(equipment, module, true);
+        assert_eq!(g.inventories[&storage].size, storage_size + 18);
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveItemFromInventoryServerRpc", &[json!(module), json!(equipment), json!(true)]);
+        assert!(!g.wos.contains_key(&module));
+        assert_eq!(g.inventories[&storage].size, storage_size);
     }
 
     /// A parked vehicle goes to a player near it when its owner is far; physics are on only

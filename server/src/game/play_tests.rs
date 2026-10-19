@@ -344,6 +344,8 @@ fn other_players_inventories_are_theirs() {
         ("InventoriesHandler.LockInventoryContentServerRpc", vec![json!(bob_inv), json!(true), json!(1.0e6)]),
         ("InventoriesHandler.AddNewItemToInventoryServerRpc", vec![json!(iron), json!(bob_eq)]),
         ("WorldObjectsHandler.DestroyWorldObjectServerRpc", vec![json!(item), json!(true)]),
+        // Decoding uses the item up (a chip, or any item: the game does not look).
+        ("UnlockedGroupsHandler.DecodeBlueprintServerRpc", vec![json!(item)]),
         ("WorldObjectsHandler.DropOnFloorServerRpc", vec![json!(item), json!([1.0, 2.0, 3.0]), json!(0.0), json!(false), json!(false), json!(0), json!(0.0)]),
         // An object linked to Bob's backpack, then destroyed: it would take the backpack along.
         ("WorldObjectsHandler.GenerateRandomAppearanceObjectServerRpc", vec![json!(100.0), json!(iron), json!(205_555_555), json!(bob_inv), json!([1.0, 2.0, 3.0]), json!([0.0, 0.0, 0.0, 1.0])]),
@@ -464,6 +466,26 @@ fn invariants(g: &Game) -> Vec<String> {
         }
     }
     bad.extend(holders_mismatch(g));
+    for w in g.wos.values() {
+        if w.net.is_some_and(|n| !g.net.objects.contains_key(&n)) {
+            bad.push(format!("world object {} ({}) has net object {:?}, which is gone", w.id, g.data.groups[w.group].id, w.net));
+        }
+    }
+    for id in g.constructed.iter().chain(g.pickables.iter()) {
+        if !g.wos.contains_key(id) {
+            bad.push(format!("constructed or pickable {id} is not a world object"));
+        }
+    }
+    // (An animal stands for its DNA sequence, which has no network object of its own.)
+    for o in g.net.objects.values().filter(|o| !o.scene && !crate::animals::spawn::is_animal(g, o.id)) {
+        if let Some(w) = o.wo {
+            match g.wos.get(&w) {
+                None => bad.push(format!("net object {} stands for world object {w}, which is gone", o.id)),
+                Some(wo) if wo.net != Some(o.id) => bad.push(format!("net object {} stands for world object {w} ({}), whose net is {:?}", o.id, g.data.groups[wo.group].id, wo.net)),
+                _ => {}
+            }
+        }
+    }
     bad
 }
 

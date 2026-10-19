@@ -413,3 +413,70 @@ fn handoff() {
     }
     assert!(equal, "the handed-off run must send and save exactly what the straight run does");
 }
+
+/// Long-uptime soak: two players act every second for PCDS_SOAK_SECONDS of game time (steps of
+/// PCDS_SOAK_STEP s); every PCDS_SOAK_REPORT s the size of each part of the state, and the
+/// network objects by what they stand for, are printed: what grows without end shows.
+/// PCDS_BENCH_SAVE=world.json cargo test soak_growth -- --ignored --nocapture
+#[test]
+#[ignore]
+fn soak_growth() {
+    let Some(mut e) = env() else { return };
+    let var = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(d);
+    let (seconds, step, report) = (var("PCDS_SOAK_SECONDS", 3600.0), var("PCDS_SOAK_STEP", 0.05), var("PCDS_SOAK_REPORT", 900.0));
+    e.players = 2;
+    let mut g = load(&e);
+    g.sim_time = Some(0.0);
+    let objects: Vec<u64> = (1..=e.players).map(|c| join(&mut g, c, &format!("Soak{c}"))).collect();
+    let mut players: Vec<Player> = (1..=e.players).map(|c| Player { rng: 0x9e37_79b9_7f4a_7c15 ^ c.wrapping_mul(0x2545_f491_4f6c_dd1d), ..Default::default() }).collect();
+    let (mut t, mut next_act, mut next_report, mut seq) = (0.0, 1.0, 0.0, 0);
+    let mut first: Option<std::collections::BTreeMap<String, usize>> = None;
+    while t < seconds {
+        t += step;
+        g.sim_time = Some(t);
+        if t >= next_act {
+            next_act += 1.0;
+            seq += 1;
+            for (i, object) in objects.iter().enumerate() {
+                act(&mut g, i as u64 + 1, *object, &mut players[i], seq);
+            }
+        }
+        g.tick();
+        g.net.out.clear();
+        g.kicks.clear();
+        if t >= next_report {
+            next_report += report;
+            let doc = serde_json::to_value(&g).unwrap();
+            let mut sizes = std::collections::BTreeMap::new();
+            for (k, v) in doc.as_object().unwrap() {
+                match (k.as_str(), v.as_object()) {
+                    ("ext" | "net", Some(o)) => o.iter().for_each(|(j, w)| {
+                        sizes.insert(format!("{k}.{j}"), w.to_string().len());
+                    }),
+                    _ => {
+                        sizes.insert(k.clone(), v.to_string().len());
+                    }
+                }
+            }
+            let base = first.get_or_insert_with(|| sizes.clone()).clone();
+            let grown: Vec<String> = sizes.iter().filter(|(k, n)| **n > base.get(*k).copied().unwrap_or(0) * 12 / 10 + 200).map(|(k, n)| format!("{k} {}->{n}", base.get(k).copied().unwrap_or(0))).collect();
+            // A network object whose world object is gone, or points at another object.
+            let strays = g.net.objects.values().filter(|o| !o.scene).filter(|o| o.wo.is_some_and(|w| g.wos.get(&w).is_none_or(|w| w.net != Some(o.id)))).count();
+            // World objects in no inventory and at no place: nothing reaches them.
+            let mut orphans: std::collections::BTreeMap<&str, usize> = Default::default();
+            for w in g.wos.values().filter(|w| !w.is_placed() && !g.is_held(w.id) && !crate::model::is_from_scene(w.id)) {
+                *orphans.entry(g.data.groups[w.group].id.as_str()).or_default() += 1;
+            }
+            println!("soak orphans: {orphans:?}");
+            // Load then save twice: the second load is the fixpoint (the first recomputes what the game does at a load).
+            let (net_data, data, spec) = crate::tables(e.dir);
+            let scenes = crate::scene_tables(e.dir, &net_data, &data);
+            let first = g.snapshot().to_text();
+            let second = Game::new(net_data.clone(), data.clone(), spec.clone(), SaveFile::from_text(&first), scenes.clone()).snapshot().to_text();
+            let third = Game::new(net_data, data, spec, SaveFile::from_text(&second), scenes).snapshot().to_text();
+            let differs = |a: &str, b: &str| a.split(['\n']).zip(b.split(['\n'])).filter(|(x, y)| x != y).map(|(x, y)| format!("{} / {}", x.chars().take(240).collect::<String>(), y.chars().take(240).collect::<String>())).take(3).collect::<Vec<_>>();
+            println!("soak save fixpoint: live vs loaded {} lines differ, loaded vs loaded-again {} lines differ {:?}", first.split('\n').zip(second.split('\n')).filter(|(x, y)| x != y).count(), second.split('\n').zip(third.split('\n')).filter(|(x, y)| x != y).count(), differs(&second, &third));
+            println!("soak t={t:.0}s: wos {} inv {} net {} strays {strays} total {} bytes; grown: {}", g.wos.len(), g.inventories.len(), g.net.objects.len(), sizes.values().sum::<usize>(), grown.join(", "));
+        }
+    }
+}

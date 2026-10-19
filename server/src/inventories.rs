@@ -12,6 +12,9 @@ use crate::net::Target;
 
 /// Inventory ids at or above this are not counted when picking the next id.
 pub const SPECIAL_INVENTORY_IDS: i32 = 9_999_999;
+/// The game's inventories hold a few dozen; a client asking for billions makes machines that
+/// fill them (animal shelters) run away, and a sum past i32 wraps to a negative size.
+const MAX_INVENTORY_SIZE: i32 = 1000;
 
 impl Game {
     // ---- Inventory (the model) ------------------------------------------------------------
@@ -96,8 +99,9 @@ impl Game {
         true
     }
 
-    /// Inventory.DestroyAllItemsInside: everything but what cannot be destroyed.
-    fn destroy_all_items_inside(&mut self, inventory: i32, destroy: bool) -> Vec<i32> {
+    /// Inventory.DestroyAllItemsInside: everything but what cannot be destroyed leaves the
+    /// inventory (the caller tells the listeners, then destroys it).
+    fn remove_all_items_inside(&mut self, inventory: i32) -> Vec<i32> {
         let Some(inv) = self.inventories.get(&inventory) else { return Vec::new() };
         let mut removed = Vec::new();
         for i in (0..inv.items.len()).rev() {
@@ -106,9 +110,6 @@ impl Game {
             if !keep {
                 self.inventories.get_mut(&inventory).unwrap().items.remove(i);
                 self.release(wo);
-                if destroy {
-                    self.destroy_world_object(wo, false);
-                }
                 removed.push(wo);
             }
         }
@@ -464,6 +465,7 @@ impl Game {
         let (touched, items): (Vec<i32>, Vec<i32>) = match name {
             "InventoriesHandler.TransferItemServerRpc" | "InventoriesHandler.TransferAllSameGroupServerRpc" | "InventoriesHandler.TransferAllItemsServerRpc" => (vec![a.i(0), a.i(1)], vec![]),
             "InventoriesHandler.AddNewItemToInventoryServerRpc" | "InventoriesHandler.RemoveItemsFromInventoryServerRpc" => (vec![a.i(1)], vec![]),
+            "InventoriesHandler.GetOrCreateNewInventoryServerRpc" => (vec![a.i(2)], vec![]),
             "InventoriesHandler.AddExistingItemToInventoryServerRpc" | "InventoriesHandler.RemoveItemFromInventoryServerRpc" => (vec![a.i(1)], vec![a.i(0)]),
             "InventoriesHandler.RemoveWorldObjectsFromInventoryServerRpc" => (vec![a.i(1)], a.ints(0).unwrap_or_default()),
             "InventoriesHandler.RemoveAndDestroyAllItemsFromInventoryServerRpc"
@@ -477,6 +479,8 @@ impl Game {
         if touched.iter().any(|i| self.others_inventory(client, *i)) || items.iter().any(|w| self.others_item(client, *w)) {
             match name {
                 "InventoriesHandler.AddNewItemToInventoryServerRpc" => self.net.rpc_scene(Target::Only(client), "InventoriesHandler.AddNewItemClientRpc", &[json!(false), json!(0)]),
+                // Neither its content nor a change of what it takes: an empty inventory.
+                "InventoriesHandler.GetOrCreateNewInventoryServerRpc" => self.retrieve_inventory(Target::Only(client), None),
                 "InventoriesHandler.DirtyInventoryLogisticsServerRpc" | "InventoriesHandler.SortInventoryServerRpc" => {}
                 _ => self.add_or_remove_result(client, false),
             }
@@ -490,9 +494,7 @@ impl Game {
                 }
             }
             "InventoriesHandler.GetOrCreateNewInventoryServerRpc" => {
-                // The game's inventories hold a few dozen; a client asking for billions makes
-                // machines that fill them (animal shelters) run away.
-                self.get_or_create(client, a.b(0), a.i(1).clamp(0, 1000), a.i(2), a.i(3), a.ints(4), a.ints(5));
+                self.get_or_create(client, a.b(0), a.i(1).clamp(0, MAX_INVENTORY_SIZE), a.i(2), a.i(3), a.ints(4), a.ints(5));
             }
             "InventoriesHandler.TransferItemServerRpc" => {
                 let ok = self.transfer(a.i(0), a.i(1), vec![a.i(2)], Some(client));
@@ -525,10 +527,11 @@ impl Game {
                 let (wo, inv, destroy) = (a.i(0), a.i(1), a.b(2));
                 let ok = self.wos.contains_key(&wo) && self.inventory_remove(inv, wo);
                 if ok {
+                    // The listeners read the item (its group) as it leaves: before it is destroyed.
+                    self.propagate(inv, wo, false);
                     if destroy {
                         self.destroy_world_object(wo, false);
                     }
-                    self.propagate(inv, wo, false);
                     self.dirty_inventory(inv, client, false);
                 }
                 self.add_or_remove_result(client, ok);
@@ -539,11 +542,11 @@ impl Game {
                 if ok {
                     let groups: Vec<usize> = hashes.iter().filter_map(|h| self.data.group_by_hash(*h)).collect();
                     let removed = self.remove_items_of_groups(inv, &groups);
-                    if destroy {
-                        self.destroy_world_objects(&removed, false);
-                    }
                     for wo in &removed {
                         self.propagate(inv, *wo, false);
+                    }
+                    if destroy {
+                        self.destroy_world_objects(&removed, false);
                     }
                     self.dirty_inventory(inv, client, false);
                 }
@@ -553,11 +556,11 @@ impl Game {
                 let (ids, inv, destroy) = (a.ints(0).unwrap_or_default(), a.i(1), a.b(2));
                 let ok = self.remove_items_by_id(inv, &ids);
                 if ok {
-                    if destroy {
-                        self.destroy_world_objects(&ids, false);
-                    }
                     for wo in &ids {
                         self.propagate(inv, *wo, false);
+                    }
+                    if destroy {
+                        self.destroy_world_objects(&ids, false);
                     }
                     self.dirty_inventory(inv, client, false);
                 }
@@ -567,9 +570,11 @@ impl Game {
                 let inv = a.i(0);
                 let ok = self.inventories.contains_key(&inv);
                 if ok {
-                    for wo in self.destroy_all_items_inside(inv, true) {
-                        self.propagate(inv, wo, false);
+                    let removed = self.remove_all_items_inside(inv);
+                    for wo in &removed {
+                        self.propagate(inv, *wo, false);
                     }
+                    self.destroy_world_objects(&removed, false);
                     self.dirty_inventory(inv, client, false);
                 }
                 self.add_or_remove_result(client, ok);
@@ -594,8 +599,7 @@ impl Game {
             }
             "InventoriesHandler.SetInventorySizeServerRpc" => {
                 let (inv, offset, drop) = (a.i(0), a.i(1), a.v3(2));
-                // C# int arithmetic wraps, as the game's does (a debug build panicked here).
-                if let Some(size) = self.inventories.get(&inv).map(|i| i.size.wrapping_add(offset)) {
+                if let Some(size) = self.inventories.get(&inv).map(|i| (i.size as i64 + offset as i64).clamp(0, MAX_INVENTORY_SIZE as i64) as i32) {
                     self.inventories.get_mut(&inv).unwrap().size = size;
                     // DropObjectsIfNotEnoughSpace.
                     let overflow: Vec<i32> = self.inventories[&inv].items.iter().skip(size.max(0) as usize).copied().collect();
@@ -659,8 +663,14 @@ impl Game {
                     }
                 }
                 let placed = self.wos.get(&id).is_some_and(|w| w.is_placed());
+                // An item dropped without leaving its inventory is in two once picked up.
+                let old = self.holder(id).filter(|h| *h != inv);
                 if (placed || created) && self.inventories.contains_key(&inv) && self.inventory_add(inv, id, true) {
                     self.propagate(inv, id, true);
+                    if let Some(old) = old.filter(|old| self.inventory_remove(*old, id)) {
+                        self.propagate(old, id, false);
+                        self.dirty_inventory(old, client, false);
+                    }
                     // The inventory's machine may have destroyed it already
                     // (MachineDestructInventoryIfFull).
                     if let Some(was_unsaved) = self.wos.get(&id).map(|w| w.dont_save) {
@@ -833,6 +843,21 @@ mod tests {
         assert_eq!(saved_items(&mut g, chest), keep.to_string());
     }
 
+    /// A client's size change cannot overflow the size or grow it without bound.
+    #[test]
+    fn a_size_change_stays_within_the_bounds_of_an_inventory() {
+        let Some((mut g, _)) = world() else { return };
+        let chest = g.create_inventory(3, 0, 0, &[], &[]);
+        let items: Vec<i32> = ["Iron", "ice"].iter().map(|n| give(&mut g, n, chest)).collect();
+        send_scene(&mut g, 1, "InventoriesHandler.SetInventorySizeServerRpc", &[json!(chest), json!(i32::MAX), json!([570.0, 3.0, 500.0])]);
+        assert!(result(&mut g));
+        assert_eq!((g.inventories[&chest].size, g.inventories[&chest].items.clone()), (MAX_INVENTORY_SIZE, items.clone()));
+        send_scene(&mut g, 1, "InventoriesHandler.SetInventorySizeServerRpc", &[json!(chest), json!(i32::MIN), json!([570.0, 3.0, 500.0])]);
+        assert!(result(&mut g));
+        assert_eq!(g.inventories[&chest].size, 0);
+        assert!(g.inventories[&chest].items.is_empty() && items.iter().all(|i| g.wos[i].is_placed()), "all dropped, none lost");
+    }
+
     /// An open inventory's other watchers hear each change; the one making it does not.
     #[test]
     fn watchers_hear_the_changes_others_make() {
@@ -946,6 +971,77 @@ mod tests {
         // Already in an inventory (not placed): refused.
         send_scene(&mut g, 1, "InventoriesHandler.AddWorldObjectToInventoryServerRpc", &[json!(dropped), json!(ice), json!(bag), json!(true)]);
         assert!(!result(&mut g));
+    }
+
+    /// An item dropped without being taken out of its inventory first (the game's client takes
+    /// it out; a hostile one need not) and then picked up into another leaves the first one.
+    #[test]
+    fn a_picked_up_item_leaves_the_inventory_it_was_dropped_from() {
+        let Some((mut g, _)) = world() else { return };
+        let (bag, _) = backpack(&g, 1);
+        let chest = g.create_inventory(5, 0, 0, &[], &[]);
+        let item = give(&mut g, "Iron", bag);
+        let iron = hash(&g, "Iron");
+        send_scene(&mut g, 1, "WorldObjectsHandler.DropOnFloorServerRpc", &[json!(item), json!([561.0, 3.0, 497.0]), json!(0.0), json!(false), json!(false), json!(0), json!(0.0)]);
+        send_scene(&mut g, 1, "InventoriesHandler.AddWorldObjectToInventoryServerRpc", &[json!(item), json!(iron), json!(chest), json!(true)]);
+        assert!(result(&mut g));
+        assert!(!g.inventories[&bag].items.contains(&item) && g.inventories[&chest].items == vec![item]);
+        assert_eq!(g.holders.get(&item), Some(&(chest, 1)));
+    }
+
+    /// Taking an item out and destroying it in one request still tells the inventory's listeners
+    /// what left: a Vegetube's multiplier from the seeds in it goes down with each one.
+    #[test]
+    fn what_is_destroyed_on_leaving_an_inventory_is_still_heard_to_leave() {
+        let Some((mut g, _)) = world() else { return };
+        let (_, net) = place(&mut g, "Vegetube1", [570.0, 3.0, 500.0]);
+        let tube = g.net.objects[&net].wo.unwrap();
+        let inv = g.wos[&tube].linked_inventory;
+        g.inventories.get_mut(&inv).unwrap().size = 5;
+        let oxygen = crate::model::unit_index("Oxygen").unwrap();
+        let (seed, seed_hash) = (g.data.group("Seed1").unwrap(), hash(&g, "Seed1"));
+        let each = g.data.groups[seed].units[oxygen] / 100.0;
+        assert!(each > 0.0);
+        let before = g.wos[&tube].unit_multiplier[oxygen];
+        let seeds: Vec<i32> = (0..4).map(|_| g.add_new_item(seed, inv, 1).1).collect();
+        let multiplier = |g: &Game| g.wos[&tube].unit_multiplier[oxygen];
+        assert_eq!(multiplier(&g), before + 4.0 * each);
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveItemFromInventoryServerRpc", &[json!(seeds[0]), json!(inv), json!(true)]);
+        assert!(result(&mut g) && !g.wos.contains_key(&seeds[0]));
+        assert_eq!(multiplier(&g), before + 3.0 * each, "RemoveItemFromInventory");
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveItemsFromInventoryServerRpc", &[json!([seed_hash]), json!(inv), json!(true)]);
+        assert!(result(&mut g));
+        assert_eq!(multiplier(&g), before + 2.0 * each, "RemoveItemsFromInventory");
+        let left = g.inventories[&inv].items[0];
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveWorldObjectsFromInventoryServerRpc", &[json!([left]), json!(inv), json!(true)]);
+        assert!(result(&mut g));
+        assert_eq!(multiplier(&g), before + each, "RemoveWorldObjectsFromInventory");
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveAndDestroyAllItemsFromInventoryServerRpc", &[json!(inv)]);
+        assert!(result(&mut g) && g.inventories[&inv].items.is_empty());
+        assert_eq!(multiplier(&g), before, "RemoveAndDestroyAllItemsFromInventory");
+    }
+
+    /// Asking for another player's backpack or equipment as an inventory gets the empty answer
+    /// the game gives for none, and does not set what it takes (a client sends the groups an
+    /// inventory authorizes; only the first one to ask sets them).
+    #[test]
+    fn another_players_inventory_is_neither_read_nor_changed_by_getting_it() {
+        let Some((mut g, _)) = world() else { return };
+        join(&mut g, 2, "Bob");
+        let (bag, equipment) = backpack(&g, 2);
+        let iron = hash(&g, "Iron");
+        let before = g.inventories[&bag].clone();
+        assert!(!before.items.is_empty() && before.authorized.is_empty());
+        for id in [bag, equipment] {
+            let authorized = g.inventories[&id].authorized.clone();
+            send_scene(&mut g, 1, "InventoriesHandler.GetOrCreateNewInventoryServerRpc", &[json!(false), json!(0), json!(id), json!(0), json!(null), json!([iron])]);
+            assert_eq!(retrieved(&mut g), vec![json!(0), json!(-1), json!([]), json!([]), json!(false)]);
+            assert_eq!(g.inventories[&id].authorized, authorized, "{id}");
+        }
+        assert!(g.inventories[&bag].authorized.is_empty());
+        // Bob's own request is answered.
+        send_scene(&mut g, 2, "InventoriesHandler.GetOrCreateNewInventoryServerRpc", &[json!(false), json!(0), json!(bag), json!(0), json!(null), json!(null)]);
+        assert_eq!(retrieved(&mut g)[1], json!(bag));
     }
 
     #[test]
