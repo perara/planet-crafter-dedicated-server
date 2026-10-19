@@ -263,6 +263,8 @@ def rnd(v):
     if isinstance(v, float):
         if v != v:
             return 'NaN'
+        if v == 0:
+            return 0.0  # no negative zero: -0.0 and 0.0 are the same angle
         return round(v, 3) if abs(v) < 1000 else float('%.4g' % v)
     if isinstance(v, list):
         return [rnd(x) for x in v]
