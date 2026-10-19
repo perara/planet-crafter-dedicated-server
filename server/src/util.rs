@@ -14,7 +14,7 @@ pub fn to_hex(bytes: &[u8]) -> String {
 }
 
 /// When a file was last written; the epoch for one that cannot be read.
-pub fn modified(path: impl AsRef<Path>) -> SystemTime {
+pub fn modified(path: &Path) -> SystemTime {
     std::fs::metadata(path).and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH)
 }
 
@@ -33,7 +33,7 @@ mod tests {
         assert_eq!(to_hex(&[0, 0x0a, 0xff]), "000aff");
         assert_eq!(parent_dir(Path::new("world.json")), Path::new("."));
         assert_eq!(parent_dir(Path::new("worlds/world.json")), Path::new("worlds"));
-        assert_eq!(modified("/no/such/file"), UNIX_EPOCH);
-        assert!(modified(env!("CARGO_MANIFEST_DIR")) > UNIX_EPOCH);
+        assert_eq!(modified(Path::new("/no/such/file")), UNIX_EPOCH);
+        assert!(modified(Path::new(env!("CARGO_MANIFEST_DIR"))) > UNIX_EPOCH);
     }
 }
