@@ -250,6 +250,15 @@ impl Link {
     }
 }
 
+/// The monotonic clock in nanoseconds: the same clock in every process of the host, so that the
+/// front and the banks can put a flip's events on one timeline.
+pub fn now_ns() -> u64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: a valid timespec for the call's duration.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+
 /// Waits until the descriptor can be written.
 fn wait_out(fd: RawFd) {
     let mut p = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };

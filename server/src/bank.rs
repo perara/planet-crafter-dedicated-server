@@ -66,10 +66,12 @@ pub fn run(args: &[String]) {
     link.send(ipc::HELLO, protocol, hello.to_string().as_bytes());
     let (mut verified, mut verify_ms) = (Value::Null, 0.0);
     let mut started = Instant::now();
+    let mut got_at = 0;
     let game = match link.recv() {
         Some(f) if f.kind == ipc::START => load(dir, save_path, net_data, data, spec, scenes),
         Some(f) if f.kind == ipc::RESTORE => {
             started = Instant::now();
+            got_at = ipc::now_ns();
             if fail_for_test("restore") {
                 eprintln!("bank: dying on the restore (PCDS_BANK_FAIL=restore)");
                 std::process::exit(3);
@@ -107,7 +109,8 @@ pub fn run(args: &[String]) {
         }
         _ => return,
     };
-    let ready = json!({"restoreMs": started.elapsed().as_secs_f64() * 1000.0 - verify_ms, "verifyMs": verify_ms, "verified": verified});
+    // gotAt and readyAt (the monotonic clock, ns) put the restore on the flip's timeline in the front.
+    let ready = json!({"restoreMs": started.elapsed().as_secs_f64() * 1000.0 - verify_ms, "verifyMs": verify_ms, "verified": verified, "gotAt": got_at, "readyAt": ipc::now_ns()});
     link.send(ipc::READY, 0, ready.to_string().as_bytes());
     Bank { game, link, save_path: save_path.clone(), build_id, data_dir: dir.clone() }.serve();
 }
@@ -281,11 +284,11 @@ impl Bank {
                         let all: Vec<u64> = mail.keys().copied().collect();
                         send(&mut self.link, &mut mail, &all, &mut loading);
                         forward_chat(game, &mut self.link);
-                        let t = Instant::now();
+                        let (t, got_at) = (Instant::now(), ipc::now_ns());
                         match crate::handoff::snapshot_memfd(game, &mut Vec::new()) {
                             Ok(fd) => {
                                 let len = std::fs::File::from(fd.try_clone().expect("dup")).metadata().map(|m| m.len()).unwrap_or(0);
-                                let head = json!({"bytes": len, "ms": t.elapsed().as_secs_f64() * 1000.0});
+                                let head = json!({"bytes": len, "ms": t.elapsed().as_secs_f64() * 1000.0, "gotAt": got_at, "doneAt": ipc::now_ns()});
                                 self.link.send_fd(ipc::SNAPSHOT, f.n, head.to_string().as_bytes(), Some(fd));
                                 // The world stays in memory until the new bank runs.
                                 match self.link.recv() {

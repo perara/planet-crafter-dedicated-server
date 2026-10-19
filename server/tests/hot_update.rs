@@ -104,6 +104,11 @@ fn banks(dir: &Path) -> PathBuf {
 }
 
 fn start(dir: &Path, data: &str, banks: &Path, releases: &str) -> Server {
+    start_with(dir, data, banks, releases, true)
+}
+
+/// `verify`: PCDS_FLIP_VERIFY, the new bank's check of its state (expensive: out of timings).
+fn start_with(dir: &Path, data: &str, banks: &Path, releases: &str, verify: bool) -> Server {
     let (admin, udp) = (free_port(), free_port());
     let log = dir.join("front.log");
     let out = std::fs::File::create(&log).unwrap();
@@ -118,7 +123,7 @@ fn start(dir: &Path, data: &str, banks: &Path, releases: &str) -> Server {
         .env("PCDS_BACKUPS", "0")
         .env("PCDS_BANKS", banks)
         .env("PCDS_RELEASES", releases)
-        .env("PCDS_FLIP_VERIFY", "1")
+        .envs(verify.then_some(("PCDS_FLIP_VERIFY", "1")))
         .env("PCDS_TEST_FAULTS", "1")
         .env("PCDS_ENV_FILE", dir.join("server.env"))
         .env("PCDS_ACCESS", dir.join("access.json"))
@@ -487,4 +492,78 @@ fn the_world_stops_starts_and_another_one_runs() {
     assert!(server.child.wait().unwrap().success(), "{}", server.log());
     drop(server);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The flip as the live server does it, on grown worlds (tools/grow-world.py), with players
+/// playing: the front, two banks, the real sockets. Prints the stand and where it went (the
+/// front's timeline) per world.
+///
+///   PCDS_FLIPBENCH_SAVES=a.json,b.json [PCDS_FLIPBENCH_N=15] [PCDS_FLIPBENCH_PLAYERS=8] \
+///     [PCDS_FLIPBENCH_OLD=release_dir] cargo test --release --test hot_update flipbench -- --ignored --nocapture
+///
+/// PCDS_FLIPBENCH_OLD: an unpacked older release as bank a: each run starts on it, flips once
+/// into this build (the migration path) and stops; N runs. Without it both banks are this
+/// build and one server makes N flips in a row. The state check is off.
+#[test]
+#[ignore]
+fn flipbench() {
+    let Some(data) = tables() else { return };
+    let var = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (n, players) = (var("PCDS_FLIPBENCH_N", 15), var("PCDS_FLIPBENCH_PLAYERS", 8) as u32);
+    let old = std::env::var("PCDS_FLIPBENCH_OLD").ok();
+    let saves = std::env::var("PCDS_FLIPBENCH_SAVES").expect("flipbench: set PCDS_FLIPBENCH_SAVES");
+    for save in saves.split(',') {
+        let mut records: Vec<Value> = Vec::new();
+        let runs = if old.is_some() { n } else { 1 };
+        for run in 0..runs {
+            let dir = std::env::temp_dir().join(format!("pcds-flipbench-{}-{run}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::copy(save, dir.join("world.json")).unwrap();
+            let banks = banks(&dir);
+            if let Some(old) = &old {
+                // Bank a is the old release's files, b this build; the front starts a.
+                let a = banks.join("a");
+                std::fs::remove_dir_all(&a).unwrap();
+                std::fs::create_dir_all(&a).unwrap();
+                for f in std::fs::read_dir(old).unwrap().flatten() {
+                    std::os::unix::fs::symlink(f.path(), a.join(f.file_name())).unwrap();
+                }
+                let info = Command::new(a.join("pcds")).arg("bank-info").output().unwrap();
+                std::fs::write(a.join("bank.json"), info.stdout).unwrap();
+            }
+            std::fs::write(banks.join("active"), "a").unwrap();
+            let server = start_with(&dir, &data, &banks, "http://127.0.0.1:9/releases", false);
+            let play = (players > 0).then(|| load(&server, &data, players, (n * 3 + 10) as u32));
+            std::thread::sleep(Duration::from_secs(3));
+            for i in 0..if old.is_some() { 1 } else { n + 1 } {
+                let done = server.update(json!({"rollback": true}));
+                assert_eq!(done["ok"], true, "flip {i}: {done}\n{}", server.log());
+                // The first flip warms nothing the next ones keep: dropped.
+                if old.is_some() || i > 0 {
+                    records.push(done);
+                }
+                std::thread::sleep(Duration::from_millis(1500));
+            }
+            if let Some(p) = play {
+                drop(finish(p));
+            }
+            drop(server);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        let spread = |f: &dyn Fn(&Value) -> Option<f64>| {
+            let mut v: Vec<f64> = records.iter().filter_map(f).collect();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            if v.is_empty() {
+                return "-".to_string();
+            }
+            format!("{:>8.2} {:>8.2} {:>8.2} {:>8.2}", v[v.len() / 2], v[((v.len() - 1) as f64 * 0.95).round() as usize], v[v.len() - 1], v[0])
+        };
+        println!("flipbench: {save}: {} flips, {players} players{} (ms: p50 / p95 / max / min); snapshot {} bytes", records.len(), old.as_ref().map(|o| format!(", from {o}")).unwrap_or_default(), records.last().map(|r| r["snapshotBytes"].to_string()).unwrap_or_default());
+        println!("flipbench:   {:<18} {}", "stood", spread(&|r| r["stoodMs"].as_f64()));
+        for key in ["handoffMs", "snapshotMs", "snapshotToFrontMs", "relayMs", "restoreToBankMs", "restoreMs", "readyToFrontMs", "releaseMs"] {
+            println!("flipbench:   {:<18} {}", key.trim_end_matches("Ms"), spread(&|r| r["timeline"][key].as_f64()));
+        }
+        println!("flipbench:   {:<18} {}", "held frames", spread(&|r| r["held"].as_f64()));
+    }
 }
