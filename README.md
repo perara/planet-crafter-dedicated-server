@@ -562,6 +562,11 @@ must leave the fingerprint as it was:
 make bench SAVE=run/worlds/world.json PLAYERS=4
 ```
 
+It also prints the time of a 5 ms step (mean, p50, p99), the allocations per step, and with
+`PCDS_BENCH_ACTION_MS=200` the players act as the load test's do; `PCDS_BENCH_SECTIONS=1` adds the
+time of each part of the tick (timers, units, energy, machines, meteo, ...). With
+`PCDS_BENCH_PLAYERS=64` the player limit goes up to that.
+
 `pcds load 127.0.0.1:PORT DATA_DIR [PLAYERS] [SECONDS] [ACTION_MS]` is a load test:
 that many scripted players join over direct IP (each from its own 127.0.0.N address) and play:
 they walk, craft, drop and pick up items, build, eat, drink, mine, chat and sort. It prints the
