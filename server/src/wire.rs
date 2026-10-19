@@ -247,11 +247,6 @@ pub struct Batch {
 impl Batch {
     fn start(&mut self) {
         if self.out.0.is_empty() {
-            // A batch is often a few hundred bytes to a few KB: room for most of them at once
-            // (unless reserve() made room for exactly what is coming).
-            if self.out.0.capacity() == 0 {
-                self.out.0.reserve(1024);
-            }
             self.out.0.resize(16, 0);
         }
     }
