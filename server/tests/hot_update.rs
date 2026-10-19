@@ -64,9 +64,19 @@ impl Server {
 
     /// Asks for an update (or a rollback) and waits for its outcome in GET /api/update.
     fn update(&self, body: Value) -> Value {
+        let seq = self.update_begin(body);
+        self.update_end(seq)
+    }
+
+    /// Asks for an update; its number.
+    fn update_begin(&self, body: Value) -> u64 {
         let (status, answer) = self.api("POST", "/api/update", body.clone());
         assert_eq!(status, 200, "{body}: {answer}");
-        let seq = answer["seq"].as_u64().unwrap();
+        answer["seq"].as_u64().unwrap()
+    }
+
+    /// The outcome of update `seq`, waited for.
+    fn update_end(&self, seq: u64) -> Value {
         let deadline = Instant::now() + Duration::from_secs(120);
         while Instant::now() < deadline {
             let (_, u) = self.api("GET", "/api/update", json!({}));
@@ -75,7 +85,25 @@ impl Server {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        panic!("{body}: no outcome within 120 s\n{}", self.log());
+        panic!("update {seq}: no outcome within 120 s\n{}", self.log());
+    }
+
+    /// The log once it holds `needle` (a failure after 90 s).
+    fn wait_log(&self, needle: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            let log = self.log();
+            if log.contains(needle) {
+                return log;
+            }
+            assert!(Instant::now() < deadline, "no \"{needle}\" in the log within 90 s\n{log}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The world objects the live bank says it holds.
+    fn objects(&self) -> u64 {
+        self.api("GET", "/api/status", json!({})).1["objects"]["world"].as_u64().unwrap_or(0)
     }
 
     fn live(&self) -> Value {
@@ -111,6 +139,11 @@ fn start(dir: &Path, data: &str, banks: &Path, releases: &str) -> Server {
 /// PCDS_FLIP_VERIFY, which compares a restored state with its own snapshot (only for banks of
 /// one build: a release before this one writes a state this build reads and adds to).
 fn start_with(program: &Path, dir: &Path, data: &str, banks: &Path, releases: &str, verify: bool) -> Server {
+    start_env(program, dir, data, banks, releases, verify, &[])
+}
+
+/// start_with() and more settings of the front's environment.
+fn start_env(program: &Path, dir: &Path, data: &str, banks: &Path, releases: &str, verify: bool, extra: &[(&str, &str)]) -> Server {
     let (admin, udp) = (free_port(), free_port());
     let log = dir.join("front.log");
     let out = std::fs::File::create(&log).unwrap();
@@ -118,6 +151,7 @@ fn start_with(program: &Path, dir: &Path, data: &str, banks: &Path, releases: &s
     if verify {
         command.env("PCDS_FLIP_VERIFY", "1");
     }
+    command.envs(extra.iter().copied());
     let child = command
         .arg("serve")
         .arg(data)
@@ -148,6 +182,11 @@ fn start_with(program: &Path, dir: &Path, data: &str, banks: &Path, releases: &s
 
 fn load(server: &Server, data: &str, players: u32, seconds: u32) -> Child {
     Command::new(PCDS).args(["load", &format!("127.0.0.1:{}", server.udp), data, &players.to_string(), &seconds.to_string(), "200"]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap()
+}
+
+/// `load` with players named `name`0, `name`1... (two groups of players may not share names).
+fn load_named(server: &Server, data: &str, name: &str, players: u32, seconds: u32) -> Child {
+    Command::new(PCDS).args(["load", &format!("127.0.0.1:{}", server.udp), data, &players.to_string(), &seconds.to_string(), "200"]).env("PCDS_LOAD_NAME", name).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap()
 }
 
 fn finish(load: Child) -> (bool, String) {
@@ -668,6 +707,356 @@ fn make_the_snapshot_fixture_of_a_release() {
     let mut gzip = Command::new("gzip").args(["-9", "-n", "-c"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     gzip.stdin.take().unwrap().write_all(&snapshot).unwrap();
     std::fs::write(&out, gzip.wait_with_output().unwrap().stdout).unwrap();
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+
+// ---- a flip, and what kills the processes in it ------------------------------------------------
+//
+// Each test stops the flip in one of its phases (a bank that holds its HELLO or its READY:
+// PCDS_BANK_FAIL slow-hello and slow-ready, by "failForTest"; a bank frozen with SIGSTOP for the
+// phase in which the running bank snapshots), kills a process with SIGKILL there, and checks the
+// world: saved or resumed, one bank running or none left, nobody orphaned, run/bin/active right.
+
+fn signal(pid: u64, sig: i32) {
+    // SAFETY: a bank of the front this test started, by the pid the front reported or logged.
+    unsafe { libc::kill(pid as i32, sig) };
+}
+
+fn alive(pid: u64) -> bool {
+    // A zombie waits for its parent: it is gone as far as the world is concerned.
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| s.rsplit(')').next().is_some_and(|rest| !rest.trim_start().starts_with('Z')))
+}
+
+/// The pids among `pids` still running after 40 s.
+fn survivors(pids: &[u64]) -> Vec<u64> {
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while Instant::now() < deadline && pids.iter().any(|p| alive(*p)) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    pids.iter().copied().filter(|p| alive(*p)).collect()
+}
+
+/// The pid of the bank the last flip in the log started.
+fn loading_pid(log: &str) -> u64 {
+    let line = log.lines().rev().find(|l| l.starts_with("flip to bank")).expect("a flip started");
+    line.split("pid ").nth(1).and_then(|r| r.split_whitespace().next()).and_then(|p| p.parse().ok()).expect("its pid")
+}
+
+/// The world objects in the save (every one has a gId).
+fn saved_objects(dir: &Path) -> usize {
+    std::fs::read_to_string(dir.join("world.json")).unwrap().matches("\"gId\"").count()
+}
+
+fn world_dir(name: &str, data: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("pcds-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(Command::new(PCDS).arg("new-save").arg(dir.join("world.json")).arg(data).stdout(Stdio::null()).status().unwrap().success());
+    dir
+}
+
+fn active_bank(banks: &Path) -> String {
+    std::fs::read_to_string(banks.join("active")).map(|s| s.trim().to_string()).unwrap_or_else(|_| "a".into())
+}
+
+/// The front is killed (SIGKILL) in `phase` of a flip. The banks find it gone and save the
+/// world; none is left running; the world has what it had; a new front runs it.
+fn front_killed_in(phase: &str) {
+    let Some(data) = tables() else { return };
+    let dir = world_dir(&format!("front-{phase}"), &data);
+    let banks = banks(&dir);
+    let releases = "http://127.0.0.1:9/releases";
+    let mut server = start(&dir, &data, &banks, releases);
+    let players = load(&server, &data, 3, 25);
+    std::thread::sleep(Duration::from_secs(5));
+    assert_eq!(server.api("POST", "/api/save", json!({})).0, 200);
+    let saved = saved_objects(&dir);
+    let old = server.live()["pid"].as_u64().unwrap();
+    let (mut frozen, new) = (None, 0);
+    let new = match phase {
+        "starting" => {
+            server.update_begin(json!({"rollback": true, "failForTest": "slow-hello"}));
+            loading_pid(&server.wait_log("holding its hello"))
+        }
+        "snapshotting" => {
+            signal(old, libc::SIGSTOP);
+            frozen = Some(old);
+            server.update_begin(json!({"rollback": true}));
+            loading_pid(&server.wait_log("is checked; the running bank is told"))
+        }
+        "restoring" => {
+            server.update_begin(json!({"rollback": true, "failForTest": "slow-ready"}));
+            loading_pid(&server.wait_log("holding its ready"))
+        }
+        _ => {
+            assert_eq!(server.update(json!({"rollback": true}))["ok"], true, "{}", server.log());
+            server.live()["pid"].as_u64().unwrap_or(new)
+        }
+    };
+    let promoted = phase == "promoted";
+    let before = std::fs::metadata(dir.join("world.json")).unwrap().modified().unwrap();
+    server.child.kill().unwrap();
+    server.child.wait().unwrap();
+    if let Some(pid) = frozen {
+        signal(pid, libc::SIGCONT);
+    }
+    let left = survivors(&[old, new]);
+    assert!(left.is_empty(), "{phase}: banks left running after the front was killed: {left:?}\n{}", server.log());
+    assert!(std::fs::metadata(dir.join("world.json")).unwrap().modified().unwrap() > before, "{phase}: a bank saved the world when it found the front gone\n{}", server.log());
+    assert!(saved_objects(&dir) >= saved, "{phase}: nothing lost");
+    assert_eq!(active_bank(&banks), if promoted { "b" } else { "a" }, "{phase}: run/bin/active");
+    let _ = finish(players);
+    // A front again, on the saved world.
+    drop(server);
+    let again = start(&dir, &data, &banks, releases);
+    assert!(again.objects() as usize >= saved.min(1), "{phase}: the world runs again");
+    assert_eq!(again.api("POST", "/api/stop", json!({})).0, 200);
+    let mut again = again;
+    assert!(again.child.wait().unwrap().success(), "{}", again.log());
+    drop(again);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_front_killed_while_the_new_bank_loads_loses_nothing() {
+    front_killed_in("starting");
+}
+
+#[test]
+fn a_front_killed_while_the_running_bank_snapshots_loses_nothing() {
+    front_killed_in("snapshotting");
+}
+
+#[test]
+fn a_front_killed_while_the_new_bank_restores_loses_nothing() {
+    front_killed_in("restoring");
+}
+
+#[test]
+fn a_front_killed_just_after_a_flip_loses_nothing() {
+    front_killed_in("promoted");
+}
+
+/// A bank is killed (SIGKILL) in `case`'s phase of a flip: the flip is off and the running bank
+/// goes on (players stay), or, when the running bank itself is the one killed, the world
+/// starts again from the last save or snapshot and the players are told to join again.
+fn bank_killed_in(case: &str) {
+    let Some(data) = tables() else { return };
+    let dir = world_dir(&format!("bank-{case}"), &data);
+    let banks = banks(&dir);
+    let server = start(&dir, &data, &banks, "http://127.0.0.1:9/releases");
+    let players = load(&server, &data, 3, 25);
+    std::thread::sleep(Duration::from_secs(5));
+    assert_eq!(server.api("POST", "/api/save", json!({})).0, 200);
+    let saved = saved_objects(&dir);
+    let before = server.objects();
+    let old = server.live()["pid"].as_u64().unwrap();
+    let stays = |server: &Server| assert_eq!(server.live()["pid"].as_u64(), Some(old), "the running bank went on\n{}", server.log());
+    match case {
+        "new-loading" => {
+            let seq = server.update_begin(json!({"rollback": true, "failForTest": "slow-hello"}));
+            signal(loading_pid(&server.wait_log("holding its hello")), libc::SIGKILL);
+            let done = server.update_end(seq);
+            assert!(done["ok"] == false && done["message"].as_str().unwrap().contains("the new bank ended"), "{done}");
+            stays(&server);
+            let (ok, said) = finish(players);
+            assert!(ok, "the players stayed: {said}");
+        }
+        "new-restoring" => {
+            let seq = server.update_begin(json!({"rollback": true, "failForTest": "slow-ready"}));
+            signal(loading_pid(&server.wait_log("holding its ready")), libc::SIGKILL);
+            let done = server.update_end(seq);
+            assert!(done["ok"] == false && done["message"].as_str().unwrap().contains("the new bank ended") && done["message"].as_str().unwrap().contains("the running bank went on"), "{done}");
+            stays(&server);
+            assert!(server.log().contains("bank: resumed"), "{}", server.log());
+            let (ok, said) = finish(players);
+            assert!(ok, "the players stayed: {said}");
+            assert!(server.objects() >= before, "the world went on");
+            // A flip works after it.
+            assert_eq!(server.update(json!({"rollback": true}))["ok"], true, "{}", server.log());
+        }
+        "running-snapshotting" => {
+            signal(old, libc::SIGSTOP);
+            let seq = server.update_begin(json!({"rollback": true}));
+            server.wait_log("is checked; the running bank is told");
+            signal(old, libc::SIGKILL);
+            let done = server.update_end(seq);
+            assert!(done["ok"] == false && done["message"].as_str().unwrap().contains("the running bank ended"), "{done}");
+            // No bank holds the world: the active bank starts again, from the save (no flip
+            // before this one, so no snapshot), and the players are told to join again.
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while server.live()["pid"].as_u64().is_none_or(|p| p == old) {
+                assert!(Instant::now() < deadline, "no new bank\n{}", server.log());
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let log = server.log();
+            assert!(log.contains("restarting bank a") && log.contains("from the save") && log.contains("runs the world again"), "{log}");
+            let (ok, said) = finish(players);
+            assert!(!ok && said.contains("dropped"), "the crash dropped its players: {said}");
+            assert!(server.objects() as usize >= saved.min(1), "the world is back");
+            assert_eq!(active_bank(&banks), "a");
+            assert!(survivors(&[old]).is_empty());
+        }
+        _ => {
+            // The new bank ends 1 s after its READY: the flip is done, then the world starts
+            // again in that bank from the snapshot of the flip.
+            let done = server.update(json!({"rollback": true, "failForTest": "die-after-ready"}));
+            assert_eq!(done["ok"], true, "{done}\n{}", server.log());
+            let log = server.wait_log("runs the world again");
+            assert!(log.contains("from the snapshot of the last flip"), "{log}");
+            let (ok, said) = finish(players);
+            assert!(!ok && said.contains("dropped"), "{said}");
+            assert!(server.objects() >= before.min(1), "the world is back");
+            assert!(survivors(&[old]).is_empty(), "the bank before ended");
+            assert_eq!(active_bank(&banks), "b");
+        }
+    }
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_new_bank_killed_while_it_loads_leaves_the_world_where_it_is() {
+    bank_killed_in("new-loading");
+}
+
+#[test]
+fn a_new_bank_killed_while_it_restores_resumes_the_old_one() {
+    bank_killed_in("new-restoring");
+}
+
+#[test]
+fn a_running_bank_killed_while_it_snapshots_restarts_from_the_save() {
+    bank_killed_in("running-snapshotting");
+}
+
+#[test]
+fn a_new_bank_that_ends_after_its_flip_restarts_from_the_flips_snapshot() {
+    bank_killed_in("new-after-ready");
+}
+
+/// What a player or the admin does while the world stands for a flip: held, then done.
+#[test]
+fn requests_and_players_during_a_flip_are_held_and_then_served() {
+    let Some(data) = tables() else { return };
+    let dir = world_dir("during-flip", &data);
+    let banks = banks(&dir);
+    let server = start(&dir, &data, &banks, "http://127.0.0.1:9/releases");
+    let players = load(&server, &data, 2, 20);
+    std::thread::sleep(Duration::from_secs(4));
+    let old = server.live()["pid"].as_u64().unwrap();
+    let seq = server.update_begin(json!({"rollback": true, "failForTest": "slow-ready"}));
+    server.wait_log("holding its ready");
+    // The world stands (about 2 s here): a status, a save, a ban and a new player wait for the new bank.
+    let newcomer = load_named(&server, &data, "Late", 1, 8);
+    let asked = Instant::now();
+    let (status, s) = server.api("GET", "/api/status", json!({}));
+    assert_eq!(status, 200, "{s}");
+    assert_ne!(s["banks"]["live"]["pid"].as_u64(), Some(old), "answered by the bank that took the world");
+    assert_eq!(server.api("POST", "/api/save", json!({})).0, 200);
+    assert_eq!(server.api("POST", "/api/ban", json!({"name": "Mallory"})).0, 200);
+    println!("a status asked during the flip's stand was answered after {:?}", asked.elapsed());
+    let done = server.update_end(seq);
+    assert_eq!(done["ok"], true, "{done}");
+    let (ok, said) = finish(players);
+    assert!(ok, "the players stayed: {said}");
+    let (ok, said) = finish(newcomer);
+    assert!(ok, "the player who came during the flip got in: {said}\n{}", server.log());
+    let (_, s) = server.api("GET", "/api/status", json!({}));
+    assert_eq!(s["access"]["bannedNames"], json!(["Mallory"]));
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+
+/// A release server whose releases change while it runs: GET path -> body from `routes`, "BASE"
+/// replaced by its address; its releases URL.
+fn live_release_server(routes: std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let served = base.clone();
+    std::thread::spawn(move || {
+        for mut s in listener.incoming().flatten() {
+            let mut reader = BufReader::new(s.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            while reader.read_line(&mut String::new()).is_ok_and(|n| n > 2) {}
+            let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+            let found = routes.lock().unwrap().iter().find(|(p, _)| *p == path).map(|(_, b)| String::from_utf8(b.clone()).map(|t| t.replace("BASE", &served).into_bytes()).unwrap_or_else(|_| b.clone()));
+            let (status, body) = found.map(|b| ("200 OK", b)).unwrap_or(("404 Not Found", b"{}".to_vec()));
+            let _ = write!(s, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = s.write_all(&body);
+        }
+    });
+    format!("{base}/releases")
+}
+
+/// PCDS_AUTO_UPDATE=on (the check every 4 s here: PCDS_TEST_CHECK_SECONDS, only with
+/// PCDS_TEST_FAULTS=1): a release later than the running one is installed and flipped to under
+/// players; the same release is not fetched again; the release rolled back from is left out;
+/// a later one is taken. The release's tag is not the program's version (v9.9.9 is this build,
+/// which says 0.6.2): the bank that came from it is compared by its tag.
+#[test]
+fn the_automatic_update_takes_a_new_release_once_and_leaves_the_rolled_back_one() {
+    let Some(data) = tables() else { return };
+    let dir = world_dir("auto-update", &data);
+    let banks = banks(&dir);
+    let routes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let publish = |tag: &str, latest: bool| {
+        let mut r = release(&dir, tag, Path::new(PCDS), false);
+        if latest {
+            let json = r.iter().find(|x| x.0 == format!("/releases/tags/{tag}")).unwrap().1.clone();
+            r.push(("/releases/latest".into(), json));
+        }
+        let mut routes = routes.lock().unwrap();
+        routes.retain(|(p, _)| p != "/releases/latest");
+        routes.extend(r);
+    };
+    publish("v9.9.9", true);
+    let releases = live_release_server(routes.clone());
+    let server = start_env(Path::new(PCDS), &dir, &data, &banks, &releases, true, &[("PCDS_AUTO_UPDATE", "on"), ("PCDS_TEST_CHECK_SECONDS", "4")]);
+    let flips = |server: &Server| server.api("GET", "/api/status", json!({})).1["banks"]["flips"].as_u64().unwrap_or(0);
+    let players = load(&server, &data, 3, 60);
+    // The first check: v9.9.9 is later than 0.6.2: installed, flipped to.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while flips(&server) < 1 {
+        assert!(Instant::now() < deadline, "no automatic update\n{}", server.log());
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let installed: Value = serde_json::from_str(&std::fs::read_to_string(banks.join(active_bank(&banks)).join("bank.json")).unwrap()).unwrap();
+    assert_eq!(installed["tag"], "v9.9.9", "{installed}");
+    // Several checks later still one flip: the release that runs is not fetched again.
+    std::thread::sleep(Duration::from_secs(14));
+    assert_eq!(flips(&server), 1, "v9.9.9 installed once\n{}", server.log());
+    assert_eq!(server.api("GET", "/api/update", json!({})).1["available"], false);
+    // Rolled back: left out by the next checks.
+    assert_eq!(server.update(json!({"rollback": true}))["ok"], true, "{}", server.log());
+    std::thread::sleep(Duration::from_secs(10));
+    assert_eq!(flips(&server), 2, "the release rolled back from is not installed again\n{}", server.log());
+    assert!(server.log().contains("the release the server was rolled back from"), "{}", server.log());
+    // A later release is taken, and the note is gone.
+    publish("v9.9.10", true);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while flips(&server) < 3 {
+        assert!(Instant::now() < deadline, "no automatic update to the later release\n{}", server.log());
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let installed: Value = serde_json::from_str(&std::fs::read_to_string(banks.join(active_bank(&banks)).join("bank.json")).unwrap()).unwrap();
+    assert_eq!(installed["tag"], "v9.9.10");
+    assert!(!banks.join("rolled-back").exists(), "a later release ends the note");
+    let (ok, said) = finish(players);
+    assert!(ok, "the players stayed through the automatic flips and the rollback:\n{said}\n{}", server.log());
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
     drop(server);
     std::fs::remove_dir_all(&dir).unwrap();
 }

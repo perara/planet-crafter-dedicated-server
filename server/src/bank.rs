@@ -8,7 +8,10 @@
 //!
 //!   pcds bank DATA_DIR SAVE.json        (started by the front, never by hand)
 //!     PCDS_FLIP_VERIFY   after a restore, check the state equals the snapshot (tests)
-//!     PCDS_BANK_FAIL     tests: "restore" dies on RESTORE, "protocol" says another protocol
+//!     PCDS_BANK_FAIL     tests: "restore" dies on RESTORE, "protocol" says another protocol,
+//!                        "slow-hello" holds its HELLO 4 s (the flip waits in its loading phase),
+//!                        "slow-ready" holds its READY 2 s after the restore (the flip waits in
+//!                        its restoring phase), "die-after-ready" ends 1 s after READY
 
 use std::collections::{HashMap, HashSet};
 use std::os::fd::FromRawFd;
@@ -63,6 +66,10 @@ pub fn run(args: &[String]) {
     let mut hello = info();
     hello["gameVersion"] = net_data.game_version.clone().into();
     let protocol = if fail_for_test("protocol") { 999 } else { ipc::PROTOCOL };
+    if fail_for_test("slow-hello") {
+        println!("bank: holding its hello for 4 s (PCDS_BANK_FAIL=slow-hello)");
+        std::thread::sleep(Duration::from_secs(4));
+    }
     link.send(ipc::HELLO, protocol, hello.to_string().as_bytes());
     let (mut verified, mut verify_ms) = (Value::Null, 0.0);
     let mut started = Instant::now();
@@ -108,7 +115,18 @@ pub fn run(args: &[String]) {
         _ => return,
     };
     let ready = json!({"restoreMs": started.elapsed().as_secs_f64() * 1000.0 - verify_ms, "verifyMs": verify_ms, "verified": verified});
+    if fail_for_test("slow-ready") {
+        println!("bank: holding its ready for 2 s (PCDS_BANK_FAIL=slow-ready)");
+        std::thread::sleep(Duration::from_secs(2));
+    }
     link.send(ipc::READY, 0, ready.to_string().as_bytes());
+    if fail_for_test("die-after-ready") {
+        println!("bank: ending 1 s after its ready (PCDS_BANK_FAIL=die-after-ready)");
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(1));
+            std::process::exit(3)
+        });
+    }
     Bank { game, link, save_path: save_path.clone(), build_id, data_dir: dir.clone() }.serve();
 }
 

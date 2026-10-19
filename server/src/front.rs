@@ -253,7 +253,9 @@ impl Front {
     fn new(dir: &str, save: &str, banks: Option<PathBuf>, utp: Option<Utp>, port: u16, stop: Arc<AtomicBool>) -> Front {
         let (tx, rx) = std::sync::mpsc::channel();
         let auto = crate::env("PCDS_AUTO_UPDATE").as_deref() == Some("on");
-        let every = Duration::from_secs(crate::config::env_number("PCDS_UPDATE_CHECK_HOURS") * 3600);
+        // The e2e tests' schedule (seconds, not hours); off unless the front was started with PCDS_TEST_FAULTS=1.
+        let test_seconds = crate::env("PCDS_TEST_CHECK_SECONDS").filter(|_| crate::env("PCDS_TEST_FAULTS").as_deref() == Some("1")).and_then(|s| s.parse::<u64>().ok());
+        let every = test_seconds.map_or_else(|| Duration::from_secs(crate::config::env_number("PCDS_UPDATE_CHECK_HOURS") * 3600), Duration::from_secs);
         let autosave_minutes = crate::autosave_start();
         Front {
             dir: dir.to_string(),
@@ -904,6 +906,7 @@ impl Front {
                     let _ = b.link.flush();
                 }
                 self.phase = Phase::Snapshotting;
+                println!("flip: bank {} is checked; the running bank is told to hand the world over", self.next.as_ref().map_or("?", |b| b.name.as_str()));
             }
             ipc::READY if matches!(self.phase, Phase::Restoring | Phase::Recovering) => self.promote(&f.body),
             _ => {}
