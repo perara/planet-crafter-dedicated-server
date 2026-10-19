@@ -159,7 +159,7 @@ pub fn tick(game: &mut Game) {
             add(game, object, "_oxygenValue", "_oxygenMaxValue", oxygen * TICK);
             add(game, object, "_thirstValue", "_thirstMaxValue", -0.13 * drain(game) * game.rules.gauges.thirst_drain * TICK);
             add_health(game, object, -0.06 * drain(game) * game.rules.gauges.food_drain * TICK);
-            let toxic_rate = -1.0 * drain(game);
+            let toxic_rate = -drain(game);
             if toxic_rate.abs() > 0.0 && get_f(game, object, "_healthValue") > 0.0 {
                 let filter = 1.0 - crate::equipment::equipment_value(game, s.client, "ToxinsFilter") as f32 / 100.0;
                 match crate::toxic::tracked_area_progress(game, s.client) {

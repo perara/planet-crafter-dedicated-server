@@ -769,6 +769,8 @@ impl Bounds {
 fn inside_bounds(game: &Game, w: &WorldObject) -> Option<Bounds> {
     const POD: ([f32; 3], [f32; 3]) = ([-4.03, -0.02, -3.84], [4.03, 6.03, 4.16]);
     const BIOLAB: ([f32; 3], [f32; 3]) = ([-11.53, 0.71, -0.28], [3.59, 5.28, 14.47]);
+    // 6.28 is the dome's measured height, not TAU.
+    #[allow(clippy::approx_constant)]
     const DOME: ([f32; 3], [f32; 3]) = ([-8.66, 0.59, -8.72], [8.97, 6.28, 8.84]);
     const BOXES: &[(&str, ([f32; 3], [f32; 3]))] = &[
         ("pod", POD),

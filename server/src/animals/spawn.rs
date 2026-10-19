@@ -197,8 +197,8 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, name: &str, a: &Args) -> b
         "WorldAnimalSpawnerHandler.SpawnerRegisteredServerRpc" => {
             let wo = a.i(0);
             let s = &mut game.ext.animals.spawn;
-            if !s.counts.contains_key(&wo) {
-                s.counts.insert(wo, 0);
+            if let std::collections::hash_map::Entry::Vacant(e) = s.counts.entry(wo) {
+                e.insert(0);
                 game.net.rpc_scene(Target::Only(client), "WorldAnimalSpawnerHandler.SendSpawnerDataClientRpc", &[json!(wo)]);
             }
             *game.ext.animals.spawn.counts.get_mut(&wo).unwrap() += 1;

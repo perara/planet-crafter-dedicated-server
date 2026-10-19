@@ -97,9 +97,9 @@ impl Graph {
             }
         };
         let Some(script) = script else { return Ok(None) };
-        if !self.scripts.contains_key(&script) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.scripts.entry(script) {
             let s = data.reader(script).and_then(|mut r| unity::mono_script(&mut r)).ok_or_else(|| format!("{}: unreadable MonoScript {}", data.files[script.0].name, script.1))?;
-            self.scripts.insert(script, (s.namespace, s.class, s.assembly));
+            e.insert((s.namespace, s.class, s.assembly));
         }
         Ok(self.scripts.get(&script))
     }

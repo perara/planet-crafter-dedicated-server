@@ -383,7 +383,7 @@ pub fn init_scene_variables(game: &mut Game, seed: i32, difficulty: i32, scene: 
         super::load_instance(game, seed, e.position, e.rotation, difficulty, wreck_seed);
     }
     // ProceduralInstancesHandler.GenerateRandomPropsFromRoot: by the owner's first generator.
-    if game.ext.planets.instances.instances.get(&seed).map_or(true, |l| l.is_empty()) {
+    if game.ext.planets.instances.instances.get(&seed).is_none_or(|l| l.is_empty()) {
         return;
     }
     let mut ignored = HashSet::new();

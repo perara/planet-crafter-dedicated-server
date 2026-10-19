@@ -100,7 +100,7 @@ impl Writer {
 
 /// Smallest byte count holding `v` (at least one byte).
 fn byte_count(v: u64) -> usize {
-    (((64 - v.leading_zeros()) as usize + 7) / 8).max(1)
+    ((64 - v.leading_zeros()) as usize).div_ceil(8).max(1)
 }
 
 pub struct Reader<'a> {
