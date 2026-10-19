@@ -12,6 +12,9 @@ use crate::net::Target;
 
 /// Inventory ids at or above this are not counted when picking the next id.
 pub const SPECIAL_INVENTORY_IDS: i32 = 9_999_999;
+/// The game's inventories hold a few dozen; a client asking for billions makes machines that
+/// fill them (animal shelters) run away, and a sum past i32 wraps to a negative size.
+const MAX_INVENTORY_SIZE: i32 = 1000;
 
 impl Game {
     // ---- Inventory (the model) ------------------------------------------------------------
@@ -490,9 +493,7 @@ impl Game {
                 }
             }
             "InventoriesHandler.GetOrCreateNewInventoryServerRpc" => {
-                // The game's inventories hold a few dozen; a client asking for billions makes
-                // machines that fill them (animal shelters) run away.
-                self.get_or_create(client, a.b(0), a.i(1).clamp(0, 1000), a.i(2), a.i(3), a.ints(4), a.ints(5));
+                self.get_or_create(client, a.b(0), a.i(1).clamp(0, MAX_INVENTORY_SIZE), a.i(2), a.i(3), a.ints(4), a.ints(5));
             }
             "InventoriesHandler.TransferItemServerRpc" => {
                 let ok = self.transfer(a.i(0), a.i(1), vec![a.i(2)], Some(client));
@@ -594,7 +595,7 @@ impl Game {
             }
             "InventoriesHandler.SetInventorySizeServerRpc" => {
                 let (inv, offset, drop) = (a.i(0), a.i(1), a.v3(2));
-                if let Some(size) = self.inventories.get(&inv).map(|i| i.size + offset) {
+                if let Some(size) = self.inventories.get(&inv).map(|i| (i.size as i64 + offset as i64).clamp(0, MAX_INVENTORY_SIZE as i64) as i32) {
                     self.inventories.get_mut(&inv).unwrap().size = size;
                     // DropObjectsIfNotEnoughSpace.
                     let overflow: Vec<i32> = self.inventories[&inv].items.iter().skip(size.max(0) as usize).copied().collect();
@@ -830,6 +831,21 @@ mod tests {
         send_scene(&mut g, 1, "InventoriesHandler.RemoveAndDestroyAllItemsFromInventoryServerRpc", &[json!(-9)]);
         assert!(!result(&mut g));
         assert_eq!(saved_items(&mut g, chest), keep.to_string());
+    }
+
+    /// A client's size change cannot overflow the size or grow it without bound.
+    #[test]
+    fn a_size_change_stays_within_the_bounds_of_an_inventory() {
+        let Some((mut g, _)) = world() else { return };
+        let chest = g.create_inventory(3, 0, 0, &[], &[]);
+        let items: Vec<i32> = ["Iron", "ice"].iter().map(|n| give(&mut g, n, chest)).collect();
+        send_scene(&mut g, 1, "InventoriesHandler.SetInventorySizeServerRpc", &[json!(chest), json!(i32::MAX), json!([570.0, 3.0, 500.0])]);
+        assert!(result(&mut g));
+        assert_eq!((g.inventories[&chest].size, g.inventories[&chest].items.clone()), (MAX_INVENTORY_SIZE, items.clone()));
+        send_scene(&mut g, 1, "InventoriesHandler.SetInventorySizeServerRpc", &[json!(chest), json!(i32::MIN), json!([570.0, 3.0, 500.0])]);
+        assert!(result(&mut g));
+        assert_eq!(g.inventories[&chest].size, 0);
+        assert!(g.inventories[&chest].items.is_empty() && items.iter().all(|i| g.wos[i].is_placed()), "all dropped, none lost");
     }
 
     /// An open inventory's other watchers hear each change; the one making it does not.
