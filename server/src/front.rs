@@ -1316,11 +1316,12 @@ impl Front {
     /// update asked for clears that note.
     fn download(&mut self, seq: u64, dir: PathBuf, bank: String, version: Option<String>, only_newer: bool, auto: bool) {
         let live = self.live.as_ref().map(|b| b.hello.clone()).unwrap_or_default();
+        let held = self.held_release(&dir);
         let tx = self.updates.tx.clone();
         self.updates.busy = Some((seq, format!("downloading {} into bank {bank}", version.as_deref().unwrap_or("the latest release"))));
         answer_on_thread(tx, seq, move || {
             let release = updater::lookup(&updater::releases_url(), version.as_deref())?;
-            if only_newer && !updater::newer(&release.tag, live["version"].as_str().unwrap_or("")) {
+            if only_newer && !updater::newer(&release.tag, &held) {
                 return Ok(UpdateDone::UpToDate { seq, tag: release.tag });
             }
             if auto && let Some(why) = updater::auto_skips(&dir, &release.tag)? {
@@ -1334,9 +1335,14 @@ impl Front {
         });
     }
 
+    /// The release the live bank holds (its tag, else its version: updater::held_release).
+    fn held_release(&self, dir: &std::path::Path) -> String {
+        self.live.as_ref().map(|b| updater::held_release(dir, &b.name, b.hello["version"].as_str().unwrap_or(""))).unwrap_or_default()
+    }
+
     /// The latest release looked up on a thread of its own; nothing is installed.
     fn check(&mut self, seq: u64) {
-        let live = self.live.as_ref().map(|b| b.hello["version"].as_str().unwrap_or("").to_string()).unwrap_or_default();
+        let live = self.banks.as_deref().map(|dir| self.held_release(dir)).unwrap_or_default();
         let tx = self.updates.tx.clone();
         self.updates.busy = Some((seq, "checking for a new release".into()));
         answer_on_thread(tx, seq, move || updater::lookup(&updater::releases_url(), None).map(|release| UpdateDone::Checked { seq, newer: updater::newer(&release.tag, &live), tag: release.tag }));

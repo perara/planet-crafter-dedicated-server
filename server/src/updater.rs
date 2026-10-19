@@ -137,10 +137,18 @@ pub fn compatible(info: &Value, live: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Why a program did not say what it is.
+#[derive(Debug)]
+enum Asked {
+    /// It ran, and did not answer bank-info as a release since hot updates does.
+    Unknown,
+    Failed(String),
+}
+
 /// What a bank's program says it is (`pcds bank-info`), within 20 s. A downloaded program, so
 /// it runs with PATH, HOME and LANG only, as the chat exec hook does: never with the admin or
 /// Steam token.
-fn ask(program: &Path) -> Result<Value, String> {
+fn ask(program: &Path) -> Result<Value, Asked> {
     let mut command = Command::new(program);
     command.arg("bank-info").env_clear().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     for key in ["PATH", "HOME", "LANG"] {
@@ -148,19 +156,20 @@ fn ask(program: &Path) -> Result<Value, String> {
             command.env(key, v);
         }
     }
-    let mut child = command.spawn().map_err(|e| format!("{}: {e}", program.display()))?;
+    // A program that cannot be run (not executable, wrong architecture) is not "a release from
+    // before hot updates".
+    let mut child = command.spawn().map_err(|e| Asked::Failed(format!("{} cannot be run: {e}", program.display())))?;
     let deadline = Instant::now() + Duration::from_secs(20);
-    while child.try_wait().map_err(|e| e.to_string())?.is_none() {
+    while child.try_wait().map_err(|e| Asked::Failed(e.to_string()))?.is_none() {
         if Instant::now() > deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("bank-info: no answer within 20 s".into());
+            return Err(Asked::Failed("bank-info: no answer within 20 s".into()));
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    let info: Value = serde_json::from_slice(&out.stdout).ok().filter(|v: &Value| out.status.success() && v["protocol"].is_u64()).ok_or("its pcds does not know bank-info")?;
-    Ok(info)
+    let out = child.wait_with_output().map_err(|e| Asked::Failed(e.to_string()))?;
+    serde_json::from_slice(&out.stdout).ok().filter(|v: &Value| out.status.success() && v["protocol"].is_u64()).ok_or(Asked::Unknown)
 }
 
 /// The release into banks/<bank>: downloaded, checked against its sha256, unpacked beside the
@@ -259,7 +268,12 @@ fn unpack(release: &Release, new: &Path) -> Result<Value, String> {
     let _ = std::fs::remove_dir_all(new);
     std::fs::create_dir_all(new).map_err(|e| format!("{}: {e}", new.display()))?;
     let file = std::path::PathBuf::from(format!("{}.tar.gz", new.display()));
-    std::fs::write(&file, &tarball).map_err(|e| format!("{}: {e}", file.display()))?;
+    // A tarball that could not be written whole (a full disk) is not left beside the banks: this
+    // process's own leftovers are never swept (sweep only takes those of processes that are gone).
+    std::fs::write(&file, &tarball).map_err(|e| {
+        let _ = std::fs::remove_file(&file);
+        format!("{}: {e}", file.display())
+    })?;
     let tar = Command::new("tar").arg("-xzf").arg(&file).arg("-C").arg(new).arg("--strip-components=1").status();
     let _ = std::fs::remove_file(&file);
     match tar {
@@ -272,7 +286,10 @@ fn unpack(release: &Release, new: &Path) -> Result<Value, String> {
     if !program.is_file() {
         return Err(format!("{tag}: no pcds in the tarball"));
     }
-    let mut info = ask(&program).map_err(|e| format!("{tag}: {e}: a release from before hot updates. It needs a front restart (pcds upgrade --restart {tag}), which disconnects every player"))?;
+    let mut info = ask(&program).map_err(|e| match e {
+        Asked::Unknown => format!("{tag}: its pcds does not know bank-info: a release from before hot updates. It needs a front restart (pcds upgrade --restart {tag}), which disconnects every player"),
+        Asked::Failed(e) => format!("{tag}: {e}"),
+    })?;
     info["tag"] = tag.clone().into();
     info["sha256"] = downloaded.into();
     info["installed"] = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).into();
@@ -393,6 +410,14 @@ pub fn other(bank: &str) -> &'static str {
 /// versions order them: a pre-release comes before its release ("1.0.0-rc.1" < "1.0.0").
 pub fn newer(tag: &str, version: &str) -> bool {
     version_key(tag) > version_key(version)
+}
+
+/// The release a bank holds, as a later release is compared with it: its tag (bank.json, written
+/// by an install of a release) when it has one, else the program's version (a build, or a
+/// release folder's program). A tag the program's version does not match (a forgotten bump)
+/// then still counts as installed, and is not fetched again at every check.
+pub fn held_release(banks: &Path, bank: &str, version: &str) -> String {
+    info(banks, bank).and_then(|i| i["tag"].as_str().map(str::to_string)).unwrap_or_else(|| version.to_string())
 }
 
 /// A pre-release's part: numbers by value, and below words (semver 11.4).
@@ -710,6 +735,135 @@ pub mod tests {
             }
         }
         assert!(!newer("1.0.0+build.2", "1.0.0") && !newer("v1.0", "1.0.0"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A release whose program says an older version than its tag (a forgotten bump) is the
+    /// release installed: the tag is compared, not the version, so the check does not find it
+    /// "available" for ever (the automatic update would flip to it at every check). A bank
+    /// without a tag (a build, a release folder's program) is compared by its version.
+    #[test]
+    fn a_release_is_compared_by_its_tag_when_the_bank_has_one() {
+        let dir = test_dir("held");
+        for (bank, info) in [("a", json!({"version": "0.6.1", "tag": "v0.6.2"})), ("b", json!({"version": "0.6.1"}))] {
+            std::fs::create_dir_all(dir.join(bank)).unwrap();
+            std::fs::write(dir.join(bank).join("pcds"), "").unwrap();
+            write_info(&dir.join(bank), &info).unwrap();
+        }
+        let held = held_release(&dir, "a", "0.6.1");
+        assert_eq!(held, "v0.6.2");
+        assert!(!newer("v0.6.2", &held), "the release that is installed is not available again");
+        assert!(newer("v0.6.3", &held));
+        let held = held_release(&dir, "b", "0.6.1");
+        assert_eq!(held, "0.6.1", "no tag: the program's version");
+        assert!(newer("v0.6.2", &held));
+        assert_eq!(held_release(&dir, "none", "0.5.0"), "0.5.0", "no bank.json at all");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A server on 127.0.0.1 that answers GET path with the raw bytes given (a whole HTTP
+    /// response, "BASE" replaced by its address): a status other than 200, a redirect, a body
+    /// shorter than its Content-Length.
+    fn raw(routes: Vec<(&str, String)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let routes: Vec<(String, String)> = routes.into_iter().map(|(p, b)| (p.to_string(), b.replace("BASE", &base))).collect();
+        std::thread::spawn(move || {
+            for mut s in listener.incoming().flatten() {
+                let mut line = String::new();
+                let mut reader = BufReader::new(s.try_clone().unwrap());
+                reader.read_line(&mut line).unwrap();
+                while reader.read_line(&mut String::new()).is_ok_and(|n| n > 2) {}
+                let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                let answer = routes.iter().find(|(p, _)| *p == path).map(|(_, b)| b.clone()).unwrap_or_else(|| "HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".into());
+                let _ = s.write_all(answer.as_bytes());
+            }
+        });
+        format!("{base}/releases")
+    }
+
+    /// What GitHub (or a mirror) does when it is not well: rate limits, a redirect, a release
+    /// without the assets, a body cut short, nonsense. Each is an error that says what, and
+    /// nothing is installed; a redirect is followed.
+    #[test]
+    fn a_release_feed_that_is_not_well_is_an_error_and_nothing_is_installed() {
+        let ok = |body: &str| format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let no_assets = r#"{"tag_name": "v1.1.0", "assets": [{"name": "pcds-v1.1.0-linux-x86_64.tar.gz", "browser_download_url": "http://x/x"}]}"#;
+        let base = raw(vec![
+            ("/releases/latest", "HTTP/1.1 403 Forbidden\r\nContent-Length: 24\r\nConnection: close\r\n\r\n{\"message\":\"rate limit\"}".into()),
+            ("/releases/tags/v1.0.0", "HTTP/1.1 302 Found\r\nLocation: BASE/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()),
+            ("/elsewhere", ok(r#"{"tag_name": "v1.0.0", "assets": []}"#)),
+            ("/releases/tags/v1.1.0", ok(no_assets)),
+            ("/releases/tags/v1.2.0", ok("not json")),
+            ("/releases/tags/v1.3.0", ok(r#"{"assets": []}"#)),
+            ("/releases/tags/v1.4.0", "HTTP/1.1 200 OK\r\nContent-Length: 500\r\nConnection: close\r\n\r\n{\"tag_name\"".into()),
+            ("/releases/tags/v1.5.0", ok(r#"{"tag_name": "v1.5.0/../../x", "assets": []}"#)),
+            ("/releases/tags/v1.6.0", "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".into()),
+        ]);
+        let err = |version: Option<&str>| lookup(&base, version).unwrap_err();
+        assert!(err(None).contains("HTTP 403"), "{}", err(None));
+        assert!(err(Some("v1.6.0")).contains("HTTP 429"));
+        // The redirect is followed (to a release that has no assets).
+        assert!(err(Some("v1.0.0")).contains("has no pcds-v1.0.0-linux-x86_64.tar.gz"), "{}", err(Some("v1.0.0")));
+        assert!(err(Some("v1.1.0")).contains("has no pcds-v1.1.0-linux-x86_64.tar.gz.sha256"), "{}", err(Some("v1.1.0")));
+        assert!(err(Some("v1.2.0")).contains("releases/tags/v1.2.0"), "nonsense is an error naming the url");
+        assert!(err(Some("v1.3.0")).contains("no tag_name"));
+        assert!(!err(Some("v1.4.0")).is_empty(), "a body cut short is an error");
+        assert!(err(Some("v1.5.0")).contains("not a release version"), "a tag from the feed is checked as a typed one is");
+        assert!(err(Some("v9.9.9")).contains("404"));
+    }
+
+    /// A tarball that is cut short or is not gzip at all (its sha256 matches: the feed served
+    /// it so), one without a program, one whose program cannot run, and a tarball that cannot
+    /// be written to the disk: each leaves the bank as it was and nothing beside it.
+    #[test]
+    fn a_broken_tarball_is_refused_and_leaves_the_banks_as_they_were() {
+        let dir = test_dir("broken-tarball");
+        let banks = dir.join("bin");
+        std::fs::create_dir_all(banks.join("b")).unwrap();
+        std::fs::write(banks.join("b/pcds"), "the old one").unwrap();
+        let serve_tar = |tag: &str, tar: Vec<u8>| {
+            let sum = hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
+            lookup(&format!("{}/releases", serve(release("BASE", tag, tar, sum))), None).unwrap()
+        };
+        let good = tarball(&dir, "v9.9.9", &script(crate::ipc::PROTOCOL));
+        // Cut short: tar fails.
+        let release_cut = serve_tar("v9.9.9", good[..good.len() / 2].to_vec());
+        let e = install(&release_cut, &banks, "b", None).unwrap_err();
+        assert!(e.contains("tar could not unpack it"), "{e}");
+        // Not a tarball.
+        let e = install(&serve_tar("v9.9.9", b"<html>an error page</html>".to_vec()), &banks, "b", None).unwrap_err();
+        assert!(e.contains("tar could not unpack it"), "{e}");
+        // A tarball without a pcds in it.
+        let empty = {
+            let root = dir.join("pcds-v9.9.9-linux-x86_64");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("README.md"), "no program").unwrap();
+            assert!(Command::new("tar").arg("-czf").arg(dir.join("e.tar.gz")).arg("-C").arg(&dir).arg("pcds-v9.9.9-linux-x86_64").status().unwrap().success());
+            std::fs::read(dir.join("e.tar.gz")).unwrap()
+        };
+        let e = install(&serve_tar("v9.9.9", empty), &banks, "b", None).unwrap_err();
+        assert!(e.contains("no pcds in the tarball"), "{e}");
+        // A pcds that is not executable is not "a release from before hot updates".
+        let plain = {
+            let root = dir.join("pcds-v9.9.8-linux-x86_64");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("pcds"), script(crate::ipc::PROTOCOL)).unwrap();
+            assert!(Command::new("tar").arg("-czf").arg(dir.join("p.tar.gz")).arg("-C").arg(&dir).arg("pcds-v9.9.8-linux-x86_64").status().unwrap().success());
+            std::fs::read(dir.join("p.tar.gz")).unwrap()
+        };
+        let e = install(&serve_tar("v9.9.8", plain), &banks, "b", None).unwrap_err();
+        assert!(e.contains("cannot be run") && !e.contains("before hot updates"), "{e}");
+        // A disk that takes no more (/dev/full behind the tarball's name): the partial file is
+        // removed, and the bank is as it was.
+        let release_good = serve_tar("v9.9.9", good);
+        let file = std::path::PathBuf::from(format!("{}.tar.gz", staging(&banks, "b").display()));
+        std::os::unix::fs::symlink("/dev/full", &file).unwrap();
+        let e = install(&release_good, &banks, "b", None).unwrap_err();
+        assert!(e.contains(".tar.gz"), "{e}");
+        assert!(file.symlink_metadata().is_err(), "the partial tarball is removed");
+        assert_eq!(std::fs::read_to_string(banks.join("b/pcds")).unwrap(), "the old one");
+        assert_eq!(names(&banks), ["b"], "nothing left beside the bank");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
