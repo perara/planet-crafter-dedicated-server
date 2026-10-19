@@ -32,6 +32,18 @@ const MAX_JOINING_PER_IP: usize = 2;
 /// MachineGenerationGroupVein, SceneInterpolationBase and GameEventActivateInterpolators,
 /// ToxicAreaVolumes and ToxicAreaDecal, WorldAnimalSpawnerData, ProceduralSceneInstance).
 /// Every other RPC before PlayerReady is dropped.
+/// The server RPCs the game declares `[Rpc(SendTo.Server)]` without `InvokePermission =
+/// Everyone`: Netcode drops one whose sender does not own the object it is sent to
+/// (RpcMessageHelpers.Handle).
+const OWNER_ONLY_RPCS: &[&str] = &[
+    "GroupNetworkContainer.RemoveOwnershipServerRpc",
+    "PlayerMainController.PlayerReadyServerRpc",
+    "PlayerShareState.InputOnJumpServerRpc",
+    "PlayerShareState.StartMiningServerRpc",
+    "PlayerShareState.StopMiningServerRpc",
+    "PlayerStatus.HandleDyingConsequencesServerRpc",
+];
+
 const LOADING_RPCS: &[&str] = &[
     "PlayerMainController.PlayerReadyServerRpc",
     "GrowthProxy.GetCurrentGrowthServerRpc",
@@ -647,6 +659,12 @@ impl Game {
         if !self.net.carries(object, class) {
             if self.misrouted.insert(name.clone()) {
                 eprintln!("client {client}: rpc {name} on object {object}, which has no {class}: ignored (logged once per RPC)");
+            }
+            return;
+        }
+        if OWNER_ONLY_RPCS.contains(&name.as_str()) && self.net.objects.get(&object).is_none_or(|o| o.owner != client) {
+            if self.misrouted.insert(format!("{name} by a client that is not the owner")) {
+                eprintln!("client {client}: rpc {name} on object {object}, which it does not own: ignored (logged once per RPC)");
             }
             return;
         }

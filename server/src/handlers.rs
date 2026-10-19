@@ -554,6 +554,29 @@ mod tests {
         assert_eq!(sent(&g, "ActionnableInteractiveProxy.BroadcastToAllClientsClientRpc").into_iter().map(|s| (s.to, s.object)).collect::<Vec<_>>(), vec![(Target::Only(2), net)]);
     }
 
+    /// The owner-only RPCs (the game's `[Rpc(SendTo.Server)]`, which Netcode drops from anyone
+    /// but the object's owner): another client's player shown jumping and mining, an item taken
+    /// off its owner, another player's dying consequences, all refused.
+    #[test]
+    fn owner_only_rpcs_are_refused_from_other_clients() {
+        let Some((mut g, ann)) = world() else { return };
+        join(&mut g, 2, "Bob");
+        g.net.out.clear();
+        send_on(&mut g, 2, ann, "PlayerShareState.InputOnJumpServerRpc", &[]);
+        send_on(&mut g, 2, ann, "PlayerShareState.StartMiningServerRpc", &[json!(101_000_001), json!(1.5), json!(2)]);
+        send_on(&mut g, 2, ann, "PlayerShareState.StopMiningServerRpc", &[]);
+        for name in ["PlayerShareState.InputOnJumpClientRpc", "PlayerShareState.StartMiningClientRpc", "PlayerShareState.StopMiningClientRpc"] {
+            assert!(sent(&g, name).is_empty(), "{name} was sent for a player that is not the sender");
+        }
+        let iron = g.create_world_object(g.data.group("Iron").unwrap(), 0, true);
+        g.drop_on_floor(iron, [561.0, 3.0, 497.0], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 0.0, false, 1);
+        let net = g.wos[&iron].net.unwrap();
+        send_on(&mut g, 2, net, "GroupNetworkContainer.RemoveOwnershipServerRpc", &[]);
+        assert_eq!(g.net.objects[&net].owner, 1, "Bob took Ann's item off her");
+        send_on(&mut g, 1, net, "GroupNetworkContainer.RemoveOwnershipServerRpc", &[]);
+        assert_eq!(g.net.objects[&net].owner, 0, "its owner still can");
+    }
+
     #[test]
     fn chat_messages_go_to_everyone_with_the_sender() {
         let Some((mut g, _)) = world() else { return };
