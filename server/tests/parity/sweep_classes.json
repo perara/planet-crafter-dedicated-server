@@ -133,8 +133,8 @@
  },
  {
   "class": "d",
-  "why": "story events: each try (every 3600 / eventsTryEveryHour s) picks an event at random and launches it on a chance (StoryEventsHandler.TryToLaunchAnEventLogic: Random.Range), so the event and its message come at another moment, beyond the pairing window (EXPECTED: randomness)",
-  "line": "StoryEventsHandler\\.AnEventHasBeenTriggeredClientRpc|MessagesHandler\\.AddNewReceivedMessageClientRpc"
+  "why": "story events: each try (every 3600 / eventsTryEveryHour s) picks an event at random and launches it on a chance (StoryEventsHandler.TryToLaunchAnEventLogic: Random.Range), so the event and its message come at another moment, beyond the pairing window, or not within the script at all (the lists of triggered events and received messages end with one more on one server; EXPECTED: randomness)",
+  "line": "StoryEventsHandler\\.AnEventHasBeenTriggeredClientRpc|MessagesHandler\\.AddNewReceivedMessageClientRpc|StoryEventsHandler\\._triggeredStoryEvents: ref|MessagesHandler\\._receivedMessages: ref"
  },
  {
   "class": "b",
