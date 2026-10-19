@@ -444,6 +444,7 @@ pub fn second_inventory_modified(game: &mut Game, wo: i32, item: i32, added: boo
         }
     }
     game.ext.machines.grab.insert(item, (wo, net));
+    game.ext.machines.grab_seen = None;
     if value < 100.0 {
         harvestable(game, wo).unwrap().growings.push((item, net));
     }

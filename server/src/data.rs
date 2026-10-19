@@ -94,17 +94,14 @@ impl NetData {
 
 /// StringExtensionMethods.GetStableHashCode: the .NET Framework string hash over UTF-16 units.
 pub fn stable_hash(s: &str) -> i32 {
-    let units: Vec<u16> = s.encode_utf16().collect();
+    let mut units = s.encode_utf16();
     let mut h1: i32 = 5381;
     let mut h2: i32 = h1;
-    let mut i = 0;
-    while i < units.len() && units[i] != 0 {
-        h1 = (h1.wrapping_shl(5).wrapping_add(h1)) ^ units[i] as i32;
-        if i == units.len() - 1 || units[i + 1] == 0 {
-            break;
-        }
-        h2 = (h2.wrapping_shl(5).wrapping_add(h2)) ^ units[i + 1] as i32;
-        i += 2;
+    // Pairs of units up to a NUL, as the game reads the string (no Vec: this runs on hot paths).
+    while let Some(a) = units.next().filter(|u| *u != 0) {
+        h1 = (h1.wrapping_shl(5).wrapping_add(h1)) ^ a as i32;
+        let Some(b) = units.next().filter(|u| *u != 0) else { break };
+        h2 = (h2.wrapping_shl(5).wrapping_add(h2)) ^ b as i32;
     }
     h1.wrapping_add(h2.wrapping_mul(1566083941))
 }
@@ -120,5 +117,28 @@ mod tests {
         assert_eq!(stable_hash("Container1"), 1768717124);
         assert_eq!(stable_hash("CraftStation1"), 769498401);
         assert_eq!(stable_hash("QuartzCraftStation1"), -1824094490);
+    }
+
+    /// The walk over the UTF-16 units is the one over a collected Vec (what it replaced): odd
+    /// and even lengths, a NUL ends the string, units outside the BMP come as two.
+    #[test]
+    fn stable_hash_without_a_vec_is_the_same_hash() {
+        fn reference(s: &str) -> i32 {
+            let units: Vec<u16> = s.encode_utf16().collect();
+            let (mut h1, mut h2): (i32, i32) = (5381, 5381);
+            let mut i = 0;
+            while i < units.len() && units[i] != 0 {
+                h1 = (h1.wrapping_shl(5).wrapping_add(h1)) ^ units[i] as i32;
+                if i == units.len() - 1 || units[i + 1] == 0 {
+                    break;
+                }
+                h2 = (h2.wrapping_shl(5).wrapping_add(h2)) ^ units[i + 1] as i32;
+                i += 2;
+            }
+            h1.wrapping_add(h2.wrapping_mul(1566083941))
+        }
+        for s in ["", "a", "ab", "abc", "abcd", "\0", "a\0b", "ab\0c", "abc\0d", "Prime", "\u{e5}\u{f8}z", "x\u{1F600}y", "\u{1F600}"] {
+            assert_eq!(stable_hash(s), reference(s), "{s:?}");
+        }
     }
 }

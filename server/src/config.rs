@@ -457,6 +457,7 @@ mod tests {
         ("PCDS_BENCH_ACTION_MS", "bench: each player acts this often (default: only moves)."),
         ("PCDS_BENCH_DUMP", "bench: a file for every message and the final save, to compare two runs."),
         ("PCDS_BENCH_HANDOFF", "bench handoff: seconds between handoffs (default half the run)."),
+        ("PCDS_BENCH_SECTIONS", "bench: 1 also prints the time per subsystem of the tick (the section! names)."),
         ("PCDS_PREVIOUS_RELEASE", "The flip gate (make gate): the folder of the release before, its pcds in it."),
         ("PCDS_GATE_CANDIDATE", "The flip gate: another program to hand the release before's world to (to see the gate fail)."),
         ("PCDS_FIXTURE_RELEASE", "The cross-release snapshot fixture: the folder of a release, to write its fixture with."),

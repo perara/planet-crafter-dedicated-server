@@ -89,18 +89,14 @@ pub fn ensure(game: &mut Game) {
 /// object, its capacity the vein's content count.
 fn start(game: &mut Game) {
     let Some(group) = game.data.group("GenerationGroupVein") else { return };
-    let Some(veins) = game.ext.machines.veins.as_ref().and_then(|s| s.veins.clone()) else { return };
-    let mut due = Vec::new();
-    for (i, v) in veins.iter().enumerate() {
-        if !v.started && v.active(game) {
-            due.push(i);
-        }
-    }
+    let Some(veins) = game.ext.machines.veins.as_ref().and_then(|s| s.veins.as_ref()) else { return };
+    // (index, id, content count) of the veins that start now.
+    let due: Vec<(usize, i32, i32)> = veins.iter().enumerate().filter(|(_, v)| !v.started && v.active(game)).map(|(i, v)| (i, v.id, v.count)).collect();
     let list = game.ext.machines.veins.as_mut().unwrap().veins.as_mut().unwrap();
-    for &i in &due {
+    for &(i, _, _) in &due {
         list[i].started = true;
     }
-    for (id, count) in due.iter().map(|&i| (veins[i].id, veins[i].count)).filter(|(id, count)| *count > 0 && *id != 0) {
+    for (_, id, count) in due.into_iter().filter(|(_, id, count)| *count > 0 && *id != 0) {
         if !game.wos.contains_key(&id) {
             game.create_world_object(group, id, true);
         }

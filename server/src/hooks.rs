@@ -21,15 +21,15 @@ pub fn init(game: &mut Game) {
 }
 
 pub fn tick(game: &mut Game) {
-    crate::handlers::default_colors_tick(game);
-    crate::chathooks::tick(game);
-    crate::machines::tick(game);
-    crate::meteo::tick(game);
-    crate::logistics::tick(game);
-    crate::rockets::tick(game);
-    crate::planets::tick(game);
-    crate::animals::tick(game);
-    crate::events::tick(game);
+    section!("colors", crate::handlers::default_colors_tick(game));
+    section!("chathooks", crate::chathooks::tick(game));
+    section!("machines", crate::machines::tick(game));
+    section!("meteo", crate::meteo::tick(game));
+    section!("logistics", crate::logistics::tick(game));
+    section!("rockets", crate::rockets::tick(game));
+    section!("planets", crate::planets::tick(game));
+    section!("animals", crate::animals::tick(game));
+    section!("events", crate::events::tick(game));
 }
 
 pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str, a: &Args) -> bool {

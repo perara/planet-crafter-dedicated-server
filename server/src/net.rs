@@ -425,11 +425,15 @@ pub struct Net {
     pub scene_handle: i32,
     /// Objects with a variable changed since the last flush (the only ones flush looks at).
     dirty: Vec<u64>,
+    /// Objects taken out so far (despawn, or a parked drone): whoever watches for an object to
+    /// go looks again only when this moved. Not saved: a restored game looks once.
+    #[serde(skip)]
+    pub removed: u64,
 }
 
 impl Net {
     pub fn new(spec: Spec, first_dynamic_id: u64) -> Net {
-        Net { objects: Default::default(), next_id: first_dynamic_id, out: Vec::new(), spec, scene_handle: SCENE_HANDLE, dirty: Vec::new() }
+        Net { objects: Default::default(), next_id: first_dynamic_id, out: Vec::new(), spec, scene_handle: SCENE_HANDLE, dirty: Vec::new(), removed: 0 }
     }
 
     /// Adds an in-scene object (fixed id, part of every join, never sent as a spawn).
@@ -457,6 +461,7 @@ impl Net {
 
     pub fn despawn(&mut self, id: u64) {
         if self.objects.shift_remove(&id).is_some() {
+            self.removed += 1;
             self.out.push(protocol::destroy_object(id).into_target(Target::All));
         }
     }

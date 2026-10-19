@@ -186,7 +186,7 @@ pub struct Game {
     /// InventoriesHandler._clientInventoryWatchers: inventory -> client -> count.
     pub watchers: HashMap<i32, IndexMap<u64, u32>>,
     pub tmp_inventory_id: i32,
-    pub clients: IndexMap<u64, Client>,
+    pub clients: crate::idmap::IdMap<u64, Client>,
     /// SavedDataHandler._playersData: saved players not in the game right now.
     pub saved_players: Vec<Value>,
     pub total_crafted: HashMap<u64, u32>,
@@ -339,7 +339,7 @@ impl Game {
             holders: Default::default(),
             watchers: HashMap::new(),
             tmp_inventory_id: -2,
-            clients: IndexMap::new(),
+            clients: Default::default(),
             saved_players: Vec::new(),
             total_crafted: HashMap::new(),
             all_time_tokens: HashMap::new(),
@@ -755,7 +755,7 @@ impl Game {
 
     /// One tick of the simulation, then the variable deltas.
     pub fn tick(&mut self) {
-        crate::handlers::run_pending(self, |g, rpc| g.rpc_cost(rpc), |g, client, rpc| g.run_rpc(client, rpc));
+        section!("rpcs", crate::handlers::run_pending(self, |g, rpc| g.rpc_cost(rpc), |g, client, rpc| g.run_rpc(client, rpc)));
         let clock = self.clock();
         let last = std::mem::replace(&mut self.last_clock, clock);
         let empty = self.rules.world.pause_when_empty && !self.clients.values().any(|c| c.ready.is_some());
@@ -780,12 +780,12 @@ impl Game {
         }
         self.time = (clock - self.paused) as f32;
         self.advanced = true;
-        crate::scene::tick(self);
+        section!("scene", crate::scene::tick(self));
         if self.time >= self.next_time_sync {
             self.next_time_sync = self.time + 1.0;
-            self.every_second();
+            section!("every_second", self.every_second());
         }
-        self.net.flush();
+        section!("flush", self.net.flush());
     }
 
     fn every_second(&mut self) {

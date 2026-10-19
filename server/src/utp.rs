@@ -134,11 +134,12 @@ impl Connection {
 
     /// Reliable header: type, ack mask length (0 = 8 bytes for a 64 window), processing time,
     /// sequence, then what we received: highest sequence and mask.
-    fn reliable_header(&self, kind: u8, sequence: u16) -> Vec<u8> {
-        let mut h = vec![kind, 0, 0, 0];
-        h.extend_from_slice(&sequence.to_le_bytes());
-        h.extend_from_slice(&self.received.to_le_bytes());
-        h.extend_from_slice(&self.mask.to_le_bytes());
+    fn reliable_header(&self, kind: u8, sequence: u16) -> [u8; 16] {
+        let mut h = [0u8; 16];
+        h[0] = kind;
+        h[4..6].copy_from_slice(&sequence.to_le_bytes());
+        h[6..8].copy_from_slice(&self.received.to_le_bytes());
+        h[8..16].copy_from_slice(&self.mask.to_le_bytes());
         h
     }
 

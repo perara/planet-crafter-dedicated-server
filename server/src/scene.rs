@@ -123,11 +123,16 @@ pub fn player_count_changed(game: &mut Game) {
 
 pub fn tick(game: &mut Game) {
     let now = game.time;
-    let due: Vec<Timer> = {
-        let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut game.timers.0).into_iter().partition(|(t, _)| *t <= now);
-        game.timers.0 = waiting;
-        ready.into_iter().map(|(_, t)| t).collect()
-    };
+    // Nothing due (nearly every tick): the list stays as it is, no new one is made.
+    let due: Vec<Timer> = section!("timers", {
+        if game.timers.0.iter().all(|(t, _)| *t > now) {
+            Vec::new()
+        } else {
+            let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut game.timers.0).into_iter().partition(|(t, _)| *t <= now);
+            game.timers.0 = waiting;
+            ready.into_iter().map(|(_, t)| t).collect()
+        }
+    });
     for timer in due {
         match timer {
             Timer::Despawn(wo, net) => {
@@ -138,9 +143,9 @@ pub fn tick(game: &mut Game) {
             Timer::FinalDeconstruct(wo, client) => crate::deconstruct::finish(game, wo, client),
         }
     }
-    crate::gauges::tick(game);
-    crate::units::tick(game);
-    crate::energy::tick(game);
+    section!("gauges", crate::gauges::tick(game));
+    section!("units", crate::units::tick(game));
+    section!("energy", crate::energy::tick(game));
     crate::hooks::tick(game);
 }
 

@@ -83,6 +83,8 @@ fn check_every(hours: impl Into<u64>) -> Duration {
     let seconds = crate::config::dev("check-seconds").and_then(|s| s.parse::<u64>().ok());
     seconds.map_or_else(|| Duration::from_secs(hours.into().clamp(1, 8760) * 3600), Duration::from_secs)
 }
+/// The front's frame while it is quiet (Front::quiet): a request on the admin API waits for it.
+const IDLE_FRAME: Duration = Duration::from_millis(20);
 /// Kicked: the reason first, the connection closed this much later.
 const KICK_DELAY: Duration = Duration::from_millis(300);
 /// More crashes than this within CRASH_WINDOW and the front gives up (systemd restarts it).
@@ -529,12 +531,19 @@ impl Front {
         }
     }
 
+    /// Nobody connected and nothing under way: only a new connection, a bank frame or an admin
+    /// request can come, and none of them needs the 5 ms frame.
+    fn quiet(&self) -> bool {
+        self.conns.is_empty() && self.next.is_none() && self.exiting.is_empty() && self.pending_drop.is_empty() && self.held.is_empty() && matches!(self.phase, Phase::Idle | Phase::Stopped)
+    }
+
     fn serve(&mut self) {
-        let mut next_frame = Instant::now();
+        let mut frame_at = Instant::now().checked_sub(IDLE_FRAME).unwrap_or_else(Instant::now);
         while !self.stop.load(Ordering::SeqCst) {
-            let frame = Instant::now() >= next_frame;
+            let every = if self.quiet() { IDLE_FRAME } else { crate::FRAME };
+            let frame = Instant::now() >= frame_at + every;
             if frame {
-                next_frame = Instant::now() + crate::FRAME;
+                frame_at = Instant::now();
                 self.poll_steam();
             }
             let mut sent = self.poll_utp();
@@ -564,7 +573,8 @@ impl Front {
                 fds.push(b.link.fd());
                 out.push(b.link.pending());
             }
-            ipc::wait(&fds, &out, next_frame.saturating_duration_since(Instant::now()));
+            let every = if self.quiet() { IDLE_FRAME } else { crate::FRAME };
+            ipc::wait(&fds, &out, (frame_at + every).saturating_duration_since(Instant::now()));
         }
         self.shutdown(0);
     }
@@ -1943,6 +1953,31 @@ mod tests {
         front.phase = Phase::Stopped;
         let (status, body) = front.update_request(&json!({"check": true}));
         assert!(status == 409 && body.contains("the world is stopped"), "{status} {body}");
+    }
+
+    /// The slow frame is for a front with nobody connected and nothing under way only.
+    #[test]
+    fn the_front_is_quiet_only_with_nobody_connected_and_nothing_under_way() {
+        let mut front = test_front();
+        assert!(front.quiet());
+        front.conns.insert(1, Conn::Ip([0; 8]));
+        assert!(!front.quiet());
+        front.conns.clear();
+        front.pending_drop.push((1, Instant::now()));
+        assert!(!front.quiet());
+        front.pending_drop.clear();
+        front.held.push((ipc::DATA, 1, vec![], 1));
+        assert!(!front.quiet());
+        front.held.clear();
+        for phase in [Phase::Starting, Phase::Snapshotting, Phase::Restoring, Phase::Recovering] {
+            front.phase = phase;
+            assert!(!front.quiet());
+        }
+        front.phase = Phase::Stopped;
+        assert!(front.quiet());
+        let (bank, _theirs) = fake_bank("b");
+        front.next = Some(bank);
+        assert!(!front.quiet());
     }
 
     /// A panic in an update's thread is that update's failure, not a busy update for ever.

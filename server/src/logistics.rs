@@ -890,6 +890,7 @@ fn park_drone(game: &mut Game, d: i32) {
     let Some(dr) = game.ext.logistics.drones.get_mut(&d) else { return };
     let Some(net) = dr.net.take() else { return };
     dr.parked = game.net.objects.shift_remove(&net);
+    game.net.removed += 1;
     let hidden = std::mem::take(&mut dr.hidden);
     if let Some(w) = game.wos.get_mut(&d) {
         w.net = None;

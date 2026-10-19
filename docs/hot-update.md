@@ -48,6 +48,10 @@ autosave setting; while the world is stopped the front answers `GET /api/status`
 `banks`, `update`). Writes to a bank never block: frames wait in a queue per bank, and a client
 with more than 16 MiB waiting for the game (held during a flip, or a stalled bank) is dropped.
 The bank writes blocking: a front that stopped reading stalls the world, which loses nothing.
+The frames queued together go out in one write (writev; a frame with a descriptor alone). The
+front loops every 5 ms; with nobody connected and no flip under way it loops every 20 ms (a
+datagram or a bank frame wakes it at once; an admin request, a chat reply, a stop signal and
+Steam's callbacks wait for the frame).
 
 **The bank** is the server loop's game half: it builds and parses batches, decides what goes
 out when (the immediate answers, the 16 ms movement batches), kicks (the reason as DATA, then

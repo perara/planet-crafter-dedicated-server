@@ -245,12 +245,29 @@ pub struct Batch {
 }
 
 impl Batch {
-    pub fn push(&mut self, kind: u32, data: &[u8]) {
+    fn start(&mut self) {
         if self.out.0.is_empty() {
             self.out.0.resize(16, 0);
         }
+    }
+
+    pub fn push(&mut self, kind: u32, data: &[u8]) {
+        self.start();
         self.out.packed_u32(kind).packed_u32(data.len() as u32).bytes(data);
         self.count = self.count.wrapping_add(1);
+    }
+
+    /// Room for `more` bytes of messages (and the head, if nothing is in yet).
+    pub fn reserve(&mut self, more: usize) {
+        self.out.0.reserve(more + if self.out.0.is_empty() { 16 } else { 0 });
+    }
+
+    /// `count` messages, already with their headers (type and size, bit-packed), as one run of
+    /// bytes.
+    pub fn push_run(&mut self, count: usize, messages: &[u8]) {
+        self.start();
+        self.out.0.extend_from_slice(messages);
+        self.count = self.count.wrapping_add(count as u16);
     }
 
     pub fn is_empty(&self) -> bool {

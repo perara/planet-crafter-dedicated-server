@@ -12,6 +12,10 @@
 //! load test's players do (load.rs): craft, drop, pick up, build, eat, drink, mine, chat, sort.
 //! "cpu at real time" is the share of one core the ticks would use running live.
 //!
+//! PCDS_BENCH_SECTIONS=1 also prints the time per subsystem (the `section!` names in the tick; "scene" holds
+//! timers, gauges, units, energy and hooks' parts; "receive" and "act" are the bench's players' packets and
+//! RPCs). The clock reads add a little to each tick: use it to see where time goes, not for the total.
+//!
 //! `handoff` (the same variables, plus PCDS_BENCH_HANDOFF=seconds, default half the run) runs
 //! the loop twice: straight through, and with the game snapshotted and rebuilt from the
 //! snapshot every that many seconds (handoff.rs). The two fingerprints must be equal. It then
@@ -23,11 +27,51 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::data::stable_hash;
 use crate::game::{tests::join, Game};
 use crate::protocol::{NETWORK_TRANSFORM, RPC};
 use crate::save::SaveFile;
 use crate::wire::Writer;
+
+/// Counts this thread's allocations (calls, bytes), for the bench's "allocations per tick".
+struct Counting;
+thread_local!(static ALLOCS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) });
+
+// SAFETY: every call goes to the system allocator; the counters are plain thread-local cells.
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
+        let _ = ALLOCS.try_with(|a| a.set((a.get().0 + 1, a.get().1 + l.size() as u64)));
+        unsafe { std::alloc::System.alloc(l) }
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(p, l) }
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: std::alloc::Layout, n: usize) -> *mut u8 {
+        let _ = ALLOCS.try_with(|a| a.set((a.get().0 + 1, a.get().1 + n as u64)));
+        unsafe { std::alloc::System.realloc(p, l, n) }
+    }
+}
+
+#[global_allocator]
+static COUNTING: Counting = Counting;
+
+static SECTIONS: AtomicBool = AtomicBool::new(false);
+thread_local!(static TIMES: RefCell<HashMap<&'static str, Duration>> = RefCell::new(HashMap::new()));
+
+/// `section!`'s clock: only while PCDS_BENCH_SECTIONS is on.
+pub fn start() -> Option<Instant> {
+    SECTIONS.load(Ordering::Relaxed).then(Instant::now)
+}
+
+pub fn stop(name: &'static str, started: Option<Instant>) {
+    if let Some(t) = started {
+        TIMES.with(|m| *m.borrow_mut().entry(name).or_default() += t.elapsed());
+    }
+}
 
 fn fingerprint(h: &mut impl Hasher, out: &mut Vec<(crate::net::Target, u32, Vec<u8>)>) -> (usize, u64, Vec<String>) {
     // Within one tick the order of independent messages may follow hash-map order: sorted.
@@ -128,6 +172,10 @@ struct Run {
     ticks: Vec<u64>,
     messages: usize,
     busy: Duration,
+    /// Allocation calls and bytes inside the timed part of the ticks.
+    allocs: (u64, u64),
+    /// Each tick's time in the timed part (the players' packets and actions that tick, then the tick), in ns.
+    tick_ns: Vec<u32>,
     save: usize,
     /// The sorted messages of the tick asked for.
     dumped: Vec<String>,
@@ -138,12 +186,18 @@ struct Run {
 /// The bench loop; `swap` may replace the game after a tick, every `swap_every` seconds.
 fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game, dump: Option<usize>) -> Run {
     g.sim_time = Some(0.0);
+    // More than the default 16 players, when asked for.
+    if e.players as usize > g.rules.max_players() {
+        g.rules.limits.max_players = Some(e.players as usize);
+    }
     let mut h = std::collections::hash_map::DefaultHasher::new();
     let objects: Vec<u64> = (1..=e.players).map(|c| join(&mut g, c, &format!("Bench{c}"))).collect();
     let mut players: Vec<Player> = (1..=e.players).map(|c| Player { rng: 0x9e37_79b9_7f4a_7c15 ^ c.wrapping_mul(0x2545_f491_4f6c_dd1d), ..Default::default() }).collect();
     let (mut messages, _, joined) = fingerprint(&mut h, &mut g.net.out);
     let (step, net_tick, act_every) = (0.005, 1.0 / g.net_data.tick_rate as f64, e.action_ms as f64 / 1000.0);
     let (mut t, mut next_move, mut next_act, mut next_swap, mut busy, mut seq) = (0.0, 0.0, act_every, swap_every, Duration::ZERO, 0);
+    let mut allocs = (0u64, 0u64);
+    let mut tick_ns = Vec::with_capacity((e.seconds / step) as usize + 1);
     let (mut ticks, mut dumped) = (Vec::new(), Vec::new());
     let mut file = e.dump.as_ref().map(|p| std::io::BufWriter::new(std::fs::File::create(p).unwrap()));
     if let Some(f) = &mut file {
@@ -154,6 +208,7 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
         t += step;
         g.sim_time = Some(t);
         let started = Instant::now();
+        let before = ALLOCS.get();
         if t >= next_move {
             next_move += net_tick;
             for (i, object) in objects.iter().enumerate() {
@@ -164,18 +219,21 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
                 for f in [560.0 + 10.0 * a.cos(), 500.0 + 10.0 * a.sin()] {
                     w.bytes(&f32::to_le_bytes(f));
                 }
-                g.receive(i as u64 + 1, &crate::wire::batch(&[(NETWORK_TRANSFORM, w.0)]));
+                section!("receive", g.receive(i as u64 + 1, &crate::wire::batch(&[(NETWORK_TRANSFORM, w.0)])));
             }
         }
         if e.action_ms > 0 && t >= next_act {
             next_act += act_every;
             seq += 1;
             for (i, object) in objects.iter().enumerate() {
-                act(&mut g, i as u64 + 1, *object, &mut players[i], seq);
+                section!("act", act(&mut g, i as u64 + 1, *object, &mut players[i], seq));
             }
         }
-        g.tick();
+        section!("tick", g.tick());
         busy += started.elapsed();
+        tick_ns.push(started.elapsed().as_nanos().min(u32::MAX as u128) as u32);
+        let after = ALLOCS.get();
+        allocs = (allocs.0 + after.0 - before.0, allocs.1 + after.1 - before.1);
         let (n, own, tick) = fingerprint(&mut h, &mut g.net.out);
         messages += n;
         if let Some(f) = &mut file {
@@ -199,7 +257,7 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
         use std::io::Write;
         writeln!(f, "save {save}").unwrap();
     }
-    Run { fingerprint: h.finish(), ticks, messages, busy, save: save.len(), dumped, game: g }
+    Run { fingerprint: h.finish(), ticks, messages, busy, allocs, tick_ns, save: save.len(), dumped, game: g }
 }
 
 /// The load test's players (three, acting every 200 ms) for 20 s on the test world, played
@@ -230,6 +288,7 @@ fn bench() {
     let loaded = Instant::now();
     let g = load(&e);
     println!("bench: load {:?}, {} world objects, {} network objects", loaded.elapsed(), g.wos.len(), g.net.objects.len());
+    SECTIONS.store(std::env::var("PCDS_BENCH_SECTIONS").is_ok_and(|v| v == "1"), Ordering::Relaxed);
     let r = run(g, &e, f64::INFINITY, |g| g, None);
     let per_tick = r.busy / r.ticks.len() as u32;
     println!(
@@ -242,6 +301,16 @@ fn bench() {
         r.save,
         r.fingerprint
     );
+    println!("bench: {:.2} allocations ({:.0} bytes) per tick, {:.2} us per tick in the timed part", r.allocs.0 as f64 / r.ticks.len() as f64, r.allocs.1 as f64 / r.ticks.len() as f64, r.busy.as_secs_f64() * 1e6 / r.ticks.len() as f64);
+    let mut sorted = r.tick_ns.clone();
+    sorted.sort_unstable();
+    let at = |p: f64| sorted[((sorted.len() - 1) as f64 * p) as usize] as f64 / 1e3;
+    println!("bench: per tick p50 {:.2} us, p99 {:.2} us, p99.9 {:.2} us, max {:.2} us", at(0.5), at(0.99), at(0.999), at(1.0));
+    let mut times: Vec<_> = TIMES.with(|m| m.borrow().iter().map(|(k, v)| (*k, *v)).collect());
+    times.sort_by_key(|t| std::cmp::Reverse(t.1));
+    for (name, t) in times {
+        println!("bench: section {name:12} {:9.1} ms, {:8.3} us per tick, {:5.1}% of the busy time", t.as_secs_f64() * 1e3, t.as_secs_f64() * 1e6 / r.ticks.len() as f64, 100.0 * t.as_secs_f64() / r.busy.as_secs_f64());
+    }
 }
 
 /// The first tick two runs differ in, with the messages only one of them sent then.

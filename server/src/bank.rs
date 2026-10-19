@@ -447,9 +447,11 @@ fn send(link: &mut Link, mail: &mut crate::idmap::FxHashMap<u64, wire::Batch>, c
             if let Some(left) = loading.get_mut(c) {
                 *left -= batch.len() as i64;
             }
-            link.send(ipc::DATA, *c, &batch);
+            link.queue(ipc::DATA, *c, &batch, None, 0);
         }
     }
+    // All the clients' batches in one write.
+    link.drain();
 }
 
 /// Who an API call names: {"id": N} is that client id exactly; {"name": S} (or the plugin
@@ -855,6 +857,57 @@ fn final_save(game: &mut Game, path: &str) -> i32 {
 /// Sorts the queued messages into each approved client's batch, in queue order. A client gets
 /// messages queued after its ConnectionApproved: everything before is in the world it was sent.
 fn post(game: &mut Game, approved: &mut HashSet<u64>, mail: &mut crate::idmap::FxHashMap<u64, wire::Batch>, loading: &mut HashMap<u64, i64>) {
+    // A join in the queue: who gets a message depends on whether it came before or after it.
+    if game.net.out.iter().any(|(_, kind, _)| *kind == protocol::CONNECTION_APPROVED) {
+        return post_in_order(game, approved, mail, loading);
+    }
+    // Client by client: each message with its header is written once into one buffer, and a
+    // client's batch is that buffer's runs of the messages that reach it (nearly all of them reach
+    // nearly everyone: a player's movement goes to all the others), so a batch is a few copies.
+    // The movement of every player goes to every other: this is players squared.
+    let mut out = std::mem::take(&mut game.net.out);
+    if !approved.is_empty() && !out.is_empty() {
+        let mut messages = wire::Writer::new();
+        let ends: Vec<usize> = out
+            .iter()
+            .map(|(_, kind, body)| {
+                messages.packed_u32(*kind).packed_u32(body.len() as u32).bytes(body);
+                messages.len()
+            })
+            .collect();
+        for c in approved.iter() {
+            let mut give = |count: usize, from: usize, to: usize| {
+                let batch = mail.entry(*c).or_default();
+                if batch.is_empty() {
+                    batch.reserve(messages.len());
+                }
+                batch.push_run(count, &messages.0[from..to]);
+            };
+            // The run of messages being gathered: (from, to, how many).
+            let mut run: Option<(usize, usize, usize)> = None;
+            let mut start = 0;
+            for ((target, _, _), end) in out.iter().zip(&ends) {
+                if target.reaches(*c) {
+                    run = Some(match run {
+                        Some((from, _, n)) => (from, *end, n + 1),
+                        None => (start, *end, 1),
+                    });
+                } else if let Some((from, to, n)) = run.take() {
+                    give(n, from, to);
+                }
+                start = *end;
+            }
+            if let Some((from, to, n)) = run {
+                give(n, from, to);
+            }
+        }
+    }
+    out.clear();
+    game.net.out = out;
+}
+
+/// `post` message by message, for a queue with a ConnectionApproved in it.
+fn post_in_order(game: &mut Game, approved: &mut HashSet<u64>, mail: &mut crate::idmap::FxHashMap<u64, wire::Batch>, loading: &mut HashMap<u64, i64>) {
     for (to, kind, body) in game.net.out.drain(..) {
         if kind == protocol::CONNECTION_APPROVED {
             if let Target::Only(c) = to {
@@ -914,6 +967,63 @@ mod tests {
             check_loading(&mut game, &mut loading);
         }
         assert_eq!(game.kicks.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [1]);
+    }
+
+    /// The batches `post` makes client by client are those the message-by-message way makes
+    /// (post_in_order, the old code), whoever the messages go to: runs of messages reaching
+    /// everyone, one client left out, one client only, clients not in the game, empty bodies.
+    #[test]
+    fn post_makes_the_same_batches_as_going_message_by_message() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let mut rng = 0x2545_f491_4f6c_dd1du64;
+        let mut random = move |n: u64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng % n
+        };
+        let mut queue = |game: &mut Game, messages: u64| {
+            game.net.out.clear();
+            for _ in 0..messages {
+                let to = match random(6) {
+                    0 => Target::Only(1 + random(7)),
+                    1 | 2 => Target::Except(1 + random(7)),
+                    _ => Target::All,
+                };
+                let size = [0, 1, 28, 28, 28, 200, 1500, 31][random(8) as usize];
+                let body = (0..size).map(|_| random(256) as u8).collect();
+                game.out_to(to, (protocol::NETWORK_TRANSFORM + random(300) as u32, body));
+            }
+        };
+        let finish = |mail: crate::idmap::FxHashMap<u64, wire::Batch>| {
+            let mut all: Vec<(u64, Vec<u8>)> = mail.into_iter().map(|(c, b)| (c, b.finish())).collect();
+            all.sort();
+            all
+        };
+        // Clients 1 to 5 are in the game; 6 and 7 are addressed but are not.
+        let approved: HashSet<u64> = (1..=5).collect();
+        for messages in [1, 2, 3, 10, 64, 300] {
+            let (mut fast, mut slow) = (Default::default(), Default::default());
+            queue(&mut game, messages);
+            let kept = game.net.out.clone();
+            post(&mut game, &mut approved.clone(), &mut fast, &mut HashMap::new());
+            assert!(game.net.out.is_empty());
+            game.net.out = kept;
+            post_in_order(&mut game, &mut approved.clone(), &mut slow, &mut HashMap::new());
+            let (fast, slow) = (finish(fast), finish(slow));
+            assert_eq!(fast, slow, "{messages} messages");
+            assert!(fast.iter().all(|(c, _)| approved.contains(c)));
+        }
+        // Nobody approved: nothing is kept; a client no message reaches has no batch.
+        let mut none = Default::default();
+        queue(&mut game, 5);
+        post(&mut game, &mut HashSet::new(), &mut none, &mut HashMap::new());
+        assert!(none.is_empty() && game.net.out.is_empty());
+        let mut few = Default::default();
+        game.net.out.clear();
+        game.out_to(Target::Only(1), (protocol::NETWORK_TRANSFORM, vec![7]));
+        post(&mut game, &mut [1, 2].into_iter().collect(), &mut few, &mut HashMap::new());
+        assert_eq!(few.len(), 1);
     }
 
     /// A save that cannot be written (here a folder where the save goes): /api/save says so, as

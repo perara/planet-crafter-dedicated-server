@@ -253,6 +253,9 @@ fn handle_rocket_multiplier(game: &mut Game, rocket: i32) {
 
 fn despawn_ignited_rockets(game: &mut Game) {
     let now = game.time;
+    if game.ext.rockets.despawns.iter().all(|(t, _, _)| *t > now) {
+        return;
+    }
     let (due, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut game.ext.rockets.despawns).into_iter().partition(|(t, _, _)| *t <= now);
     game.ext.rockets.despawns = waiting;
     for (_, wo, net) in due {

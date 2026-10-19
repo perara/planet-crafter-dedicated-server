@@ -78,10 +78,7 @@ impl Game {
     /// Increment/DecrementNetworkList on a GroupCountData list of the handler.
     fn count_list(&mut self, increment: bool, var: &str, hash: i32) {
         let Some((object, _)) = self.net.find_class(HANDLER) else { return };
-        let items = match self.net.get(object, HANDLER, var) {
-            Some(VarValue::List(items)) => items.clone(),
-            _ => return,
-        };
+        let Some(VarValue::List(items)) = self.net.get(object, HANDLER, var) else { return };
         let index = items.iter().position(|i| i32::from_le_bytes(i[0..4].try_into().unwrap()) == hash);
         let event = match (index, increment) {
             (None, true) => ListEvent::Add(Game::count_item(hash, 1)),

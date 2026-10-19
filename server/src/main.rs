@@ -22,6 +22,23 @@
 //! them, the README's Settings tables repeat them, and tests keep all of it equal). Gameplay
 //! and tuning are rules (rules.rs), not variables.
 
+/// `section!("name", expr)` is `expr`; the bench (PCDS_BENCH_SECTIONS=1) also adds up the time of each name.
+#[cfg(test)]
+macro_rules! section {
+    ($name:expr, $e:expr) => {{
+        let started = crate::bench::start();
+        let value = $e;
+        crate::bench::stop($name, started);
+        value
+    }};
+}
+#[cfg(not(test))]
+macro_rules! section {
+    ($name:expr, $e:expr) => {
+        $e
+    };
+}
+
 mod animals;
 #[cfg(test)]
 mod bench;
