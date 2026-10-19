@@ -67,6 +67,40 @@ pub fn process_of(pid: u32) -> (f64, u64) {
     (cpu, rss.unwrap_or(0) * 1024)
 }
 
+/// The memory limit of the cgroup this process runs in (cgroup v2: a container's `--memory`, a
+/// Kubernetes memory limit) and what counts against it now (anonymous memory and shared
+/// memory, the snapshot's memfd among it; page cache is reclaimable and left out). None
+/// without a limit or without cgroup v2 (a host: nothing is checked).
+pub fn cgroup_memory() -> Option<(u64, u64)> {
+    let limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max").ok()?.trim().parse().ok()?;
+    let stat = std::fs::read_to_string("/sys/fs/cgroup/memory.stat").ok()?;
+    let field = |name: &str| stat.lines().find_map(|l| l.strip_prefix(name)?.trim().parse::<u64>().ok());
+    Some((limit, field("anon ")? + field("shmem ")?))
+}
+
+/// Whether a flip fits in the memory the cgroup leaves. The new bank and the world's snapshot
+/// are in memory while the old bank still holds the world: measured on a world of 100000
+/// objects (bank 321 MB, snapshot 166 MB, the new bank peaking at 488 MB as it restores),
+/// about twice the live bank's memory beyond what is in use. A flip that does not fit gets a
+/// bank killed by the kernel (a crash restart, players dropped), so it is refused first.
+pub fn flip_memory(live_bank: u64, cgroup: Option<(u64, u64)>) -> Result<(), String> {
+    let Some((limit, used)) = cgroup else { return Ok(()) };
+    let need = live_bank * 2;
+    let free = limit.saturating_sub(used);
+    if free >= need {
+        return Ok(());
+    }
+    let mb = |b: u64| b.div_ceil(1 << 20);
+    Err(format!(
+        "a hot update needs about {} MB of memory beyond what runs (the new bank and the world's snapshot are in memory while the old bank still holds the world); this container's limit is {} MB with {} MB in use, {} MB free. Raise the memory limit to at least {} MB (docker run --memory, Compose mem_limit, a Kubernetes memory limit), or restart instead (pcds upgrade --restart VERSION), which needs no extra memory and disconnects every player",
+        mb(need),
+        mb(limit),
+        mb(used),
+        mb(free),
+        mb(used + need)
+    ))
+}
+
 /// The CPU time of the children this process has reaped (banks that ended).
 pub fn reaped_children_cpu() -> f64 {
     // SAFETY: getrusage only fills the struct it is given.
@@ -260,5 +294,22 @@ mod tests {
         assert!(process()["cpuSeconds"].as_f64().is_some() && process()["memoryBytes"].as_u64().unwrap() > 0);
         let (cpu, memory) = process_of(std::process::id());
         assert!(cpu >= 0.0 && memory > 0);
+    }
+
+    #[test]
+    fn a_flip_must_fit_in_the_memory_the_container_leaves() {
+        const MB: u64 = 1 << 20;
+        // No limit (a host): nothing is checked.
+        assert!(flip_memory(10_000 * MB, None).is_ok());
+        // The measured world: bank 321 MB; 1 GB with 355 MB in use fits, with the last
+        // snapshot (166 MB) also held it does not, nor does 512 MB.
+        assert!(flip_memory(321 * MB, Some((1024 * MB, 355 * MB))).is_ok());
+        let e = flip_memory(321 * MB, Some((1024 * MB, 521 * MB))).unwrap_err();
+        assert!(e.contains("about 642 MB") && e.contains("limit is 1024 MB") && e.contains("at least 1163 MB") && e.contains("pcds upgrade --restart"), "{e}");
+        assert!(flip_memory(321 * MB, Some((512 * MB, 355 * MB))).is_err());
+        // Already over the limit counts as no room.
+        assert!(flip_memory(MB, Some((MB, 2 * MB))).is_err());
+        // This test's own cgroup, whatever it is: reads or says nothing, never fails.
+        let _ = cgroup_memory();
     }
 }

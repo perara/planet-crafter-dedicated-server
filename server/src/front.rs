@@ -1003,6 +1003,7 @@ impl Front {
         if self.phase != Phase::Idle || self.live.is_none() {
             return Err("a flip is under way".into());
         }
+        self.flip_fits()?;
         let b = self.spawn(bank, fail)?;
         println!("flip to bank {bank} ({reason}): pid {} loading", b.child.id());
         self.next = Some(b);
@@ -1010,6 +1011,12 @@ impl Front {
         self.flip = Some(Flip { seq, reason: reason.to_string(), stopped: None, snapshot: Value::Null, kept: None });
         self.updates.busy = Some((seq, format!("flipping to bank {bank}")));
         Ok(())
+    }
+
+    /// Err when a flip would not fit in the container's memory (dashboard::flip_memory).
+    fn flip_fits(&self) -> Result<(), String> {
+        let live = self.live.as_ref().map_or(0, |b| crate::dashboard::process_of(b.child.id()).1);
+        crate::dashboard::flip_memory(live, crate::dashboard::cgroup_memory())
     }
 
     /// The live bank ended.
@@ -1323,6 +1330,10 @@ impl Front {
         if body["check"] == true {
             self.check(seq);
             return (200, json!({"ok": true, "seq": seq}).to_string());
+        }
+        // Before the download: a release that cannot be flipped to is not fetched for nothing.
+        if let Err(e) = self.flip_fits() {
+            return (409, json!({"error": e}).to_string());
         }
         let version = body["version"].as_str().filter(|v| *v != "latest").map(str::to_string);
         self.download(seq, dir, target, version, body["onlyNewer"] == true, false);

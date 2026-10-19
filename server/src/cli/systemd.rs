@@ -209,6 +209,34 @@ WantedBy=timers.target
         Ok(())
     }
 
+    /// In the container, `pcds upgrade --restart`: there is no unit to restart, so the server's
+    /// supervisor (`pcds container`, the front's parent) is asked (SIGUSR1) to stop the server
+    /// and start it again as the same process: the front saves and stops the bank, and the
+    /// new start runs the active bank's front. Waits until the server answers again, and
+    /// says which release runs. Err when the front has no such parent (it is not started by
+    /// `pcds container`): nothing is restarted, and the message says what to do.
+    pub fn restart_in_place(&self) -> Result {
+        let front = self.server_pid().ok_or("the server is not running")?;
+        let Some(supervisor) = supervisor_of(&front) else {
+            return Err("this server is not started by 'pcds container' (the image's entrypoint), which is what restarts it in place: restart the container to run the new release (docker restart CONTAINER)".into());
+        };
+        // SAFETY: SIGUSR1 to the supervisor of this container's server, by the pid /proc names.
+        if unsafe { libc::kill(supervisor, libc::SIGUSR1) } != 0 {
+            return Err(format!("cannot signal the supervisor (pid {supervisor}): {}; restart the container instead (docker restart CONTAINER)", std::io::Error::last_os_error()));
+        }
+        say(format!("restarting the server in place (pid {front} stops, the world is saved)"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        while std::time::Instant::now() < deadline {
+            super::sleep(1);
+            if self.server_pid().is_some_and(|now| now != front) && let Ok(status) = self.api_json("GET", "/api/status") {
+                let live = &status["banks"]["live"];
+                say(format!("the server is back: bank {} runs the world (pcds {})", live["bank"].as_str().unwrap_or("?"), status["serverVersion"].as_str().unwrap_or("?")));
+                return Ok(());
+            }
+        }
+        Err("the server did not come back within 10 minutes (docker logs CONTAINER)".into())
+    }
+
     /// After `pcds update` made new tables: the server restarted on them, unless it is stopped.
     pub fn restart_after_update(&self) -> Result {
         if self.container {
@@ -242,6 +270,18 @@ WantedBy=timers.target
         }
         Ok(true)
     }
+}
+
+/// The pid of the supervisor of the server `front` (its parent) when that is `pcds container`,
+/// which restarts it in place.
+fn supervisor_of(front: &str) -> Option<i32> {
+    let stat = fs::read_to_string(format!("/proc/{front}/stat")).ok()?;
+    // pid (comm) state ppid ...: comm may hold spaces and parentheses.
+    let ppid: i32 = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()?;
+    let cmdline = fs::read(format!("/proc/{ppid}/cmdline")).ok()?;
+    let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
+    let ours = args.first().is_some_and(|a| a.ends_with(b"/pcds") || *a == b"pcds") && args.get(1) == Some(&&b"container"[..]);
+    ours.then_some(ppid)
 }
 
 /// Whether a unit in this ActiveState runs (or is starting, stopping or reloading).
@@ -334,5 +374,17 @@ mod tests {
         assert!(units[0].1.contains("KillMode=mixed\n"));
         assert!(units[1].1.contains("TimeoutStartSec="));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The restart in place goes only to `pcds container`, the front's parent.
+    #[test]
+    fn only_a_pcds_container_supervisor_is_restarted_in_place() {
+        // This test's parent is cargo's test harness or a shell, not `pcds container`.
+        assert_eq!(supervisor_of(&std::process::id().to_string()), None);
+        // No such process.
+        assert_eq!(supervisor_of("4294967295"), None);
+        assert_eq!(supervisor_of("not-a-pid"), None);
+        // (restart_in_place itself is not called: it would signal whichever pcds server of this
+        // user runs on the machine running the tests. docker/test.sh runs it in a container.)
     }
 }

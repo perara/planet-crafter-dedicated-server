@@ -120,7 +120,7 @@ impl Ctx {
         request(port, &token, method, path, body, if path.starts_with("/api/world/") { WORLD_TIMEOUT } else { ADMIN_TIMEOUT })
     }
 
-    fn api_json(&self, method: &str, path: &str) -> Result<Value> {
+    pub(super) fn api_json(&self, method: &str, path: &str) -> Result<Value> {
         let text = self.api(method, path, None)?;
         serde_json::from_str(&text).map_err(|e| format!("{method} {path}: {e}"))
     }

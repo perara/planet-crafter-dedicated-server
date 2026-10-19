@@ -1,0 +1,149 @@
+# The Planet Crafter dedicated server on Kubernetes (docs/docker.md explains every choice).
+#
+#   kubectl create namespace pcds
+#   kubectl -n pcds apply -f docs/kubernetes.yaml
+#   # The game's files, once (the server reads the game's tables from them at every start):
+#   kubectl -n pcds wait --for=condition=Ready pod/pcds-game-copy   (the server pod waits for the
+#     game, restarting itself until it is there; if it sits Pending on the volume, delete the copy pod)
+#   kubectl -n pcds cp "$HOME/.local/share/Steam/steamapps/common/The Planet Crafter" pcds-game-copy:/game
+#   kubectl -n pcds delete pod pcds-game-copy
+#
+# Then: kubectl -n pcds exec sts/pcds -- pcds status | players | worlds | upgrade ...
+#       kubectl -n pcds port-forward svc/pcds-admin 7782   (the admin page; its token: pcds token)
+#
+# Hot update (players stay connected):   kubectl -n pcds exec sts/pcds -- pcds upgrade
+# New image (every player disconnects):  kubectl -n pcds set image sts/pcds pcds=IMAGE
+# A bank in /data/bin newer than the image wins over it: after a hot update the pod runs the
+# hot-updated release whatever image the manifest names (pcds status says which runs).
+---
+# The game's files: filled once, from the commands above, then only read.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pcds-game
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+---
+# A pod that only holds pcds-game open for the copy; delete it afterwards.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pcds-game-copy
+spec:
+  restartPolicy: Never
+  containers:
+    - name: copy
+      image: busybox:1.37
+      command: ["sleep", "3600"]
+      volumeMounts:
+        - { name: game, mountPath: /game }
+  volumes:
+    - name: game
+      persistentVolumeClaim: { claimName: pcds-game }
+---
+# One server, one world: a StatefulSet of one, whose volume (/data: worlds, settings, the
+# banks of installed releases, backups) outlives the pod.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pcds
+spec:
+  serviceName: pcds-game
+  replicas: 1
+  selector:
+    matchLabels: { app: pcds }
+  template:
+    metadata:
+      labels: { app: pcds }
+    spec:
+      # The server saves at SIGTERM: its front gives the bank 30 s twice, then 20 s for what
+      # is left (80 s); 120 s leaves room for a slow disk.
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: pcds
+          image: ghcr.io/perara/planet-crafter-dedicated-server:0.6.2
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            # Updates inside the running pod (off by default; see docs/docker.md).
+            # - { name: PCDS_AUTO_UPDATE, value: "on" }
+            # Invite codes need Steam; "off" leaves direct IP only.
+            - { name: PCDS_STEAM, value: "on" }
+          ports:
+            - { name: game, containerPort: 7777, protocol: UDP }
+            - { name: admin, containerPort: 7782, protocol: TCP }
+          # The same check as the image's HEALTHCHECK: the admin API answers once the world
+          # runs. The first start extracts the game's tables (under a minute), so the startup
+          # probe allows 10 minutes; a hot update stands the world for 50 to 600 ms, far
+          # inside the liveness probe's 3 x 15 s.
+          startupProbe:
+            exec: { command: ["pcds", "api", "GET", "/api/status"] }
+            periodSeconds: 10
+            timeoutSeconds: 15
+            failureThreshold: 60
+          readinessProbe:
+            exec: { command: ["pcds", "api", "GET", "/api/status"] }
+            periodSeconds: 15
+            timeoutSeconds: 15
+          livenessProbe:
+            exec: { command: ["pcds", "api", "GET", "/api/status"] }
+            periodSeconds: 30
+            timeoutSeconds: 15
+            failureThreshold: 3
+          # A hot update holds the old bank, the world's snapshot and the new bank in memory
+          # at once: about 3 times the running bank (docs/docker.md). The bank of a small world
+          # is about 70 MB, of a world of 100000 objects 320 MB (1.2 GB for the pod). A flip that
+          # does not fit is refused with the size to give, never killed.
+          resources:
+            requests: { cpu: "500m", memory: 768Mi }
+            limits: { memory: 1Gi }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: game, mountPath: /game, readOnly: true }
+      volumes:
+        - name: game
+          persistentVolumeClaim: { claimName: pcds-game, readOnly: true }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+---
+# Players join NODE:PORT or the load balancer's address, UDP 7777 (direct IP; Steam invite
+# codes need no inbound port). LoadBalancer needs UDP support from your provider; use
+# type: NodePort with nodePort: 30777 otherwise.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pcds-game
+spec:
+  type: LoadBalancer
+  selector: { app: pcds }
+  ports:
+    - { name: game, port: 7777, targetPort: game, protocol: UDP }
+---
+# The admin page and API: plain HTTP, so cluster-internal only (kubectl port-forward). Never
+# expose it with an Ingress or LoadBalancer without TLS and a firewall.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pcds-admin
+spec:
+  type: ClusterIP
+  selector: { app: pcds }
+  ports:
+    - { name: admin, port: 7782, targetPort: admin, protocol: TCP }

@@ -65,7 +65,7 @@ impl Ctx {
             // them at 'pcds start').
             self.tables_or_undo(None, &banks, &active)?;
             say("restarting the server: every player is disconnected and reconnects");
-            return self.restart_if_running();
+            return if self.container { self.restart_in_place() } else { self.restart_if_running() };
         }
         say("the server runs it from its next start ('pcds start')");
         Ok(())
@@ -86,6 +86,25 @@ impl Ctx {
     /// (what the running server uses), else GitHub's.
     fn releases_url(&self) -> String {
         crate::env("PCDS_RELEASES").or_else(|| self.env_get("PCDS_RELEASES")).unwrap_or_else(updater::releases_url)
+    }
+
+    /// In the container: which release the server runs from, against the image's. A hot update
+    /// puts newer banks into /data/bin, and a bank newer than the image wins over it (bank_for),
+    /// so a pinned image tag does not pin the server; this says so. None outside the container.
+    pub fn image_note(&self, running: Option<&str>) -> Option<String> {
+        if !self.container {
+            return None;
+        }
+        let banks = self.banks();
+        let bank = running.map_or_else(|| updater::active(&banks), str::to_string);
+        let held = updater::info(&banks, &bank)?;
+        let (image, held) = (env!("CARGO_PKG_VERSION"), held["version"].as_str().unwrap_or("?").to_string());
+        let how = if held == image { "the image's version".to_string() } else if updater::newer(&held, image) {
+            format!("newer than the image's: a hot update put it in /data/bin, and a bank newer than the image wins over it, so the image tag does not pin the server. 'pcds upgrade v{image} --restart' runs the image's release again; an image newer than the banks replaces them at its first start")
+        } else {
+            format!("older than the image's: the bank 'pcds upgrade --rollback' chose is kept (or the image's release could not be installed: see the log above). 'pcds upgrade v{image} --restart' runs the image's release")
+        };
+        Some(format!("image: pcds {image}; the server runs pcds {held} from bank {bank}: {how}"))
     }
 
     /// The bank the running front runs the world in.
@@ -137,6 +156,9 @@ impl Ctx {
                 None => println!("bank {bank}: empty{marks}"),
             }
         }
+        if let Some(note) = self.image_note(live.and_then(|l| l["live"]["bank"].as_str())) {
+            println!("{note}");
+        }
         // The running front's view, else the note on disk.
         let fallback = live.map(|l| l["fallback"].clone()).filter(|f| !f.is_null()).or_else(|| updater::fallback(&banks));
         if let Some(f) = fallback {
@@ -183,6 +205,38 @@ mod tests {
         assert!(e.contains("is still the active one") && e.contains("not restarted"), "{e}");
         assert_eq!(updater::active(&banks), "a");
         assert!(describe(&json!({"version": "0.6.0", "tag": "v0.6.0", "protocol": 2, "format": 1})).starts_with("pcds 0.6.0 (v0.6.0), front protocol 2, snapshot format 1"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// In the container, `pcds status` and the start say which release runs against the image's.
+    #[test]
+    fn the_container_says_which_release_runs_against_the_images() {
+        let dir = super::super::test_dir("image-note");
+        let mut ctx = super::super::test_ctx(&dir);
+        let banks = ctx.banks();
+        let image = env!("CARGO_PKG_VERSION");
+        for b in updater::BANKS {
+            std::fs::create_dir_all(banks.join(b)).unwrap();
+        }
+        let put = |bank: &str, version: &str| {
+            std::fs::write(banks.join(bank).join("pcds"), "").unwrap();
+            updater::write_info(&banks.join(bank), &json!({"version": version})).unwrap();
+        };
+        put("a", image);
+        assert_eq!(ctx.image_note(None), None, "outside the container there is no image");
+        ctx.container = true;
+        let note = ctx.image_note(None).unwrap();
+        assert!(note.starts_with(&format!("image: pcds {image}; the server runs pcds {image} from bank a")) && note.contains("the image's version"), "{note}");
+        // A hot update put a newer release in the active bank: it wins, and the note says how to go back.
+        put("a", "99.0.0");
+        let note = ctx.image_note(None).unwrap();
+        assert!(note.contains("pcds 99.0.0 from bank a") && note.contains("does not pin the server") && note.contains(&format!("pcds upgrade v{image} --restart")), "{note}");
+        // The bank that runs (the live one) is the one described, not the active one.
+        put("b", image);
+        assert!(ctx.image_note(Some("b")).unwrap().contains("the image's version"));
+        // An older release left active (a rollback).
+        put("a", "0.0.1");
+        assert!(ctx.image_note(None).unwrap().contains("older than the image's"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

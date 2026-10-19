@@ -27,4 +27,4 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - run: shellcheck -S error install.sh docker/entrypoint.sh tools/flip-gate.sh
+      - run: shellcheck -S error install.sh docker/entrypoint.sh docker/test.sh tools/flip-gate.sh
