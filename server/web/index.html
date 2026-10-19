@@ -1452,6 +1452,8 @@ function renderStopped(s) {
   for (const id of ['pauseWorld', 'saveWorld', 'backupNow', 'ovPause', 'ovSave', 'newWorld', 's3Now']) $(id).disabled = true;
   $('worldState').replaceChildren(h('span', { class: 'chip bad' }, 'stopped'));
   if (current === 'world' && worldsSig !== [s.worldControl, s.state, worldsData && worldsData.current].join('|')) loadWorlds();
+  // The Updates page says the world is stopped and what is possible (its buttons are off).
+  if (current === 'updates') renderUpdates(s);
 }
 async function startWorld(name, btn) {
   const r = await act(r => `World ${r.world} is running`, () => api('POST', '/api/world/start', name ? { world: name } : {}, 150000), btn);
@@ -1547,7 +1549,7 @@ async function updateCall(body, label, btn) {
 const checkUpdate = btn => updateCall({ check: true }, 'Looking for a new release…', btn);
 async function updateNow(btn) {
   const u = status?.update || {};
-  const ok = await ask({ title: u.available ? `Update to ${u.latest}?` : 'Update to the latest release?', body: 'The release is downloaded and checked, installed into the standby bank, and the running world is handed over to it. Players stay connected; the world pauses for a moment. If anything fails, the current version keeps running.', ok: 'Update now' });
+  const ok = await ask({ title: u.available ? `Update to ${u.latest}?` : 'Update to the latest release?', body: 'The release is downloaded and checked, installed into the standby bank, and the running world is handed over to it. Players stay connected; the world pauses for a moment. If anything fails, the current version keeps running. A release that needs a restart (another front protocol or game tables format) is refused and nothing stops: pcds upgrade VERSION --restart on the host installs it.', ok: 'Update now' });
   if (ok) updateCall({ onlyNewer: true }, 'Update started', btn);
 }
 $('updNow').onclick = e => updateNow(e.currentTarget);
@@ -1563,6 +1565,8 @@ function rollbackBlocked(s) {
   const other = (b.installed || []).find(x => !live || x.bank !== live.bank), i = other && other.info;
   if (!live || !i) return null;
   if (i.protocol !== b.frontProtocol) return `pcds ${i.version} speaks another front protocol (${i.protocol}, this front speaks ${b.frontProtocol})`;
+  const mine = ((b.installed || []).find(x => x.bank === live.bank) || {}).info || {};
+  if (i.tablesFormat !== mine.tablesFormat) return `pcds ${i.version} reads game tables of format ${i.tablesFormat ?? 'none'}, the running server's are of format ${mine.tablesFormat ?? 'none'}`;
   if (!(i.reads || []).includes(live.format)) return `pcds ${i.version} reads snapshot formats ${(i.reads || []).join(', ')}, and the running world is in format ${live.format}`;
   return null;
 }
