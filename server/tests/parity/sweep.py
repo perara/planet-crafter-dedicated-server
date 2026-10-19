@@ -1091,6 +1091,17 @@ def settled(line):
     return bool(re.search(r'\.rot: ref "[^"]+" ours "0,0,0,1"$', line))
 
 
+def close_rates(line):
+    """A growth the server told at a few polls, ours and the reference's growing at rates within
+    a quarter of each other (each poll lands at its own moment of a growth that moves a
+    hundredth a second)."""
+    m = re.match(r'~ \S+ growth: ref \[.*\] \(rate ([-\d.e]+)\) ours \[.*\] \(rate ([-\d.e]+)\)$', line)
+    if not m:
+        return False
+    a, b = float(m.group(1)), float(m.group(2))
+    return a > 0 and b > 0 and 0.75 < a / b < 1.34
+
+
 def noise_key(tag, line):
     """What a difference is about, to find the same kind of difference between two reference
     runs: the step's tag and the RPC (or create/destroy), a state variable, a save field."""
@@ -1123,6 +1134,10 @@ def classify(rules, script, tag, line, noise=(), paired=True):
     for r in rules:
         if r.get('kind') == 'settled':
             if settled(line):
+                return r['class'], r['why']
+            continue
+        if r.get('kind') == 'rate':
+            if close_rates(line):
                 return r['class'], r['why']
             continue
         if r.get('paired') and not paired:
