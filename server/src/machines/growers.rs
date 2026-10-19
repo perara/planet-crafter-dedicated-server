@@ -482,7 +482,7 @@ pub fn harvestable_enabled(game: &mut Game, wo: i32) {
 
 /// The growing spots (spawnOnThis) of the prefabs that grow on one, in the machine's frame, and
 /// the height of the soil others raycast onto; measured on the game (the dump has no transforms).
-const SPOTS: &[(&str, [f32; 3])] = &[("VegetableGrower1", [0.00476, 1.249, 0.03]), ("VegetableGrower2", [0.00476, 1.249, 0.03])];
+const SPOTS: &[(&str, [f32; 3], [f32; 3])] = &[("VegetableGrower1", [0.00476, 1.249, 0.03], [-0.005, 0.992, -0.1265]), ("VegetableGrower2", [0.00476, 1.249, 0.03], [-0.005, 0.992, -0.1265])];
 const SOILS: &[(&str, f32)] = &[("Farm1", 0.618_337), ("Farm2", 0.826_295)];
 
 /// GetRandomPosition: the spot an item grows on, in at most `tries` tries (None: none found).
@@ -496,9 +496,10 @@ fn random_position(game: &mut Game, wo: i32, random: &mut MathRandom, machine_ro
     let base = game.wos[&wo].position;
     let id = game.data.groups[game.wos[&wo].group].id.as_str();
     if radius == 0.0 && spawn_on_this {
-        let spot = SPOTS.iter().find(|(g, _)| *g == id).map(|(_, s)| *s).unwrap_or([0.0; 3]);
+        // The soil's normal leans a little (measured from the crops' turns on the game).
+        let (spot, normal) = SPOTS.iter().find(|(g, _, _)| *g == id).map(|(_, s, n)| (*s, *n)).unwrap_or(([0.0; 3], [0.0, 1.0, 0.0]));
         let offset = rotate(machine_rotation, spot);
-        return Some(([0, 1, 2].map(|i| base[i] + offset[i]), rotate(machine_rotation, [0.0, 1.0, 0.0])));
+        return Some(([0, 1, 2].map(|i| base[i] + offset[i]), rotate(machine_rotation, normal)));
     }
     let soil = SOILS.iter().find(|(g, _)| *g == id).map(|(_, s)| *s).unwrap_or(0.0);
     let water = water_only && crate::water::known(game);
@@ -665,6 +666,9 @@ mod tests {
         assert_eq!(game.wos[&vegetable].position, [50.00476, 6.249, 0.03], "on the growing spot, as the game puts it");
         assert_eq!(game.wos[&vegetable].growth, 0.3f32 * 100.0);
         assert!(game.wos[&vegetable].net.is_some());
+        // Its up axis is the soil's normal, which leans 7 degrees (measured: the game's crops).
+        let up = rotate(game.wos[&vegetable].rotation, [0.0, 1.0, 0.0]);
+        assert!((up[0] + 0.005).abs() < 2e-3 && (up[1] - 0.992).abs() < 2e-3 && (up[2] + 0.1265).abs() < 2e-3, "{up:?}");
         game.ext.machines.energy.insert(grower, true);
         for _ in 0..1200 {
             game.time += 1.0;
