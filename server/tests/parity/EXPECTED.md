@@ -110,7 +110,9 @@ energy: the grower's random state).
 
 - **A second escape pod**: its storage is the start save's scene object (WorldUniqueId
   103976415), which the game keeps inactive in the copy, so the copy cannot be deconstructed
-  there; no client deconstructs a pod through GroupNetworkBase.
+  there; no client deconstructs a pod through GroupNetworkBase. The three pods `sweep_build_1`
+  builds (EscapePod, Humble, Toxicity) stay on the reference: they stay in its world object counts
+  and its save, and their deconstruction shows as a difference here.
 - **Physics the host simulates**: resting places of dropped items (some fall through the
   terrain on the reference), a dropped buildable's rotation, the truck's motion between the
   owner's transforms.

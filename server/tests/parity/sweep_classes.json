@@ -89,6 +89,12 @@
   "line": "."
  },
  {
+  "class": "e",
+  "why": "a second escape pod stays on the reference (it cannot be deconstructed there, see above): the world object counts and the saved objects keep its three pods (EscapePod, EscapePodHumble, EscapePodToxicity) the script built, which this server deconstructs (EXPECTED: not comparable)",
+  "script": "^sweep_build_1$",
+  "line": "^~ scene:WorldObjectsHandler WorldObjectsHandler\\._(allWorldObjectsGroups of EscapePod(Humble|Toxicity)?: changed by ref 1 ours 0|constructedWorldObjectsGroups: ref )"
+ },
+ {
   "class": "b",
   "why": "time: the same message, a few script steps earlier or later (machine coroutines and the 30-frame host run on their own clocks; EXPECTED: Time)",
   "line": "^~ shifted"
