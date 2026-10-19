@@ -21,6 +21,11 @@
   "why": "items the server drops and buildable items: the host owns them and simulates their physics, here the nearest player (EXPECTED: the reference has a host player)"
  },
  {
+  "class": "d",
+  "why": "a new GeneticTrait item gets a random lootable trait (GeneticTraitHandler.GetRandomGeneticTraitWithRarity: Random.Range); the only lootable colour trait, PatternColor10, is the one brown, every other trait leaves the colour unset",
+  "line": "^~ new:GroupNetworkContainer#\\d+ ColorProxy\\._color: ref \\[(0\\.557, 0\\.278, 0\\.157, 1\\.0|0\\.0, 0\\.0, 0\\.0, 0\\.0)\\] ours \\[(0\\.557, 0\\.278, 0\\.157, 1\\.0|0\\.0, 0\\.0, 0\\.0, 0\\.0)\\]"
+ },
+ {
   "class": "b",
   "why": "what the owner of a vehicle or lamp writes: its default colour, VehicleShareData, its rigidbody state by distance to the host (EXPECTED)",
   "line": "ColorProxy\\._color: ref \\[[^]]*\\] ours \\[0\\.0, 0\\.0, 0\\.0, 0\\.0\\]|VehicleShareData\\.|UpdateNetworkRigidBodyState\\.Set(RigidBody|VehicleController)EnabledClientRpc|^worldObjects\\[\\d+\\] field order: ref \\[.*'planet', 'color'\\] ours \\[.*'planet'\\]$"
