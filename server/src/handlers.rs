@@ -32,10 +32,8 @@ pub struct Limits {
     /// Per client: the clock when it last sent motion and the units it may still send.
     #[serde(skip)]
     motion: HashMap<u64, (f64, f64)>,
-    /// Per client: the clock of its last chat message and the messages it may still send. Still
-    /// written (the previous release reads it), never read by a handoff: the next bank's clock
-    /// starts again, and a fresh burst is the worst that gives.
-    #[serde(skip_deserializing)]
+    /// Per client: the clock of its last chat message and the messages it may still send (the
+    /// clock goes on across a handoff, `started` is part of the snapshot).
     chat: HashMap<u64, (f64, f32)>,
     /// RPC work done this tick per client, and its RPCs waiting for the next ticks.
     #[serde(skip)]
