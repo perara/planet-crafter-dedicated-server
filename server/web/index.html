@@ -516,9 +516,14 @@
       <section class="view" id="view-plugins" hidden>
         <div class="card">
           <div class="head"><h2>Plugins</h2><div class="right"><button id="pluginsReload">Read the folder again</button></div></div>
-          <p class="sub">Plugins add commands, rules and reactions to the server without changing it. They live in the server's <code id="pluginsFolder">plugins</code> folder; add one with <code>pcds plugin install PATH</code>. A plugin does nothing until you approve what it asks for, and a plugin that misbehaves is stopped and restarted, and switched off after five faults in a minute.</p>
+          <p class="sub">Plugins add commands, rules and reactions to the server without changing it. They live in the server's <code id="pluginsFolder">plugins</code> folder; add one with <code>pcds plugin install PATH</code>. A plugin does nothing until you approve what it asks for; a folder put there is found within a few seconds, and a plugin can be approved, switched off and replaced while the world runs. A plugin that misbehaves is stopped and restarted, and switched off after five faults in a minute.</p>
           <p class="sub" id="pluginsNote"></p>
           <div class="tw" id="pluginsTable"></div>
+        </div>
+        <div class="card">
+          <div class="head"><h2>Programs reading the event stream</h2></div>
+          <p class="sub">An out-of-process plugin registers by asking for events (<code>POST /api/plugins/events</code>) and leaves by saying so, or after a minute of silence. They hold the admin token: the capabilities above do not apply to them.</p>
+          <div class="tw" id="pluginConsumers"></div>
         </div>
       </section>
 
@@ -1727,7 +1732,7 @@ async function loadPlugins() {
   try { pluginData = await api('GET', '/api/plugins'); drawPlugins(); }
   catch (e) { if (!e.auth) $('pluginsNote').textContent = e.message; }
 }
-const STATE_CHIP = { running: 'ok', disabled: '', pending: 'warn', changed: 'warn', invalid: 'bad', incompatible: 'bad', failed: 'bad' };
+const STATE_CHIP = { running: 'ok', disabled: '', pending: 'warn', changed: 'warn', unloading: 'warn', invalid: 'bad', incompatible: 'bad', failed: 'bad' };
 function drawPlugins() {
   const d = pluginData; if (!d) return;
   $('pluginsFolder').textContent = d.folder || 'plugins';
@@ -1736,7 +1741,7 @@ function drawPlugins() {
   const rows = (d.plugins || []).map(p => {
     const caps = h('td', {}, (p.requested || []).map(c => h('span', { class: 'chip ' + ((p.granted || []).includes(c) ? 'ok' : 'warn'), title: what[c] || '' }, c)));
     const calls = p.stats.calls ? `${p.stats.calls.toLocaleString()} calls, ${Math.round(p.stats.averageMicros)} µs each, slowest ${Math.round(p.stats.maxMicros)} µs` : 'no calls yet';
-    const problem = [p.detail, p.stats.lastError ? `last fault: ${p.stats.lastError}` : null, ...(p.warnings || [])].filter(Boolean);
+    const problem = [p.detail, p.notice, p.stats.lastError ? `last fault: ${p.stats.lastError}` : null, ...(p.warnings || [])].filter(Boolean);
     const buttons = h('td', { class: 'row' },
       p.status === 'running'
         ? h('button', { class: 'small', onclick: e => act(`${p.id} switched off`, () => api('POST', '/api/plugins/disable', { id: p.id }).then(loadPlugins), e.currentTarget) }, 'Disable')
@@ -1751,6 +1756,8 @@ function drawPlugins() {
       buttons
     ];
   });
+  const consumers = (d.stream && d.stream.consumers) || [];
+  $('pluginConsumers').replaceChildren(table(['Name', 'Events', 'Last poll', 'Polls'], consumers.map(c => [h('td', { class: 'mono' }, c.name), (c.kinds || []).join(', '), `${c.lastPollSecondsAgo} s ago`, String(c.polls)]), 'No program is reading the stream'));
   const sig = JSON.stringify(rows.map(r => r.map(c => c.textContent)));
   if ($('pluginsTable').dataset.sig === sig) return;
   $('pluginsTable').dataset.sig = sig;

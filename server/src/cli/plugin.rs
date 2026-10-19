@@ -63,27 +63,34 @@ impl Ctx {
     fn plugin_list(&self) -> Result {
         let dir = self.plugins_dir();
         // The running server knows more (counters, faults); the folder alone gives the rest.
-        let (plugins, from) = match self.api("GET", "/api/plugins", None).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
-            Some(v) => (v["plugins"].as_array().cloned().unwrap_or_default(), "from the running server"),
+        let (plugins, consumers, from) = match self.api("GET", "/api/plugins", None).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
+            Some(v) => (v["plugins"].as_array().cloned().unwrap_or_default(), v["stream"]["consumers"].as_array().cloned().unwrap_or_default(), "from the running server"),
             None => {
                 let host = plugins::prepare(&dir, "world");
                 if let Some(e) = &host.approvals_error {
                     println!("pcds: {e}: no plugin is approved until that is fixed");
                 }
-                (host.plugins.iter().map(plugins::admin::plugin_json).collect(), "the server is not running; showing what its folder holds")
+                (host.plugins.iter().map(plugins::admin::plugin_json).collect(), Vec::new(), "the server is not running; showing what its folder holds")
+            }
+        };
+        let print_consumers = || {
+            for c in &consumers {
+                let kinds: Vec<&str> = c["kinds"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                println!("stream consumer {}: {} (last poll {} s ago, {} polls)", c["name"].as_str().unwrap_or(""), kinds.join(" "), c["lastPollSecondsAgo"], c["polls"]);
             }
         };
         if plugins.is_empty() {
-            println!("no plugins in {}; pcds plugin new ID makes one, pcds plugin install PATH adds one", dir.display());
+            println!("no plugins in {}; pcds plugin new ID makes one, pcds plugin install PATH adds one (a folder put there is found within a few seconds)", dir.display());
+            print_consumers();
             return Ok(());
         }
         println!("({from})");
-        println!("{:<20} {:<8} {:<5} {:<9} {:>8} {:>6}  {}", "ID", "VERSION", "KIND", "STATE", "CALLS", "FAULTS", "CAPABILITIES (granted of asked)");
+        println!("{:<20} {:<8} {:<5} {:<10} {:>8} {:>6}  {}", "ID", "VERSION", "KIND", "STATE", "CALLS", "FAULTS", "CAPABILITIES (granted of asked)");
         for p in &plugins {
             let list = |k: &str| p[k].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>()).unwrap_or_default();
             let asked = list("requested").len();
             println!(
-                "{:<20} {:<8} {:<5} {:<9} {:>8} {:>6}  {}/{}: {}",
+                "{:<20} {:<8} {:<5} {:<10} {:>8} {:>6}  {}/{}: {}",
                 p["id"].as_str().unwrap_or(""),
                 p["version"].as_str().unwrap_or("-"),
                 p["kind"].as_str().unwrap_or("-"),
@@ -97,6 +104,9 @@ impl Ctx {
             if let Some(d) = p["detail"].as_str() {
                 println!("    {d}");
             }
+            if let Some(n) = p["notice"].as_str() {
+                println!("    notice: {n}");
+            }
             for w in p["warnings"].as_array().into_iter().flatten().filter_map(Value::as_str) {
                 println!("    warning: {w}");
             }
@@ -104,6 +114,7 @@ impl Ctx {
                 println!("    last fault: {e}");
             }
         }
+        print_consumers();
         Ok(())
     }
 

@@ -21,6 +21,7 @@ The token and the webhook URL are never printed: the URL of a Discord webhook is
 """
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -51,6 +52,10 @@ def post(url, payload, headers=None, timeout=10):
         return json.load(answer) if answer.headers.get("Content-Type", "").startswith("application/json") else answer.read()
 
 
+# The name this program registers under (GET /api/plugins lists it); it leaves with an unregister.
+CONSUMER = "webhook-relay"
+
+
 class Relay:
     def __init__(self, api, token, webhook, types, send):
         self.api, self.token, self.webhook, self.types, self.send = api, token, webhook, types, send
@@ -58,7 +63,7 @@ class Relay:
 
     def poll(self):
         """One poll; the number of lines sent."""
-        answer = post(self.api + "/api/plugins/events", {"after": self.after, "types": self.types}, {"Authorization": "Bearer " + self.token})
+        answer = post(self.api + "/api/plugins/events", {"consumer": CONSUMER, "after": self.after, "types": self.types}, {"Authorization": "Bearer " + self.token})
         # The server restarted (a new epoch): its ids began again.
         if self.epoch not in (None, answer["epoch"]):
             self.after = 0
@@ -76,6 +81,13 @@ class Relay:
         self.after = max(self.after, answer["last"]) if not answer["events"] else self.after
         return sent
 
+    def leave(self):
+        """Deregisters: the server stops recording what only this program wanted."""
+        try:
+            post(self.api + "/api/plugins/events", {"consumer": CONSUMER, "unregister": True}, {"Authorization": "Bearer " + self.token}, timeout=3)
+        except (urllib.error.URLError, OSError, ValueError):
+            pass
+
     def run(self, interval):
         failures = 0
         while True:
@@ -90,7 +102,7 @@ class Relay:
 
 
 def self_test():
-    seen, hooked = [], []
+    seen, hooked, left = [], [], []
 
     class Fake(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -100,6 +112,9 @@ def self_test():
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             if self.path == "/api/plugins/events":
                 assert self.headers["Authorization"] == "Bearer secret-token"
+                if body.get("unregister"):
+                    left.append(body["consumer"])
+                    return self._answer({"ok": True})
                 seen.append(body)
                 events = [e for e in [
                     {"id": 1, "type": "player_join", "name": "Ann"},
@@ -110,6 +125,9 @@ def self_test():
             else:
                 hooked.append(body)
                 out = {}
+            self._answer(out)
+
+        def _answer(self, out):
             data = json.dumps(out).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -123,9 +141,11 @@ def self_test():
     relay = Relay(base, "secret-token", base + "/hook", ["chat", "player_join"], lambda t: post(base + "/hook", {"content": t}))
     assert relay.poll() == 2
     assert relay.poll() == 0, "the second poll starts after the first's last event"
+    relay.leave()
     server.shutdown()
     assert [h["content"] for h in hooked] == ["Ann joined the game", "**Ann**: hello"], hooked
-    assert seen[0] == {"after": 0, "types": ["chat", "player_join"]} and seen[1]["after"] == 3, seen
+    assert seen[0] == {"consumer": "webhook-relay", "after": 0, "types": ["chat", "player_join"]} and seen[1]["after"] == 3, seen
+    assert left == ["webhook-relay"], left
     print("self-test ok")
 
 
@@ -139,7 +159,11 @@ def main(argv):
         sys.exit("set PCDS_ADMIN_TOKEN and WEBHOOK_URL (or use --dry-run); see the top of this file")
     send = print if dry else (lambda text: post(webhook, {"content": text[:1900]}))
     relay = Relay(os.environ.get("PCDS_API", "http://127.0.0.1:7782"), token, webhook, os.environ.get("RELAY_TYPES", "chat,player_join,player_leave").split(","), send)
-    relay.run(float(os.environ.get("RELAY_POLL", "2")))
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        relay.run(float(os.environ.get("RELAY_POLL", "2")))
+    finally:
+        relay.leave()
 
 
 if __name__ == "__main__":

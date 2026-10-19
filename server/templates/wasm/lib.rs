@@ -28,6 +28,10 @@ impl Plugin for MyPlugin {
         w.u32(self.greeted);
         Some(SavedState { version: 1, bytes: w.0 })
     }
+
+    // Optional: the last call before the plugin is switched off or removed (not at a reload; `save`
+    // is asked right after it). Nothing queued here is applied.
+    // fn unload(&mut self) {}
 }
 
 export!(MyPlugin);
