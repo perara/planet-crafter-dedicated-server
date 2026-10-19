@@ -134,6 +134,10 @@ fn go_off(game: &mut Game, wo: i32, net: u64) {
     let planet = game.planet_hash();
     game.ext.meteo.explode.exploded.insert(wo);
     game.ext.meteo.explode.hit.insert(wo);
+    // Its network object stays for the blast's lifetime (Step::Despawn below).
+    if let Some(w) = game.wos.get_mut(&wo) {
+        w.net = None;
+    }
     game.destroy_world_object(wo, false);
     let reached: Vec<(i32, usize, u64)> = game
         .wos
