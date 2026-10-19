@@ -299,6 +299,8 @@ impl Bank {
                         send(&mut self.link, &mut mail, &all, &mut loading);
                         forward_chat(game, &mut self.link);
                         let t = Instant::now();
+                        // The plugins' states go into the snapshot (within their budget altogether).
+                        contained("the plugins' state", || plugins::checkpoint(game, Some(plugins::limits::FLIP_BUDGET)));
                         match ipc::memfd("pcds-snapshot", |w| crate::handoff::snapshot_to(game, w)) {
                             Ok(fd) => {
                                 let len = std::fs::File::from(fd.try_clone().expect("dup")).metadata().map(|m| m.len()).unwrap_or(0);

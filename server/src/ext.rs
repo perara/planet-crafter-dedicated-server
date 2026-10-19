@@ -24,8 +24,8 @@ pub struct Ext {
     /// Chat events on their way to the front's hooks, and the replies back.
     #[serde(default)]
     pub chat: crate::chathooks::State,
-    /// The plugin host, what the events want, and the plugins' state (docs/plugins.md). Not in the
-    /// snapshot yet: the next commits add it.
-    #[serde(skip)]
+    /// The plugin host (never in the snapshot) and what the snapshot carries for plugins: their
+    /// state and the event stream. Additive: banks that do not know it ignore it (docs/plugins.md).
+    #[serde(default)]
     pub plugins: crate::plugins::Slot,
 }

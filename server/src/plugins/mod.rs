@@ -45,6 +45,8 @@ mod wasm;
 #[cfg(test)]
 mod cost;
 #[cfg(test)]
+mod game_tests;
+#[cfg(test)]
 mod tests;
 
 use approvals::{Approval, Approvals};

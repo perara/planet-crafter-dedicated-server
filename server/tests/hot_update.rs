@@ -488,3 +488,92 @@ fn the_world_stops_starts_and_another_one_runs() {
     drop(server);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// What a scripted player sees when it types `lines` in the chat (pcds probe, a real client over
+/// the real socket): the whole of what the server sent back, as text.
+fn say_in_chat(server: &Server, data: &str, dir: &Path, name: &str, lines: &[&str]) -> String {
+    let mut steps = vec![json!({"wait": 600})];
+    for l in lines {
+        steps.push(json!({"rpc": "ChatHandler.SendChatMessageServerRpc", "on": "ChatHandler", "args": [l]}));
+        steps.push(json!({"wait": 250}));
+    }
+    steps.push(json!({"wait": 600}));
+    let script = dir.join(format!("{name}.json"));
+    std::fs::write(&script, json!({"name": name, "steps": steps}).to_string()).unwrap();
+    let out = Command::new(PCDS).args(["probe", &format!("127.0.0.1:{}", server.udp), data]).arg(&script).output().unwrap();
+    format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+}
+
+/// A plugin installed with the command line, running in a bank: a player's commands reach it, its
+/// state goes through hot updates (the snapshot) and through a restart (the file beside it), and
+/// the admin API tells how it does.
+#[test]
+fn a_plugins_state_goes_through_hot_updates_and_a_restart() {
+    let Some(data) = tables() else { return };
+    let dir = std::env::temp_dir().join(format!("pcds-plugins-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    assert!(Command::new(PCDS).arg("new-save").arg(dir.join("world.json")).arg(&data).stdout(Stdio::null()).status().unwrap().success());
+    // The plugins folder is beside the rules file (here dir/rules.json): dir/plugins. The command
+    // line, with PCDS_HOME = dir, installs and approves there.
+    let cli = |args: &[&str]| {
+        let out = Command::new(PCDS).arg("plugin").args(args).env("PCDS_HOME", &dir).env("HOME", dir.join("home")).env_remove("PCDS_UNIT").env_remove("PCDS_CONTAINER").output().unwrap();
+        assert!(out.status.success(), "plugin {args:?}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    };
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins");
+    cli(&["install", example.join("hello-stats").to_str().unwrap()]);
+    cli(&["enable", "hello-stats", "--yes"]);
+    let banks = banks(&dir);
+    let server = start(&dir, &data, &banks, "http://127.0.0.1:9/releases");
+    let (status, list) = server.api("GET", "/api/plugins", json!({}));
+    assert_eq!((status, list["plugins"][0]["id"].as_str(), list["plugins"][0]["status"].as_str()), (200, Some("hello-stats"), Some("running")), "{list}\n{}", server.log());
+    assert!(server.log().contains("plugins: 1 running (hello-stats)"), "{}", server.log());
+
+    // Commands in the chat of a real client: both counters go up.
+    let said = say_in_chat(&server, &data, &dir, "First", &["!stats", "!uses"]);
+    assert!(said.contains("Server on Prime: 1 players"), "!stats answered the asker: {said}");
+    assert!(said.contains("!stats was used 1 times, !uses 1 times on this world"), "{said}");
+    let (_, list) = server.api("GET", "/api/plugins", json!({}));
+    let calls_before = list["plugins"][0]["stats"]["calls"].as_u64().unwrap();
+    assert!(calls_before >= 3 && list["plugins"][0]["stats"]["faults"] == 0, "{list}");
+
+    // A hot update, and another back: the snapshot carries the state; the new bank's plugin goes on.
+    for (i, expect) in [(0, 2), (1, 3)] {
+        let done = server.update(json!({"rollback": true}));
+        assert_eq!((done["ok"].as_bool(), done["verified"].as_bool()), (Some(true), Some(true)), "flip {i}: {done}\n{}", server.log());
+        let said = say_in_chat(&server, &data, &dir, &format!("After{i}"), &["!uses"]);
+        assert!(said.contains(&format!("!stats was used 1 times, !uses {expect} times on this world")), "after flip {i}: {said}\n{}", server.log());
+    }
+    // The new bank's plugin is a new instance (its counters began again), running, no fault.
+    let (_, list) = server.api("GET", "/api/plugins", json!({}));
+    assert_eq!((list["plugins"][0]["status"].as_str(), list["plugins"][0]["stats"]["faults"].as_u64()), (Some("running"), Some(0)), "{list}");
+
+    // A stop saves the world, and the plugin's state beside it; a new server picks it up.
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    assert!(dir.join("plugins/hello-stats/data/world.state").is_file());
+    drop(server);
+    let server = start(&dir, &data, &banks, "http://127.0.0.1:9/releases");
+    let said = say_in_chat(&server, &data, &dir, "Restarted", &["!uses"]);
+    assert!(said.contains("!stats was used 1 times, !uses 4 times on this world"), "{said}\n{}", server.log());
+
+    // A file of the plugin changed on disk: the next reload shows it waiting for the admin, and
+    // nothing of it runs; approving it again brings it back.
+    let wasm = dir.join("plugins/hello-stats/plugin.wasm");
+    let mut bytes = std::fs::read(&wasm).unwrap();
+    bytes.extend_from_slice(&[0, 6, 4, b'n', b'o', b't', b'e', 0]);
+    std::fs::write(&wasm, bytes).unwrap();
+    let (status, _) = server.api("POST", "/api/plugins/reload", json!({}));
+    let (_, list) = server.api("GET", "/api/plugins", json!({}));
+    assert_eq!((status, list["plugins"][0]["status"].as_str()), (200, Some("changed")), "{list}");
+    let said = say_in_chat(&server, &data, &dir, "Waiting", &["!uses"]);
+    assert!(!said.contains("!stats was used"), "an unapproved plugin does not answer: {said}");
+    let (status, answer) = server.api("POST", "/api/plugins/enable", json!({"id": "hello-stats"}));
+    assert_eq!((status, answer["plugin"]["status"].as_str()), (200, Some("running")), "{answer}");
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
