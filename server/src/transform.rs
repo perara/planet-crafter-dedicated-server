@@ -76,6 +76,15 @@ impl Update {
         self.position.iter().chain(&self.euler).flatten().chain(self.quaternion.iter().flatten()).all(|v| v.is_finite())
     }
 
+    /// `apply` on copies; None when the result is not all numbers. Every value the state carries
+    /// can be finite and still not be: a quaternion of 3e38 passes `finite`, and the next
+    /// Euler-only state merged onto it overflows to NaN, which no snapshot can hold.
+    pub fn applied(&self, position: [f32; 3], rotation: [f32; 4]) -> Option<([f32; 3], [f32; 4])> {
+        let (mut p, mut q) = (position, rotation);
+        self.apply(&mut p, &mut q);
+        (p.iter().chain(&q).all(|v| v.is_finite())).then_some((p, q))
+    }
+
     /// NetworkTransform.ApplyUpdatedState: present axes replace the last state's; Euler angles
     /// merge on the current rotation's eulerAngles.
     pub fn apply(&self, position: &mut [f32; 3], rotation: &mut [f32; 4]) {
@@ -172,6 +181,20 @@ mod tests {
             assert!(!update(&message(QUATERNION_SYNC | 16 | 32 | 64, &[0.0, bad, 0.0, 1.0])).unwrap().finite());
             assert!(!update(&message(IN_LOCAL_SPACE | 2, &[bad])).unwrap().finite());
         }
+    }
+
+    #[test]
+    fn a_finite_state_that_overflows_when_merged_is_refused() {
+        let huge = update(&message(QUATERNION_SYNC | 16 | 32 | 64, &[3.0e38; 4])).unwrap();
+        assert!(huge.finite(), "each value is a number");
+        // The quaternion itself is kept as it came (still numbers) ...
+        let (_, q) = huge.applied([0.0; 3], [0.0, 0.0, 0.0, 1.0]).unwrap();
+        assert_eq!(q, [3.0e38; 4]);
+        // ... but a yaw merged onto it turns to NaN: refused.
+        let yaw = update(&message(32, &[90.0])).unwrap();
+        assert!(yaw.finite());
+        assert!(yaw.applied([0.0; 3], q).is_none());
+        assert!(yaw.applied([0.0; 3], [0.0, 0.0, 0.0, 1.0]).is_some());
     }
 
     #[test]
