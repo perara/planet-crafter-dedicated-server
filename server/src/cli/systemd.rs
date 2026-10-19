@@ -375,4 +375,16 @@ mod tests {
         assert!(units[1].1.contains("TimeoutStartSec="));
         fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// The restart in place goes only to `pcds container`, the front's parent.
+    #[test]
+    fn only_a_pcds_container_supervisor_is_restarted_in_place() {
+        // This test's parent is cargo's test harness or a shell, not `pcds container`.
+        assert_eq!(supervisor_of(&std::process::id().to_string()), None);
+        // No such process.
+        assert_eq!(supervisor_of("4294967295"), None);
+        assert_eq!(supervisor_of("not-a-pid"), None);
+        // (restart_in_place itself is not called: it would signal whichever pcds server of this
+        // user runs on the machine running the tests. docker/test.sh runs it in a container.)
+    }
 }
