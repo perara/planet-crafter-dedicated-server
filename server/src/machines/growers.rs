@@ -331,6 +331,8 @@ pub struct Harvestable {
     radius: f32,
     spawn_on_this: bool,
     down_value: f32,
+    /// allowedLayers is the Water layer alone (1 << 4): a spot is where a ray down meets water.
+    water_only: bool,
     things: Vec<String>,
     model_to_override: Option<String>,
 }
@@ -348,6 +350,7 @@ impl Harvestable {
             radius: f32_of(f, "radius"),
             spawn_on_this: f["spawnOnThis"].is_string(),
             down_value: f32_of(f, "downValue"),
+            water_only: f["allowedLayers"].as_i64() == Some(1 << 4),
             things: f["thingsToGrow"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect(),
             model_to_override: f["modelToOverride"].as_str().map(str::to_string),
         }
@@ -440,7 +443,8 @@ fn create_new_growable(game: &mut Game, wo: i32) -> bool {
     let mut rotation = [0.0, 0.0, 0.0, 1.0];
     if is_active(game, wo) {
         let mut random = MathRandom::new(game.rng.range(1, 9999) as u32);
-        let (p, normal) = random_position(game, wo, &mut random, machine_rotation);
+        // CreateNewGrowable gives up after 52 tries (no spot, no item).
+        let Some((p, normal)) = random_position(game, wo, &mut random, machine_rotation, 52) else { return false };
         position = p;
         rotation = mul(look_rotation(normal), mul(axis_angle(2, random.range(0.0, 360.0)), axis_angle(0, 90.0)));
     }
@@ -465,8 +469,8 @@ pub fn harvestable_enabled(game: &mut Game, wo: i32) {
         if (0..3).map(|i| (at[i] - pivot[i]) * (at[i] - pivot[i])).sum::<f32>() >= EPSILON {
             continue;
         }
-        // GetRandomPosition gets 21 tries; here the first always lands (random_position).
-        let (position, normal) = random_position(game, wo, &mut random, machine_rotation);
+        // OnEnable gives up after 22 tries and leaves the item on the pivot.
+        let Some((position, normal)) = random_position(game, wo, &mut random, machine_rotation, 22) else { continue };
         let rotation = mul(look_rotation(normal), mul(axis_angle(2, random.range(0.0, 360.0)), axis_angle(0, 90.0)));
         let w = game.wos.get_mut(&item).unwrap();
         (w.position, w.rotation) = (position, rotation);
@@ -481,23 +485,36 @@ pub fn harvestable_enabled(game: &mut Game, wo: i32) {
 const SPOTS: &[(&str, [f32; 3])] = &[("VegetableGrower1", [0.00476, 1.249, 0.03]), ("VegetableGrower2", [0.00476, 1.249, 0.03])];
 const SOILS: &[(&str, f32)] = &[("Farm1", 0.618_337), ("Farm2", 0.826_295)];
 
-/// GetRandomPosition: the spot an item grows on.
-// ponytail: the game raycasts down onto the soil or the water within the ring; the server has
-// no colliders, so the ring is taken as level at the measured soil height (the machine's own
-// for algae on water) and every try hits. Upgrade: dump the spots and soil colliders per prefab.
-fn random_position(game: &Game, wo: i32, random: &mut MathRandom, machine_rotation: [f32; 4]) -> ([f32; 3], [f32; 3]) {
+/// GetRandomPosition: the spot an item grows on, in at most `tries` tries (None: none found).
+// ponytail: the game raycasts down onto the soil or the water within the ring; the server has no
+// soil colliders, so the ring is taken as level at the measured soil height and every try hits.
+// Water is real (water::surface_below), on a planet whose water volumes are known: the algae
+// generators grow nothing where there is no water. Upgrade: dump the spots and soil colliders.
+fn random_position(game: &mut Game, wo: i32, random: &mut MathRandom, machine_rotation: [f32; 4], tries: u32) -> Option<([f32; 3], [f32; 3])> {
     let h = game.ext.machines.list[&wo].harvestable.as_ref().unwrap();
+    let (radius, min_radius, down, spawn_on_this, water_only) = (h.radius, h.min_radius, h.down_value, h.spawn_on_this, h.water_only);
     let base = game.wos[&wo].position;
     let id = game.data.groups[game.wos[&wo].group].id.as_str();
-    if h.radius == 0.0 && h.spawn_on_this {
+    if radius == 0.0 && spawn_on_this {
         let spot = SPOTS.iter().find(|(g, _)| *g == id).map(|(_, s)| *s).unwrap_or([0.0; 3]);
         let offset = rotate(machine_rotation, spot);
-        return ([0, 1, 2].map(|i| base[i] + offset[i]), rotate(machine_rotation, [0.0, 1.0, 0.0]));
+        return Some(([0, 1, 2].map(|i| base[i] + offset[i]), rotate(machine_rotation, [0.0, 1.0, 0.0])));
     }
-    let [dx, dz] = random.direction();
-    let r = random.range(h.min_radius, h.radius);
     let soil = SOILS.iter().find(|(g, _)| *g == id).map(|(_, s)| *s).unwrap_or(0.0);
-    ([base[0] + dx * r, base[1] + soil - h.down_value, base[2] + dz * r], [0.0, 1.0, 0.0])
+    let water = water_only && crate::water::known(game);
+    for _ in 0..tries {
+        let [dx, dz] = random.direction();
+        let r = random.range(min_radius, radius);
+        let (x, z) = (base[0] + dx * r, base[2] + dz * r);
+        if !water {
+            return Some(([x, base[1] + soil - down, z], [0.0, 1.0, 0.0]));
+        }
+        // The ray starts 5 m above the machine and reaches 50 m down.
+        if let Some(surface) = crate::water::surface_below(game, [x, base[1] + 5.0, z], 50.0) {
+            return Some(([x, surface - down, z], [0.0, 1.0, 0.0]));
+        }
+    }
+    None
 }
 
 /// CreateAndInstantiateWorldObjectServerRpc as the server calls it (no position check, saved),
@@ -666,6 +683,25 @@ mod tests {
         game.inventories_rpc(1, "InventoriesHandler.RemoveItemFromInventoryServerRpc", &Args(vec![json!(seed), json!(seeds), json!(true)]));
         assert!(!game.wos.contains_key(&next[0]));
         assert!(game.inventories[&second].items.is_empty());
+    }
+
+    #[test]
+    fn algae_grow_where_a_ray_down_meets_water() {
+        let Some(mut game) = game() else { return };
+        // A Prime lake at 57.23 m (machines: floating_machines_follow_the_rising_water).
+        let planet = game.planet_hash();
+        game.units.planet_mut(planet).unwrap().units.iter_mut().filter(|u| u.kind == crate::units::Kind::Terraformation).for_each(|u| u.total = 26.5e6);
+        let wet = build(&mut game, "AlgaeGenerator1", [1420.0, 54.0, -800.0]);
+        let dry = build(&mut game, "AlgaeGenerator1", [50.0, 5.0, 0.0]);
+        crate::machines::tick(&mut game);
+        let crops = |game: &Game, wo: i32| game.inventories[&game.wos[&wo].secondary_inventories[0]].items.clone();
+        let (wet_crops, dry_crops) = (crops(&game, wet), crops(&game, dry));
+        assert!(!wet_crops.is_empty(), "the generator on the lake fills its crop inventory");
+        for c in wet_crops {
+            let y = game.wos[&c].position[1];
+            assert!((y - (57.23 - 0.1)).abs() < 0.02, "{y}: a tenth of a meter under the surface (downValue)");
+        }
+        assert!(dry_crops.is_empty(), "no water under the ring, no spot, no crop (CreateNewGrowable gives up)");
     }
 
     #[test]

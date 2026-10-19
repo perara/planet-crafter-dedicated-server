@@ -56,6 +56,10 @@ the escape pod) so it does not take over a saved player.
   which the start save is just below; it rises over the land east of the pod a little earlier on
   the reference, and RequireEnergy sets what is under water to energy 0 (the sweep builds at
   y = 60).
+- **An autocrafter's craft round** (every craftEveryXSec, the first one `_instancedAutocrafters % 50 / 10`
+  s after the machine starts) runs on each server's own clock: an ingredient that arrives within
+  milliseconds of a round is used by it on one server and by the next round on the other, so
+  the craft's animation and the craft count (AddOneToTotalCraft) come a whole round apart.
 - **Frame timing**: the reference runs at 30 frames a second (the plugin sets it), so a
   coroutine's WaitForSeconds ends up to a frame late each round; a trade rocket's growth at
   one poll can be a step behind ours (4 against 5 after 24 s; equal again later).
@@ -64,13 +68,19 @@ the escape pod) so it does not take over a saved player.
 
 - MachineOutsideGrowerUpdateStartClientRpc's random state.
 - DropSomeItems on death (50 % per item).
-- Unlinked blueprint chips, meteor events and their seeds, recycler drop spots, genetic
-  traits of spawned animals, portal choices (UpdateChoices).
+- Unlinked blueprint chips, meteor events and their seeds, story events (which one a try
+  picks, and the chance it launches: the help messages come at other moments), recycler drop
+  spots, genetic traits of spawned animals, portal choices (UpdateChoices).
 - What ore extractors, harvesting robots and disintegrators make (one of their groups at
-  random), so the save's own machines change different groups' counts on each run; where a
-  harvestable grower places its produce; the trait a petted animal gives; the animal a DNA
+  random; a disintegrator also gives its ingredients back in a random order), so the save's own machines change different groups' counts on each run; where a
+  harvestable grower places its produce (so which crop a player picks near it, and where the
+  next one grows); the trait a petted animal gives; the animal a DNA
   sequence without a species trait becomes (InventorySpawnContent: a random one of the
   AnimalList); the loot a built wreck container gets.
+
+The order of the new world objects in the save (they are saved in the order they were made)
+follows from these: savediff pairs them by group and place, else by rank, and a random group or
+spot reorders the pairing.
 
 Shown by running the reference twice (players: the items kept after dying; machines and
 energy: the grower's random state).
@@ -81,6 +91,14 @@ energy: the grower's random state).
   here, outside or inside a world instance, holds the layout of its pool seed, not of the
   game's seed. Two reference runs of `instances.json` generate the same objects; ours differ.
   Opening the instance itself (seed 400000032) matches.
+
+- **Scene objects inside a built prefab**: ToxicityDiorama2 holds two wreck doors
+  (WorldObjectFromScene, group WreckPilar). The game registers them as world objects when the
+  diorama is built (not saved, no network object) and counts them in
+  `_constructedWorldObjectsGroups`, where they stayed counted after the diorama was deconstructed in the
+  reference run (measured, not read from the code). This server makes neither, so that count of
+  WreckPilar is 2 lower per diorama built. Nothing else the server sends or saves differs; the
+  doors would need world object ids of their own for a number nobody reads.
 
 ## Safety rules (deliberate)
 
@@ -116,7 +134,9 @@ energy: the grower's random state).
 
 - **A second escape pod**: its storage is the start save's scene object (WorldUniqueId
   103976415), which the game keeps inactive in the copy, so the copy cannot be deconstructed
-  there; no client deconstructs a pod through GroupNetworkBase.
+  there; no client deconstructs a pod through GroupNetworkBase. The three pods `sweep_build_1`
+  builds (EscapePod, Humble, Toxicity) stay on the reference: they stay in its world object counts
+  and its save, and their deconstruction shows as a difference here.
 - **Physics the host simulates**: resting places of dropped items (some fall through the
   terrain on the reference), a dropped buildable's rotation, the truck's motion between the
   owner's transforms.

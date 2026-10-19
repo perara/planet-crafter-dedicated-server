@@ -192,6 +192,12 @@ pub fn in_boxes(boxes: &[([f32; 3], [f32; 4], [f32; 3])], position: [f32; 3]) ->
     })
 }
 
+/// Whether the current planet's water is known (its scene dump has water volumes): where it is
+/// not, a ray at the Water layer cannot be answered.
+pub fn known(game: &mut Game) -> bool {
+    !volumes(game).is_empty()
+}
+
 /// Physics.Raycast straight down from `origin` against the Water layer, within `distance`: the
 /// height of the first water surface hit. A ray that starts inside a box does not hit it.
 pub fn surface_below(game: &mut Game, origin: [f32; 3], distance: f32) -> Option<f32> {

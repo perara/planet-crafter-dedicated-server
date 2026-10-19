@@ -14,6 +14,8 @@ What legitimately differs is normalized away:
   position for objects in the approval, and by prefab hash and creation order for new ones;
 - world object ids the server allocates (WorldObjectsIdHandler: 20xxxxxxx, not in SAVE.json):
   named by the step they first appear in and their rank there ("WO@12.1", ...);
+- an RPC the game sends to an object ahead of its spawn message (from OnNetworkSpawn: an
+  optimizer's SetGrowerSpeedMultiplier to a grower just built) names the object by its create;
 - floats are compared to 3 decimals (0.1% for large values).
 
 Network variable deltas are decoded with the tables and compared as state: the value each
@@ -284,6 +286,7 @@ class Transcript:
         self.t = tables
         self.known = known_ids
         self.labels = {}     # net id -> label
+        self.unnamed = {}    # net id -> events that named it before its create (the game sends RPCs from OnNetworkSpawn ahead of the spawn)
         self.objects = {}    # label -> {hash, position, vars}
         self.created = {}    # hash -> count of creations during the run
         self.wo = {}         # allocated world object id -> "WO@step.n"
@@ -360,6 +363,8 @@ class Transcript:
             while label in self.objects:
                 label += "'"
         self.labels[l['id']] = label
+        for e in self.unnamed.pop(l['id'], []):
+            e['object'] = label
         beh = self.t.behaviours(hash_, l['id'])
         vars_ = decode_sync(beh, bytes.fromhex(l['sync'])) if beh is not None else {'?sync': l['sync']}
         self.objects[label] = {'hash': l['hash'], 'owner': 'me' if l['owner'] == self.client and l['owner'] else l['owner'],
@@ -463,7 +468,10 @@ class Transcript:
                 if l['name'] == 'WorldObjectsHandler.CreateAndInstantiateWorldObjectClientRpc' and args and args[0]:
                     net_ids[args[0]] = self.label(args[0])
                     args = [net_ids[args[0]]]
-                self.events.append((step, {'msg': 'rpc', 'name': l['name'], 'object': self.label(l['object']), 'args': self.norm(args)}))
+                e = {'msg': 'rpc', 'name': l['name'], 'object': self.label(l['object']), 'args': self.norm(args)}
+                if e['object'].startswith('net:'):
+                    self.unnamed.setdefault(l['object'], []).append(e)
+                self.events.append((step, e))
             elif m == 'delta':
                 self._delta(l)
             elif m in ('captured', 'capture failed', 'disconnected'):

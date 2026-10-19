@@ -43,8 +43,8 @@
  },
  {
   "class": "b",
-  "why": "time: the reference ran before the probe joined, so growth, gauges, units and meteo timers stand further (EXPECTED: Time)",
-  "line": "^planets\\[0\\].*unit\\w+Level|\\.grwth: ref \\d+ ours \\d+$|playerGauge"
+  "why": "time: the reference ran before the probe joined, so growth, gauges, units, meteo timers and the day and night cycle (full day for the game clock's first 16 minutes, then a ping-pong) stand further, and so does an animal's hunger in its DNA sequence (it falls by _hungerDecreasePerSecond a second) (EXPECTED: Time)",
+  "line": "^planets\\[0\\].*unit\\w+Level|\\.grwth: ref \\d+ ours \\d+$|playerGauge|^~ scene:EnvironmentDayNightCycle EnvironmentDayNightCycle\\._dayNightLerpValue|^worldObjects\\[\\d+\\] \\(DNASequence\\)\\.hunger: ref"
  },
  {
   "class": "b",
@@ -68,6 +68,19 @@
   "line": "\\(GeneticTrait\\)\\.(trt(Ind|Val)|color)|^worldObjects\\[\\d+\\] field order: ref \\['id', 'gId', ('color'|'trtInd')"
  },
  {
+  "class": "d",
+  "why": "the produce a player picks at a harvestable grower: each crop grows on a random spot of the grower's ring (GetRandomPosition: NextFloat) and the probe takes the one nearest the machine, so each run picks another object, with another id, place and rank in its step; the crop that regrows lands on another random spot (EXPECTED: randomness)",
+  "script": "^sweep_feed$",
+  "tag": "\\|harvest from |^player\\|final inventory$",
+  "line": "WorldObjectAssociatedProxy\\.GetWorldObjectId(Client|Server)Rpc|AddWorldObjectToInventoryServerRpc|\"msg\": \"(captured|create|destroy)\"|RetrieveInventoryClientRpc"
+ },
+ {
+  "class": "d",
+  "why": "a disintegrator gives back its ingredients in a random order, and a random part of them when it gives back fewer than the recipe has (MachineDisintegrator.TryToDesintegrateAnObjectInInventory: Random.Range(0, list.Count) and RemoveAt, giveXIngredientsBack times; EXPECTED: randomness)",
+  "tag": "^(DetoxificationMachine[123]|OreBreaker[123]|RecyclingMachine2)\\|(inventory|run)$",
+  "line": "InventoriesHandler\\.RetrieveInventoryClientRpc"
+ },
+ {
   "class": "b",
   "why": "time: the start save is just below TerraformStage4-Water; Prime's lake rises over the build land a little earlier on the reference (it ran before the probe joined), and RequireEnergy sets what is under water to energy 0 (EXPECTED: Time)",
   "tag": "world object details",
@@ -81,9 +94,27 @@
   "line": "."
  },
  {
+  "class": "e",
+  "why": "a second escape pod stays on the reference (it cannot be deconstructed there, see above): the world object counts and the saved objects keep its three pods (EscapePod, EscapePodHumble, EscapePodToxicity) the script built, which this server deconstructs (EXPECTED: not comparable)",
+  "script": "^sweep_build_1$",
+  "line": "^~ scene:WorldObjectsHandler WorldObjectsHandler\\._(allWorldObjectsGroups of EscapePod(Humble|Toxicity)?: changed by ref 1 ours 0|constructedWorldObjectsGroups: ref )"
+ },
+ {
+  "class": "c",
+  "why": "a built ToxicityDiorama2 holds two wreck doors that the game registers as constructed WreckPilar world objects (WorldObjectFromScene children, neither saved nor networked); this server makes none, so the constructed count of WreckPilar stays 2 lower (EXPECTED: approximations)",
+  "script": "^sweep_build_3$",
+  "line": "^~ scene:WorldObjectsHandler WorldObjectsHandler\\._constructedWorldObjectsGroups: ref "
+ },
+ {
   "class": "b",
   "why": "time: the same message, a few script steps earlier or later (machine coroutines and the 30-frame host run on their own clocks; EXPECTED: Time)",
   "line": "^~ shifted"
+ },
+ {
+  "class": "b",
+  "why": "time: an autocrafter's craft round starts every craftEveryXSec after its own first one (_instancedAutocrafters % 50 / 10 s), on each server's own clock; an ingredient that arrives within milliseconds of a round is used by it on one server and by the next round on the other, so that craft (its animation and the craft count) comes a whole round apart, beyond the pairing window (EXPECTED: Time)",
+  "tag": "\\|autocraft at ",
+  "line": "WorldObjectsHandler\\.AddOneToTotalCraftClientRpc|ConstructibleProxy\\.StartCraftAnimationClientRpc"
  },
  {
   "class": "b",
@@ -99,6 +130,11 @@
   "class": "d",
   "why": "meteor events: when one starts, its seed, its target player and place (MeteoHandler.TryToLaunchAnEventLogic and LaunchSpecificMeteoEvent: Random.Range); the reference picks the host's own position (the player nearest the launch, EXPECTED)",
   "line": "MeteoHandler\\._(currentSeed|selectedDataMeteoEventIndex|timeNewMeteoSet|asteroidReference\\w+)"
+ },
+ {
+  "class": "d",
+  "why": "story events: each try (every 3600 / eventsTryEveryHour s) picks an event at random and launches it on a chance (StoryEventsHandler.TryToLaunchAnEventLogic: Random.Range), so the event and its message come at another moment, beyond the pairing window, or not within the script at all (the lists of triggered events and received messages end with one more on one server; EXPECTED: randomness)",
+  "line": "StoryEventsHandler\\.AnEventHasBeenTriggeredClientRpc|MessagesHandler\\.AddNewReceivedMessageClientRpc|StoryEventsHandler\\._triggeredStoryEvents: ref|MessagesHandler\\._receivedMessages: ref|^(messages|storyEvents): \\d+ records"
  },
  {
   "class": "b",
@@ -126,6 +162,18 @@
   "why": "what a recycler drops lands on random spots of its drop bounds (ConstructibleProxy.RecycleContent: Random.Range; EXPECTED: randomness)",
   "tag": "\\|recycle$",
   "line": "\"msg\": \"create\""
+ },
+ {
+  "class": "d",
+  "script": "^sweep_(feed|build_[123]|water|autocraft_AutoCrafter1_[123])$",
+  "line": "^worldObjects order at ",
+  "why": "the saved world objects come in the order they were made, and savediff pairs the new ones by group and place, else by rank: machines that make a random group (ore extractors and breakers, a built wreck's loot, a disintegrator's ingredients) and crops that grow on random spots reorder them (EXPECTED: randomness; the record counts are compared on their own line)"
+ },
+ {
+  "class": "d",
+  "script": "^sweep_autocraft_",
+  "line": "^inventories\\[\\d+\\] \\(\\d+\\)\\.woIds: ref \"NEW#[0-9,NEW#]*\" ours \"NEW#[0-9,NEW#]*\"$",
+  "why": "two items of one group at one place are paired in the order of the world object list, which the random ids decide, while the inventory lists them as they arrived; the pairing can cross (EXPECTED: randomness)"
  },
  {
   "class": "e",
