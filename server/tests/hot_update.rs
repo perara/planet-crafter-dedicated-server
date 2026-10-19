@@ -142,8 +142,19 @@ fn start_with(program: &Path, dir: &Path, data: &str, banks: &Path, releases: &s
     start_env(program, dir, data, banks, releases, verify, &[])
 }
 
-/// start_with() and more settings of the front's environment.
+/// start_with() and more settings of the front's environment. The ports are free when chosen and
+/// a front of another test (or of someone else on this host) may take one before this one binds:
+/// a front that stops for an address in use is started again on others.
 fn start_env(program: &Path, dir: &Path, data: &str, banks: &Path, releases: &str, verify: bool, extra: &[(&str, &str)]) -> Server {
+    for _ in 0..5 {
+        if let Some(server) = start_once(program, dir, data, banks, releases, verify, extra) {
+            return server;
+        }
+    }
+    panic!("the server did not start in 5 tries (ports taken?)");
+}
+
+fn start_once(program: &Path, dir: &Path, data: &str, banks: &Path, releases: &str, verify: bool, extra: &[(&str, &str)]) -> Option<Server> {
     let (admin, udp) = (free_port(), free_port());
     let log = dir.join("front.log");
     let out = std::fs::File::create(&log).unwrap();
@@ -174,10 +185,21 @@ fn start_env(program: &Path, dir: &Path, data: &str, banks: &Path, releases: &st
     let mut server = Server { child, log, admin, udp };
     let deadline = Instant::now() + Duration::from_secs(60);
     while server.api("GET", "/api/status", json!({})).0 != 200 {
-        assert!(Instant::now() < deadline && server.child.try_wait().unwrap().is_none(), "the server did not start\n{}", server.log());
+        if server.child.try_wait().unwrap().is_some() {
+            let log = server.log();
+            if log.to_lowercase().contains("address already in use") || log.contains("admin: 127.0.0.1") {
+                return None;
+            }
+            panic!("the server ended at its start\n{log}");
+        }
+        // The admin port taken: the front goes on without an admin API.
+        if server.log().contains("admin: 127.0.0.1:") {
+            return None;
+        }
+        assert!(Instant::now() < deadline, "the server did not start\n{}", server.log());
         std::thread::sleep(Duration::from_millis(100));
     }
-    server
+    Some(server)
 }
 
 fn load(server: &Server, data: &str, players: u32, seconds: u32) -> Child {
@@ -1057,6 +1079,102 @@ fn the_automatic_update_takes_a_new_release_once_and_leaves_the_rolled_back_one(
     assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
     let mut server = server;
     assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+
+/// Two updates at once, a world stop and a shutdown of the world while an update is under way:
+/// the second is refused and says why; the first is not disturbed.
+#[test]
+fn a_second_update_or_a_world_stop_while_an_update_is_under_way_is_refused() {
+    let Some(data) = tables() else { return };
+    let dir = world_dir("two-updates", &data);
+    let banks = banks(&dir);
+    let server = start(&dir, &data, &banks, "http://127.0.0.1:9/releases");
+    let players = load(&server, &data, 2, 14);
+    std::thread::sleep(Duration::from_secs(4));
+    let first = server.update_begin(json!({"rollback": true, "failForTest": "slow-hello"}));
+    server.wait_log("holding its hello");
+    for body in [json!({"rollback": true}), json!({"version": "v9.9.9"}), json!({"check": true})] {
+        let (status, answer) = server.api("POST", "/api/update", body.clone());
+        assert!(status == 409 && answer["error"].as_str().is_some_and(|e| e.contains("under way")), "{body}: {status} {answer}");
+    }
+    let (status, answer) = server.api("POST", "/api/world/stop", json!({}));
+    assert!(status == 409 && answer["error"].as_str().is_some_and(|e| e.contains("an update is under way")), "{status} {answer}");
+    let (status, answer) = server.api("POST", "/api/world/switch", json!({"world": "world"}));
+    assert!(status == 409 || status == 400, "{status} {answer}");
+    let done = server.update_end(first);
+    assert_eq!(done["ok"], true, "the first update was not disturbed: {done}\n{}", server.log());
+    let (ok, said) = finish(players);
+    assert!(ok, "{said}");
+    // A flip of a paused world stays paused (the admin's pause is in the snapshot).
+    assert_eq!(server.api("POST", "/api/pause", json!({"paused": true})).0, 200);
+    assert_eq!(server.update(json!({"rollback": true}))["ok"], true, "{}", server.log());
+    assert_eq!(server.api("GET", "/api/status", json!({})).1["held"], true, "still paused after the flip");
+    assert_eq!(server.api("POST", "/api/pause", json!({"paused": false})).0, 200);
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A save that fails (its path made a folder) does not stop an update: the flip works, the new bank
+/// has the world and says its saves fail; with the path right again the next save works. Nothing
+/// of the world is lost: the stop keeps what it cannot save beside the save.
+#[test]
+fn an_update_with_a_save_that_fails_loses_nothing_and_keeps_failing_honestly() {
+    let Some(data) = tables() else { return };
+    let dir = world_dir("save-fails", &data);
+    let banks = banks(&dir);
+    let server = start(&dir, &data, &banks, "http://127.0.0.1:9/releases");
+    let players = load(&server, &data, 2, 12);
+    std::thread::sleep(Duration::from_secs(4));
+    let save = dir.join("world.json");
+    std::fs::rename(&save, dir.join("world.json.away")).unwrap();
+    std::fs::create_dir(&save).unwrap();
+    assert_eq!(server.api("POST", "/api/save", json!({})).0, 500);
+    assert_eq!(server.api("GET", "/api/status", json!({})).1["lastSave"]["ok"], false);
+    let done = server.update(json!({"rollback": true}));
+    assert_eq!(done["ok"], true, "{done}\n{}", server.log());
+    let (ok, said) = finish(players);
+    assert!(ok, "{said}");
+    // The new bank has the world and its saves still fail, in words.
+    let (status, answer) = server.api("POST", "/api/save", json!({}));
+    assert!(status == 500 && answer["error"].as_str().is_some_and(|e| e.contains("world.json")), "{status} {answer}");
+    // The path is right again: it saves.
+    std::fs::remove_dir(&save).unwrap();
+    std::fs::rename(dir.join("world.json.away"), &save).unwrap();
+    assert_eq!(server.api("POST", "/api/save", json!({})).0, 200, "{}", server.log());
+    assert_eq!(server.api("GET", "/api/status", json!({})).1["lastSave"]["ok"], true);
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A release that reads other game tables, over the feed: refused before anything is installed
+/// into a bank that runs, with the command that does it (pcds upgrade --restart).
+#[test]
+fn a_release_of_another_tables_format_is_refused_live_and_says_how() {
+    let Some(data) = tables() else { return };
+    let dir = world_dir("tables-format", &data);
+    let banks = banks(&dir);
+    let tables_format = serde_json::from_slice::<Value>(&Command::new(PCDS).arg("bank-info").output().unwrap().stdout).unwrap()["tablesFormat"].as_u64().unwrap();
+    let fake = dir.join("fake-pcds");
+    std::fs::write(&fake, format!("#!/bin/sh\n[ \"$1\" = bank-info ] && echo '{{\"version\":\"9.9.6\",\"protocol\":3,\"format\":3,\"reads\":[2,3],\"tablesFormat\":{}}}'\n", tables_format + 1)).unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let releases = release_server(release(&dir, "v9.9.6", &fake, false));
+    let server = start(&dir, &data, &banks, &releases);
+    let done = server.update(json!({"version": "v9.9.6"}));
+    let message = done["message"].as_str().unwrap();
+    assert!(done["ok"] == false && message.contains(&format!("game tables of format {}", tables_format + 1)) && message.contains("pcds upgrade --restart v9.9.6") && message.contains("disconnects every player"), "{done}");
+    assert_eq!(server.live()["bank"], "a", "nothing flipped");
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success());
     drop(server);
     std::fs::remove_dir_all(&dir).unwrap();
 }

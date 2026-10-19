@@ -925,4 +925,27 @@ pub mod tests {
         reads["reads"] = json!([2, 3]);
         assert!(compatible_for(&reads, &live, true).is_ok());
     }
+
+    /// A banks folder that cannot be written (permissions): the install fails with the path, the
+    /// bank is as it was, nothing is left beside it. (Not as root: root writes anywhere.)
+    #[test]
+    fn a_banks_folder_that_cannot_be_written_fails_the_install_and_changes_nothing() {
+        // SAFETY: geteuid only reads.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = test_dir("read-only");
+        let base = fake(&dir, "v9.9.9", &script(crate::ipc::PROTOCOL), false);
+        let banks = dir.join("bin");
+        std::fs::create_dir_all(banks.join("b")).unwrap();
+        std::fs::write(banks.join("b/pcds"), "the old one").unwrap();
+        // The folder itself read-only: no staging folder can be made beside the banks.
+        std::fs::set_permissions(&banks, std::os::unix::fs::PermissionsExt::from_mode(0o555)).unwrap();
+        let e = install(&lookup(&base, None).unwrap(), &banks, "b", None).unwrap_err();
+        std::fs::set_permissions(&banks, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        assert!(e.contains("bin") && e.to_lowercase().contains("denied"), "{e}");
+        assert_eq!(std::fs::read_to_string(banks.join("b/pcds")).unwrap(), "the old one");
+        assert_eq!(names(&banks), ["b"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

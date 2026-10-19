@@ -94,15 +94,15 @@ impl Ctx {
             return Ok(Ok(active));
         }
         let version = env!("CARGO_PKG_VERSION");
-        let newer_than = |b: &str| match updater::info(banks, b) {
+        // What a bank holds: its release's tag when it came from one (a release whose program
+        // forgot to bump its version is still that release), else its program's version.
+        let held_of = |b: &str| updater::info(banks, b).map(|i| updater::held_release(banks, b, i["version"].as_str().unwrap_or("")));
+        let newer_than = |b: &str| match held_of(b) {
             None => true,
-            Some(info) => {
-                let held = info["version"].as_str().unwrap_or("");
-                updater::newer(version, held) || (!updater::newer(held, version) && super::modified(&self.exe) > super::modified(&program(b)))
-            }
+            Some(held) => updater::newer(version, &held) || (!updater::newer(&held, version) && super::modified(&self.exe) > super::modified(&program(b))),
         };
         if !updater::BANKS.iter().all(|b| newer_than(b)) {
-            let newer = updater::BANKS.iter().find_map(|b| updater::info(banks, b).and_then(|i| i["version"].as_str().filter(|held| updater::newer(held, version)).map(|held| (*b, held.to_string()))));
+            let newer = updater::BANKS.iter().find_map(|b| held_of(b).filter(|held| updater::newer(held, version)).map(|held| (*b, held.trim_start_matches('v').to_string())));
             return Ok(Err(newer.map(|(b, held)| {
                 format!("pcds {version} is not installed: bank {b} holds pcds {held}, which is newer, and the server goes on with what the banks hold. To go back to {version}: pcds upgrade v{version} --restart")
             })));
@@ -110,9 +110,9 @@ impl Ctx {
         // The standby bank, or the active one while it is empty (never the live one, which
         // holds the world and so is not empty).
         let target = if updater::info(banks, &active).is_none() && live.is_none() { active } else { updater::other(&active).to_string() };
-        let rolled_from = updater::rolled_back(banks).filter(|r| r["bank"] == target.as_str()).and_then(|_| updater::info(banks, &target)).and_then(|i| i["version"].as_str().map(str::to_string));
+        let rolled_from = updater::rolled_back(banks).filter(|r| r["bank"] == target.as_str()).and_then(|_| held_of(&target));
         if let Some(held) = rolled_from.filter(|held| !updater::newer(version, held)) {
-            return Ok(Err(Some(format!("pcds {version} is not installed: bank {target} holds pcds {held}, the release the server was rolled back from, and is kept ('pcds upgrade' installs a release there)"))));
+            return Ok(Err(Some(format!("pcds {version} is not installed: bank {target} holds pcds {}, the release the server was rolled back from, and is kept ('pcds upgrade' installs a release there)", held.trim_start_matches('v')))));
         }
         Ok(Ok(target))
     }
@@ -793,6 +793,87 @@ mod tests {
         build("build 5");
         assert_eq!(ctx.bank_for(&banks, Some("a")).unwrap(), Ok("b".to_string()));
         assert_eq!(ctx.bank_for(&banks, Some("b")).unwrap(), Ok("a".to_string()));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// bank_for() on the version sequences a server meets: the first install, an update, a rebuild
+    /// of the same version, a pre-release, a downgrade, a rollback with its note, and a release
+    /// whose program says another version than its tag.
+    #[test]
+    fn the_standby_bank_rule_on_real_version_sequences() {
+        let dir = super::super::test_dir("bank-for");
+        let ctx = super::super::test_ctx(&dir);
+        fs::create_dir_all(dir.join("build/web")).unwrap();
+        fs::write(dir.join("build/pcds"), "this build").unwrap();
+        let banks = ctx.banks();
+        let me = env!("CARGO_PKG_VERSION");
+        // A bank holding `version` (and `tag`), its program written `later` than this build's or before it.
+        let bank = |name: &str, held: Option<(&str, Option<&str>)>, later: bool| {
+            let _ = fs::remove_dir_all(banks.join(name));
+            let Some((version, tag)) = held else { return };
+            fs::create_dir_all(banks.join(name)).unwrap();
+            let program = banks.join(name).join("pcds");
+            fs::write(&program, format!("{name} {version}")).unwrap();
+            let base = fs::metadata(dir.join("build/pcds")).unwrap().modified().unwrap();
+            let at = if later { base + std::time::Duration::from_secs(60) } else { base - std::time::Duration::from_secs(60) };
+            fs::File::options().write(true).open(&program).unwrap().set_modified(at).unwrap();
+            let mut info = serde_json::json!({"version": version});
+            if let Some(tag) = tag {
+                info["tag"] = tag.into();
+            }
+            updater::write_info(&banks.join(name), &info).unwrap();
+        };
+        let rule = |active: &str, live: Option<&str>| {
+            updater::set_active(&banks, active).unwrap();
+            ctx.bank_for(&banks, live).unwrap()
+        };
+        let skipped = |r: std::result::Result<String, Option<String>>| match r {
+            Err(why) => why.unwrap_or_else(|| "(nothing said)".into()),
+            Ok(bank) => panic!("went into bank {bank}"),
+        };
+        // The first install: the active bank, whichever it is.
+        bank("a", None, false);
+        bank("b", None, false);
+        assert_eq!(rule("a", None), Ok("a".to_string()));
+        // 0.6.1 runs from a: this build goes into b. And with 0.6.0 in b: over it.
+        bank("a", Some(("0.5.0", None)), false);
+        assert_eq!(rule("a", None), Ok("b".to_string()));
+        bank("b", Some(("0.4.0", Some("v0.4.0"))), false);
+        assert_eq!(rule("a", Some("a")), Ok("b".to_string()), "a running bank a: into b");
+        assert_eq!(rule("b", Some("b")), Ok("a".to_string()), "a running bank b: into a, never the one that runs");
+        // The same version, built before the banks' programs: nothing said (it is installed); built after: goes in.
+        bank("a", Some((me, None)), true);
+        bank("b", Some((me, None)), true);
+        assert!(skipped(rule("a", None)).contains("nothing said"), "an older build of the same version");
+        bank("b", Some((me, None)), false);
+        bank("a", Some((me, None)), false);
+        assert_eq!(rule("a", None), Ok("b".to_string()), "a later build of the same version");
+        // A later version in a bank (a release put there by pcds upgrade): this build is a downgrade, said with how.
+        bank("a", Some(("99.0.0", Some("v99.0.0"))), false);
+        bank("b", Some(("0.5.0", None)), false);
+        let why = skipped(rule("b", None));
+        assert!(why.contains("bank a holds pcds 99.0.0") && why.contains("--restart"), "{why}");
+        // A pre-release of a later version is later; a pre-release of this version is earlier.
+        bank("a", Some(("99.0.0-rc.1", None)), false);
+        assert!(skipped(rule("b", None)).contains("99.0.0-rc.1"));
+        bank("a", Some((&format!("{me}-rc.1"), None)), false);
+        bank("b", Some(("0.5.0", None)), false);
+        assert_eq!(rule("a", None), Ok("b".to_string()), "this release is later than its own release candidate");
+        // Rolled back from the release in b (0.6.2, this version): this build does not go there; a later one does.
+        bank("a", Some(("0.5.0", None)), false);
+        bank("b", Some((me, Some(&format!("v{me}")))), false);
+        updater::set_rolled_back(&banks, "b").unwrap();
+        let why = skipped(rule("a", None));
+        assert!(why.contains("rolled back from"), "{why}");
+        bank("b", Some(("0.5.5", Some("v0.5.5"))), false);
+        updater::set_rolled_back(&banks, "b").unwrap();
+        assert_eq!(rule("a", None), Ok("b".to_string()), "a later version than the one rolled back from");
+        updater::clear_rolled_back(&banks).unwrap();
+        // A release whose program says 0.5.0 under the tag v99.0.1: it is v99.0.1 that this build is compared with.
+        bank("a", Some(("0.5.0", None)), false);
+        bank("b", Some(("0.5.0", Some("v99.0.1"))), false);
+        let why = skipped(rule("a", None));
+        assert!(why.contains("bank b holds pcds 99.0.1"), "{why}");
         fs::remove_dir_all(&dir).unwrap();
     }
 }
