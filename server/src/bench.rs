@@ -462,6 +462,12 @@ fn soak_growth() {
             let grown: Vec<String> = sizes.iter().filter(|(k, n)| **n > base.get(*k).copied().unwrap_or(0) * 12 / 10 + 200).map(|(k, n)| format!("{k} {}->{n}", base.get(k).copied().unwrap_or(0))).collect();
             // A network object whose world object is gone, or points at another object.
             let strays = g.net.objects.values().filter(|o| !o.scene).filter(|o| o.wo.is_some_and(|w| g.wos.get(&w).is_none_or(|w| w.net != Some(o.id)))).count();
+            // World objects in no inventory and at no place: nothing reaches them.
+            let mut orphans: std::collections::BTreeMap<&str, usize> = Default::default();
+            for w in g.wos.values().filter(|w| !w.is_placed() && !g.is_held(w.id) && !crate::model::is_from_scene(w.id)) {
+                *orphans.entry(g.data.groups[w.group].id.as_str()).or_default() += 1;
+            }
+            println!("soak orphans: {orphans:?}");
             println!("soak t={t:.0}s: wos {} inv {} net {} strays {strays} total {} bytes; grown: {}", g.wos.len(), g.inventories.len(), g.net.objects.len(), sizes.values().sum::<usize>(), grown.join(", "));
         }
     }
