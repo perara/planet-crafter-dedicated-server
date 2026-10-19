@@ -114,10 +114,21 @@ impl ObjectDef {
 #[derive(Default, Clone)]
 pub struct Prefabs(HashMap<String, Prefab>);
 
-#[derive(Clone)]
+/// A prefab searched this often is parsed instead (the search is for the few asks of a start).
+const MENTIONS_BEFORE_PARSING: u32 = 8;
+
 struct Prefab {
     raw: Box<serde_json::value::RawValue>,
     parsed: std::sync::OnceLock<Value>,
+    /// How often `mentions` looked through the text: a prefab asked about again and again is
+    /// parsed, which is cheaper than searching it each time.
+    asked: std::sync::atomic::AtomicU32,
+}
+
+impl Clone for Prefab {
+    fn clone(&self) -> Prefab {
+        Prefab { raw: self.raw.clone(), parsed: self.parsed.clone(), asked: Default::default() }
+    }
 }
 
 impl Prefab {
@@ -130,7 +141,7 @@ impl Prefabs {
     /// Whether the prefab can hold `word` (a component type): false only when its text has no
     /// such word, so that asking does not parse the prefabs that cannot answer.
     pub fn mentions(&self, group: &str, word: &str) -> bool {
-        self.0.get(group).is_some_and(|p| p.parsed.get().is_some() || p.raw.get().contains(word))
+        self.0.get(group).is_some_and(|p| p.parsed.get().is_some() || p.asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= MENTIONS_BEFORE_PARSING || p.raw.get().contains(word))
     }
 
     /// (parsed, all): how many prefabs have been read.
@@ -150,7 +161,7 @@ impl std::ops::Index<&str> for Prefabs {
 
 impl std::ops::IndexMut<&str> for Prefabs {
     fn index_mut(&mut self, group: &str) -> &mut Value {
-        let prefab = self.0.entry(group.to_string()).or_insert_with(|| Prefab { raw: serde_json::value::RawValue::NULL.to_owned(), parsed: Default::default() });
+        let prefab = self.0.entry(group.to_string()).or_insert_with(|| Prefab { raw: serde_json::value::RawValue::NULL.to_owned(), parsed: Default::default(), asked: Default::default() });
         prefab.value();
         prefab.parsed.get_mut().expect("parsed above")
     }
@@ -217,7 +228,7 @@ impl GameData {
             by_hash,
             layouts: Arc::new(layouts),
             assets: Arc::new(assets),
-            group_prefabs: Arc::new(Prefabs(root.group_prefabs.into_iter().map(|(k, raw)| (k, Prefab { raw, parsed: Default::default() })).collect())),
+            group_prefabs: Arc::new(Prefabs(root.group_prefabs.into_iter().map(|(k, raw)| (k, Prefab { raw, parsed: Default::default(), asked: Default::default() })).collect())),
             panels: Arc::new(root.panels),
             singletons: Arc::new(root.singletons),
         })
