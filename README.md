@@ -133,10 +133,6 @@ so `--rollback` needs no download. A release that changes how the server's two p
 (Steam players get a new invite code unless `PCDS_STEAM_TOKEN` is set). With the server stopped,
 `pcds upgrade` makes the release the one the next start runs. The rule `update.auto` does this
 by itself for each new release (off by default; `./pcds rules set update.auto=true`).
-Coming from a release before 0.7, whose `server.env` still holds settings that are rules now, run
-`./pcds config migrate --apply` right after the update (see [Settings](#settings); in Docker,
-`docker exec pcds /data/bin/pcds config migrate --apply`, since the image's own `pcds` is the old
-one until the image is replaced): the server refuses to start with them at its next restart.
 
 Other ways:
 - Run the installer again, or `./pcds up` in a newer release folder (move the old folder's `run/`
@@ -255,15 +251,8 @@ every `pcds` command:
 | `PCDS_UNIT` | `pcds` | the systemd unit's name; with `PCDS_HOME` for a second server on the machine |
 | `PCDS_CONTAINER` | unset | set by the Docker image: no systemd, the admin address may be public inside the container |
 
-**Moving from 0.6.** A setting that older releases read and this one does not (`PCDS_AUTOSAVE`,
-`PCDS_BACKUPS`, `PCDS_BACKUP_MINUTES`, `PCDS_MAX_PLAYERS`, `PCDS_AUTO_UPDATE`,
-`PCDS_UPDATE_CHECK_HOURS`, `PCDS_TRACE`, `PCDS_RULES`, `PCDS_ACCESS`, and a few more, all
-listed in [docs/env.md](docs/env.md)) stops the server at its next start, in one line that says
-what replaces it (`PCDS_AUTOSAVE is now the rule save.autosaveMinutes: edit rules.json or POST
-/api/config`). `./pcds config migrate` shows what it would change in `server.env` and
-`rules.json` (nothing is written, and no secret is printed); `./pcds config migrate --apply`
-writes it. A hot update itself needs nothing: the running server keeps its settings, and the
-new release says in the log which of them it ignores.
+A name in `server.env` that is not a setting stops the server at start, in one line that names the
+file and the name.
 
 `run/server.env` holds the admin token and is readable by your user only.
 

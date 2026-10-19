@@ -177,121 +177,26 @@ pub fn dev(hook: &str) -> Option<String> {
     })
 }
 
-/// How an old setting's text becomes its rule's value.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Conv {
-    Number,
-    /// on or off.
-    OnOff,
-    /// Set (not empty): true.
-    Flag,
-}
-
-/// What became of a setting that is not read any more.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Fate {
-    /// It is this rule now (rules.json, the admin API and page): `pcds config migrate` moves it.
-    Rule(&'static str, Conv),
-    /// It is a file of the installation now: this one in PCDS_HOME.
-    File(&'static str),
-    /// A developer hook: PCDS_DEV=this.
-    Dev(&'static str),
-    /// It is gone, for this reason.
-    Gone(&'static str),
-}
-
-/// Every setting that was read once and is not now: a server started with one of them set
-/// refuses to start and says what replaces it (check_env), whichever way it was set. This table
-/// is the only place that knows them. Names that were never operator settings (the tests' and
-/// tools') are not here.
-pub static RETIRED: &[(&str, Fate)] = &[
-    ("PCDS_AUTOSAVE", Fate::Rule("save.autosaveMinutes", Conv::Number)),
-    ("PCDS_BACKUPS", Fate::Rule("save.backupsKept", Conv::Number)),
-    ("PCDS_BACKUP_MINUTES", Fate::Rule("save.backupMinutes", Conv::Number)),
-    ("PCDS_MAX_PLAYERS", Fate::Rule("limits.maxPlayers", Conv::Number)),
-    ("PCDS_AUTO_UPDATE", Fate::Rule("update.auto", Conv::OnOff)),
-    ("PCDS_UPDATE_CHECK_HOURS", Fate::Rule("update.checkHours", Conv::Number)),
-    ("PCDS_TRACE", Fate::Rule("log.trace", Conv::Flag)),
-    ("PCDS_PORT", Fate::Gone("it only chose the port of the first server.env: the port is part of PCDS_LISTEN (HOST:PORT)")),
-    ("PCDS_ADMIN_BIND", Fate::Gone("it only chose the admin address of the first server.env: that is PCDS_ADMIN (the Docker image sets it)")),
-    ("PCDS_RULES", Fate::File("rules.json")),
-    ("PCDS_ACCESS", Fate::File("access.json")),
-    ("PCDS_ENV_FILE", Fate::Gone("pcds run derives it from PCDS_HOME (server.env there)")),
-    ("PCDS_BANKS", Fate::Gone("pcds run derives it from PCDS_HOME (bin/ there)")),
-    ("PCDS_BANK", Fate::Gone("fronts before 0.7 set it for their banks; nothing reads it")),
-    ("PCDS_NEW_WORLD", Fate::Gone("the options of the first world are the container's arguments now: docker run IMAGE --planet Aqualis (Compose: command: [\"--planet\", \"Aqualis\"])")),
-    ("PCDS_WEB", Fate::Gone("the page is web/index.html beside the program (a release or bank folder): change that file")),
-    ("PCDS_TRUST_LOOPBACK", Fate::Dev("trust-loopback")),
-    ("PCDS_FLIP_VERIFY", Fate::Dev("flip-verify")),
-    ("PCDS_TEST_FAULTS", Fate::Dev("test-faults")),
-    ("PCDS_BANK_FAIL", Fate::Dev("bank-fail=restore or bank-fail=protocol")),
-];
-
-/// What a launcher or front before 0.7 sets for its child (the front for its banks, with the rest
-/// of its environment inherited): paths and names that this version derives from PCDS_HOME.
-/// The front and the banks of this version take them without a word when they say what is
-/// derived anyway (check_old_plumbing, installation_file) and stop on one that says otherwise.
-/// A bank never refuses to start on any other retired setting either, because the front it was
-/// started by has its own environment, which a hot update does not change: it says them once
-/// in a line (inherited_note) and ignores them. Always a subset of RETIRED.
-pub const OLD_PLUMBING: &[&str] = &["PCDS_BANK", "PCDS_BANKS", "PCDS_ENV_FILE", "PCDS_RULES", "PCDS_ACCESS"];
-
 /// The most variables an operator meets: the settings of server.env plus the install ones.
 /// A new one is a decision (a rule if it is gameplay or tuning), not a habit.
 #[cfg(test)]
 pub const OPERATOR_ENV_BUDGET: usize = 12;
 
-/// Why a retired setting is not read, and what to do.
-pub fn retired_message(name: &str, fate: Fate) -> String {
-    match fate {
-        Fate::Rule(key, _) => format!("{name} is now the rule {key}: edit rules.json or POST /api/config"),
-        Fate::File(file) => format!("{name} is gone: the file is {file} in PCDS_HOME (move yours there)"),
-        Fate::Dev(hook) => format!("{name} is now PCDS_DEV={hook} (a developer hook)"),
-        Fate::Gone(why) => format!("{name} is gone: {why}"),
-    }
-}
-
-/// The retired settings `get` has set (not empty), in the table's order, as their messages.
-pub fn retired_set(get: &impl Fn(&str) -> Option<String>) -> Vec<(&'static str, Fate)> {
-    RETIRED.iter().filter(|(name, _)| get(name).is_some_and(|v| !v.is_empty())).copied().collect()
-}
-
 /// A file of the installation (rules.json, access.json): in PCDS_HOME, which pcds run gives the
 /// front and so its banks; a server started by hand without it keeps them beside the world.
-/// A launcher or front before 0.7 handed its child the file's own path in PCDS_RULES or
-/// PCDS_ACCESS (`old_var`): when it names this file it is ignored, else Err, since the child
-/// would read other rules or bans than the ones set, in silence.
-pub fn installation_file(get: &impl Fn(&str) -> Option<String>, save_path: &str, name: &str, old_var: &str) -> Result<String, String> {
-    let path = match get("PCDS_HOME") {
+pub fn installation_file(get: &impl Fn(&str) -> Option<String>, save_path: &str, name: &str) -> String {
+    match get("PCDS_HOME") {
         Some(home) => std::path::Path::new(&home).join(name),
         None => std::path::Path::new(save_path).with_file_name(name),
-    };
-    let path = path.to_string_lossy().to_string();
-    match get(old_var) {
-        Some(told) if std::path::Path::new(&told) != std::path::Path::new(&path) => Err(format!("{old_var}={told}, but this version reads {path} (PCDS_HOME/{name}): move the file there, and restart the server so that pcds run of this version starts it")),
-        _ => Ok(path),
     }
+    .to_string_lossy()
+    .to_string()
 }
 
-/// What a launcher before 0.7 gave the front (OLD_PLUMBING) is what this version finds in
-/// PCDS_HOME: Err for one that says otherwise, or that has no PCDS_HOME to be compared with.
-pub fn check_old_plumbing(get: &impl Fn(&str) -> Option<String>, save_path: &str) -> Result<(), String> {
-    installation_file(get, save_path, "rules.json", "PCDS_RULES")?;
-    installation_file(get, save_path, "access.json", "PCDS_ACCESS")?;
-    for (var, name) in [("PCDS_BANKS", "bin"), ("PCDS_ENV_FILE", "server.env")] {
-        let Some(told) = get(var) else { continue };
-        let home = get("PCDS_HOME").ok_or(format!("{var}={told}, but PCDS_HOME is not set: restart the server so that pcds run of this version starts it"))?;
-        if std::path::Path::new(&told) != std::path::Path::new(&home).join(name) {
-            return Err(format!("{var}={told}, but this version reads PCDS_HOME/{name}: restart the server so that pcds run of this version starts it"));
-        }
-    }
-    Ok(())
-}
-
-/// A bank's one line about the settings it inherited from a front before 0.7 (None: none).
-pub fn inherited_note(get: &impl Fn(&str) -> Option<String>) -> Option<String> {
-    let names: Vec<&str> = retired_set(get).into_iter().map(|(n, _)| n).filter(|n| !OLD_PLUMBING.contains(n)).collect();
-    (!names.is_empty()).then(|| format!("bank: the front that started it passes settings this version does not read ({}); the bank ignores them and takes rules.json (pcds config migrate moves them there, docs/env.md)", names.join(", ")))
+/// The PCDS_ names of a server.env that are no setting: Err naming the file and each one.
+pub fn check_keys(file: &str, keys: impl IntoIterator<Item = String>) -> Result<(), String> {
+    let unknown: Vec<String> = keys.into_iter().filter(|k| k.starts_with("PCDS_") && !knob_for(k).is_some_and(|n| n.read_only())).collect();
+    if unknown.is_empty() { Ok(()) } else { Err(format!("{file}: unknown setting {}", unknown.join(", "))) }
 }
 
 pub fn knob_for(key: &str) -> Option<&'static Knob> {
@@ -402,18 +307,11 @@ fn env_value(kind: Type, text: &str) -> Value {
 
 /// Every server.env setting the server reads (config::KNOBS' Env and Secret entries), checked
 /// once at start, as `get` (the environment, or the settings file) has them: Err naming each
-/// setting that is not what its entry takes (a secret's value never shown), each retired one
-/// (RETIRED) with what replaces it, and each PCDS_DEV hook that does not exist. The server
-/// refuses to start on it: a mistyped or old setting is never read as the default.
+/// setting that is not what its entry takes (a secret's value never shown) and each PCDS_DEV
+/// hook that does not exist. The server refuses to start on it: a mistyped setting is never
+/// read as the default.
 pub fn check_env(get: impl Fn(&str) -> Option<String>) -> Result<(), String> {
-    check_env_tolerating(get, &[])
-}
-
-/// check_env, except that the retired settings in `tolerated` pass (the front takes OLD_PLUMBING,
-/// which a launcher before 0.7 sets for it; check_old_plumbing compares them with what it
-/// derives).
-pub fn check_env_tolerating(get: impl Fn(&str) -> Option<String>, tolerated: &[&str]) -> Result<(), String> {
-    let mut bad: Vec<String> = retired_set(&get).into_iter().filter(|(name, _)| !tolerated.contains(name)).map(|(name, fate)| retired_message(name, fate)).collect();
+    let mut bad: Vec<String> = Vec::new();
     for k in KNOBS.iter().filter(|k| k.read_only()) {
         let Some(text) = get(k.key).filter(|t| !t.is_empty()) else { continue };
         let checked = match k.key {
@@ -429,7 +327,7 @@ pub fn check_env_tolerating(get: impl Fn(&str) -> Option<String>, tolerated: &[&
             bad.push(format!("PCDS_DEV: no hook {name:?}"));
         }
     }
-    if bad.is_empty() { Ok(()) } else { Err(format!("server.env: {} (pcds config edits it, pcds config migrate moves the settings that are rules now)", bad.join("; "))) }
+    if bad.is_empty() { Ok(()) } else { Err(format!("server.env: {} (pcds config edits it)", bad.join("; "))) }
 }
 
 /// A whole-number server.env setting, or its default: what check_env() let through at start.
@@ -632,11 +530,11 @@ mod tests {
     }
 
     fn known(name: &str) -> bool {
-        knob_for(name).is_some() || PROCESS_ENV.iter().any(|v| v.name == name) || RETIRED.iter().any(|(n, _)| *n == name) || TEST_ENV.iter().any(|(n, _)| *n == name)
+        knob_for(name).is_some() || PROCESS_ENV.iter().any(|v| v.name == name) || TEST_ENV.iter().any(|(n, _)| *n == name)
     }
 
     /// A PCDS_ name anywhere in the program, its tests, the scripts and the images is a KNOBS
-    /// entry, a process variable, a retired one (refused or ignored on purpose) or a test's;
+    /// entry, a process variable or a test's;
     /// and what the tables list is read somewhere.
     #[test]
     fn every_environment_name_in_the_source_is_in_the_schema_or_the_list() {
@@ -644,13 +542,7 @@ mod tests {
         assert!(sources.len() > 40 && everything.len() > sources.len());
         for (file, text) in &everything {
             for name in names(text) {
-                assert!(known(name), "{file} uses {name}: a KNOBS entry (config.rs) if it is a setting, PROCESS_ENV, RETIRED or TEST_ENV");
-            }
-        }
-        // The images, scripts and the build do not set a setting that is gone.
-        for (file, text) in everything.iter().filter(|(file, _)| !file.ends_with(".rs")) {
-            for name in names(text) {
-                assert!(!RETIRED.iter().any(|(n, _)| *n == name), "{file} sets {name}, which is retired: {}", RETIRED.iter().find(|(n, _)| *n == name).map(|(n, f)| retired_message(n, *f)).unwrap_or_default());
+                assert!(known(name), "{file} uses {name}: a KNOBS entry (config.rs) if it is a setting, PROCESS_ENV or TEST_ENV");
             }
         }
         let read_in = |name: &str, files: &[(String, String)]| files.iter().any(|(_, text)| names(text).contains(&name));
@@ -665,15 +557,6 @@ mod tests {
             assert!(read_in(name, &everything), "{name} is nowhere in the tests and scripts any more: remove it from TEST_ENV");
         }
     }
-
-    /// Variables of 0.6 that were only for debugging or one tool and are deleted, not moved.
-    const DELETED: &[(&str, &str)] = &[
-        ("PCDS_WRECKS_TRACE", "debug prints of the wreck layout in read-game: deleted"),
-        ("PCDS_REACH_IL", "`pcds native-reach ... --il`"),
-        ("PCDS_DIFF_SHOW", "the fourth argument of `pcds tables-diff`"),
-        ("PCDS_REVIEW_CHESTS, PCDS_REVIEW_LOOSE, PCDS_REVIEW_DEMANDS, PCDS_REVIEW_GROWING", "constants of the one perf test they sized"),
-        ("PCDS_FUZZ_TRACE", "debug prints of the fuzz test: deleted"),
-    ];
 
     fn cell(text: &str) -> String {
         text.replace('|', "\\|").replace('\n', " ")
@@ -707,16 +590,7 @@ mod tests {
         for (name, what) in TEST_ENV {
             out += &format!("| `{name}` | {} |\n", cell(what));
         }
-        out += "\n## Gone since 0.6\n\nA server started with one of these set (in `server.env` or its environment) stops, in one line that says what replaces it, and `pcds start` and `pcds restart` say so before asking systemd. `pcds config migrate` shows what it would change in `server.env` and `rules.json`; `--apply` writes it.\n\n| Was | Now |\n|---|---|\n";
-        for (name, fate) in RETIRED {
-            out += &format!("| `{name}` | {} |\n", cell(&retired_message(name, *fate).replacen(name, "", 1).trim_start_matches(" is now ").trim_start_matches(" is gone: ")));
-        }
-        for (names, now) in DELETED {
-            out += &format!("| {} | {now} |\n", names.split(", ").map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", "));
-        }
-        out += "\n## Hot updates from a release before 0.7\n\nA hot update replaces the bank, not the front, so the new bank runs under a front that still has the environment of 0.6: its whole `server.env` and the paths its launcher set. The bank never refuses to start on a retired setting; it ignores them and says so once in one line. The rules decide what they set, so run `pcds config migrate --apply` after the update (the old values are kept as `server.env.before-migrate`), before the next restart. These the old front or launcher sets for its child; this version takes them without a word when they say what `PCDS_HOME` gives anyway and stops on one that says otherwise:\n\n";
-        out += &OLD_PLUMBING.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
-        out += ".\n\n`rules.json` and the snapshot of a bank leave the sections new in 0.7 (`save`, `update`, `log`) out while they hold the defaults, so a 0.6 bank can still read them for a rollback; once one of those rules is set, a rollback to a 0.6 bank needs it removed.\n";
+        out += "\n## Hot updates\n\nThe new bank runs under the environment of the running front, which a hot update does not replace, and reads the files in `PCDS_HOME` itself. A release that changes what the front and the bank share is installed with `pcds upgrade --restart`.\n";
         out
     }
 
@@ -742,9 +616,8 @@ mod tests {
         assert!(KNOBS.iter().filter(|k| k.read_only()).all(|k| !["min", "h", "players", "×", "s"].contains(&k.unit)), "a tuning number in server.env: make it a rule");
     }
 
-    /// The README outside its Settings section (where the retired ones are named, to say what
-    /// replaces them), the Docker image and compose.yaml set and tell of no variable that is gone,
-    /// and what they set exists.
+    /// The README outside its Settings section, the Docker image, compose.yaml and the entrypoint
+    /// name only variables that exist, and the image sets what a container needs.
     #[test]
     fn the_docker_files_and_the_readme_use_only_variables_that_exist() {
         let readme = include_str!("../../README.md");
@@ -754,7 +627,7 @@ mod tests {
         for text in outside.iter().copied().chain(docker.iter().map(String::as_str)) {
             for name in names(text) {
                 // PCDS_KEEP_ACTIVE: the parity reference's plugin in the game, not this program.
-                assert!((known(name) || name == "PCDS_KEEP_ACTIVE") && !RETIRED.iter().any(|(n, _)| *n == name), "the README or a Docker file uses {name}");
+                assert!((known(name) || name == "PCDS_KEEP_ACTIVE"), "the README or a Docker file uses {name}");
             }
         }
         // The image sets what a container needs: where it lives, that it is one, and the admin page open to the host.
@@ -839,57 +712,17 @@ mod tests {
         assert_eq!(env_number("PCDS_SESSION"), 4242);
     }
 
-    /// A retired setting stops the start with what replaces it, in one line; setting them
-    /// all to nothing (an empty value is no value) starts.
+    /// A name in server.env that is no setting is one line naming the file and the key; a hook
+    /// of PCDS_DEV that does not exist stops the start; the files of the installation are in
+    /// PCDS_HOME, else beside the world.
     #[test]
-    fn retired_settings_are_refused_with_their_replacement() {
-        let with = |pairs: &[(&str, &str)]| {
-            let pairs: Vec<(String, String)> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-            check_env(move |key| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()))
-        };
-        for (name, fate) in RETIRED {
-            let e = with(&[(name, "1")]).unwrap_err();
-            assert!(e.starts_with("server.env: ") && e.contains(&retired_message(name, *fate)) && !e.contains('\n'), "{name}: {e}");
-            assert!(with(&[(name, "")]).is_ok(), "{name} empty");
-        }
-        let e = with(&[("PCDS_AUTOSAVE", "10")]).unwrap_err();
-        assert!(e.contains("PCDS_AUTOSAVE is now the rule save.autosaveMinutes: edit rules.json or POST /api/config"), "{e}");
-        // Every name once; a rule fate names a rule, a bank is told nothing about plumbing.
-        let defaults = serde_json::to_value(Rules::default()).unwrap();
-        let mut seen = Vec::new();
-        for (name, fate) in RETIRED {
-            assert!(!seen.contains(name) && knob_for(name).is_none() && PROCESS_ENV.iter().all(|v| v.name != *name), "{name}");
-            seen.push(name);
-            if let Fate::Rule(key, _) = fate {
-                assert!(knob_for(key).is_some_and(|k| k.source == Source::Rules) && !at(&defaults, key).is_null() || *key == "limits.maxPlayers", "{name}: {key}");
-            }
-        }
-        assert!(OLD_PLUMBING.iter().all(|n| RETIRED.iter().any(|(r, _)| r == n)));
-        let old_front = |pairs: &'static [&'static str]| inherited_note(&|k: &str| pairs.contains(&k).then(|| "1".to_string()));
-        assert_eq!(old_front(&["PCDS_BANK", "PCDS_BANKS", "PCDS_ENV_FILE", "PCDS_RULES", "PCDS_ACCESS"]), None, "the plumbing is no news");
-        let note = old_front(&["PCDS_BANK", "PCDS_AUTOSAVE", "PCDS_BACKUPS"]).unwrap();
-        assert!(note.contains("PCDS_AUTOSAVE, PCDS_BACKUPS") && !note.contains("PCDS_BANK,") && !note.contains('\n'), "{note}");
-    }
-
-    /// What a launcher before 0.7 told the front is taken when it is what PCDS_HOME derives
-    /// (trailing and doubled slashes do not matter) and refused when it is not.
-    #[test]
-    fn an_old_launchers_paths_are_taken_only_when_they_are_the_derived_ones() {
+    fn unknown_settings_and_the_installations_files() {
+        let e = check_keys("/srv/run/server.env", ["PCDS_LISTEN".to_string(), "PCDS_AUTOSAVE".to_string(), "PATH".to_string(), "PCDS_HOME".to_string()]).unwrap_err();
+        assert_eq!(e, "/srv/run/server.env: unknown setting PCDS_AUTOSAVE, PCDS_HOME");
+        check_keys("f", KNOBS.iter().filter(|k| k.read_only()).map(|k| k.key.to_string())).unwrap();
         let env = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string());
-        let old = env(&[("PCDS_HOME", "/srv/run"), ("PCDS_RULES", "/srv/run//rules.json"), ("PCDS_ACCESS", "/srv/run/access.json"), ("PCDS_BANKS", "/srv/run/bin/"), ("PCDS_ENV_FILE", "/srv/run/server.env")]);
-        check_old_plumbing(&old, "/srv/run/worlds/world.json").unwrap();
-        assert_eq!(installation_file(&old, "/srv/run/worlds/world.json", "rules.json", "PCDS_RULES").unwrap(), "/srv/run/rules.json");
-        // Nothing told: PCDS_HOME's, or beside the world without one.
-        assert_eq!(installation_file(&env(&[]), "/w/world.json", "access.json", "PCDS_ACCESS").unwrap(), "/w/access.json");
-        assert_eq!(installation_file(&env(&[("PCDS_HOME", "/h")]), "/w/world.json", "access.json", "PCDS_ACCESS").unwrap(), "/h/access.json");
-        // Told another file: refused, naming both.
-        let e = check_old_plumbing(&env(&[("PCDS_HOME", "/srv/run"), ("PCDS_RULES", "/etc/rules.json")]), "/srv/run/worlds/w.json").unwrap_err();
-        assert!(e.contains("PCDS_RULES=/etc/rules.json, but this version reads /srv/run/rules.json"), "{e}");
-        let e = check_old_plumbing(&env(&[("PCDS_HOME", "/srv/run"), ("PCDS_BANKS", "/opt/bin")]), "/s/w.json").unwrap_err();
-        assert!(e.contains("PCDS_BANKS=/opt/bin, but this version reads PCDS_HOME/bin"), "{e}");
-        // Without PCDS_HOME there is nothing to compare the banks and the settings file with.
-        let e = check_old_plumbing(&env(&[("PCDS_ENV_FILE", "/srv/run/server.env")]), "/s/w.json").unwrap_err();
-        assert!(e.contains("PCDS_HOME is not set"), "{e}");
+        assert_eq!(installation_file(&env(&[]), "/w/world.json", "access.json"), "/w/access.json");
+        assert_eq!(installation_file(&env(&[("PCDS_HOME", "/h")]), "/w/world.json", "rules.json"), "/h/rules.json");
     }
 
     fn rule_knobs() -> impl Iterator<Item = &'static Knob> {

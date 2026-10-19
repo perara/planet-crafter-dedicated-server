@@ -18,7 +18,7 @@
 //!        pcds read-game GAME_DIR OUT_DIR   (a game version's tables, see native/)
 //!        pcds COMMAND ...   (installing and running a server: cli/)
 //! Environment: a dozen PCDS_* variables, all in config.rs (KNOBS for server.env, PROCESS_ENV for
-//! the installation, DEV_HOOKS, RETIRED for the ones that are gone; docs/env.md is written from
+//! the installation, DEV_HOOKS; docs/env.md is written from
 //! them, the README's Settings tables repeat them, and tests keep all of it equal). Gameplay
 //! and tuning are rules (rules.rs), not variables.
 

@@ -213,7 +213,7 @@ pub fn run(args: &[String]) {
         std::process::exit(2);
     };
     // Settings that are not what they should be stop the start, before anything is opened.
-    if let Err(e) = crate::config::check_env_tolerating(crate::env, crate::config::OLD_PLUMBING).and_then(|()| crate::config::check_old_plumbing(&crate::env, save)) {
+    if let Err(e) = crate::config::check_env(crate::env) {
         eprintln!("{e}");
         std::process::exit(2);
     }
@@ -1170,7 +1170,7 @@ impl Front {
                 _ => {
                     let id = self.next_request;
                     self.next_request += 1;
-                    let body = json!({"method": r.method, "path": r.path, "body": r.body, "autosaveMinutes": self.autosave_minutes});
+                    let body = json!({"method": r.method, "path": r.path, "body": r.body});
                     self.answers.insert(id, (r.reply, r.path));
                     self.to_bank(ipc::ADMIN, id, body.to_string().as_bytes(), 0);
                 }
@@ -1200,7 +1200,6 @@ impl Front {
     fn answer(&mut self, id: u64, body: &[u8]) {
         let Some((reply, path)) = self.answers.remove(&id) else { return };
         let a: Value = serde_json::from_slice(body).unwrap_or_default();
-        self.set_autosave(a["autosaveMinutes"].as_u64());
         let status = a["status"].as_u64().unwrap_or(500) as u16;
         let mut text = a["body"].as_str().unwrap_or("{}").to_string();
         if path == "/api/status"

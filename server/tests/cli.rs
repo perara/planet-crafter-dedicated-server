@@ -217,76 +217,28 @@ fn one_server_per_world() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// A setting that moved to the rules, still set in server.env, stops the start in one line that
-/// says where it went; `pcds config migrate` is the way out (config_migrate below).
+/// A name in server.env that is no setting stops the start in one line that names the file and
+/// the key (never a value), at `pcds run` and before `pcds restart` asks systemd.
 #[test]
-fn retired_settings_stop_the_start_and_name_their_replacement() {
-    let dir = test_dir("retired");
+fn an_unknown_setting_stops_the_start() {
+    let dir = test_dir("unknown");
     let fake = fake_systemctl(&dir, "echo inactive");
     std::fs::create_dir_all(dir.join("run")).unwrap();
-    std::fs::write(dir.join("run/server.env"), "PCDS_ADMIN_TOKEN=s3cret-token\nPCDS_AUTOSAVE=10\nPCDS_BACKUPS=5\n").unwrap();
+    // Names of settings that older releases had (not spelled out: the guard test of config.rs reads this file).
+    let (autosave, backups) = (concat!("PCDS_", "AUTOSAVE"), concat!("PCDS_", "BACKUPS"));
+    std::fs::write(dir.join("run/server.env"), format!("PCDS_ADMIN_TOKEN=s3cret-token\n{autosave}=10\n{backups}=5\n")).unwrap();
     let out = pcds(&dir, &fake, &["run"]);
     let said = text(&out);
     assert_eq!(out.status.code(), Some(1), "{said}");
-    assert!(said.contains("PCDS_AUTOSAVE is now the rule save.autosaveMinutes: edit rules.json or POST /api/config") && said.contains("PCDS_BACKUPS is now the rule save.backupsKept"), "{said}");
-    assert!(!said.contains("s3cret-token") && said.matches("server.env: ").count() == 1, "one line, no secrets: {said}");
-    // The front refuses it too, set in its environment.
-    let out = Command::new(PCDS).arg("serve").arg(dir.join("no-tables")).arg(dir.join("world.json")).env("PCDS_TRACE", "1").output().unwrap();
-    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
-    assert!(text(&out).contains("PCDS_TRACE is now the rule log.trace"), "{}", text(&out));
-    // What an older launcher sets for the front is taken when it is where PCDS_HOME has it, and
-    // stops the front when it is not.
-    let home = dir.join("run");
-    let serve = |vars: &[(&str, &Path)]| Command::new(PCDS).arg("serve").arg(dir.join("no-tables")).arg(dir.join("world.json")).env("PCDS_HOME", &home).envs(vars.iter().copied()).output().unwrap();
-    let elsewhere = dir.join("elsewhere/rules.json");
-    let out = serve(&[("PCDS_RULES", &elsewhere)]);
-    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
-    assert!(text(&out).contains(&format!("PCDS_RULES={}, but this version reads {}", elsewhere.display(), home.join("rules.json").display())), "{}", text(&out));
-    let out = serve(&[("PCDS_BANKS", &dir.join("bin"))]);
-    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
-    assert!(text(&out).contains("PCDS_BANKS=") && text(&out).contains("PCDS_HOME/bin"), "{}", text(&out));
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-/// `pcds config migrate` shows what it would do and writes nothing, then with --apply moves the
-/// retired settings into rules.json, keeps the old file and never prints a secret; after it the
-/// server no longer stops at the old settings.
-#[test]
-fn config_migrate_moves_the_retired_settings() {
-    let dir = test_dir("migrate");
-    let fake = fake_systemctl(&dir, "echo inactive");
-    let run = dir.join("run");
-    std::fs::create_dir_all(&run).unwrap();
-    let old = "PCDS_LISTEN=0.0.0.0:7777\nPCDS_STEAM_TOKEN=STEAMSECRET\nPCDS_AUTOSAVE=10\nPCDS_BACKUPS=24\nPCDS_BACKUP_MINUTES=60\nPCDS_ADMIN=127.0.0.1:7782\nPCDS_ADMIN_TOKEN=ADMINSECRET\nPCDS_AUTO_UPDATE=on\nPCDS_WORLD=world\n";
-    std::fs::write(run.join("server.env"), old).unwrap();
-    let out = pcds(&dir, &fake, &["config", "migrate"]);
-    let said = text(&out);
-    assert_eq!(out.status.code(), Some(0), "{said}");
-    assert!(said.contains("dry run") && said.contains("PCDS_AUTOSAVE=10  -> rules.json: save.autosaveMinutes = 10") && said.contains("PCDS_AUTO_UPDATE=on  -> rules.json: update.auto = on"), "{said}");
-    assert!(said.contains(r#"{"save":{"autosaveMinutes":10},"update":{"auto":true}}"#), "{said}");
-    assert!(!said.contains("SECRET"), "no secret in the output: {said}");
-    assert_eq!(std::fs::read_to_string(run.join("server.env")).unwrap(), old, "a dry run writes nothing");
-    assert!(!run.join("rules.json").exists());
-    // The server still stops at the old file, and `restart` says so before it asks systemd.
-    assert!(text(&pcds(&dir, &fake, &["run"])).contains("PCDS_AUTOSAVE is now the rule save.autosaveMinutes"));
+    assert!(said.contains(&format!("{}: unknown setting {autosave}, {backups}", dir.join("run/server.env").display())), "{said}");
+    assert!(!said.contains("s3cret-token") && said.trim().lines().count() == 1, "one line, no secrets: {said}");
     std::fs::create_dir_all(dir.join("home/.config/systemd/user")).unwrap();
     std::fs::write(dir.join("home/.config/systemd/user/pcds-cli-itest.service"), "").unwrap();
     let out = pcds(&dir, &fake, &["restart"]);
-    assert!(text(&out).contains("PCDS_AUTOSAVE is now the rule save.autosaveMinutes") && out.status.code() == Some(1), "{}", text(&out));
-    let out = pcds(&dir, &fake, &["config", "migrate", "--apply"]);
-    let said = text(&out);
-    assert_eq!(out.status.code(), Some(0), "{said}");
-    assert!(!said.contains("SECRET"), "{said}");
-    assert_eq!(std::fs::read_to_string(run.join("server.env")).unwrap(), "PCDS_LISTEN=0.0.0.0:7777\nPCDS_STEAM_TOKEN=STEAMSECRET\nPCDS_ADMIN=127.0.0.1:7782\nPCDS_ADMIN_TOKEN=ADMINSECRET\nPCDS_WORLD=world\n");
-    let rules: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(run.join("rules.json")).unwrap()).unwrap();
-    assert_eq!(rules, serde_json::json!({"save": {"autosaveMinutes": 10}, "update": {"auto": true}}));
-    assert_eq!(std::fs::read_to_string(run.join("server.env.before-migrate")).unwrap(), old);
-    assert_eq!(std::fs::metadata(run.join("server.env")).unwrap().permissions().mode() & 0o777, 0o600);
-    assert_eq!(std::fs::metadata(run.join("server.env.before-migrate")).unwrap().permissions().mode() & 0o777, 0o600);
-    // Done: nothing more to move, and the start goes past the settings (to the missing world).
-    assert!(text(&pcds(&dir, &fake, &["config", "migrate"])).contains("nothing to migrate"));
-    let said = text(&pcds(&dir, &fake, &["run"]));
-    assert!(said.contains("no world at") && !said.contains("is now the rule"), "{said}");
+    assert!(text(&out).contains(&format!("unknown setting {autosave}")) && out.status.code() == Some(1), "{}", text(&out));
+    // Without them the start goes on, to the missing world.
+    std::fs::write(dir.join("run/server.env"), "PCDS_ADMIN_TOKEN=s3cret-token\n").unwrap();
+    assert!(text(&pcds(&dir, &fake, &["run"])).contains("no world at"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

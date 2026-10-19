@@ -50,12 +50,6 @@ pub fn run(args: &[String]) {
         libc::signal(libc::SIGINT, libc::SIG_IGN);
         libc::signal(libc::SIGTERM, libc::SIG_IGN);
     }
-    // Before the hello, so a front that would have it read the wrong files finds out before the
-    // world stands still; and what a front before 0.7 passes on is said once.
-    let _ = (rules_path(save_path), access_path(save_path));
-    if let Some(note) = config::inherited_note(&crate::env) {
-        eprintln!("{note}");
-    }
     let fd: i32 = crate::env("PCDS_IPC_FD").and_then(|v| v.parse().ok()).unwrap_or_else(|| {
         eprintln!("pcds bank: no PCDS_IPC_FD (the front starts banks)");
         std::process::exit(2)
@@ -160,21 +154,12 @@ fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, data: crate:
     game
 }
 
-/// The bank ends before its hello on a file path it would read differently than the front says
-/// (config::installation_file): the flip fails, the world goes on in the old bank.
-fn installation_file(save_path: &str, name: &str, old_var: &str) -> String {
-    config::installation_file(&crate::env, save_path, name, old_var).unwrap_or_else(|e| {
-        eprintln!("bank: {e}");
-        std::process::exit(1)
-    })
-}
-
 fn rules_path(save_path: &str) -> String {
-    installation_file(save_path, "rules.json", "PCDS_RULES")
+    config::installation_file(&crate::env, save_path, "rules.json")
 }
 
 fn access_path(save_path: &str) -> String {
-    installation_file(save_path, "access.json", "PCDS_ACCESS")
+    config::installation_file(&crate::env, save_path, "access.json")
 }
 
 /// The access lists from their file (none: empty lists). Err for a file that is there and does
@@ -278,8 +263,7 @@ impl Bank {
                         let ctx = Ctx { save_path: &self.save_path, build_id: self.build_id.as_deref(), data_dir: &self.data_dir, loop_rate: loops.2, busy: busy_last };
                         let request = || admin_request(game, r["method"].as_str().unwrap_or(""), r["path"].as_str().unwrap_or(""), &r["body"], &ctx);
                         let (status, body) = contained("an admin request", request).unwrap_or_else(|| (500, "{\"error\":\"the server failed on this request\"}".to_string()));
-                        // autosaveMinutes: the front before 0.7 takes its timer from it.
-                        let answer = json!({"status": status, "body": body, "autosaveMinutes": game.rules.save.autosave_minutes});
+                        let answer = json!({"status": status, "body": body});
                         self.link.send(ipc::ANSWER, f.n, answer.to_string().as_bytes());
                     }
                     ipc::SAVE => autosave(game, &self.save_path),
