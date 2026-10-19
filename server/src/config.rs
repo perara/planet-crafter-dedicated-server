@@ -135,10 +135,6 @@ pub static KNOBS: &[Knob] = &[
     env("PCDS_ADMIN", Type::String, "", "127.0.0.1:7782", "The admin API and web page's address; off disables them."),
     Knob { source: Source::Secret, ..env("PCDS_ADMIN_TOKEN", Type::String, "", "", "The admin API's bearer token (pcds token).") },
     env("PCDS_WORLD", Type::String, "", "world", "The world pcds starts: worlds/<name>.json (pcds world use NAME)."),
-    env("PCDS_ACCESS", Type::String, "", "", "The access lists file; unset: run/access.json, the installation's (pcds run; a pcds serve started by hand: access.json next to the world)."),
-    env("PCDS_RULES", Type::String, "", "", "The rules file; unset: run/rules.json, the installation's (pcds run; a pcds serve started by hand: rules.json next to the world)."),
-    env("PCDS_WEB", Type::String, "", "", "This web page's file; unset: web/index.html next to the server binary."),
-    env("PCDS_TRUST_LOOPBACK", Type::Enum, "", "0", "1: believe the SteamID a direct-IP client from 127.0.0.1 claims (tests, the load and probe tools). Never behind a UDP relay, where every player comes from 127.0.0.1.").values(&["0", "1"]),
     env("PCDS_RELEASES", Type::String, "", "", "Where pcds upgrade and update.auto look up releases; unset: GitHub's API for this project. A mirror, or a test's server (plain http only for 127.0.0.1)."),
 ];
 
@@ -157,6 +153,7 @@ pub static PROCESS_ENV: &[Var] = &[
     Var { name: "PCDS_GAME_DIR", scope: "install", text: "The game's folder (the one with Planet Crafter.exe). Default: the one used last (run/game-dir), else the Steam library that lists the game; --game DIR on the commands that need it." },
     Var { name: "PCDS_CONTAINER", scope: "install", text: "Set by the Docker image: no systemd, the server is the container's own process, the admin address may be public inside it." },
     Var { name: "PCDS_UNIT", scope: "install", text: "The systemd unit's name (default pcds): set it, with PCDS_HOME, for a second server on the same machine. The units pcds writes carry it." },
+    Var { name: "PCDS_NEW_WORLD", scope: "install", text: "Docker: the options of the new world (`--planet Aqualis`) made on the first start without a world." },
     Var { name: "PCDS_IPC_FD", scope: "internal", text: "The front gives each bank its socket at this descriptor (always 3). Never set by hand." },
     Var { name: "PCDS_DEV", scope: "dev", text: "Developer hooks, comma-separated (DEV_HOOKS). Tests and tools set it; never an installation." },
 ];
@@ -214,6 +211,16 @@ pub static RETIRED: &[(&str, Fate)] = &[
     ("PCDS_AUTO_UPDATE", Fate::Rule("update.auto", Conv::OnOff)),
     ("PCDS_UPDATE_CHECK_HOURS", Fate::Rule("update.checkHours", Conv::Number)),
     ("PCDS_TRACE", Fate::Rule("log.trace", Conv::Flag)),
+    ("PCDS_RULES", Fate::File("rules.json")),
+    ("PCDS_ACCESS", Fate::File("access.json")),
+    ("PCDS_ENV_FILE", Fate::Gone("pcds run derives it from PCDS_HOME (server.env there)")),
+    ("PCDS_BANKS", Fate::Gone("pcds run derives it from PCDS_HOME (bin/ there)")),
+    ("PCDS_BANK", Fate::Gone("fronts before 0.7 set it for their banks; nothing reads it")),
+    ("PCDS_WEB", Fate::Gone("the page is web/index.html beside the program (a release or bank folder): change that file")),
+    ("PCDS_TRUST_LOOPBACK", Fate::Dev("trust-loopback")),
+    ("PCDS_FLIP_VERIFY", Fate::Dev("flip-verify")),
+    ("PCDS_TEST_FAULTS", Fate::Dev("test-faults")),
+    ("PCDS_BANK_FAIL", Fate::Dev("bank-fail=restore or bank-fail=protocol")),
 ];
 
 /// What a front before 0.7 hands its banks, in the environment they inherit: a bank of this
@@ -221,7 +228,7 @@ pub static RETIRED: &[(&str, Fate)] = &[
 /// refuses to start on a retired setting, because the front it was started by has its own
 /// environment, which a hot update does not change; every other retired setting in its
 /// environment is said once in a line (inherited_note) and ignored. Always a subset of RETIRED.
-pub const OLD_FRONT_PLUMBING: &[&str] = &[];
+pub const OLD_FRONT_PLUMBING: &[&str] = &["PCDS_BANK", "PCDS_BANKS", "PCDS_ENV_FILE", "PCDS_RULES", "PCDS_ACCESS"];
 
 /// The most variables an operator meets: the settings of server.env plus the install ones.
 /// A new one is a decision (a rule if it is gameplay or tuning), not a habit.
@@ -245,7 +252,7 @@ pub fn retired_set(get: &impl Fn(&str) -> Option<String>) -> Vec<(&'static str, 
 /// A bank's one line about the settings it inherited from a front before 0.7 (None: none).
 pub fn inherited_note(get: &impl Fn(&str) -> Option<String>) -> Option<String> {
     let names: Vec<&str> = retired_set(get).into_iter().map(|(n, _)| n).filter(|n| !OLD_FRONT_PLUMBING.contains(n)).collect();
-    (!names.is_empty()).then(|| format!("bank: the front that started it passes settings that are rules now ({}); they are ignored, the rules decide (pcds config migrate moves them)", names.join(", ")))
+    (!names.is_empty()).then(|| format!("bank: the front that started it passes settings this version does not read ({}); they are ignored, and what they set is a rule now (pcds config migrate moves them, docs/env.md)", names.join(", ")))
 }
 
 pub fn knob_for(key: &str) -> Option<&'static Knob> {
@@ -492,51 +499,80 @@ pub fn set(game: &mut Game, body: &Value) -> Result<(), Value> {
 mod tests {
     use super::*;
 
-    /// The PCDS_* names the source uses that are not KNOBS, so not server.env settings read at
-    /// start: install (the installer and the commands read or set them), internal (the
-    /// processes of this program talk through them, or a diagnostic of the table reader) and
-    /// test (hooks and fixtures; some are honoured by the production binary because the end-to-end
-    /// tests run it).
-    const OTHER_ENV: &[(&str, &str)] = &[
-        ("PCDS_ADMIN_BIND", "install"),
-        ("PCDS_CONTAINER", "install"),
-        ("PCDS_ENV_FILE", "install"),
-        ("PCDS_GAME_DIR", "install"),
-        ("PCDS_HOME", "install"),
-        ("PCDS_NEW_WORLD", "install"),
-        ("PCDS_PORT", "install"),
-        ("PCDS_UNIT", "install"),
-        ("PCDS_BANKS", "internal"),
-        ("PCDS_DIFF_SHOW", "internal"),
-        ("PCDS_IPC_FD", "internal"),
-        ("PCDS_REACH_IL", "internal"),
-        ("PCDS_WRECKS_TRACE", "internal"),
-        ("PCDS_BANK_FAIL", "test"),
-        ("PCDS_FLIP_VERIFY", "test"),
-        ("PCDS_RNG_SEED", "test"),
-        ("PCDS_TEST_DATA", "test"),
-        ("PCDS_TEST_FAULTS", "test"),
+    /// The names the tests and the installer use, which an installation never sets: each in the
+    /// code that reads it (a test's own, or a tool's), with what it is for. Set by hand for the
+    /// tests and benchmarks (TEST_DATA, RNG_SEED, BENCH_*, FUZZ_*) or by a test for the child
+    /// process it starts (the others).
+    pub const TEST_ENV: &[(&str, &str)] = &[
+        ("PCDS_TEST_DATA", "The game tables the tests run on (default run/data/2.103); none skips the tests that need them (CI)."),
+        ("PCDS_RNG_SEED", "A fixed seed for the game's random numbers: benchmarks and replays compare runs. Read by test builds only."),
+        ("PCDS_BENCH_SAVE", "bench: the save the benchmark runs on (required)."),
+        ("PCDS_BENCH_SECONDS", "bench: game seconds to run (default 300)."),
+        ("PCDS_BENCH_PLAYERS", "bench: scripted players (default 0)."),
+        ("PCDS_BENCH_ACTION_MS", "bench: each player acts this often (default: only moves)."),
+        ("PCDS_BENCH_DUMP", "bench: a file for every message and the final save, to compare two runs."),
+        ("PCDS_BENCH_HANDOFF", "bench handoff: seconds between handoffs (default half the run)."),
+        ("PCDS_FUZZ_ROUNDS", "The RPC fuzz test's rounds (default 1500)."),
+        ("PCDS_FUZZ_SEED", "The RPC fuzz test's seed."),
+        ("PCDS_IPC_ECHO", "ipc test: the child process's socket file."),
+        ("PCDS_BACKUP_CUT_DIR", "save test: the child process's folder."),
+        ("PCDS_SUPERVISE_TEST", "supervise test: the child process's folder."),
+        ("PCDS_SUPERVISE_WHAT", "supervise test: how the child front ends."),
+        ("PCDS_ADMIN_TOKEN_EXEC_TEST", "chat hook test: a secret the exec program must not see."),
+        ("PCDS_TARBALL_URL", "install.sh: a release tarball to install instead of GitHub's latest (with its .sha256 beside it)."),
     ];
 
-    /// (file, text) of every source file's non-test part: up to its `#[cfg(test)] mod ...tests`,
-    /// without the files that are test code only and without this one (which names them all).
+    /// Names that are still read while the commits that retire them are not made.
+    const PENDING: &[&str] = &["PCDS_ADMIN_BIND", "PCDS_PORT", "PCDS_DIFF_SHOW", "PCDS_REACH_IL", "PCDS_WRECKS_TRACE", "PCDS_NEW_WORLD", "PCDS_REVIEW_CHESTS", "PCDS_REVIEW_LOOSE", "PCDS_REVIEW_DEMANDS", "PCDS_REVIEW_GROWING", "PCDS_FUZZ_TRACE"];
+
+    /// (file, text) of every program source file's non-test part: up to its `#[cfg(test)] mod
+    /// ...tests`, without the files that are test code only and without this one (which names
+    /// them all).
     fn sources() -> Vec<(String, String)> {
-        fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        files(true)
+    }
+
+    /// The same, with the test code, the integration tests and the scripts and images around the
+    /// program: everywhere the program or its tests are told something through PCDS_*.
+    fn everything() -> Vec<(String, String)> {
+        files(false)
+    }
+
+    fn files(program_only: bool) -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, program_only: bool, out: &mut Vec<(String, String)>) {
             for entry in std::fs::read_dir(dir).unwrap().flatten() {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
-                if path.is_dir() {
-                    walk(&path, out);
-                } else if name.ends_with(".rs") && !["bench.rs", "coverage.rs", "scenario.rs", "testkit.rs", "tests.rs", "play_tests.rs", "config.rs"].contains(&name.as_str()) {
+                if path.is_dir() && !["target", "web", ".git", "probes"].contains(&name.as_str()) {
+                    walk(&path, program_only, out);
+                } else if ["rs", "sh", "yaml"].contains(&path.extension().and_then(|e| e.to_str()).unwrap_or("")) || ["Makefile", "Dockerfile"].contains(&name.as_str()) {
                     let text = std::fs::read_to_string(&path).unwrap();
+                    if name == "config.rs" {
+                        continue;
+                    }
                     let lines: Vec<&str> = text.lines().collect();
-                    let end = (0..lines.len()).find(|&i| lines[i] == "#[cfg(test)]" && lines.get(i + 1).is_some_and(|l| l.contains("mod ") && l.contains("tests"))).unwrap_or(lines.len());
+                    let tests_only = ["bench.rs", "coverage.rs", "scenario.rs", "testkit.rs", "tests.rs", "play_tests.rs"].contains(&name.as_str());
+                    if program_only && (tests_only || path.starts_with(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests"))) {
+                        continue;
+                    }
+                    let end = if program_only { (0..lines.len()).find(|&i| lines[i] == "#[cfg(test)]" && lines.get(i + 1).is_some_and(|l| l.contains("mod ") && l.contains("tests"))).unwrap_or(lines.len()) } else { lines.len() };
                     out.push((path.display().to_string(), lines[..end].join("\n")));
                 }
             }
         }
         let mut out = Vec::new();
-        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut out);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        if program_only {
+            walk(&root.join("src"), true, &mut out);
+        } else {
+            walk(root, false, &mut out);
+            for sibling in ["Makefile", "Dockerfile", "compose.yaml", "install.sh"] {
+                if let Ok(text) = std::fs::read_to_string(root.join("..").join(sibling)) {
+                    out.push((sibling.to_string(), text));
+                }
+            }
+            walk(&root.join("../docker"), false, &mut out);
+        }
         out
     }
 
@@ -544,7 +580,7 @@ mod tests {
     fn names(text: &str) -> Vec<&str> {
         let mut out = Vec::new();
         for (at, _) in text.match_indices("PCDS_") {
-            let len = text[at..].find(|c: char| !(c.is_ascii_uppercase() || c == '_')).unwrap_or(text.len() - at);
+            let len = text[at..].find(|c: char| !(c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())).unwrap_or(text.len() - at);
             if len > 5 {
                 out.push(&text[at..at + len]);
             }
@@ -552,21 +588,32 @@ mod tests {
         out
     }
 
-    /// A PCDS_ name in the program is a KNOBS entry or on the list above with its scope, and
-    /// the list holds no name that is gone.
+    fn known(name: &str) -> bool {
+        knob_for(name).is_some() || PROCESS_ENV.iter().any(|v| v.name == name) || RETIRED.iter().any(|(n, _)| *n == name) || TEST_ENV.iter().any(|(n, _)| *n == name) || PENDING.contains(&name)
+    }
+
+    /// A PCDS_ name anywhere in the program, its tests, the scripts and the images is a KNOBS
+    /// entry, a process variable, a retired one (refused or ignored on purpose) or a test's;
+    /// and what the tables list is read somewhere.
     #[test]
     fn every_environment_name_in_the_source_is_in_the_schema_or_the_list() {
-        let sources = sources();
-        assert!(sources.len() > 40);
-        for (file, text) in &sources {
+        let (sources, everything) = (sources(), everything());
+        assert!(sources.len() > 40 && everything.len() > sources.len());
+        for (file, text) in &everything {
             for name in names(text) {
-                assert!(knob_for(name).is_some() || OTHER_ENV.iter().any(|(n, _)| *n == name), "{file} uses {name}: a KNOBS entry (config.rs) if it is a setting, else OTHER_ENV with its scope");
+                assert!(known(name), "{file} uses {name}: a KNOBS entry (config.rs) if it is a setting, PROCESS_ENV, RETIRED or TEST_ENV");
             }
         }
-        for (name, scope) in OTHER_ENV {
-            assert!(["install", "internal", "test"].contains(scope), "{name}: scope {scope}");
-            assert!(knob_for(name).is_none(), "{name} is a KNOBS entry");
-            assert!(sources.iter().any(|(_, text)| names(text).contains(name)), "{name} is in no source file any more: remove it from OTHER_ENV");
+        let read_in = |name: &str, files: &[(String, String)]| files.iter().any(|(_, text)| names(text).contains(&name));
+        for v in PROCESS_ENV {
+            assert!(["install", "internal", "dev"].contains(&v.scope), "{}: scope {}", v.name, v.scope);
+            assert!(knob_for(v.name).is_none() && read_in(v.name, &sources), "{} is in no program source file: remove it from PROCESS_ENV", v.name);
+        }
+        for k in KNOBS.iter().filter(|k| k.read_only()) {
+            assert!(read_in(k.key, &sources), "{} is in no program source file: remove its entry", k.key);
+        }
+        for (name, _) in TEST_ENV {
+            assert!(read_in(name, &everything), "{name} is nowhere in the tests and scripts any more: remove it from TEST_ENV");
         }
     }
 
@@ -576,20 +623,20 @@ mod tests {
         readme.lines().filter(|l| l.starts_with("| `")).map(cells).filter(|c| c.len() >= 2).filter_map(|c| Some((c[0].strip_prefix('`')?.strip_suffix('`')?.to_string(), c[1].clone()))).collect()
     }
 
-    /// The README's Settings table lists the server.env knobs and nothing else; where it gives
-    /// a default and the knob has one, they are the same.
+    /// The README's Settings tables list the server.env knobs and the install variables and
+    /// nothing else; where it gives a default and the knob has one, they are the same.
     #[test]
     fn the_readme_settings_are_the_server_env_knobs() {
         let readme = include_str!("../../README.md");
         let section = readme.split("\n## Settings\n").nth(1).unwrap().split("\n## ").next().unwrap();
         let documented = rows(section);
         let mut keys: Vec<&str> = documented.iter().map(|(k, _)| k.as_str()).collect();
-        let mut wanted: Vec<&str> = KNOBS.iter().filter(|k| k.read_only()).map(|k| k.key).collect();
+        let mut wanted: Vec<&str> = KNOBS.iter().filter(|k| k.read_only()).map(|k| k.key).chain(PROCESS_ENV.iter().filter(|v| v.scope == "install").map(|v| v.name)).collect();
         keys.sort();
         wanted.sort();
-        assert_eq!(keys, wanted, "README Settings table and config::KNOBS");
+        assert_eq!(keys, wanted, "README Settings tables and config::KNOBS and PROCESS_ENV");
         for (key, default) in &documented {
-            let knob = knob_for(key).unwrap();
+            let Some(knob) = knob_for(key) else { continue };
             assert!(knob.default.is_empty() || *default == format!("`{}`", knob.default), "{key}: README says {default}, KNOBS {:?}", knob.default);
         }
     }

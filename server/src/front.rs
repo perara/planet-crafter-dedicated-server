@@ -18,8 +18,9 @@
 //! told to join again (they have seen newer state than either).
 //!
 //!   pcds serve DATA_DIR SAVE.json   (pcds run starts it from the active bank)
-//!     PCDS_BANKS        the banks' folder (run/bin: a/, b/, active); unset: both banks are
-//!                       this program (a checkout build), and there is nothing to update
+//!     PCDS_HOME         (pcds run sets it) the installation: server.env, rules.json and
+//!                       access.json in it, the banks in bin/ (a/, b/, active); without it both
+//!                       banks are this program (a checkout build), and there is nothing to update
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -192,6 +193,12 @@ struct Front {
     world_lock: Option<std::fs::File>,
 }
 
+/// The banks' folder: bin/ of PCDS_HOME, which pcds run gives the front. Without one (a front
+/// started by hand, the tests') both banks are this program.
+fn banks_dir() -> Option<PathBuf> {
+    crate::env("PCDS_HOME").map(|home| PathBuf::from(home).join("bin")).filter(|dir| dir.is_dir())
+}
+
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -232,7 +239,7 @@ pub fn run(args: &[String]) {
         }
     };
     let port = listen.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
-    let mut front = Front::new(dir, save, crate::env("PCDS_BANKS").map(PathBuf::from), utp, port, stop);
+    let mut front = Front::new(dir, save, banks_dir(), utp, port, stop);
     front.world_lock = Some(world);
     front.boot();
     front.start_admin();
@@ -296,9 +303,6 @@ impl Front {
     }
 
     fn web_page(&self, bank: &str) -> Option<String> {
-        if let Some(web) = crate::env("PCDS_WEB") {
-            return Some(web);
-        }
         let dir = self.exe(bank);
         Some(dir.with_file_name("web").join("index.html").to_string_lossy().to_string())
     }
@@ -311,7 +315,7 @@ impl Front {
         let mut command = Command::new(&exe);
         command.arg("bank").arg(&self.dir).arg(&self.save).env("PCDS_IPC_FD", "3");
         if let Some(f) = fail {
-            command.env("PCDS_BANK_FAIL", f);
+            command.env("PCDS_DEV", format!("{},bank-fail={f}", crate::env("PCDS_DEV").unwrap_or_default()));
         }
         let fd = theirs.as_raw_fd();
         // SAFETY: between fork and exec only async-signal-safe calls: dup2 and fcntl. fd 3 then
@@ -619,7 +623,7 @@ impl Front {
                     println!("client {client}: connected from {addr}");
                     self.ip_clients.insert(token, client);
                     self.conns.insert(client, Conn::Ip(token));
-                    let c = json!({"ip": addr.ip().to_string(), "trusted": trusted(addr.ip(), crate::env("PCDS_TRUST_LOOPBACK").as_deref() == Some("1"))});
+                    let c = json!({"ip": addr.ip().to_string(), "trusted": trusted(addr.ip(), crate::config::dev("trust-loopback").is_some())});
                     self.to_bank(ipc::CONNECTED, client, c.to_string().as_bytes(), 0);
                 }
                 utp::Event::Data(token, batch) => {
@@ -1298,8 +1302,8 @@ impl Front {
         }
         let Some(live) = &self.live else { return (503, "{\"error\":\"the game is starting\"}".into()) };
         let target = updater::other(&live.name).to_string();
-        // The e2e tests' fault injection; off unless the front was started with PCDS_TEST_FAULTS=1.
-        let fail = body["failForTest"].as_str().filter(|_| crate::env("PCDS_TEST_FAULTS").as_deref() == Some("1")).map(str::to_string);
+        // The e2e tests' fault injection; off unless the front was started with PCDS_DEV=test-faults.
+        let fail = body["failForTest"].as_str().filter(|_| crate::config::dev("test-faults").is_some()).map(str::to_string);
         self.updates.seq += 1;
         let seq = self.updates.seq;
         if body["rollback"] == true {
@@ -1315,7 +1319,7 @@ impl Front {
             };
         }
         let Some(dir) = self.banks.clone() else {
-            return (400, "{\"error\":\"no banks: this server runs from a build, not from pcds run (PCDS_BANKS); rollback flips between two copies of it\"}".into());
+            return (400, "{\"error\":\"no banks: this server runs from a build, not from pcds run (PCDS_HOME/bin); rollback flips between two copies of it\"}".into());
         };
         if body["check"] == true {
             self.check(seq);
@@ -1501,8 +1505,8 @@ impl Front {
             let lock = crate::cli::hold(std::path::Path::new(&format!("{save}.lock")), "another server runs that world")?;
             self.world_lock = Some(lock);
             self.save = save;
-            if let Some(env) = crate::env("PCDS_ENV_FILE")
-                && let Err(e) = crate::cli::set_env_file(std::path::Path::new(&env), "PCDS_WORLD", &name)
+            if let Some(home) = crate::env("PCDS_HOME")
+                && let Err(e) = crate::cli::set_env_file(&std::path::Path::new(&home).join("server.env"), "PCDS_WORLD", &name)
             {
                 eprintln!("world {name}: not remembered for the next start ({e})");
             }
@@ -1569,7 +1573,7 @@ fn disconnected(user_data: i64, peer: u64, joined_now: &[(u64, u64)]) -> Vec<u64
 }
 
 /// Whether the SteamID a direct-IP client reports is believed: only from this machine, and
-/// only when asked (PCDS_TRUST_LOOPBACK=1: tests, the load and probe tools). Behind a UDP
+/// only when asked (PCDS_DEV=trust-loopback: tests, the load and probe tools). Behind a UDP
 /// relay (playit.gg, frp, ssh -R) every player comes from 127.0.0.1.
 fn trusted(ip: std::net::IpAddr, opted_in: bool) -> bool {
     opted_in && utp::is_loopback(ip)

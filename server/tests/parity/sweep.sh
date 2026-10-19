@@ -62,7 +62,7 @@ ours_start() {
   mkdir -p "$out/ours"; cp "$START" "$out/ours/world.json"
   # No autosave (a rule: rules.json beside the world, as a server started without PCDS_HOME reads it).
   echo '{"save": {"autosaveMinutes": 0}}' > "$out/ours/rules.json"
-  PCDS_LISTEN=127.0.0.1:$OURS_PORT PCDS_STEAM=off PCDS_ADMIN=off PCDS_TRUST_LOOPBACK=1 \
+  PCDS_LISTEN=127.0.0.1:$OURS_PORT PCDS_STEAM=off PCDS_ADMIN=off PCDS_DEV=trust-loopback \
     "$PCDS" serve "$DATA_DIR" "$out/ours/world.json" > "$out/ours/server.log" 2>&1 < /dev/null &
   ours_pid=$!
   sleep 2

@@ -123,8 +123,10 @@ pub struct PlayerState {
 pub struct Rng(u64);
 
 impl Rng {
-    /// PCDS_RNG_SEED fixes the sequence (benchmarks and replays compare runs).
+    /// In a test build, PCDS_RNG_SEED fixes the sequence (benchmarks and replays compare runs);
+    /// the server itself never reads it.
     pub fn seeded() -> Rng {
+        #[cfg(test)]
         if let Some(seed) = std::env::var("PCDS_RNG_SEED").ok().and_then(|s| s.parse::<u64>().ok()) {
             return Rng(seed | 1);
         }

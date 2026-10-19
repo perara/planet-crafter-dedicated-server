@@ -218,12 +218,11 @@ impl Ctx {
         let banks = self.banks();
         let front = |bank: &str| {
             let mut server = Command::new(banks.join(bank).join("pcds"));
-            server.arg("serve").arg(&data).arg(&world).env("PCDS_BANKS", &banks).envs(&settings);
-            // Access lists and rules are the installation's, whichever world runs.
-            server.env("PCDS_ACCESS", get("PCDS_ACCESS").unwrap_or_else(|| self.run.join("access.json").display().to_string()));
-            server.env("PCDS_RULES", get("PCDS_RULES").unwrap_or_else(|| self.run.join("rules.json").display().to_string()));
-            // The front remembers there which world it runs (the dashboard can run another).
-            server.env("PCDS_ENV_FILE", &self.env_file);
+            server.arg("serve").arg(&data).arg(&world).envs(&settings);
+            // The installation's folder: the front finds server.env (where it remembers which
+            // world it runs: the dashboard can run another), the rules and access lists (the
+            // installation's, whichever world runs) and the banks (bin/) in it.
+            server.env("PCDS_HOME", &self.run);
             // The game the tables are for: /api/status says when it has changed (bank.rs).
             server.env("PCDS_GAME_DIR", &game);
             server

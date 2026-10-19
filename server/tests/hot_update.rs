@@ -107,6 +107,8 @@ fn start(dir: &Path, data: &str, banks: &Path, releases: &str) -> Server {
     let (admin, udp) = (free_port(), free_port());
     let log = dir.join("front.log");
     let out = std::fs::File::create(&log).unwrap();
+    // The front finds the banks in bin/ of PCDS_HOME.
+    assert_eq!(banks, dir.join("bin"));
     // No backups: the rule save.backupsKept.
     std::fs::write(dir.join("rules.json"), "{\"save\": {\"backupsKept\": 0}}").unwrap();
     let child = Command::new(PCDS)
@@ -117,13 +119,9 @@ fn start(dir: &Path, data: &str, banks: &Path, releases: &str) -> Server {
         .env("PCDS_ADMIN", format!("127.0.0.1:{admin}"))
         .env("PCDS_ADMIN_TOKEN", "t")
         .env("PCDS_STEAM", "off")
-        .env("PCDS_BANKS", banks)
+        .env("PCDS_HOME", dir)
         .env("PCDS_RELEASES", releases)
-        .env("PCDS_FLIP_VERIFY", "1")
-        .env("PCDS_TEST_FAULTS", "1")
-        .env("PCDS_ENV_FILE", dir.join("server.env"))
-        .env("PCDS_ACCESS", dir.join("access.json"))
-        .env("PCDS_RULES", dir.join("rules.json"))
+        .env("PCDS_DEV", "flip-verify,test-faults")
         .stdout(out.try_clone().unwrap())
         .stderr(out)
         .spawn()

@@ -20,7 +20,7 @@ data sector on boot.
 ```
  run/bin/pcds      what the systemd units run: it hands every command to the active bank's
                    program (exec), so `pcds run` is the active bank's: it starts that
-                   bank's `pcds serve`, the front, with PCDS_BANKS=run/bin, as a child, and
+                   bank's `pcds serve`, the front, with PCDS_HOME=run (its bin/ holds the banks), as a child, and
                    supervises it (signals passed on, orphaned banks waited for, the
                    other bank's front when this one cannot start the world)
  run/bin/fallback  the last start that fell back to the other bank, and why (pcds status)
@@ -75,7 +75,7 @@ sends what is queued, snapshots and waits; RESTORE; the new bank restores and sa
 `run/bin/active`. A refusal at the HELLO (protocol, tables, snapshot format) kills the new
 bank and sends nothing: the old bank never stopped. Any failure after HANDOFF and before
 READY kills the new bank and sends RESUME to the old one. With
-`PCDS_FLIP_VERIFY` the new bank also checks that its restored state, written and read back, is
+`PCDS_DEV=flip-verify` the new bank also checks that its restored state, written and read back, is
 the snapshot (without the two clocks and the order of sets); the tests run with it.
 
 **A crash** (the live bank ends outside a flip): the front starts the same bank again from the
@@ -114,8 +114,8 @@ only (http only for a `PCDS_RELEASES` on 127.0.0.1, which the tests use); versio
 must match `v?[0-9A-Za-z._-]+`; the unpacked tree may hold only plain files and folders;
 `bank-info` runs with only PATH, HOME and LANG in its environment. The sha256 guards against a
 damaged download, not a forged release: releases are not signed. Renames into the banks and
-writes of `active` take a lock on `run/bin/.lock`. `PCDS_AUTO_UPDATE=on` checks every
-`PCDS_UPDATE_CHECK_HOURS` (default 24, the first check 10 minutes after the start) and installs
+writes of `active` take a lock on `run/bin/.lock`. The rule `update.auto` checks every
+`update.checkHours` (default 24, the first check 10 minutes after the start) and installs
 and flips to a release later than the live bank's; it is off by default, and with it off the
 server never contacts GitHub on its own. A rollback writes `run/bin/rolled-back` (the bank it
 left and that bank's tag); the automatic check skips that tag, and a later release, an explicit
@@ -137,8 +137,8 @@ unit starts, runs the front as its child and stays the parent of the banks
 crashed or not, it waits up to 60 s for the banks to save, then ends what is left. The unit keeps
 `KillMode=mixed`; its main process is `pcds run`. The dashboard's
 Updates section shows the banks and has Check, Update now (only a newer release), Install and
-Roll back; the Config tab shows PCDS_AUTO_UPDATE and
-PCDS_UPDATE_CHECK_HOURS (server.env, read-only there).
+Roll back; the Config tab sets `update.auto` and
+`update.checkHours` (rules; the front gets them from the bank in an `OPS` frame).
 
 ### Measured
 
@@ -156,7 +156,7 @@ passed there and back and the content read, 2.0 to 2.2 ms, against 11.6 to 12.1 
 bytes through the socket twice in the spike. Frames: a 120-byte round trip p50 4.1 to 4.5 µs,
 p99 11 to 14 µs, back to back.
 
-With `PCDS_FLIP_VERIFY` on the same world: all 10 restored states equal to their snapshots; the
+With `PCDS_DEV=flip-verify` on the same world: all 10 restored states equal to their snapshots; the
 check takes 65 to 115 ms and is inside the stand (77 to 128 ms), which is why it is a test
 setting.
 
@@ -379,8 +379,10 @@ found by reading `Game::new`, not by the bench (the live world has both settings
 
 **State the logic holds outside `Game`.** None in the game modules: they have no `static`,
 `thread_local`, `OnceLock` or `Cell` (searched). Environment read while running:
-`PCDS_MAX_PLAYERS` (on every join), `PCDS_TRACE`, `PCDS_RNG_SEED` (at a fresh start only); the
-front passes its environment to every bank. The server loop in `main.rs` holds the batches
+`PCDS_HOME` (where `rules.json` and `access.json` are), `PCDS_GAME_DIR` (the status) and
+`PCDS_SESSION`; the front passes its environment to every bank (what a bank of this version
+does with the environment of a front before 0.7 is in `docs/env.md`). What used to be settings
+here (`PCDS_MAX_PLAYERS`, `PCDS_TRACE`, backups) are rules, read from `game.rules`. The server loop in `main.rs` holds the batches
 being filled (`mail`, sent before the snapshot, so empty), who got `ConnectionApproved`
 (`approved`, rebuilt from `clients[..].approved`), the urgent list (empty at a tick boundary),
 and the autosave countdown and the API's autosave setting, which belong in the state module.
@@ -486,7 +488,7 @@ the save of the same world is 165 KB.
 
 Measured live under the load test, 8 players: the world stood 10.5 to 28.9 ms per flip (19
 flips in four runs), 0 to 9 client frames were held each time, and the four forced failures
-(`PCDS_SPLIT_FAIL` then, `PCDS_BANK_FAIL` now) resumed the old bank after 8 to 14 ms. No player
+(`PCDS_SPLIT_FAIL` then, `PCDS_DEV=bank-fail=...` now) resumed the old bank after 8 to 14 ms. No player
 was dropped. Of the live pause, about 12 ms is the snapshot crossing the socket twice (4 MiB there and back measured
 11.6 to 12.1 ms); passing it in a memfd, or straight from the old process to the new one,
 brings the stand close to the snapshot-plus-restore time above.
@@ -605,7 +607,7 @@ PCDS_BENCH_SAVE=<copy of world.json> PCDS_RNG_SEED=1 PCDS_BENCH_SECONDS=300 PCDS
 target/release/deps/pcds-* ipc::tests::ipc --ignored --exact --nocapture
 PCDS_TEST_DATA=<tables> target/release/deps/hot_update-* --nocapture   # the end-to-end test
 
-# a server on a scratch save, flipped by hand (both banks are this build without PCDS_BANKS):
+# a server on a scratch save, flipped by hand (both banks are this build without PCDS_HOME):
 PCDS_LISTEN=127.0.0.1:47777 PCDS_ADMIN=127.0.0.1:47778 PCDS_ADMIN_TOKEN=t PCDS_STEAM=off \
   target/release/pcds serve DATA_DIR scratch-world.json &
 target/release/pcds load 127.0.0.1:47777 DATA_DIR 8 60 &

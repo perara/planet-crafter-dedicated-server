@@ -7,8 +7,8 @@
 //! queued, writes its snapshot into a memfd and waits: EXIT (the new bank runs) or RESUME.
 //!
 //!   pcds bank DATA_DIR SAVE.json        (started by the front, never by hand)
-//!     PCDS_FLIP_VERIFY   after a restore, check the state equals the snapshot (tests)
-//!     PCDS_BANK_FAIL     tests: "restore" dies on RESTORE, "protocol" says another protocol
+//!     PCDS_DEV=flip-verify       after a restore, check the state equals the snapshot (tests)
+//!     PCDS_DEV=bank-fail=WHAT    tests: "restore" dies on RESTORE, "protocol" says another protocol
 
 use std::collections::{HashMap, HashSet};
 use std::os::fd::FromRawFd;
@@ -36,7 +36,7 @@ pub fn info() -> Value {
 const LOADING_ALLOWANCE: i64 = 8 << 20;
 
 fn fail_for_test(what: &str) -> bool {
-    std::env::var("PCDS_BANK_FAIL").is_ok_and(|v| v == what)
+    config::dev("bank-fail").is_some_and(|v| v == what)
 }
 
 pub fn run(args: &[String]) {
@@ -77,7 +77,7 @@ pub fn run(args: &[String]) {
         Some(f) if f.kind == ipc::RESTORE => {
             started = Instant::now();
             if fail_for_test("restore") {
-                eprintln!("bank: dying on the restore (PCDS_BANK_FAIL=restore)");
+                eprintln!("bank: dying on the restore (PCDS_DEV=bank-fail=restore)");
                 std::process::exit(3);
             }
             let recover = serde_json::from_slice::<Value>(&f.body).is_ok_and(|b| b["recover"] == true);
@@ -85,7 +85,7 @@ pub fn run(args: &[String]) {
             let restored = snapshot.and_then(|s| crate::handoff::restore_bytes(net_data, data, spec, &s, scenes).map(|g| (g, s)));
             match restored {
                 Ok((mut g, snapshot)) => {
-                    if std::env::var_os("PCDS_FLIP_VERIFY").is_some() {
+                    if config::dev("flip-verify").is_some() {
                         let t = Instant::now();
                         if let Err(e) = crate::handoff::verify(&g, &snapshot) {
                             eprintln!("bank: {e}");

@@ -218,7 +218,13 @@ example `--planet Aqualis`, chooses its options). [compose.yaml](compose.yaml) d
 
 ## Settings
 
-`./pcds config` edits `run/server.env`; `./pcds restart` applies it.
+Settings are of two kinds. What the server must know before it can read any file is an
+environment variable, the lines of `run/server.env` (`./pcds config` edits it, `./pcds restart`
+applies it). Everything else, gameplay and tuning alike (saves, backups, updates, speeds,
+limits, access lists), is a [rule](#server-rules): it lives in `run/rules.json` and
+`run/access.json` and changes while the server runs, through `pcds rules`, `POST /api/config`
+and the web page's Config tab. [docs/env.md](docs/env.md) lists every variable, including the
+ones for tests and tools.
 
 | Setting | Default | |
 |---|---|---|
@@ -229,21 +235,31 @@ example `--planet Aqualis`, chooses its options). [compose.yaml](compose.yaml) d
 | `PCDS_ADMIN` | `127.0.0.1:7782` | admin API and web page; `off` disables them. Plain HTTP: keep it on 127.0.0.1 and reach it from elsewhere through an SSH tunnel (`ssh -L 7782:127.0.0.1:7782 HOST`) or an HTTPS proxy; another address logs a warning |
 | `PCDS_ADMIN_TOKEN` | generated | the admin API's bearer token |
 | `PCDS_WORLD` | `world` | the world the server runs: `run/worlds/<name>.json` (`pcds world use NAME`) |
-| `PCDS_RULES` | `run/rules.json` | the server rules file (see [Server rules](#server-rules)) |
-| `PCDS_ACCESS` | `run/access.json` | the access lists file (see [Administration](#administration)) |
-| `PCDS_WEB` | the bank's `web/index.html` | the admin web page's file (for a page of your own) |
-| `PCDS_TRUST_LOOPBACK` | `0` | `1`: believe the SteamID a direct-IP client from 127.0.0.1 claims (tests, load and probe tools); never behind a UDP relay (see Known limits) |
 | `PCDS_RELEASES` | GitHub's API for this project | where `pcds upgrade` and the rule `update.auto` look up releases (a mirror) |
 
 A value that is not what the setting takes (`PCDS_SESSION=five`, an address without a port)
-stops the server at start, with the setting named in `./pcds logs`. So does a setting that
-older releases read and this one does not (`PCDS_AUTOSAVE`, `PCDS_BACKUPS`...: they are rules
-now, see [Server rules](#server-rules)): the line says what replaces it.
+stops the server at start, with the setting named in `./pcds logs`.
 
-Two more are read only when `pcds setup` first writes `run/server.env`, from the environment:
-`PCDS_PORT` (default `7777`, the port of `PCDS_LISTEN`) and `PCDS_ADMIN_BIND` (default
-`127.0.0.1:7782`, the first `PCDS_ADMIN`; the Docker image sets `0.0.0.0:7782`). For example
-`PCDS_PORT=7778 ./pcds setup ...` for a second server.
+Where the installation is, set by the image or the unit that starts it, or in your shell for
+every `pcds` command:
+
+| Variable | Default | |
+|---|---|---|
+| `PCDS_HOME` | `run/` of the release or checkout folder | the folder the installation keeps everything in: `worlds/`, `server.env`, `rules.json`, `access.json`, `data/` and `bin/`. A second server on the machine gets its own |
+| `PCDS_GAME_DIR` | the one used last, else the Steam library's | the game's folder (also `--game DIR`) |
+| `PCDS_UNIT` | `pcds` | the systemd unit's name; with `PCDS_HOME` for a second server on the machine |
+| `PCDS_CONTAINER` | unset | set by the Docker image: no systemd, the admin address may be public inside the container |
+| `PCDS_NEW_WORLD` | unset | Docker: options of the new world made on the first start without a world |
+
+**Moving from 0.6.** A setting that older releases read and this one does not (`PCDS_AUTOSAVE`,
+`PCDS_BACKUPS`, `PCDS_BACKUP_MINUTES`, `PCDS_MAX_PLAYERS`, `PCDS_AUTO_UPDATE`,
+`PCDS_UPDATE_CHECK_HOURS`, `PCDS_TRACE`, `PCDS_RULES`, `PCDS_ACCESS`, and a few more, all
+listed in [docs/env.md](docs/env.md)) stops the server at its next start, in one line that says
+what replaces it (`PCDS_AUTOSAVE is now the rule save.autosaveMinutes: edit rules.json or POST
+/api/config`). `./pcds config migrate` shows what it would change in `server.env` and
+`rules.json` (nothing is written, and no secret is printed); `./pcds config migrate --apply`
+writes it. A hot update itself needs nothing: the running server keeps its settings, and the
+new release says in the log which of them it ignores.
 
 `run/server.env` holds the admin token and is readable by your user only.
 
@@ -495,7 +511,7 @@ platform, landing spots, seats, machine ranges), the code says so in a `ponytail
   Invite codes (Steam networking) do not have this problem.
 - **Behind a UDP relay** (playit.gg, frp, `ssh -R`) every player comes from 127.0.0.1: the
   per-address limits do not apply to loopback, and the SteamID a direct-IP client reports is
-  believed from 127.0.0.1 only with `PCDS_TRUST_LOOPBACK=1` (for tests and the load and probe
+  believed from 127.0.0.1 only with `PCDS_DEV=trust-loopback` (for tests and the load and probe
   tools; never set it behind a relay).
 - **Connection slots can be flooded.** The server caps connections (128 in all, 8 per IP, 10
   seconds to send data) to protect its memory; a flood can still keep new players out while it
@@ -558,7 +574,7 @@ each sends back is compared.
    the hidden host takes the saved host player's place. Without Steam the game owns no DLC.
 2. **This server** on a copy of the same save, with `{"save": {"autosaveMinutes": 0}}` as
    `rules.json` beside it: `PCDS_LISTEN=127.0.0.1:PORT PCDS_STEAM=off PCDS_ADMIN=off
-   PCDS_TRUST_LOOPBACK=1 pcds serve DATA_DIR world.json`.
+   PCDS_DEV=trust-loopback pcds serve DATA_DIR world.json`.
 3. **Run a script** against both: `server/tests/parity/run.sh REF_ADDR OURS_ADDR DATA_DIR
    START_SAVE server/tests/parity/scripts/NAME.json OUT_DIR`. `parity.py` decodes every
    network variable with the tables and prints what differs: the approval (objects and their
