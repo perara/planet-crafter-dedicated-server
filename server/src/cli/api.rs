@@ -82,7 +82,14 @@ pub fn rules_patch(args: &[String]) -> Result<Value> {
     for arg in args {
         let bad = || format!("{arg}: expected SECTION.RULE=VALUE");
         let (key, value) = arg.split_once('=').filter(|(k, _)| k.contains('.')).ok_or_else(bad)?;
-        let value = serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_string()));
+        // A rule that is text takes 12345 or true as that text (a bucket or a secret of digits):
+        // read as a JSON number it would be refused as "not text" with no way to say it but quotes.
+        let is_text = crate::config::knob_for(key).is_some_and(|k| k.kind == crate::config::Type::String);
+        let value = match serde_json::from_str::<Value>(value) {
+            Ok(Value::Number(_) | Value::Bool(_)) if is_text => Value::String(value.to_string()),
+            Ok(json) => json,
+            Err(_) => Value::String(value.to_string()),
+        };
         let mut path: Vec<&str> = key.split('.').collect();
         let last = path.pop().unwrap_or_default();
         let mut node = &mut patch;
@@ -261,6 +268,9 @@ mod tests {
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let patch = rules_patch(&args(&["speed.growth=2", "gauges.noDeath=true", "death.consequences=DropAllItems", "limits.buildings.Drill4=10", "death.dropChance=null"])).unwrap();
         assert_eq!(patch, json!({"speed": {"growth": 2}, "gauges": {"noDeath": true}, "death": {"consequences": "DropAllItems", "dropChance": null}, "limits": {"buildings": {"Drill4": 10}}}));
+        // Text rules take digits as text; null still resets; quotes still work.
+        let text = rules_patch(&args(&["chat.secret=12345", "backup.s3Bucket=123456789", "chat.commandPrefix=true", "backup.s3Region=null", "backup.s3Prefix=\"7\""])).unwrap();
+        assert_eq!(text, json!({"chat": {"secret": "12345", "commandPrefix": "true"}, "backup": {"s3Bucket": "123456789", "s3Region": null, "s3Prefix": "7"}}));
         assert!(rules_patch(&args(&["speed=2"])).is_err());
         assert!(rules_patch(&args(&["speed.growth"])).is_err());
         assert!(rules_patch(&args(&["speed.growth=2", "speed.growth.x=1"])).is_err());
