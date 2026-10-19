@@ -43,6 +43,7 @@ mod bench;
 mod access;
 mod admin;
 mod bank;
+mod bincodec;
 mod chathooks;
 mod cli;
 #[cfg(test)]

@@ -351,6 +351,57 @@ pub fn memfd(name: &str, write: impl FnOnce(&mut std::io::BufWriter<&File>) -> R
     Ok(file.into())
 }
 
+/// A sealed memfd's content mapped read-only, in place: no copy of what the old bank wrote (a
+/// big world's snapshot is tens of MiB; reading it into a Vec costs about 0.4 ms per MiB). The
+/// seals (no write, no shrink) keep the bytes still for as long as it is mapped.
+pub struct Mapped {
+    ptr: *const u8,
+    len: usize,
+}
+
+// SAFETY: a read-only private mapping of a sealed file: nothing writes through or under it.
+unsafe impl Send for Mapped {}
+unsafe impl Sync for Mapped {}
+
+impl std::ops::Deref for Mapped {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        // SAFETY: ptr..ptr+len is the live mapping, unmapped only in drop.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl Drop for Mapped {
+    fn drop(&mut self) {
+        if self.len > 0 {
+            // SAFETY: the mapping made in map_memfd, unmapped once.
+            unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.len) };
+        }
+    }
+}
+
+/// Maps a memfd's whole content; Err when it is not sealed against writes (a map of a file
+/// that may change under the reader would be unsound to read as a slice).
+pub fn map_memfd(fd: &OwnedFd) -> std::io::Result<Mapped> {
+    // SAFETY: F_GET_SEALS only reads the descriptor's seals.
+    let seals = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GET_SEALS) };
+    let needed = libc::F_SEAL_WRITE | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW;
+    if seals < 0 || seals & needed != needed {
+        return Err(std::io::Error::other("the snapshot's memfd is not sealed"));
+    }
+    let len = File::from(fd.try_clone()?).metadata()?.len() as usize;
+    if len == 0 {
+        return Ok(Mapped { ptr: std::ptr::NonNull::dangling().as_ptr(), len: 0 });
+    }
+    // SAFETY: a new read-only mapping of a file this process holds open; MAP_POPULATE maps the
+    // pages in this call instead of faulting them in one by one while the world stands.
+    let ptr = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_PRIVATE | libc::MAP_POPULATE, fd.as_raw_fd(), 0) };
+    if ptr == libc::MAP_FAILED {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(Mapped { ptr: ptr as *const u8, len })
+}
+
 /// A memfd's whole content (read at offset 0: the fd's offset is shared with every holder).
 pub fn read_memfd(fd: &OwnedFd) -> std::io::Result<Vec<u8>> {
     let file = File::from(fd.try_clone()?);

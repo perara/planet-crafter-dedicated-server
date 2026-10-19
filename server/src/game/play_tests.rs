@@ -182,7 +182,7 @@ fn the_holder_index_follows_the_inventories() {
     g.destroy_world_object(wo, true);
     assert_eq!(holders_mismatch(&g), None);
     // A handoff restores it.
-    let text = crate::handoff::snapshot(&g).unwrap();
+    let text = crate::handoff::snapshot(&mut g).unwrap();
     let (net_data, data, spec, scenes) = test_tables().unwrap();
     let restored = crate::handoff::restore(net_data, data, spec, &text, scenes).unwrap();
     assert_eq!(restored.holders, g.holders);
@@ -219,7 +219,7 @@ fn world_objects_keep_the_dictionary_order() {
     assert_eq!(saved, vec![a as i64, d as i64, c as i64]);
     // A handoff keeps the free places: the next one created goes where the next would have.
     g.destroy_world_object(a, true);
-    let text = crate::handoff::snapshot(&g).unwrap();
+    let text = crate::handoff::snapshot(&mut g).unwrap();
     let (net_data, data, spec, scenes) = test_tables().unwrap();
     let mut h = crate::handoff::restore(net_data, data, spec, &text, scenes).unwrap();
     let e = h.create_world_object(iron, 0, true);
@@ -239,19 +239,21 @@ fn inventories_keep_the_dictionary_order() {
     let ours = |g: &mut Game| g.snapshot().inventories.iter().filter_map(|i| i["id"].as_i64()).map(|i| i as i32).filter(|i| [b, d, e].contains(i)).collect::<Vec<_>>();
     // c's place went first to d, then a's to e: e comes before b, d after.
     assert_eq!(ours(&mut g), vec![e, b, d]);
-    let text = crate::handoff::snapshot(&g).unwrap();
+    let text = crate::handoff::snapshot(&mut g).unwrap();
     let (net_data, data, spec, scenes) = test_tables().unwrap();
     let mut h = crate::handoff::restore(net_data, data, spec, &text, scenes).unwrap();
     assert_eq!(ours(&mut h), vec![e, b, d]);
 }
 
-/// H3: a snapshot of the previous format (world objects as a map, the sets as lists) restores.
+/// H3: a snapshot of format 1 (world objects as a map, the sets as lists) still restores (no
+/// release is told it may flip from it any more: this build reads 3 and 4).
 #[test]
 fn a_format_1_snapshot_restores() {
     let Some(mut g) = test_game(save()) else { return };
     join(&mut g, 1, "Ann");
     g.disconnect(1);
-    let text = crate::handoff::snapshot(&g).unwrap();
+    let text = crate::handoff::snapshot_json(&g).unwrap();
+    let current = crate::handoff::snapshot(&mut g).unwrap();
     let (_, state) = text.split_once('\n').unwrap();
     let mut state: Value = serde_json::from_str(state).unwrap();
     let pairs = |v: &Value| v["slots"].as_array().unwrap().iter().filter(|s| !s.is_null()).map(|s| (s[0].clone(), s[1].clone())).collect::<Vec<_>>();
@@ -269,8 +271,8 @@ fn a_format_1_snapshot_restores() {
     }
     let old = format!("{{\"format\":1,\"game_version\":\"{}\"}}\n{state}", g.net_data.game_version);
     let (net_data, data, spec, scenes) = test_tables().unwrap();
-    let h = crate::handoff::restore(net_data, data, spec, &old, scenes).unwrap();
-    crate::handoff::verify(&h, text.as_bytes()).unwrap();
+    let h = crate::handoff::restore(net_data, data, spec, old.as_bytes(), scenes).unwrap();
+    crate::handoff::verify(&h, &current).unwrap();
 }
 
 /// M2: an RPC runs only on an object with a behaviour of its class (or a subclass), as Netcode

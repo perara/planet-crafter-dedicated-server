@@ -75,9 +75,9 @@ pub mod enc {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ListEvent {
-    Add(Vec<u8>),
+    Add(#[serde(with = "crate::bincodec::bytes")] Vec<u8>),
     RemoveAt(i32),
-    Value(i32, Vec<u8>),
+    Value(i32, #[serde(with = "crate::bincodec::bytes")] Vec<u8>),
     Clear,
 }
 
@@ -97,8 +97,8 @@ fn encode_events(events: &[ListEvent]) -> Vec<u8> {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum VarValue {
-    Plain(Vec<u8>),
-    List(Vec<Vec<u8>>),
+    Plain(#[serde(with = "crate::bincodec::bytes")] Vec<u8>),
+    List(#[serde(with = "crate::bincodec::byte_lists")] Vec<Vec<u8>>),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -145,6 +145,7 @@ pub struct NetObj {
     pub rotation: [f32; 4],
     pub scale: [f32; 3],
     pub behaviours: Vec<NetBehaviour>,
+    #[serde(with = "crate::bincodec::bytes")]
     pub tail: Vec<u8>,
     pub tail_position: Option<usize>,
     /// The world object it stands for.

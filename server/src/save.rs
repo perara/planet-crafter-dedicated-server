@@ -11,15 +11,25 @@ use serde_json::Value;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct SaveFile {
+    #[serde(with = "crate::bincodec::json_value")]
     pub world: Value,
+    #[serde(with = "crate::bincodec::json_values")]
     pub planets: Vec<Value>,
+    #[serde(with = "crate::bincodec::json_values")]
     pub players: Vec<Value>,
+    #[serde(with = "crate::bincodec::json_values")]
     pub objects: Vec<Value>,
+    #[serde(with = "crate::bincodec::json_values")]
     pub inventories: Vec<Value>,
+    #[serde(with = "crate::bincodec::json_value")]
     pub stats: Value,
+    #[serde(with = "crate::bincodec::json_values")]
     pub messages: Vec<Value>,
+    #[serde(with = "crate::bincodec::json_values")]
     pub story_events: Vec<Value>,
+    #[serde(with = "crate::bincodec::json_value")]
     pub settings: Value,
+    #[serde(with = "crate::bincodec::json_values")]
     pub procedural: Vec<Value>,
 }
 

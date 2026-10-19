@@ -77,7 +77,7 @@ pub fn run(args: &[String]) {
                 std::process::exit(3);
             }
             let recover = serde_json::from_slice::<Value>(&f.body).is_ok_and(|b| b["recover"] == true);
-            let snapshot = f.fd.as_ref().ok_or("no memfd".to_string()).and_then(|fd| ipc::read_memfd(fd).map_err(|e| e.to_string()));
+            let snapshot = f.fd.as_ref().ok_or("no memfd".to_string()).and_then(|fd| ipc::map_memfd(fd).map_err(|e| e.to_string()));
             let restored = snapshot.and_then(|s| crate::handoff::restore_bytes(net_data, data, spec, &s, scenes).map(|g| (g, s)));
             match restored {
                 Ok((mut g, snapshot)) => {

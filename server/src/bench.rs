@@ -210,17 +210,18 @@ fn a_played_session_ends_the_same_through_handoffs() {
     let Some(start) = crate::game::test_game(crate::game::tests::save()) else { return };
     let e = Env { path: String::new(), dir: crate::test_data().unwrap(), seconds: 20.0, players: 3, action_ms: 200, dump: None };
     // A copy of a game as a new bank makes it (one start for both runs: the same random state).
-    let copy = |g: &Game| {
+    let copy = |g: &mut Game| {
         let (net_data, data, spec, scenes) = crate::game::test_tables().unwrap();
         crate::handoff::restore(net_data, data, spec, &crate::handoff::snapshot(g).unwrap(), scenes).unwrap()
     };
-    let a = run(copy(&start), &e, f64::INFINITY, |g| g, None);
-    let b = run(copy(&start), &e, 5.0, |old| copy(&old), None);
+    let mut start = start;
+    let a = run(copy(&mut start), &e, f64::INFINITY, |g| g, None);
+    let b = run(copy(&mut start), &e, 5.0, |mut old| copy(&mut old), None);
     // They played: built, crafted, chatted.
     let containers = a.game.wos.values().filter(|w| a.game.data.groups[w.group].id == "Container1").count();
     assert!(containers >= 3, "{containers} containers built");
     assert!(a.game.inventories.values().any(|i| i.items.len() >= 2), "crafted items in a backpack");
-    assert_eq!(a.fingerprint, b.fingerprint, "{}", divergence(&a, &b, |d| (run(copy(&start), &e, f64::INFINITY, |g| g, d), run(copy(&start), &e, 5.0, |old| copy(&old), d))));
+    assert_eq!(a.fingerprint, b.fingerprint, "{}", divergence(&a, &b, |d| (run(copy(&mut start), &e, f64::INFINITY, |g| g, d), run(copy(&mut start), &e, 5.0, |mut old| copy(&mut old), d))));
 }
 
 #[test]
@@ -318,12 +319,12 @@ fn handoff() {
     let stats = std::cell::RefCell::new(Vec::<(usize, Duration, Duration)>::new());
     let handed = |dump| {
         stats.borrow_mut().clear();
-        run(load(&e), &e, every, |old| {
+        run(load(&e), &e, every, |mut old| {
             // The new bank has its tables loaded before the handoff starts.
             let (net_data, data, spec) = tables();
             let scenes = crate::scene_tables(e.dir, &net_data, &data);
             let started = Instant::now();
-            let text = crate::handoff::snapshot(&old).unwrap_or_else(|err| panic!("snapshot: {err}"));
+            let text = crate::handoff::snapshot(&mut old).unwrap_or_else(|err| panic!("snapshot: {err}"));
             let serialized = started.elapsed();
             drop(old);
             let started = Instant::now();
@@ -386,7 +387,7 @@ fn handoff() {
         let Some(slot) = doc.pointer_mut(&pointer) else { continue };
         *slot = cold;
         // A snapshot: the live one's head line, then the changed state.
-        let head = crate::handoff::snapshot(&load(&e)).unwrap();
+        let head = crate::handoff::snapshot_json(&load(&e)).unwrap();
         let text = format!("{}\n{doc}", head.split_once('\n').unwrap().0);
         let quiet = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
@@ -399,7 +400,7 @@ fn handoff() {
                 let (net_data, data, spec) = tables();
                 {
                 let scenes = crate::scene_tables(e.dir, &net_data, &data);
-                crate::handoff::restore(net_data, data, spec, &text, scenes)
+                crate::handoff::restore(net_data, data, spec, text.as_bytes(), scenes)
             }.unwrap_or_else(|err| panic!("restore: {err}"))
             }, None)
         }));
@@ -463,7 +464,7 @@ fn flipbench() {
             let scenes = crate::scene_tables(dir, &net_data, &data);
             let mut phases: Vec<(&'static str, f64)> = Vec::new();
             let fd = match &from {
-                None => crate::handoff::snapshot_memfd(&g, &mut phases).unwrap(),
+                None => crate::handoff::snapshot_memfd(&mut g, &mut phases).unwrap(),
                 Some(s) => crate::ipc::memfd("pcds-snapshot", |w| w.write_all(s).map_err(|e| e.to_string())).unwrap(),
             };
             // The front passes the descriptor on: the old bank's link to the front's, then the front's to the new bank's.
@@ -475,11 +476,12 @@ fn flipbench() {
             let f = bank.recv().unwrap();
             phases.push(("fd pass", t.elapsed().as_secs_f64() * 1000.0));
             let t = Instant::now();
-            let text = crate::ipc::read_memfd(f.fd.as_ref().unwrap()).unwrap();
-            phases.push(("memfd read", t.elapsed().as_secs_f64() * 1000.0));
+            let text = crate::ipc::map_memfd(f.fd.as_ref().unwrap()).unwrap();
+            phases.push(("memfd map", t.elapsed().as_secs_f64() * 1000.0));
             bytes = text.len();
             let new = crate::handoff::restore_timed(net_data, data, spec, &text, scenes, &mut phases).unwrap_or_else(|err| panic!("restore: {err}"));
-            let stand: f64 = phases.iter().map(|p| p.1).sum();
+            // The steps inside a step (their names start with a dot) are not added twice.
+            let stand: f64 = phases.iter().filter(|p| !p.0.starts_with('.')).map(|p| p.1).sum();
             phases.push(("stand", stand));
             drop(text);
             // The old bank ends (EXIT): its world is freed after the stand, not in it.
@@ -497,7 +499,7 @@ fn flipbench() {
             g.net.out.clear();
         }
         println!("flipbench: {path}: {} world objects, {} network objects, {} inventories; loaded in {loaded:?}; snapshot {bytes} bytes; {rounds} flips (ms: p50 / p95 / max / min)", g.wos.len(), g.net.objects.len(), g.inventories.len());
-        let order = ["snapshot", "serialize", "memfd write", "fd pass", "memfd read", "head", "parse value", "migrate", "parse", "rebuild holders", "refresh tables", "generation", "stand"];
+        let order = ["snapshot", "serialize", "memfd write", "fd pass", "memfd map", "head", "parse value", "migrate", ".parts read", ".parts joined", ".slot indexes", ".net index", "parse", "rebuild holders", "refresh tables", "generation", "stand"];
         for name in order {
             let Some(v) = samples.get_mut(name) else { continue };
             v.sort_by(|a, b| a.partial_cmp(b).unwrap());

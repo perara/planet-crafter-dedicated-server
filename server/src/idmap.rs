@@ -114,6 +114,32 @@ impl<K: Copy + Eq + Hash, V> Slots<K, V> {
     }
 }
 
+impl<K: Copy + Eq + Hash, V> Slots<K, V> {
+    /// The slots as they are (None: free), for a snapshot's writer to serialize in parts.
+    pub fn slots(&self) -> &[Option<(K, V)>] {
+        &self.slots
+    }
+
+    /// Takes the slots out and leaves the index and the free list: for as long as they are out
+    /// nothing may look anything up (the snapshot writer holds the game still). Put back with
+    /// `unlend`.
+    pub fn lend(&mut self) -> Vec<Option<(K, V)>> {
+        std::mem::take(&mut self.slots)
+    }
+
+    pub fn unlend(&mut self, slots: Vec<Option<(K, V)>>) {
+        self.slots = slots;
+    }
+
+    /// The slots of a snapshot read in parts, into a Slots that came with its free list and no
+    /// slots (`lend`'s counterpart on the reading side): the index is built here.
+    pub fn fill(&mut self, slots: Vec<Option<(K, V)>>) {
+        self.index = FxHashMap::with_capacity_and_hasher(slots.len(), Default::default());
+        self.index.extend(slots.iter().enumerate().filter_map(|(i, s)| s.as_ref().map(|(k, _)| (*k, i))));
+        self.slots = slots;
+    }
+}
+
 impl<K: Copy + Eq + Hash, V> std::ops::Index<&K> for Slots<K, V> {
     type Output = V;
     fn index(&self, k: &K) -> &V {

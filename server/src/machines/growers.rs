@@ -727,8 +727,8 @@ mod tests {
     fn a_restored_algae_generator_still_needs_water() {
         let Some(mut game) = game() else { return };
         let wo = build(&mut game, "AlgaeGenerator1", [50.0, 5.0, 0.0]);
-        let snapshot = crate::handoff::snapshot(&game).unwrap();
-        assert!(!snapshot.contains("water_only"), "the flag is not part of a snapshot, so an older snapshot restores");
+        let snapshot = crate::handoff::snapshot(&mut game).unwrap();
+        assert!(!crate::handoff::snapshot_json(&game).unwrap().contains("water_only"), "the flag is not part of a snapshot, so an older snapshot restores");
         let water_only = |g: &Game| g.ext.machines.list.get(&wo).and_then(|m| m.harvestable.as_ref()).map(|h| h.water_only);
         assert_eq!(water_only(&game), Some(true));
         let (net_data, data, spec, scenes) = crate::game::test_tables().unwrap();
@@ -736,7 +736,7 @@ mod tests {
         assert_eq!(water_only(&restored), Some(true), "set again from the tables after the restore");
         // The vegetable grower on the same restore does not need water.
         let grower = build(&mut game, "VegetableGrower1", [60.0, 5.0, 0.0]);
-        let snapshot = crate::handoff::snapshot(&game).unwrap();
+        let snapshot = crate::handoff::snapshot(&mut game).unwrap();
         let (net_data, data, spec, scenes) = crate::game::test_tables().unwrap();
         let restored = crate::handoff::restore(net_data, data, spec, &snapshot, scenes).unwrap();
         assert_eq!(restored.ext.machines.list.get(&grower).and_then(|m| m.harvestable.as_ref()).map(|h| h.water_only), Some(false));

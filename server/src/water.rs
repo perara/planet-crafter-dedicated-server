@@ -19,8 +19,10 @@ struct Volume {
     local_rotation: [f32; 4],
     root_position: [f32; 3],
     root_rotation: [f32; 4],
+    #[serde(with = "crate::bincodec::json_value")]
     positioning: Value,
     active: bool,
+    #[serde(with = "crate::bincodec::json_value")]
     activators: Value,
     /// WaterVolume.ignoreForEnergyDetection: not water for IsUnderWater, still on the Water layer.
     ignored: bool,
