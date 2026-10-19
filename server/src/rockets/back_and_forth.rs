@@ -356,10 +356,10 @@ fn remove_items_of_groups(game: &mut Game, inventory: i32, groups: &[usize]) {
             removed.push(item);
         }
     }
-    game.destroy_world_objects(&removed, false);
     for item in &removed {
         game.propagate(inventory, *item, false);
     }
+    game.destroy_world_objects(&removed, false);
     game.dirty_inventory(inventory, 0, false);
 }
 
