@@ -267,8 +267,7 @@ impl Bank {
                         let ctx = Ctx { save_path: &self.save_path, build_id: self.build_id.as_deref(), data_dir: &self.data_dir, loop_rate: loops.2, busy: busy_last };
                         let request = || admin_request(game, r["method"].as_str().unwrap_or(""), r["path"].as_str().unwrap_or(""), &r["body"], &ctx, &mut autosave);
                         let (status, body) = contained("an admin request", request).unwrap_or_else(|| (500, "{\"error\":\"the server failed on this request\"}".to_string()));
-                        let answer = json!({"status": status, "body": body, "autosaveMinutes": autosave});
-                        self.link.send(ipc::ANSWER, f.n, answer.to_string().as_bytes());
+                        self.link.send(ipc::ANSWER, f.n, admin_answer(status, body, autosave).as_bytes());
                     }
                     ipc::SAVE => autosave(game, &self.save_path),
                     ipc::STOP => std::process::exit(final_save(game, &self.save_path)),
@@ -659,6 +658,18 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
     }
 }
 
+/// The ANSWER frame for an admin request. One past what a frame holds is never sent (the
+/// request would end in the front's 10 s timeout, "the game loop did not answer"): its place is
+/// an error that says what to do.
+fn admin_answer(status: u16, body: String, autosave: u64) -> String {
+    let answer = json!({"status": status, "body": body, "autosaveMinutes": autosave}).to_string();
+    if ipc::fits(answer.as_bytes()) {
+        return answer;
+    }
+    let error = json!({"error": format!("the answer is {} MiB, more than the link to the front carries ({} MiB): for a world's file, copy it from the worlds folder on the server", answer.len() >> 20, ipc::MAX_FRAME >> 20)});
+    json!({"status": 500, "body": error.to_string(), "autosaveMinutes": autosave}).to_string()
+}
+
 /// /api/status's "tables": the version and build these tables are for, the installed game's
 /// build (PCDS_GAME_DIR, which pcds run sets), and a warning when that game has no tables of
 /// this server's format (a game update `pcds update` has not read yet).
@@ -969,6 +980,16 @@ mod tests {
     }
 
     /// A ban and a rules change written after a snapshot are in the game restored from it.
+    /// An answer too large for a frame is an error the caller can read, not a lost answer.
+    #[test]
+    fn an_answer_past_a_frame_is_an_error() {
+        let small: Value = serde_json::from_str(&admin_answer(200, "{}".into(), 5)).unwrap();
+        assert_eq!((small["status"].as_u64(), small["body"].as_str()), (Some(200), Some("{}")));
+        let big: Value = serde_json::from_str(&admin_answer(200, "x".repeat(ipc::MAX_FRAME), 5)).unwrap();
+        assert_eq!((big["status"].as_u64(), big["autosaveMinutes"].as_u64()), (Some(500), Some(5)));
+        assert!(big["body"].as_str().unwrap().contains("copy it from the worlds folder"), "{big}");
+    }
+
     #[test]
     fn a_restored_game_takes_access_and_rules_from_their_files() {
         let Some(mut game) = game::test_game(game::tests::save()) else { return };
