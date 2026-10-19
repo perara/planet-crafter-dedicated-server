@@ -51,6 +51,18 @@ pub(crate) const LOADING_RPCS: &[&str] = &[
     "ProceduralInstancesHandler.LoadInstanceFromSceneServerRpc",
 ];
 
+/// The server RPCs the game declares `[Rpc(SendTo.Server)]` without `InvokePermission =
+/// Everyone`: Netcode drops one whose sender does not own the object it is sent to
+/// (RpcMessageHelpers.Handle).
+const OWNER_ONLY_RPCS: &[&str] = &[
+    "GroupNetworkContainer.RemoveOwnershipServerRpc",
+    "PlayerMainController.PlayerReadyServerRpc",
+    "PlayerShareState.InputOnJumpServerRpc",
+    "PlayerShareState.StartMiningServerRpc",
+    "PlayerShareState.StopMiningServerRpc",
+    "PlayerStatus.HandleDyingConsequencesServerRpc",
+];
+
 /// RPC arguments in signature order, with typed accessors.
 pub struct Args(pub Vec<Value>);
 
@@ -551,6 +563,10 @@ impl Game {
                 println!("trace client {client} -> {kind} {}", crate::util::to_hex(body));
             }
             let approved = self.clients.get(&client).is_some_and(|c| c.approved);
+            let now = self.clock();
+            if approved && matches!(kind, NETWORK_TRANSFORM | NETWORK_VARIABLE_DELTA) && !self.limits.motion(client, body.len(), now) {
+                continue;
+            }
             match kind {
                 CONNECTION_REQUEST if !approved => self.approve(client, body),
                 _ if !approved => {}
@@ -611,7 +627,7 @@ impl Game {
             }
             return;
         }
-        if self.net.spec.get(method).is_some_and(|r| r.name == "ChatHandler.SendChatMessageServerRpc") && !self.limits.chat(client, self.time) {
+        if self.net.spec.get(method).is_some_and(|r| r.name == "ChatHandler.SendChatMessageServerRpc") && !self.limits.chat(client, self.clock()) {
             return;
         }
         // A tick's work per client is bounded; the rest waits for the next ticks (tick()).
@@ -647,6 +663,12 @@ impl Game {
         if !self.net.carries(object, class) {
             if self.misrouted.insert(name.clone()) {
                 eprintln!("client {client}: rpc {name} on object {object}, which has no {class}: ignored (logged once per RPC)");
+            }
+            return;
+        }
+        if OWNER_ONLY_RPCS.contains(&name.as_str()) && self.net.objects.get(&object).is_none_or(|o| o.owner != client) {
+            if self.misrouted.insert(format!("{name} by a client that is not the owner")) {
+                eprintln!("client {client}: rpc {name} on object {object}, which it does not own: ignored (logged once per RPC)");
             }
             return;
         }
@@ -1133,8 +1155,12 @@ pub mod tests {
             assert_eq!(said(&mut g, "hi"), Some(2));
         }
         assert_eq!(said(&mut g, "hi"), None, "the 11th at once");
-        g.time += 1.0;
-        assert_eq!(said(&mut g, "hi"), Some(2), "one a second after that");
+        // The clock runs on while the world is held (the game's time stands): players still chat.
+        g.held = true;
+        g.sim_time = Some(g.clock() + 1.0);
+        g.tick();
+        assert_eq!(said(&mut g, "hi"), Some(2), "one a second after that, held or not");
+        assert_eq!(said(&mut g, "hi"), None);
     }
 
     /// 100 RPCs in one batch: 32 now, the rest in the next ticks, in order. A lookup over the
@@ -1442,6 +1468,44 @@ pub mod tests {
                 g.tick();
             }
         }
+    }
+
+    /// Transform states and deltas go to every other client, so one client's flood of them is
+    /// cut at its budget (a second's worth), not multiplied by the players: what a real client
+    /// sends is far under it.
+    #[test]
+    fn a_flood_of_transforms_is_cut_at_the_clients_budget() {
+        let Some(mut g) = test_game(save()) else { return };
+        let ann = join(&mut g, 1, "Ann");
+        join(&mut g, 2, "Bob");
+        g.sim_time = Some(100.0);
+        g.net.out.clear();
+        let mut state = Writer::new();
+        state.packed_u64(ann).packed_i32(0).packed_u32(2).packed_i32(1).bytes(&1.0f32.to_le_bytes());
+        let relayed = |g: &Game| g.net.out.iter().filter(|(to, kind, _)| *kind == NETWORK_TRANSFORM && to.reaches(2)).count();
+        g.receive(1, &wire::batch(&vec![(NETWORK_TRANSFORM, state.0.clone()); 100]));
+        assert_eq!(relayed(&g), 100, "a real client's states all pass");
+        let flood = wire::batch(&vec![(NETWORK_TRANSFORM, state.0.clone()); 30_000]);
+        g.receive(1, &flood);
+        assert!(relayed(&g) < 9_000, "{} of 30100 states relayed", relayed(&g));
+        // One state with a megabyte of trailing bytes is a flood by itself.
+        let mut fat = state.0.clone();
+        fat.resize(1 << 20, 7);
+        g.net.out.clear();
+        g.receive(1, &wire::batch(&[(NETWORK_TRANSFORM, fat)]));
+        assert_eq!(relayed(&g), 0);
+        // Another client has a budget of its own.
+        g.receive(2, &wire::batch(&[(NETWORK_VARIABLE_DELTA, vec![0; 3])]));
+        g.limits.forget(1);
+        g.receive(1, &wire::batch(&[(NETWORK_TRANSFORM, state.0.clone())]));
+        assert_eq!(relayed(&g), 1);
+        // And the budget comes back with the clock: a second's worth after a second.
+        g.net.out.clear();
+        g.receive(1, &flood);
+        g.net.out.clear();
+        g.sim_time = Some(101.0);
+        g.receive(1, &flood);
+        assert!(relayed(&g) > 7_000 && relayed(&g) < 9_000, "{} relayed a second after", relayed(&g));
     }
 
     #[test]

@@ -10,7 +10,7 @@ use crate::handlers::change_panel;
 use crate::net::{enc, NetBehaviour, NetObj, VarValue};
 
 /// DataConfig.BuildPanelSubType.
-const SUB_TYPES: [&str; 17] = ["WallNull", "WallPlain", "WallCorridor", "WallGlass", "WallDoor", "FloorLight", "FloorGlass", "FloorPlain", "FloorLab", "WallLab", "FloorNoLight", "WallInside", "None", "WallWaterLife", "FloorAnglePlain", "FloorAngleGlass", "FloorAngleLight"];
+pub const SUB_TYPES: [&str; 17] = ["WallNull", "WallPlain", "WallCorridor", "WallGlass", "WallDoor", "FloorLight", "FloorGlass", "FloorPlain", "FloorLab", "WallLab", "FloorNoLight", "WallInside", "None", "WallWaterLife", "FloorAnglePlain", "FloorAngleGlass", "FloorAngleLight"];
 const WALL_CORRIDOR: i32 = 2;
 
 /// GameConfig.undergroundConstructionLocation: below it panels take their underground look.

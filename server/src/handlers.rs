@@ -19,11 +19,22 @@ const CHAT_EVERY: f32 = 1.0;
 const RPC_BUDGET: u32 = 32;
 const MAX_PENDING: usize = 8192;
 
-/// What one client may do how often: chat and RPC work.
+/// Transform states and variable deltas a client's objects send are passed on to every other
+/// client, so what a client may send is bounded too: MOTION_PER_SECOND units, a message costing
+/// 1 and one more per 64 bytes, with a second's worth as burst. A game client sends at most
+/// about 2500 units a second (its player and the tens of animals and drops it simulates, 30
+/// times a second each); more is dropped, the next state replaces it anyway.
+const MOTION_PER_SECOND: f64 = 8000.0;
+
+/// What one client may do how often: chat, RPC work and motion.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Limits {
-    /// Per client: the game time of its last chat message and the messages it may still send.
-    chat: HashMap<u64, (f32, f32)>,
+    /// Per client: the clock when it last sent motion and the units it may still send.
+    #[serde(skip)]
+    motion: HashMap<u64, (f64, f64)>,
+    /// Per client: the clock of its last chat message and the messages it may still send (the
+    /// clock goes on across a handoff, `started` is part of the snapshot).
+    chat: HashMap<u64, (f64, f32)>,
     /// RPC work done this tick per client, and its RPCs waiting for the next ticks.
     #[serde(skip)]
     used: HashMap<u64, u32>,
@@ -41,15 +52,29 @@ impl Limits {
     }
 
     /// Whether a client's chat message goes out now (a client's, not the server's own).
-    pub fn chat(&mut self, client: u64, now: f32) -> bool {
+    pub fn chat(&mut self, client: u64, now: f64) -> bool {
         let (last, left) = self.chat.entry(client).or_insert((now, CHAT_BURST));
-        *left = (*left + (now - *last).max(0.0) / CHAT_EVERY).min(CHAT_BURST);
+        *left = (*left + (now - *last).max(0.0) as f32 / CHAT_EVERY).min(CHAT_BURST);
         *last = now;
         if *left < 1.0 {
             self.warn(client, "chat messages over the rate, dropped");
             return false;
         }
         *left -= 1.0;
+        true
+    }
+
+    /// Whether a transform state or variable delta of `bytes` bytes is taken and passed on.
+    pub fn motion(&mut self, client: u64, bytes: usize, now: f64) -> bool {
+        let (last, left) = self.motion.entry(client).or_insert((now, MOTION_PER_SECOND));
+        *left = (*left + (now - *last).max(0.0) * MOTION_PER_SECOND).min(MOTION_PER_SECOND);
+        *last = now;
+        let cost = 1.0 + (bytes / 64) as f64;
+        if *left < cost {
+            self.warn(client, "transforms and variable deltas over the rate, dropped");
+            return false;
+        }
+        *left -= cost;
         true
     }
 
@@ -74,6 +99,8 @@ impl Limits {
 
     pub fn forget(&mut self, client: u64) {
         self.chat.remove(&client);
+        self.motion.remove(&client);
+        self.warned.retain(|(c, _)| *c != client);
         self.used.remove(&client);
         self.pending.remove(&client);
     }
@@ -258,6 +285,12 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
 /// Panel.ChangePanelServerRpc: the panel's look; the world object keeps every panel's type.
 /// The RPC addresses one of the object's Panel behaviours by index.
 pub fn change_panel(game: &mut Game, object: u64, index: u16, sub_type: i32, refresh: bool, disolve: bool) {
+    // Only the game's own panel types: any other number would be shown to every client, saved,
+    // and counted as a new entry of a list the wire cannot carry past 65535.
+    if !(0..crate::panels::SUB_TYPES.len() as i32).contains(&sub_type) {
+        eprintln!("panel type {sub_type} is not one of the game's (0 to {}): ignored", crate::panels::SUB_TYPES.len() - 1);
+        return;
+    }
     let current = game.net.behaviour_var(object, index, "_currentSubPanelType").cloned();
     if current.is_none() || matches!(current, Some(VarValue::Plain(ref v)) if *v == enc::enumeration(sub_type)) {
         return;
@@ -344,6 +377,12 @@ pub fn gain_tokens(game: &mut Game, gained: i32) {
 /// LinkedGroupsProxy.SetLinkedGroupsServerRpc: the list is cleared, then each group added;
 /// the world object follows the list (OnListChanged).
 pub fn set_linked_groups(game: &mut Game, object: u64, hashes: &[i32]) {
+    // A group each at most: a longer list is not the game's, and a NetworkList cannot carry
+    // 65536 events or items on the wire (its count is a ushort), which would break every client.
+    if hashes.len() > game.data.groups.len() {
+        eprintln!("linked groups: {} groups sent for object {object}, more than the game has ({}): ignored", hashes.len(), game.data.groups.len());
+        return;
+    }
     let mut events = vec![ListEvent::Clear];
     events.extend(hashes.iter().map(|h| ListEvent::Add(enc::int(*h))));
     game.net.list_events(object, "LinkedGroupsProxy", "_linkedGroupsHash", events);
@@ -554,11 +593,70 @@ mod tests {
         assert_eq!(sent(&g, "ActionnableInteractiveProxy.BroadcastToAllClientsClientRpc").into_iter().map(|s| (s.to, s.object)).collect::<Vec<_>>(), vec![(Target::Only(2), net)]);
     }
 
+    /// The owner-only RPCs (the game's `[Rpc(SendTo.Server)]`, which Netcode drops from anyone
+    /// but the object's owner): another client's player shown jumping and mining, an item taken
+    /// off its owner, another player's dying consequences, all refused.
+    #[test]
+    fn owner_only_rpcs_are_refused_from_other_clients() {
+        let Some((mut g, ann)) = world() else { return };
+        join(&mut g, 2, "Bob");
+        g.net.out.clear();
+        send_on(&mut g, 2, ann, "PlayerShareState.InputOnJumpServerRpc", &[]);
+        send_on(&mut g, 2, ann, "PlayerShareState.StartMiningServerRpc", &[json!(101_000_001), json!(1.5), json!(2)]);
+        send_on(&mut g, 2, ann, "PlayerShareState.StopMiningServerRpc", &[]);
+        for name in ["PlayerShareState.InputOnJumpClientRpc", "PlayerShareState.StartMiningClientRpc", "PlayerShareState.StopMiningClientRpc"] {
+            assert!(sent(&g, name).is_empty(), "{name} was sent for a player that is not the sender");
+        }
+        let iron = g.create_world_object(g.data.group("Iron").unwrap(), 0, true);
+        g.drop_on_floor(iron, [561.0, 3.0, 497.0], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 0.0, false, 1);
+        let net = g.wos[&iron].net.unwrap();
+        send_on(&mut g, 2, net, "GroupNetworkContainer.RemoveOwnershipServerRpc", &[]);
+        assert_eq!(g.net.objects[&net].owner, 1, "Bob took Ann's item off her");
+        send_on(&mut g, 1, net, "GroupNetworkContainer.RemoveOwnershipServerRpc", &[]);
+        assert_eq!(g.net.objects[&net].owner, 0, "its owner still can");
+    }
+
     #[test]
     fn chat_messages_go_to_everyone_with_the_sender() {
         let Some((mut g, _)) = world() else { return };
         send_scene(&mut g, 1, "ChatHandler.SendChatMessageServerRpc", &[json!("hello")]);
         assert_eq!(sent(&g, "ChatHandler.ReceiveChatMessageClientRpc").into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(Target::All, vec![json!(1), json!("hello")])]);
+    }
+
+    /// What a client sends into a NetworkList is bounded: a panel type the game has none of
+    /// would be a new entry of the constructed-panels list every time (70000 RPCs overflow the
+    /// ushort count on the wire), and a linked-groups list longer than the game has groups
+    /// would do it at once; every client's and every later joiner's copy of the object breaks.
+    #[test]
+    fn lists_clients_write_cannot_outgrow_the_wire() {
+        let Some((mut g, _)) = world() else { return };
+        let container = group_with(&g, &["TextProxy", "LinkedGroupsProxy"], true);
+        let building = group_with(&g, &["Panel"], true);
+        let (_, net) = place(&mut g, &container, [570.0, 3.0, 500.0]);
+        let (_, panel) = place(&mut g, &building, [580.0, 3.0, 500.0]);
+        let index = g.net.objects[&panel].behaviours.iter().find(|b| b.class == "Panel").unwrap().index;
+        let (handler, _) = g.net.find_class("WorldObjectsHandler").unwrap();
+        let constructed = |g: &crate::game::Game| list(g, handler, "WorldObjectsHandler", "_constructedPanelTypes").len();
+        let before = constructed(&g);
+        for sub_type in [17, 999, -1, i32::MAX] {
+            send_rpc(&mut g, 1, panel, index, "Panel.ChangePanelServerRpc", &[json!(sub_type), json!(false), json!(false)]);
+        }
+        assert_eq!(constructed(&g), before, "no entry for a panel type the game has none of");
+        send_on(&mut g, 1, net, "LinkedGroupsProxy.SetLinkedGroupsServerRpc", &[json!((0..70_000).collect::<Vec<i32>>())]);
+        assert!(list(&g, net, "LinkedGroupsProxy", "_linkedGroupsHash").len() < 1000);
+    }
+
+    /// What the limits remember of a client goes with it: a client id is never used again, so
+    /// a flood of short connections would otherwise leave an entry for each, for ever.
+    #[test]
+    fn a_client_that_left_leaves_nothing_in_the_limits() {
+        let mut l = super::Limits::default();
+        for client in 1..=3u64 {
+            assert!(l.chat(client, 0.0) && l.motion(client, 10, 0.0) && l.spend(client, 1, b"rpc"));
+            l.warn(client, "over the rate");
+        }
+        l.forget(2);
+        assert_eq!((l.chat.len(), l.motion.len(), l.used.len(), l.warned.len()), (2, 2, 2, 2));
     }
 
     /// Story messages: received once (an unknown one not at all), read, and both saved.

@@ -594,7 +594,8 @@ impl Game {
             }
             "InventoriesHandler.SetInventorySizeServerRpc" => {
                 let (inv, offset, drop) = (a.i(0), a.i(1), a.v3(2));
-                if let Some(size) = self.inventories.get(&inv).map(|i| i.size + offset) {
+                // C# int arithmetic wraps, as the game's does (a debug build panicked here).
+                if let Some(size) = self.inventories.get(&inv).map(|i| i.size.wrapping_add(offset)) {
                     self.inventories.get_mut(&inv).unwrap().size = size;
                     // DropObjectsIfNotEnoughSpace.
                     let overflow: Vec<i32> = self.inventories[&inv].items.iter().skip(size.max(0) as usize).copied().collect();
@@ -879,6 +880,17 @@ mod tests {
         assert_eq!(one(&g, "InventoriesHandler.DirtyInventoryLogisticsClientRpc"), vec![json!(chest), json!([iron]), json!([ice]), json!(2)]);
         let saved = g.snapshot().inventories.into_iter().find(|i| i["id"] == chest).unwrap();
         assert_eq!((&saved["demandGrps"], &saved["supplyGrps"], &saved["priority"]), (&json!("Iron"), &json!("ice"), &json!(2)));
+    }
+
+    /// The size offset is C# int arithmetic: it wraps, as the game's does, in a debug build too.
+    #[test]
+    fn a_size_offset_that_overflows_wraps_instead_of_panicking() {
+        let Some((mut g, _)) = world() else { return };
+        let chest = g.create_inventory(3, 0, 0, &[], &[]);
+        for _ in 0..2 {
+            send_scene(&mut g, 1, "InventoriesHandler.SetInventorySizeServerRpc", &[json!(chest), json!(i32::MAX), json!([570.0, 3.0, 500.0])]);
+        }
+        assert_eq!(g.inventories[&chest].size, 3i32.wrapping_add(i32::MAX).wrapping_add(i32::MAX));
     }
 
     #[test]

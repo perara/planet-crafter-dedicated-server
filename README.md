@@ -511,7 +511,9 @@ platform, landing spots, seats, machine ranges), the code says so in a `ponytail
   in one message; a world whose join message is larger is refused over Steam (logged).
 - **Clients are trusted with their own inventories**, as the game does: there are no ownership
   checks on inventory changes. Each client gets 32 units of RPC work per 5 ms tick (the rest
-  waits) and 10 chat lines at once, one a second after that, 500 characters each.
+  waits), 8000 units a second of movement and variable updates (a message costs 1, and 1 more
+  per 64 bytes; the rest is dropped) and 10 chat lines at once, one a second after that, 500
+  characters each.
 
 ## How it works
 

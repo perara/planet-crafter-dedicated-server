@@ -144,7 +144,12 @@ impl Access {
         }
         let mut ips = self.lists.banned_ips.clone();
         if let (None, Some(ip)) = (steam_id, ip) {
-            ips.push(ip.to_string());
+            // Behind a UDP relay every player is 127.0.0.1: banning that bans them all.
+            if ip.parse().is_ok_and(crate::utp::is_loopback) {
+                eprintln!("access: {name} connects from {ip} (a local relay): banned by name only, as that address is every player's");
+            } else {
+                ips.push(ip.to_string());
+            }
         }
         self.save(Lists { banned_names: clean(names), banned_ips: clean(ips), ..self.lists.clone() })
     }
@@ -209,6 +214,17 @@ mod tests {
         }
         assert!(ip_matches("1.2.3.4", "0.0.0.0/0"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Players behind a UDP relay all come from 127.0.0.1 (README, Known limits): banning one
+    /// bans their name, not the address every other player and the admin's own tests share.
+    #[test]
+    fn a_ban_never_takes_the_loopback_address_everyone_behind_a_relay_has() {
+        let mut a = Access { lists: Lists::default(), path: None };
+        a.ban("Mallory", None, Some("127.0.0.1")).unwrap();
+        a.ban("Eve", None, Some("::ffff:127.0.0.1")).unwrap();
+        assert!(a.lists.banned_ips.is_empty());
+        assert!(a.ip_allowed("127.0.0.1") && !a.name_allowed("mallory", None) && !a.name_allowed("Eve", None));
     }
 
     /// A ban that cannot be written is refused, not kept in memory only (and lost at restart).

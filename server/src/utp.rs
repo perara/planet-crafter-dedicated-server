@@ -96,7 +96,7 @@ struct Connection {
     /// Reliable send: next sequence, packets not yet acknowledged, bytes waiting for room.
     sequence: u16,
     in_flight: VecDeque<(u16, Vec<u8>, Instant)>,
-    queued: Vec<u8>,
+    queued: VecDeque<u8>,
     fragments: [Fragments; 2],
     /// Packets allowed in flight, when the in-flight ones were last acknowledged (or the first
     /// of them sent), and resend rounds since.
@@ -123,7 +123,7 @@ impl Connection {
             ack_due: false,
             sequence: 0,
             in_flight: VecDeque::new(),
-            queued: Vec::new(),
+            queued: VecDeque::new(),
             fragments: Default::default(),
             window: INITIAL_WINDOW,
             progress: now,
@@ -420,8 +420,8 @@ impl Utp {
             self.dropped.push(*token);
             return;
         }
-        c.queued.extend_from_slice(&(batch.len() as i32).to_le_bytes());
-        c.queued.extend_from_slice(batch);
+        c.queued.extend((batch.len() as i32).to_le_bytes());
+        c.queued.extend(batch);
     }
 
     /// Sends what fits in the window, resends what was not acknowledged, acks, heartbeats.
@@ -909,6 +909,58 @@ mod tests {
             window = (window * 2).min(WINDOW);
             assert_eq!(server.connections[&token].window, window);
         }
+    }
+
+    /// A late-game world is several MiB: taking one packet's bytes off the queue must not move
+    /// everything behind them (once per packet, that is gigabytes of copying per join).
+    #[test]
+    fn a_big_world_is_sent_in_linear_time() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let (from, token) = ("127.0.0.1:9".parse().unwrap(), [21; 8]);
+        handshake(&mut server, from, token);
+        server.datagram(&[[DATA].as_slice(), &token].concat(), from, Instant::now(), &mut Vec::new());
+        server.send(&token, &vec![0; 8 << 20]);
+        let start = Instant::now();
+        let mut sent = 0;
+        while !server.connections[&token].queued.is_empty() {
+            server.flush();
+            let c = &server.connections[&token];
+            sent += c.in_flight.len();
+            let ack = [[DATA].as_slice(), &token, &[RELIABLE, ACK, 0, 0, 0, 0, 0], &c.sequence.wrapping_sub(1).to_le_bytes(), &u64::MAX.to_le_bytes()].concat();
+            server.datagram(&ack, from, Instant::now(), &mut Vec::new());
+        }
+        assert!(sent > 6000);
+        assert!(start.elapsed() < Duration::from_secs(1), "{sent} packets took {:?}", start.elapsed());
+    }
+
+    /// Sequence numbers are 16 bits: a session that lasts past 65536 packets each way (80 MB
+    /// at the full size) goes on delivering and acknowledging across the wrap.
+    #[test]
+    fn sequences_wrap_around() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let (from, token) = ("127.0.0.1:9".parse().unwrap(), [22; 8]);
+        handshake(&mut server, from, token);
+        let mut events = Vec::new();
+        let one = [1i32.to_le_bytes().as_slice(), b"x"].concat();
+        for i in 0..70_000u32 {
+            let packet = [[DATA].as_slice(), &token, &[RELIABLE, PAYLOAD, 0, 0, 0], &(i as u16).to_le_bytes(), &u16::MAX.to_le_bytes(), &u64::MAX.to_le_bytes(), &one].concat();
+            server.datagram(&packet, from, Instant::now(), &mut events);
+        }
+        assert_eq!(events.len(), 70_000);
+        assert!(events.iter().all(|e| matches!(e, Event::Data(_, b) if b == b"x")));
+        server.datagram(&[[DATA].as_slice(), &token].concat(), from, Instant::now(), &mut Vec::new());
+        let mut acked = 0;
+        for _ in 0..11 {
+            server.send(&token, &vec![0; 8 << 20]);
+            while !server.connections[&token].queued.is_empty() || !server.connections[&token].in_flight.is_empty() {
+                server.flush();
+                let c = &server.connections[&token];
+                acked += c.in_flight.len();
+                let ack = [[DATA].as_slice(), &token, &[RELIABLE, ACK, 0, 0, 0, 0, 0], &c.sequence.wrapping_sub(1).to_le_bytes(), &u64::MAX.to_le_bytes()].concat();
+                server.datagram(&ack, from, Instant::now(), &mut Vec::new());
+            }
+        }
+        assert!(acked > 65_536 && server.connections.contains_key(&token), "{acked} packets acknowledged");
     }
 
     /// No client acks what was never sent: a blind spoofer guessing ahead loses its session.
