@@ -96,7 +96,7 @@ game's tables after a game update, a snapshot format it does not read, not a sna
 to `world.json.snapshot.unusable-<UTC time>` with a line in the log, and the world starts from
 the save. If a start cannot restore it for another reason, the start fails: move it away. A save that fails is never silent: `POST /api/save` answers 500 with the error, `GET
 /api/status` has `lastSave` (`ok`, `at` in Unix seconds, `error`), and a failed autosave is tried
-again at the next one. When the last save (at a stop, or when the front is gone) fails, the bank
+again at the next one. An autosave makes its text on the game thread (about 1 ms for a world of 2500 objects, 36 ms for 100k) and a thread of the bank backs up and writes the file, so the disk never holds the world still; `lastSave` is set when the write ends. One autosave is written at a time, and the saves that wait for the result (`POST /api/save`, the one at a stop, a flip's exit) wait for it first, so a save never overtakes an older one. When the last save (at a stop, or when the front is gone) fails, the bank
 writes its snapshot to `world.json.snapshot` (else to the temporary folder, and says where) and
 ends with 1; the front says so and ends with 1 too.
 

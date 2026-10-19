@@ -539,6 +539,25 @@ fn scale() {
     let t = Cpu::now();
     let h = crate::handoff::snapshot(&g).unwrap();
     println!("scale: handoff snapshot {:?}, {} bytes", t.elapsed(), h.len());
+    {
+        let (mut vars, mut behaviours, mut name_bytes, mut value_bytes, mut list_items) = (0usize, 0usize, 0usize, 0usize, 0usize);
+        for o in g.net.objects.values() {
+            behaviours += o.behaviours.len();
+            name_bytes += o.behaviours.iter().map(|b| b.class.len()).sum::<usize>();
+            for b in &o.behaviours {
+                vars += b.vars.len();
+                for v in &b.vars {
+                    name_bytes += v.name.len() + v.ty.len();
+                    match &v.value {
+                        crate::net::VarValue::Plain(x) => value_bytes += x.len(),
+                        crate::net::VarValue::List(l) => list_items += l.len(),
+                    }
+                }
+            }
+        }
+        let n = g.net.objects.len().max(1);
+        println!("scale: per network object: {:.1} behaviours, {:.1} variables, {:.0} bytes of names and types, {:.0} bytes of plain values, {:.1} list items", behaviours as f64 / n as f64, vars as f64 / n as f64, name_bytes as f64 / n as f64, value_bytes as f64 / n as f64, list_items as f64 / n as f64);
+    }
     println!("scale: prefabs parsed (of all): {:?}", g.data.group_prefabs.parsed());
     // What each part of the game holds: the heap before and after it is dropped (last: the rest
     // of the game is not whole after it).
