@@ -17,6 +17,10 @@
 //! PlayerReady the game sends first, so the player stays as it spawned; "id": N makes the player
 //! claim Steam id N there. A step's "tag" is printed with its call (which sweep row it exercises);
 //! a step whose "$name" was never captured is skipped (printed with "skipped").
+//! {"transform": TARGET, "position": [x, y, z]} moves an object the player owns (a
+//! NetworkTransformMessage); "transforms": ["$var", ...] prints the transforms the server relays
+//! for those objects. "$near:HASH@x,y,z" is the object of that prefab spawned nearest to the
+//! point (within 20 m): something a machine made, to harvest.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -39,6 +43,10 @@ struct Session {
     inventory: i64,
     equipment: i64,
     vars: std::collections::HashMap<String, Value>,
+    /// Network objects whose transforms are printed.
+    watched: Vec<u64>,
+    /// Every object spawned for us: (id, prefab hash, position), for "$near:".
+    spawned: Vec<(u64, u32, [f32; 3])>,
 }
 
 fn print(started: Instant, mut line: Value) {
@@ -118,6 +126,7 @@ impl Session {
                 match protocol::read_scene_object(&mut r) {
                     Some(o) => {
                         self.vars.entry(format!("hash:{:08x}", o.hash)).or_insert(json!(o.id));
+                        self.spawned.push((o.id, o.hash, o.position.unwrap_or([f32::MAX; 3])));
                         object_line(&o, "create")
                     }
                     None => json!({"msg": "create", "hex": hex_of(body)}),
@@ -128,7 +137,12 @@ impl Session {
                 let mut r = Reader::new(body);
                 json!({"msg": "delta", "object": r.packed_u64(), "behaviour": r.packed_u16(), "hex": hex_of(r.rest())})
             }
-            TIME_SYNC | NETWORK_TRANSFORM => return,
+            // Transforms of the objects the script watches ("transforms": ["$var", ...]).
+            NETWORK_TRANSFORM => match crate::transform::update(body) {
+                Some(u) if self.watched.contains(&u.object) => json!({"msg": "transform", "object": u.object, "position": u.position}),
+                _ => return,
+            },
+            TIME_SYNC => return,
             _ => json!({"msg": kind, "hex": hex_of(body)}),
         };
         print(self.started, line);
@@ -182,9 +196,19 @@ fn substitute(v: &Value, s: &Session) -> Value {
         Value::String(t) if t == "$equipment" => json!(s.equipment),
         Value::String(t) if t.starts_with('$') && s.vars.contains_key(&t[1..]) => s.vars[&t[1..]].clone(),
         Value::String(t) if t.starts_with('#') => json!(crate::data::stable_hash(&t[1..])),
+        // "$near:HASH@x,y,z": the object of that prefab spawned nearest to the point, within 20 m.
+        Value::String(t) if t.starts_with("$near:") => near(s, &t[6..]).map(|id| json!(id)).unwrap_or_else(|| v.clone()),
         Value::Array(items) => Value::Array(items.iter().map(|i| substitute(i, s)).collect()),
         other => other.clone(),
     }
+}
+
+fn near(s: &Session, spec: &str) -> Option<u64> {
+    let (hash, at) = spec.split_once('@')?;
+    let hash = u32::from_str_radix(hash, 16).ok()?;
+    let p: Vec<f32> = at.split(',').filter_map(|x| x.parse().ok()).collect();
+    let d2 = |q: &[f32; 3]| (0..3).map(|i| (q[i] - p.get(i).copied().unwrap_or(0.0)).powi(2)).sum::<f32>();
+    s.spawned.iter().filter(|(_, h, q)| *h == hash && d2(q) < 400.0).min_by(|a, b| d2(&a.2).total_cmp(&d2(&b.2))).map(|(id, _, _)| *id)
 }
 
 /// The first "$name" left after substitution (a capture that failed), if any.
@@ -206,7 +230,7 @@ pub fn run(args: &[String]) {
     let script: Value = serde_json::from_str(&std::fs::read_to_string(script).expect("script")).expect("script JSON");
     let addr: SocketAddr = addr.parse().expect("HOST:PORT");
     let (utp, token) = Utp::connect("0.0.0.0:0".parse().unwrap(), addr, Duration::from_secs(10)).unwrap_or_else(|e| panic!("{addr}: {e}"));
-    let mut s = Session { utp, token, started: Instant::now(), client: 0, player: 0, inventory: 0, equipment: 0, vars: Default::default() };
+    let mut s = Session { utp, token, started: Instant::now(), client: 0, player: 0, inventory: 0, equipment: 0, vars: Default::default(), watched: Vec::new(), spawned: Vec::new() };
     s.send(&[(CONNECTION_REQUEST, request)]);
     let player_hash = data.prefabs["Player"].hash;
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -236,6 +260,28 @@ pub fn run(args: &[String]) {
     for step in steps {
         if let Some(ms) = step["wait"].as_u64() {
             s.pump(ms, &spec);
+            continue;
+        }
+        if let Some(names) = script["transforms"].as_array() {
+            s.watched = names.iter().filter_map(|n| substitute(n, &s).as_u64()).collect();
+        }
+        // {"transform": TARGET, "position": [x, y, z]}: the owner moving an object (a
+        // NetworkTransformMessage with the three position axes, as a ClientNetworkTransform sends).
+        if !step["transform"].is_null() {
+            let on = substitute(&step["transform"], &s);
+            if let Some(var) = unresolved(&on) {
+                print(s.started, json!({"msg": "call", "name": "transform", "skipped": var, "tag": step["tag"]}));
+                continue;
+            }
+            let (object, behaviour) = target(&on, &data, s.player);
+            let mut w = Writer::new();
+            w.packed_u64(object).packed_i32(behaviour as i32).packed_u32(2 | 4 | 8).packed_i32(0);
+            for f in step["position"].as_array().into_iter().flatten() {
+                w.bytes(&(f.as_f64().unwrap_or(0.0) as f32).to_le_bytes());
+            }
+            print(s.started, json!({"msg": "call", "name": "transform", "object": object, "behaviour": behaviour, "args": step["position"], "tag": step["tag"]}));
+            s.send(&[(NETWORK_TRANSFORM, w.0)]);
+            s.pump(step["after"].as_u64().unwrap_or(300), &spec);
             continue;
         }
         let Some(name) = step["rpc"].as_str() else { continue };
