@@ -56,6 +56,10 @@ the escape pod) so it does not take over a saved player.
   which the start save is just below; it rises over the land east of the pod a little earlier on
   the reference, and RequireEnergy sets what is under water to energy 0 (the sweep builds at
   y = 60).
+- **An autocrafter's craft round** (every craftEveryXSec, the first one `_instancedAutocrafters % 50 / 10`
+  s after the machine starts) runs on each server's own clock: an ingredient that arrives within
+  milliseconds of a round is used by it on one server and by the next round on the other, so
+  the craft's animation and the craft count (AddOneToTotalCraft) come a whole round apart.
 - **Frame timing**: the reference runs at 30 frames a second (the plugin sets it), so a
   coroutine's WaitForSeconds ends up to a frame late each round; a trade rocket's growth at
   one poll can be a step behind ours (4 against 5 after 24 s; equal again later).

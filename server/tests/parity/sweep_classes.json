@@ -95,6 +95,12 @@
  },
  {
   "class": "b",
+  "why": "time: an autocrafter's craft round starts every craftEveryXSec after its own first one (_instancedAutocrafters % 50 / 10 s), on each server's own clock; an ingredient that arrives within milliseconds of a round is used by it on one server and by the next round on the other, so that craft (its animation and the craft count) comes a whole round apart, beyond the pairing window (EXPECTED: Time)",
+  "tag": "\\|autocraft at ",
+  "line": "WorldObjectsHandler\\.AddOneToTotalCraftClientRpc|ConstructibleProxy\\.StartCraftAnimationClientRpc"
+ },
+ {
+  "class": "b",
   "why": "an animal's owner simulates it: the host owns the animals it spawned and sends their animator state (NetworkAnimator), here the nearest player owns them (EXPECTED: the reference has a host player)",
   "line": "NetworkAnimator\\.(SendAnimState|SendParametersUpdate|SendAnimTrigger)ClientRpc"
  },
