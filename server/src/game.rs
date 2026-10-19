@@ -711,7 +711,7 @@ impl Game {
 
     /// One tick of the simulation, then the variable deltas.
     pub fn tick(&mut self) {
-        crate::handlers::run_pending(self, |g, rpc| g.rpc_cost(rpc), |g, client, rpc| g.run_rpc(client, rpc));
+        section!("rpcs", crate::handlers::run_pending(self, |g, rpc| g.rpc_cost(rpc), |g, client, rpc| g.run_rpc(client, rpc)));
         let clock = self.clock();
         let last = std::mem::replace(&mut self.last_clock, clock);
         let empty = self.rules.world.pause_when_empty && !self.clients.values().any(|c| c.ready.is_some());
@@ -733,12 +733,12 @@ impl Game {
         }
         self.time = (clock - self.paused) as f32;
         self.advanced = true;
-        crate::scene::tick(self);
+        section!("scene", crate::scene::tick(self));
         if self.time >= self.next_time_sync {
             self.next_time_sync = self.time + 1.0;
-            self.every_second();
+            section!("every_second", self.every_second());
         }
-        self.net.flush();
+        section!("flush", self.net.flush());
     }
 
     fn every_second(&mut self) {
