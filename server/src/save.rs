@@ -129,18 +129,28 @@ impl SaveFile {
             text.push_str(&s);
             text.push_str("\r@");
         }
-        // Only whole fields: ",\"hunger\":0.0" must not cut ",\"hunger\":0.07".
+        // Only whole fields: ",\"hunger\":0.0" must not cut ",\"hunger\":0.07". Found in the text as
+        // it is, cut in one pass: removing them one by one moved the rest of the text each time
+        // (40 000 objects took half a minute).
+        let mut cuts: Vec<(usize, usize)> = Vec::new();
         for d in DEFAULTS {
             let mut from = 0;
             while let Some(at) = text[from..].find(d).map(|i| i + from) {
-                if text[at + d.len()..].starts_with([',', '}']) {
-                    text.replace_range(at..at + d.len(), "");
-                    from = at;
-                } else {
-                    from = at + d.len();
+                from = at + d.len();
+                if text[from..].starts_with([',', '}']) {
+                    cuts.push((at, from));
                 }
             }
         }
+        cuts.sort_unstable();
+        let mut kept = String::with_capacity(text.len());
+        let mut last = 0;
+        for (from, to) in cuts {
+            kept.push_str(&text[last..from]);
+            last = to;
+        }
+        kept.push_str(&text[last..]);
+        text = kept;
         for key in ["gameMode", "gameDyingConsequences", "gameStartLocation"] {
             // JsonableGameState.CleanSaveStringOfVariables: ,"key":<digit>
             let pattern = format!(",\"{key}\":");
@@ -361,6 +371,67 @@ mod tests {
         assert_eq!(save.objects.len(), 2);
         assert_eq!(save.to_text(), original);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The old way of cutting the defaults (each one cut in place, the rest of the text moved
+    /// each time): the new one makes the same text.
+    fn cut_one_by_one(mut text: String) -> String {
+        for d in DEFAULTS {
+            let mut from = 0;
+            while let Some(at) = text[from..].find(d).map(|i| i + from) {
+                if text[at + d.len()..].starts_with([',', '}']) {
+                    text.replace_range(at..at + d.len(), "");
+                    from = at;
+                } else {
+                    from = at + d.len();
+                }
+            }
+        }
+        text
+    }
+
+    fn many_objects(n: usize) -> SaveFile {
+        let mut save = SaveFile::empty();
+        save.world = json!({"terraTokens": 1});
+        save.objects = (0..n)
+            .map(|i| {
+                let mut o = json!({"id": 200_000_000 + i as i32, "gId": "Iron", "liId": 0, "siIds": "", "liGrps": "", "pos": "0,0,0", "rot": "0,0,0,0", "planet": 0, "liPlanet": 0, "pnls": "", "color": "", "text": "", "grwth": 0, "set": 0, "trtInd": 0, "trtVal": 0, "hunger": 0.0, "count": "0,0", "linkedWo": 0});
+                match i % 4 {
+                    1 => o["hunger"] = json!(0.07),
+                    2 => o["text"] = json!("a,\"set\":0}"),
+                    3 => (o["set"], o["pos"], o["count"]) = (json!(3), json!("1,2,3"), json!("0,5")),
+                    _ => {}
+                }
+                o
+            })
+            .collect();
+        save
+    }
+
+    #[test]
+    fn the_defaults_are_cut_as_they_were_cut_one_by_one() {
+        let save = many_objects(400);
+        let text = save.to_text();
+        let mut uncut = save;
+        // The same text without the cuts: the other steps of to_text are the same.
+        let all = uncut.objects.iter().map(|o| serde_json::to_string(o).unwrap()).collect::<Vec<_>>().join("|\n");
+        uncut.objects.clear();
+        let expected = cut_one_by_one(all);
+        let cut = text.split("\r@").nth(3).unwrap().trim_start_matches('\r');
+        assert_eq!(cut, cut_one_by_one(cut.to_string()), "nothing left to cut");
+        assert_eq!(cut, expected);
+    }
+
+    /// A big world saves in time: the cuts were quadratic in the size of the save (40 000 objects
+    /// took 50 s in a release build). In a thread: the old way would not end within the test.
+    #[test]
+    fn a_big_save_is_written_in_time() {
+        let save = many_objects(100_000);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(save.to_text().len());
+        });
+        rx.recv_timeout(Duration::from_secs(60)).expect("the text of 100 000 objects in under a minute");
     }
 
     #[test]
