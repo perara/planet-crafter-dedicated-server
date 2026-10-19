@@ -15,7 +15,8 @@ const TICK: f32 = 0.2;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct State {
     pub client: u64,
-    pub next_tick: f32,
+    /// f64: a game that has run for weeks cannot add 0.2 to an f32 (units::advance).
+    pub next_tick: f64,
     pub rebreather: bool,
     pub outside_oxygen: f32,
 }
@@ -93,7 +94,7 @@ pub fn start(game: &mut Game, client: u64, object: u64, gauges: [f32; 4], equipm
         }
     }
     let outside = -1.9 * drain(game) * game.rules.gauges.oxygen_drain;
-    game.ext.gauges.0.insert(object, State { client, next_tick: game.time, rebreather, outside_oxygen: outside });
+    game.ext.gauges.0.insert(object, State { client, next_tick: game.time as f64, rebreather, outside_oxygen: outside });
 }
 
 fn add(game: &mut Game, object: u64, var: &str, max: &str, delta: f32) {
@@ -145,13 +146,13 @@ fn outside_oxygen(game: &mut Game, object: u64, rebreather: bool) -> f32 {
 
 /// GaugesTick for every player due.
 pub fn tick(game: &mut Game) {
-    let due: Vec<(u64, State)> = game.ext.gauges.0.iter().filter(|(_, s)| s.next_tick <= game.time).map(|(o, s)| (*o, s.clone())).collect();
+    let due: Vec<(u64, State)> = game.ext.gauges.0.iter().filter(|(_, s)| s.next_tick <= game.time as f64).map(|(o, s)| (*o, s.clone())).collect();
     for (object, mut s) in due {
         if !game.net.objects.contains_key(&object) {
             game.ext.gauges.0.remove(&object);
             continue;
         }
-        s.next_tick += TICK;
+        s.next_tick = crate::units::advance(game.time, s.next_tick, TICK);
         if !get_b(game, object, "_pauseConsumption") {
             s.outside_oxygen = outside_oxygen(game, object, s.rebreather);
             // PlayerEffects only live on the client that ate the food: no effect here.

@@ -152,8 +152,8 @@ pub struct Units {
     /// The game's is a float, which stops counting at 2^24 changes (the units would then never
     /// be recounted); a u64 does not.
     pub constructed_index: u64,
-    next_compute: f32,
-    next_define: f32,
+    next_compute: f64,
+    next_define: f64,
     /// The terraformation totals _unitSysTerraformation was last made from (bits).
     sys_from: Option<Vec<u32>>,
 }
@@ -339,16 +339,37 @@ fn multiplayer_factor(game: &Game, kind: Kind) -> f32 {
     1.0 / (1.0 + (players as f32 - 1.0) * modifier)
 }
 
+/// Seconds of game time up to which a repeating schedule adds in f32, as the game does.
+const F32_EXACT_UNTIL: f32 = 4096.0;
+
+/// How many periods of `step` seconds a schedule due at `next` has behind it at `now`, moving
+/// `next` past them. The game adds `0.1f32` to a float: that is what this does for the first
+/// hour or so (the bench's fingerprint depends on it), but a float that large cannot take it
+/// for ever: at 2^21 seconds (24 days up) `x + 0.1` is `x`, and `while now >= next { next +=
+/// 0.1 }` never ended, the bank stood still; from 6 days the steps were already 0.125, so the
+/// units computed 20% too slowly. Later it adds in f64.
+fn due(now: f32, next: &mut f64, step: f32) -> u32 {
+    let mut n = 0;
+    while now as f64 >= *next {
+        *next = advance(now, *next, step);
+        n += 1;
+    }
+    n
+}
+
+/// `next` one `step` on, as the game adds it (an f32 sum) for the first hour, in f64 after.
+pub fn advance(now: f32, next: f64, step: f32) -> f64 {
+    if now < F32_EXACT_UNTIL { (next as f32 + step) as f64 } else { next + step as f64 }
+}
+
 pub fn tick(game: &mut Game) {
     let now = game.time;
-    while now >= game.units.next_define {
-        game.units.next_define += 1.0;
+    for _ in 0..due(now, &mut game.units.next_define, 1.0) {
         for i in 0..game.units.planets.len() {
             define(game, i);
         }
     }
-    while now >= game.units.next_compute {
-        game.units.next_compute += 0.1;
+    for _ in 0..due(now, &mut game.units.next_compute, 0.1) {
         for i in 0..game.units.planets.len() {
             for k in 0..KINDS.len() {
                 let factor = multiplayer_factor(game, KINDS[k]);
@@ -433,6 +454,38 @@ mod tests {
     /// Every second the rates come from the planet's powered buildings (scaled by the world's
     /// pace); every tenth the totals grow, slower for each extra player as the world's
     /// multiplayer factor says. The units' variables follow, the save keeps the levels.
+    /// A world that has run for a month: the schedule still moves on (it stood still at 2^21
+    /// seconds, and the loop never ended) and still fires ten times a second, not eight.
+    #[test]
+    fn the_unit_schedule_survives_weeks_of_uptime() {
+        for start in [4000.0f32, 600_000.0, 2_097_152.0, 5_000_000.0, 20_000_000.0] {
+            let mut next = start as f64;
+            let mut fired = 0;
+            let mut now = start;
+            for _ in 0..2000 {
+                now += 0.05;
+                fired += due(now, &mut next, 0.1);
+            }
+            // 2000 ticks of 0.05 s is 100 s, but f32 time moves in steps of its own precision.
+            let seconds = (now - start) as f64;
+            assert!((fired as f64 - seconds * 10.0).abs() < 25.0, "from {start}: {fired} periods in {seconds} s");
+        }
+        // A per-player schedule (gauges: 0.2 s) after 48 days: still 0.2 s on, not stuck.
+        let next = advance(5_000_000.0, 5_000_000.0, 0.2);
+        assert!((next - 5_000_000.2).abs() < 1e-6, "{next}");
+        // The first hour is the game's own f32 sum.
+        let (mut next, mut f32_next) = (0.0f64, 0.0f32);
+        for i in 1..4000 {
+            let now = i as f32 * 0.05;
+            let mut by_hand = 0;
+            while now >= f32_next {
+                f32_next += 0.1;
+                by_hand += 1;
+            }
+            assert_eq!(due(now, &mut next, 0.1), by_hand, "at {now}");
+        }
+    }
+
     #[test]
     fn units_grow_from_powered_buildings_and_slow_down_for_more_players() {
         let mut save = save();
