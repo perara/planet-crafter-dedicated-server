@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use crate::data::{stable_hash, NetData};
 use crate::gamedata::GameData;
-use crate::idmap::{IdMap, SlotSet, Slots};
+use crate::idmap::{SlotSet, Slots};
 use crate::model::{Inventory, WorldObject};
 use crate::net::{self, ListEvent, Net, NetObj, Target};
 use crate::protocol::{self, CONNECTION_APPROVED, CONNECTION_REQUEST, NETWORK_TRANSFORM, NETWORK_VARIABLE_DELTA};
@@ -160,7 +160,8 @@ pub struct Game {
     /// The save's sections the handlers below keep as JSON (world state, planets, players...).
     pub save: SaveFile,
     pub wos: Slots<i32, WorldObject>,
-    pub inventories: IdMap<i32, Inventory>,
+    /// InventoriesHandler._allWorldInventories, a Dictionary: the save lists it in its order.
+    pub inventories: Slots<i32, Inventory>,
     /// WorldObjectsHandler._constructedWorldObjects / _itemsPickablesWorldObjects.
     pub constructed: SlotSet<i32>,
     pub pickables: SlotSet<i32>,
@@ -304,7 +305,7 @@ impl Game {
             net: Net::new(spec, FIRST_DYNAMIC_ID),
             save,
             wos: Slots::default(),
-            inventories: IdMap::default(),
+            inventories: Slots::default(),
             constructed: SlotSet::default(),
             pickables: SlotSet::default(),
             holders: Default::default(),
