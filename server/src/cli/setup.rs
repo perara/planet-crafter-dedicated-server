@@ -229,7 +229,7 @@ impl Ctx {
             server
         };
         let first = updater::active(&banks);
-        let mut code = supervise(front(&first)).map_err(|e| format!("{}: {e}", banks.join(&first).display()))?;
+        let mut code = supervise(front(&first), self.container).map_err(|e| format!("{}: {e}", banks.join(&first).display()))?;
         // The release of the active bank cannot run the world (its front tried both banks, and
         // the other is of another front protocol, or it fell over): the other bank's own front,
         // which ran before, unless the owner rolled back from it. Said loudly and noted
@@ -241,7 +241,7 @@ impl Ctx {
                     eprintln!("pcds: bank {first} {reason}. Starting bank {other}, which ran before");
                     updater::note_fallback(&banks, &first, &other, &reason)?;
                     updater::set_active(&banks, &other)?;
-                    code = supervise(front(&other)).map_err(|e| format!("{}: {e}", banks.join(&other).display()))?;
+                    code = supervise(front(&other), self.container).map_err(|e| format!("{}: {e}", banks.join(&other).display()))?;
                     if code == crate::front::BOOT_FAILED && !STOP_ASKED.load(Ordering::SeqCst) {
                         eprintln!("pcds: bank {other} could not start the world either; bank {first} is the active one again");
                         updater::set_active(&banks, &first)?;
@@ -250,6 +250,14 @@ impl Ctx {
                 }
                 Err(why) => eprintln!("pcds: bank {first} could not start the world, and bank {}: {why}", updater::other(&first)),
             }
+        }
+        // In the container: `pcds upgrade --restart` asked for a restart in place (restart_in_place).
+        // The same program starts again as this very process (same pid, same container), and so
+        // starts the front of the bank that is the active one now.
+        if self.container && RESTART_ASKED.swap(false, Ordering::SeqCst) {
+            say("restarting the server in place");
+            let e = Command::new(&self.exe).args(std::env::args_os().skip(1)).exec();
+            return Err(format!("{}: {e}", self.exe.display()));
         }
         std::process::exit(code)
     }
@@ -449,6 +457,9 @@ impl Ctx {
         self.remove_leftovers();
         self.write_env()?;
         self.install_server()?;
+        if let Some(note) = self.image_note(None) {
+            say(note);
+        }
         let downloaded = self.run.join("game");
         let steam_user = crate::env("STEAM_USER");
         if let Some(user) = &steam_user
@@ -500,6 +511,10 @@ const BANKS_GRACE: Duration = Duration::from_secs(20);
 /// to fall back from.
 static STOP_ASKED: AtomicBool = AtomicBool::new(false);
 
+/// A restart in place came to supervise() (SIGUSR1, container only): a stop, after which
+/// run_server() starts the server again.
+static RESTART_ASKED: AtomicBool = AtomicBool::new(false);
+
 /// The bank `pcds run` falls back to when the active one's front cannot start the world: the
 /// other one, when it holds a release and is not the one the owner rolled back from.
 fn fallback_bank(banks: &Path, failed: &str) -> std::result::Result<String, String> {
@@ -521,7 +536,7 @@ fn fallback_bank(banks: &Path, failed: &str) -> std::result::Result<String, Stri
 /// subreaper the orphaned banks are handed to, and it waits for them (BANKS_GRACE at most,
 /// then kills the front's process group). SIGTERM, SIGINT and SIGHUP go on to the front, which
 /// stops its banks with a save itself. The front's exit code, or 128 + its signal.
-fn supervise(mut front: Command) -> Result<i32> {
+fn supervise(mut front: Command, restartable: bool) -> Result<i32> {
     // A signal that comes before the front's pid is known waits in PENDING: whichever of the
     // handler and this thread sees both sends it (one swap takes it).
     static FRONT: AtomicI32 = AtomicI32::new(0);
@@ -535,7 +550,11 @@ fn supervise(mut front: Command) -> Result<i32> {
     }
     extern "C" fn pass_on(signal: libc::c_int) {
         STOP_ASKED.store(true, Ordering::SeqCst);
-        PENDING.store(signal, Ordering::SeqCst);
+        // SIGUSR1 (a restart in place) stops the front like SIGTERM does.
+        if signal == libc::SIGUSR1 {
+            RESTART_ASKED.store(true, Ordering::SeqCst);
+        }
+        PENDING.store(if signal == libc::SIGUSR1 { libc::SIGTERM } else { signal }, Ordering::SeqCst);
         pass(FRONT.load(Ordering::SeqCst));
     }
     // SAFETY: prctl and signal dispositions of this process; the handler only touches atomics
@@ -544,7 +563,7 @@ fn supervise(mut front: Command) -> Result<i32> {
         if libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) != 0 {
             return Err(format!("cannot wait for the banks (PR_SET_CHILD_SUBREAPER): {}", std::io::Error::last_os_error()));
         }
-        for s in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        for s in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP].into_iter().chain(restartable.then_some(libc::SIGUSR1)) {
             libc::signal(s, pass_on as *const () as libc::sighandler_t);
         }
     }
@@ -646,12 +665,12 @@ mod tests {
         };
         let mut front = Command::new("sh");
         front.arg("-c").arg(script).arg(&dir);
-        std::process::exit(supervise(front).unwrap());
+        std::process::exit(supervise(front, what == "restart").map(|code| if RESTART_ASKED.load(Ordering::SeqCst) { 77 } else { code }).unwrap());
     }
 
     #[test]
     fn the_banks_of_a_front_that_ended_get_to_save_first() {
-        for what in ["crash", "stop"] {
+        for what in ["crash", "stop", "restart"] {
             let dir = super::super::test_dir(&format!("supervise-{what}"));
             let mut helper = Command::new(std::env::current_exe().unwrap())
                 .args(["cli::setup::tests::supervise_in_a_process_of_its_own", "--ignored", "--exact", "--nocapture"])
@@ -660,17 +679,19 @@ mod tests {
                 .stdout(Stdio::null())
                 .spawn()
                 .unwrap();
-            if what == "stop" {
+            if what != "crash" {
                 let deadline = std::time::Instant::now() + Duration::from_secs(20);
                 while !dir.join("up").is_file() {
                     assert!(std::time::Instant::now() < deadline, "the front did not start");
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                // SAFETY: the helper process this test started (systemctl stop's SIGTERM).
-                assert_eq!(unsafe { libc::kill(helper.id() as i32, libc::SIGTERM) }, 0);
+                // SAFETY: the helper process this test started (systemctl stop's SIGTERM, or
+                // pcds upgrade --restart's SIGUSR1 in the container).
+                assert_eq!(unsafe { libc::kill(helper.id() as i32, if what == "restart" { libc::SIGUSR1 } else { libc::SIGTERM }) }, 0);
             }
             let status = super::super::wait_for(&mut helper, Duration::from_secs(30)).expect("the helper ends");
-            assert_eq!(status.code(), Some(if what == "crash" { 3 } else { 0 }), "{what}: the front's exit code");
+            // A restart in place: the helper says so with 77 (run_server starts the server again).
+            assert_eq!(status.code(), Some(match what { "crash" => 3, "restart" => 77, _ => 0 }), "{what}: the front's exit code");
             assert_eq!(fs::read_to_string(dir.join("saved")).ok().as_deref(), Some("saved\n"), "{what}: the bank saved before the end");
             fs::remove_dir_all(&dir).unwrap();
         }

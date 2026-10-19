@@ -65,7 +65,7 @@ impl Ctx {
             // them at 'pcds start').
             self.ensure_tables(None)?;
             say("restarting the server: every player is disconnected and reconnects");
-            return self.restart_if_running();
+            return if self.container { self.restart_in_place() } else { self.restart_if_running() };
         }
         say("the server runs it from its next start ('pcds start')");
         Ok(())
@@ -75,6 +75,25 @@ impl Ctx {
     /// (what the running server uses), else GitHub's.
     fn releases_url(&self) -> String {
         crate::env("PCDS_RELEASES").or_else(|| self.env_get("PCDS_RELEASES")).unwrap_or_else(updater::releases_url)
+    }
+
+    /// In the container: which release the server runs from, against the image's. A hot update
+    /// puts newer banks into /data/bin, and a bank newer than the image wins over it (bank_for),
+    /// so a pinned image tag does not pin the server; this says so. None outside the container.
+    pub fn image_note(&self, running: Option<&str>) -> Option<String> {
+        if !self.container {
+            return None;
+        }
+        let banks = self.banks();
+        let bank = running.map_or_else(|| updater::active(&banks), str::to_string);
+        let held = updater::info(&banks, &bank)?;
+        let (image, held) = (env!("CARGO_PKG_VERSION"), held["version"].as_str().unwrap_or("?").to_string());
+        let how = if held == image { "the image's release".to_string() } else if updater::newer(&held, image) {
+            format!("newer than the image's: a hot update put it in /data/bin, and a bank newer than the image wins over it, so the image tag does not pin the server. 'pcds upgrade v{image} --restart' runs the image's release again; an image newer than the banks replaces them at its first start")
+        } else {
+            format!("older than the image's: the bank 'pcds upgrade --rollback' chose is kept (or the image's release could not be installed: see the log above). 'pcds upgrade v{image} --restart' runs the image's release")
+        };
+        Some(format!("image: pcds {image}; the server runs pcds {held} from bank {bank}: {how}"))
     }
 
     /// The bank the running front runs the world in.
@@ -125,6 +144,9 @@ impl Ctx {
                 Some(info) => println!("bank {bank}: {}{marks}", describe(&info)),
                 None => println!("bank {bank}: empty{marks}"),
             }
+        }
+        if let Some(note) = self.image_note(live.and_then(|l| l["live"]["bank"].as_str())) {
+            println!("{note}");
         }
         // The running front's view, else the note on disk.
         let fallback = live.map(|l| l["fallback"].clone()).filter(|f| !f.is_null()).or_else(|| updater::fallback(&banks));
