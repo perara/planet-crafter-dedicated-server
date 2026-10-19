@@ -125,6 +125,9 @@ struct Flip {
 }
 
 enum UpdateDone {
+    /// A flip's banks-folder writes are on disk: its outcome is recorded now, so that whoever
+    /// sees it done also finds `active` and the rollback note written.
+    Flipped { seq: u64, message: String, extra: Value },
     Installed { seq: u64, bank: String, info: Value },
     Failed { seq: u64, message: String },
     UpToDate { seq: u64, tag: String },
@@ -939,13 +942,13 @@ impl Front {
         self.flush_banks();
         let (released, released_at) = (Instant::now(), ipc::now_ns());
         let rolled_back = self.flip.as_ref().is_some_and(|f| f.reason == "rollback").then(|| from.clone());
-        self.persist_flip(&to, rolled_back);
         *self.web.write().unwrap_or_else(|e| e.into_inner()) = self.web_page(&to);
         if recovered {
+            self.persist_flip(&to, None, None);
             println!("bank {to} (pid {}) runs the world again", self.live.as_ref().map_or(0, |b| b.child.id()));
             return;
         }
-        let Some(mut flip) = self.flip.take() else { return };
+        let Some(mut flip) = self.flip.take() else { return self.persist_flip(&to, None, None) };
         // Restored, so a crash restarts from it (one that failed to restore must not be).
         if let Some(kept) = flip.kept.take() {
             self.last_snapshot = Some(kept);
@@ -982,15 +985,22 @@ impl Front {
             "releaseMs": gap(ready_at, released_at),
         });
         println!("flip timeline (ms): {timeline}");
-        self.record(flip.seq, true, &message, json!({"from": from, "to": to, "stoodMs": ms(stood), "snapshotBytes": flip.snapshot["bytes"], "snapshotMs": flip.snapshot["ms"], "restoreMs": ready["restoreMs"], "held": held, "verified": ready["verified"], "version": version, "timeline": timeline}));
+        let extra = json!({"from": from, "to": to, "stoodMs": ms(stood), "snapshotBytes": flip.snapshot["bytes"], "snapshotMs": flip.snapshot["ms"], "restoreMs": ready["restoreMs"], "held": held, "verified": ready["verified"], "version": version, "timeline": timeline});
+        self.persist_flip(&to, rolled_back, Some((flip.seq, message, extra)));
     }
 
     /// `active` points at `bank` from now on, and a rollback notes the bank it left (so that the
     /// automatic update does not bring back what the owner left): both flush to disk, so a
     /// thread writes them.
-    fn persist_flip(&mut self, bank: &str, rolled_back_from: Option<String>) {
-        let Some(dir) = self.banks.clone() else { return };
-        let bank = bank.to_string();
+    /// `record`: the flip's outcome (seq, message, fields), recorded once the files are written.
+    fn persist_flip(&mut self, bank: &str, rolled_back_from: Option<String>, record: Option<(u64, String, Value)>) {
+        let Some(dir) = self.banks.clone() else {
+            if let Some((seq, message, extra)) = record {
+                self.record(seq, true, &message, extra);
+            }
+            return;
+        };
+        let (bank, tx) = (bank.to_string(), self.updates.tx.clone());
         self.persisting.retain(|t| !t.is_finished());
         let write = move || {
             if let Err(e) = updater::set_active(&dir, &bank) {
@@ -1000,6 +1010,9 @@ impl Front {
                 && let Err(e) = updater::set_rolled_back(&dir, &from)
             {
                 eprintln!("banks: the rollback from bank {from} could not be noted ({e}): the automatic update may install its release again");
+            }
+            if let Some((seq, message, extra)) = record {
+                let _ = tx.send(UpdateDone::Flipped { seq, message, extra });
             }
         };
         match std::thread::Builder::new().name("banks-folder".into()).spawn(write) {
@@ -1395,8 +1408,13 @@ impl Front {
 
     fn updates(&mut self) {
         while let Ok(done) = self.updates.rx.try_recv() {
+            if let UpdateDone::Flipped { seq, message, extra } = done {
+                self.record(seq, true, &message, extra);
+                continue;
+            }
             self.updates.checked = Some(now_secs());
             match done {
+                UpdateDone::Flipped { .. } => {}
                 UpdateDone::Installed { seq, bank, info } => {
                     let tag = info["tag"].as_str().unwrap_or("?").to_string();
                     self.updates.latest = Some(tag.clone());
