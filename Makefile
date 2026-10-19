@@ -6,6 +6,8 @@
 #   make test        the tests (PCDS_TEST_DATA: game tables to test on, else run/data/2.103)
 #   make bench       the tick benchmark: make bench SAVE=run/worlds/world.json [PLAYERS=4]
 #                    (PCDS_BENCH_SECONDS: the game time it runs, default 300)
+#   make gate        the flip gate: the last release's world taken over by this build (before every tag;
+#                    needs PCDS_TEST_DATA, see docs/hot-update.md)
 #   make lint        clippy and shellcheck
 #   make docker      the Docker image (IMAGE=...)
 #   make dist        the release tarball, as the release workflow makes it (VERSION=vX.Y.Z)
@@ -24,7 +26,7 @@ IMAGE ?= planet-crafter-dedicated-server
 SAVE ?= run/worlds/world.json
 PLAYERS ?= 4
 
-.PHONY: build install test bench lint docker dist clean
+.PHONY: build install test bench gate lint docker dist clean
 
 # The program finds libsteam_api.so next to itself; copied then renamed, so a running copy keeps its own.
 build:
@@ -44,9 +46,13 @@ bench: build
 	LD_LIBRARY_PATH="$(STEAM_LIB_DIR)" PCDS_BENCH_SAVE=$(abspath $(SAVE)) PCDS_RNG_SEED=1 PCDS_BENCH_PLAYERS=$(PLAYERS) \
 	  $(LIMIT) cargo test $(MANIFEST) --release --locked bench -- --ignored --nocapture
 
+# A hot update from the last release, as a user meets it (tools/flip-gate.sh).
+gate: build
+	$(LIMIT) tools/flip-gate.sh
+
 lint:
 	$(LIMIT) cargo clippy $(MANIFEST) --release --locked
-	shellcheck install.sh docker/entrypoint.sh
+	shellcheck install.sh docker/entrypoint.sh tools/flip-gate.sh
 
 docker:
 	$(LIMIT) docker build -t $(IMAGE) .

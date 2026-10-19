@@ -1452,6 +1452,8 @@ function renderStopped(s) {
   for (const id of ['pauseWorld', 'saveWorld', 'backupNow', 'ovPause', 'ovSave', 'newWorld', 's3Now']) $(id).disabled = true;
   $('worldState').replaceChildren(h('span', { class: 'chip bad' }, 'stopped'));
   if (current === 'world' && worldsSig !== [s.worldControl, s.state, worldsData && worldsData.current].join('|')) loadWorlds();
+  // The Updates page says the world is stopped and what is possible (its buttons are off).
+  if (current === 'updates') renderUpdates(s);
 }
 async function startWorld(name, btn) {
   const r = await act(r => `World ${r.world} is running`, () => api('POST', '/api/world/start', name ? { world: name } : {}, 150000), btn);
@@ -1483,7 +1485,8 @@ $('stopServer').onclick = async () => {
 
 // ---- updates ----
 let pendingUpdate = null;
-function updateBusy(s) { const b = s.banks || {}, u = s.update || {}; return u.state === 'busy' ? (u.doing || 'working') : b.phase && b.phase !== 'idle' ? `handing the world over (${b.phase})` : null; }
+const worldStopped = s => !!(s.banks && s.banks.phase === 'stopped');
+function updateBusy(s) { const b = s.banks || {}, u = s.update || {}; return u.state === 'busy' ? (u.doing || 'working') : b.phase && !['idle', 'stopped'].includes(b.phase) ? `handing the world over (${b.phase})` : null; }
 function renderUpdateSummary(s, box, chipBox, compact) {
   const u = s.update || {}, b = s.banks || {}, busy = updateBusy(s);
   const chip = busy ? h('span', { class: 'chip warn' }, 'updating') : u.available ? h('span', { class: 'chip warn' }, `${u.latest} available`) : u.latest ? h('span', { class: 'chip ok' }, 'up to date') : h('span', { class: 'chip' }, 'not checked');
@@ -1497,8 +1500,8 @@ function renderUpdateSummary(s, box, chipBox, compact) {
       h('div', {}, h('div', { class: 'k' }, 'Latest release'), h('div', { class: 'v' }, u.latest || '–'))),
     busy ? h('div', {}, h('div', { class: 'progress' }, h('i')), h('p', { class: 'sub', style: 'margin:8px 0 0' }, busy)) : null,
     h('div', { class: 'row', style: 'margin-top:8px' },
-      h('button', { class: 'primary small', disabled: !!busy || !b.dir, title: b.dir ? '' : 'This server does not run from banks (pcds run)', onclick: e => updateNow(e.currentTarget) }, u.available ? `Update to ${u.latest}` : 'Update now'),
-      h('button', { class: 'small', disabled: !!busy || !b.dir, onclick: e => checkUpdate(e.currentTarget) }, 'Check'),
+      h('button', { class: 'primary small', disabled: !!busy || !b.dir || worldStopped(s), title: worldStopped(s) ? 'The world is stopped: start it first' : b.dir ? '' : 'This server does not run from banks (pcds run)', onclick: e => updateNow(e.currentTarget) }, u.available ? `Update to ${u.latest}` : 'Update now'),
+      h('button', { class: 'small', disabled: !!busy || !b.dir || worldStopped(s), onclick: e => checkUpdate(e.currentTarget) }, 'Check'),
       h('span', { class: 'muted', style: 'font-size:12px' }, u.checkedAt ? `checked ${ago(u.checkedAt)}` : ''))].filter(Boolean));
 }
 function renderUpdates(s) {
@@ -1510,11 +1513,12 @@ function renderUpdates(s) {
     h('div', {}, h('div', { class: 'k' }, 'Last checked'), h('div', { class: 'v', style: 'font-size:14px;padding-top:4px' }, u.checkedAt ? ago(u.checkedAt) : 'never')));
   $('updBusy').hidden = !busy; $('updBusyText').textContent = busy || '';
   const noBanks = !b.dir;
-  for (const id of ['updNow', 'updCheck', 'updInstall']) $(id).disabled = !!busy || noBanks;
-  $('updRollback').disabled = !!busy;
+  const stopped = worldStopped(s);
+  for (const id of ['updNow', 'updCheck', 'updInstall']) $(id).disabled = !!busy || noBanks || stopped;
+  $('updRollback').disabled = !!busy || stopped;
   $('updNow').textContent = u.available ? `Update to ${u.latest}` : 'Update now';
-  $('updNote').textContent = noBanks ? 'This server runs from a build, not from installed banks (pcds run): updates need pcds run; Roll back flips between two copies of this build.'
-    : `Automatic updates: ${u.auto ? `on, a check every ${u.checkHours} h` : 'off (PCDS_AUTO_UPDATE in Config)'}. Releases from ${u.releases || 'GitHub'}.`;
+  $('updNote').textContent = stopped ? 'The world is stopped, so no release runs it and there is nothing to hand over: start the world first, then update. (pcds upgrade VERSION --restart on the host installs a release and restarts the server.)' : noBanks ? 'This server runs from a build, not from installed banks (pcds run): updates need pcds run; Roll back flips between two copies of this build.'
+    : `${rollbackBlocked(s) ? `Rolling back needs a restart (${rollbackBlocked(s)}): pcds upgrade --rollback --restart on the host. ` : ''}Automatic updates: ${u.auto ? `on, a check every ${u.checkHours} h` : 'off (PCDS_AUTO_UPDATE in Config)'}. Releases from ${u.releases || 'GitHub'}.`;
   const installed = (b.installed || []).length ? b.installed : (b.live ? [{ bank: b.live.bank, info: b.live }] : []);
   $('banks').replaceChildren(table(['Bank', 'Release', 'Protocol', 'Format', 'State'], installed.map(x => {
     const i = x.info || {}, running = b.live && b.live.bank === x.bank;
@@ -1545,7 +1549,7 @@ async function updateCall(body, label, btn) {
 const checkUpdate = btn => updateCall({ check: true }, 'Looking for a new release…', btn);
 async function updateNow(btn) {
   const u = status?.update || {};
-  const ok = await ask({ title: u.available ? `Update to ${u.latest}?` : 'Update to the latest release?', body: 'The release is downloaded and checked, installed into the standby bank, and the running world is handed over to it. Players stay connected; the world pauses for a moment. If anything fails, the current version keeps running.', ok: 'Update now' });
+  const ok = await ask({ title: u.available ? `Update to ${u.latest}?` : 'Update to the latest release?', body: 'The release is downloaded and checked, installed into the standby bank, and the running world is handed over to it. Players stay connected; the world pauses for a moment. If anything fails, the current version keeps running. A release that needs a restart (another front protocol or game tables format) is refused and nothing stops: pcds upgrade VERSION --restart on the host installs it.', ok: 'Update now' });
   if (ok) updateCall({ onlyNewer: true }, 'Update started', btn);
 }
 $('updNow').onclick = e => updateNow(e.currentTarget);
@@ -1554,7 +1558,21 @@ $('updInstall').onclick = async e => {
   const v = $('updVersion').value.trim(); if (!v) return toast('Give a release tag, e.g. v0.6.0', 'err');
   if (await ask({ title: `Install ${v}?`, body: 'It replaces the standby bank and the world is handed over to it, also when it is older than the running release.', ok: 'Install' })) updateCall({ version: v }, `Installing ${v}…`, e.currentTarget);
 };
+// Why the other bank's release cannot take the running world live (null: it can). It reads the
+// snapshot format the running one writes, speaks this front's protocol and reads its tables.
+function rollbackBlocked(s) {
+  const b = s.banks || {}, live = b.live;
+  const other = (b.installed || []).find(x => !live || x.bank !== live.bank), i = other && other.info;
+  if (!live || !i) return null;
+  if (i.protocol !== b.frontProtocol) return `pcds ${i.version} speaks another front protocol (${i.protocol}, this front speaks ${b.frontProtocol})`;
+  const mine = ((b.installed || []).find(x => x.bank === live.bank) || {}).info || {};
+  if (i.tablesFormat !== mine.tablesFormat) return `pcds ${i.version} reads game tables of format ${i.tablesFormat ?? 'none'}, the running server's are of format ${mine.tablesFormat ?? 'none'}`;
+  if (!(i.reads || []).includes(live.format)) return `pcds ${i.version} reads snapshot formats ${(i.reads || []).join(', ')}, and the running world is in format ${live.format}`;
+  return null;
+}
 $('updRollback').onclick = async e => {
+  const blocked = status && rollbackBlocked(status);
+  if (blocked) return void await ask({ title: 'Rolling back needs a restart', body: `The world cannot be handed back live: ${blocked}. On the host, pcds upgrade --rollback --restart goes back: the server saves the world, restarts on the other release and every player has to join again.`, ok: 'Understood' });
   if (await ask({ title: 'Roll back?', body: 'The world is handed back to the other bank\'s release. Players stay connected.', ok: 'Roll back', danger: true })) updateCall({ rollback: true }, 'Rolling back…', e.currentTarget);
 };
 

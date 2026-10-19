@@ -70,6 +70,11 @@ pub const BOOT_FAILED: i32 = 75;
 /// A new bank's tables and world load in seconds; the restore must be READY within this.
 const LOAD_DEADLINE: Duration = Duration::from_secs(120);
 const READY_DEADLINE: Duration = Duration::from_secs(5);
+/// An automatic check that failed (GitHub unreachable, rate limited) is made again after this
+/// (or the check interval, when that is shorter), not after the whole interval; one that
+/// found the world busy (a flip, a crash restart, a stopped world) after BUSY_RETRY.
+const CHECK_RETRY: Duration = Duration::from_secs(3600);
+const BUSY_RETRY: Duration = Duration::from_secs(600);
 /// Kicked: the reason first, the connection closed this much later.
 const KICK_DELAY: Duration = Duration::from_millis(300);
 /// More crashes than this within CRASH_WINDOW and the front gives up (systemd restarts it).
@@ -77,6 +82,8 @@ const MAX_CRASHES: usize = 5;
 const CRASH_WINDOW: Duration = Duration::from_secs(600);
 const RESTARTED: &str = "The server restarted after an error: join again";
 const STOPPED: &str = "The world is stopped: join again later";
+/// What an update or a rollback asked for while the world is stopped is told.
+const STOPPED_UPDATE: &str = "the world is stopped, so no bank runs a world to hand over: start the world first (the dashboard's Start button, POST /api/world/start) and update then, or run pcds upgrade VERSION --restart, which installs the release and restarts the server";
 
 enum Conn {
     /// Steam networking: the connection carries the verified SteamID.
@@ -142,6 +149,8 @@ struct Updates {
     auto: bool,
     every: Duration,
     next_check: Instant,
+    /// The request the automatic check made (its failure is tried again sooner).
+    auto_seq: Option<u64>,
     latest: Option<String>,
     /// The latest release is later than the live bank's (as the last check found).
     newer: bool,
@@ -244,7 +253,9 @@ impl Front {
     fn new(dir: &str, save: &str, banks: Option<PathBuf>, utp: Option<Utp>, port: u16, stop: Arc<AtomicBool>) -> Front {
         let (tx, rx) = std::sync::mpsc::channel();
         let auto = crate::env("PCDS_AUTO_UPDATE").as_deref() == Some("on");
-        let every = Duration::from_secs(crate::config::env_number("PCDS_UPDATE_CHECK_HOURS") * 3600);
+        // The e2e tests' schedule (seconds, not hours); off unless the front was started with PCDS_TEST_FAULTS=1.
+        let test_seconds = crate::env("PCDS_TEST_CHECK_SECONDS").filter(|_| crate::env("PCDS_TEST_FAULTS").as_deref() == Some("1")).and_then(|s| s.parse::<u64>().ok());
+        let every = test_seconds.map_or_else(|| Duration::from_secs(crate::config::env_number("PCDS_UPDATE_CHECK_HOURS") * 3600), Duration::from_secs);
         let autosave_minutes = crate::autosave_start();
         Front {
             dir: dir.to_string(),
@@ -277,7 +288,7 @@ impl Front {
             autosave_minutes,
             next_save: Instant::now() + Duration::from_secs(autosave_minutes.max(1) * 60),
             // The first check a while after the start: a crash loop must not ask GitHub each time.
-            updates: Updates { tx, rx, busy: None, seq: 0, history: VecDeque::new(), auto, every, next_check: Instant::now() + every.min(Duration::from_secs(600)), latest: None, newer: false, checked: None },
+            updates: Updates { tx, rx, busy: None, seq: 0, history: VecDeque::new(), auto, every, next_check: Instant::now() + every.min(Duration::from_secs(600)), auto_seq: None, latest: None, newer: false, checked: None },
             started: Instant::now(),
             stop,
             game_version: String::new(),
@@ -895,6 +906,7 @@ impl Front {
                     let _ = b.link.flush();
                 }
                 self.phase = Phase::Snapshotting;
+                println!("flip: bank {} is checked; the running bank is told to hand the world over", self.next.as_ref().map_or("?", |b| b.name.as_str()));
             }
             ipc::READY if matches!(self.phase, Phase::Restoring | Phase::Recovering) => self.promote(&f.body),
             _ => {}
@@ -1277,6 +1289,10 @@ impl Front {
     /// or {"rollback": true}: back to the other bank. The answer comes at once with the
     /// request's "seq"; GET /api/update has its outcome in "history" when done.
     fn update_request(&mut self, body: &Value) -> (u16, String) {
+        // No bank runs: there is no world to hand over. Said as it is (the dashboard says the same).
+        if self.phase == Phase::Stopped {
+            return (409, json!({"error": STOPPED_UPDATE, "stopped": true}).to_string());
+        }
         if self.updates.busy.is_some() || self.phase != Phase::Idle {
             return (409, json!({"error": "an update or a flip is under way", "doing": self.updates.busy.as_ref().map(|b| b.1.clone())}).to_string());
         }
@@ -1289,7 +1305,7 @@ impl Front {
         if body["rollback"] == true {
             if let Some(dir) = &self.banks {
                 let Some(info) = updater::info(dir, &target) else { return (400, json!({"error": format!("bank {target} holds no release to go back to")}).to_string()) };
-                if let Err(e) = updater::compatible(&info, &live.hello) {
+                if let Err(e) = updater::compatible_for(&info, &live.hello, true) {
                     return (400, json!({"error": e}).to_string());
                 }
             }
@@ -1316,11 +1332,12 @@ impl Front {
     /// update asked for clears that note.
     fn download(&mut self, seq: u64, dir: PathBuf, bank: String, version: Option<String>, only_newer: bool, auto: bool) {
         let live = self.live.as_ref().map(|b| b.hello.clone()).unwrap_or_default();
+        let held = self.held_release(&dir);
         let tx = self.updates.tx.clone();
         self.updates.busy = Some((seq, format!("downloading {} into bank {bank}", version.as_deref().unwrap_or("the latest release"))));
         answer_on_thread(tx, seq, move || {
             let release = updater::lookup(&updater::releases_url(), version.as_deref())?;
-            if only_newer && !updater::newer(&release.tag, live["version"].as_str().unwrap_or("")) {
+            if only_newer && !updater::newer(&release.tag, &held) {
                 return Ok(UpdateDone::UpToDate { seq, tag: release.tag });
             }
             if auto && let Some(why) = updater::auto_skips(&dir, &release.tag)? {
@@ -1334,9 +1351,14 @@ impl Front {
         });
     }
 
+    /// The release the live bank holds (its tag, else its version: updater::held_release).
+    fn held_release(&self, dir: &std::path::Path) -> String {
+        self.live.as_ref().map(|b| updater::held_release(dir, &b.name, b.hello["version"].as_str().unwrap_or(""))).unwrap_or_default()
+    }
+
     /// The latest release looked up on a thread of its own; nothing is installed.
     fn check(&mut self, seq: u64) {
-        let live = self.live.as_ref().map(|b| b.hello["version"].as_str().unwrap_or("").to_string()).unwrap_or_default();
+        let live = self.banks.as_deref().map(|dir| self.held_release(dir)).unwrap_or_default();
         let tx = self.updates.tx.clone();
         self.updates.busy = Some((seq, "checking for a new release".into()));
         answer_on_thread(tx, seq, move || updater::lookup(&updater::releases_url(), None).map(|release| UpdateDone::Checked { seq, newer: updater::newer(&release.tag, &live), tag: release.tag }));
@@ -1357,6 +1379,9 @@ impl Front {
                 }
                 UpdateDone::Failed { seq, message } => {
                     eprintln!("update: {message}");
+                    if self.updates.auto_seq == Some(seq) {
+                        self.updates.next_check = Instant::now() + CHECK_RETRY.min(self.updates.every);
+                    }
                     self.record(seq, false, &message, json!({}));
                 }
                 UpdateDone::UpToDate { seq, tag } => {
@@ -1383,7 +1408,11 @@ impl Front {
                 self.updates.seq += 1;
                 let seq = self.updates.seq;
                 println!("update: checking for a new release (PCDS_AUTO_UPDATE=on)");
+                self.updates.auto_seq = Some(seq);
                 self.download(seq, dir, bank, None, true, true);
+            } else {
+                self.updates.next_check = Instant::now() + BUSY_RETRY.min(self.updates.every);
+                println!("update: the automatic check waits ({}): next in {} min", if self.live.is_none() || self.phase != Phase::Idle { format!("the world is not running ({:?})", self.phase) } else { "an update is under way".into() }, BUSY_RETRY.min(self.updates.every).as_secs() / 60);
             }
         }
     }
@@ -1773,6 +1802,39 @@ mod tests {
 
     fn snapshot_fd(text: &str) -> OwnedFd {
         ipc::memfd("test", |w| std::io::Write::write_all(w, text.as_bytes()).map_err(|e| e.to_string())).unwrap()
+    }
+
+    /// The automatic check that failed (GitHub offline, a rate limit) is made again within the
+    /// hour, not after the day of the check interval; one that finds the world busy within 10
+    /// minutes; a check that works waits its interval.
+    #[test]
+    fn a_failed_or_skipped_automatic_check_is_made_again_sooner() {
+        let mut front = test_front();
+        front.updates.auto = true;
+        front.updates.every = Duration::from_secs(24 * 3600);
+        // A check that cannot run (no live bank: the world is stopped or recovering).
+        front.updates.next_check = Instant::now();
+        front.updates();
+        let wait = front.updates.next_check.saturating_duration_since(Instant::now());
+        assert!(wait > Duration::from_secs(590) && wait <= BUSY_RETRY, "{wait:?}");
+        // A check that failed.
+        front.updates.auto_seq = Some(7);
+        front.updates.tx.send(UpdateDone::Failed { seq: 7, message: "GitHub: HTTP 403".into() }).unwrap();
+        front.updates.next_check = Instant::now() + front.updates.every;
+        front.updates();
+        let wait = front.updates.next_check.saturating_duration_since(Instant::now());
+        assert!(wait > Duration::from_secs(3590) && wait <= CHECK_RETRY, "{wait:?}");
+        // A manual update's failure leaves the schedule alone.
+        front.updates.next_check = Instant::now() + front.updates.every;
+        front.updates.tx.send(UpdateDone::Failed { seq: 8, message: "sha256".into() }).unwrap();
+        front.updates();
+        assert!(front.updates.next_check > Instant::now() + Duration::from_secs(23 * 3600));
+        // Never longer than the interval itself (PCDS_UPDATE_CHECK_HOURS=1 stays at an hour).
+        front.updates.every = Duration::from_secs(1800);
+        front.updates.auto_seq = Some(9);
+        front.updates.tx.send(UpdateDone::Failed { seq: 9, message: "x".into() }).unwrap();
+        front.updates();
+        assert!(front.updates.next_check <= Instant::now() + Duration::from_secs(1800));
     }
 
     /// A panic in an update's thread is that update's failure, not a busy update for ever.

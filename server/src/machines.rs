@@ -148,22 +148,45 @@ fn root(game: &Game, group: usize, ty: &str) -> Option<Value> {
     components(game, group, ty, true).first().map(|v| (*v).clone())
 }
 
-/// What a machine takes from the tables and a snapshot does not carry, set again from the tables
-/// after a restore (a snapshot of an earlier release does not have what a later one added).
+/// What a machine takes from the tables, set again from them after a restore. A snapshot of
+/// an earlier release has no field a later one added from the tables (0.6.1's `water_only`
+/// broke the first hot update that way), and has the values the release that wrote it
+/// derived, which this one may read differently: neither may be kept. State (timers, what is
+/// growing, the random sequence, what the rays found) is the snapshot's. A machine part that
+/// keeps table values beside its state is listed here (docs/hot-update.md, "State"); Generator
+/// (spawn_every, speed, groups) mixes both and is not refreshed.
 pub fn refresh_from_tables(game: &mut Game) {
-    let harvestables: Vec<(i32, Value)> = game
-        .ext
-        .machines
-        .list
-        .iter()
-        .filter(|(_, m)| m.harvestable.is_some())
-        .filter_map(|(wo, _)| Some((*wo, root(game, game.wos.get(wo)?.group, "MachineGrowerVegetationHarvestable")?)))
-        .collect();
-    for (wo, f) in harvestables {
-        if let Some(h) = game.ext.machines.list.get_mut(&wo).and_then(|m| m.harvestable.as_mut()) {
-            h.refresh(&f);
+    let machines: Vec<i32> = game.ext.machines.list.keys().copied().collect();
+    for wo in machines {
+        let Some(group) = game.wos.get(&wo).map(|w| w.group) else { continue };
+        let f = |ty: &str| root(game, group, ty);
+        let (harvestable, vegetation, linked, autocrafter, disintegrator, optimizer) = (f("MachineGrowerVegetationHarvestable"), f("MachineGrowerVegetationStatic"), f("MachineGrowerIfLinkedGroup"), f("MachineAutoCrafter"), f("MachineDisintegrator"), f("MachineOptimizer"));
+        let Some(m) = game.ext.machines.list.get_mut(&wo) else { continue };
+        if let (Some(h), Some(f)) = (m.harvestable.as_mut(), &harvestable) {
+            h.refresh(f);
+        }
+        if let (Some(v), Some(f)) = (m.vegetation.as_mut(), &vegetation) {
+            v.refresh(f);
+        }
+        if let (Some(l), Some(f)) = (m.linked_grower.as_mut(), &linked) {
+            l.refresh(f);
+        }
+        if let (Some(a), Some(f)) = (m.autocrafter.as_mut(), &autocrafter) {
+            a.refresh(f);
+        }
+        if let (Some(d), Some(f)) = (m.disintegrator.as_mut(), &disintegrator) {
+            d.refresh(f);
+        }
+        if let (Some(o), Some(f)) = (m.optimizer.as_mut(), &optimizer) {
+            o.refresh(f);
         }
     }
+}
+
+/// How many world objects have a machine's state (the snapshot fixtures' check).
+#[cfg(test)]
+pub fn machine_count(game: &Game) -> usize {
+    game.ext.machines.list.len()
 }
 
 /// GetComponent<MachineRocketBackAndForth>() (its trade and interplanetary subclasses).
@@ -824,6 +847,60 @@ pub(crate) mod tests {
         w.planet = planet;
         game.instantiate(id, false, 0);
         id
+    }
+
+    /// A restore sets what machines take from the tables again and keeps their state: a
+    /// snapshot of an earlier release holds the values that release derived (here, every one
+    /// changed), and the restored game has this release's, the snapshot's timers and all.
+    #[test]
+    fn a_restore_sets_the_table_values_again_and_keeps_the_state() {
+        let Some(mut game) = game() else { return };
+        let groups: Vec<String> = game.data.groups.iter().filter(|g| g.constructible && g.has_prefab && g.id != "ProceduralInstanceGenerator").map(|g| g.id.clone()).collect();
+        for (i, group) in groups.iter().enumerate() {
+            build(&mut game, group, [300.0 + (i % 17) as f32 * 30.0, 20.0, 300.0 + (i / 17) as f32 * 30.0]);
+        }
+        for _ in 0..30 {
+            game.time += 1.0;
+            tick(&mut game);
+        }
+        let text = crate::handoff::snapshot(&game).unwrap();
+        let (head, body) = text.split_once('\n').unwrap();
+        let mut state: Value = serde_json::from_str(body).unwrap();
+        let mut parts = std::collections::BTreeMap::<&str, usize>::new();
+        let wrong = |v: &mut Value, keys: &[&str]| {
+            for k in keys {
+                v[*k] = match &v[*k] {
+                    Value::Array(_) => json!(["Gone"]),
+                    Value::Bool(b) => json!(!b),
+                    Value::Null => Value::Null,
+                    n if n.is_u64() || n.is_i64() => json!(12345),
+                    _ => json!(12345.5),
+                };
+            }
+        };
+        for m in state["ext"]["machines"]["list"].as_object_mut().unwrap().values_mut() {
+            for (part, keys) in [
+                ("harvestable", &["interval", "grow_speed", "min_growth", "min_radius", "radius", "spawn_on_this", "down_value", "things"][..]),
+                ("vegetation", &["grow_speed", "interval", "min_growth", "original"]),
+                ("linked_grower", &["rate"]),
+                ("autocrafter", &["period", "range"]),
+                ("disintegrator", &["period", "give"]),
+                ("optimizer", &["range", "max"]),
+            ] {
+                if !m[part].is_null() {
+                    *parts.entry(part).or_default() += 1;
+                    wrong(&mut m[part], keys);
+                }
+            }
+        }
+        for part in ["harvestable", "vegetation", "linked_grower", "autocrafter", "disintegrator", "optimizer"] {
+            assert!(parts.get(part).copied().unwrap_or(0) > 0, "the world has a machine with a {part}: {parts:?}");
+        }
+        let older = format!("{head}\n{state}");
+        let (net_data, data, spec, scenes) = crate::game::test_tables().unwrap();
+        let restored = crate::handoff::restore(net_data, data, spec, &older, scenes).unwrap();
+        crate::handoff::verify(&restored, text.as_bytes()).expect("the table's values are this release's, the state the snapshot's");
+        assert!(crate::handoff::verify(&restored, older.as_bytes()).is_err(), "the older values were replaced");
     }
 
     #[test]

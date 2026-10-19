@@ -5,6 +5,7 @@
 //! each call the server answers (craft, build, chat) as percentiles, and what players received.
 //!
 //! Usage: pcds load HOST:PORT DATA_DIR [PLAYERS=8] [SECONDS=60] [ACTION_MS=200]
+//! (the players are named Load0, Load1...; PCDS_LOAD_NAME gives another prefix, for a second group)
 //! Each player connects from its own 127.0.0.N address (the server allows 8 per address), so
 //! HOST must be a loopback address of this machine.
 
@@ -237,7 +238,7 @@ fn play(n: usize, server: SocketAddr, data: &NetData, spec: &Spec, request: &[u8
         }
         if bot.player != 0 && !ready_sent {
             ready_sent = true;
-            bot.call("PlayerMainController.PlayerReadyServerRpc", &[json!(0), json!(format!("Load{n}"))], None);
+            bot.call("PlayerMainController.PlayerReadyServerRpc", &[json!(0), json!(format!("{}{n}", crate::env("PCDS_LOAD_NAME").unwrap_or_else(|| "Load".into())))], None);
         }
         bot.flush();
         std::thread::sleep(Duration::from_millis(2));

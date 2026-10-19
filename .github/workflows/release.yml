@@ -8,7 +8,45 @@ permissions:
   contents: write
 
 jobs:
+  # A hot update from the last release into this build: that release runs a world with one of
+  # every building and players, and this build takes it over (tools/flip-gate.sh). The first
+  # update users made (0.6.0 to 0.6.1) failed on a snapshot field the release before did not
+  # write, which no test of this build against itself can show. It needs game tables, which
+  # are not in the repository: PCDS_TEST_TABLES_URL (a secret) is a .tar.gz of a tables folder
+  # (run/data/<game version> of an installed server) the job fetches. Without it the job fails
+  # and so does the release: that is the point. To release without it once, set the repository
+  # variable PCDS_FLIP_GATE to "off" (the job then only warns), and run `make gate` by hand.
+  flip-gate:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+      - name: The gate is skipped on purpose
+        if: ${{ vars.PCDS_FLIP_GATE == 'off' }}
+        run: echo "::warning::PCDS_FLIP_GATE=off - the hot update from the release before was NOT tested (make gate)"
+      - name: Game tables
+        if: ${{ vars.PCDS_FLIP_GATE != 'off' }}
+        env:
+          TABLES_URL: ${{ secrets.PCDS_TEST_TABLES_URL }}
+        run: |
+          if [ -z "$TABLES_URL" ]; then
+            echo "::error::no secret PCDS_TEST_TABLES_URL (a .tar.gz of a game tables folder): the flip from the release before cannot be tested. Set it, or set the variable PCDS_FLIP_GATE to off for this release and run make gate by hand."
+            exit 1
+          fi
+          mkdir "$RUNNER_TEMP/tables"
+          curl -fsSL "$TABLES_URL" | tar -xz -C "$RUNNER_TEMP/tables"
+          echo "PCDS_TEST_DATA=$RUNNER_TEMP/tables" >> "$GITHUB_ENV"
+      - name: The release before, taken over by this build
+        if: ${{ vars.PCDS_FLIP_GATE != 'off' }}
+        env:
+          PCDS_GAME_DIR: none
+        run: tools/flip-gate.sh
+
   linux:
+    needs: flip-gate
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
