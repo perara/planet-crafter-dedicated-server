@@ -15,3 +15,6 @@ __pycache__/
 /tools/plugin-engine-bench/*/target/
 /tools/plugin-engine-bench/engine-bench/guest/guest.wasm
 /tools/plugin-engine-bench/engine-bench/guest/libnative.so
+/server/fuzz/artifacts/
+/server/fuzz/target/
+/server/fuzz/coverage/

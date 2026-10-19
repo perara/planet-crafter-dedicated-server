@@ -1,0 +1,4 @@
+POST
+/api/chat
+
+{"text": "hello"}

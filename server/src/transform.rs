@@ -71,9 +71,20 @@ pub fn position_rotation(body: &[u8]) -> Option<(u64, [f32; 3], Option<[f32; 4]>
 }
 
 impl Update {
-    /// Every value it carries is a number (NaN or infinity would end up in the save).
+    /// Every value it carries is a number (NaN or infinity would end up in the save) and within
+    /// rpcspec::SANE_FLOAT.
     pub fn finite(&self) -> bool {
-        self.position.iter().chain(&self.euler).flatten().chain(self.quaternion.iter().flatten()).all(|v| v.is_finite())
+        let sane = |v: &f32| v.is_finite() && v.abs() <= crate::rpcspec::SANE_FLOAT as f32;
+        self.position.iter().chain(&self.euler).flatten().chain(self.quaternion.iter().flatten()).all(sane)
+    }
+
+    /// `apply` on copies; None when the result is not all numbers. Every value the state carries
+    /// can be finite and still not be: a quaternion of 3e38 passes `finite`, and the next
+    /// Euler-only state merged onto it overflows to NaN, which no snapshot can hold.
+    pub fn applied(&self, position: [f32; 3], rotation: [f32; 4]) -> Option<([f32; 3], [f32; 4])> {
+        let (mut p, mut q) = (position, rotation);
+        self.apply(&mut p, &mut q);
+        (p.iter().chain(&q).all(|v| v.is_finite())).then_some((p, q))
     }
 
     /// NetworkTransform.ApplyUpdatedState: present axes replace the last state's; Euler angles
@@ -175,6 +186,22 @@ mod tests {
     }
 
     #[test]
+    fn a_finite_state_that_overflows_when_merged_is_refused() {
+        // Past SANE_FLOAT a state is refused outright ...
+        let huge = update(&message(QUATERNION_SYNC | 16 | 32 | 64, &[3.0e38; 4])).unwrap();
+        assert!(!huge.finite());
+        // ... and a merge of sane values that still overflows (applied) is refused too.
+        let big = update(&message(QUATERNION_SYNC | 16 | 32 | 64, &[9.0e8; 4])).unwrap();
+        assert!(big.finite());
+        let (_, q) = big.applied([0.0; 3], [0.0, 0.0, 0.0, 1.0]).unwrap();
+        assert_eq!(q, [9.0e8; 4]);
+        let yaw = update(&message(32, &[90.0])).unwrap();
+        assert!(yaw.finite());
+        assert!(yaw.applied([0.0; 3], [3.0e38; 4]).is_none(), "a state this big cannot be in the world, but the merge is checked anyway");
+        assert!(yaw.applied([0.0; 3], [0.0, 0.0, 0.0, 1.0]).is_some());
+    }
+
+    #[test]
     fn euler_round_trips() {
         for e in [[0.0, 73.0, 0.0], [30.0, -120.0, 45.0], [-60.0, 10.0, 170.0]] {
             let back = euler_angles(from_euler(e));
@@ -183,3 +210,7 @@ mod tests {
         assert!((euler_angles(crate::geometry::from_euler_y(73.0))[1] - 73.0).abs() < 0.01);
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/transform.rs"]
+pub mod fuzz;

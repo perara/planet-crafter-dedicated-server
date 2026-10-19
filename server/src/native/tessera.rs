@@ -1268,7 +1268,7 @@ impl PathView {
     }
 
     fn ban_relevant(&self, w: &mut Wfc, node: usize) {
-        if node % 7 == 0 {
+        if node.is_multiple_of(7) {
             w.ban(node / 7, &self.path);
         }
     }

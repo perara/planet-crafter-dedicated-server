@@ -64,6 +64,22 @@ fn check(a: &Arg) -> Result<bool, String> {
     if ok { Ok(true) } else { Err(format!("encoding {} (item {:?}, base {:?}, fields {:?}) of {} is not supported", a.enc, a.item, a.base, a.fields, a.ty)) }
 }
 
+/// The largest float a client may send in an RPC or a transform. Every position, rotation, time
+/// and amount of the game is far below it (positions are within tens of thousands, a month is
+/// 2.6e6 seconds), and above it the server's own arithmetic overflows: a quaternion or position of
+/// 1e30 in LoadInstanceFromScene made NaN positions in the objects the server then created,
+/// which no snapshot can hold (hot updates refused) and the save writes as "NaN".
+pub const SANE_FLOAT: f64 = 1.0e9;
+
+/// Whether an argument holds a float (not an integer) past SANE_FLOAT.
+fn huge(v: &Value) -> bool {
+    match v {
+        Value::Number(n) => n.is_f64() && n.as_f64().is_some_and(|f| f.abs() > SANE_FLOAT),
+        Value::Array(items) => items.iter().any(huge),
+        _ => false,
+    }
+}
+
 fn floats(v: &Value, n: usize) -> Vec<f32> {
     (0..n).map(|i| v.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32).collect()
 }
@@ -320,8 +336,14 @@ impl Spec {
         (hash, w.0)
     }
 
-    /// The arguments of an RPC; None for an unknown or undecodable one or a short body.
+    /// The arguments of an RPC; None for an unknown or undecodable one, a short body, or a float
+    /// past SANE_FLOAT (see there).
     pub fn decode(&self, hash: u32, body: &[u8]) -> Option<Vec<Value>> {
+        let args = self.decode_all(hash, body)?;
+        (!args.iter().any(huge)).then_some(args)
+    }
+
+    fn decode_all(&self, hash: u32, body: &[u8]) -> Option<Vec<Value>> {
         let rpc = self.by_hash.get(&hash).filter(|r| r.decodable)?;
         let mut r = Reader::new(body);
         let mut out = Vec::new();
@@ -364,6 +386,19 @@ mod tests {
     }
 
     #[test]
+    fn floats_past_the_sane_range_are_not_decoded() {
+        let s = Spec::parse(r#"{"1": {"name": "A.BRpc", "args": [{"name": "p", "type": "Vector3", "enc": "raw", "optional": false}, {"name": "n", "type": "int", "enc": "raw", "optional": false}]}}"#).unwrap();
+        let (hash, ok) = s.encode("A.BRpc", &[json!([100000.0, -5.0, 3.0]), json!(i32::MAX)]);
+        assert_eq!(s.decode(hash, &ok).unwrap()[1], json!(i32::MAX), "big integers are not floats");
+        for bad in [1.0e30, -3.0e38, 2.0e9] {
+            let (hash, body) = s.encode("A.BRpc", &[json!([0.0, bad, 0.5]), json!(1)]);
+            assert!(s.decode(hash, &body).is_none(), "{bad}");
+        }
+        let (hash, edge) = s.encode("A.BRpc", &[json!([9.0e8, 0.0, 0.0]), json!(1)]);
+        assert!(s.decode(hash, &edge).is_some());
+    }
+
+    #[test]
     fn enums_take_their_underlying_size() {
         let s = Spec::parse(r#"{"1": {"name": "A.BRpc", "args": [{"name": "e", "type": "E", "enc": "enum", "base": "byte", "optional": false}, {"name": "f", "type": "F[]", "enc": "array", "item": "enum", "base": "short", "optional": true}]}}"#).unwrap();
         let (hash, bytes) = s.encode("A.BRpc", &[json!(200), json!([-2, 3])]);
@@ -399,3 +434,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/rpcspec.rs"]
+pub mod fuzz;

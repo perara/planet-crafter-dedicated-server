@@ -244,15 +244,20 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 fn modules() -> (BTreeSet<String>, BTreeSet<String>) {
     let main = std::fs::read_to_string(format!("{SRC}/main.rs")).unwrap();
     let (mut all, mut test_only) = (BTreeSet::new(), BTreeSet::new());
-    let mut prev_cfg_test = false;
+    let (mut prev_cfg_test, mut fuzz_only) = (false, false);
     for line in main.lines() {
         let line = line.trim();
         if let Some(name) = line.strip_prefix("mod ").or_else(|| line.strip_prefix("pub mod ")).and_then(|r| r.strip_suffix(';')) {
-            all.insert(name.to_string());
-            if prev_cfg_test {
-                test_only.insert(name.to_string());
+            // The fuzz harness's entry (server/fuzz, built with --cfg fuzzing) is tooling, not a module of the server.
+            if !fuzz_only {
+                all.insert(name.to_string());
+                if prev_cfg_test {
+                    test_only.insert(name.to_string());
+                }
             }
+            fuzz_only = false;
         }
+        fuzz_only |= line.starts_with("#[cfg(any(fuzzing");
         prev_cfg_test = line == "#[cfg(test)]";
     }
     (all, test_only)

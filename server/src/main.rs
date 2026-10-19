@@ -22,6 +22,29 @@
 //! them, the README's Settings tables repeat them, and tests keep all of it equal). Gameplay
 //! and tuning are rules (rules.rs), not variables.
 
+// Style lints this code base accepts on purpose; each is a matter of taste, not of behavior:
+// - collapsible_if, collapsible_match: the nesting mirrors the game's decompiled host code line
+//   for line (parity work reads the two side by side), and collapsing needs let chains everywhere.
+// - type_complexity, too_many_arguments: tuples and argument lists that are the game's own
+//   signatures (World object drops, S3 upload); a named type would only hide them.
+// - needless_range_loop, explicit_counter_loop, neg_multiply, wrong_self_convention: parity ports
+//   keep the game's index loops and its `x * -1.0` terms; the numbers are bit-for-bit the same.
+// - chunks_exact_to_as_chunks: as_chunks is newer than the 1.88 MSRV this crate declares.
+#![allow(
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::needless_range_loop,
+    clippy::explicit_counter_loop,
+    clippy::neg_multiply,
+    clippy::wrong_self_convention,
+    clippy::chunks_exact_to_as_chunks,
+    clippy::some_filter
+)]
+
+#![cfg_attr(fuzzing, no_main)]
+
 /// `section!("name", expr)` is `expr`; the bench (PCDS_BENCH_SECTIONS=1) also adds up the time of each name.
 #[cfg(test)]
 macro_rules! section {
@@ -39,6 +62,9 @@ macro_rules! section {
     };
 }
 
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/entry.rs"]
+mod fuzz_entry;
 mod animals;
 #[cfg(test)]
 mod bench;

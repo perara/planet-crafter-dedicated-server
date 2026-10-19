@@ -100,7 +100,7 @@ impl Writer {
 
 /// Smallest byte count holding `v` (at least one byte).
 fn byte_count(v: u64) -> usize {
-    (((64 - v.leading_zeros()) as usize + 7) / 8).max(1)
+    ((64 - v.leading_zeros()) as usize).div_ceil(8).max(1)
 }
 
 pub struct Reader<'a> {
@@ -329,3 +329,7 @@ mod tests {
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/wire.rs"]
+pub mod fuzz;

@@ -1,0 +1,18 @@
+{
+ "limits": {
+  "maxPlayers": 4,
+  "buildings": {
+   "Drill4": 10
+  }
+ },
+ "chat": {
+  "commandPrefix": "!",
+  "timeoutSeconds": 5.0,
+  "webhooks": [
+   "https://example.com/hook"
+  ]
+ },
+ "speed": {
+  "growth": 2.0
+ }
+}

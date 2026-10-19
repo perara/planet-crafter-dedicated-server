@@ -614,8 +614,14 @@ impl Game {
         }
         if let Some(u) = update.filter(|u| !u.local) {
             if let Some(o) = self.net.objects.get_mut(&u.object) {
-                u.apply(&mut o.position, &mut o.rotation);
-                let (position, rotation) = (o.position, o.rotation);
+                // Finite values can still overflow once merged onto the last state.
+                let Some((position, rotation)) = u.applied(o.position, o.rotation) else {
+                    if self.unhandled.insert(format!("overflowing transform {client}")) {
+                        eprintln!("client {client}: a transform that overflows to NaN or infinity, dropped (logged once)");
+                    }
+                    return;
+                };
+                (o.position, o.rotation) = (position, rotation);
                 if let Some(w) = o.wo.and_then(|wo| self.wos.get_mut(&wo)) {
                     w.position = position;
                     w.rotation = rotation;
@@ -1580,3 +1586,7 @@ pub mod tests {
         assert!(g.wos.contains_key(&id) && g.inventories[&inventory].items.contains(&id), "the despawn timer went with the dropped object");
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/game.rs"]
+pub mod fuzz;

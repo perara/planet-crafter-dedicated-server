@@ -458,6 +458,20 @@ mod tests {
         ("PCDS_BENCH_DUMP", "bench: a file for every message and the final save, to compare two runs."),
         ("PCDS_BENCH_HANDOFF", "bench handoff: seconds between handoffs (default half the run)."),
         ("PCDS_BENCH_SECTIONS", "bench: 1 also prints the time per subsystem of the tick (the section! names)."),
+        ("PCDS_FUZZ_TARGET", "fuzz: the target a fuzz binary runs (server/fuzz/entry.rs)."),
+        ("PCDS_FUZZ_DATA", "fuzz: the game tables the targets that need them read."),
+        ("PCDS_FUZZ_LOG", "fuzz: where the game target catalogues the sites of its panics (default panics.log)."),
+        ("PCDS_FUZZ_HISTORY", "fuzz: where the game target dumps the inputs since its last reset when a panic ends the run (default history.bin)."),
+        ("PCDS_FUZZ_REPLAY", "fuzz: a history file the game target runs again."),
+        ("PCDS_FUZZ_TRACE", "fuzz: set: the game target prints each input it runs."),
+        ("PCDS_FUZZ_RESET", "fuzz: inputs the game target runs on one game before it starts a fresh one (1 for a replay)."),
+        ("PCDS_FUZZ_SAVE", "fuzz: the save whose snapshot PCDS_FUZZ_SEED_OUT writes (default: the test world)."),
+        ("PCDS_FUZZ_SEED_OUT", "fuzz: a file the handoff target writes a snapshot of a world to, as a seed."),
+        ("PCDS_FUZZ_SWEEP_FILE", "fuzz: the snapshot or save a sweep puts boundary values into, one at a time."),
+        ("PCDS_FUZZ_SWEEP_OFFSET", "fuzz: the number a sweep starts at."),
+        ("PCDS_FUZZ_SWEEP_STEP", "fuzz: a sweep tries every this many numbers."),
+        ("PCDS_CORPUS", "fuzz: the corpus folder `replay_corpus` runs (cfg pcds_corpus)."),
+        ("PCDS_CORPUS_LIMIT", "fuzz: at most this many corpus files."),
         ("PCDS_PREVIOUS_RELEASE", "The flip gate (make gate): the folder of the release before, its pcds in it."),
         ("PCDS_GATE_CANDIDATE", "The flip gate: another program to hand the release before's world to (to see the gate fail)."),
         ("PCDS_FIXTURE_RELEASE", "The cross-release snapshot fixture: the folder of a release, to write its fixture with."),
@@ -797,3 +811,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/config.rs"]
+pub mod fuzz;

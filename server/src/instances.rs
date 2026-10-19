@@ -426,7 +426,7 @@ fn unload_instances(game: &mut Game, owner: i32, respawn: [f32; 3]) {
     if !game.ext.planets.instances.instances.contains_key(&owner) {
         return;
     }
-    while game.ext.planets.instances.instances[&owner].first().is_some() {
+    while !game.ext.planets.instances.instances[&owner].is_empty() {
         unload_instance(game, owner, 0, respawn, true);
     }
     state(game).instances.shift_remove(&owner);
@@ -476,7 +476,7 @@ pub fn set_and_open(game: &mut Game, data: Option<WorldInstance>) {
 pub fn unload_world_instance(game: &mut Game) {
     let Some(seed) = game.ext.planets.instances.opened.as_ref().map(|o| o.seed) else { return };
     let planet = game.planet_hash();
-    let respawn = portal_generators(game).iter().filter(|w| w.planet_hash() == planet).last().map(|w| [w.position[0], w.position[1] + 7.0, w.position[2]]).unwrap_or([0.0; 3]);
+    let respawn = portal_generators(game).iter().rfind(|w| w.planet_hash() == planet).map(|w| [w.position[0], w.position[1] + 7.0, w.position[2]]).unwrap_or([0.0; 3]);
     // The instance's wreck generators (whose triggers cover it) are what sends players back;
     // without any (no wreck entry of its variation is active), the instance area does it.
     if !game.ext.planets.instances.instances.contains_key(&seed) {

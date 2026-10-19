@@ -180,7 +180,7 @@ fn initializers(asm: &Assembly, class: &TypeName, il: &[u8]) -> Result<Vec<(Stri
             }
             0x14 => stack.push(Val::Null),
             0x15..=0x1E => stack.push(Val::Int(op.code as i64 - 0x16)),
-            0x1F | 0x20 | 0x21 => stack.push(Val::Int(op.arg)),
+            0x1F..=0x21 => stack.push(Val::Int(op.arg)),
             0x22 => stack.push(Val::Float(f32::from_bits(op.arg as u32) as f64)),
             0x23 => stack.push(Val::Float(f64::from_bits(op.arg as u64))),
             0x6B | 0x6C | 0x76 => match pop(&mut stack) {

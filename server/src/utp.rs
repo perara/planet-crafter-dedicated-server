@@ -1100,3 +1100,7 @@ mod tests {
         server.flush();
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/utp.rs"]
+pub mod fuzz;

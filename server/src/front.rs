@@ -2120,3 +2120,7 @@ mod tests {
         assert!(reassemble(&mut split, b"x").is_err());
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/front.rs"]
+pub mod fuzz;

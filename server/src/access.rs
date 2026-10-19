@@ -241,3 +241,7 @@ mod tests {
         assert!(a.name_allowed("Mallory", None));
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/access.rs"]
+pub mod fuzz;

@@ -320,12 +320,13 @@ pub fn wait(fds: &[RawFd], out: &[bool], timeout: Duration) -> Vec<bool> {
 const CMSG_FDS: usize = 4;
 
 fn send_with_fd(sock: RawFd, data: &[u8], fd: RawFd) -> std::io::Result<usize> {
-    // SAFETY: msghdr points at a live iovec and a control buffer sized by CMSG_SPACE for one
-    // fd; CMSG_FIRSTHDR of that buffer is non-null and in bounds.
+    // SAFETY: msghdr points at a live iovec and an 8-aligned control buffer of at least CMSG_SPACE
+    // for one fd; CMSG_FIRSTHDR of that buffer is non-null and in bounds.
     unsafe {
         let mut iov = libc::iovec { iov_base: data.as_ptr() as *mut libc::c_void, iov_len: data.len() };
         let space = libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) as usize;
-        let mut control = vec![0u8; space];
+        // u64s, not bytes: the control message headers read from it need 8-byte alignment.
+        let mut control = vec![0u64; space.div_ceil(8)];
         let mut msg: libc::msghdr = std::mem::zeroed();
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
@@ -557,3 +558,7 @@ mod tests {
         println!("ipc: 20000 round trips of a 120-byte frame: p50 {:?}, p99 {:?}; a 4 MiB snapshot written, passed there and back as a memfd and read: {bulk:?}", rounds[10_000], rounds[19_800]);
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/ipc.rs"]
+pub mod fuzz;

@@ -1,0 +1,53 @@
+# Coverage-guided fuzzing of the parsers (cargo install cargo-fuzz; see fuzz/README below).
+#
+# The server is one binary crate, so the fuzz binary is that same main.rs compiled with
+# --cfg fuzzing: main.rs then has no `main` and pulls in fuzz/entry.rs, which dispatches on the
+# environment variable PCDS_FUZZ_TARGET to the `fuzz` module a source file includes from
+# fuzz/targets/ (also only under cfg(fuzzing)). Nothing changes in a normal build.
+#
+#   cd server
+#   PCDS_FUZZ_TARGET=wire cargo fuzz run pcds_fuzz fuzz/corpus/wire
+#
+# Targets: wire utp rpcspec transform ipc config chathooks updater access rules save handoff game front.
+# Sweeps (one run each, no libFuzzer input): handoffsweep and savesweep put awkward numbers and strings
+# in a real snapshot / save, one value at a time (PCDS_FUZZ_SWEEP_FILE, _STEP, _OFFSET; pass -timeout=0).
+# game runs 40 inputs on one Game, takes a snapshot and restores it every 20 (a NaN fails there), and
+# writes the inputs of a crash to history-<pid>.bin beside PCDS_FUZZ_LOG (PCDS_FUZZ_REPLAY, PCDS_FUZZ_TRACE).
+# Build for what production runs: RUSTFLAGS="-C overflow-checks=off -C debug-assertions=off" (cargo fuzz
+# turns them on, which also finds wrapping arithmetic).
+# Targets that need the game's tables read them from PCDS_FUZZ_DATA (a tables directory).
+[package]
+name = "pcds-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ctrlc = { version = "3.5.2", features = ["termination"] }
+indexmap = { version = "2", features = ["serde"] }
+libc = "0.2"
+pcds-plugin-api = { path = "../../plugin-api", features = ["std"] }
+ring = "0.17"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+steamworks = "0.13.1"
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
+wasmi = { version = "2.0.0", default-features = false, features = ["std", "validate"] }
+xxhash-rust = { version = "0.8.19", features = ["xxh32", "xxh64"] }
+
+[[bin]]
+name = "pcds_fuzz"
+path = "../src/main.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)', 'cfg(pcds_corpus)'] }

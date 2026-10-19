@@ -583,6 +583,26 @@ mod tests {
         }
     }
 
+    /// The first hour is the game's own f32 sum, step by step (the bench's fingerprint depends on it).
+    #[test]
+    fn the_first_hour_adds_in_f32_as_the_game_does() {
+        let (mut next, mut late, mut f32_next) = (0.0f32, None, 0.0f32);
+        for i in 1..4000 {
+            let now = i as f32 * 0.05;
+            let mut by_hand = 0;
+            while now >= f32_next {
+                f32_next += 0.1;
+                by_hand += 1;
+            }
+            let mut ours = 0;
+            while is_due(next, late, now) {
+                advance(&mut next, &mut late, now, 0.1);
+                ours += 1;
+            }
+            assert_eq!(ours, by_hand, "at {now}");
+        }
+    }
+
     fn libm_spacing(x: f32) -> f32 {
         f32::from_bits(x.to_bits() + 1) - x
     }
