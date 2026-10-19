@@ -170,9 +170,11 @@ def inventory_of(s, t, group, obj, tag, prefix):
 
 def grid(origin, cols, spacing, y=BUILD_Y):
     """Positions on a grid from origin, row by row."""
+    # A little off the grid, never the same twice: equal distances to an optimizer or a station
+    # make the game's unstable sort pick any of the tied machines.
     i = 0
     while True:
-        yield (round(origin[0] + (i % cols) * spacing, 2), y, round(origin[1] + (i // cols) * spacing, 2))
+        yield (round(origin[0] + (i % cols) * spacing + (i * 0.37) % 1.3, 2), y, round(origin[1] + (i // cols) * spacing + (i * 0.71) % 1.7, 2))
         i += 1
 
 

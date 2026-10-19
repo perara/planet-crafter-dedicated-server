@@ -506,14 +506,17 @@ def diff_events(ref, ours):
                 only[s][1].extend(b[j1:j2])
     # Pair what one server sent in a step with the same message the other sent within SHIFT steps.
     shifted = []
+    # A world object named by the step it appeared in is the same object a step later.
+    same = lambda x: re.sub(r'WO@\d+\.', 'WO@', x)
     for s in sorted(only):
         for x in list(only[s][0]):
             if '"msg": "call"' in x:
                 continue
             for t in sorted(only, key=lambda t: abs(t - s)):
-                if t != s and abs(t - s) <= SHIFT and x in only[t][1]:
+                match = next((y for y in only[t][1] if same(y) == same(x)), None) if t != s and abs(t - s) <= SHIFT else None
+                if match is not None:
                     only[s][0].remove(x)
-                    only[t][1].remove(x)
+                    only[t][1].remove(match)
                     shifted.append((s, t, x))
                     break
     for s in sorted(only):

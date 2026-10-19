@@ -28,12 +28,12 @@
   "class": "b",
   "why": "a space event's reference client is the player nearest the launch, the host there: the host's asteroids drop their resources, here the probe's client would (EXPECTED)",
   "script": "craft_world",
-  "line": "MeteoHandler\\._asteroidReference|new:GroupNetworkContainer#"
+  "line": "new:GroupNetworkContainer#"
  },
  {
   "class": "b",
   "why": "time: the reference ran before the probe joined, so growth, gauges, units and meteo timers stand further (EXPECTED: Time)",
-  "line": "^planets\\[0\\].*unit\\w+Level|\\.grwth: ref \\d+ ours \\d+$|playerGauge|MeteoHandler\\._(currentSeed|selectedDataMeteoEventIndex|timeNewMeteoSet|asteroidReferenceClient)"
+  "line": "^planets\\[0\\].*unit\\w+Level|\\.grwth: ref \\d+ ours \\d+$|playerGauge"
  },
  {
   "class": "b",
@@ -64,12 +64,6 @@
   "script": "sweep_build_1"
  },
  {
-  "class": "b",
-  "why": "distance to the host's own player: PerformancerDisableIfFarAway hides the deconstruction trigger of a Biolab, LightBoxMedium or Megadome1 further than 75 to 120 m from the host, so the reference answers nothing (EXPECTED); this server has no host",
-  "tag": "^(Biolab|LightBoxMedium|Megadome1)\\|deconstruct",
-  "line": "."
- },
- {
   "class": "e",
   "why": "a second escape pod: its storage is the start save's scene object 103976415, kept inactive in the copy, so the game cannot deconstruct it; no client deconstructs a pod through GroupNetworkBase (EXPECTED: not comparable)",
   "tag": "^EscapePod(Humble|Toxicity)?\\|deconstruct",
@@ -89,5 +83,32 @@
   "class": "b",
   "why": "time: the game's clock runs slower than wall time when its frames stall (Time.maximumDeltaTime caps a frame's step at a third of a second), so a cooldown that counts down by deltaTime lags (EXPECTED: Time)",
   "line": "VehicleBackToGarage\\._cooldown"
+ },
+ {
+  "class": "d",
+  "why": "meteor events: when one starts, its seed, its target player and place (MeteoHandler.TryToLaunchAnEventLogic and LaunchSpecificMeteoEvent: Random.Range); the reference picks the host's own position (the player nearest the launch, EXPECTED)",
+  "line": "MeteoHandler\\._(currentSeed|selectedDataMeteoEventIndex|timeNewMeteoSet|asteroidReference\\w+)"
+ },
+ {
+  "class": "b",
+  "why": "gauges under the sweep's keep-alive (Breath/Drink/Eat every 30 s) rise and fall in a sawtooth, so the rate over the second half depends on where in the tooth each server was; the gauges are compared in players.json (EXPECTED: Time)",
+  "line": "PlayerGaugesHandler\\._(oxygen|thirst|health)(Max)?Value: rate"
+ },
+ {
+  "class": "b",
+  "why": "network visibility by distance: another player's object reaches the reference's probe only once that player stands near, so its first state there is its moved one (EXPECTED: network visibility)",
+  "line": "^~ object player@client"
+ },
+ {
+  "class": "b",
+  "why": "inventory protection: another player's backpack and equipment are refused here, the game's host takes them from anyone (EXPECTED: safety rules)",
+  "tag": "refused here|first player backpack|second player reads the first",
+  "line": "."
+ },
+ {
+  "class": "d",
+  "why": "what a recycler drops lands on random spots of its drop bounds (ConstructibleProxy.RecycleContent: Random.Range; EXPECTED: randomness)",
+  "tag": "\\|recycle$",
+  "line": "\"msg\": \"create\""
  }
 ]
