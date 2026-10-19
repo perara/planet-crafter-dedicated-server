@@ -28,6 +28,10 @@ const FIRST_CHECK: f32 = 1.0;
 /// VehicleBackToGarage._cooldown: at spawn, and after a recall.
 const COOLDOWN_START: f32 = 5.0;
 const COOLDOWN: f32 = 600.0;
+/// LockNetworkPlayerPosition seats, in behaviour order: where the seat holds a player in the
+/// vehicle's frame, and its turn about Y in degrees; measured on the game (the dump has no
+/// transforms): the pilot's seat and the two passengers'.
+const SEATS: &[(&str, &[([f32; 3], f32)])] = &[("VehicleTruck", &[([0.0, 2.065, 1.963], 0.0), ([0.696, 2.5, -1.925], 90.0), ([-0.75, 2.5, -1.925], -90.0)])];
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Vehicle {
@@ -64,6 +68,17 @@ pub struct State {
     /// Equipment inventory -> the vehicle's world object (VehicleEquipment).
     equipment: HashMap<i32, i32>,
     last_frame: f32,
+    /// A seated player's object -> (where the seat put it, the owner's own last state): the
+    /// game's seat overrides the copy of the player every frame, and once it lets go the copy
+    /// goes back to what the owner last sent.
+    #[serde(default)]
+    seated: HashMap<u64, Seated>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Seated {
+    put: [f32; 3],
+    own: ([f32; 3], [f32; 4]),
 }
 
 fn component<'a>(game: &'a Game, wo: &WorldObject, ty: &str) -> Vec<&'a Value> {
@@ -288,15 +303,46 @@ pub fn frame(game: &mut Game) {
             rigidbody_check(game, object);
         }
         // LockNetworkPlayerPosition.LateUpdate: a seated player is where the seat is.
-        // ponytail: the seat is taken to be the vehicle's origin (seat offsets are not in the data).
-        let p = position(game, object);
-        let indices: Vec<u16> = game.net.objects.get(&object).map(|o| o.behaviours.iter().filter(|b| b.class == "LockNetworkPlayerPosition").map(|b| b.index).collect()).unwrap_or_default();
-        for index in indices {
-            if let Some(player) = seat(game, object, index).and_then(|c| game.player_object(c)) {
-                game.net.move_object(player, p, None);
+        let Some(o) = game.net.objects.get(&object) else { continue };
+        let (p, turn) = (o.position, o.rotation);
+        let group = o.wo.and_then(|w| game.wos.get(&w)).map(|w| game.data.groups[w.group].id.clone()).unwrap_or_default();
+        let seats = SEATS.iter().find(|(g, _)| *g == group).map(|(_, s)| *s).unwrap_or(&[]);
+        let indices: Vec<u16> = o.behaviours.iter().filter(|b| b.class == "LockNetworkPlayerPosition").map(|b| b.index).collect();
+        for (k, index) in indices.into_iter().enumerate() {
+            let Some(player) = seat(game, object, index).and_then(|c| game.player_object(c)) else { continue };
+            let (offset, yaw) = seats.get(k).copied().unwrap_or(([0.0; 3], 0.0));
+            let at = { let r = crate::geometry::rotate(turn, offset); [p[0] + r[0], p[1] + r[1], p[2] + r[2]] };
+            let facing = crate::geometry::mul(turn, crate::geometry::from_euler_y(yaw));
+            let Some(now) = game.net.objects.get(&player) else { continue };
+            // The owner's state is whatever is there but what this seat put there last.
+            let own = match game.ext.animals.vehicles.seated.get(&player) {
+                Some(s) if s.put == now.position => None,
+                _ => Some((now.position, now.rotation)),
+            };
+            let entry = game.ext.animals.vehicles.seated.entry(player).or_insert(Seated { put: at, own: (now.position, now.rotation) });
+            entry.put = at;
+            if let Some(own) = own {
+                entry.own = own;
             }
+            game.net.move_object(player, at, Some(facing));
         }
     }
+    // A seat that let go: the copy of the player returns to the owner's last state.
+    let free: Vec<u64> = {
+        let held: Vec<u64> = game.ext.animals.vehicles.vehicles.keys().flat_map(|v| seated_players(game, *v)).collect();
+        game.ext.animals.vehicles.seated.keys().filter(|p| !held.contains(p)).copied().collect()
+    };
+    for player in free {
+        if let Some(s) = game.ext.animals.vehicles.seated.remove(&player) {
+            game.net.move_object(player, s.own.0, Some(s.own.1));
+        }
+    }
+}
+
+/// The player objects locked into the seats of a vehicle.
+fn seated_players(game: &Game, object: u64) -> Vec<u64> {
+    let Some(o) = game.net.objects.get(&object) else { return Vec::new() };
+    o.behaviours.iter().filter(|b| b.class == "LockNetworkPlayerPosition").filter_map(|b| seat(game, object, b.index)).filter_map(|c| game.player_object(c)).collect()
 }
 
 fn garage_frame(game: &mut Game, garage: u64, dt: f32) {
@@ -497,12 +543,46 @@ mod tests {
         g.receive(1, &crate::wire::batch(&[(crate::protocol::NETWORK_TRANSFORM, w.0)]));
         g.time += 1.0;
         crate::animals::tick(&mut g);
-        assert_eq!((g.net.objects[&player].position, g.net.objects[&net].owner), ([600.0, 3.0, 494.0], 1));
+        // The pilot's seat holds the player 2.065 m up and 1.963 m ahead of the rover's origin.
+        assert_eq!((g.net.objects[&player].position, g.net.objects[&net].owner), ([600.0, 5.065, 495.963], 1));
+
+        // The seat only overrides the copy of the player: the owner's own states are kept, and
+        // once the seat lets go the copy is where the owner last put it.
+        let mut w = Writer::new();
+        w.packed_u64(player).packed_i32(0).packed_u32(2 | 4 | 8).packed_i32(1).f32(610.0).f32(4.0).f32(500.0);
+        g.receive(1, &crate::wire::batch(&[(crate::protocol::NETWORK_TRANSFORM, w.0)]));
+        g.time += 1.0;
+        crate::animals::tick(&mut g);
+        assert_eq!(g.net.objects[&player].position, [600.0, 5.065, 495.963], "the seat wins while it holds");
 
         // GetOut: the seat is freed and the rover unlocked for the next driver.
         send_rpc(&mut g, 1, net, pilot, "LockNetworkPlayerPosition.SetPlayerLockedServerRpc", &[json!(false), json!(0)]);
         send_rpc(&mut g, 1, net, switcher, "OwnershipSwitcher.ResetOwnershipServerRpc", &[]);
         assert_eq!((seat(&g, net, pilot), bool_var(&g, net, "OwnershipSwitcher", "_locked")), (None, false));
+        g.time += 1.0;
+        crate::animals::tick(&mut g);
+        assert_eq!(g.net.objects[&player].position, [610.0, 4.0, 500.0], "back where the owner last put the player");
+    }
+
+    /// The passengers' seats of the rover: beside the pilot's and turned a quarter either way.
+    #[test]
+    fn the_rovers_passenger_seats_hold_a_player_turned_aside() {
+        let Some(mut g) = crate::game::test_game(crate::game::tests::save()) else { return };
+        let player = crate::game::tests::join(&mut g, 1, "Ann");
+        let truck = g.data.group("VehicleTruck").unwrap();
+        let (_, net) = g.create_and_instantiate(truck, [560.0, 3.0, 494.0], [0.0, 0.0, 0.0, 1.0], false, true, false);
+        let seats: Vec<u16> = g.net.objects[&net].behaviours.iter().filter(|b| b.class == "LockNetworkPlayerPosition").map(|b| b.index).collect();
+        assert_eq!(seats.len(), 3);
+        for (seat_index, (expect, yaw)) in seats.iter().skip(1).zip([([560.696, 5.5, 492.075], 90.0), ([559.25, 5.5, 492.075], -90.0)]) {
+            send_rpc(&mut g, 1, net, *seat_index, "LockNetworkPlayerPosition.SetPlayerLockedServerRpc", &[json!(true), json!(1)]);
+            g.time += 1.0;
+            crate::animals::tick(&mut g);
+            let o = &g.net.objects[&player];
+            assert!((0..3).all(|i| (o.position[i] - expect[i]).abs() < 1e-3), "{:?}", o.position);
+            let want = crate::geometry::from_euler_y(yaw);
+            assert!((0..4).all(|i| (o.rotation[i] - want[i]).abs() < 1e-3), "{:?} {want:?}", o.rotation);
+            send_rpc(&mut g, 1, net, *seat_index, "LockNetworkPlayerPosition.SetPlayerLockedServerRpc", &[json!(false), json!(0)]);
+        }
     }
 
     /// Recalling a vehicle to its garage: refused while someone drives it; else the server takes
