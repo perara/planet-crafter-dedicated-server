@@ -174,6 +174,8 @@ struct Run {
     busy: Duration,
     /// Allocation calls and bytes inside the timed part of the ticks.
     allocs: (u64, u64),
+    /// Each tick's time in the timed part (the players' packets and actions that tick, then the tick), in ns.
+    tick_ns: Vec<u32>,
     save: usize,
     /// The sorted messages of the tick asked for.
     dumped: Vec<String>,
@@ -184,6 +186,10 @@ struct Run {
 /// The bench loop; `swap` may replace the game after a tick, every `swap_every` seconds.
 fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game, dump: Option<usize>) -> Run {
     g.sim_time = Some(0.0);
+    // More than the default 16 players, when asked for.
+    if e.players as usize > g.rules.max_players() {
+        g.rules.limits.max_players = Some(e.players as usize);
+    }
     let mut h = std::collections::hash_map::DefaultHasher::new();
     let objects: Vec<u64> = (1..=e.players).map(|c| join(&mut g, c, &format!("Bench{c}"))).collect();
     let mut players: Vec<Player> = (1..=e.players).map(|c| Player { rng: 0x9e37_79b9_7f4a_7c15 ^ c.wrapping_mul(0x2545_f491_4f6c_dd1d), ..Default::default() }).collect();
@@ -191,6 +197,7 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
     let (step, net_tick, act_every) = (0.005, 1.0 / g.net_data.tick_rate as f64, e.action_ms as f64 / 1000.0);
     let (mut t, mut next_move, mut next_act, mut next_swap, mut busy, mut seq) = (0.0, 0.0, act_every, swap_every, Duration::ZERO, 0);
     let mut allocs = (0u64, 0u64);
+    let mut tick_ns = Vec::with_capacity((e.seconds / step) as usize + 1);
     let (mut ticks, mut dumped) = (Vec::new(), Vec::new());
     let mut file = e.dump.as_ref().map(|p| std::io::BufWriter::new(std::fs::File::create(p).unwrap()));
     if let Some(f) = &mut file {
@@ -224,6 +231,7 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
         }
         section!("tick", g.tick());
         busy += started.elapsed();
+        tick_ns.push(started.elapsed().as_nanos().min(u32::MAX as u128) as u32);
         let after = ALLOCS.get();
         allocs = (allocs.0 + after.0 - before.0, allocs.1 + after.1 - before.1);
         let (n, own, tick) = fingerprint(&mut h, &mut g.net.out);
@@ -249,7 +257,7 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
         use std::io::Write;
         writeln!(f, "save {save}").unwrap();
     }
-    Run { fingerprint: h.finish(), ticks, messages, busy, allocs, save: save.len(), dumped, game: g }
+    Run { fingerprint: h.finish(), ticks, messages, busy, allocs, tick_ns, save: save.len(), dumped, game: g }
 }
 
 /// The load test's players (three, acting every 200 ms) for 20 s on the test world, played
@@ -294,6 +302,10 @@ fn bench() {
         r.fingerprint
     );
     println!("bench: {:.2} allocations ({:.0} bytes) per tick, {:.2} us per tick in the timed part", r.allocs.0 as f64 / r.ticks.len() as f64, r.allocs.1 as f64 / r.ticks.len() as f64, r.busy.as_secs_f64() * 1e6 / r.ticks.len() as f64);
+    let mut sorted = r.tick_ns.clone();
+    sorted.sort_unstable();
+    let at = |p: f64| sorted[((sorted.len() - 1) as f64 * p) as usize] as f64 / 1e3;
+    println!("bench: per tick p50 {:.2} us, p99 {:.2} us, p99.9 {:.2} us, max {:.2} us", at(0.5), at(0.99), at(0.999), at(1.0));
     let mut times: Vec<_> = TIMES.with(|m| m.borrow().iter().map(|(k, v)| (*k, *v)).collect());
     times.sort_by_key(|t| std::cmp::Reverse(t.1));
     for (name, t) in times {
