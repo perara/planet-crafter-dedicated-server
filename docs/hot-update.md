@@ -40,8 +40,10 @@ listen socket, every `NetConnection` with its `Split<n>` reassembly, the invite 
 ids, the 300 ms delayed close of kicked clients, the admin HTTP listener (it serves the live
 bank's `web/index.html`), the chat hooks (`chathooks::Hooks`: the event ring, the webhook and
 exec worker, `/api/chat`), and the autosave timer (it sends SAVE; the bank saves only if the
-world advanced). Admin requests other than `/api/stop` and `/api/update` go to the bank as ADMIN
-frames with the autosave setting; the answer comes back as ANSWER, and the front adds its part to
+world advanced). Admin requests other than `/api/stop`, `/api/update` and `/api/world/*` (stop,
+start, switch: the front owns the world's lifetime) go to the bank as ADMIN frames with the
+autosave setting; while the world is stopped the front answers `GET /api/status` and `GET
+/api/worlds` itself and refuses the rest. The answer comes back as ANSWER, and the front adds its part to
 `/api/status` (invite code, network, uptime, traffic, CPU and memory of front and banks,
 `banks`, `update`). Writes to a bank never block: frames wait in a queue per bank, and a client
 with more than 16 MiB waiting for the game (held during a flip, or a stalled bank) is dropped.
@@ -225,10 +227,10 @@ small world the stand is 6 to 11 ms with the check (1 to 2 ms without it).
                      │  client ids, delayed drops        │
                      │  holds client frames in a flip ◄─unix socket─►
                      │  supervisor: start a bank, flip,  │
- pcds update-server ─┘  health check, flip back          └── game process from bank B (during a flip)
+ pcds upgrade, updater ─┘  health check, flip back          └── game process from bank B (during a flip)
 
  run/bin/a/  run/bin/b/   each a whole unpacked release, checked against its sha256
- run/bin/active           which bank the front starts (a symlink, replaced atomically)
+ run/bin/active           which bank the front starts (a file holding "a" or "b", renamed over)
 ```
 
 **Front (the bootloader).** Owns the UDP socket and every Unity Transport session (`utp.rs`:
@@ -251,13 +253,13 @@ sessions, while batch contents and batching policy change with server releases a
 with the bank. The spike works this way; a broadcast then crosses the socket once per
 recipient, about 25000 batches a minute at 8 players (measured).
 
-**Banks and the updater.** `pcds update-server` (shell, as `install.sh` is): reads the latest
-tag from the GitHub API, downloads `pcds-<tag>-linux-x86_64.tar.gz` and its `.sha256` into the
-inactive bank's directory, checks it with `sha256sum -c` (`install.sh` already does both),
-unpacks it there, and asks the front to flip (`POST /api/update {"bank": "b"}`). Only after the
-new bank has confirmed does the front point `run/bin/active` at it (a new symlink renamed over
-the old one), so a restart of the whole unit starts the bank that last ran well. The old bank
-stays installed: flipping back needs no download. The release stays one tarball with one
+**Banks and the updater.** `updater.rs` (a thread of the front, or `pcds upgrade` when the server
+is stopped; see "The updater" under As built): reads the latest release from the GitHub API,
+downloads `pcds-<tag>-linux-x86_64.tar.gz` and its `.sha256`, checks the tarball's SHA-256,
+unpacks it into the inactive bank, and the front is asked to flip (`POST /api/update`). Only
+after the new bank has confirmed does the front write `run/bin/active` (a new file renamed
+over the old one), so a restart of the whole unit starts the bank that last ran well. The old
+bank stays installed: flipping back needs no download. The release stays one tarball with one
 binary (`pcds serve`, the front; `pcds bank`, the game process; the tools).
 
 **Supervisor.** The front, the systemd unit's process; the game process is its child (same
@@ -268,8 +270,9 @@ the Steam login and the invite code survive it.
 
 ## (b) The boundary between front and game
 
-One unix stream socket per game process, carrying frames: `u32 length, u8 kind, u64 client,
-body`. The spike's frames (`server/src/split.rs`):
+One unix stream socket per game process, carrying frames: `u32 length` (of what follows),
+`u8 kind`, `u64 n` (the client id, or a request or flip number), body. The spike's frames; the
+built ones, with what each carries, are listed in `ipc.rs`:
 
 | frame | direction | body |
 |---|---|---|
@@ -295,12 +298,12 @@ bounded per client as `utp.rs` bounds its send queue (a client over the bound is
 the world). Frames from the game are read every loop; a front that stopped reading would
 stall the game's writes, which is the right direction (the world waits, nothing is lost). The
 spike uses blocking writes on both sides; the front needs non-blocking writes with the bound
-above (marked `ponytail:` in `split.rs`).
+above (built in `ipc.rs`).
 
 **Latency budget.** Today a client's own packet is answered at once (the loop wakes on the
 socket). With the split the path gains two hops: the front wakes and writes a frame, the game
 wakes and answers, the front wakes again. Measured between two processes
-(`split::tests::ipc`, 120-byte frames, two runs):
+(the spike's `split::tests::ipc`, 120-byte frames, two runs; now `ipc::tests::ipc`):
 
 | | p50 | p99 | CPU |
 |---|---|---|---|
@@ -527,7 +530,7 @@ as after a long frame); for the pauses measured, clients' network time sees abou
 
 ## (e) What moves where in the refactor
 
-Front (`front.rs`, new, from `main.rs` and `split.rs`):
+Front (`front.rs`, new, from `main.rs`):
 - `utp.rs` as it is. Its only crate dependency is `idmap::FxHashMap`; the spike's front uses it
   unchanged (one accessor for its socket was added, to wait on it with other descriptors).
 - From `main.rs`: `start_steam`, `APP_ID`, `Link`, `reassemble`, `send` (Steam `Split<n>`),
@@ -535,19 +538,19 @@ Front (`front.rs`, new, from `main.rs` and `split.rs`):
   client ids, `links`, `ip_clients`), `pending_drop`, the signal handler, the shutdown.
 - `admin.rs` (the HTTP thread), forwarding requests to the game; the front fills
   `invite_code`, `network`, `port` and the per-player link type of `/api/status`.
-- The supervisor from `split.rs`: banks, HELLO checks, HANDOFF / SNAPSHOT / RESTORE / READY /
+- The supervisor (also in `front.rs`): banks, HELLO checks, HANDOFF / SNAPSHOT / RESTORE / READY /
   EXIT / RESUME, holding frames, the health check, the active pointer, restarting a crashed
   bank from the save.
 
 Shared (`ipc.rs`, new): the frame format and kinds, `Link`, `wait`, `PROTOCOL`.
 
-State module (`state/`, new; later a crate): the types in the table under (c), moved out of
+State module (planned as `state/`, not built: the types stay where they are and `handoff.rs` holds the format): the types in the table under (c), moved out of
 the logic modules with their derives; `handoff.rs` (the head, `FORMAT`, `migrate`, `snapshot`,
 `restore`, the encodings for clocks, infinities, tuple-keyed maps and static names); the
 autosave countdown and setting from `main.rs`. The logic keeps `impl` blocks and functions
 over these types, so moving a type is a change of its path, not of its code.
 
-Logic (the game process, `gameproc.rs`, new, from `main.rs` and `split.rs`):
+Logic (the game process; built as `bank.rs`, from `main.rs`, not `gameproc.rs`):
 - From `main.rs`: `tables`, `network_tables`, the save loading, rules and access setup,
   `persist`, `backups_kept`, `guarded`, the tick and its panic guard, `post`, `send_mail` (now
   DATA frames), the movement and urgent policy, kicks (the reason batch, then GONE),
