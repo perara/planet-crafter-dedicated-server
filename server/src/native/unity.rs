@@ -785,23 +785,6 @@ pub fn is_component(id: i32) -> bool {
 pub mod tests {
     use super::*;
 
-    /// The installed game (PCDS_GAME_DIR, else the default Steam library). Without one the
-    /// tests that read it fail, unless PCDS_GAME_DIR=none says there is none (CI).
-    pub fn game_dir() -> Option<PathBuf> {
-        let game = match std::env::var("PCDS_GAME_DIR").ok().filter(|v| !v.is_empty()) {
-            Some(v) if v == "none" => return None,
-            Some(v) => PathBuf::from(v),
-            None => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/Steam/steamapps/common/The Planet Crafter"),
-        };
-        assert!(game.join("Planet Crafter_Data/globalgamemanagers").exists(), "no game in {}: set PCDS_GAME_DIR to the game's folder, or to none to skip the tests that read it", game.display());
-        Some(game)
-    }
-
-    /// The installed game's data folder.
-    pub fn game_data() -> Option<PathBuf> {
-        Some(game_dir()?.join("Planet Crafter_Data"))
-    }
-
     /// A serialized file with one GameObject of `size` bytes at `offset` past the data start.
     fn synthetic(format: u32, unity: &str, offset: u64, size: u32) -> Vec<u8> {
         let mut b = vec![0u8; 48];
@@ -864,7 +847,7 @@ pub mod tests {
 
     #[test]
     fn the_build_lists_its_scenes_and_scripts() {
-        let Some(dir) = game_data() else { return };
+        let Some(dir) = crate::testkit::game_data() else { return };
         let mut data = Data::open(&dir).unwrap();
         let ggm = data.file("globalgamemanagers").unwrap();
         let settings = data.files[ggm].objects.iter().find(|o| o.class_id == BUILD_SETTINGS).map(|o| o.path).unwrap();

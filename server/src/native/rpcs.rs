@@ -347,11 +347,7 @@ mod tests {
     /// enums carry their underlying type, the memcpy structs their in-memory layout.
     #[test]
     fn reads_the_games_rpcs() {
-        let home = std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".local/share/Steam/steamapps/common/The Planet Crafter"));
-        let Some(dir) = std::env::var_os("PCDS_GAME_DIR").map(std::path::PathBuf::from).or(home).map(|d| d.join("Planet Crafter_Data/Managed")).filter(|d| d.is_dir()) else {
-            eprintln!("skipped: no game");
-            return;
-        };
+        let Some(dir) = crate::testkit::managed() else { return };
         let asm = Assemblies::load_dir(&dir).unwrap();
         let code = Code::new(&asm);
         let rpcs = rpcs(&asm).unwrap();

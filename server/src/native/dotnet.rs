@@ -1195,22 +1195,10 @@ mod tests {
     use super::*;
     use std::sync::OnceLock;
 
-    /// The game's Managed folder: PCDS_GAME_DIR, else the default Steam library. Each user has
-    /// their own game, so it may be missing: then None, and the test skips.
-    fn managed() -> Option<PathBuf> {
-        let home = std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/share/Steam/steamapps/common/The Planet Crafter"));
-        let dir = std::env::var_os("PCDS_GAME_DIR").map(PathBuf::from).or(home)?.join("Planet Crafter_Data/Managed");
-        if !dir.is_dir() {
-            eprintln!("skipped: no game in {}", dir.display());
-            return None;
-        }
-        Some(dir)
-    }
-
     /// The whole Managed folder, loaded once for all tests.
     fn game() -> Option<&'static Assemblies> {
         static GAME: OnceLock<Option<Assemblies>> = OnceLock::new();
-        GAME.get_or_init(|| Some(Assemblies::load_dir(&managed()?).unwrap())).as_ref()
+        GAME.get_or_init(|| Some(Assemblies::load_dir(&crate::testkit::managed()?).unwrap())).as_ref()
     }
 
     fn name(namespace: &str, name: &str) -> TypeName {
@@ -1324,7 +1312,7 @@ mod tests {
     #[test]
     fn loads_and_resolves_across_the_managed_folder() {
         let Some(game) = game() else { return };
-        let dlls = std::fs::read_dir(managed().unwrap()).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "dll")).count();
+        let dlls = std::fs::read_dir(crate::testkit::managed().unwrap()).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "dll")).count();
         println!("{} of {dlls} DLLs", game.0.len());
         assert_eq!(game.0.len(), dlls);
         for a in &game.0 {

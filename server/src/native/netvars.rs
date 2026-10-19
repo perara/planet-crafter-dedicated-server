@@ -667,15 +667,9 @@ mod tests {
         assert!(Flow::new(&decode(&[0x2B, 0x01, 0x20, 0, 0, 0, 0, 0x2A]).unwrap()).is_err());
     }
 
-    /// The game's assemblies (PCDS_GAME_DIR, else the default Steam library); None skips.
+    /// The game's assemblies; None skips (see testkit::game_dir).
     fn game() -> Option<Assemblies> {
-        let home = std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".local/share/Steam/steamapps/common/The Planet Crafter"));
-        let dir = std::env::var_os("PCDS_GAME_DIR").map(std::path::PathBuf::from).or(home)?.join("Planet Crafter_Data/Managed");
-        if !dir.is_dir() {
-            eprintln!("skipped: no game in {}", dir.display());
-            return None;
-        }
-        Some(Assemblies::load_dir(&dir).unwrap())
+        Some(Assemblies::load_dir(&crate::testkit::managed()?).unwrap())
     }
 
     #[test]

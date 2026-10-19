@@ -609,7 +609,7 @@ mod tests {
     /// writes what config_hash hashes.
     #[test]
     fn message_versions_follow_calls_and_the_config_writes_are_checked() {
-        let Some(dir) = super::super::unity::tests::game_data() else { return };
+        let Some(dir) = crate::testkit::game_data() else { return };
         let mut ctx = Ctx::open(dir.parent().unwrap()).unwrap();
         let versions = ctx.message_versions().unwrap();
         let netcode = ctx.layouts.asm.0.iter().find(|a| a.name == "Unity.Netcode.Runtime").unwrap();

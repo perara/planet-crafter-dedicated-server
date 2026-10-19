@@ -450,7 +450,7 @@ mod tests {
     #[test]
     #[ignore]
     fn read_game_writes_the_test_tables() {
-        let (Some(game), Some(expected)) = (crate::native::unity::tests::game_dir(), crate::test_data()) else { return };
+        let (Some(game), Some(expected)) = (crate::testkit::game_dir(), crate::test_data()) else { return };
         let out = std::env::temp_dir().join(format!("pcds-read-game-{}", std::process::id()));
         std::fs::create_dir_all(&out).unwrap();
         let version = super::read_game(&game, &out).unwrap();

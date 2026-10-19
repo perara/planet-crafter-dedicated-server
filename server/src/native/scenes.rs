@@ -659,7 +659,7 @@ mod tests {
     /// WorldVariationObjects' Awakes run.
     #[test]
     fn instance_scenes_are_placed_and_woken_as_in_the_game() {
-        let Some(dir) = super::super::unity::tests::game_data() else { return };
+        let Some(dir) = crate::testkit::game_data() else { return };
         let mut ctx = Ctx::open(dir.parent().unwrap()).unwrap();
         ctx.assets().unwrap();
         let (main, file) = (ctx.scene_file("GameMainScene").unwrap(), ctx.scene_file("Instance-HugeTrees").unwrap());

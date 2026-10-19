@@ -1,12 +1,36 @@
 //! What the tests share: a world with a player in it, RPCs sent as a client sends them (the
 //! whole way in: batch, message, decode, handler), and what the server sent back.
 
+use std::path::PathBuf;
+
 use serde_json::Value;
 
 pub use crate::game::tests::{approve, join, save};
 use crate::game::{test_game, Game};
 use crate::net::{Target, VarValue};
 use crate::wire::{Reader, Writer};
+
+/// The installed game (PCDS_GAME_DIR, else the default Steam library). Without one the tests
+/// that read it fail, unless PCDS_GAME_DIR=none says there is none (CI).
+pub fn game_dir() -> Option<PathBuf> {
+    let game = match std::env::var("PCDS_GAME_DIR").ok().filter(|v| !v.is_empty()) {
+        Some(v) if v == "none" => return None,
+        Some(v) => PathBuf::from(v),
+        None => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/Steam/steamapps/common/The Planet Crafter"),
+    };
+    assert!(game.join("Planet Crafter_Data/globalgamemanagers").exists(), "no game in {}: set PCDS_GAME_DIR to the game's folder, or to none to skip the tests that read it", game.display());
+    Some(game)
+}
+
+/// The installed game's data folder.
+pub fn game_data() -> Option<PathBuf> {
+    Some(game_dir()?.join("Planet Crafter_Data"))
+}
+
+/// The installed game's Managed folder (its .NET assemblies).
+pub fn managed() -> Option<PathBuf> {
+    Some(game_data()?.join("Managed"))
+}
 
 /// The test world (an escape pod on Prime) with Ann in it as client 1: the game and Ann's
 /// player object. None without game tables.
