@@ -210,7 +210,7 @@ scripted players join, `pcds upgrade` hot-updates it to a release published from
 image's own program as `v999.0.0`), all three stay connected, `docker restart` comes back on the
 new bank, and `pcds upgrade --rollback --restart` restarts the server inside the running container.
 The container uses the host's network because the updater takes plain http only for `127.0.0.1`.
-It runs in about two minutes.
+It runs in about a minute and a half (part 1 alone, about a minute) on a host with a busy Docker daemon.
 
 ## Not verified
 
