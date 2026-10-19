@@ -96,6 +96,11 @@
   "line": "MeteoHandler\\._(currentSeed|selectedDataMeteoEventIndex|timeNewMeteoSet|asteroidReference\\w+)"
  },
  {
+  "class": "d",
+  "why": "story events: each try (every 3600 / eventsTryEveryHour s) picks an event at random and launches it on a chance (StoryEventsHandler.TryToLaunchAnEventLogic: Random.Range), so the event and its message come at another moment, beyond the pairing window (EXPECTED: randomness)",
+  "line": "StoryEventsHandler\\.AnEventHasBeenTriggeredClientRpc|MessagesHandler\\.AddNewReceivedMessageClientRpc"
+ },
+ {
   "class": "b",
   "why": "gauges under the sweep's keep-alive (Breath/Drink/Eat every 30 s) rise and fall in a sawtooth, so the rate over the second half depends on where in the tooth each server was; the gauges are compared in players.json (EXPECTED: Time)",
   "line": "PlayerGaugesHandler\\._(oxygen|thirst|health)(Max)?Value: rate"

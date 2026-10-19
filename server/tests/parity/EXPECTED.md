@@ -64,8 +64,9 @@ the escape pod) so it does not take over a saved player.
 
 - MachineOutsideGrowerUpdateStartClientRpc's random state.
 - DropSomeItems on death (50 % per item).
-- Unlinked blueprint chips, meteor events and their seeds, recycler drop spots, genetic
-  traits of spawned animals, portal choices (UpdateChoices).
+- Unlinked blueprint chips, meteor events and their seeds, story events (which one a try
+  picks, and the chance it launches: the help messages come at other moments), recycler drop
+  spots, genetic traits of spawned animals, portal choices (UpdateChoices).
 - What ore extractors, harvesting robots and disintegrators make (one of their groups at
   random), so the save's own machines change different groups' counts on each run; where a
   harvestable grower places its produce; the trait a petted animal gives; the animal a DNA
