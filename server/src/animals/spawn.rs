@@ -18,7 +18,7 @@ use crate::net::{enc, NetObj, Target};
 use crate::wire::Writer;
 
 /// The AnimalList prefabs' network prefab hashes. gamedata.json lays out group prefabs only;
-/// these come from the game's network prefab table (GET /api/manifest).
+/// these were taken from the game's network prefab table, which the tables do not carry.
 const PREFABS: [(&str, u32); 10] = [
     ("Sharky", 0x60be7ec3),
     ("AlienCat", 0x553c3117),

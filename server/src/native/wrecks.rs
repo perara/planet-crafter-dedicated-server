@@ -1,6 +1,5 @@
-//! wrecks.json from the game files, with no game running (what the Wine-era extractor got
-//! from the running game): the generators' prefabs, the RandomizePropData lists their walks
-//! take, and each seed's layout from the Tessera port (tessera.rs), as the game lays it out.
+//! wrecks.json from the game files, with no game running: the generators' prefabs, the
+//! RandomizePropData lists their walks take, and each seed's layout from the Tessera port (tessera.rs), as the game lays it out.
 //! `native-reach` (reach below) measures how much of the game's IL a port like that has to cover.
 
 use std::collections::{HashMap, HashSet};
@@ -279,8 +278,8 @@ struct Slot {
     ignore: Vec<Id>,
 }
 
-/// Generation.Props: the RandomizePropData lists by the object walked from, keyed as the
-/// extractor keys them (first come first named, "#n" on a repeated name).
+/// Generation.Props: the RandomizePropData lists by the object walked from, keyed as
+/// read-game keys them (first come first named, "#n" on a repeated name).
 #[derive(Default)]
 struct Props {
     keys: HashMap<Id, Option<String>>,
@@ -477,7 +476,7 @@ impl Ctx {
         Ok(())
     }
 
-    /// GenerateOnTrigger.InstantiateRandomPropsInHierarchy as the extractor runs it: the props
+    /// GenerateOnTrigger.InstantiateRandomPropsInHierarchy as read-game runs it: the props
     /// it instantiates under the container (`parent`), as (prefab, world matrix). `ignored`:
     /// the RandomizePropData.ignore flags set.
     #[allow(clippy::too_many_arguments)]

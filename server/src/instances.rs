@@ -6,7 +6,7 @@
 //! What a wreck and an opened world instance hold is generated in generate.rs.
 //!
 //! What the server cannot do, and what stands in for it:
-//! - Wrecks get seeds the extractor laid out (generate::pool_seed).
+//! - Wrecks get seeds `pcds read-game` laid out (generate::pool_seed).
 
 pub mod generate;
 
