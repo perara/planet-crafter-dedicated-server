@@ -28,7 +28,7 @@ pub use interplanetary::inventory_growth_finished;
 
 /// GameConfig.spaceGlobalMultipliersGroupIds: the building in space that holds the rockets
 /// multiplying one unit.
-const SPACE_MULTIPLIERS: [(Kind, &str); 8] = [
+pub(crate) const SPACE_MULTIPLIERS: [(Kind, &str); 8] = [
     (Kind::Oxygen, "SpaceMultiplierOxygen"),
     (Kind::Heat, "SpaceMultiplierHeat"),
     (Kind::Pressure, "SpaceMultiplierPressure"),
@@ -38,6 +38,9 @@ const SPACE_MULTIPLIERS: [(Kind, &str); 8] = [
     (Kind::Biomass, "SpaceMultiplierBiomass"),
     (Kind::Purification, "SpaceMultiplierPurification"),
 ];
+/// MachineRocketBackAndForth's subclasses: the classes of a rocket platform's prefab, the trade
+/// platform's first and the interplanetary exchange's second.
+pub(crate) const PLATFORM_CLASSES: [&str; 2] = ["MachineRocketBackAndForthTrade", "MachineRocketBackAndForthInterplanetaryExchange"];
 /// GameConfig.spaceLocation.
 const SPACE_LOCATION: [f32; 3] = [-500.0, -500.0, -500.0];
 /// MachineRocket.destroyAfter: an ignited rocket despawns on the server after this long.

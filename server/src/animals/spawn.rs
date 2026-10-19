@@ -19,7 +19,7 @@ use crate::wire::Writer;
 
 /// The AnimalList prefabs' network prefab hashes. gamedata.json lays out group prefabs only;
 /// these were taken from the game's network prefab table, which the tables do not carry.
-const PREFABS: [(&str, u32); 10] = [
+pub(crate) const PREFABS: [(&str, u32); 10] = [
     ("Sharky", 0x60be7ec3),
     ("AlienCat", 0x553c3117),
     ("Gazelle", 0x460320a1),
@@ -185,8 +185,8 @@ fn component<'a>(game: &'a Game, group: usize, ty: &str) -> Option<&'a Value> {
 }
 
 /// AnimalList: (species id, prefab name).
-fn animal_list(game: &Game) -> Vec<(i32, String)> {
-    let list = game.data.asset("AnimalList:AnimalList").and_then(|a| a["animals"].as_array()).cloned().unwrap_or_default();
+pub(crate) fn animal_list(data: &crate::gamedata::GameData) -> Vec<(i32, String)> {
+    let list = data.asset("AnimalList:AnimalList").and_then(|a| a["animals"].as_array()).cloned().unwrap_or_default();
     list.iter().map(|a| (a["id"].as_i64().unwrap_or(0) as i32, a["prefab"].as_str().unwrap_or("").trim_start_matches("GameObject:").to_string())).collect()
 }
 
@@ -413,7 +413,7 @@ fn sequence_trait(game: &mut Game, sequence: i32, ty: i32) -> (i32, [f32; 4]) {
         _ => {
             let v = game.rng.range(0, 6);
             if ty == SPECIES {
-                let list = animal_list(game);
+                let list = animal_list(&game.data);
                 list.get(game.rng.range(0, list.len() as i32) as usize).map(|a| a.0).unwrap_or(v)
             } else {
                 v
@@ -465,7 +465,7 @@ fn animal_layout(hash: u32, tick: i32) -> Layout {
 /// the server), with its hunger speed and looks.
 fn spawn_animal(game: &mut Game, key: i32, sequence: i32, owner: u64, random_position: bool) {
     let species = sequence_trait(game, sequence, SPECIES).0;
-    let Some(prefab) = animal_list(game).into_iter().find(|a| a.0 == species).map(|a| a.1) else { return };
+    let Some(prefab) = animal_list(&game.data).into_iter().find(|a| a.0 == species).map(|a| a.1) else { return };
     let Some(hash) = PREFABS.iter().find(|p| p.0 == prefab).map(|p| p.1) else { return };
     let sp = &game.ext.animals.spawn.spawners[&key];
     let (position, params) = (sp.position, sp.params.clone());

@@ -32,7 +32,7 @@ const MAX_JOINING_PER_IP: usize = 2;
 /// MachineGenerationGroupVein, SceneInterpolationBase and GameEventActivateInterpolators,
 /// ToxicAreaVolumes and ToxicAreaDecal, WorldAnimalSpawnerData, ProceduralSceneInstance).
 /// Every other RPC before PlayerReady is dropped.
-const LOADING_RPCS: &[&str] = &[
+pub(crate) const LOADING_RPCS: &[&str] = &[
     "PlayerMainController.PlayerReadyServerRpc",
     "GrowthProxy.GetCurrentGrowthServerRpc",
     "ConstructibleProxy.MachineOutsideGrowerUpdateStartServerRpc",

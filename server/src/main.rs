@@ -42,6 +42,7 @@ mod deconstruct;
 mod energy;
 mod equipment;
 mod ext;
+mod facts;
 mod front;
 mod game;
 mod gamedata;
@@ -114,6 +115,7 @@ fn autosave_start() -> u64 {
 fn tables(dir: &str) -> (NetData, GameData, Spec) {
     let (net, spec) = network_tables(dir);
     let data = GameData::load(&format!("{dir}/gamedata.json")).unwrap_or_else(|e| no_tables(dir, e));
+    facts::check(&data, &spec).unwrap_or_else(|e| no_tables(dir, e));
     (net, data, spec)
 }
 

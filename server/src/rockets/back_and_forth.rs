@@ -46,7 +46,7 @@ pub struct Machine {
 
 fn kind_of(game: &Game, group: usize) -> Option<(Kind, f32)> {
     let id = &game.data.groups[group].id;
-    [(Kind::Trade, "MachineRocketBackAndForthTrade"), (Kind::Exchange, "MachineRocketBackAndForthInterplanetaryExchange")]
+    [(Kind::Trade, super::PLATFORM_CLASSES[0]), (Kind::Exchange, super::PLATFORM_CLASSES[1])]
         .into_iter()
         .find_map(|(kind, ty)| game.data.prefab_components(id, ty).first().map(|c| (kind, c["updateGrowthEvery"].as_f64().unwrap_or(6.0) as f32)))
 }

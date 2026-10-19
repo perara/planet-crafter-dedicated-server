@@ -168,7 +168,7 @@ pub fn refresh_from_tables(game: &mut Game) {
 
 /// GetComponent<MachineRocketBackAndForth>() (its trade and interplanetary subclasses).
 fn is_rocket_platform(game: &Game, group: usize) -> bool {
-    root(game, group, "MachineRocketBackAndForthTrade").is_some() || root(game, group, "MachineRocketBackAndForthInterplanetaryExchange").is_some()
+    crate::rockets::PLATFORM_CLASSES.iter().any(|class| root(game, group, class).is_some())
 }
 
 fn f32_of(v: &Value, key: &str) -> f32 {
