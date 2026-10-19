@@ -38,8 +38,8 @@
  },
  {
   "class": "b",
-  "why": "time: the reference ran before the probe joined, so growth, gauges, units and meteo timers stand further (EXPECTED: Time)",
-  "line": "^planets\\[0\\].*unit\\w+Level|\\.grwth: ref \\d+ ours \\d+$|playerGauge"
+  "why": "time: the reference ran before the probe joined, so growth, gauges, units, meteo timers and the day and night cycle (full day for the game clock's first 16 minutes, then a ping-pong) stand further (EXPECTED: Time)",
+  "line": "^planets\\[0\\].*unit\\w+Level|\\.grwth: ref \\d+ ours \\d+$|playerGauge|^~ scene:EnvironmentDayNightCycle EnvironmentDayNightCycle\\._dayNightLerpValue"
  },
  {
   "class": "b",
