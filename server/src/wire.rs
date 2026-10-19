@@ -262,13 +262,12 @@ impl Batch {
         self.out.0.reserve(more + if self.out.0.is_empty() { 16 } else { 0 });
     }
 
-    /// `push` with the header (the type and size, bit-packed) made once, for a message that
-    /// goes into many batches.
-    pub fn push_with(&mut self, header: &[u8], data: &[u8]) {
+    /// `count` messages, already with their headers (type and size, bit-packed), as one run of
+    /// bytes.
+    pub fn push_run(&mut self, count: usize, messages: &[u8]) {
         self.start();
-        self.out.0.extend_from_slice(header);
-        self.out.0.extend_from_slice(data);
-        self.count = self.count.wrapping_add(1);
+        self.out.0.extend_from_slice(messages);
+        self.count = self.count.wrapping_add(count as u16);
     }
 
     pub fn is_empty(&self) -> bool {

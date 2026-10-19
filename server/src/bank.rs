@@ -791,29 +791,44 @@ fn post(game: &mut Game, approved: &mut HashSet<u64>, mail: &mut crate::idmap::F
     if game.net.out.iter().any(|(_, kind, _)| *kind == protocol::CONNECTION_APPROVED) {
         return post_in_order(game, approved, mail, loading);
     }
-    // Client by client (one lookup of its batch, one allocation), each message's header made
-    // once: the movement of every player goes to every other, so this is players squared.
+    // Client by client: each message with its header is written once into one buffer, and a
+    // client's batch is that buffer's runs of the messages that reach it (nearly all of them reach
+    // nearly everyone: a player's movement goes to all the others), so a batch is a few copies.
+    // The movement of every player goes to every other: this is players squared.
     let mut out = std::mem::take(&mut game.net.out);
     if !approved.is_empty() && !out.is_empty() {
-        let mut headers = wire::Writer::new();
-        let spans: Vec<std::ops::Range<usize>> = out
+        let mut messages = wire::Writer::new();
+        let ends: Vec<usize> = out
             .iter()
             .map(|(_, kind, body)| {
-                let start = headers.len();
-                headers.packed_u32(*kind).packed_u32(body.len() as u32);
-                start..headers.len()
+                messages.packed_u32(*kind).packed_u32(body.len() as u32).bytes(body);
+                messages.len()
             })
             .collect();
         for c in approved.iter() {
-            let reaching = || out.iter().zip(&spans).filter(|((to, _, _), _)| to.reaches(*c));
-            let size: usize = reaching().map(|((_, _, body), span)| span.len() + body.len()).sum();
-            if size == 0 {
-                continue;
+            let mut give = |count: usize, from: usize, to: usize| {
+                let batch = mail.entry(*c).or_default();
+                if batch.is_empty() {
+                    batch.reserve(messages.len());
+                }
+                batch.push_run(count, &messages.0[from..to]);
+            };
+            // The run of messages being gathered: (from, to, how many).
+            let mut run: Option<(usize, usize, usize)> = None;
+            let mut start = 0;
+            for ((target, _, _), end) in out.iter().zip(&ends) {
+                if target.reaches(*c) {
+                    run = Some(match run {
+                        Some((from, _, n)) => (from, *end, n + 1),
+                        None => (start, *end, 1),
+                    });
+                } else if let Some((from, to, n)) = run.take() {
+                    give(n, from, to);
+                }
+                start = *end;
             }
-            let batch = mail.entry(*c).or_default();
-            batch.reserve(size);
-            for ((_, _, body), span) in reaching() {
-                batch.push_with(&headers.0[span.clone()], body);
+            if let Some((from, to, n)) = run {
+                give(n, from, to);
             }
         }
     }
@@ -885,15 +900,29 @@ mod tests {
     }
 
     /// The batches `post` makes client by client are those the message-by-message way makes
-    /// (post_in_order, the old code), whoever the messages go to.
+    /// (post_in_order, the old code), whoever the messages go to: runs of messages reaching
+    /// everyone, one client left out, one client only, clients not in the game, empty bodies.
     #[test]
     fn post_makes_the_same_batches_as_going_message_by_message() {
         let Some(mut game) = game::test_game(game::tests::save()) else { return };
-        let queue = |game: &mut Game| {
-            let body = |n: usize, seed: u8| (0..n).map(|i| seed.wrapping_add(i as u8)).collect::<Vec<u8>>();
+        let mut rng = 0x2545_f491_4f6c_dd1du64;
+        let mut random = move |n: u64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng % n
+        };
+        let mut queue = |game: &mut Game, messages: u64| {
             game.net.out.clear();
-            for (i, to) in [Target::All, Target::Except(2), Target::Only(3), Target::Except(1), Target::Only(9), Target::All, Target::Except(3), Target::Only(2)].into_iter().enumerate() {
-                game.out_to(to, (protocol::NETWORK_TRANSFORM + i as u32 % 3, body([0, 1, 28, 200, 1500, 31, 300, 5][i], i as u8)));
+            for _ in 0..messages {
+                let to = match random(6) {
+                    0 => Target::Only(1 + random(7)),
+                    1 | 2 => Target::Except(1 + random(7)),
+                    _ => Target::All,
+                };
+                let size = [0, 1, 28, 28, 28, 200, 1500, 31][random(8) as usize];
+                let body = (0..size).map(|_| random(256) as u8).collect();
+                game.out_to(to, (protocol::NETWORK_TRANSFORM + random(300) as u32, body));
             }
         };
         let finish = |mail: crate::idmap::FxHashMap<u64, wire::Batch>| {
@@ -901,19 +930,23 @@ mod tests {
             all.sort();
             all
         };
-        let approved: HashSet<u64> = [1, 2, 3, 4].into_iter().collect();
-        let (mut fast, mut slow) = (Default::default(), Default::default());
-        queue(&mut game);
-        post(&mut game, &mut approved.clone(), &mut fast, &mut HashMap::new());
-        assert!(game.net.out.is_empty());
-        queue(&mut game);
-        post_in_order(&mut game, &mut approved.clone(), &mut slow, &mut HashMap::new());
-        let (fast, slow) = (finish(fast), finish(slow));
-        assert_eq!(fast.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [1, 2, 3, 4], "everyone approved gets something");
-        assert_eq!(fast, slow);
+        // Clients 1 to 5 are in the game; 6 and 7 are addressed but are not.
+        let approved: HashSet<u64> = (1..=5).collect();
+        for messages in [1, 2, 3, 10, 64, 300] {
+            let (mut fast, mut slow) = (Default::default(), Default::default());
+            queue(&mut game, messages);
+            let kept = game.net.out.clone();
+            post(&mut game, &mut approved.clone(), &mut fast, &mut HashMap::new());
+            assert!(game.net.out.is_empty());
+            game.net.out = kept;
+            post_in_order(&mut game, &mut approved.clone(), &mut slow, &mut HashMap::new());
+            let (fast, slow) = (finish(fast), finish(slow));
+            assert_eq!(fast, slow, "{messages} messages");
+            assert!(fast.iter().all(|(c, _)| approved.contains(c)));
+        }
         // Nobody approved: nothing is kept; a client no message reaches has no batch.
         let mut none = Default::default();
-        queue(&mut game);
+        queue(&mut game, 5);
         post(&mut game, &mut HashSet::new(), &mut none, &mut HashMap::new());
         assert!(none.is_empty() && game.net.out.is_empty());
         let mut few = Default::default();
