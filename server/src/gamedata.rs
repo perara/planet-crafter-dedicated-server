@@ -170,11 +170,14 @@ impl std::ops::IndexMut<&str> for Prefabs {
 /// gamedata.json as it is read: the parts that are used whole parsed, the prefabs left as text.
 #[derive(serde::Deserialize)]
 struct Root {
+    #[serde(default)]
     assets: indexmap::IndexMap<String, Value>,
-    #[serde(rename = "groupPrefabs")]
+    #[serde(rename = "groupPrefabs", default)]
     group_prefabs: HashMap<String, Box<serde_json::value::RawValue>>,
     layouts: Box<serde_json::value::RawValue>,
+    #[serde(default)]
     singletons: Value,
+    #[serde(default)]
     panels: Value,
 }
 
