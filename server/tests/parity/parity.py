@@ -436,7 +436,7 @@ class Transcript:
             elif m == 'create':
                 label = self._object(l, created=True)
                 o = self.objects[label]
-                self.events.append((step, {'msg': 'create', 'object': label, 'owner': o['owner'], 'flags': l['flags'], 'position': self.recycle_spot(o['position'])}))
+                self.events.append((step, {'msg': 'create', 'object': label, 'hash': o['hash'], 'owner': o['owner'], 'flags': l['flags'], 'rotation': o['rotation'], 'position': self.recycle_spot(o['position'])}))
             elif m == 'transform':
                 self.events.append((step, {'msg': 'transform', 'object': self.label(l['object']), 'position': rnd(l['position'])}))
             elif m == 'destroy':
