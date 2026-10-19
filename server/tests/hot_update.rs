@@ -464,6 +464,15 @@ fn the_world_stops_starts_and_another_one_runs() {
     let (_, s) = server.api("GET", "/api/status", json!({}));
     assert_eq!((s["state"].as_str(), s["save"].as_str()), (Some("stopped"), Some("world")), "{s}");
     assert_eq!(server.api("POST", "/api/save", json!({})).0, 409, "nothing to save while stopped");
+    // No bank runs: an update or a rollback says so (not "a flip is under way"), the update
+    // status stays readable, and the banks say the phase (the dashboard disables its buttons by it).
+    for body in [json!({"rollback": true}), json!({"version": "v9.9.9"}), json!({"onlyNewer": true}), json!({"check": true})] {
+        let (status, answer) = server.api("POST", "/api/update", body.clone());
+        let why = answer["error"].as_str().unwrap_or("");
+        assert!(status == 409 && answer["stopped"] == true && why.contains("the world is stopped") && why.contains("--restart") && !why.contains("under way"), "{body}: {status} {answer}");
+    }
+    assert_eq!(server.api("GET", "/api/update", json!({})).0, 200);
+    assert_eq!(server.api("GET", "/api/status", json!({})).1["banks"]["phase"], "stopped");
     let (ok, said) = finish(load(&server, &data, 1, 3));
     assert!(!ok, "a join is refused while stopped: {said}");
     // Another world, from the stopped state; then back, from a running one.
@@ -472,6 +481,9 @@ fn the_world_stops_starts_and_another_one_runs() {
     assert!(std::fs::read_to_string(dir.join("server.env")).unwrap().contains("PCDS_WORLD=other"));
     let (_, s) = server.api("GET", "/api/status", json!({}));
     assert_eq!((s["state"].as_str(), s["save"].as_str()), (Some("running"), Some("other")));
+    // Running again: an update works again (a flip between the banks).
+    let done = server.update(json!({"rollback": true}));
+    assert_eq!(done["ok"], true, "{done}\n{}", server.log());
     let players = load(&server, &data, 2, 12);
     std::thread::sleep(Duration::from_secs(3));
     let (status, answer) = server.api("POST", "/api/world/switch", json!({"world": "world"}));

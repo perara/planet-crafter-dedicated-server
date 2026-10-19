@@ -1483,7 +1483,8 @@ $('stopServer').onclick = async () => {
 
 // ---- updates ----
 let pendingUpdate = null;
-function updateBusy(s) { const b = s.banks || {}, u = s.update || {}; return u.state === 'busy' ? (u.doing || 'working') : b.phase && b.phase !== 'idle' ? `handing the world over (${b.phase})` : null; }
+const worldStopped = s => !!(s.banks && s.banks.phase === 'stopped');
+function updateBusy(s) { const b = s.banks || {}, u = s.update || {}; return u.state === 'busy' ? (u.doing || 'working') : b.phase && !['idle', 'stopped'].includes(b.phase) ? `handing the world over (${b.phase})` : null; }
 function renderUpdateSummary(s, box, chipBox, compact) {
   const u = s.update || {}, b = s.banks || {}, busy = updateBusy(s);
   const chip = busy ? h('span', { class: 'chip warn' }, 'updating') : u.available ? h('span', { class: 'chip warn' }, `${u.latest} available`) : u.latest ? h('span', { class: 'chip ok' }, 'up to date') : h('span', { class: 'chip' }, 'not checked');
@@ -1497,8 +1498,8 @@ function renderUpdateSummary(s, box, chipBox, compact) {
       h('div', {}, h('div', { class: 'k' }, 'Latest release'), h('div', { class: 'v' }, u.latest || '–'))),
     busy ? h('div', {}, h('div', { class: 'progress' }, h('i')), h('p', { class: 'sub', style: 'margin:8px 0 0' }, busy)) : null,
     h('div', { class: 'row', style: 'margin-top:8px' },
-      h('button', { class: 'primary small', disabled: !!busy || !b.dir, title: b.dir ? '' : 'This server does not run from banks (pcds run)', onclick: e => updateNow(e.currentTarget) }, u.available ? `Update to ${u.latest}` : 'Update now'),
-      h('button', { class: 'small', disabled: !!busy || !b.dir, onclick: e => checkUpdate(e.currentTarget) }, 'Check'),
+      h('button', { class: 'primary small', disabled: !!busy || !b.dir || worldStopped(s), title: worldStopped(s) ? 'The world is stopped: start it first' : b.dir ? '' : 'This server does not run from banks (pcds run)', onclick: e => updateNow(e.currentTarget) }, u.available ? `Update to ${u.latest}` : 'Update now'),
+      h('button', { class: 'small', disabled: !!busy || !b.dir || worldStopped(s), onclick: e => checkUpdate(e.currentTarget) }, 'Check'),
       h('span', { class: 'muted', style: 'font-size:12px' }, u.checkedAt ? `checked ${ago(u.checkedAt)}` : ''))].filter(Boolean));
 }
 function renderUpdates(s) {
@@ -1510,10 +1511,11 @@ function renderUpdates(s) {
     h('div', {}, h('div', { class: 'k' }, 'Last checked'), h('div', { class: 'v', style: 'font-size:14px;padding-top:4px' }, u.checkedAt ? ago(u.checkedAt) : 'never')));
   $('updBusy').hidden = !busy; $('updBusyText').textContent = busy || '';
   const noBanks = !b.dir;
-  for (const id of ['updNow', 'updCheck', 'updInstall']) $(id).disabled = !!busy || noBanks;
-  $('updRollback').disabled = !!busy;
+  const stopped = worldStopped(s);
+  for (const id of ['updNow', 'updCheck', 'updInstall']) $(id).disabled = !!busy || noBanks || stopped;
+  $('updRollback').disabled = !!busy || stopped;
   $('updNow').textContent = u.available ? `Update to ${u.latest}` : 'Update now';
-  $('updNote').textContent = noBanks ? 'This server runs from a build, not from installed banks (pcds run): updates need pcds run; Roll back flips between two copies of this build.'
+  $('updNote').textContent = stopped ? 'The world is stopped, so no release runs it and there is nothing to hand over: start the world first, then update. (pcds upgrade VERSION --restart on the host installs a release and restarts the server.)' : noBanks ? 'This server runs from a build, not from installed banks (pcds run): updates need pcds run; Roll back flips between two copies of this build.'
     : `Automatic updates: ${u.auto ? `on, a check every ${u.checkHours} h` : 'off (PCDS_AUTO_UPDATE in Config)'}. Releases from ${u.releases || 'GitHub'}.`;
   const installed = (b.installed || []).length ? b.installed : (b.live ? [{ bank: b.live.bank, info: b.live }] : []);
   $('banks').replaceChildren(table(['Bank', 'Release', 'Protocol', 'Format', 'State'], installed.map(x => {
