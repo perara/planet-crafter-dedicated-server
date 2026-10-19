@@ -1,0 +1,78 @@
+[
+ {
+  "class": "b",
+  "why": "new players spawn where the host stands (EXPECTED: the reference has a host player)",
+  "line": "PlayerMainController.InitPlayerClientRpc"
+ },
+ {
+  "class": "b",
+  "kind": "settled",
+  "why": "resting positions in the save: the host simulates the physics of what it owns, ours keeps the spot it was put at (EXPECTED: the reference has a host player)"
+ },
+ {
+  "class": "b",
+  "why": "items the server drops and buildable items: the host owns them and simulates their physics, here the nearest player (EXPECTED: the reference has a host player)",
+  "line": "GroupNetworkContainer.StartAndStopPhysicsAfterDelayClientRpc|\"msg\": \"create\".*\"owner\": (0|\"me\")|^~ \\S+ GroupNetworkContainer\\.(_scale|_transformSync)"
+ },
+ {
+  "class": "b",
+  "why": "what the owner of a vehicle or lamp writes: its default colour, VehicleShareData, its rigidbody state by distance to the host (EXPECTED)",
+  "line": "ColorProxy\\._color: ref \\[[^]]*\\] ours \\[0\\.0, 0\\.0, 0\\.0, 0\\.0\\]|VehicleShareData\\.|UpdateNetworkRigidBodyState\\.Set(RigidBody|VehicleController)EnabledClientRpc"
+ },
+ {
+  "class": "b",
+  "why": "network visibility by distance: the reference hides animals, drones and players from the probe it sees at 0,0,0, so it never hears of them (EXPECTED)",
+  "line": "\"msg\": \"(create|destroy)\", \"object\": \"new:(60be7ec3|553c3117|460320a1|d39118a5|1e125d4f|ee998591|086edd87|884a38e6|81939b5b|3641b32a|Player)#|\"object\": \"new:(60be7ec3|553c3117|460320a1|d39118a5|1e125d4f|ee998591|086edd87|884a38e6|81939b5b|3641b32a)#\\d+\"|^~ new:(60be7ec3|553c3117|460320a1|d39118a5|1e125d4f|ee998591|086edd87|884a38e6|81939b5b|3641b32a)#\\d+ growth"
+ },
+ {
+  "class": "b",
+  "why": "a space event's reference client is the player nearest the launch, the host there: the host's asteroids drop their resources, here the probe's client would (EXPECTED)",
+  "script": "craft_world",
+  "line": "MeteoHandler\\._asteroidReference|new:GroupNetworkContainer#"
+ },
+ {
+  "class": "b",
+  "why": "time: the reference ran before the probe joined, so growth, gauges, units and meteo timers stand further (EXPECTED: Time)",
+  "line": "^planets\\[0\\].*unit\\w+Level|\\.grwth: ref \\d+ ours \\d+$|playerGauge|MeteoHandler\\._(currentSeed|selectedDataMeteoEventIndex|timeNewMeteoSet|asteroidReferenceClient)"
+ },
+ {
+  "class": "b",
+  "why": "the save: the probe player at 0,0,0 on the reference, the host flag, modded, pcdsCurrentPlanet (EXPECTED: save layout)",
+  "line": "playerPosition: ref \"0,0,0\"|\\.host: ref (false|true) ours (true|false)|\\.modded: ref true ours false|^state\\[0\\] field order|^players: \\d+ records|^players order"
+ },
+ {
+  "class": "d",
+  "why": "MachineOutsideGrowerUpdateStartClientRpc's random state (EXPECTED: randomness in the game)",
+  "line": "MachineOutsideGrowerUpdateStartClientRpc"
+ },
+ {
+  "class": "d",
+  "why": "an animal from a DNA sequence without a species trait is a random one of the AnimalList (InventorySpawnContent.GetTraitFromSequence: Random.Range)",
+  "tag": "AnimalShelter1|fed DNASequence|DNASequence\\|into AnimalShelter1",
+  "line": "\"object\": \"new:[0-9a-f]{8}#"
+ },
+ {
+  "class": "d",
+  "why": "genetic traits: those of spawned animals and the random trait a petted animal gives (EXPECTED: randomness in the game)",
+  "line": "\\(GeneticTrait\\)\\.trt(Ind|Val)"
+ },
+ {
+  "class": "b",
+  "why": "time: the start save is just below TerraformStage4-Water; Prime's lake rises over the build land a little earlier on the reference (it ran before the probe joined), and RequireEnergy sets what is under water to energy 0 (EXPECTED: Time)",
+  "tag": "world object details",
+  "line": "GetWorldObjectDetailsClientRpc\", \"object\": \"new:ButterflyDome1#1\"",
+  "script": "sweep_build_1"
+ },
+ {
+  "class": "b",
+  "why": "distance to the host's own player: PerformancerDisableIfFarAway hides the deconstruction trigger of a Biolab, LightBoxMedium or Megadome1 further than 75 to 120 m from the host, so the reference answers nothing (EXPECTED); this server has no host",
+  "tag": "^(Biolab|LightBoxMedium|Megadome1)\\|deconstruct",
+  "line": "."
+ },
+ {
+  "class": "e",
+  "why": "a second escape pod: its storage is the start save's scene object 103976415, kept inactive in the copy, so the game cannot deconstruct it; no client deconstructs a pod through GroupNetworkBase (EXPECTED: not comparable)",
+  "tag": "^EscapePod(Humble|Toxicity)?\\|deconstruct",
+  "line": "."
+ }
+]
