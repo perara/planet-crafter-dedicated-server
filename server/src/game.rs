@@ -563,6 +563,9 @@ impl Game {
                 println!("trace client {client} -> {kind} {}", body.iter().map(|b| format!("{b:02x}")).collect::<String>());
             }
             let approved = self.clients.get(&client).is_some_and(|c| c.approved);
+            if approved && matches!(kind, NETWORK_TRANSFORM | NETWORK_VARIABLE_DELTA) && !self.limits.motion(client, body.len()) {
+                continue;
+            }
             match kind {
                 CONNECTION_REQUEST if !approved => self.approve(client, body),
                 _ if !approved => {}
@@ -1460,6 +1463,36 @@ pub mod tests {
                 g.tick();
             }
         }
+    }
+
+    /// Transform states and deltas go to every other client, so one client's flood of them is
+    /// cut at its budget (a second's worth), not multiplied by the players: what a real client
+    /// sends is far under it.
+    #[test]
+    fn a_flood_of_transforms_is_cut_at_the_clients_budget() {
+        let Some(mut g) = test_game(save()) else { return };
+        let ann = join(&mut g, 1, "Ann");
+        join(&mut g, 2, "Bob");
+        g.net.out.clear();
+        let mut state = Writer::new();
+        state.packed_u64(ann).packed_i32(0).packed_u32(2).packed_i32(1).bytes(&1.0f32.to_le_bytes());
+        let relayed = |g: &Game| g.net.out.iter().filter(|(to, kind, _)| *kind == NETWORK_TRANSFORM && to.reaches(2)).count();
+        g.receive(1, &wire::batch(&vec![(NETWORK_TRANSFORM, state.0.clone()); 100]));
+        assert_eq!(relayed(&g), 100, "a real client's states all pass");
+        let flood = wire::batch(&vec![(NETWORK_TRANSFORM, state.0.clone()); 30_000]);
+        g.receive(1, &flood);
+        assert!(relayed(&g) < 9_000, "{} of 30100 states relayed", relayed(&g));
+        // One state with a megabyte of trailing bytes is a flood by itself.
+        let mut fat = state.0.clone();
+        fat.resize(1 << 20, 7);
+        g.net.out.clear();
+        g.receive(1, &wire::batch(&[(NETWORK_TRANSFORM, fat)]));
+        assert_eq!(relayed(&g), 0);
+        // Another client has a budget of its own.
+        g.receive(2, &wire::batch(&[(NETWORK_VARIABLE_DELTA, vec![0; 3])]));
+        g.limits.forget(1);
+        g.receive(1, &wire::batch(&[(NETWORK_TRANSFORM, state.0.clone())]));
+        assert_eq!(relayed(&g), 1);
     }
 
     #[test]

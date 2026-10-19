@@ -19,9 +19,19 @@ const CHAT_EVERY: f32 = 1.0;
 const RPC_BUDGET: u32 = 32;
 const MAX_PENDING: usize = 8192;
 
-/// What one client may do how often: chat and RPC work.
+/// Transform states and variable deltas a client's objects send are passed on to every other
+/// client, so what a client may send is bounded too: MOTION_PER_SECOND units, a message costing
+/// 1 and one more per 64 bytes, with a second's worth as burst. A game client sends at most
+/// about 2500 units a second (its player and the tens of animals and drops it simulates, 30
+/// times a second each); more is dropped, the next state replaces it anyway.
+const MOTION_PER_SECOND: f64 = 8000.0;
+
+/// What one client may do how often: chat, RPC work and motion.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Limits {
+    /// Per client: when it last sent motion and the units it may still send.
+    #[serde(skip)]
+    motion: HashMap<u64, (std::time::Instant, f64)>,
     /// Per client: the game time of its last chat message and the messages it may still send.
     chat: HashMap<u64, (f32, f32)>,
     /// RPC work done this tick per client, and its RPCs waiting for the next ticks.
@@ -53,6 +63,21 @@ impl Limits {
         true
     }
 
+    /// Whether a transform state or variable delta of `bytes` bytes is taken and passed on.
+    pub fn motion(&mut self, client: u64, bytes: usize) -> bool {
+        let now = std::time::Instant::now();
+        let (last, left) = self.motion.entry(client).or_insert((now, MOTION_PER_SECOND));
+        *left = (*left + now.duration_since(*last).as_secs_f64() * MOTION_PER_SECOND).min(MOTION_PER_SECOND);
+        *last = now;
+        let cost = 1.0 + (bytes / 64) as f64;
+        if *left < cost {
+            self.warn(client, "transforms and variable deltas over the rate, dropped");
+            return false;
+        }
+        *left -= cost;
+        true
+    }
+
     /// Whether an RPC of this cost runs now; false when it waits (queued) or is dropped. The
     /// first of a tick always runs, whatever it costs.
     pub fn spend(&mut self, client: u64, cost: u32, rpc: &[u8]) -> bool {
@@ -74,6 +99,7 @@ impl Limits {
 
     pub fn forget(&mut self, client: u64) {
         self.chat.remove(&client);
+        self.motion.remove(&client);
         self.used.remove(&client);
         self.pending.remove(&client);
     }
