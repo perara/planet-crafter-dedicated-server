@@ -310,9 +310,9 @@ impl Game {
         self.drop_on_floor_told(id, position, rotation, drop_size, sound, nearest, setting, despawn, disolve, sender, true);
     }
 
-    /// `tell_server_kept`: whether a drop whose ownership the server keeps (a drone, a rover)
-    /// still tells the dropping player to start its physics: DropOnFloor does, creating on the
-    /// floor does not.
+    /// `tell_server_kept`: whether an object with a physics body of its own (a drone, a rover)
+    /// is announced with StartAndStopPhysicsAfterDelay: DropOnFloor and what the server creates
+    /// itself (a recycler's output) do, a client's CreateAndDropOnFloor does not.
     #[allow(clippy::too_many_arguments)]
     fn drop_on_floor_told(&mut self, id: i32, position: [f32; 3], rotation: [f32; 4], drop_size: f32, sound: bool, nearest: bool, setting: i32, despawn: f32, disolve: bool, sender: u64, tell_server_kept: bool) {
         let planet = self.planet_hash();
@@ -339,8 +339,8 @@ impl Game {
                 w.rotation = r;
             }
         }
-        let holder = self.net.objects.get(&net).map_or(0, |o| o.owner);
-        if holder != 0 || tell_server_kept {
+        let group = self.wos.get(&id).map_or(0, |w| w.group);
+        if tell_server_kept || !container_keeps_server_ownership(self, group) {
             self.net.rpc(Target::Only(owner), net, "GroupNetworkContainer.StartAndStopPhysicsAfterDelayClientRpc", &[json!(drop_size), json!(sound), json!(despawn > f32::EPSILON)]);
         }
         if despawn > f32::EPSILON {
@@ -353,7 +353,7 @@ impl Game {
 
     pub fn create_and_drop_on_floor(&mut self, group: usize, position: [f32; 3], drop_size: f32, save: bool, nearest: bool, despawn: f32, sender: u64) -> i32 {
         let id = self.create_world_object(group, 0, save);
-        self.drop_on_floor_told(id, position, [0.0, 0.0, 0.0, 1.0], drop_size, false, nearest, 0, despawn, false, sender, false);
+        self.drop_on_floor_told(id, position, [0.0, 0.0, 0.0, 1.0], drop_size, false, nearest, 0, despawn, false, sender, true);
         id
     }
 
@@ -520,7 +520,9 @@ impl Game {
             "WorldObjectsHandler.CreateAndDropOnFloorServerRpc" => {
                 if let Some(group) = self.data.group_by_hash(a.i(0)) {
                     let despawn = a.f(5);
-                    let id = self.create_and_drop_on_floor(group, a.v3(1), a.f(2), a.b(3), a.b(4), despawn, client);
+                    // A client creating a rover or a drone on the floor is told nothing of its physics.
+                    let id = self.create_world_object(group, 0, a.b(3));
+                    self.drop_on_floor_told(id, a.v3(1), [0.0, 0.0, 0.0, 1.0], a.f(2), false, a.b(4), 0, despawn, false, client, false);
                     // Rules: what the game drops with a despawn time is a meteor's material.
                     if let Some(seconds) = self.rules.meteo.material_despawn_seconds.filter(|_| despawn > f32::EPSILON) {
                         crate::scene::set_despawn(self, id, seconds);
@@ -661,20 +663,22 @@ mod tests {
         assert_eq!(g.wos[&other].rotation, kept, "a rotation the caller gave stays");
     }
 
-    /// A drone has its own physics body, so the server keeps it: dropping it still tells the
-    /// dropping client to start the physics, creating it on the floor tells nobody (the real
-    /// host); an iron bar belongs to the player either way.
+    /// A drone and a rover have a physics body of their own: dropping one, or the server making
+    /// one, starts the physics on the dropper's client; a client creating one on the floor is
+    /// told nothing (the real host). An iron bar is announced every way.
     #[test]
-    fn creating_a_drop_the_server_keeps_tells_no_client_to_start_its_physics() {
+    fn a_client_creating_a_drone_or_rover_on_the_floor_is_not_told_to_start_its_physics() {
         let Some((mut g, _)) = world() else { return };
         const RPC: &str = "GroupNetworkContainer.StartAndStopPhysicsAfterDelayClientRpc";
-        for (name, kept) in [("Iron", false), ("Drone1", true)] {
+        for (name, bodied) in [("Iron", false), ("Drone1", true), ("VehicleTruck", true)] {
             let group = g.data.group(name).unwrap();
             g.net.out.clear();
-            let made = g.create_and_drop_on_floor(group, [561.0, 3.0, 497.0], 0.0, true, false, 0.0, 1);
-            let net = g.wos[&made].net.unwrap();
-            assert_eq!(g.net.objects[&net].owner == 0, kept, "{name}");
-            assert_eq!(sent(&g, RPC).is_empty(), kept, "{name} created");
+            let hash = g.data.groups[group].hash;
+            send_scene(&mut g, 1, "WorldObjectsHandler.CreateAndDropOnFloorServerRpc", &[json!(hash), json!([561.0, 3.0, 497.0]), json!(0.0), json!(true), json!(false), json!(0.0)]);
+            assert_eq!(sent(&g, RPC).is_empty(), bodied, "{name} created by a client");
+            g.net.out.clear();
+            g.create_and_drop_on_floor(group, [561.0, 3.0, 497.0], 0.0, true, false, 0.0, 0);
+            assert!(!sent(&g, RPC).is_empty(), "{name} created by the server");
             let item = g.create_world_object(group, 0, true);
             g.net.out.clear();
             g.drop_on_floor(item, [561.0, 3.0, 497.0], [0.0, 0.0, 0.0, 1.0], 0.0, true, false, 0, 0.0, false, 1);
