@@ -31,6 +31,8 @@ pub fn run(target: &str, data: &[u8]) {
         "save" => crate::save::fuzz::run(data),
         "handoff" => crate::handoff::fuzz::run(data),
         "game" => crate::game::fuzz::run(data),
+        "handoffsweep" => crate::handoff::fuzz::sweep(data),
+        "savesweep" => crate::game::fuzz::savesweep::run(data),
         "front" => crate::front::fuzz::run(data),
         other => panic!("PCDS_FUZZ_TARGET={other:?}: no such target"),
     }

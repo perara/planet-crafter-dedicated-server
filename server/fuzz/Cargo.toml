@@ -9,6 +9,12 @@
 #   PCDS_FUZZ_TARGET=wire cargo fuzz run pcds_fuzz fuzz/corpus/wire
 #
 # Targets: wire utp rpcspec transform ipc config chathooks updater access rules save handoff game front.
+# Sweeps (one run each, no libFuzzer input): handoffsweep and savesweep put awkward numbers and strings
+# in a real snapshot / save, one value at a time (PCDS_FUZZ_SWEEP_FILE, _STEP, _OFFSET; pass -timeout=0).
+# game runs 40 inputs on one Game, takes a snapshot and restores it every 20 (a NaN fails there), and
+# writes the inputs of a crash to history-<pid>.bin beside PCDS_FUZZ_LOG (PCDS_FUZZ_REPLAY, PCDS_FUZZ_TRACE).
+# Build for what production runs: RUSTFLAGS="-C overflow-checks=off -C debug-assertions=off" (cargo fuzz
+# turns them on, which also finds wrapping arithmetic).
 # Targets that need the game's tables read them from PCDS_FUZZ_DATA (a tables directory).
 [package]
 name = "pcds-fuzz"

@@ -124,7 +124,7 @@ pub fn run(data: &[u8]) {
             let at = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
             let what = info.payload().downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| info.payload().downcast_ref::<String>().cloned()).unwrap_or_default();
             let log = std::env::var("PCDS_FUZZ_LOG").unwrap_or_else(|_| "panics.log".into());
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
                 use std::io::Write;
                 let _ = writeln!(f, "{at} | {what} | history-{pid}.bin");
             }
@@ -133,7 +133,8 @@ pub fn run(data: &[u8]) {
                     if let Some((_, _, history)) = s.as_ref() {
                         // Length-prefixed inputs, oldest first (PCDS_FUZZ_REPLAY=file runs them again).
                         let bytes: Vec<u8> = history.iter().flat_map(|h| (h.len() as u32).to_le_bytes().into_iter().chain(h.iter().copied())).collect();
-                        let _ = std::fs::write(format!("history-{pid}.bin"), bytes);
+                        let dir = std::path::Path::new(&log).parent().map(|d| d.to_path_buf()).unwrap_or_default();
+                        let _ = std::fs::write(dir.join(format!("history-{pid}.bin")), bytes);
                     }
                 }
             });
@@ -169,10 +170,34 @@ fn run_one(tables: &Tables, names: &[String], data: &[u8], reset: u32) {
         *n += 1;
         history.push(data.to_vec());
         step(g, names, data);
+        // Whatever the clients did must leave a world that hot-updates: its snapshot is written,
+        // read back, and the restored game is the same one (a NaN becomes null in JSON and fails here).
+        if *n % 20 == 0 {
+            let mut out = Vec::new();
+            if let Err(e) = crate::handoff::snapshot_to(g, &mut out) {
+                panic!("a client made a world that cannot be snapshotted: {e}");
+            }
+            let (nd, d, sp, sc) = tables.clone();
+            match crate::handoff::restore_bytes(nd, d, sp, &out, sc) {
+                Ok(back) => {
+                    if let Err(e) = crate::handoff::verify(&back, &out) {
+                        panic!("a restored world differs from its snapshot: {e}");
+                    }
+                }
+                Err(e) => panic!("a client made a world whose snapshot cannot be restored: {e}"),
+            }
+        }
     });
 }
 
+fn finite_world(g: &Game) -> Option<String> {
+    let bad = |v: &[f32]| v.iter().any(|x| !x.is_finite());
+    g.net.objects.values().find(|o| bad(&o.position) || bad(&o.rotation)).map(|o| format!("network object {} ({:?}) at {:?} {:?}", o.id, o.behaviours.iter().map(|b| b.class.as_str()).collect::<Vec<_>>(), o.position, o.rotation))
+        .or_else(|| g.wos.values().find(|w| bad(&w.position) || bad(&w.rotation)).map(|w| format!("world object {} at {:?} {:?}", w.id, w.position, w.rotation)))
+}
+
 fn step(g: &mut Game, names: &[String], data: &[u8]) {
+    let trace = std::env::var_os("PCDS_FUZZ_TRACE").is_some();
     let mut c = Cur(data);
     let mut ops = 0;
     while !c.done() && ops < 48 {
@@ -197,6 +222,9 @@ fn step(g: &mut Game, names: &[String], data: &[u8]) {
                 }
                 let mut w = Writer::new();
                 w.packed_u64(client).packed_u64(object).packed_u16(behaviour).packed_u32(hash).bytes(&body);
+                if trace {
+                    eprintln!("OP client {client} {name} on object {object} behaviour {behaviour} args {}", Value::Array(args.clone()));
+                }
                 g.incoming_rpc(client, &w.0);
             }
             // An RPC with a table hash and raw argument bytes.
@@ -207,6 +235,9 @@ fn step(g: &mut Game, names: &[String], data: &[u8]) {
                 let object = all[c.pick(all.len())];
                 let mut w = Writer::new();
                 w.packed_u64(client).packed_u64(object).packed_u16((c.u8() % 6) as u16).packed_u32(hash).bytes(&c.bytes(300));
+                if trace {
+                    eprintln!("OP client {client} raw rpc {name} on object {object}: {:02x?}", &w.0);
+                }
                 g.incoming_rpc(client, &w.0);
             }
             // A batch of raw messages.
@@ -217,6 +248,9 @@ fn step(g: &mut Game, names: &[String], data: &[u8]) {
                 if c.u8() % 4 == 0 {
                     let cut = c.pick(batch.len() + 1);
                     batch.truncate(cut);
+                }
+                if trace {
+                    eprintln!("OP client {client} raw batch kind {kind}: {:02x?}", &batch);
                 }
                 g.receive(client, &batch);
             }
@@ -231,6 +265,9 @@ fn step(g: &mut Game, names: &[String], data: &[u8]) {
                     let f = if c.u8() % 3 == 0 { f32::from_bits(c.u32()) } else { (c.u32() as i32 as f32) / 1000.0 };
                     w.f32(f);
                 }
+                if trace {
+                    eprintln!("OP client {client} transform of object {object}: {:02x?}", &w.0);
+                }
                 g.receive(client, &wire::batch(&[(NETWORK_TRANSFORM, w.0)]));
             }
             // A variable delta on an object.
@@ -239,6 +276,9 @@ fn step(g: &mut Game, names: &[String], data: &[u8]) {
                 let object = all[c.pick(all.len())];
                 let mut w = Writer::new();
                 w.packed_u64(object).packed_u16((c.u8() % 6) as u16).i32(0).bytes(&c.bytes(120));
+                if trace {
+                    eprintln!("OP client {client} variable delta on object {object}: {:02x?}", &w.0);
+                }
                 g.receive(client, &wire::batch(&[(NETWORK_VARIABLE_DELTA, w.0)]));
             }
             // Time passes; one client leaves and comes back.
@@ -252,5 +292,13 @@ fn step(g: &mut Game, names: &[String], data: &[u8]) {
             }
         }
         g.net.out.clear();
+        if trace {
+            if let Some(what) = finite_world(g) {
+                panic!("after op {ops}: {what}");
+            }
+        }
     }
 }
+
+#[path = "savesweep.rs"]
+pub mod savesweep;
