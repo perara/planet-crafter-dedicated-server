@@ -12,12 +12,14 @@ use crate::geometry::{conj, rotate, sub};
 pub struct Vein {
     id: i32,
     groups: Vec<usize>,
+    #[serde(with = "crate::bincodec::json_value")]
     identifier: Value,
     count: i32,
     /// The colliders on the vein's object, as boxes in world space: center, half size, rotation.
     boxes: Vec<([f32; 3], [f32; 3], [f32; 4])>,
     /// Shown when the scene loaded (HideDependingOnTerraStage on it or its parents).
     shown_at_load: bool,
+    #[serde(with = "crate::bincodec::json_value")]
     activators: Value,
     /// Its Start ran (on its first activation).
     started: bool,

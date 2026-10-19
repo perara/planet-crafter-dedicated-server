@@ -876,9 +876,9 @@ pub(crate) mod tests {
             game.time += 1.0;
             tick(&mut game);
         }
-        let text = crate::handoff::snapshot(&game).unwrap();
-        let (head, body) = text.split_once('\n').unwrap();
-        let mut state: Value = serde_json::from_str(body).unwrap();
+        let text = crate::handoff::snapshot(&mut game).unwrap();
+        // The state of the game as JSON, with the table values changed, is the earlier release's.
+        let mut state: Value = serde_json::to_value(&game).unwrap();
         let mut parts = std::collections::BTreeMap::<&str, usize>::new();
         let wrong = |v: &mut Value, keys: &[&str]| {
             for k in keys {
@@ -909,11 +909,13 @@ pub(crate) mod tests {
         for part in ["harvestable", "vegetation", "linked_grower", "autocrafter", "disintegrator", "optimizer"] {
             assert!(parts.get(part).copied().unwrap_or(0) > 0, "the world has a machine with a {part}: {parts:?}");
         }
-        let older = format!("{head}\n{state}");
+        let mut earlier: Game = serde_json::from_value(state).unwrap();
         let (net_data, data, spec, scenes) = crate::game::test_tables().unwrap();
+        (earlier.net_data, earlier.data, earlier.net.spec) = (net_data.clone(), data.clone(), spec.clone());
+        let older = crate::handoff::snapshot(&mut earlier).unwrap();
         let restored = crate::handoff::restore(net_data, data, spec, &older, scenes).unwrap();
-        crate::handoff::verify(&restored, text.as_bytes()).expect("the table's values are this release's, the state the snapshot's");
-        assert!(crate::handoff::verify(&restored, older.as_bytes()).is_err(), "the older values were replaced");
+        crate::handoff::verify(&restored, &text).expect("the table's values are this release's, the state the snapshot's");
+        assert!(crate::handoff::verify(&restored, &older).is_err(), "the older values were replaced");
     }
 
     #[test]

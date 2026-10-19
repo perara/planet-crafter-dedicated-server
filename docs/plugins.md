@@ -38,7 +38,7 @@ is docs/architecture.md.
    per event (0.35 ns).
 10. **State survives a hot update**: each plugin hands over opaque bytes with a version, they ride
     in the snapshot in an additive part of `ext`, the new bank prepares its plugins before the
-    world stops and only starts them after the restore. `handoff::FORMAT` is not bumped (and may be: there is no legacy support).
+    world stops and only starts them after the restore. They are part of the snapshot's state, written by the same binary codec (bincodec.rs) as the rest.
 
 ## What a plugin can and cannot be
 
@@ -466,20 +466,16 @@ removing a plugin's folder removes its state with it.
 The project has no legacy support (docs/plugins-api.md, "Versioning and compatibility"): the
 plugin part is a normal part of the current snapshot format, not a second format kept alive.
 
-- `handoff::FORMAT` is **not bumped** by the plugin part (it is 3 as before): it is a new field
-  of `Ext`, `plugins` (`#[serde(default)]`), holding `{"saved": {"states": {ID: {"version": N,
-  "hex": "..."}}, "stream": {"epoch", "next", "events", "dropped"}}}`, every field with a default.
-  That was the smaller change to code another agent is rewriting; bumping the number, with a
-  step in `handoff::migrate`, would have been just as allowed.
-- What follows from serde is a fact, not a promise: a snapshot without the part reads as no
-  state (plugins start from their files on disk, or empty), and no type of the snapshot denies
-  unknown fields.
+- The plugin part is `ext.plugins` of the state in `handoff::FORMAT` 5 (the binary codec of
+  bincodec.rs carries it in the REST part with the rest of `ext`): `{saved: {states: {ID:
+  {version, bytes}}, stream: {epoch, next, events, dropped}}}`. Every field is written; nothing is
+  skipped or defaulted on reading, and a snapshot of another format is not read at all.
 - A later change to the part's shape that an older reader cannot read **bumps `FORMAT`**; the front
   then refuses the hot update and the server is restarted (`pcds upgrade --restart`). Nothing
   keeps the old shape readable.
 - The bytes of a plugin's state are the plugin's business: it raises its state version and reads
   the old one in `load`.
-- `handoff::verify` (PCDS_FLIP_VERIFY) compares the restored state with the snapshot's, including
+- `handoff::verify` (`PCDS_DEV=flip-verify`) compares the restored state with the snapshot's, including
   this part, and the tests restore into a second game and verify (`plugins::game_tests`, and
   `tests/hot_update.rs` through real flips).
 

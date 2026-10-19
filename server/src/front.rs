@@ -134,11 +134,17 @@ struct Flip {
     /// HANDOFF sent: the world stands from here.
     stopped: Option<Instant>,
     snapshot: Value,
+    /// The flip's events on the monotonic clock (ipc::now_ns, ns): HANDOFF sent, SNAPSHOT
+    /// handled, RESTORE flushed to the new bank, READY handled, the held frames released.
+    at: [u64; 5],
     /// Its snapshot: the last one (last_snapshot) once the new bank restored it and said READY.
     kept: Option<(OwnedFd, SystemTime)>,
 }
 
 enum UpdateDone {
+    /// A flip's banks-folder writes are on disk: its outcome is recorded now, so that whoever
+    /// sees it done also finds `active` and the rollback note written.
+    Flipped { seq: u64, message: String, extra: Value },
     Installed { seq: u64, bank: String, info: Value },
     Failed { seq: u64, message: String },
     UpToDate { seq: u64, tag: String },
@@ -195,6 +201,9 @@ struct Front {
     recover_from: Option<OwnedFd>,
     crashes: VecDeque<Instant>,
     exiting: Vec<(Child, Instant)>,
+    /// Writes of the banks folder's files that a flip made (they flush to disk, which takes as
+    /// long as the disk does): off the front's thread, joined at shutdown.
+    persisting: Vec<std::thread::JoinHandle<()>>,
     admin: Option<Receiver<admin::Request>>,
     answers: HashMap<u64, (Sender<(u16, String)>, String)>,
     next_request: u64,
@@ -295,6 +304,7 @@ impl Front {
             recover_from: None,
             crashes: VecDeque::new(),
             exiting: Vec::new(),
+            persisting: Vec::new(),
             admin: None,
             answers: HashMap::new(),
             next_request: 1,
@@ -560,6 +570,13 @@ impl Front {
             self.supervise();
             sent |= self.drops();
             self.flush_banks();
+            if self.phase == Phase::Restoring
+                && let (Some(flip), Some(n)) = (self.flip.as_mut(), self.next.as_ref())
+                && flip.at[2] == 0
+                && !n.link.pending()
+            {
+                flip.at[2] = ipc::now_ns();
+            }
             if let Some(utp) = self.utp.as_mut().filter(|_| frame || sent) {
                 utp.flush();
             }
@@ -860,6 +877,7 @@ impl Front {
             ipc::SNAPSHOT => match f.fd {
                 Some(fd) => {
                     if let Some(flip) = self.flip.as_mut() {
+                        flip.at[1] = ipc::now_ns();
                         flip.snapshot = serde_json::from_slice(&f.body).unwrap_or_default();
                         flip.kept = fd.try_clone().ok().map(|d| (d, SystemTime::now()));
                     }
@@ -917,6 +935,15 @@ impl Front {
                 if hello["gameVersion"] != live["gameVersion"] {
                     return self.fail_flip(&format!("it has game {}'s tables, the world runs on {}'s", hello["gameVersion"], live["gameVersion"]));
                 }
+                if let (Some(n), Some(l)) = (self.next.as_ref(), self.live.as_ref()) {
+                    println!(
+                        "flip: bank {} has loaded its tables after {:.0} ms and holds {:.0} MiB; the live bank holds {:.0} MiB",
+                        n.name,
+                        n.started.elapsed().as_secs_f64() * 1000.0,
+                        crate::dashboard::process_of(n.child.id()).1 as f64 / 1048576.0,
+                        crate::dashboard::process_of(l.child.id()).1 as f64 / 1048576.0
+                    );
+                }
                 // Quiesce: from here the world stands.
                 if let Some(flip) = self.flip.as_mut() {
                     flip.stopped = Some(Instant::now());
@@ -925,6 +952,9 @@ impl Front {
                 if let Some(b) = self.live.as_mut() {
                     b.link.queue(ipc::HANDOFF, seq, &[], None, 0);
                     let _ = b.link.flush();
+                    if let Some(flip) = self.flip.as_mut() {
+                        flip.at[0] = ipc::now_ns();
+                    }
                 }
                 self.phase = Phase::Snapshotting;
                 println!("flip: bank {} is checked; the running bank is told to hand the world over", self.next.as_ref().map_or("?", |b| b.name.as_str()));
@@ -939,6 +969,7 @@ impl Front {
         let Some(new) = self.next.take() else { return };
         let ready: Value = serde_json::from_slice(ready).unwrap_or_default();
         let old = self.live.take();
+        let ready_at = ipc::now_ns();
         let recovered = self.phase == Phase::Recovering;
         self.phase = Phase::Idle;
         let (from, to) = (old.as_ref().map(|b| b.name.clone()).unwrap_or_else(|| "-".into()), new.name.clone());
@@ -949,22 +980,22 @@ impl Front {
         }
         self.live = Some(new);
         let held = self.release_held();
-        if let Some(dir) = &self.banks
-            && let Err(e) = updater::set_active(dir, &to)
-        {
-            eprintln!("banks: {e}");
-        }
+        // The held frames go now: what follows waits for no disk.
+        self.flush_banks();
+        let (released, released_at) = (Instant::now(), ipc::now_ns());
+        let rolled_back = self.flip.as_ref().is_some_and(|f| f.reason == "rollback").then(|| from.clone());
         *self.web.write().unwrap_or_else(|e| e.into_inner()) = self.web_page(&to);
         if recovered {
+            self.persist_flip(&to, None, None);
             println!("bank {to} (pid {}) runs the world again", self.live.as_ref().map_or(0, |b| b.child.id()));
             return;
         }
-        let Some(mut flip) = self.flip.take() else { return };
+        let Some(mut flip) = self.flip.take() else { return self.persist_flip(&to, None, None) };
         // Restored, so a crash restarts from it (one that failed to restore must not be).
         if let Some(kept) = flip.kept.take() {
             self.last_snapshot = Some(kept);
         }
-        let stood = flip.stopped.map(|t| t.elapsed()).unwrap_or_default();
+        let stood = flip.stopped.map(|t| released.duration_since(t)).unwrap_or_default();
         self.flips += 1;
         let verified = match ready["verified"].as_bool() {
             Some(true) => format!("; the restored state is the snapshot's, checked in {:.1} ms (in the stand)", ready["verifyMs"].as_f64().unwrap_or(0.0)),
@@ -979,15 +1010,57 @@ impl Front {
             ready["restoreMs"].as_f64().unwrap_or(0.0)
         );
         println!("{message}");
-        // Rolled back: the automatic update must not bring back what the owner left.
-        if flip.reason == "rollback"
-            && let Some(dir) = &self.banks
-            && let Err(e) = updater::set_rolled_back(dir, &from)
-        {
-            eprintln!("banks: the rollback from bank {from} could not be noted ({e}): the automatic update may install its release again");
-        }
         let version = self.live.as_ref().map(|b| b.hello["version"].clone()).unwrap_or_default();
-        self.record(flip.seq, true, &message, json!({"from": from, "to": to, "stoodMs": ms(stood), "snapshotBytes": flip.snapshot["bytes"], "snapshotMs": flip.snapshot["ms"], "restoreMs": ready["restoreMs"], "held": held, "verified": ready["verified"], "version": version}));
+        // Where the stand went, on the monotonic clock all three processes read: the HANDOFF to
+        // the old bank, its snapshot, the SNAPSHOT to the front, the front's relay of the memfd,
+        // the RESTORE to the new bank, its restore, the READY to the front, the held frames out.
+        let gap = |from: u64, to: u64| if from == 0 || to == 0 { 0.0 } else { (to.saturating_sub(from) as f64 / 1e4).round() / 100.0 };
+        let (bank, new) = (|k: &str| flip.snapshot[k].as_u64().unwrap_or(0), |k: &str| ready[k].as_u64().unwrap_or(0));
+        let timeline = json!({
+            "handoffMs": gap(flip.at[0], bank("gotAt")),
+            "snapshotMs": gap(bank("gotAt"), bank("doneAt")),
+            "snapshotToFrontMs": gap(bank("doneAt"), flip.at[1]),
+            "relayMs": gap(flip.at[1], flip.at[2]),
+            "restoreToBankMs": gap(flip.at[2], new("gotAt")),
+            "restoreMs": gap(new("gotAt"), new("readyAt")),
+            "readyToFrontMs": gap(new("readyAt"), ready_at),
+            "releaseMs": gap(ready_at, released_at),
+        });
+        println!("flip timeline (ms): {timeline}");
+        let extra = json!({"from": from, "to": to, "stoodMs": ms(stood), "snapshotBytes": flip.snapshot["bytes"], "snapshotMs": flip.snapshot["ms"], "restoreMs": ready["restoreMs"], "held": held, "verified": ready["verified"], "version": version, "timeline": timeline, "restoreFaults": ready["faults"]});
+        self.persist_flip(&to, rolled_back, Some((flip.seq, message, extra)));
+    }
+
+    /// `active` points at `bank` from now on, and a rollback notes the bank it left (so that the
+    /// automatic update does not bring back what the owner left): both flush to disk, so a
+    /// thread writes them.
+    /// `record`: the flip's outcome (seq, message, fields), recorded once the files are written.
+    fn persist_flip(&mut self, bank: &str, rolled_back_from: Option<String>, record: Option<(u64, String, Value)>) {
+        let Some(dir) = self.banks.clone() else {
+            if let Some((seq, message, extra)) = record {
+                self.record(seq, true, &message, extra);
+            }
+            return;
+        };
+        let (bank, tx) = (bank.to_string(), self.updates.tx.clone());
+        self.persisting.retain(|t| !t.is_finished());
+        let write = move || {
+            if let Err(e) = updater::set_active(&dir, &bank) {
+                eprintln!("banks: {e}");
+            }
+            if let Some(from) = rolled_back_from
+                && let Err(e) = updater::set_rolled_back(&dir, &from)
+            {
+                eprintln!("banks: the rollback from bank {from} could not be noted ({e}): the automatic update may install its release again");
+            }
+            if let Some((seq, message, extra)) = record {
+                let _ = tx.send(UpdateDone::Flipped { seq, message, extra });
+            }
+        };
+        match std::thread::Builder::new().name("banks-folder".into()).spawn(write) {
+            Ok(t) => self.persisting.push(t),
+            Err(e) => eprintln!("banks: no thread to write the banks folder ({e})"),
+        }
     }
 
     /// A flip that did not work: the new bank is killed, the old one goes on with the frames
@@ -1029,7 +1102,7 @@ impl Front {
         println!("flip to bank {bank} ({reason}): pid {} loading", b.child.id());
         self.next = Some(b);
         self.phase = Phase::Starting;
-        self.flip = Some(Flip { seq, reason: reason.to_string(), stopped: None, snapshot: Value::Null, kept: None });
+        self.flip = Some(Flip { seq, reason: reason.to_string(), stopped: None, snapshot: Value::Null, at: [0; 5], kept: None });
         self.updates.busy = Some((seq, format!("flipping to bank {bank}")));
         Ok(())
     }
@@ -1414,8 +1487,13 @@ impl Front {
 
     fn updates(&mut self) {
         while let Ok(done) = self.updates.rx.try_recv() {
+            if let UpdateDone::Flipped { seq, message, extra } = done {
+                self.record(seq, true, &message, extra);
+                continue;
+            }
             self.updates.checked = Some(now_secs());
             match done {
+                UpdateDone::Flipped { .. } => {}
                 UpdateDone::Installed { seq, bank, info } => {
                     let tag = info["tag"].as_str().unwrap_or("?").to_string();
                     self.updates.latest = Some(tag.clone());
@@ -1628,6 +1706,9 @@ impl Front {
         for (mut child, _) in self.exiting.drain(..) {
             let _ = child.kill();
             let _ = child.wait();
+        }
+        for t in self.persisting.drain(..) {
+            let _ = t.join();
         }
         if let Some(utp) = &mut self.utp {
             utp.tokens().iter().for_each(|t| utp.disconnect(t));
@@ -2009,7 +2090,7 @@ mod tests {
         front.live = Some(live);
         front.next = Some(next);
         front.phase = Phase::Starting;
-        front.flip = Some(Flip { seq: 2, reason: "test".into(), stopped: None, snapshot: Value::Null, kept: None });
+        front.flip = Some(Flip { seq: 2, reason: "test".into(), stopped: None, snapshot: Value::Null, at: [0; 5], kept: None });
         front.on_next(Frame { kind: ipc::HELLO, n: ipc::PROTOCOL, body: br#"{"format":1,"reads":[0,1]}"#.to_vec(), fd: None });
         assert_eq!(front.phase, Phase::Snapshotting);
         let handoff = old.recv().unwrap();

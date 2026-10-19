@@ -54,6 +54,12 @@ pub enum Action {
 #[derive(Clone, Copy)]
 struct WorldRef(*const dyn World);
 
+// SAFETY: the pointer is set by `begin` and dropped by `end` inside one call of the host on the
+// game's thread; between calls (when a snapshot's threads share or move the game, handoff.rs) it
+// is None, and nothing reads it from another thread.
+unsafe impl Send for WorldRef {}
+unsafe impl Sync for WorldRef {}
+
 pub struct Ctx {
     pub id: String,
     pub grant: Grant,

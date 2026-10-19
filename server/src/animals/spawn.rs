@@ -125,6 +125,7 @@ struct Pending {
     wo: i32,
     position: [f32; 3],
     range: [i32; 2],
+    #[serde(with = "crate::bincodec::json_values")]
     traits: Vec<Value>,
 }
 

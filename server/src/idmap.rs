@@ -114,11 +114,62 @@ impl<K: Copy + Eq + Hash, V> Slots<K, V> {
     }
 }
 
+impl<K: Copy + Eq + Hash, V> Slots<K, V> {
+    /// The slots as they are (None: free), for a snapshot's writer to serialize in parts.
+    #[cfg(test)]
+    pub fn slots(&self) -> &[Option<(K, V)>] {
+        &self.slots
+    }
+
+    /// Takes the slots out and leaves the index and the free list: for as long as they are out
+    /// nothing may look anything up (the snapshot writer holds the game still). Put back with
+    /// `unlend`.
+    pub fn lend(&mut self) -> Vec<Option<(K, V)>> {
+        std::mem::take(&mut self.slots)
+    }
+
+    pub fn unlend(&mut self, slots: Vec<Option<(K, V)>>) {
+        self.slots = slots;
+    }
+
+    /// The slots of a snapshot read in parts, into a Slots that came with its free list and no
+    /// slots (`lend`'s counterpart on the reading side): the index is built here.
+    /// An error (and no change) when the free list and the slots do not fit (see `index_of`).
+    pub fn fill(&mut self, slots: Vec<Option<(K, V)>>) -> Result<(), String> {
+        self.index = index_of(&slots, &self.free)?;
+        self.slots = slots;
+        Ok(())
+    }
+}
+
 impl<K: Copy + Eq + Hash, V> std::ops::Index<&K> for Slots<K, V> {
     type Output = V;
     fn index(&self, k: &K) -> &V {
         self.get(k).expect("no entry for the key")
     }
+}
+
+/// The index of slots read from a snapshot, after checking them against the free list. What a
+/// corrupt snapshot could say and a later insert would trip over: a free slot out of range,
+/// occupied, or listed twice (its entry overwritten, or an index out of bounds); a hole nobody
+/// lists (never reused); a key in two slots.
+fn index_of<K: Copy + Eq + Hash, V>(slots: &[Option<(K, V)>], free: &[usize]) -> Result<FxHashMap<K, usize>, String> {
+    let mut listed = vec![false; slots.len()];
+    for i in free {
+        match (listed.get_mut(*i), slots.get(*i)) {
+            (Some(seen), Some(None)) if !*seen => *seen = true,
+            _ => return Err(format!("free slot {i} is out of range, occupied or listed twice")),
+        }
+    }
+    if slots.iter().zip(&listed).any(|(s, l)| s.is_none() && !l) {
+        return Err("a free slot is not in the free list".into());
+    }
+    let mut index = FxHashMap::with_capacity_and_hasher(slots.len(), Default::default());
+    index.extend(slots.iter().enumerate().filter_map(|(i, s)| s.as_ref().map(|(k, _)| (*k, i))));
+    if index.len() != slots.len() - free.len() {
+        return Err("a key is in two slots".into());
+    }
+    Ok(index)
 }
 
 /// As serialized: the slots (null where free) and the free list; the index is rebuilt.
@@ -141,23 +192,11 @@ impl<K: serde::Serialize, V: serde::Serialize> serde::Serialize for Slots<K, V> 
 impl<'de, K: serde::Deserialize<'de> + Copy + Eq + Hash, V: serde::Deserialize<'de>> serde::Deserialize<'de> for Slots<K, V> {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let r: SlotsRepr<(K, V)> = serde::Deserialize::deserialize(d)?;
-        // What a corrupt snapshot could say and a later insert would trip over: a free slot out of
-        // range, occupied, or listed twice (its entry overwritten, or an index out of bounds); a
-        // hole nobody lists (never reused); a key in two slots.
-        let mut listed = vec![false; r.slots.len()];
-        for i in &r.free {
-            match (listed.get_mut(*i), r.slots.get(*i)) {
-                (Some(seen), Some(None)) if !*seen => *seen = true,
-                _ => return Err(serde::de::Error::custom(format!("free slot {i} is out of range, occupied or listed twice"))),
-            }
+        // Slots lent to a snapshot's writer come as a free list alone: `fill` checks it with them.
+        if r.slots.is_empty() && !r.free.is_empty() {
+            return Ok(Slots { slots: r.slots, free: r.free, index: FxHashMap::default() });
         }
-        if r.slots.iter().zip(&listed).any(|(s, l)| s.is_none() && !l) {
-            return Err(serde::de::Error::custom("a free slot is not in the free list"));
-        }
-        let index: FxHashMap<K, usize> = r.slots.iter().enumerate().filter_map(|(i, s)| s.as_ref().map(|(k, _)| (*k, i))).collect();
-        if index.len() != r.slots.len() - r.free.len() {
-            return Err(serde::de::Error::custom("a key is in two slots"));
-        }
+        let index = index_of(&r.slots, &r.free).map_err(serde::de::Error::custom)?;
         Ok(Slots { slots: r.slots, free: r.free, index })
     }
 }
@@ -235,5 +274,23 @@ mod tests {
             assert!(read(bad).is_err(), "{bad}");
         }
         assert!(read(r#"{"slots": [null, [1, "a"]], "free": [0]}"#).is_ok());
+    }
+
+    /// Slots lent to a snapshot's writer come back as a free list alone and are filled with the
+    /// slots read: the same checks hold there.
+    #[test]
+    fn filled_slots_are_checked_against_their_free_list() {
+        let mut s: Slots<i32, String> = Slots::default();
+        for k in [5, 6, 7] {
+            s.insert(k, format!("v{k}"));
+        }
+        s.remove(&6);
+        let slots = s.lend();
+        let doc = serde_json::to_string(&s).unwrap();
+        let mut back: Slots<i32, String> = serde_json::from_str(&doc).unwrap();
+        assert!(back.fill(vec![Some((5, "a".into())), Some((6, "b".into())), Some((7, "c".into()))]).is_err(), "the listed hole is occupied");
+        assert!(back.fill(vec![Some((5, "a".into())), None, Some((5, "c".into()))]).is_err(), "a key twice");
+        assert!(back.fill(slots).is_ok());
+        assert_eq!(back.keys().copied().collect::<Vec<_>>(), [5, 7]);
     }
 }

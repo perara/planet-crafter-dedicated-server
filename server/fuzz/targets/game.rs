@@ -171,7 +171,7 @@ fn run_one(tables: &Tables, names: &[String], data: &[u8], reset: u32) {
         history.push(data.to_vec());
         step(g, names, data);
         // Whatever the clients did must leave a world that hot-updates: its snapshot is written,
-        // read back, and the restored game is the same one (a NaN becomes null in JSON and fails here).
+        // read back, and the restored game is the same one.
         if *n % 20 == 0 {
             let mut out = Vec::new();
             if let Err(e) = crate::handoff::snapshot_to(g, &mut out) {

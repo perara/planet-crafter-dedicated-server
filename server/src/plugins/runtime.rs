@@ -34,7 +34,7 @@ pub struct Cost {
     pub fuel: u64,
 }
 
-pub trait Runtime {
+pub trait Runtime: Send + Sync {
     fn ctx(&mut self) -> &mut Ctx;
 
     /// Starts the plugin: the module's start function and `pcds_load` with the state it kept.

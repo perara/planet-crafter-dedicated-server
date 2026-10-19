@@ -30,7 +30,16 @@ use crate::{access, chathooks, config, dashboard, plugins, protocol, rules, save
 /// protocol it speaks, the snapshot format it writes and the ones it reads, and the format of
 /// the game tables it loads (and its read-game writes).
 pub fn info() -> Value {
-    json!({"version": env!("CARGO_PKG_VERSION"), "protocol": ipc::PROTOCOL, "format": crate::handoff::FORMAT, "reads": [crate::handoff::FORMAT - 1, crate::handoff::FORMAT], "tablesFormat": crate::native::tables::TABLES_FORMAT})
+    json!({"version": env!("CARGO_PKG_VERSION"), "protocol": ipc::PROTOCOL, "format": crate::handoff::FORMAT, "reads": [crate::handoff::FORMAT], "tablesFormat": crate::native::tables::TABLES_FORMAT})
+}
+
+/// The page faults this process (all its threads) has had without reading a disk: a restore into
+/// a new process touches every page of the world for the first time.
+fn minor_faults() -> u64 {
+    // SAFETY: getrusage fills the struct it is given.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    usage.ru_minflt as u64
 }
 
 /// What a client may be sent before it is a player (PlayerReady): the world in its
@@ -77,16 +86,19 @@ pub fn run(args: &[String]) {
     link.send(ipc::HELLO, protocol, hello.to_string().as_bytes());
     let (mut verified, mut verify_ms) = (Value::Null, 0.0);
     let mut started = Instant::now();
+    let (mut got_at, mut faults_before) = (0, 0);
     let game = match link.recv() {
         Some(f) if f.kind == ipc::START => load(dir, save_path, net_data, data, spec, scenes),
         Some(f) if f.kind == ipc::RESTORE => {
             started = Instant::now();
+            got_at = ipc::now_ns();
+            faults_before = minor_faults();
             if fail_for_test("restore") {
                 eprintln!("bank: dying on the restore (PCDS_DEV=bank-fail=restore)");
                 std::process::exit(3);
             }
             let recover = serde_json::from_slice::<Value>(&f.body).is_ok_and(|b| b["recover"] == true);
-            let snapshot = f.fd.as_ref().ok_or("no memfd".to_string()).and_then(|fd| ipc::read_memfd(fd).map_err(|e| e.to_string()));
+            let snapshot = f.fd.as_ref().ok_or("no memfd".to_string()).and_then(|fd| ipc::map_memfd(fd).map_err(|e| e.to_string()));
             let restored = snapshot.and_then(|s| crate::handoff::restore_bytes(net_data, data, spec, &s, scenes).map(|g| (g, s)));
             match restored {
                 Ok((mut g, snapshot)) => {
@@ -124,7 +136,8 @@ pub fn run(args: &[String]) {
     // the system, not to sit in the process.
     // SAFETY: malloc_trim only returns free memory to the system.
     unsafe { libc::malloc_trim(0) };
-    let ready = json!({"restoreMs": started.elapsed().as_secs_f64() * 1000.0 - verify_ms, "verifyMs": verify_ms, "verified": verified});
+    // gotAt and readyAt (the monotonic clock, ns) put the restore on the flip's timeline in the front.
+    let ready = json!({"restoreMs": started.elapsed().as_secs_f64() * 1000.0 - verify_ms, "verifyMs": verify_ms, "verified": verified, "gotAt": got_at, "readyAt": ipc::now_ns(), "faults": minor_faults() - faults_before});
     if fail_for_test("slow-ready") {
         println!("bank: holding its ready for 2 s (PCDS_DEV=bank-fail=slow-ready)");
         std::thread::sleep(Duration::from_secs(2));
@@ -315,13 +328,13 @@ impl Bank {
                         let all: Vec<u64> = mail.keys().copied().collect();
                         send(&mut self.link, &mut mail, &all, &mut loading);
                         forward_chat(game, &mut self.link);
-                        let t = Instant::now();
+                        let (t, got_at) = (Instant::now(), ipc::now_ns());
                         // The plugins' states go into the snapshot (within their budget altogether).
                         contained("the plugins' state", || plugins::checkpoint(game, Some(plugins::limits::FLIP_BUDGET)));
-                        match ipc::memfd("pcds-snapshot", |w| crate::handoff::snapshot_to(game, w)) {
+                        match crate::handoff::snapshot_memfd(game, &mut Vec::new()) {
                             Ok(fd) => {
                                 let len = std::fs::File::from(fd.try_clone().expect("dup")).metadata().map(|m| m.len()).unwrap_or(0);
-                                let head = json!({"bytes": len, "ms": t.elapsed().as_secs_f64() * 1000.0});
+                                let head = json!({"bytes": len, "ms": t.elapsed().as_secs_f64() * 1000.0, "gotAt": got_at, "doneAt": ipc::now_ns()});
                                 self.link.send_fd(ipc::SNAPSHOT, f.n, head.to_string().as_bytes(), Some(fd));
                                 // The world stays in memory until the new bank runs.
                                 match self.link.recv() {

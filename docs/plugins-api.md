@@ -13,7 +13,7 @@ Versions in this release:
 | plugin ABI | 1.1 (`ABI 1.1`; `pcds_plugin_api::ABI`, `0x0001_0001`) |
 | `pcds-plugin-api` crate | 0.1.0 |
 | manifest (`plugin.toml`) | the keys below; unknown keys are refused |
-| snapshot | `handoff::FORMAT` 3, with the `ext.plugins` part (docs/plugins.md, "The compatibility rule") |
+| snapshot | `handoff::FORMAT` 5, with the `ext.plugins` part (docs/plugins.md, "The compatibility rule") |
 
 ## A plugin is
 

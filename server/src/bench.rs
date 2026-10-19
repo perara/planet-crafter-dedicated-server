@@ -268,17 +268,18 @@ fn a_played_session_ends_the_same_through_handoffs() {
     let Some(start) = crate::game::test_game(crate::game::tests::save()) else { return };
     let e = Env { path: String::new(), dir: crate::test_data().unwrap(), seconds: 20.0, players: 3, action_ms: 200, dump: None };
     // A copy of a game as a new bank makes it (one start for both runs: the same random state).
-    let copy = |g: &Game| {
+    let copy = |g: &mut Game| {
         let (net_data, data, spec, scenes) = crate::game::test_tables().unwrap();
         crate::handoff::restore(net_data, data, spec, &crate::handoff::snapshot(g).unwrap(), scenes).unwrap()
     };
-    let a = run(copy(&start), &e, f64::INFINITY, |g| g, None);
-    let b = run(copy(&start), &e, 5.0, |old| copy(&old), None);
+    let mut start = start;
+    let a = run(copy(&mut start), &e, f64::INFINITY, |g| g, None);
+    let b = run(copy(&mut start), &e, 5.0, |mut old| copy(&mut old), None);
     // They played: built, crafted, chatted.
     let containers = a.game.wos.values().filter(|w| a.game.data.groups[w.group].id == "Container1").count();
     assert!(containers >= 3, "{containers} containers built");
     assert!(a.game.inventories.values().any(|i| i.items.len() >= 2), "crafted items in a backpack");
-    assert_eq!(a.fingerprint, b.fingerprint, "{}", divergence(&a, &b, |d| (run(copy(&start), &e, f64::INFINITY, |g| g, d), run(copy(&start), &e, 5.0, |old| copy(&old), d))));
+    assert_eq!(a.fingerprint, b.fingerprint, "{}", divergence(&a, &b, |d| (run(copy(&mut start), &e, f64::INFINITY, |g| g, d), run(copy(&mut start), &e, 5.0, |mut old| copy(&mut old), d))));
 }
 
 #[test]
@@ -387,12 +388,12 @@ fn handoff() {
     let stats = std::cell::RefCell::new(Vec::<(usize, Duration, Duration)>::new());
     let handed = |dump| {
         stats.borrow_mut().clear();
-        run(load(&e), &e, every, |old| {
+        run(load(&e), &e, every, |mut old| {
             // The new bank has its tables loaded before the handoff starts.
             let (net_data, data, spec) = tables();
             let scenes = crate::scene_tables(e.dir, &net_data, &data);
             let started = Instant::now();
-            let text = crate::handoff::snapshot(&old).unwrap_or_else(|err| panic!("snapshot: {err}"));
+            let text = crate::handoff::snapshot(&mut old).unwrap_or_else(|err| panic!("snapshot: {err}"));
             let serialized = started.elapsed();
             drop(old);
             let started = Instant::now();
@@ -454,9 +455,6 @@ fn handoff() {
         let cold = cold_doc.pointer(&pointer).cloned().unwrap_or(Value::Null);
         let Some(slot) = doc.pointer_mut(&pointer) else { continue };
         *slot = cold;
-        // A snapshot: the live one's head line, then the changed state.
-        let head = crate::handoff::snapshot(&load(&e)).unwrap();
-        let text = format!("{}\n{doc}", head.split_once('\n').unwrap().0);
         let quiet = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -466,10 +464,12 @@ fn handoff() {
                     return g;
                 }
                 let (net_data, data, spec) = tables();
-                {
                 let scenes = crate::scene_tables(e.dir, &net_data, &data);
-                crate::handoff::restore(net_data, data, spec, &text, scenes)
-            }.unwrap_or_else(|err| panic!("restore: {err}"))
+                // A snapshot of the changed state: the document read as a game, written as a bank does.
+                let mut changed: Game = serde_json::from_value(doc.clone()).unwrap_or_else(|err| panic!("state: {err}"));
+                changed.net_data.game_version = net_data.game_version.clone();
+                let text = crate::handoff::snapshot(&mut changed).unwrap_or_else(|err| panic!("snapshot: {err}"));
+                crate::handoff::restore(net_data, data, spec, &text, scenes).unwrap_or_else(|err| panic!("restore: {err}"))
             }, None)
         }));
         std::panic::set_hook(quiet);
@@ -687,7 +687,7 @@ fn scale() {
     let back = SaveFile::load(&path).unwrap();
     println!("scale: reload {:?} ({} objects)", t.elapsed(), back.objects.len());
     let t = Cpu::now();
-    let h = crate::handoff::snapshot(&g).unwrap();
+    let h = crate::handoff::snapshot(&mut g).unwrap();
     println!("scale: handoff snapshot {:?}, {} bytes", t.elapsed(), h.len());
     {
         let (mut vars, mut behaviours, mut name_bytes, mut value_bytes, mut list_items) = (0usize, 0usize, 0usize, 0usize, 0usize);
@@ -731,4 +731,160 @@ fn scale() {
     measure("units", &mut || g.units = Default::default());
     println!("scale: heap MiB by part ({wos} world objects, {net} network objects, {invs} inventories, {holders} holders): {}", parts.join(", "));
     std::fs::remove_dir_all(dir).ok();
+}
+
+/// The flip's stand on worlds of several sizes, phase by phase (docs/hot-update.md, "Flip
+/// speed"). The old bank snapshots into a memfd, the descriptor crosses a unix socket as the
+/// front passes it on, the new bank reads it and restores (its tables loaded beforehand), and
+/// the restored game is the next flip's old bank: N flips in a row.
+///
+///   tools/grow-world.py SAVE OUT N        a save grown to about N world objects
+///   PCDS_FLIPBENCH_SAVES=a.json,b.json [PCDS_FLIPBENCH_N=20] [PCDS_FLIPBENCH_PLAYERS=8] \
+///     [PCDS_FLIPBENCH_FROM=old.snapshot] cargo test --release flipbench -- --ignored --nocapture
+///
+/// PCDS_FLIPBENCH_FROM: a snapshot file (an older release's) restored every round instead of
+/// the live game's own (the migration path; its game version must be the tables').
+/// Prints, per save, p50 / p95 / max (ms) of: serialize, memfd write, fd pass, memfd read, each
+/// restore step, and the stand (the sum). The verify check is not run (PCDS_DEV=flip-verify is a
+/// test aid). The front's own part (held frames, READY) is in its log line and record.
+#[test]
+#[ignore]
+fn flipbench() {
+    use std::collections::BTreeMap;
+    use std::io::Write;
+    let Some(dir) = crate::test_data() else { return };
+    let var = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (rounds, players) = (var("PCDS_FLIPBENCH_N", 20), var("PCDS_FLIPBENCH_PLAYERS", 8) as u64);
+    let saves = std::env::var("PCDS_FLIPBENCH_SAVES").or_else(|_| std::env::var("PCDS_BENCH_SAVE")).expect("flipbench: set PCDS_FLIPBENCH_SAVES");
+    let from = std::env::var("PCDS_FLIPBENCH_FROM").ok().map(|p| std::fs::read(&p).unwrap_or_else(|e| panic!("{p}: {e}")));
+    for path in saves.split(',') {
+        let e = Env { path: path.to_string(), dir, seconds: 0.0, players, action_ms: 0, dump: None };
+        let loading = Instant::now();
+        let mut g = load(&e);
+        let loaded = loading.elapsed();
+        g.sim_time = Some(0.0);
+        for c in 1..=players {
+            join(&mut g, c, &format!("Bench{c}"));
+        }
+        g.net.out.clear();
+        // Some play: a second of ticks, so that timers and queues hold state.
+        for i in 1..=200 {
+            g.sim_time = Some(i as f64 * 0.005);
+            g.tick();
+            g.net.out.clear();
+        }
+        // What a new bank does before the stand, and what it holds: its tables.
+        {
+            let rss = || std::fs::read_to_string("/proc/self/status").ok().and_then(|t| t.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok())).unwrap_or(0.0) / 1024.0;
+            let (before, started) = (rss(), Instant::now());
+            let (net_data, data, spec) = crate::tables(dir);
+            let tables = started.elapsed();
+            let scenes = crate::scene_tables(dir, &net_data, &data);
+            println!("flipbench:   a new bank loads the tables in {tables:?}, the scenes in {:?}; its memory grows by {:.0} MiB (this process holds {:.0} MiB with the world loaded)", started.elapsed() - tables, rss() - before, before);
+            drop((net_data, data, spec, scenes));
+        }
+        let mut samples: BTreeMap<&'static str, Vec<f64>> = BTreeMap::new();
+        let (mut bytes, mut sizes) = (0, [0; crate::handoff::KINDS]);
+        let (front_end, bank_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (mut front, mut bank) = (crate::ipc::Link::new(front_end), crate::ipc::Link::new(bank_end));
+        for round in 0..rounds + 1 {
+            let (net_data, data, spec) = crate::tables(dir);
+            let scenes = crate::scene_tables(dir, &net_data, &data);
+            let mut phases: Vec<(&'static str, f64)> = Vec::new();
+            let fd = match &from {
+                None => crate::handoff::snapshot_memfd(&mut g, &mut phases).unwrap(),
+                Some(s) => crate::ipc::memfd("pcds-snapshot", |w| w.write_all(s).map_err(|e| e.to_string())).unwrap(),
+            };
+            // The front passes the descriptor on: the old bank's link to the front's, then the front's to the new bank's.
+            let t = Instant::now();
+            bank.send_fd(crate::ipc::SNAPSHOT, 1, b"{}", Some(fd));
+            let f = front.recv().unwrap();
+            front.queue(crate::ipc::RESTORE, 0, b"{}", f.fd, 0);
+            front.flush().unwrap();
+            let f = bank.recv().unwrap();
+            phases.push(("fd pass", t.elapsed().as_secs_f64() * 1000.0));
+            let t = Instant::now();
+            let text = crate::ipc::map_memfd(f.fd.as_ref().unwrap()).unwrap();
+            phases.push(("memfd map", t.elapsed().as_secs_f64() * 1000.0));
+            bytes = text.len();
+            sizes = crate::handoff::part_sizes(&text);
+            let new = crate::handoff::restore_timed(net_data, data, spec, &text, scenes, &mut phases).unwrap_or_else(|err| panic!("restore: {err}"));
+            // The steps inside a step (their names start with a dot) are not added twice.
+            let stand: f64 = phases.iter().filter(|p| !p.0.starts_with('.')).map(|p| p.1).sum();
+            phases.push(("stand", stand));
+            drop(text);
+            // The old bank ends (EXIT): its world is freed after the stand, not in it.
+            let old = std::mem::replace(&mut g, new);
+            drop(old);
+            // Round 0 warms the allocator and the page cache.
+            if round > 0 {
+                for (k, v) in phases {
+                    samples.entry(k).or_default().push(v);
+                }
+            }
+            g.net.out.clear();
+            g.sim_time = Some(1.0 + round as f64 * 0.005);
+            g.tick();
+            g.net.out.clear();
+        }
+        println!("flipbench: {path}: {} world objects, {} network objects, {} inventories; loaded in {loaded:?}; snapshot {bytes} bytes; {rounds} flips (ms: p50 / p95 / max / min)", g.wos.len(), g.net.objects.len(), g.inventories.len());
+        println!("flipbench:   bytes: {}", crate::handoff::NAMES.iter().zip(sizes).map(|(n, b)| format!("{n} {b}")).collect::<Vec<_>>().join(", "));
+        let order = ["serialize", ".write cpu rest", ".write cpu world objects", ".write cpu inventories", ".write cpu network objects", ".write cpu machines", ".write cpu water", "memfd write", "fd pass", "memfd map", "head", ".parts read", ".read cpu rest", ".read cpu world objects", ".read cpu inventories", ".read cpu network objects", ".read cpu machines", ".read cpu water", ".parts joined", ".slot indexes", ".net index", "parse", "rebuild holders", "refresh tables", "generation", "stand"];
+        for name in order {
+            let Some(v) = samples.get_mut(name) else { continue };
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let at = |q: f64| v[((v.len() - 1) as f64 * q).round() as usize];
+            println!("flipbench:   {name:<16} {:>8.2} {:>8.2} {:>8.2} {:>8.2}", at(0.5), at(0.95), v[v.len() - 1], v[0]);
+        }
+    }
+}
+
+/// How much of a big world changes while a pre-copy would be under way (docs/hot-update.md, "Flip
+/// speed"): the same players act (PCDS_BENCH_ACTION_MS, default 200) over PCDS_FLIPBENCH_PLAYERS
+/// (default 8); the entries of the world objects, inventories and network objects are digested at
+/// two moments `delta` seconds apart (0.25, 1 and 5), and the entries and the 2048-entry chunks
+/// that differ are counted.
+///
+///   PCDS_FLIPBENCH_SAVES=a.json cargo test --release --bin pcds bench::dirtybench -- --ignored --nocapture
+#[test]
+#[ignore]
+fn dirtybench() {
+    use std::hash::{Hash, Hasher};
+    let Some(dir) = crate::test_data() else { return };
+    let players = std::env::var("PCDS_FLIPBENCH_PLAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8u64);
+    let action_ms = std::env::var("PCDS_BENCH_ACTION_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(200u64);
+    let saves = std::env::var("PCDS_FLIPBENCH_SAVES").expect("dirtybench: set PCDS_FLIPBENCH_SAVES");
+    /// Each entry's digest, keyed by its id, per collection.
+    fn digests(g: &Game) -> [Vec<(u64, u64)>; 3] {
+        let digest = |v: &[u8]| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            v.hash(&mut h);
+            h.finish()
+        };
+        let wos = g.wos.slots().iter().enumerate().map(|(i, s)| (i as u64, s.as_ref().map(|(k, v)| digest(&crate::bincodec::to_vec(&(k, v)).unwrap())).unwrap_or(0))).collect();
+        let inventories = g.inventories.slots().iter().enumerate().map(|(i, s)| (i as u64, s.as_ref().map(|(k, v)| digest(&crate::bincodec::to_vec(&(k, v)).unwrap())).unwrap_or(0))).collect();
+        let net = g.net.objects.iter().map(|(k, v)| (*k, digest(&crate::bincodec::to_vec(v).unwrap()))).collect();
+        [wos, inventories, net]
+    }
+    for path in saves.split(',') {
+        for delta in [0.25, 1.0, 5.0] {
+            let e = Env { path: path.to_string(), dir, seconds: 2.0 * delta + 0.01, players, action_ms, dump: None };
+            let taken = std::cell::RefCell::new(Vec::<[Vec<(u64, u64)>; 3]>::new());
+            run(load(&e), &e, delta, |g| {
+                taken.borrow_mut().push(digests(&g));
+                g
+            }, None);
+            let taken = taken.into_inner();
+            let [a, b] = [&taken[0], &taken[1]];
+            let mut line = format!("dirtybench: {path}: {players} players, {delta} s apart:");
+            for (name, (x, y)) in ["world objects", "inventories", "network objects"].iter().zip(a.iter().zip(b.iter())) {
+                let y: std::collections::HashMap<u64, u64> = y.iter().copied().collect();
+                let changed: Vec<usize> = x.iter().enumerate().filter(|(_, (k, d))| y.get(k) != Some(d)).map(|(i, _)| i).collect();
+                let new = y.len().saturating_sub(x.len());
+                let chunks: std::collections::BTreeSet<usize> = changed.iter().map(|i| i / 2048).collect();
+                line += &format!(" {name} {}/{} entries (+{new} new), {}/{} chunks;", changed.len(), x.len(), chunks.len(), x.len().div_ceil(2048));
+            }
+            println!("{line}");
+        }
+    }
 }

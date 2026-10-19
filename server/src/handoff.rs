@@ -47,10 +47,12 @@ use crate::game::Game;
 use crate::gamedata::GameData;
 use crate::rpcspec::Spec;
 
-/// The snapshot's format. A release that changes the state's shape (a field renamed, removed
-/// or meaning something else; a new field only needs `#[serde(default)]`) bumps it and adds
-/// the step from the previous format to `migrate`: each build reads its own and the previous.
-pub const FORMAT: u32 = 3;
+/// The snapshot's format: one, the current. A release that changes the state's shape or its
+/// encoding bumps it; a snapshot of another format is not read (the front refuses a hot flip
+/// across formats, and `pcds upgrade --restart` installs the release, the world then loading from
+/// the save). The format is the binary codec of bincodec.rs, written and read in parts on several
+/// threads.
+pub const FORMAT: u32 = 5;
 
 /// The snapshot's first line: its format, and the tables it is for (state holds indices into
 /// them, so it is only valid on the same game version).
@@ -60,70 +62,330 @@ struct Head {
     game_version: String,
 }
 
+// ---- the binary codec, in parts -------------------------------------------------------
+//
+// head line, then: u32 n, n * (u8 kind, u32 entries, u64 length), then the n parts back to back. Part kinds:
+// REST (the game with its big collections, the machines and the water left empty, but for the free
+// lists), the machines and the water, then chunks of
+// CHUNK entries, in order, of the world objects' slots, the inventories' slots and the network
+// objects. The parts are encoded and decoded on several threads: they are independent.
+
+const REST: u8 = 0;
+const WOS: u8 = 1;
+const INVENTORIES: u8 = 2;
+const NET_OBJECTS: u8 = 3;
+const MACHINES: u8 = 4;
+const WATER: u8 = 5;
+/// The kinds of part.
+pub const KINDS: usize = 6;
+/// What flipbench calls the CPU time of each kind of part (names with a dot are inside a step).
+pub const WRITE_CPU: [&str; KINDS] = [".write cpu rest", ".write cpu world objects", ".write cpu inventories", ".write cpu network objects", ".write cpu machines", ".write cpu water"];
+pub const READ_CPU: [&str; KINDS] = [".read cpu rest", ".read cpu world objects", ".read cpu inventories", ".read cpu network objects", ".read cpu machines", ".read cpu water"];
+#[cfg(test)]
+pub const NAMES: [&str; KINDS] = ["rest", "world objects", "inventories", "network objects", "machines", "water"];
+
+/// Entries per chunk: about 0.4 ms of work to write and 1 ms to read.
+const CHUNK: usize = 2048;
+
+type WoSlots = Vec<Option<(i32, crate::model::WorldObject)>>;
+type InventorySlots = Vec<Option<(i32, crate::model::Inventory)>>;
+
+/// The threads a flip may use (PCDS_DEV=flip-threads=N, else the cores this process may run on, at
+/// most 8).
+fn threads() -> usize {
+    crate::config::dev("flip-threads").and_then(|v| v.parse().ok()).unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(8)).max(1)
+}
+
+/// `work` on every item, in as many threads as there are items and cores, results in the items'
+/// order. The caller's thread works too.
+fn in_parallel<I: Sync, O: Send>(items: &[I], work: impl Fn(&I) -> O + Sync) -> Vec<O> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    let workers = threads().min(items.len());
+    if workers <= 1 {
+        return items.iter().map(work).collect();
+    }
+    let next = AtomicUsize::new(0);
+    let results: Vec<Mutex<Option<O>>> = items.iter().map(|_| Mutex::new(None)).collect();
+    let run = || {
+        loop {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            let Some(item) = items.get(i) else { break };
+            *results[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(work(item));
+        }
+    };
+    std::thread::scope(|s| {
+        for _ in 1..workers {
+            s.spawn(run);
+        }
+        run();
+    });
+    results.into_iter().map(|r| r.into_inner().unwrap_or_else(|e| e.into_inner()).expect("every item is worked")).collect()
+}
+
+/// The CPU time of the calling thread, in ms (the host is shared: wall time is not the code's).
+fn thread_cpu_ms() -> f64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: a valid timespec for the call's duration.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as f64 * 1e3 + ts.tv_nsec as f64 / 1e6
+}
+
+enum Task {
+    Rest,
+    Machines,
+    Water,
+    Wos(std::ops::Range<usize>),
+    Inventories(std::ops::Range<usize>),
+    NetObjects(std::ops::Range<usize>),
+}
+
+fn chunks(len: usize) -> impl Iterator<Item = std::ops::Range<usize>> {
+    (0..len.div_ceil(CHUNK)).map(move |i| i * CHUNK..((i + 1) * CHUNK).min(len))
+}
+
+/// The parts of the state, as `kind, entries, bytes`, the first being REST. Leaves the game as
+/// it was.
+fn encode(g: &mut Game, cpu: &mut [f64; KINDS]) -> Result<Vec<(u8, usize, Vec<u8>)>, String> {
+    /// Puts the lent collections back, however the encoding ends.
+    struct Lent<'a> {
+        g: &'a mut Game,
+        wos: Option<WoSlots>,
+        inventories: Option<InventorySlots>,
+        objects: Option<crate::idmap::IdMap<u64, crate::net::NetObj>>,
+        machines: crate::machines::Machines,
+        water: crate::water::Water,
+    }
+    impl Drop for Lent<'_> {
+        fn drop(&mut self) {
+            self.g.wos.unlend(self.wos.take().unwrap_or_default());
+            self.g.inventories.unlend(self.inventories.take().unwrap_or_default());
+            self.g.net.objects = self.objects.take().unwrap_or_default();
+            self.g.ext.machines = std::mem::take(&mut self.machines);
+            self.g.ext.water = std::mem::take(&mut self.water);
+        }
+    }
+    let (wos, inventories, objects) = (g.wos.lend(), g.inventories.lend(), std::mem::take(&mut g.net.objects));
+    let (machines, water) = (std::mem::take(&mut g.ext.machines), std::mem::take(&mut g.ext.water));
+    let lent = Lent { g, wos: Some(wos), inventories: Some(inventories), objects: Some(objects), machines, water };
+    let (wos, inventories, objects) = (lent.wos.as_deref().unwrap_or_default(), lent.inventories.as_deref().unwrap_or_default(), lent.objects.as_ref().unwrap());
+    let (game, machines, water): (&Game, &crate::machines::Machines, &crate::water::Water) = (lent.g, &lent.machines, &lent.water);
+    let mut tasks = vec![Task::Machines, Task::Rest, Task::Water];
+    tasks.extend(chunks(wos.len()).map(Task::Wos));
+    tasks.extend(chunks(inventories.len()).map(Task::Inventories));
+    tasks.extend(chunks(objects.len()).map(Task::NetObjects));
+    let encoded = in_parallel(&tasks, |t| -> Result<(u8, usize, Vec<u8>, f64), String> {
+        let started = thread_cpu_ms();
+        let (kind, entries, mut out) = match t {
+            Task::Rest => (REST, 1, Vec::with_capacity(1 << 20)),
+            Task::Machines => (MACHINES, 1, Vec::with_capacity(1 << 20)),
+            Task::Water => (WATER, 1, Vec::with_capacity(1 << 18)),
+            Task::Wos(r) => (WOS, r.len(), Vec::with_capacity(CHUNK * 224)),
+            Task::Inventories(r) => (INVENTORIES, r.len(), Vec::with_capacity(CHUNK * 64)),
+            Task::NetObjects(r) => (NET_OBJECTS, r.len(), Vec::with_capacity(CHUNK * 256)),
+        };
+        match t {
+            Task::Rest => crate::bincodec::append(game, &mut out),
+            Task::Machines => crate::bincodec::append(machines, &mut out),
+            Task::Water => crate::bincodec::append(water, &mut out),
+            Task::Wos(r) => crate::bincodec::append(&wos[r.clone()], &mut out),
+            Task::Inventories(r) => crate::bincodec::append(&inventories[r.clone()], &mut out),
+            Task::NetObjects(r) => crate::bincodec::append(&objects.as_slice().get_range(r.clone()).ok_or("network objects range")?.iter().collect::<Vec<_>>(), &mut out),
+        }
+        .map_err(|e| e.to_string())?;
+        Ok((kind, entries, out, thread_cpu_ms() - started))
+    });
+    drop(lent);
+    let mut parts = Vec::with_capacity(encoded.len());
+    for e in encoded {
+        let (kind, entries, bytes, ms) = e?;
+        cpu[kind as usize] += ms;
+        parts.push((kind, entries, bytes));
+    }
+    Ok(parts)
+}
+
 /// The game's state at a tick boundary (the bank sent everything queued: net.out is empty),
 /// written to `w`. An error leaves the game as it was: it goes on, and the flip is off.
-pub fn snapshot_to(g: &Game, w: &mut impl std::io::Write) -> Result<(), String> {
-    // JSON has no NaN or infinity (serde_json writes null, which does not read back as a
-    // float): a position or rotation that is not a number stops the snapshot here, by name.
-    let finite = |v: &[f32]| v.iter().all(|x| x.is_finite());
-    if let Some(o) = g.net.objects.values().find(|o| !finite(&o.position) || !finite(&o.rotation)) {
-        return Err(format!("network object {} is at {:?} {:?}, not a number: no snapshot", o.id, o.position, o.rotation));
-    }
-    if let Some(w) = g.wos.values().find(|w| !finite(&w.position) || !finite(&w.rotation)) {
-        return Err(format!("world object {} is at {:?} {:?}, not a number: no snapshot", w.id, w.position, w.rotation));
-    }
-    let head = Head { format: FORMAT, game_version: g.net_data.game_version.clone() };
-    serde_json::to_writer(&mut *w, &head).map_err(|e| e.to_string())?;
-    w.write_all(b"\n").map_err(|e| e.to_string())?;
-    serde_json::to_writer(w, g).map_err(|e| e.to_string())
+pub fn snapshot_to(g: &mut Game, w: &mut impl std::io::Write) -> Result<(), String> {
+    snapshot_timed(g, w, &mut Vec::new())
 }
 
+/// snapshot_to, with the milliseconds of its steps appended to `phases` (flipbench); the CPU
+/// time the encoding took per kind of part is there too, named with a dot in front.
+pub fn snapshot_timed(g: &mut Game, w: &mut impl std::io::Write, phases: &mut Vec<(&'static str, f64)>) -> Result<(), String> {
+    let mut laps = Laps::new(phases);
+    let head = Head { format: FORMAT, game_version: g.net_data.game_version.clone() };
+    let mut cpu = [0.0; KINDS];
+    let parts = encode(g, &mut cpu)?;
+    laps.lap("serialize");
+    for (name, ms) in WRITE_CPU.into_iter().zip(cpu) {
+        laps.phases.push((name, ms));
+    }
+    laps.clock = std::time::Instant::now();
+    let io = |e: std::io::Error| e.to_string();
+    serde_json::to_writer(&mut *w, &head).map_err(|e| e.to_string())?;
+    w.write_all(b"\n").map_err(io)?;
+    w.write_all(&(parts.len() as u32).to_le_bytes()).map_err(io)?;
+    for (kind, entries, bytes) in &parts {
+        w.write_all(&[*kind]).map_err(io)?;
+        w.write_all(&(*entries as u32).to_le_bytes()).map_err(io)?;
+        w.write_all(&(bytes.len() as u64).to_le_bytes()).map_err(io)?;
+    }
+    for (_, _, bytes) in &parts {
+        w.write_all(bytes).map_err(io)?;
+    }
+    w.flush().map_err(io)?;
+    laps.lap("memfd write");
+    Ok(())
+}
+
+/// The state in a sealed memfd, as the old bank sends it to the new one; the milliseconds of
+/// its steps are appended to `phases` (flipbench).
+pub fn snapshot_memfd(g: &mut Game, phases: &mut Vec<(&'static str, f64)>) -> Result<std::os::fd::OwnedFd, String> {
+    crate::ipc::memfd("pcds-snapshot", |w| snapshot_timed(g, w, phases))
+}
+
+/// The state as this build writes it.
 #[cfg(test)]
-pub fn snapshot(g: &Game) -> Result<String, String> {
+pub fn snapshot(g: &mut Game) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     snapshot_to(g, &mut out)?;
-    String::from_utf8(out).map_err(|e| e.to_string())
+    Ok(out)
 }
 
-/// The previous format's state brought to this one, as firmware migrates its data on boot.
-fn migrate(from: u32, state: serde_json::Value) -> Result<serde_json::Value, String> {
-    let mut state = state;
-    match from {
-        // 2: the world objects (an id -> object map) and the constructed and pickable sets (id
-        // lists) became Slots, in their order and with no slot free yet; the units' constructed
-        // index became an integer.
-        1 => {
-            let wos = std::mem::take(&mut state["wos"]);
-            let slots: Vec<serde_json::Value> = wos.as_object().into_iter().flatten().map(|(id, wo)| serde_json::json!([id.parse::<i32>().unwrap_or(0), wo])).collect();
-            state["wos"] = serde_json::json!({"slots": slots, "free": []});
-            for set in ["constructed", "pickables"] {
-                let ids: Vec<serde_json::Value> = state[set].as_array().into_iter().flatten().map(|id| serde_json::json!([id, null])).collect();
-                state[set] = serde_json::json!({"slots": ids, "free": []});
-            }
-            // The constructed-objects index, a float, became a u64.
-            let int = |v: &mut serde_json::Value| *v = serde_json::json!(v.as_f64().unwrap_or(0.0) as u64);
-            int(&mut state["units"]["constructed_index"]);
-            for p in state["units"]["planets"].as_array_mut().into_iter().flatten() {
-                p["units"].as_array_mut().into_iter().flatten().for_each(|u| int(&mut u["previous_index"]));
-            }
-            migrate(2, state)
-        }
-        // 3: the inventories (an id -> inventory map) became Slots, in their order and with no
-        // slot free yet.
-        2 => {
-            let inventories = std::mem::take(&mut state["inventories"]);
-            let slots: Vec<serde_json::Value> = inventories.as_object().into_iter().flatten().map(|(id, inv)| serde_json::json!([id.parse::<i32>().unwrap_or(0), inv])).collect();
-            state["inventories"] = serde_json::json!({"slots": slots, "free": []});
-            Ok(state)
-        }
-        _ => Err(format!("snapshot format {from}: this build reads format {FORMAT} and the one before")),
+/// Bytes per kind of part of a snapshot: where
+/// the size goes (flipbench).
+#[cfg(test)]
+pub fn part_sizes(snapshot: &[u8]) -> [usize; KINDS] {
+    let mut sizes = [0; KINDS];
+    let Ok((_, body)) = split(snapshot) else { return sizes };
+    let n = u32::from_le_bytes(body[..4].try_into().unwrap()) as usize;
+    for i in 0..n {
+        let entry = &body[4 + i * 13..4 + i * 13 + 13];
+        sizes[entry[0] as usize] += u64::from_le_bytes(entry[5..].try_into().unwrap()) as usize;
     }
+    sizes
+}
+
+/// The game of a format 4 body, without the tables (they are not state); the milliseconds of its
+/// steps appended to `phases` (named with a dot in front: they are inside "parse").
+fn decode(body: &[u8], phases: &mut Vec<(&'static str, f64)>) -> Result<Game, String> {
+    let mut laps = Laps::new(phases);
+    use std::mem::MaybeUninit;
+    let short = || "the snapshot ends inside its directory".to_string();
+    let n = u32::from_le_bytes(body.get(..4).ok_or_else(short)?.try_into().unwrap()) as usize;
+    let mut at = n.checked_mul(13).and_then(|d| d.checked_add(4)).ok_or_else(short)?;
+    // Kind, entries and bytes of each part.
+    let mut parts: Vec<(u8, usize, &[u8])> = Vec::with_capacity(n.min(body.len()));
+    for i in 0..n {
+        let entry = body.get(4 + i * 13..4 + i * 13 + 13).ok_or_else(short)?;
+        let entries = u32::from_le_bytes(entry[1..5].try_into().unwrap()) as usize;
+        let len = u64::from_le_bytes(entry[5..].try_into().unwrap()) as usize;
+        parts.push((entry[0], entries, body.get(at..at.checked_add(len).ok_or_else(short)?).ok_or("a part ends beyond the snapshot")?));
+        at += len;
+    }
+    if at != body.len() {
+        return Err("bytes after the snapshot's last part".into());
+    }
+    // The world objects and the inventories are read straight into their final Vec, each chunk
+    // into its own stretch of it (a chunk cannot ask for more than the directory says).
+    let total = |kind: u8| parts.iter().filter(|p| p.0 == kind).map(|p| p.1).sum::<usize>();
+    let (mut wos, mut inventories): (WoSlots, InventorySlots) = (Vec::with_capacity(total(WOS)), Vec::with_capacity(total(INVENTORIES)));
+    enum Out<'a> {
+        Wos(&'a mut [MaybeUninit<Option<(i32, crate::model::WorldObject)>>]),
+        Inventories(&'a mut [MaybeUninit<Option<(i32, crate::model::Inventory)>>]),
+        Other,
+    }
+    let (mut wos_free, mut inventories_free) = (wos.spare_capacity_mut(), inventories.spare_capacity_mut());
+    type Job<'a> = (u8, &'a [u8], std::sync::Mutex<Option<Out<'a>>>);
+    let jobs: Vec<Job> = parts
+        .iter()
+        .map(|&(kind, entries, bytes)| {
+            let out = match kind {
+                WOS => {
+                    let (head, rest) = std::mem::take(&mut wos_free).split_at_mut(entries);
+                    wos_free = rest;
+                    Out::Wos(head)
+                }
+                INVENTORIES => {
+                    let (head, rest) = std::mem::take(&mut inventories_free).split_at_mut(entries);
+                    inventories_free = rest;
+                    Out::Inventories(head)
+                }
+                _ => Out::Other,
+            };
+            (kind, bytes, std::sync::Mutex::new(Some(out)))
+        })
+        .collect();
+    enum Done {
+        Rest(Box<Game>),
+        Filled,
+        NetObjects(Vec<(u64, crate::net::NetObj)>),
+        Machines(Box<crate::machines::Machines>),
+        Water(Box<crate::water::Water>),
+    }
+    let e = |e: crate::bincodec::Error| e.to_string();
+    let done = in_parallel(&jobs, |(kind, bytes, out)| -> Result<(Done, u8, f64), String> {
+        let started = thread_cpu_ms();
+        let out = out.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let done = match (*kind, out) {
+            (REST, _) => Done::Rest(Box::new(crate::bincodec::from_slice(bytes).map_err(e)?)),
+            (WOS, Some(Out::Wos(out))) => {
+                crate::bincodec::fill(bytes, out).map_err(e)?;
+                Done::Filled
+            }
+            (INVENTORIES, Some(Out::Inventories(out))) => {
+                crate::bincodec::fill(bytes, out).map_err(e)?;
+                Done::Filled
+            }
+            (NET_OBJECTS, _) => Done::NetObjects(crate::bincodec::from_slice(bytes).map_err(e)?),
+            (MACHINES, _) => Done::Machines(Box::new(crate::bincodec::from_slice(bytes).map_err(e)?)),
+            (WATER, _) => Done::Water(Box::new(crate::bincodec::from_slice(bytes).map_err(e)?)),
+            (k, _) => return Err(format!("a part of kind {k}")),
+        };
+        Ok((done, *kind, thread_cpu_ms() - started))
+    });
+    laps.lap(".parts read");
+    let (mut game, mut objects, mut cpu, mut machines, mut water) = (None, Vec::new(), [0.0; KINDS], None, None);
+    for (d, kind, ms) in done.into_iter().collect::<Result<Vec<_>, _>>()? {
+        cpu[kind as usize % KINDS] += ms;
+        match d {
+            Done::Rest(g) if game.is_none() => game = Some(g),
+            Done::Rest(_) => return Err("two REST parts".into()),
+            Done::Filled => {}
+            Done::NetObjects(mut c) => objects.append(&mut c),
+            Done::Machines(m) => machines = Some(m),
+            Done::Water(w) => water = Some(w),
+        }
+    }
+    laps.lap(".parts joined");
+    for (name, ms) in READ_CPU.into_iter().zip(cpu) {
+        laps.phases.push((name, ms));
+    }
+    laps.clock = std::time::Instant::now();
+    drop(jobs);
+    // SAFETY: every chunk of both Vecs was filled in full (`fill` is Ok only then), and the
+    // chunks' lengths add up to the capacity asked for.
+    unsafe {
+        wos.set_len(wos.capacity());
+        inventories.set_len(inventories.capacity());
+    }
+    let mut g = game.ok_or("no REST part")?;
+    g.ext.machines = *machines.ok_or("no MACHINES part")?;
+    g.ext.water = *water.ok_or("no WATER part")?;
+    g.wos.fill(wos)?;
+    g.inventories.fill(inventories)?;
+    laps.lap(".slot indexes");
+    g.net.objects = objects.into_iter().collect();
+    laps.lap(".net index");
+    Ok(*g)
 }
 
 /// A game from a snapshot and this process's own tables.
 #[cfg(test)]
-pub fn restore(net_data: NetData, data: GameData, spec: Spec, snapshot: &str, scenes: crate::Scenes) -> Result<Game, String> {
-    restore_bytes(net_data, data, spec, snapshot.as_bytes(), scenes)
+pub fn restore(net_data: NetData, data: GameData, spec: Spec, snapshot: &[u8], scenes: crate::Scenes) -> Result<Game, String> {
+    restore_bytes(net_data, data, spec, snapshot, scenes)
 }
 
 fn split(snapshot: &[u8]) -> Result<(Head, &[u8]), String> {
@@ -133,23 +395,50 @@ fn split(snapshot: &[u8]) -> Result<(Head, &[u8]), String> {
 }
 
 pub fn restore_bytes(net_data: NetData, data: GameData, spec: Spec, snapshot: &[u8], scenes: crate::Scenes) -> Result<Game, String> {
+    restore_timed(net_data, data, spec, snapshot, scenes, &mut Vec::new())
+}
+
+/// The milliseconds between laps, appended to a list (flipbench).
+struct Laps<'a> {
+    phases: &'a mut Vec<(&'static str, f64)>,
+    clock: std::time::Instant,
+}
+
+impl<'a> Laps<'a> {
+    fn new(phases: &'a mut Vec<(&'static str, f64)>) -> Laps<'a> {
+        Laps { phases, clock: std::time::Instant::now() }
+    }
+    fn lap(&mut self, name: &'static str) {
+        self.phases.push((name, self.clock.elapsed().as_secs_f64() * 1000.0));
+        self.clock = std::time::Instant::now();
+    }
+}
+
+/// restore_bytes, with the milliseconds each step took appended to `phases` (flipbench).
+pub fn restore_timed(net_data: NetData, data: GameData, spec: Spec, snapshot: &[u8], scenes: crate::Scenes, phases: &mut Vec<(&'static str, f64)>) -> Result<Game, String> {
+    let mut laps = Laps::new(phases);
     let (head, state) = split(snapshot)?;
     if head.game_version != net_data.game_version {
         return Err(format!("a snapshot on game {}'s tables, these are {}'s", head.game_version, net_data.game_version));
     }
-    let mut g: Game = match head.format {
-        FORMAT => serde_json::from_slice(state).map_err(|e| e.to_string())?,
-        f => serde_json::from_value(migrate(f, serde_json::from_slice(state).map_err(|e| e.to_string())?)?).map_err(|e| e.to_string())?,
-    };
+    if head.format != FORMAT {
+        return Err(format!("a snapshot of format {}: this build reads format {FORMAT} only", head.format));
+    }
+    laps.lap("head");
+    let mut g = decode(state, laps.phases)?;
+    laps.lap("parse");
     g.net_data = net_data;
     g.data = data;
     g.net.spec = spec;
     g.scenes = scenes;
     g.rebuild_holders();
+    laps.lap("rebuild holders");
     crate::machines::refresh_from_tables(&mut g);
+    laps.lap("refresh tables");
     // The tables are not quite static: Game::new scales the groups' generation by the
     // world's settings.
     g.change_generation_for_groups();
+    laps.lap("generation");
     Ok(g)
 }
 
@@ -181,7 +470,12 @@ pub fn verify(g: &Game, snapshot: &[u8]) -> Result<(), String> {
         }
         canon(v);
     };
-    let mut sent: Value = serde_json::from_slice(split(snapshot)?.1).map_err(|e| e.to_string())?;
+    let (head, body) = split(snapshot)?;
+    if head.format != FORMAT {
+        return Err(format!("a snapshot of format {}", head.format));
+    }
+    // Through the text, as the restored game below: a float is its shortest text, not its f64.
+    let mut sent: Value = serde_json::from_str(&serde_json::to_string(&decode(body, &mut Vec::new())?).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     let mut restored: Value = serde_json::from_str(&serde_json::to_string(g).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     state(&mut sent);
     state(&mut restored);
@@ -208,11 +502,19 @@ mod tests {
         assert!(serde_json::from_str::<Clock>("-3.0").is_ok(), "a clock before its start counts as now");
     }
 
+    /// A snapshot with its head line's text changed.
+    fn with_head(snapshot: &[u8], from: &str, to: &str) -> Vec<u8> {
+        let at = snapshot.iter().position(|b| *b == b'\n').unwrap();
+        let head = String::from_utf8(snapshot[..at].to_vec()).unwrap();
+        assert!(head.contains(from), "{head} has no {from}");
+        [head.replacen(from, to, 1).as_bytes(), &snapshot[at..]].concat()
+    }
+
     #[test]
     fn a_snapshot_restores_only_in_its_format_and_on_its_tables() {
         let Some(mut g) = test_game(save()) else { return };
         let player = join(&mut g, 1, "Ann");
-        let text = super::snapshot(&g).unwrap();
+        let text = super::snapshot(&mut g).unwrap();
         let dir = crate::test_data().unwrap();
         let tables = || {
             let (n, d, s) = crate::tables(dir);
@@ -222,40 +524,46 @@ mod tests {
         let (n, d, s, scenes) = tables();
         let back = super::restore(n, d, s, &text, scenes).unwrap();
         assert_eq!(back.player_object(1), Some(player));
-        super::verify(&back, text.as_bytes()).unwrap();
+        super::verify(&back, &text).unwrap();
         let (n, d, s, scenes) = tables();
         let mut other = super::restore(n, d, s, &text, scenes).unwrap();
         other.tmp_inventory_id += 1;
-        assert!(super::verify(&other, text.as_bytes()).unwrap_err().contains("tmp_inventory_id"));
+        assert!(super::verify(&other, &text).unwrap_err().contains("tmp_inventory_id"));
         for (from, to) in [(&*format!("\"format\":{}", super::FORMAT), "\"format\":99"), (&*format!("\"game_version\":\"{}\"", g.net_data.game_version), "\"game_version\":\"0.1\"")] {
             let (n, d, s, scenes) = tables();
-            assert!(super::restore(n, d, s, &text.replacen(from, to, 1), scenes).is_err(), "{to} is refused");
+            assert!(super::restore(n, d, s, &with_head(&text, from, to), scenes).is_err(), "{to} is refused");
+        }
+        // A cut or damaged body is an error, never a panic.
+        for cut in [text.len() / 2, text.len() - 1, text.len() - 100] {
+            let (n, d, s, scenes) = tables();
+            assert!(super::restore(n, d, s, &text[..cut], scenes).is_err(), "cut at {cut}");
         }
     }
 
-    /// A position that is not a number would be written as null and never read back: the
-    /// snapshot refuses, naming the object.
+    /// The binary codec carries what JSON could not: a position that is not a number comes
+    /// back as it was.
     #[test]
-    fn a_snapshot_never_writes_a_position_it_cannot_read_back() {
+    fn a_position_that_is_not_a_number_crosses_a_flip() {
         let Some(mut g) = test_game(save()) else { return };
         let player = join(&mut g, 1, "Ann");
         g.net.objects.get_mut(&player).unwrap().position[1] = f32::NAN;
-        assert!(super::snapshot(&g).unwrap_err().contains(&format!("network object {player}")));
-        g.net.objects.get_mut(&player).unwrap().position[1] = 3.0;
         let pod = *g.wos.keys().next().unwrap();
         g.wos.get_mut(&pod).unwrap().rotation[0] = f32::INFINITY;
-        assert!(super::snapshot(&g).unwrap_err().contains(&format!("world object {pod}")));
+        let (n, d, s, scenes) = crate::game::test_tables().unwrap();
+        let text = super::snapshot(&mut g).unwrap();
+        let h = super::restore(n, d, s, &text, scenes).unwrap();
+        assert!(h.net.objects[&player].position[1].is_nan());
+        assert_eq!(h.wos[&pod].rotation[0], f32::INFINITY);
     }
 
-    /// A snapshot as the release before wrote it (tests/fixtures/snapshot-<release>.json.gz: a
-    /// world with one of every building and 4 players, made by tests/hot_update.rs
-    /// make_the_snapshot_fixture_of_a_release with that release's program) restores in this
-    /// build, goes on for a minute of game time, and is written and read again. 0.6.1 failed
-    /// its first hot update on a field ("water_only") that 0.6.0's snapshot did not have, which
-    /// no test found: they all restored what the same build had written. A release that no
-    /// longer reads a fixture's format (FORMAT bumped twice) refuses it with that said.
+    /// A snapshot as a release wrote it (tests/fixtures/snapshot-<release>.json.gz: a world with
+    /// one of every building and 4 players, made by tests/hot_update.rs
+    /// make_the_snapshot_fixture_of_a_release with that release's program). This build reads its
+    /// own format only: a fixture of another format is refused with the formats said (the update
+    /// is then `pcds upgrade --restart`, the world loading from the save), one of this format
+    /// restores, goes on for a minute of game time, and is written and read again.
     #[test]
-    fn the_snapshot_of_every_release_restores() {
+    fn the_snapshot_of_every_release_restores_or_is_refused_by_its_format() {
         let Some((net_data, data, spec, scenes)) = crate::game::test_tables() else { return };
         let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         let mut fixtures: Vec<_> = std::fs::read_dir(&folder).unwrap().flatten().map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("snapshot-") && n.to_string_lossy().ends_with(".json.gz"))).collect();
@@ -266,12 +574,13 @@ mod tests {
             let unzipped = std::process::Command::new("gzip").arg("-dc").arg(&path).output().unwrap();
             assert!(unzipped.status.success(), "{name}");
             let (head, _) = super::split(&unzipped.stdout).unwrap();
-            if head.format + 1 < super::FORMAT {
-                let e = super::restore_bytes(net_data.clone(), data.clone(), spec.clone(), &unzipped.stdout, scenes.clone()).map(|_| ()).unwrap_err();
-                assert!(e.contains(&format!("format {}", head.format)) && e.contains("reads"), "{name}: {e}");
+            let restored = super::restore_bytes(net_data.clone(), data.clone(), spec.clone(), &unzipped.stdout, scenes.clone());
+            if head.format != super::FORMAT {
+                let e = restored.map(|_| ()).unwrap_err();
+                assert!(e.contains(&format!("format {}", head.format)) && e.contains(&format!("format {}", super::FORMAT)), "{name}: {e}");
                 continue;
             }
-            let mut game = super::restore_bytes(net_data.clone(), data.clone(), spec.clone(), &unzipped.stdout, scenes.clone()).unwrap_or_else(|e| panic!("{name}: the release before's world does not restore in this build: {e}"));
+            let mut game = restored.unwrap_or_else(|e| panic!("{name}: the release before's world does not restore in this build: {e}"));
             // Every building the game has was in it (the fixture is regenerated with a release
             // that has more of them, never with fewer).
             let placed: std::collections::HashSet<&str> = game.wos.values().map(|w| game.data.groups[w.group].id.as_str()).collect();
@@ -286,9 +595,30 @@ mod tests {
                 game.tick();
             }
             // And is written and read again, as the next flip would.
-            let again = super::snapshot(&game).unwrap();
-            let back = super::restore_bytes(net_data.clone(), data.clone(), spec.clone(), again.as_bytes(), scenes.clone()).unwrap_or_else(|e| panic!("{name}: after a minute: {e}"));
-            super::verify(&back, again.as_bytes()).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let again = super::snapshot(&mut game).unwrap();
+            let back = super::restore_bytes(net_data.clone(), data.clone(), spec.clone(), &again, scenes.clone()).unwrap_or_else(|e| panic!("{name}: after a minute: {e}"));
+            super::verify(&back, &again).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+    }
+
+    /// The parts run on several threads and come back in order.
+    #[test]
+    fn work_in_parallel_comes_back_in_order() {
+        let items: Vec<u64> = (0..1000).collect();
+        let out = super::in_parallel(&items, |i| {
+            std::thread::sleep(std::time::Duration::from_micros(i % 7));
+            i * 2
+        });
+        assert_eq!(out, items.iter().map(|i| i * 2).collect::<Vec<_>>());
+        assert_eq!(super::in_parallel(&[] as &[u8], |_| 1), Vec::<i32>::new());
+        assert_eq!(super::in_parallel(&[5], |i| *i), vec![5]);
+    }
+
+    /// Nothing is a snapshot: errors, not panics, and no allocation of what a length asks for.
+    #[test]
+    fn garbage_is_not_a_snapshot() {
+        for body in [&[][..], &[1, 0, 0, 0][..], &[1, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255][..], &[0xff; 64][..], &[1, 0, 0, 0, 9, 1, 0, 0, 0, 0, 0, 0, 0, 7][..]] {
+            assert!(super::decode(body, &mut Vec::new()).is_err());
         }
     }
 }

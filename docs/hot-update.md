@@ -12,8 +12,8 @@ flips. The network front plays the bootloader: it stays up through the flip and 
 sockets and the Steam connections. The old bank keeps running until the new one has
 confirmed it is healthy, so a failed flip is a flip back with nobody disconnected. The world
 crosses the flip as a serialized snapshot of a separate state module, in a versioned format
-that each release reads in its own version and the previous one, as firmware migrates its
-data sector on boot.
+that only the release that wrote it reads (no migration: a release that changes the format is
+installed with `pcds upgrade --restart`, which disconnects every player).
 
 ## As built
 
@@ -33,7 +33,7 @@ data sector on boot.
 non-blocking queue, SCM_RIGHTS, the memfd), `updater.rs` (releases into a bank),
 `cli/upgrade.rs` (`pcds upgrade`, the banks in `pcds status`). `split.rs` is gone. The state
 module of (e) is not split out: the state types stay where they are, and `handoff.rs` holds the
-snapshot format, `migrate` and `verify`. `main.rs` dispatches.
+snapshot format and `verify`; `bincodec.rs` is the codec. `main.rs` dispatches.
 
 **The front** owns the UDP socket and the utp.rs sessions, the Steam game server login, its
 listen socket, every `NetConnection` with its `Split<n>` reassembly, the invite code, the client
@@ -246,6 +246,89 @@ installed and flipped to under 4 players, and a rollback; `pcds upgrade`, `statu
 `upgrade --rollback` with the server stopped; and `/api/stop` saving the world. On the test's
 small world the stand is 6 to 11 ms with the check (1 to 2 ms without it).
 
+### Flip speed
+
+The numbers above are the spike's. Since then the stand was measured on grown worlds and cut
+(branch `flip-speed`). Worlds: `tools/grow-world.py SAVE OUT N` copies the bench world's world
+objects, inventories and links (ids renumbered) up to N objects; the four used here have 2.6k,
+10.3k, 30.7k and 99.5k world objects (the 2.6k one is the bench world itself, 410 network
+objects; the 99.5k one has 14.9k network objects, 10.3k inventories). 8 players. This host is
+shared (load average 85 to 120 during all of these), so p50 moves by a factor of 2 between runs;
+the min column and the single-thread runs are the steadier ones.
+
+**Harnesses.** `bench::flipbench` (in-process: the old bank snapshots into a memfd, the
+descriptor crosses a socket pair as the front passes it on, the new bank maps it and restores;
+per phase p50 / p95 / max / min, plus the CPU time of each kind of part):
+`PCDS_FLIPBENCH_SAVES=a.json,b.json [PCDS_FLIPBENCH_N=15] [PCDS_DEV=flip-threads=1] cargo test
+--release --bin pcds bench::flipbench -- --ignored --nocapture`. `hot_update::flipbench` (the
+real thing: front, two banks, 8 `pcds load` players, sockets; the front's timeline of the flip on
+one monotonic clock: HANDOFF to the old bank, its snapshot, the SNAPSHOT to the front, the relay,
+the RESTORE to the new bank, its restore, the READY, the held frames out): `cargo test --release
+--test hot_update flipbench -- --ignored --nocapture`, same variables; `PCDS_FLIPBENCH_OLD=dir`
+makes an older unpacked release bank a. `bench::dirtybench` counts what changes while a
+pre-copy would run. The state check is off in all of them.
+
+**The stand before and after**, ms (v0.6.2 is the code this branch was cut from):
+
+| world objects | in-process before (p50) | in-process after (p50 / min) | live before (p50 / min) | live after (p50 / min) |
+|---|---|---|---|---|
+| 2.6k | 12.9 | 4.6 / 2.8 | 180 / 61 | 8.3 / 6.0 |
+| 10.3k | 39.7 | 10.6 / 6.8 | 91 / 79 | 17.3 / 12.9 |
+| 30.7k | 115 | 20.1 / 15.2 | 312 / 225 | 47.4 / 18.2 |
+| 99.5k | 350 | 52 / 34 | 841 / 573 | 130 / 79 (90 / 69 in a calmer run; 40.5 for one flip with no players) |
+
+In-process one thread, 99.5k: 72.7 (min 68.5); 2.6k: 3.8. Live at 99.5k by threads
+(`PCDS_DEV=flip-threads=N`) under load: 1: 190, 2: 155, 4: 89, 8: 96. Snapshot 2.18 / 8.0 / 23.5 / 75.9 MB
+(JSON) now 0.46 / 1.4 / 4.1 / 12.9 MB.
+
+**What cost what.** (1) The live stand was dominated by something that was not the snapshot:
+`promote` wrote `run/bin/active` (an fsync) after queueing the held frames and before the loop's
+flush, so on a busy disk the held frames waited about 100 ms for a file write, and the front
+served no client meanwhile (2.6k world: 126 ms stand, 18 ms of it snapshot and restore). The held
+frames now go first and the banks-folder writes run in a thread (joined at shutdown; the flip is
+recorded once they are on disk). (2) The profile of the JSON snapshot at 30k objects (perf, frame
+pointers): 61% of the write and 68% of the read were world objects, 28% / 20% network objects,
+6% machines; the time was serde_json itself, names written and matched for every struct, numbers
+as digits, `Vec<u8>` as arrays of numbers; nothing in the state was slow by itself
+(`rebuild_holders` 0.8 ms and `change_generation_for_groups` 0.01 ms at 99.5k). (3) The binary
+codec, in parts on threads (format 5, above): CPU ms at 99.5k, write / read: world objects 7.2 /
+15.9, network objects 7.4 / 15.2, machines 1.7 / 4.1, inventories 0.9 / 1.8, rest 0.4 / 1.4;
+then the memfd write 4.1, the slot indexes 4.0 and the network index 0.9 in the read, all on
+one thread. What is left is the network objects' strings (class, variable name and type, three
+allocations per variable; a layout-based restore or interned names would halve their read), the
+first touch of the heap in a new process (16k page faults at 99.5k, about 8 ms of CPU spread over
+the threads) and 5 wake-ups (0.02 to 0.1 ms each when the host is not saturated).
+
+**Not done, and why.** A parallel memfd write through a shared mapping was tried and left out: no
+gain over write(2) that the noise could show. Moving the held-frame release and the READY off the
+critical path: the release is 0.02 ms and the READY to the front 0.05 ms in the timeline; there
+is nothing to take. A persistent thread pool and a pre-faulted heap in the new bank: not built
+(the restore takes 347 page faults at 2.6k and 8k to 15k at 99.5k; not measured what pre-faulting
+saves).
+
+**Pre-copy** (the old bank streams a full snapshot while it runs, only the changes follow at the
+stand) was evaluated, not built. `bench::dirtybench`, 8 players acting every 200 ms: in 0.25 s 1
+of 99549 world objects, 3 of 10312 inventories and 11 of 14852 network objects differ (1 of 49,
+1 of 6, 2 of 8 chunks); in 5 s on the 2.6k world 25 of 2640 world objects, 8 of 291 inventories,
+14 of 427 network objects (every one of them in one chunk of 2048). So the world objects, the
+inventories and the network objects (92% of the bytes and 94% of the CPU) would leave the stand
+almost entirely: what is left in the stand at 99.5k is the machines, the rest and the water (CPU
+2.6 ms to write and 6.3 ms to read), the dirty chunks and the wake-ups. It needs dirty tracking in `Slots` (its mutators are get_mut, values_mut,
+insert, remove, retain: feasible) and in the network objects' map, two new frames, an assembly of
+the new bank's state from a base and a delta that must give the same slot order and free lists,
+twice the memory for the transfer, and a failure path (old bank resumes while the new one holds
+half a world). Not worth it at 99.5k: the stand is 40 to 90 ms; it would be at several hundred
+thousand objects, or if the stand must stay under 20 ms at 100k.
+
+**Around the stand** (not part of it): downloading v0.6.2 from GitHub 1.2 s (4.6 MB), its sha256
+0.01 s, unpacking 0.1 s, `bank-info` 0.01 s. The new bank is up and says HELLO 69 ms after the
+front spawns it (tables and scenes: 66 MiB resident; the live bank with the 99.5k world holds
+181 MiB). The 120 s load deadline is not near. A standby bank kept ready would save those 70 ms
+of an update that takes seconds and cost 66 MiB all the time: not worth it.
+
+**Deleted** (owner rule: no legacy support): `migrate` and its steps for formats 1 and 2, the
+JSON reading path of format 3, `snapshot_json`, the format-1 test; `reads` is `[FORMAT]`.
+
 ### Not verified
 
 - **Steam.** Steam connections, their `Split<n>` handling and the invite code live in the
@@ -269,9 +352,9 @@ small world the stand is 6 to 11 ms with the check (1 to 2 ms without it).
   (the same JSON fields and asset names as GitHub's API and `make dist`); GitHub was not
   contacted. Its redirects to the asset storage go through ureq's default redirect handling,
   untested here.
-- **Across releases.** Every flip ran between two banks of the same build; `migrate` has no
-  step yet, and a release from before this one has no `bank-info`, so the first hot update
-  possible is from this release to a later one.
+- **Across releases.** A flip between two releases of the same format is the same as one between
+  two banks of one build. Nothing is migrated: a release of another format needs
+  `pcds upgrade --restart`.
 - **Front restarts.** Updating the front is a restart (`pcds upgrade --restart`; in a container
   also in place, see docs/docker.md): every player reconnects. Keeping the UDP socket and the
   sessions across it is not built; the design note below ("Updating the front without dropping
@@ -486,30 +569,32 @@ acceptance test passed):
 
 ### The snapshot format and its versions
 
-A snapshot is two lines: a head `{"format":1,"game_version":"2.103"}` and the state. Rust
-layouts are not stable across builds, so state crosses a flip only serialized, never as shared
-memory. `restore` (spike: `handoff.rs`):
+A snapshot is a head line `{"format":5,"game_version":"2.103"}` and the state in the binary
+codec of `bincodec.rs` (serde's data model with no names and no tags: a struct is its fields back
+to back; integers of two bytes and more, lengths and variants are LEB128, zigzag when signed;
+floats and bytes are fixed width; a float array that is all zeros is one byte; a `Value` is its
+JSON text; the types are read as the types they were written as, so it is exact, and NaN and
+infinity keep their bits, which JSON could not carry). The body is a directory (`u32 n`, then
+`n * (u8 kind, u32 entries, u64 length)`) and the parts back to back: REST (the game with its big
+collections left empty), MACHINES, WATER, and chunks of 2048 entries of the world objects, the
+inventories and the network objects, in order. The parts are independent: they are encoded and
+decoded on up to 8 threads (`PCDS_DEV=flip-threads=N`), and the chunks of the world objects and
+inventories are read straight into their final `Vec`. Rust layouts are not stable across builds,
+so state crosses a flip only serialized, never as shared memory. `restore` (`handoff.rs`):
 
 - refuses a snapshot made on other game tables (state holds indices into the tables);
-- reads its own `FORMAT` directly;
-- reads the previous format by `migrate`, which edits the JSON before it is read (rename a
-  field, fill a new one, convert a value): each release carries the step from the one before,
-  as firmware migrates its data sector on boot;
-- refuses anything else, and the old bank goes on. A unit test checks the refusals.
+- reads `FORMAT` and nothing else: there is no `migrate` and there are no older formats. A
+  release that changes the state's shape or the encoding bumps `FORMAT`; its bank-info says
+  `reads: [FORMAT]`, so the front refuses a hot flip between releases of different formats and
+  says to use `pcds upgrade --restart VERSION` (the world then loads from the save); a rollback
+  across a format bump is refused the same way. A snapshot kept on disk by an older release is
+  moved aside (`world.json.snapshot.unusable-*`) and the world starts from the save;
+- needs a field added to the state to be added in the format as well: there are no defaults, a
+  snapshot is read in full or refused. `tests::a_snapshot_restores_only_in_its_format_and_on_its_tables`
+  checks the refusals.
 
-Rules for releases: a new field gets `#[serde(default)]` and needs no new format; a field
-renamed, removed or changed in meaning bumps `FORMAT` and adds its step to `migrate`. CI keeps
-a snapshot written by the previous release and restores it in the new build (the acceptance
-test, across versions). Flipping back after a confirmed flip (B to A) needs A to read B's
-snapshot; with additive changes only, B can write A's format by leaving its new fields out.
-When that is not possible, flipping back goes through the save, and players reconnect.
-
-JSON is self-describing, which is what makes `migrate` easy, and the spike's format is exact
-(300 handoffs, bit-exact output). Its weak spots are non-finite floats (an `f32` holding one
-fails the restore loudly, so the old bank resumes; an `Option<f32>` holding NaN would come back
-as `None` silently) and size. A binary self-describing format (CBOR, MessagePack) keeps the
-easy migrations, removes both weak spots and shrinks the snapshot, at the cost of a new
-dependency.
+`verify` (`PCDS_DEV=flip-verify`, tests) reads the snapshot again as a game, writes it and the restored
+game as JSON and compares them without the clocks and the order of sets.
 
 ### Acceptance test results
 
@@ -587,8 +672,8 @@ as after a long frame); for the pauses measured, clients' network time sees abou
 
 - **Frame protocol.** HELLO carries `PROTOCOL`; the front refuses a bank with another one
   before stopping anything. A release that changes the frames also needs a front update.
-- **Snapshot format and tables.** As above: `FORMAT` in the head, `migrate` for the previous
-  one, refusal otherwise; the game version in HELLO and in the head (the refactor should add
+- **Snapshot format and tables.** As above: `FORMAT` in the head, `reads` an exact match,
+  refusal otherwise; the game version in HELLO and in the head (the refactor should add
   the tables' build id). A game update is a cold restart in any case: the players' clients must
   update too, and old clients are refused.
 - **Health check.** The spike's check is READY within 5 s (restored without error). A stricter
@@ -724,8 +809,8 @@ Tools, unchanged, in the same binary: `load.rs`, `probe.rs` (both use `utp.rs` a
   chatting, sorting). Drones in flight, meteor events, animals, rockets, world instances and
   deconstructions are serialized by the same derives but were not seen to matter in a run. A
   bench world with them running would close that.
-- **Across releases.** Both sides of every flip ran the same build; `migrate` has no step yet
-  and the format rules are not tested against a real older release.
+- **Across releases.** Both sides of every flip ran the same build; there is no migration (a
+  release of another format is installed with a restart).
 - **Banks on disk.** The bank directories, the active pointer and the updater were not built;
   the spike's front starts its own binary. The download and the sha256 check are
   `install.sh`'s, not rerun against GitHub.

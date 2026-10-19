@@ -74,22 +74,20 @@ fn the_example_plugins_run_in_the_game_and_their_state_goes_through_a_hot_update
 
     // The hot update: the state goes into the snapshot, the next bank prepares and starts its plugins from it.
     checkpoint(&mut g, Some(limits::FLIP_BUDGET));
-    let snapshot = crate::handoff::snapshot(&g).unwrap();
-    assert!(snapshot.contains("\"plugins\":{\"saved\":{\"states\":{\"hello-stats\":"), "the plugin's state is in the snapshot");
+    let snapshot = crate::handoff::snapshot(&mut g).unwrap();
+    assert!(snapshot.windows(11).any(|w| w == b"hello-stats"), "the plugin's state is in the snapshot");
     let dirs = crate::test_data().unwrap();
     let (n, d, s) = crate::tables(dirs);
     let scenes = crate::scene_tables(dirs, &n, &d);
     let mut next = crate::handoff::restore(n, d, s, &snapshot, scenes).unwrap();
-    crate::handoff::verify(&next, snapshot.as_bytes()).unwrap();
+    crate::handoff::verify(&next, &snapshot).unwrap();
+    let carried = serde_json::to_value(&next).unwrap();
+    assert!(carried["ext"]["plugins"]["saved"]["states"]["hello-stats"].is_object(), "the restored game carries the plugin's state: {}", carried["ext"]["plugins"]["saved"]);
     assert!(next.ext.plugins.host.is_none() && next.ext.plugins.interest == 0, "a restored game has no host until the bank attaches one");
     start(&mut next, &dir);
     next.net.out.clear();
     send_scene(&mut next, 1, "ChatHandler.SendChatMessageServerRpc", &[json!("!uses")]);
     assert!(chat_out(&next).iter().any(|(_, t)| t == "!stats was used 1 times, !uses 2 times on this world"), "the counters went on: {:?}", chat_out(&next));
-
-    // An older snapshot, from before plugins, restores with no plugin state.
-    let plain: Value = serde_json::from_str(snapshot.split_once('\n').unwrap().1).unwrap();
-    assert!(plain["ext"]["plugins"]["saved"]["states"].is_object());
 }
 
 #[test]
