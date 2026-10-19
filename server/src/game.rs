@@ -1370,9 +1370,6 @@ pub mod tests {
             let mut w = Writer::new();
             w.packed_u64(client).packed_u64(object).packed_u16(behaviour).packed_u32(hash).bytes(&body);
             let message = w.0;
-            if std::env::var_os("PCDS_FUZZ_TRACE").is_some() {
-                eprintln!("FUZZ {round} {name} {}", Value::Array(args.clone()).to_string().chars().take(200).collect::<String>());
-            }
             let mut outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.incoming_rpc(client, &message))).err().map(|e| (name.clone(), e));
             if outcome.is_none() && round % 50 == 0 {
                 g.time += 0.7;
@@ -1380,11 +1377,6 @@ pub mod tests {
             }
             // The main loop sends and clears the queue every tick.
             g.net.out.clear();
-            if std::env::var_os("PCDS_FUZZ_TRACE").is_some() && round % 500 == 0 {
-                let texts: usize = g.wos.values().map(|w| w.text.len()).sum();
-                let items: usize = g.inventories.values().map(|i| i.items.len()).sum();
-                eprintln!("SIZES {round} wos={} inventories={} items={items} net={} timers={} watchers={} saved={} texts={texts} unhandled={}", g.wos.len(), g.inventories.len(), g.net.objects.len(), g.timers.0.len(), g.watchers.len(), g.saved_players.len(), g.unhandled.len());
-            }
             if let Some((what, e)) = outcome {
                 let why = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
                 let at = WHERE.lock().unwrap().clone();

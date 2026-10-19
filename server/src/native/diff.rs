@@ -132,11 +132,11 @@ fn scene_files(dir: &str) -> Vec<String> {
 
 pub fn run(args: &[String]) {
     let (Some(expected), Some(actual)) = (args.first(), args.get(1)) else {
-        eprintln!("usage: pcds tables-diff EXPECTED_DIR ACTUAL_DIR [SECTION]");
+        eprintln!("usage: pcds tables-diff EXPECTED_DIR ACTUAL_DIR [SECTION [SHOWN_PER_FILE]]");
         std::process::exit(2);
     };
     let only = args.get(2).map(String::as_str);
-    let show = std::env::var("PCDS_DIFF_SHOW").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    let show = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(8);
     match diff(expected, actual, only, show) {
         Ok(0) => println!("no differences"),
         Ok(n) => {

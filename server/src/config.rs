@@ -565,9 +565,6 @@ mod tests {
         ("PCDS_TARBALL_URL", "install.sh: a release tarball to install instead of GitHub's latest (with its .sha256 beside it)."),
     ];
 
-    /// Names that are still read while the commits that retire them are not made.
-    const PENDING: &[&str] = &["PCDS_DIFF_SHOW", "PCDS_REACH_IL", "PCDS_WRECKS_TRACE", "PCDS_NEW_WORLD", "PCDS_REVIEW_CHESTS", "PCDS_REVIEW_LOOSE", "PCDS_REVIEW_DEMANDS", "PCDS_REVIEW_GROWING", "PCDS_FUZZ_TRACE"];
-
     /// (file, text) of every program source file's non-test part: up to its `#[cfg(test)] mod
     /// ...tests`, without the files that are test code only and without this one (which names
     /// them all).
@@ -632,7 +629,7 @@ mod tests {
     }
 
     fn known(name: &str) -> bool {
-        knob_for(name).is_some() || PROCESS_ENV.iter().any(|v| v.name == name) || RETIRED.iter().any(|(n, _)| *n == name) || TEST_ENV.iter().any(|(n, _)| *n == name) || PENDING.contains(&name)
+        knob_for(name).is_some() || PROCESS_ENV.iter().any(|v| v.name == name) || RETIRED.iter().any(|(n, _)| *n == name) || TEST_ENV.iter().any(|(n, _)| *n == name)
     }
 
     /// A PCDS_ name anywhere in the program, its tests, the scripts and the images is a KNOBS
