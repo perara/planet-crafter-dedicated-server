@@ -1172,10 +1172,15 @@ def report(t, out, run, rules_path, cs_dir=None):
         for tag, label, line, step in diffs:
             m = re.search(r'"msg": "create", "object": "([^"]+)"', line)
             if m:
-                made.setdefault((step, m.group(1)), set()).add(line[0])
+                body = json.loads(line[line.index('{'):])
+                body.pop('owner', None)
+                made.setdefault((step, m.group(1)), {})[line[0]] = body
         for tag, label, line, step in diffs:
             m = re.search(r'"object": "(new:[^"]+)"', line)
-            paired = not m or made.get((step, m.group(1)), set()) >= {'-', '+'}
+            sides = made.get((step, m.group(1)), {}) if m else {}
+            # Both sides created it, and alike in everything but who owns it (hash, flags, rotation,
+            # position): a rule for the owner of a drop never covers a different object.
+            paired = not m or (set(sides) >= {'-', '+'} and sides['-'] == sides['+'])
             if tag:
                 key = tuple(tag.split('|', 1))
             else:
