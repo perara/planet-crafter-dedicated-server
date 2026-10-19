@@ -153,6 +153,12 @@
   "line": "\"msg\": \"create\""
  },
  {
+  "class": "d",
+  "script": "^sweep_(feed|build_[123]|water|autocraft_AutoCrafter1_[123])$",
+  "line": "^worldObjects order at ",
+  "why": "the saved world objects come in the order they were made, and savediff pairs the new ones by group and place, else by rank: machines that make a random group (ore extractors and breakers, a built wreck's loot, a disintegrator's ingredients) and crops that grow on random spots reorder them (EXPECTED: randomness; the record counts are compared on their own line)"
+ },
+ {
   "class": "e",
   "script": "^sweep_water$",
   "tag": "^AlgaeGenerator[12]\\|",

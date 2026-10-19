@@ -78,6 +78,10 @@ the escape pod) so it does not take over a saved player.
   sequence without a species trait becomes (InventorySpawnContent: a random one of the
   AnimalList); the loot a built wreck container gets.
 
+The order of the new world objects in the save (they are saved in the order they were made)
+follows from these: savediff pairs them by group and place, else by rank, and a random group or
+spot reorders the pairing.
+
 Shown by running the reference twice (players: the items kept after dying; machines and
 energy: the grower's random state).
 
