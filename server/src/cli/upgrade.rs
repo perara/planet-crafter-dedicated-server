@@ -88,7 +88,7 @@ impl Ctx {
         let bank = running.map_or_else(|| updater::active(&banks), str::to_string);
         let held = updater::info(&banks, &bank)?;
         let (image, held) = (env!("CARGO_PKG_VERSION"), held["version"].as_str().unwrap_or("?").to_string());
-        let how = if held == image { "the image's release".to_string() } else if updater::newer(&held, image) {
+        let how = if held == image { "the image's version".to_string() } else if updater::newer(&held, image) {
             format!("newer than the image's: a hot update put it in /data/bin, and a bank newer than the image wins over it, so the image tag does not pin the server. 'pcds upgrade v{image} --restart' runs the image's release again; an image newer than the banks replaces them at its first start")
         } else {
             format!("older than the image's: the bank 'pcds upgrade --rollback' chose is kept (or the image's release could not be installed: see the log above). 'pcds upgrade v{image} --restart' runs the image's release")

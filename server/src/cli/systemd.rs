@@ -272,15 +272,15 @@ WantedBy=timers.target
     }
 }
 
-/// The pid of the supervisor of the server `front` (its parent) when that is `pcds container`
-/// or `pcds run`, which restart it in place.
+/// The pid of the supervisor of the server `front` (its parent) when that is `pcds container`,
+/// which restarts it in place.
 fn supervisor_of(front: &str) -> Option<i32> {
     let stat = fs::read_to_string(format!("/proc/{front}/stat")).ok()?;
     // pid (comm) state ppid ...: comm may hold spaces and parentheses.
     let ppid: i32 = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()?;
     let cmdline = fs::read(format!("/proc/{ppid}/cmdline")).ok()?;
     let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
-    let ours = args.first().is_some_and(|a| a.ends_with(b"/pcds") || *a == b"pcds") && matches!(args.get(1), Some(&b"container") | Some(&b"run"));
+    let ours = args.first().is_some_and(|a| a.ends_with(b"/pcds") || *a == b"pcds") && args.get(1) == Some(&&b"container"[..]);
     ours.then_some(ppid)
 }
 

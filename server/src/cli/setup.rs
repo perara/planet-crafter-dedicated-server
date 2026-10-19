@@ -181,6 +181,12 @@ impl Ctx {
     /// front's code once the front and its banks have ended (supervise). Returns only when it
     /// cannot start.
     pub fn run_server(&self) -> Result {
+        self.start_front(true)
+    }
+
+    /// run_server(); `install`: whether this program goes into a bank first (the container's
+    /// start did that already, and said what it found once).
+    fn start_front(&self, install: bool) -> Result {
         // By hand while the service runs it (under the unit, this process is its main one).
         if !self.container && self.active()? {
             let pid = self.server_pid().unwrap_or_default();
@@ -209,7 +215,9 @@ impl Ctx {
         }
         // A newer build into a bank is not what the start needs: when it fails (a full disk),
         // the server starts from the banks as they are.
-        if let Err(e) = self.install_beside(None) {
+        if install
+            && let Err(e) = self.install_beside(None)
+        {
             eprintln!("pcds: {} was not put into a bank ({e}); starting the server from bank {}", self.exe.display(), updater::active(&self.banks()));
         }
         // The tables of the bank that runs (installing may have changed which one).
@@ -498,7 +506,7 @@ impl Ctx {
         }
         self.ensure_steamclient();
         say("manage it with: docker exec CONTAINER pcds worlds | players | rules | gui");
-        self.run_server()
+        self.start_front(false)
     }
 }
 
