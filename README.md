@@ -315,8 +315,9 @@ The admin API listens on 127.0.0.1. To reach the web page from another machine, 
 tunnel (`ssh -L 7782:127.0.0.1:7782 server`) rather than exposing it.
 
 To run a second server on the same machine, give it its own folder and unit names:
-`PCDS_HOME=/srv/world2 PCDS_UNIT=pcds-world2 ./pcds setup ...` (and the same two variables for
-every later `pcds` command), with other ports in its `server.env`.
+`PCDS_HOME=/srv/world2 PCDS_UNIT=pcds-world2 PCDS_LISTEN=0.0.0.0:7778 PCDS_ADMIN=127.0.0.1:7783
+./pcds setup ...` (the two ports only seed its first `server.env`; `PCDS_HOME` and `PCDS_UNIT`
+again for every later `pcds` command).
 
 ## Server rules
 

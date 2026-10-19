@@ -102,14 +102,17 @@ impl Ctx {
             return Ok(());
         }
         super::mkdir(&self.run)?;
-        let port = crate::env("PCDS_PORT").unwrap_or_else(|| "7777".into());
-        let admin = crate::env("PCDS_ADMIN_BIND").unwrap_or_else(|| "127.0.0.1:7782".into());
+        // The first file starts from the environment's addresses (the Docker image sets PCDS_ADMIN,
+        // a second server gets PCDS_LISTEN), so a setting that moved is refused here too.
+        crate::config::check_env(crate::env)?;
+        let listen = crate::env("PCDS_LISTEN").unwrap_or_else(|| "0.0.0.0:7777".into());
+        let admin = crate::env("PCDS_ADMIN").unwrap_or_else(|| "127.0.0.1:7782".into());
         let token = super::token()?;
         let text = format!(
             "# Planet Crafter dedicated server settings. Apply with: pcds restart
 # Saves, backups, updates and the rest of what is tuned are rules (run/rules.json, the admin page).
 # Direct IP (UDP): players join with HOST:PORT; \"off\" disables.
-PCDS_LISTEN=0.0.0.0:{port}
+PCDS_LISTEN={listen}
 # Invite codes through Steam (an anonymous Steam game server; needs steamclient.so,
 # see README); \"off\" disables.
 PCDS_STEAM=on

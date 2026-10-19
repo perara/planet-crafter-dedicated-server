@@ -234,6 +234,17 @@ fn retired_settings_stop_the_start_and_name_their_replacement() {
     let out = Command::new(PCDS).arg("serve").arg(dir.join("no-tables")).arg(dir.join("world.json")).env("PCDS_TRACE", "1").output().unwrap();
     assert_eq!(out.status.code(), Some(2), "{}", text(&out));
     assert!(text(&out).contains("PCDS_TRACE is now the rule log.trace"), "{}", text(&out));
+    // What an older launcher sets for the front is taken when it is where PCDS_HOME has it, and
+    // stops the front when it is not.
+    let home = dir.join("run");
+    let serve = |vars: &[(&str, &Path)]| Command::new(PCDS).arg("serve").arg(dir.join("no-tables")).arg(dir.join("world.json")).env("PCDS_HOME", &home).envs(vars.iter().copied()).output().unwrap();
+    let elsewhere = dir.join("elsewhere/rules.json");
+    let out = serve(&[("PCDS_RULES", &elsewhere)]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(text(&out).contains(&format!("PCDS_RULES={}, but this version reads {}", elsewhere.display(), home.join("rules.json").display())), "{}", text(&out));
+    let out = serve(&[("PCDS_BANKS", &dir.join("bin"))]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(text(&out).contains("PCDS_BANKS=") && text(&out).contains("PCDS_HOME/bin"), "{}", text(&out));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

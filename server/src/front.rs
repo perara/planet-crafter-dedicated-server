@@ -213,7 +213,7 @@ pub fn run(args: &[String]) {
         std::process::exit(2);
     };
     // Settings that are not what they should be stop the start, before anything is opened.
-    if let Err(e) = crate::config::check_env(crate::env) {
+    if let Err(e) = crate::config::check_env_tolerating(crate::env, crate::config::OLD_PLUMBING).and_then(|()| crate::config::check_old_plumbing(&crate::env, save)) {
         eprintln!("{e}");
         std::process::exit(2);
     }

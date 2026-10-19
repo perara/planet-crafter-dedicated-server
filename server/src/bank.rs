@@ -160,22 +160,13 @@ fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, data: crate:
     game
 }
 
-/// A file of the installation (rules.json, access.json): in PCDS_HOME, which pcds run gives the
-/// front and so its banks; a server started by hand without it keeps them beside the world.
-/// A front before 0.7 handed its banks the file's own path in PCDS_RULES or PCDS_ACCESS; one
-/// that names another file than this would have the bank read the wrong rules or bans in
-/// silence, so the bank ends there (the flip fails, the world goes on in the old bank).
+/// The bank ends before its hello on a file path it would read differently than the front says
+/// (config::installation_file): the flip fails, the world goes on in the old bank.
 fn installation_file(save_path: &str, name: &str, old_var: &str) -> String {
-    let path = match crate::env("PCDS_HOME") {
-        Some(home) => std::path::Path::new(&home).join(name),
-        None => std::path::Path::new(save_path).with_file_name(name),
-    };
-    let path = path.to_string_lossy().to_string();
-    if let Some(told) = crate::env(old_var).filter(|t| std::path::Path::new(t) != std::path::Path::new(&path)) {
-        eprintln!("bank: the front says {old_var}={told}, this version reads {path} (PCDS_HOME/{name}): move the file there, or restart the server so that pcds run starts a front of this version");
-        std::process::exit(1);
-    }
-    path
+    config::installation_file(&crate::env, save_path, name, old_var).unwrap_or_else(|e| {
+        eprintln!("bank: {e}");
+        std::process::exit(1)
+    })
 }
 
 fn rules_path(save_path: &str) -> String {
