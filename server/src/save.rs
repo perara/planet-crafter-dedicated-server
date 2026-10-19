@@ -43,8 +43,15 @@ fn split_outside_strings(text: &str, delimiter: char) -> Vec<&str> {
     parts
 }
 
-fn entries(section: &str) -> Vec<Value> {
-    split_outside_strings(section, '|').into_iter().map(str::trim).filter(|s| !s.is_empty()).filter_map(|s| serde_json::from_str(s).ok()).collect()
+/// The entries of a section; one that is not JSON (a save cut short, edited by hand) is an error:
+/// dropped quietly it would be gone from the next save.
+fn entries(section: &str) -> Result<Vec<Value>, String> {
+    split_outside_strings(section, '|')
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| serde_json::from_str(s).map_err(|e| format!("{e} in {}", s.chars().take(80).collect::<String>())))
+        .collect()
 }
 
 /// What JSONExport.SaveStringsInFile removes after serializing.
@@ -86,26 +93,34 @@ impl SaveFile {
     }
 
     pub fn load(path: &str) -> std::io::Result<SaveFile> {
-        Ok(SaveFile::from_text(&std::fs::read_to_string(path)?))
+        SaveFile::parse(&std::fs::read_to_string(path)?).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
+    /// A save that was written by this server or the game; panics on one that is not (tests,
+    /// the bench: `parse` and `load` say why).
+    #[cfg(test)]
     pub fn from_text(text: &str) -> SaveFile {
+        SaveFile::parse(text).unwrap_or_else(|e| panic!("not a save: {e}"))
+    }
+
+    pub fn parse(text: &str) -> Result<SaveFile, String> {
         let text = text.trim_start_matches('\u{feff}');
         let sections = split_outside_strings(text, '@');
         let section = |i: usize| sections.get(i).copied().unwrap_or("");
-        let first = |i: usize| entries(section(i)).into_iter().next().unwrap_or(Value::Null);
-        SaveFile {
-            world: first(0),
-            planets: entries(section(1)),
-            players: entries(section(2)),
-            objects: entries(section(3)),
-            inventories: entries(section(4)),
-            stats: first(5),
-            messages: entries(section(6)),
-            story_events: entries(section(7)),
-            settings: first(8),
-            procedural: entries(section(9)),
-        }
+        let list = |i: usize| entries(section(i)).map_err(|e| format!("section {i}: {e}"));
+        let first = |i: usize| list(i).map(|v| v.into_iter().next().unwrap_or(Value::Null));
+        Ok(SaveFile {
+            world: first(0)?,
+            planets: list(1)?,
+            players: list(2)?,
+            objects: list(3)?,
+            inventories: list(4)?,
+            stats: first(5)?,
+            messages: list(6)?,
+            story_events: list(7)?,
+            settings: first(8)?,
+            procedural: list(9)?,
+        })
     }
 
     pub fn to_text(&self) -> String {
@@ -432,6 +447,21 @@ mod tests {
             let _ = tx.send(save.to_text().len());
         });
         rx.recv_timeout(Duration::from_secs(60)).expect("the text of 50 000 objects in under a minute");
+    }
+
+    /// An entry that is not JSON (a save cut short) stops the load, naming it: it would
+    /// otherwise be dropped, and gone from the next save.
+    #[test]
+    fn a_save_with_a_damaged_entry_is_refused() {
+        let good = "\u{feff}\r{\"terraTokens\":0}\r@\r\r@\r\r@\r{\"id\":5,\"gId\":\"Iron\"}|\n{\"id\":6,\"gId\":\"Ir";
+        let err = SaveFile::parse(good).err().expect("refused");
+        assert!(err.contains("section 3") && err.contains("\"gId\":\"Ir"), "{err}");
+        let dir = std::env::temp_dir().join(format!("pcds-damaged-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("w.json");
+        std::fs::write(&path, good).unwrap();
+        assert_eq!(SaveFile::load(path.to_str().unwrap()).err().map(|e| e.kind()), Some(std::io::ErrorKind::InvalidData));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
