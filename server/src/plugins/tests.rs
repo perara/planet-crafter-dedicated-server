@@ -450,3 +450,81 @@ fn the_admin_json_shows_what_was_asked_what_was_granted_and_what_went_wrong() {
     assert_eq!(j["limits"]["fuelPerEvent"], limits::FUEL_PER_EVENT);
 }
 
+/// docs/plugins-api.md says what the code does: the kinds, the capabilities, the imports and
+/// exports, the limits, the endpoints and the version. A change on one side fails here until the
+/// other follows.
+#[test]
+fn the_api_document_matches_the_code() {
+    let doc = include_str!("../../../docs/plugins-api.md");
+    let has_row = |row: &str| doc.lines().any(|l| l.starts_with(row));
+    for k in Kind::ALL {
+        assert!(has_row(&format!("| {} | `{}` |", k as u32, k.name())), "the event table lacks kind {} `{}`", k as u32, k.name());
+    }
+    for (name, allows) in pcds_plugin_api::caps::ALL {
+        assert!(has_row(&format!("| `{name}` | {allows}")), "the capability table lacks `{name}` | {allows}");
+    }
+    for import in ["log", "query", "say", "tell", "kick", "teleport", "rules_patch"] {
+        assert!(has_row(&format!("| `pcds.{import}` |")), "pcds.{import}");
+        assert!(super::wasm::IMPORTS.contains(&import));
+    }
+    assert_eq!(super::wasm::IMPORTS.len(), 7);
+    for export in ["memory", "pcds_abi", "pcds_alloc", "pcds_free", "pcds_event", "pcds_load", "pcds_save", "pcds_state_version"] {
+        assert!(has_row(&format!("| `{export}` |")), "export {export}");
+    }
+    assert!(doc.contains(&format!("`ABI {}.{}`", pcds_plugin_api::ABI_MAJOR, pcds_plugin_api::ABI_MINOR)), "the ABI version");
+    assert!(doc.contains(&format!("`handoff::FORMAT` {}", crate::handoff::FORMAT)), "the snapshot format the plugin part is added to");
+    let limit_rows = [
+        ("FUEL_PER_EVENT", limits::FUEL_PER_EVENT),
+        ("MAX_FUEL_PER_EVENT", limits::MAX_FUEL_PER_EVENT),
+        ("FUEL_PER_SAVE", limits::FUEL_PER_SAVE),
+        ("MAX_FUEL_PER_SAVE", limits::MAX_FUEL_PER_SAVE),
+        ("FUEL_LOAD", limits::FUEL_LOAD),
+        ("MEMORY_PAGES", limits::MEMORY_PAGES as u64),
+        ("MAX_MEMORY_PAGES", limits::MAX_MEMORY_PAGES as u64),
+        ("MAX_MODULE_BYTES", limits::MAX_MODULE_BYTES as u64),
+        ("TICK_EVERY_MS", limits::TICK_EVERY_MS as u64),
+        ("MIN_TICK_MS", limits::MIN_TICK_MS as u64),
+        ("ACTIONS_PER_CALL", limits::ACTIONS_PER_CALL as u64),
+        ("ACTIONS_PER_SECOND", limits::ACTIONS_PER_SECOND as u64),
+        ("RULE_CHANGES_PER_SECOND", limits::RULE_CHANGES_PER_SECOND as u64),
+        ("LOG_LINES_PER_SECOND", limits::LOG_LINES_PER_SECOND as u64),
+        ("LOG_LINE_CHARS", limits::LOG_LINE_CHARS as u64),
+        ("SAY_CHARS", limits::SAY_CHARS as u64),
+        ("MAX_STATE_BYTES", limits::MAX_STATE_BYTES as u64),
+        ("MAX_PAYLOAD", limits::MAX_PAYLOAD as u64),
+        ("MAX_FAULTS", limits::MAX_FAULTS as u64),
+        ("MAX_PLUGINS", limits::MAX_PLUGINS as u64),
+    ];
+    for (name, value) in limit_rows {
+        assert!(has_row(&format!("| `{name}` | {value} |")), "the limits table: `{name}` should be {value}");
+    }
+    // And the other way: every limit the document lists is one the code has.
+    let section = doc.split("## Limits").nth(1).unwrap().split("\n## ").next().unwrap();
+    for row in section.lines().filter(|l| l.starts_with("| `")) {
+        let name = row.trim_start_matches("| `").split('`').next().unwrap();
+        assert!(limit_rows.iter().any(|(n, _)| *n == name), "the document lists a limit the code does not have: {name}");
+    }
+    assert!(doc.contains("`TICK_BUDGET` (2 ms)") && limits::TICK_BUDGET.as_millis() == 2);
+    assert!(doc.contains("`FLIP_BUDGET` (25 ms)") && limits::FLIP_BUDGET.as_millis() == 25);
+    assert!(doc.contains("`SLOW_CALL` (5 ms)") && limits::SLOW_CALL.as_millis() == 5);
+    assert!(doc.contains("`FAULT_WINDOW` is 60 seconds") && limits::FAULT_WINDOW.as_secs() == 60);
+    let admin = include_str!("admin.rs");
+    for route in ["GET /api/plugins", "POST /api/plugins/reload", "POST /api/plugins/enable", "POST /api/plugins/disable", "POST /api/plugins/events"] {
+        assert!(doc.contains(&format!("`{route}`")), "{route} in the document");
+        let (method, path) = route.split_once(' ').unwrap();
+        assert!(admin.contains(&format!("(\"{method}\", \"{path}\")")), "{route} in admin.rs");
+    }
+    for status in ["running", "pending", "disabled", "changed", "invalid", "incompatible", "failed"] {
+        assert!(doc.contains(&format!("`{status}`")), "status {status}");
+    }
+    for key in ["id", "name", "version", "description", "authors", "license", "kind", "entry", "abi", "min_server", "capabilities", "fuel_per_event", "fuel_per_save", "memory_pages", "tick_every_ms", "subscribe", "rpc"] {
+        assert!(doc.contains(&format!("\n{key} = ")) || doc.contains(&format!("\n{key} =")), "manifest key {key}");
+    }
+    for var in ["name", "client", "players", "planet", "time", "args", "arg1", "arg2", "arg3"] {
+        assert!(doc.contains(&format!("`{{{var}}}`")), "variable {var}");
+    }
+    // The guide's steps use commands that exist.
+    for cmd in ["list", "check", "install", "enable", "disable", "reload", "new"] {
+        assert!(include_str!("../cli/plugin.rs").contains(&format!("[\"{cmd}\"")) || include_str!("../cli/plugin.rs").contains(&format!("[\"{cmd}\",")), "pcds plugin {cmd}");
+    }
+}

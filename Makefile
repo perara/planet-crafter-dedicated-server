@@ -60,6 +60,7 @@ dist: build
 	rm -rf dist/$(DIST) && mkdir -p dist/$(DIST)/web
 	cp $(RELEASE)/pcds $(RELEASE)/libsteam_api.so install.sh README.md LICENSE dist/$(DIST)/
 	cp server/web/index.html dist/$(DIST)/web/
+	cp -r docs dist/$(DIST)/docs
 	tar -C dist -czf dist/$(DIST).tar.gz $(DIST)
 	cd dist && sha256sum $(DIST).tar.gz > $(DIST).tar.gz.sha256
 
