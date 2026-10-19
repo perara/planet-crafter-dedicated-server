@@ -363,7 +363,10 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     if root(game, group, "RequireEnergy").is_some() {
         let planet = game.wos[&wo].planet_hash();
         let enough = crate::energy::has_enough(game, planet);
-        let runs = crate::energy::check_energy_status(game, wo, enough, &mut None);
+        // Loading: one set of water boxes for every machine (see Game::load_water).
+        let mut shared = game.load_water.take();
+        let runs = crate::energy::check_energy_status(game, wo, enough, shared.as_mut().unwrap_or(&mut None));
+        game.load_water = shared;
         game.ext.machines.energy.insert(wo, runs);
     }
     // MachineGrowerVegetationStatic.SetWorldObjectForGrower.

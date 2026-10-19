@@ -414,6 +414,22 @@ fn handoff() {
     assert!(equal, "the handed-off run must send and save exactly what the straight run does");
 }
 
+/// The CPU time of this thread (a loaded host stretches wall time, not this).
+#[derive(Clone, Copy)]
+struct Cpu(Duration);
+
+impl Cpu {
+    fn now() -> Cpu {
+        let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: clock_gettime fills the timespec it is given.
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+        Cpu(Duration::new(t.tv_sec as u64, t.tv_nsec as u32))
+    }
+    fn elapsed(&self) -> Duration {
+        Cpu::now().0 - self.0
+    }
+}
+
 /// Resident memory of this process, in KiB.
 fn rss_kib() -> u64 {
     std::fs::read_to_string("/proc/self/statm").ok().and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok()).unwrap_or(0) * 4
@@ -484,22 +500,22 @@ fn scale() {
     let (net_data, data, spec) = crate::tables(e.dir);
     let scenes = crate::scene_tables(e.dir, &net_data, &data);
     let tables_rss = rss_kib();
-    let t = Instant::now();
+    let t = Cpu::now();
     let save = SaveFile::load(&e.path).unwrap();
     println!("scale: heap after tables {} MiB; tables {} MiB rss; read+parse save {:?}, {} objects", heap_bytes() >> 20, tables_rss >> 10, t.elapsed(), save.objects.len());
-    let t = Instant::now();
+    let t = Cpu::now();
     let mut g = Game::with_clock(net_data, data, spec, save, scenes, Some(0.0));
     println!("scale: Game::new {:?}, {} world objects, {} network objects, rss {} MiB (+{} MiB), heap {} MiB", t.elapsed(), g.wos.len(), g.net.objects.len(), rss_kib() >> 10, (rss_kib() - tables_rss) >> 10, heap_bytes() >> 20);
-    let t = Instant::now();
+    let t = Cpu::now();
     let snapshot = g.snapshot();
     let took = t.elapsed();
     let peak = rss_kib();
-    let t = Instant::now();
+    let t = Cpu::now();
     let text = snapshot.to_text();
     println!("scale: snapshot (JSON trees) {took:?}, to_text {:?}, {} bytes, rss {} MiB", t.elapsed(), text.len(), peak >> 10);
     drop(snapshot);
     let before = rss_kib();
-    let t = Instant::now();
+    let t = Cpu::now();
     let direct = g.save_text();
     println!("scale: save_text (no trees) {:?}, rss {} MiB (+{} MiB)", t.elapsed(), rss_kib() >> 10, rss_kib().saturating_sub(before) >> 10);
     assert!(direct == text, "save_text is the snapshot's text");
@@ -507,16 +523,16 @@ fn scale() {
     let dir = std::env::temp_dir().join(format!("pcds-scale-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("world.json").to_string_lossy().to_string();
-    let t = Instant::now();
+    let t = Cpu::now();
     snapshot.write(&path).unwrap();
     println!("scale: write (to_text + write_atomic) {:?}", t.elapsed());
-    let t = Instant::now();
+    let t = Cpu::now();
     crate::save::backup(&path, Duration::ZERO, 24).unwrap();
     println!("scale: backup {:?}", t.elapsed());
-    let t = Instant::now();
+    let t = Cpu::now();
     let back = SaveFile::load(&path).unwrap();
     println!("scale: reload {:?} ({} objects)", t.elapsed(), back.objects.len());
-    let t = Instant::now();
+    let t = Cpu::now();
     let h = crate::handoff::snapshot(&g).unwrap();
     println!("scale: handoff snapshot {:?}, {} bytes", t.elapsed(), h.len());
     println!("scale: prefabs parsed (of all): {:?}", g.data.group_prefabs.parsed());

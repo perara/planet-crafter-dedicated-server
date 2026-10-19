@@ -230,6 +230,11 @@ pub struct Game {
     /// Chat rate and RPC work per client.
     #[serde(default)]
     pub limits: crate::handlers::Limits,
+    /// While the world loads: the water boxes the machines' energy checks share (None: not
+    /// loading, each check makes its own; Some(None): not made yet). They only move with
+    /// terraformation, which stands still while the world is placed.
+    #[serde(skip)]
+    pub load_water: Option<Option<Vec<([f32; 3], [f32; 4], [f32; 3])>>>,
 }
 
 /// An RPC message's method hash (after sender, object and behaviour).
@@ -341,6 +346,7 @@ impl Game {
             refused_inventories: Default::default(),
             save_requested: false,
             limits: Default::default(),
+            load_water: None,
         };
         game.sim_time = sim_time;
         game.change_generation_for_groups();
@@ -401,11 +407,13 @@ impl Game {
             self.change_state_index(*id);
         }
         // PlaceAllWorldObjects.
+        self.load_water = Some(None);
         for id in ids {
             if self.wos.get(&id).is_some_and(|w| w.is_placed()) {
                 self.instantiate(id, true, 0);
             }
         }
+        self.load_water = None;
         crate::hooks::init(self);
         crate::unlocks::add_unlocked_groups(self);
         // Spawns before any client connects go out with ConnectionApproved instead.
