@@ -308,7 +308,7 @@ impl Front {
         ours.set_nonblocking(true).map_err(|e| e.to_string())?;
         let exe = self.exe(bank);
         let mut command = Command::new(&exe);
-        command.arg("bank").arg(&self.dir).arg(&self.save).env("PCDS_IPC_FD", "3").env("PCDS_BANK", bank);
+        command.arg("bank").arg(&self.dir).arg(&self.save).env("PCDS_IPC_FD", "3");
         if let Some(f) = fail {
             command.env("PCDS_BANK_FAIL", f);
         }
