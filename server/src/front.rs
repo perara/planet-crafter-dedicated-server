@@ -68,7 +68,7 @@ pub const STOP_GRACE: Duration = Duration::from_secs(30);
 pub const BOOT_FAILED: i32 = 75;
 
 /// A new bank's tables and world load in seconds; the restore must be READY within this.
-const LOAD_DEADLINE: Duration = Duration::from_secs(120);
+pub const LOAD_DEADLINE: Duration = Duration::from_secs(120);
 const READY_DEADLINE: Duration = Duration::from_secs(5);
 /// Kicked: the reason first, the connection closed this much later.
 const KICK_DELAY: Duration = Duration::from_millis(300);

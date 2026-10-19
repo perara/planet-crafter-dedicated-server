@@ -26,6 +26,11 @@ const MAX_CONNECTIONS: usize = 64;
 const MAX_REQUEST: u64 = 64 << 10;
 const HEAD: Duration = Duration::from_secs(3);
 const DEADLINE: Duration = Duration::from_secs(10);
+/// How long the game loop may take to answer: 10 s, but the world controls stop and start the
+/// bank inside that loop (a save and a stop of up to 60 s, a load of up to 120 s: front.rs
+/// STOP_GRACE and LOAD_DEADLINE), so a switch is answered up to 200 s after, not as failed at 10.
+const ANSWER: Duration = Duration::from_secs(10);
+const WORLD_ANSWER: Duration = Duration::from_secs(200);
 
 pub struct Request {
     pub method: String,
@@ -84,6 +89,11 @@ impl Read for Deadline {
         self.0.set_read_timeout(Some(left))?;
         self.0.read(buf)
     }
+}
+
+/// How long a request's answer is waited for.
+fn answer_wait(path: &str) -> Duration {
+    if path.starts_with("/api/world/") { WORLD_ANSWER } else { ANSWER }
 }
 
 /// Equal strings, in time that does not depend on where they differ.
@@ -176,10 +186,11 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
         return respond(stream, status, "application/json", &json);
     }
     let (reply, answer) = channel();
+    let wait = answer_wait(&path);
     if tx.send(Request { method, path, body, reply }).is_err() {
         return respond(stream, 500, "application/json", "{\"error\":\"server stopping\"}");
     }
-    match answer.recv_timeout(Duration::from_secs(10)) {
+    match answer.recv_timeout(wait) {
         Ok((status, json)) => respond(stream, status, "application/json", &json),
         Err(_) => respond(stream, 500, "application/json", "{\"error\":\"the game loop did not answer\"}"),
     }
@@ -209,6 +220,18 @@ mod tests {
         let mut answer = String::new();
         let _ = s.read_to_string(&mut answer);
         answer
+    }
+
+    /// Stopping, starting and switching a world are answered when done, not failed at 10 s.
+    #[test]
+    fn world_controls_are_waited_for_as_long_as_they_may_take() {
+        let longest = crate::front::STOP_GRACE * 2 + crate::front::LOAD_DEADLINE;
+        for path in ["/api/world/stop", "/api/world/start", "/api/world/switch"] {
+            assert!(answer_wait(path) >= longest, "{path}");
+        }
+        for path in ["/api/status", "/api/worlds", "/api/worlds/file", "/api/save"] {
+            assert_eq!(answer_wait(path), ANSWER, "{path}");
+        }
     }
 
     #[test]
