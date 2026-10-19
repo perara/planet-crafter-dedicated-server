@@ -63,6 +63,13 @@
   "line": "\\(GeneticTrait\\)\\.(trt(Ind|Val)|color)|^worldObjects\\[\\d+\\] field order: ref \\['id', 'gId', ('color'|'trtInd')"
  },
  {
+  "class": "d",
+  "why": "the produce a player picks at a harvestable grower: each crop grows on a random spot of the grower's ring (GetRandomPosition: NextFloat) and the probe takes the one nearest the machine, so each run picks another object, with another id, place and rank in its step; the crop that regrows lands on another random spot (EXPECTED: randomness)",
+  "script": "^sweep_feed$",
+  "tag": "\\|harvest from |^player\\|final inventory$",
+  "line": "WorldObjectAssociatedProxy\\.GetWorldObjectId(Client|Server)Rpc|AddWorldObjectToInventoryServerRpc|\"msg\": \"(captured|create|destroy)\"|RetrieveInventoryClientRpc"
+ },
+ {
   "class": "b",
   "why": "time: the start save is just below TerraformStage4-Water; Prime's lake rises over the build land a little earlier on the reference (it ran before the probe joined), and RequireEnergy sets what is under water to energy 0 (EXPECTED: Time)",
   "tag": "world object details",
