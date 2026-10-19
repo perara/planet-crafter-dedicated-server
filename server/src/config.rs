@@ -446,7 +446,7 @@ mod tests {
 
     /// The names the tests and the installer use, which an installation never sets: each in the
     /// code that reads it (a test's own, or a tool's), with what it is for. Set by hand for the
-    /// tests and benchmarks (TEST_DATA, RNG_SEED, BENCH_*, FUZZ_*) or by a test for the child
+    /// tests and benchmarks (TEST_DATA, RNG_SEED, BENCH_*, SOAK_*, FUZZ_*) or by a test for the child
     /// process it starts (the others).
     pub const TEST_ENV: &[(&str, &str)] = &[
         ("PCDS_TEST_DATA", "The game tables the tests run on (default run/data/2.103); none skips the tests that need them (CI)."),
@@ -457,6 +457,9 @@ mod tests {
         ("PCDS_BENCH_ACTION_MS", "bench: each player acts this often (default: only moves)."),
         ("PCDS_BENCH_DUMP", "bench: a file for every message and the final save, to compare two runs."),
         ("PCDS_BENCH_HANDOFF", "bench handoff: seconds between handoffs (default half the run)."),
+        ("PCDS_SOAK_SECONDS", "soak_growth: game seconds to run (default 3600)."),
+        ("PCDS_SOAK_STEP", "soak_growth: seconds of game time per step (default 0.05)."),
+        ("PCDS_SOAK_REPORT", "soak_growth: seconds of game time between reports (default 900)."),
         ("PCDS_FUZZ_ROUNDS", "The RPC fuzz test's rounds (default 1500)."),
         ("PCDS_FUZZ_SEED", "The RPC fuzz test's seed."),
         ("PCDS_IPC_ECHO", "ipc test: the child process's socket file."),

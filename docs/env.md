@@ -51,7 +51,8 @@ For the end-to-end tests and the load and probe tools; the hooks are in the next
 | `flip-verify` | A bank that restores a snapshot checks its state equals the snapshot's (every flip). |
 | `test-faults` | POST /api/update takes failForTest, to make the next bank fail on purpose. |
 | `trust-loopback` | Believe the SteamID a direct-IP client from 127.0.0.1 claims. Never behind a UDP relay, where every player comes from 127.0.0.1. |
-| `bank-fail=restore\|protocol` | The front sets it for a bank: it dies on RESTORE, or says another protocol. |
+| `bank-fail=WHAT` | The front sets it for a bank (a test's failForTest): WHAT is restore (dies on RESTORE), protocol (says another protocol), slow-hello (holds its HELLO 4 s), slow-ready (holds its READY 2 s) or die-after-ready (ends 1 s after READY). |
+| `check-seconds=N` | The automatic update check every N seconds, not every update.checkHours hours. |
 
 ## Tests and tools
 
@@ -67,6 +68,9 @@ Read by test builds and tools, never by an installation. Set by hand for the ben
 | `PCDS_BENCH_ACTION_MS` | bench: each player acts this often (default: only moves). |
 | `PCDS_BENCH_DUMP` | bench: a file for every message and the final save, to compare two runs. |
 | `PCDS_BENCH_HANDOFF` | bench handoff: seconds between handoffs (default half the run). |
+| `PCDS_SOAK_SECONDS` | soak_growth: game seconds to run (default 3600). |
+| `PCDS_SOAK_STEP` | soak_growth: seconds of game time per step (default 0.05). |
+| `PCDS_SOAK_REPORT` | soak_growth: seconds of game time between reports (default 900). |
 | `PCDS_FUZZ_ROUNDS` | The RPC fuzz test's rounds (default 1500). |
 | `PCDS_FUZZ_SEED` | The RPC fuzz test's seed. |
 | `PCDS_IPC_ECHO` | ipc test: the child process's socket file. |
