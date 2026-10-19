@@ -132,7 +132,8 @@ so `--rollback` needs no download. A release that changes how the server's two p
 `pcds upgrade --restart VERSION` installs it with a restart, which disconnects every player
 (Steam players get a new invite code unless `PCDS_STEAM_TOKEN` is set). With the server stopped,
 `pcds upgrade` makes the release the one the next start runs. `PCDS_AUTO_UPDATE=on` in
-`server.env` does this by itself for each new release (off by default).
+`server.env` does this by itself for each new release (off by default). In Docker, see
+[Updating in Docker](#updating-in-docker).
 
 Other ways:
 - Run the installer again, or `./pcds up` in a newer release folder (move the old folder's `run/`
@@ -208,6 +209,35 @@ of 10 s would kill it during the save); Compose has `stop_grace_period: 90s`. `P
 a world, the newest save in `data/worlds/` runs, or a new world is made (`PCDS_NEW_WORLD`, for
 example `--planet Aqualis`, chooses its options). [compose.yaml](compose.yaml) does the same with
 `docker compose up -d`.
+
+### Updating in Docker
+
+Two ways, and they differ in what players notice:
+
+```bash
+docker exec pcds pcds upgrade          # a hot update inside the running container: players stay connected
+docker compose pull && docker compose up -d   # a new image: the container is replaced, every player disconnects
+```
+
+- **Hot update.** `pcds upgrade` (also the admin page's **Update now**, or `PCDS_AUTO_UPDATE=on`
+  in the container's environment, which checks daily and does it by itself) downloads the release
+  into `data/bin` and hands the running world over to it; the world pauses for the flip. The
+  container keeps running, so it needs the network to GitHub (`api.github.com` over https). It
+  replaces the game; the part that holds the sockets and Steam keeps running until the next restart
+  (`docker restart pcds`, or `docker exec pcds pcds upgrade --restart`, which restarts the server
+  inside the container and disconnects everyone). A release that cannot take over a running world
+  says so and names that command.
+- **New image.** The image's release goes into `data/bin` and runs only if it is newer than what
+  `data/bin` holds. So **a pinned image tag does not pin the server** once a hot update has run:
+  the newer release from `data/bin` keeps running. The container's log and `docker exec pcds pcds
+  status` say which release runs and why; `pcds upgrade vX.Y.Z --restart` goes back to a given one.
+- A hot update needs spare memory (about three times the running game, which is 70 MB for a small
+  world): with `--memory` set too low it is refused with the size to give, never killed.
+
+[docs/docker.md](docs/docker.md) has the rule in full, what `docker stop`, `kill` and crashes do, running
+with a read-only root and without root (`--user`, Kubernetes), and a Kubernetes manifest
+([docs/kubernetes.yaml](docs/kubernetes.yaml)). `make docker-test` runs a hot update inside a
+container end to end.
 
 ## Joining
 
@@ -500,7 +530,7 @@ platform, landing spots, seats, machine ranges), the code says so in a `ponytail
 
 ```bash
 make build      # server/target/release/pcds (make install links it as ~/.local/bin/pcds)
-make test       # also: make lint, make docker, make dist (the release tarball), make clean
+make test       # also: make lint, make docker, make docker-test, make dist (the release tarball), make clean
 ```
 
 Tests that need game tables use `run/data/2.103` (or `PCDS_TEST_DATA`) and fail without

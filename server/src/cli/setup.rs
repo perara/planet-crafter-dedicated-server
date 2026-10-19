@@ -716,6 +716,11 @@ mod tests {
         let compose = include_str!("../../../compose.yaml");
         assert!(compose.contains(&format!("stop_grace_period: {timeout}s")), "compose.yaml stops as late as the unit");
         assert!(include_str!("../../../README.md").contains(&format!("--stop-timeout {timeout}")), "so does the README's docker run");
+        let docs = include_str!("../../../docs/docker.md");
+        assert!(docs.contains(&format!("--stop-timeout {timeout}")) && docs.contains(&format!("stop_grace_period: {timeout}s")), "and docs/docker.md");
+        // Kubernetes: the grace period of the pod covers the unit's stop, with room.
+        let grace: u64 = include_str!("../../../docs/kubernetes.yaml").lines().find_map(|l| l.trim().strip_prefix("terminationGracePeriodSeconds:")?.trim().parse().ok()).expect("a terminationGracePeriodSeconds in docs/kubernetes.yaml");
+        assert!(grace >= timeout, "the pod's grace period {grace} s is shorter than the unit's {timeout} s");
         fs::remove_dir_all(&dir).unwrap();
     }
 

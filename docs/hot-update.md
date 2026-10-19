@@ -122,7 +122,10 @@ update or the next rollback clears or replaces the note.
 **The CLI.** `pcds upgrade [VERSION] [--restart] | --rollback | --check`. Running: through the
 admin API (`POST /api/update`, then `GET /api/update` until its outcome). `--restart` installs
 into the standby bank without the protocol check, makes it active and restarts the unit (the
-path for a release that changes the front protocol). Stopped: the release becomes the active
+path for a release that changes the front protocol); in a container, which has no unit, the
+supervisor (`pcds container`) restarts the server in place on SIGUSR1 (docs/docker.md).
+Before it downloads or flips, the front refuses an update that does not fit in the container's
+cgroup v2 memory limit (`dashboard::flip_memory`). Stopped: the release becomes the active
 bank for the next start; `--rollback` points `active` at the other bank. `pcds status` lists
 both banks (version, tag, front protocol, snapshot format, which is active and which runs).
 `setup`, `start`, `restart`, `run` and `container` install this program into a bank by one rule
@@ -187,8 +190,10 @@ small world the stand is 6 to 11 ms with the check (1 to 2 ms without it).
 - **Across releases.** Every flip ran between two banks of the same build; `migrate` has no
   step yet, and a release from before this one has no `bank-info`, so the first hot update
   possible is from this release to a later one.
-- **Front restarts.** Updating the front is a restart (`pcds upgrade --restart`): every player
-  reconnects. Keeping the UDP socket and the sessions across it (see (d)) is not built.
+- **Front restarts.** Updating the front is a restart (`pcds upgrade --restart`; in a container
+  also in place, see docs/docker.md): every player reconnects. Keeping the UDP socket and the
+  sessions across it is not built; the design note below ("Updating the front without dropping
+  players") lists what it would take.
 - **The systemd unit** with the front and bank (KillMode=mixed, the stop through the front)
   was checked by reading, not by running the unit: the tests start the front directly.
 
@@ -524,6 +529,62 @@ as after a long frame); for the pauses measured, clients' network time sees abou
 
   None of the front restart was built in the spike. Keeping the front small keeps it rare:
   the module list below gives it only transport and supervision.
+
+## Updating the front without dropping players (a design note)
+
+Status: analysis only, nothing of it is built. Today the front is updated by a restart
+(`pcds upgrade --restart`, in a container also in place: the server stops, saves and starts
+again as the same process), and every player reconnects. The idea is nginx's binary upgrade: the
+running front starts the new program and gives it what a client notices, so direct-IP players see
+a pause of a few hundred milliseconds. The owner decides whether it is worth it; what follows
+is what it would take, read from `front.rs` and `utp.rs`.
+
+**What the front holds, and what happens to each at the handover**
+
+| held by the front | handover |
+|---|---|
+| the UDP socket (`Utp.socket`) | inherited as a file descriptor (CLOEXEC cleared, its number given to the new program). The kernel keeps the datagrams that arrive in the gap in the socket's buffer, and clients resend every 200 ms, so a gap of a few hundred milliseconds loses nothing |
+| the admin TCP listener (`admin::listen`) | inherited the same way; requests in flight are answered first, or fail with 503 |
+| the bank's unix socket (`Bank.link`, one per bank; two during a flip) and what is queued on it either way | the front stops reading at a frame boundary, flushes what it has queued, and passes the socket; the new front tells the bank to announce itself again (a new ATTACH frame answered by HELLO). A flip, a recovery and an update under way (`Phase` not `Idle`, `updates.busy`) refuse the handover |
+| the bank processes themselves | children of the front. With an exec in place the PID stays, so they stay its children and the supervisor (`pcds container` or `pcds run`, which waits for the front's PID) does not notice. With fork and exec the new front is a grandchild that the supervisor, already the subreaper, inherits, but it then waits for a front PID that has exited: it would have to learn the new PID |
+| the Unity Transport sessions (`utp::Connection`: address, handshake time, `received`/`mask`/`next`, early packets, the reassembled stream, the send sequence, `in_flight` with send times, queued bytes, the two fragment buffers, window, backoff, closing) and `Utp.handshakes`, `outbox`, `dropped` | serialized as the game state is: plain data, `Instant`s written as ages, a versioned format with `migrate`. `outbox` is flushed first. A session is only as exact as the clock: the in-flight packets' resend times are re-based, so some resend at once, which is harmless |
+| the front's tables: `conns` (client id to token), `ip_clients`, `next_client`, `pending_drop` (the 300 ms kicks), `kicked`, `held` (empty outside a flip), `crashes`, `invite_code` | serialized in the same record |
+| `last_snapshot` and `recover_from` (memfds), the world's `flock` (`world_lock`) | the descriptors are inherited, so a crash right after the handover still recovers from the last snapshot and the world stays locked to this server |
+| the chat hooks (`Hooks`: the event ring, the webhook and exec workers), the update history, the web page cache | the ring and history serialized or dropped (they are for the admin page); the workers restarted by the new front |
+| **the Steam connections** (`Conn::Steam`: the game server login, the listen socket, every `NetConnection` with its `Split<n>` buffer) | **cannot survive**: they live inside the Steam API in the process that logged in and end with it. Steam players are told why and disconnected; the new front logs in again, which gives anonymous logins a new SteamID and invite code (`PCDS_STEAM_TOKEN` keeps it). Only a third process that owns Steam and never updates would keep them, which is a different design |
+
+**Parts of the work**
+
+1. Re-exec plumbing in the supervisor and the front: which descriptors are passed (a list, with
+   CLOEXEC cleared on exactly those), how the new program is told it is an inheritor, a
+   handover refused during a flip or recovery, and what the supervisor does about the PID (an
+   exec in place keeps it; a fork needs the supervisor to follow). Also decides the failure
+   story: with an exec in place there is nothing to fall back to if the new program cannot
+   start, so the new program must be started first (fork), prove it is ready (it holds the
+   sockets, restored its tables, re-attached the bank), and only then does the old one exit; the
+   old one keeps serving until then.
+2. A snapshot and restore of `utp.rs` (`Utp`, `Connection`, `Fragments`) with a format version
+   and a test that runs a conversation across a handover with packet loss on both sides and
+   compares the stream the client sees with one without a handover.
+3. A snapshot and restore of the front's own tables (the record above), in the same format.
+4. Taking over a live bank: quiescing the link at a frame boundary, the ATTACH/HELLO exchange,
+   the bank's side of it (a bank that is running must answer a new front, which no bank does
+   today), and the protocol rule for a new front that speaks a different front protocol than the
+   running bank (today it cannot take over the world and says so). The new front would have to
+   speak the previous protocol for one flip, as snapshots are read in the previous format, or a
+   protocol change keeps needing the restart.
+5. Steam: refuse the handover while Steam players are connected, or kick them with a reason,
+   then log in again in the new front; a message to the admin saying what it did to them.
+6. The handover command and its place in the CLI and admin page (`pcds upgrade --front`?), the
+   container's and the systemd unit's stop budgets (a failed handover must still end in
+   `docker stop` saving the world), and the documentation.
+7. Tests in `tests/hot_update.rs` style: players through two front handovers, a new front that
+   dies at start (the old keeps the players), a handover in the middle of a bank crash
+   (refused), the admin API through a handover, and a Steam-off run of everything.
+
+Not part of it: updating the bank (done), the Steam player's connection (impossible without
+the third process), and anything that makes the front bigger: the smaller its state, the
+shorter the list above, which is the reason to keep new features out of it.
 
 ## (e) What moves where in the refactor
 

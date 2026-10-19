@@ -3,6 +3,12 @@
 # ./data holds everything the server keeps: worlds/ (copy a save there to add a world),
 # server.env, rules.json, access.json, the game tables and backups. Manage it with
 # `docker compose exec pcds pcds worlds | world use NAME | players | rules | gui`.
+#
+# Updates (docs/docker.md): `docker compose exec pcds pcds upgrade` installs the latest release into
+# ./data/bin and hands the running world over to it, players stay connected; PCDS_AUTO_UPDATE
+# below does that by itself. `docker compose pull && docker compose up -d` recreates the
+# container (every player disconnects): the image's release runs unless ./data/bin holds a
+# newer one (the container's log and `pcds status` say which runs).
 services:
   pcds:
     image: ghcr.io/perara/planet-crafter-dedicated-server:latest
@@ -17,4 +23,8 @@ services:
     environment:
       PUID: "1000"   # the owner of ./data on the host (id -u)
       PGID: "1000"
+      # PCDS_AUTO_UPDATE: "on"   # install each new release and hand the world over (checked daily)
     stop_grace_period: 90s
+    # The server writes only /data (and /game is read-only), so the rest can be locked down:
+    # read_only: true
+    # security_opt: ["no-new-privileges:true"]
