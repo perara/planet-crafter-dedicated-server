@@ -945,6 +945,36 @@ def scene_family(t, start):
     return s
 
 
+def system_family(t, start):
+    """The scene handlers no building carries: a built elevator started, checked, registered and
+    reversed (SceneInterpolationHandler), and the toxic-area registrations (ToxicAreaHandler)."""
+    s = Script('sweep_system', 76561197999990023)
+    SIH, TAH = 'SceneInterpolationHandler', 'ToxicAreaHandler'
+    tag = 'Elevator|scene interpolation'
+    build(s, 'Elevator', (680.0, GROUND_Y, 700.0), tag, 'lift')
+    s.call('WorldObjectAssociatedProxy.GetWorldObjectIdServerRpc', ['$lift', t.behaviour('Elevator', 'WorldObjectAssociatedProxy')[0]], [], tag,
+           cap=('liftid', 'WorldObjectAssociatedProxy.GetWorldObjectIdClientRpc', 0))
+    s.call(f'{SIH}.RegisterInterpolatorServerRpc', SIH, ['$liftid', 0.25], tag)
+    s.call(f'{SIH}.CheckInterpolatorActiveServerRpc', SIH, ['$liftid', 0.25], tag)
+    s.call(f'{SIH}.StartInterpolationServerRpc', SIH, ['$liftid', 0.25, -1], tag)
+    s.wait(3000)
+    s.call(f'{SIH}.CheckInterpolatorActiveServerRpc', SIH, ['$liftid', 0.25], tag)
+    s.wait(6000)
+    s.call(f'{SIH}.StartInterpolationServerRpc', SIH, ['$liftid', 0.25, 1], tag)
+    s.wait(3000)
+    s.call(f'{SIH}.RegisterInterpolatorServerRpc', SIH, ['$liftid', 0.25], tag)
+    s.call(f'{SIH}.CheckInterpolatorActiveServerRpc', SIH, ['$liftid', 0.25], tag)
+    s.call(f'{SIH}.StartInterpolationServerRpc', SIH, [0, 0.25, 1], tag)
+    tag = 'player|toxic areas'
+    s.call(f'{TAH}.GetCurrentPlanetToxicProgressServerRpc', TAH, [], tag)
+    for area in (0, 5):
+        for name in ('RegisterToAreaToxicProgress', 'UnregisterToAreaToxicProgress', 'RegisterToAreaToxicFinished', 'UnregisterToAreaToxicFinished'):
+            s.call(f'{TAH}.{name}ServerRpc', TAH, [area], tag)
+    s.wait(2000)
+    s.call(f'{TAH}.GetCurrentPlanetToxicProgressServerRpc', TAH, [], tag)
+    return s
+
+
 def interplanetary_family(t):
     """TransferGroups from a planet's containers: items in containers built on Prime are taken
     to the backpack by a client asking for them by group, planet and amount."""
@@ -992,7 +1022,7 @@ def generate(t, out, start=None):
     scripts += vehicle_family(t) + sharing_family(t) + seat_family(t)
     scripts += [growth_family(t), ground_family(t), recycle_family(t), interplanetary_family(t)]
     if start:
-        scripts.append(scene_family(t, start))
+        scripts += [scene_family(t, start), system_family(t, start)]
     buildable = [g for g in t.constructibles() if g in t.layouts]
     wet = [g for g in t.constructibles(wet=True) if g in t.layouts]
     scripts.append(build_family(t, 'sweep_water', wet, 300000, 76561197999990030))
