@@ -1,7 +1,9 @@
 """The exhaustive parity sweep: probe scripts generated from the game tables, so every group, every
 interaction its prefab carries and every vehicle is exercised (SWEEP.md has the matrix).
 
-    python3 sweep.py gen DATA_DIR OUT_DIR       write OUT_DIR/<script>.json and OUT_DIR/rows.json
+    python3 sweep.py gen DATA_DIR OUT_DIR [START.json]
+                                                write OUT_DIR/<script>.json and OUT_DIR/rows.json
+                                                (START: the start save, for the scene objects' ids)
     python3 sweep.py report DATA_DIR OUT_DIR RUN_DIR [CS_DIR]
                                                 the matrix with each row's result, from the
                                                 parity.py diffs in RUN_DIR (<script>.diff),
@@ -818,7 +820,94 @@ def bounds_result(path):
     return out
 
 
-def generate(t, out):
+def growth_family(t):
+    """Every group with a GrowthProxy built; its growth asked, reset to 0 and to 40 (the owner
+    committing it, GrowthProxy.SetGrowth), asked again."""
+    s = Script('sweep_growth', 76561197999990019)
+    groups = [g for g in t.constructibles() if g in t.layouts and t.behaviour(g, 'GrowthProxy')]
+    power(s, t, groups, (630.0, 790.0))
+    spots = grid((650.0, 600.0), 10, 12.0)
+    for k, g in enumerate(groups):
+        b = t.behaviour(g, 'GrowthProxy')[0]
+        build(s, g, next(spots), f'{g}|growth reset', f'o{k}')
+        s.call('GrowthProxy.GetCurrentGrowthServerRpc', [f'$o{k}', b], [], f'{g}|growth reset')
+        s.call('GrowthProxy.ResetCurrentGrowthServerRpc', [f'$o{k}', b], [0.0], f'{g}|growth reset')
+        s.call('GrowthProxy.GetCurrentGrowthServerRpc', [f'$o{k}', b], [], f'{g}|growth reset')
+        s.call('GrowthProxy.ResetCurrentGrowthServerRpc', [f'$o{k}', b], [40.0], f'{g}|growth reset')
+        s.call('GrowthProxy.GetCurrentGrowthServerRpc', [f'$o{k}', b], [], f'{g}|growth reset')
+    return s
+
+
+def recycle_family(t):
+    """Every item put in a recycling machine and recycled (ConstructibleProxy.RecycleContent): its
+    ingredients dropped, or itself when it has none or cannot be recycled."""
+    s = Script('sweep_recycle', 76561197999990020)
+    power(s, t, ['RecyclingMachine'], (630.0, 790.0))
+    at = (680.0, BUILD_Y, 640.0)
+    build(s, 'RecyclingMachine', at, 'RecyclingMachine|build (recycler)', 'rec')
+    inv = inventory_of(s, t, 'RecyclingMachine', 'rec', 'RecyclingMachine|inventory', 'recinv')[0]
+    cp = t.behaviour('RecyclingMachine', 'ConstructibleProxy')[0]
+    bounds = [[at[0], at[1] + 1.0, at[2] + 3.0], [1.0, 1.0, 1.0]]
+    for g in t.items():
+        tag = f'{g}|recycle'
+        add_new(s, g, f'${inv}', tag)
+        s.call('ConstructibleProxy.RecycleContentServerRpc', ['$rec', cp], bounds, tag, after=400)
+        retrieve(s, f'${inv}', tag)
+        s.call(f'{INV}.RemoveAndDestroyAllItemsFromInventoryServerRpc', INV, [f'${inv}'], tag)
+    return s
+
+
+def scene_family(t, start):
+    """The scene's own world objects (ids 101xxxxxx, in the start save): asked for, grown, mined
+    (picked up), disabled, destroyed and re-generated, one set of ids per group."""
+    text = open(start, encoding='utf-8-sig').read().split('@')[3]
+    ids = {}
+    for r in text.split('|'):
+        if r.strip():
+            o = json.loads(r)
+            if 100000000 <= o['id'] < 110000000 and o['gId'] in t.groups:
+                ids.setdefault(o['gId'], []).append(o['id'])
+    s = Script('sweep_scene', 76561197999990021)
+    prelude(s)
+    for g in sorted(ids):
+        pool = ids[g]
+        pick = lambda k: pool[k % len(pool)]
+        h, tag = f'#{g}', f'{g}|scene object'
+        s.call(f'{WOH}.IsWorldObjectFromSceneActiveServerRpc', WOH, [pick(0)], tag)
+        s.call(f'{WOH}.SetSceneWorldObjectGrowthServerRpc', WOH, [pick(0), h, [3, 10]], tag)
+        s.call(f'{WOH}.RefreshSceneWorldObjectGrowthServerRpc', WOH, [pick(0)], tag)
+        s.call(f'{WOH}.GenerateRandomAppearanceObjectServerRpc', WOH, [100.0, h, pick(1), -1, [610.0, GROUND_Y, 700.0], [0, 0, 0, 1]], tag)
+        s.call(f'{WOH}.IsWorldObjectFromSceneActiveServerRpc', WOH, [pick(1)], tag)
+        s.call(f'{INV}.AddWorldObjectToInventoryServerRpc', INV, [pick(2), h, '$inventory', True], tag)
+        s.call(f'{WOH}.IsWorldObjectFromSceneActiveServerRpc', WOH, [pick(2)], tag)
+        s.call(f'{WOH}.DisableWorldObjectFromSceneServerRpc', WOH, [pick(3), h, True, [0.0, 0.0, 0.0]], tag)
+        s.call(f'{WOH}.DisableWorldObjectFromSceneServerRpc', WOH, [pick(4), h, True, [612.0, GROUND_Y, 700.0]], tag, after=500)
+        s.call(f'{WOH}.DestroyWorldObjectFromSceneServerRpc', WOH, [pick(5), h, 0.0], tag)
+        s.call(f'{WOH}.DestroyWorldObjectFromSceneServerRpc', WOH, [pick(5), h, 0.0], tag)
+    retrieve(s, '$inventory', 'player|final inventory', after=1000)
+    return s
+
+
+def interplanetary_family(t):
+    """TransferGroups from a planet's containers: items in containers built on Prime are taken
+    to the backpack by a client asking for them by group, planet and amount."""
+    s = Script('sweep_transfer', 76561197999990022)
+    prelude(s)
+    power(s, t, ['Container2'] * 2, (630.0, 790.0))
+    build(s, 'Container2', (650.0, BUILD_Y, 640.0), 'Container2|interplanetary transfer', 'box')
+    inv = inventory_of(s, t, 'Container2', 'box', 'Container2|interplanetary transfer', 'boxinv')[0]
+    for g, n in (('Iron', 3), ('Cobalt', 2), ('Silicon', 4)):
+        for _ in range(n):
+            add_new(s, g, f'${inv}', f'{g}|interplanetary transfer')
+    s.wait(3000)
+    for g, n in (('Iron', 2), ('Cobalt', 5), ('Silicon', 4), ('Titanium', 1)):
+        s.call('LogisticInterplanetaryManager.TransferGroupsServerRpc', 'LogisticInterplanetaryManager', [f'#{g}', n, f'#{PRIME}', '$inventory'], f'{g}|interplanetary transfer', after=800)
+    retrieve(s, '$inventory', 'player|final inventory')
+    retrieve(s, f'${inv}', 'Container2|interplanetary transfer')
+    return s
+
+
+def generate(t, out, start=None):
     os.makedirs(out, exist_ok=True)
     scripts, rows = [], {}
 
@@ -844,6 +933,9 @@ def generate(t, out):
     scripts.append(autocraft_family(t, 'Incubator2', (1, incubator)))
     scripts += [feed_family(t), convert_family(t), optimizer_family(t), animals_family(t)]
     scripts += vehicle_family(t) + sharing_family(t)
+    scripts += [growth_family(t), recycle_family(t), interplanetary_family(t)]
+    if start:
+        scripts.append(scene_family(t, start))
     buildable = [g for g in t.constructibles() if g in t.layouts]
     for c in chunks(buildable, 3):
         scripts.append(build_family(t, f'sweep_build_{c[0]}', c[1], 300000, 76561197999990010 + c[0]))
@@ -1037,7 +1129,8 @@ def report(t, out, run, rules_path, cs_dir=None):
             for c in cl:
                 classes[c] = classes.get(c, 0) + 1
             cells.append(f'{i}: ' + '/'.join(cl))
-        lines.append(f'| {g} | {t.groups[g]["kind"] if g in t.groups else "-"} | {len(rows[g])} | {"; ".join(cells) or "all match"} |')
+        used = sorted({sc.replace('sweep_', '') for v in rows[g].values() for sc in v if not sc.startswith('none:')})
+        lines.append(f'| {g} | {t.groups[g]["kind"] if g in t.groups else "-"} | {len(rows[g])} | {", ".join(used)} | {"; ".join(cells) or "all match"} |')
     for key in sorted(k for k in results if k[0] not in rows):
         lines.append(f'| {key[0]} ({key[1]}) | - | - | ' + '/'.join(sorted({c for _, c, _, _ in results[key]})) + ' |')
     detail = []
@@ -1046,20 +1139,26 @@ def report(t, out, run, rules_path, cs_dir=None):
             detail.append({'group': key[0], 'interaction': key[1], 'script': script, 'class': c, 'why': why, 'line': line[:600]})
     json.dump(detail, open(f'{run}/classified.json', 'w'), indent=1)
     print(json.dumps({'totals': totals, 'rows with differences, by class': classes}, indent=1))
-    open(f'{run}/matrix.md', 'w').write('| group | kind | interactions | differences (class) |\n|---|---|---|---|\n' + '\n'.join(lines) + '\n')
+    open(f'{run}/matrix.md', 'w').write('| group | kind | interactions | scripts | differences (class), none: all match |\n|---|---|---|---|---|\n' + '\n'.join(lines) + '\n')
     if cs_dir:
         inv = inventory(t, cs_dir)
+        scripts_of = {}   # component type -> scripts of the rows of the groups carrying it
+        for ty, v in inv.items():
+            scripts_of[ty] = sorted({sc.replace('sweep_', '') for g in v['groups'] for rr in rows.get(g, {}).values() for sc in rr if not sc.startswith('none:')})
         with open(f'{run}/components.md', 'w') as f:
-            f.write('| component | groups | RPCs its behaviour sends |\n|---|---|---|\n')
+            f.write('| component | groups carrying it | RPCs its behaviour sends | scripts that run groups carrying it |\n|---|---|---|---|\n')
             for ty, v in inv.items():
-                f.write(f'| {ty} | {len(v["groups"])} | {", ".join(r.split(".", 1)[1] if r.startswith(ty + ".") else r for r in v["rpcs"]) or "-"} |\n')
+                names = ', '.join(r.split('.', 1)[1] if r.startswith(ty + '.') else r for r in v['rpcs']) or '-'
+                sc = scripts_of[ty]
+                f.write(f'| {ty} | {len(v["groups"])} | {names} | {", ".join(sc) if len(sc) <= 8 else ", ".join(sc[:8]) + ", ..."} |\n')
+    return totals, classes
 
 
 def main():
     cmd, data, out = sys.argv[1:4]
     t = Tables(data)
     if cmd == 'gen':
-        generate(t, out)
+        generate(t, out, sys.argv[4] if len(sys.argv) > 4 else None)
     elif cmd == 'bounds':
         # bounds DATA OUT [COARSE_TRANSCRIPT]: the coarse script, or the fine one from its result
         fine = None

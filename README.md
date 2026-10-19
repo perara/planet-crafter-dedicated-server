@@ -541,6 +541,13 @@ each sends back is compared.
    `server/tests/parity/savediff.py START_SAVE REF_SAVE OURS_SAVE`: field by field, order
    included.
 
+`server/tests/parity/SWEEP.md` is the exhaustive version: `sweep.py` writes probe scripts from the
+game tables (every item, every constructible with each interaction its prefab carries, the
+vehicle, the animals, the farms, two players sharing a container), `sweep.sh` runs them against
+both and compares, and the matrix of group x interaction with the result of each row is in
+`SWEEP.matrix.md`. The reference there runs with the extractor plugin's `PCDS_KEEP_ACTIVE=1`
+(SWEEP.md says what that is).
+
 Start both again from the start save for every script. `server/tests/parity/EXPECTED.md` lists
 what still differs on purpose (the reference's host player, time, the game's randomness, the
 safety rules); anything else is a bug.

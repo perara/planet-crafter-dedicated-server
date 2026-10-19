@@ -74,5 +74,20 @@
   "why": "a second escape pod: its storage is the start save's scene object 103976415, kept inactive in the copy, so the game cannot deconstruct it; no client deconstructs a pod through GroupNetworkBase (EXPECTED: not comparable)",
   "tag": "^EscapePod(Humble|Toxicity)?\\|deconstruct",
   "line": "."
+ },
+ {
+  "class": "b",
+  "why": "time: the same message, a few script steps earlier or later (machine coroutines and the 30-frame host run on their own clocks; EXPECTED: Time)",
+  "line": "^~ shifted"
+ },
+ {
+  "class": "b",
+  "why": "an animal's owner simulates it: the host owns the animals it spawned and sends their animator state (NetworkAnimator), here the nearest player owns them (EXPECTED: the reference has a host player)",
+  "line": "NetworkAnimator\\.(SendAnimState|SendParametersUpdate|SendAnimTrigger)ClientRpc"
+ },
+ {
+  "class": "b",
+  "why": "time: the game's clock runs slower than wall time when its frames stall (Time.maximumDeltaTime caps a frame's step at a third of a second), so a cooldown that counts down by deltaTime lags (EXPECTED: Time)",
+  "line": "VehicleBackToGarage\\._cooldown"
  }
 ]
