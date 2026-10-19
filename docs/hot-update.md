@@ -228,8 +228,9 @@ the threads) and 5 wake-ups (0.02 to 0.1 ms each when the host is not saturated)
 **Not done, and why.** A parallel memfd write through a shared mapping was tried and left out: no
 gain over write(2) that the noise could show. Moving the held-frame release and the READY off the
 critical path: the release is 0.02 ms and the READY to the front 0.05 ms in the timeline; there
-is nothing to take. A persistent thread pool and a pre-faulted heap in the new bank: under 1 ms
-at 2.6k, perhaps 5 ms at 99.5k, not built.
+is nothing to take. A persistent thread pool and a pre-faulted heap in the new bank: not built
+(the restore takes 347 page faults at 2.6k and 8k to 15k at 99.5k; not measured what pre-faulting
+saves).
 
 **Pre-copy** (the old bank streams a full snapshot while it runs, only the changes follow at the
 stand) was evaluated, not built. `bench::dirtybench`, 8 players acting every 200 ms: in 0.25 s 1
@@ -237,8 +238,8 @@ of 99549 world objects, 3 of 10312 inventories and 11 of 14852 network objects d
 1 of 6, 2 of 8 chunks); in 5 s on the 2.6k world 25 of 2640 world objects, 8 of 291 inventories,
 14 of 427 network objects (every one of them in one chunk of 2048). So the world objects, the
 inventories and the network objects (92% of the bytes and 94% of the CPU) would leave the stand
-almost entirely: the 99.5k stand would be the machines, the rest, the dirty chunks and the
-wake-ups, perhaps 10 ms. It needs dirty tracking in `Slots` (its mutators are get_mut, values_mut,
+almost entirely: what is left in the stand at 99.5k is the machines, the rest and the water (CPU
+2.6 ms to write and 6.3 ms to read), the dirty chunks and the wake-ups. It needs dirty tracking in `Slots` (its mutators are get_mut, values_mut,
 insert, remove, retain: feasible) and in the network objects' map, two new frames, an assembly of
 the new bank's state from a base and a delta that must give the same slot order and free lists,
 twice the memory for the transfer, and a failure path (old bank resumes while the new one holds
