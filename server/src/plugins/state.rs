@@ -65,7 +65,7 @@ pub fn hex(bytes: &[u8]) -> String {
 }
 
 pub fn unhex(text: &str) -> Result<Vec<u8>, String> {
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return Err("state: an odd number of hex digits".into());
     }
     (0..text.len() / 2).map(|i| u8::from_str_radix(&text[2 * i..2 * i + 2], 16).map_err(|_| "state: not hex".to_string())).collect()

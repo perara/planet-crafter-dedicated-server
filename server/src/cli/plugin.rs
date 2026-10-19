@@ -85,7 +85,7 @@ impl Ctx {
             return Ok(());
         }
         println!("({from})");
-        println!("{:<20} {:<8} {:<5} {:<10} {:>8} {:>6}  {}", "ID", "VERSION", "KIND", "STATE", "CALLS", "FAULTS", "CAPABILITIES (granted of asked)");
+        println!("{:<20} {:<8} {:<5} {:<10} {:>8} {:>6}  CAPABILITIES (granted of asked)", "ID", "VERSION", "KIND", "STATE", "CALLS", "FAULTS");
         for p in &plugins {
             let list = |k: &str| p[k].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>()).unwrap_or_default();
             let asked = list("requested").len();
