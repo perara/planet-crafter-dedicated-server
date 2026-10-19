@@ -245,36 +245,6 @@ fn inventories_keep_the_dictionary_order() {
     assert_eq!(ours(&mut h), vec![e, b, d]);
 }
 
-/// H3: a snapshot of format 1 (world objects as a map, the sets as lists) still restores (no
-/// release is told it may flip from it any more: this build reads 3 and 4).
-#[test]
-fn a_format_1_snapshot_restores() {
-    let Some(mut g) = test_game(save()) else { return };
-    join(&mut g, 1, "Ann");
-    g.disconnect(1);
-    let text = crate::handoff::snapshot_json(&g).unwrap();
-    let current = crate::handoff::snapshot(&mut g).unwrap();
-    let (_, state) = text.split_once('\n').unwrap();
-    let mut state: Value = serde_json::from_str(state).unwrap();
-    let pairs = |v: &Value| v["slots"].as_array().unwrap().iter().filter(|s| !s.is_null()).map(|s| (s[0].clone(), s[1].clone())).collect::<Vec<_>>();
-    let wos: serde_json::Map<String, Value> = pairs(&state["wos"]).into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-    state["wos"] = Value::Object(wos);
-    let inventories: serde_json::Map<String, Value> = pairs(&state["inventories"]).into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-    state["inventories"] = Value::Object(inventories);
-    for set in ["constructed", "pickables"] {
-        state[set] = Value::Array(pairs(&state[set]).into_iter().map(|(k, _)| k).collect());
-    }
-    let float = |v: &mut Value| *v = json!(v.as_u64().unwrap() as f64);
-    float(&mut state["units"]["constructed_index"]);
-    for p in state["units"]["planets"].as_array_mut().unwrap() {
-        p["units"].as_array_mut().unwrap().iter_mut().for_each(|u| float(&mut u["previous_index"]));
-    }
-    let old = format!("{{\"format\":1,\"game_version\":\"{}\"}}\n{state}", g.net_data.game_version);
-    let (net_data, data, spec, scenes) = test_tables().unwrap();
-    let h = crate::handoff::restore(net_data, data, spec, old.as_bytes(), scenes).unwrap();
-    crate::handoff::verify(&h, &current).unwrap();
-}
-
 /// M2: an RPC runs only on an object with a behaviour of its class (or a subclass), as Netcode
 /// routes it: a departure sequence started on anything but a departure platform does nothing
 /// (it used to force a full save each time).

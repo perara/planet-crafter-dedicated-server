@@ -728,7 +728,7 @@ mod tests {
         let Some(mut game) = game() else { return };
         let wo = build(&mut game, "AlgaeGenerator1", [50.0, 5.0, 0.0]);
         let snapshot = crate::handoff::snapshot(&mut game).unwrap();
-        assert!(!crate::handoff::snapshot_json(&game).unwrap().contains("water_only"), "the flag is not part of a snapshot, so an older snapshot restores");
+        assert!(!serde_json::to_string(&game).unwrap().contains("water_only"), "the flag is not part of the state: the tables give it");
         let water_only = |g: &Game| g.ext.machines.list.get(&wo).and_then(|m| m.harvestable.as_ref()).map(|h| h.water_only);
         assert_eq!(water_only(&game), Some(true));
         let (net_data, data, spec, scenes) = crate::game::test_tables().unwrap();

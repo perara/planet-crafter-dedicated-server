@@ -1014,7 +1014,7 @@ pub mod tests {
         }
         assert!(g.net.out.is_empty(), "not passed on");
         assert_eq!((g.wos[&iron].position, g.net.objects[&net].position), ([560.0, 3.0, 500.0], [560.0, 3.0, 500.0]));
-        assert!(crate::handoff::snapshot_json(&g).is_ok());
+        assert!(crate::handoff::snapshot(&mut g).is_ok());
         g.transform(1, &transform_message(net, 2, &[561.0]));
         assert_eq!(g.wos[&iron].position[0], 561.0);
         assert_eq!(g.net.out.len(), 1);

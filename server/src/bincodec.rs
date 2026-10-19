@@ -1,8 +1,9 @@
 //! The snapshot's binary codec (handoff format 4): serde's data model written with no names and
 //! no tags, in declaration order, so a struct is its fields back to back. Not self-describing:
 //! a type must be read as the type it was written as (the snapshot's head names the format,
-//! the format fixes the types). Little-endian; integers of 8 bytes and the lengths and enum
-//! variants are LEB128 (most ids and counts are small), the rest fixed width.
+//! the format fixes the types). Little-endian; integers of 2 bytes and more, the lengths and the
+//! enum variants are LEB128 (zigzag for the signed: most ids and counts are small), floats and
+//! bytes fixed width.
 //!
 //! Why not the text: serde_json writes every field's name and every number as digits, and reads
 //! them back by matching names and parsing digits; the same state is 4 to 7 times smaller and
@@ -66,6 +67,18 @@ pub fn append<T: Serialize + ?Sized>(v: &T, out: &mut Vec<u8>) -> Result<()> {
 
 pub struct Writer<'a>(&'a mut Vec<u8>);
 
+/// Small magnitudes of either sign become small numbers.
+#[inline]
+fn zigzag(v: i64) -> u64 {
+    ((v << 1) ^ (v >> 63)) as u64
+}
+
+#[inline]
+fn unzigzag(z: u64) -> i64 {
+    (z >> 1) as i64 ^ -((z & 1) as i64)
+}
+
+#[inline]
 fn varint(out: &mut Vec<u8>, mut v: u64) {
     while v >= 0x80 {
         out.push(v as u8 | 0x80);
@@ -97,16 +110,15 @@ impl<'a, 'b> ser::Serializer for &'b mut Writer<'a> {
         Ok(())
     }
     fn serialize_i16(self, v: i16) -> Result<()> {
-        self.0.extend_from_slice(&v.to_le_bytes());
+        varint(self.0, zigzag(v as i64));
         Ok(())
     }
     fn serialize_i32(self, v: i32) -> Result<()> {
-        self.0.extend_from_slice(&v.to_le_bytes());
+        varint(self.0, zigzag(v as i64));
         Ok(())
     }
     fn serialize_i64(self, v: i64) -> Result<()> {
-        // Zigzag: small magnitudes of either sign are short.
-        varint(self.0, ((v << 1) ^ (v >> 63)) as u64);
+        varint(self.0, zigzag(v));
         Ok(())
     }
     fn serialize_i128(self, v: i128) -> Result<()> {
@@ -118,11 +130,11 @@ impl<'a, 'b> ser::Serializer for &'b mut Writer<'a> {
         Ok(())
     }
     fn serialize_u16(self, v: u16) -> Result<()> {
-        self.0.extend_from_slice(&v.to_le_bytes());
+        varint(self.0, v as u64);
         Ok(())
     }
     fn serialize_u32(self, v: u32) -> Result<()> {
-        self.0.extend_from_slice(&v.to_le_bytes());
+        varint(self.0, v as u64);
         Ok(())
     }
     fn serialize_u64(self, v: u64) -> Result<()> {
@@ -326,7 +338,7 @@ pub fn fill<'de, T: Deserialize<'de>>(bytes: &'de [u8], out: &mut [std::mem::May
 pub struct Reader<'de>(&'de [u8]);
 
 impl<'de> Reader<'de> {
-    #[inline]
+    #[inline(always)]
     fn take(&mut self, n: usize) -> Result<&'de [u8]> {
         if self.0.len() < n {
             return err("the snapshot ends inside a value");
@@ -335,13 +347,25 @@ impl<'de> Reader<'de> {
         self.0 = b;
         Ok(a)
     }
-    #[inline]
+    #[inline(always)]
     fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
         let a = self.take(N)?;
         Ok(a.try_into().unwrap())
     }
-    #[inline]
+    #[inline(always)]
     fn varint(&mut self) -> Result<u64> {
+        // Most are one byte.
+        if let Some((&b, rest)) = self.0.split_first()
+            && b < 0x80
+        {
+            self.0 = rest;
+            return Ok(b as u64);
+        }
+        self.varint_long()
+    }
+
+    #[inline(never)]
+    fn varint_long(&mut self) -> Result<u64> {
         let mut v = 0u64;
         for shift in (0..70).step_by(7) {
             let b = self.take(1)?[0];
@@ -388,16 +412,25 @@ impl<'de> de::Deserializer<'de> for &mut Reader<'de> {
         }
     }
     fixed!(deserialize_i8, visit_i8, i8);
-    fixed!(deserialize_i16, visit_i16, i16);
-    fixed!(deserialize_i32, visit_i32, i32);
+    fn deserialize_i16<V: Visitor<'de>>(self, v: V) -> Result<V::Value> {
+        let n = unzigzag(self.varint()?);
+        v.visit_i16(i16::try_from(n).map_err(|_| Error::new("a number too big for 16 bits"))?)
+    }
+    fn deserialize_i32<V: Visitor<'de>>(self, v: V) -> Result<V::Value> {
+        let n = unzigzag(self.varint()?);
+        v.visit_i32(i32::try_from(n).map_err(|_| Error::new("a number too big for 32 bits"))?)
+    }
     fn deserialize_i64<V: Visitor<'de>>(self, v: V) -> Result<V::Value> {
-        let z = self.varint()?;
-        v.visit_i64((z >> 1) as i64 ^ -((z & 1) as i64))
+        v.visit_i64(unzigzag(self.varint()?))
     }
     fixed!(deserialize_i128, visit_i128, i128);
     fixed!(deserialize_u8, visit_u8, u8);
-    fixed!(deserialize_u16, visit_u16, u16);
-    fixed!(deserialize_u32, visit_u32, u32);
+    fn deserialize_u16<V: Visitor<'de>>(self, v: V) -> Result<V::Value> {
+        v.visit_u16(u16::try_from(self.varint()?).map_err(|_| Error::new("a number too big for 16 bits"))?)
+    }
+    fn deserialize_u32<V: Visitor<'de>>(self, v: V) -> Result<V::Value> {
+        v.visit_u32(u32::try_from(self.varint()?).map_err(|_| Error::new("a number too big for 32 bits"))?)
+    }
     fn deserialize_u64<V: Visitor<'de>>(self, v: V) -> Result<V::Value> {
         v.visit_u64(self.varint()?)
     }
@@ -560,6 +593,60 @@ pub mod bytes {
     }
 }
 
+/// `#[serde(with = "crate::bincodec::floats")]` on a `[f32; N]` that is mostly all zeros (a world
+/// object's position of an item in a backpack...): one byte for zeros in the binary codec, a
+/// tag and the floats otherwise; a JSON array as ever.
+pub mod floats {
+    use serde::ser::SerializeTuple;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer, const N: usize>(v: &[f32; N], s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() {
+            let mut t = s.serialize_tuple(N)?;
+            for f in v {
+                t.serialize_element(f)?;
+            }
+            return t.end();
+        }
+        // -0.0 is not a zero here: the bits come back as they went.
+        if v.iter().all(|f| f.to_bits() == 0) {
+            let mut t = s.serialize_tuple(1)?;
+            t.serialize_element(&0u8)?;
+            return t.end();
+        }
+        let mut t = s.serialize_tuple(1 + N)?;
+        t.serialize_element(&1u8)?;
+        for f in v {
+            t.serialize_element(f)?;
+        }
+        t.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, const N: usize>(d: D) -> Result<[f32; N], D::Error> {
+        struct V<const N: usize>(bool);
+        impl<'de, const N: usize> serde::de::Visitor<'de> for V<N> {
+            type Value = [f32; N];
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("floats")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<[f32; N], A::Error> {
+                let tag: u8 = if self.0 { 1 } else { seq.next_element()?.ok_or_else(|| serde::de::Error::custom("no tag"))? };
+                let mut out = [0.0f32; N];
+                if tag == 1 {
+                    for f in out.iter_mut() {
+                        *f = seq.next_element()?.ok_or_else(|| serde::de::Error::custom("too few floats"))?;
+                    }
+                } else if tag != 0 {
+                    return Err(serde::de::Error::custom("a tag of floats"));
+                }
+                Ok(out)
+            }
+        }
+        let human = d.is_human_readable();
+        d.deserialize_tuple(if human { N } else { 1 + N }, V(human))
+    }
+}
+
 /// `#[serde(with = "crate::bincodec::byte_lists")]` on a `Vec<Vec<u8>>`.
 pub mod byte_lists {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -667,8 +754,18 @@ mod tests {
         map: BTreeMap<String, u16>,
         hash: HashMap<u64, Vec<i32>>,
         none: Option<u8>,
+        #[serde(with = "crate::bincodec::floats")]
+        zeros: [f32; 4],
+        #[serde(with = "crate::bincodec::floats")]
+        some: [f32; 3],
+        #[serde(with = "crate::bincodec::floats")]
+        negative_zero: [f32; 2],
+        ints: (i16, u16, i32, u32, i64),
         t: (),
     }
+
+    #[derive(Serialize, Deserialize)]
+    struct Z(#[serde(with = "crate::bincodec::floats")] [f32; 8]);
 
     fn thing() -> Thing {
         Thing {
@@ -685,6 +782,10 @@ mod tests {
             map: [("b".to_string(), 2), ("a".to_string(), 1)].into(),
             hash: [(7, vec![1, 2]), (u64::MAX, vec![])].into(),
             none: None,
+            zeros: [0.0; 4],
+            some: [0.0, 5.5, 0.0],
+            negative_zero: [0.0, -0.0],
+            ints: (-1, 65535, i32::MIN, u32::MAX, -1),
             t: (),
         }
     }
@@ -693,7 +794,12 @@ mod tests {
     fn what_is_written_reads_back_exactly() {
         let t = thing();
         let bytes = to_vec(&t).unwrap();
-        assert_eq!(from_slice::<Thing>(&bytes).unwrap(), t);
+        let back = from_slice::<Thing>(&bytes).unwrap();
+        assert_eq!(back, t);
+        assert_eq!(back.negative_zero[1].to_bits(), (-0.0f32).to_bits(), "-0.0 is not a zero to elide");
+        // A float array of zeros is one byte; the small numbers are short.
+        assert_eq!(to_vec(&(crate::bincodec::tests::Z([0.0; 8]), 1u8)).unwrap().len(), 2);
+        assert_eq!(to_vec(&(1i32, -1i32, 300u32, 7u16)).unwrap().len(), 1 + 1 + 2 + 1);
         // NaN keeps its bits (JSON could not carry it).
         let nan = f32::from_bits(0x7fc0_1234);
         assert_eq!(from_slice::<f32>(&to_vec(&nan).unwrap()).unwrap().to_bits(), nan.to_bits());

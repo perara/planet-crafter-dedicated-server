@@ -27,7 +27,7 @@ use crate::{access, chathooks, config, dashboard, protocol, rules, save, status,
 /// protocol it speaks, the snapshot format it writes and the ones it reads, and the format of
 /// the game tables it loads (and its read-game writes).
 pub fn info() -> Value {
-    json!({"version": env!("CARGO_PKG_VERSION"), "protocol": ipc::PROTOCOL, "format": crate::handoff::FORMAT, "reads": [crate::handoff::FORMAT - 1, crate::handoff::FORMAT], "tablesFormat": crate::native::tables::TABLES_FORMAT})
+    json!({"version": env!("CARGO_PKG_VERSION"), "protocol": ipc::PROTOCOL, "format": crate::handoff::FORMAT, "reads": [crate::handoff::FORMAT], "tablesFormat": crate::native::tables::TABLES_FORMAT})
 }
 
 /// What a client may be sent before it is a player (PlayerReady): the world in its

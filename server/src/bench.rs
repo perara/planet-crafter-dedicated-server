@@ -386,9 +386,6 @@ fn handoff() {
         let cold = cold_doc.pointer(&pointer).cloned().unwrap_or(Value::Null);
         let Some(slot) = doc.pointer_mut(&pointer) else { continue };
         *slot = cold;
-        // A snapshot: the live one's head line, then the changed state.
-        let head = crate::handoff::snapshot_json(&load(&e)).unwrap();
-        let text = format!("{}\n{doc}", head.split_once('\n').unwrap().0);
         let quiet = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -398,10 +395,12 @@ fn handoff() {
                     return g;
                 }
                 let (net_data, data, spec) = tables();
-                {
                 let scenes = crate::scene_tables(e.dir, &net_data, &data);
-                crate::handoff::restore(net_data, data, spec, text.as_bytes(), scenes)
-            }.unwrap_or_else(|err| panic!("restore: {err}"))
+                // A snapshot of the changed state: the document read as a game, written as a bank does.
+                let mut changed: Game = serde_json::from_value(doc.clone()).unwrap_or_else(|err| panic!("state: {err}"));
+                changed.net_data.game_version = net_data.game_version.clone();
+                let text = crate::handoff::snapshot(&mut changed).unwrap_or_else(|err| panic!("snapshot: {err}"));
+                crate::handoff::restore(net_data, data, spec, &text, scenes).unwrap_or_else(|err| panic!("restore: {err}"))
             }, None)
         }));
         std::panic::set_hook(quiet);
@@ -456,7 +455,7 @@ fn flipbench() {
             g.net.out.clear();
         }
         let mut samples: BTreeMap<&'static str, Vec<f64>> = BTreeMap::new();
-        let mut bytes = 0;
+        let (mut bytes, mut sizes) = (0, [0; crate::handoff::KINDS]);
         let (front_end, bank_end) = std::os::unix::net::UnixStream::pair().unwrap();
         let (mut front, mut bank) = (crate::ipc::Link::new(front_end), crate::ipc::Link::new(bank_end));
         for round in 0..rounds + 1 {
@@ -479,6 +478,7 @@ fn flipbench() {
             let text = crate::ipc::map_memfd(f.fd.as_ref().unwrap()).unwrap();
             phases.push(("memfd map", t.elapsed().as_secs_f64() * 1000.0));
             bytes = text.len();
+            sizes = crate::handoff::part_sizes(&text);
             let new = crate::handoff::restore_timed(net_data, data, spec, &text, scenes, &mut phases).unwrap_or_else(|err| panic!("restore: {err}"));
             // The steps inside a step (their names start with a dot) are not added twice.
             let stand: f64 = phases.iter().filter(|p| !p.0.starts_with('.')).map(|p| p.1).sum();
@@ -499,7 +499,8 @@ fn flipbench() {
             g.net.out.clear();
         }
         println!("flipbench: {path}: {} world objects, {} network objects, {} inventories; loaded in {loaded:?}; snapshot {bytes} bytes; {rounds} flips (ms: p50 / p95 / max / min)", g.wos.len(), g.net.objects.len(), g.inventories.len());
-        let order = ["snapshot", "serialize", "memfd write", "fd pass", "memfd map", "head", "parse value", "migrate", ".parts read", ".parts joined", ".slot indexes", ".net index", "parse", "rebuild holders", "refresh tables", "generation", "stand"];
+        println!("flipbench:   bytes: {}", crate::handoff::NAMES.iter().zip(sizes).map(|(n, b)| format!("{n} {b}")).collect::<Vec<_>>().join(", "));
+        let order = ["serialize", ".write cpu rest", ".write cpu world objects", ".write cpu inventories", ".write cpu network objects", ".write cpu machines", ".write cpu water", "memfd write", "fd pass", "memfd map", "head", ".parts read", ".read cpu rest", ".read cpu world objects", ".read cpu inventories", ".read cpu network objects", ".read cpu machines", ".read cpu water", ".parts joined", ".slot indexes", ".net index", "parse", "rebuild holders", "refresh tables", "generation", "stand"];
         for name in order {
             let Some(v) = samples.get_mut(name) else { continue };
             v.sort_by(|a, b| a.partial_cmp(b).unwrap());

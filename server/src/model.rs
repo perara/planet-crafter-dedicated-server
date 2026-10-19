@@ -16,8 +16,11 @@ pub fn is_from_scene(id: i32) -> bool {
 pub struct WorldObject {
     pub id: i32,
     pub group: usize,
+    #[serde(with = "crate::bincodec::floats")]
     pub position: [f32; 3],
+    #[serde(with = "crate::bincodec::floats")]
     pub rotation: [f32; 4],
+    #[serde(with = "crate::bincodec::floats")]
     pub color: [f32; 4],
     pub text: String,
     pub linked_groups: Option<Vec<usize>>,
@@ -38,7 +41,9 @@ pub struct WorldObject {
     pub from_db: bool,
     pub planet: i32,
     pub planet_linked: i32,
+    #[serde(with = "crate::bincodec::floats")]
     pub unit_generation: [f32; 8],
+    #[serde(with = "crate::bincodec::floats")]
     pub unit_multiplier: [f32; 8],
     /// The network object standing for this world object in the scene (the game's GameObject).
     pub net: Option<u64>,
