@@ -1,0 +1,733 @@
+group,kind,category,in_save,world_objects,in_inventories,planets,host_components,host_components_missing,named_in_code,named_in_tests,family_tested,sweep_scripts,sweep_interactions,sweep_classes,sweep_result,status
+AirFilter1,item,Equipment,3,0,3,,WorldObjectAssociated,,0,1,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle, use",12,b,create on the floor: b,implemented
+AirPurificationMachine1,constructible,Purification,0,0,0,,ConstructibleProxy RequireEnergy WorldObjectAssociatedProxy,,0,1,yes,build_1,4,,all match,implemented
+AirPurificationMachine2,constructible,Purification,0,0,0,,ConstructibleProxy RequireEnergy WorldObjectAssociatedProxy,,0,0,yes,build_1,4,b,deconstruct: b,implemented
+AirPurificationMachine3,constructible,Purification,0,0,0,,ConstructibleProxy RequireEnergy WorldObjectAssociatedProxy,,0,0,yes,build_1,4,b,deconstruct: b,implemented
+AirPurificationMachine4,constructible,Purification,0,0,0,,ConstructibleProxy RequireEnergy WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+Algae1Growable,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"items_1, recycle",8,b,create on the floor: b,implemented
+Algae1Seed,item,Null,1166,220,1166,Aqualis:15 Humble:50 Prime:140 Selenea:15,WorldObjectAssociated,,0,0,yes,"items_1, recycle",8,b,create on the floor: b,implemented
+AlgaeGenerator1,constructible,Biomass,2,2,0,Humble:1 Prime:1,ConstructibleProxy GrowthProxy InventoryAssociatedProxy MachineGrowerVegetationHarvestable RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,5,yes,water,9,d,grower start: d,implemented
+AlgaeGenerator2,constructible,Biomass,14,14,0,Aqualis:1 Humble:3 Prime:9 Selenea:1,ConstructibleProxy GrowthProxy InventoryAssociatedProxy MachineGrowerVegetationHarvestable RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,water,9,d,grower start: d,implemented
+Alloy,item,Null,756,23,648,Aqualis:1 Humble:10 Prime:12,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle, scene",11,b,create on the floor: b,implemented
+Aluminium,item,Null,584,24,517,Aqualis:2 Humble:21 Prime:1,WorldObjectAssociated,,0,1,yes,"items_1, recycle, scene",9,b,create on the floor: b,implemented
+Amber,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"items_1, recycle",8,b,create on the floor: b,implemented
+AmphibiansFarm1,constructible,Biomass,7,7,0,Aqualis:1 Prime:5 Selenea:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_1, feed",17,,all match,implemented
+AnimalBones,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"items_1, recycle",8,b,create on the floor: b,implemented
+AnimalEffigie1,constructible,Null,2,1,0,Humble:1,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+AnimalEffigie10,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+AnimalEffigie2,constructible,Null,4,2,0,Prime:2,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+AnimalEffigie3,constructible,Null,2,0,1,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,b,deconstruct: b,implemented
+AnimalEffigie4,constructible,Null,6,2,0,Humble:1 Prime:1,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+AnimalEffigie5,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,b,deconstruct: b,implemented
+AnimalEffigie6,constructible,Null,4,0,2,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+AnimalEffigie7,constructible,Null,3,1,0,Selenea:1,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+AnimalEffigie8,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+AnimalEffigie9,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+AnimalFeeder1,constructible,Biomass,5,5,0,Humble:2 Prime:2 Selenea:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,1,yes,"build_1, feed",24,,all match,implemented
+AnimalFood1,item,Food,237,1,236,Humble:1,WorldObjectAssociated,,0,1,yes,"autocraft_AutoCrafter1_1, craft_1, feed, items_1, recycle, use",12,b,create on the floor: b,implemented
+AnimalFood2,item,Food,19,0,19,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, feed, items_1, recycle, use",12,b,create on the floor: b,implemented
+AnimalFood3,item,Food,3,0,3,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, feed, items_1, recycle, use",12,b,create on the floor: b,implemented
+AnimalShelter1,constructible,Biomass,6,6,0,Humble:2 Prime:2 Selenea:2,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy InventorySpawnContent RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,2,yes,"build_1, craft_2, feed",10,b,deconstruct: b; deconstruct refused (inventory not empty): b; input DNASequence: b,implemented
+AntiToxinsExplosive1,item,Null,0,0,0,,Explode WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle, use",11,b,create on the floor: b,implemented
+AntiToxinsExplosive2,item,Null,0,0,0,,Explode WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle, use",11,b,create on the floor: b,implemented
+Aquarium1,constructible,Biomass,4,4,0,Humble:2 Prime:2,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_1, craft_1, craft_2, feed",15,,all match,implemented
+Aquarium2,constructible,Biomass,4,4,0,Aqualis:1 Humble:1 Prime:1 Selenea:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy Panel RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,1,2,yes,"build_1, feed",14,,all match,implemented
+AquariumTube1,constructible,Furnitures,0,0,0,,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+ArcadeMachine1,constructible,Furnitures,7,7,0,Humble:1 Prime:6,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+Arch1,constructible,BaseBuilding,0,0,0,,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+AutoCrafter1,constructible,Machines,32,32,0,Humble:23 Prime:6 Selenea:3,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy LinkedGroupsProxy MachineAutoCrafter RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,3,yes,"autocraft_AutoCrafter1_1, autocraft_AutoCrafter1_2, autocraft_AutoCrafter1_3, build_1",9,b,build: b,implemented
+Backpack1,item,Equipment,0,0,0,,WorldObjectAssociated,,0,1,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle, use",12,b,create on the floor: b,implemented
+Backpack2,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle, use",12,b,create on the floor: b,implemented
+Backpack3,item,Equipment,0,0,0,,WorldObjectAssociated,,0,1,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle, use",12,b,create on the floor: b,implemented
+Backpack4,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle, use",12,b,create on the floor: b,implemented
+Backpack5,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle, use",12,b,create on the floor: b,implemented
+Backpack6,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle, use",12,b,create on the floor: b,implemented
+Backpack7,item,Equipment,3,0,3,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle, use",12,b,create on the floor: b,implemented
+Bacteria1,item,Null,263,1,262,Aqualis:1,WorldObjectAssociated,,0,1,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle",10,b,create on the floor: b,implemented
+BalzarQuartz,item,Null,723,0,719,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle",10,b,create on the floor: b,implemented
+Bauxite,item,Null,319,1,318,Humble:1,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+Beacon,constructible,Machines,7,7,0,Aqualis:1 Humble:1 Prime:4 Selenea:1,ColorProxy ConstructibleProxy TextProxy WorldObjectColor,,0,0,yes,build_1,4,,all match,implemented
+BedDouble,constructible,Furnitures,1,1,0,Selenea:1,ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+BedDoubleColored,constructible,Furnitures,2,2,0,Humble:1 Prime:1,ColorProxy ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy WorldObjectColor,,0,0,yes,build_1,5,,all match,implemented
+BedSimple,constructible,Furnitures,0,0,0,,ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+Bee1Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Bee1Larvae,item,Larvae,227,2,225,Aqualis:2,WorldObjectAssociated,,0,1,yes,"autocraft_AutoCrafter1_1, autocraft_Incubator2_1, convert, craft_1, feed, items_1, recycle",13,b,create on the floor: b,implemented
+Beehive1,constructible,Biomass,9,9,0,Prime:9,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGenerator RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,7,,all match,implemented
+Beehive2,constructible,Biomass,12,12,0,Aqualis:2 Humble:2 Prime:5 Selenea:3,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGenerator RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,7,"b,d",build: b; run: d,implemented
+Biodome2,constructible,Biomass,5,5,0,Aqualis:1 Humble:1 Prime:2 Selenea:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGenerator Panel RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_1, optimizer",10,,all match,implemented
+Biolab,constructible,BaseBuilding,1,1,0,Prime:1,ConstructibleProxy Panel RequireEnergy WorldObjectAssociatedProxy,,1,3,yes,"build_1, craft_1, craft_2",7,,all match,implemented
+Bioplastic1,item,Null,411,10,401,Prime:10,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle",10,b,create on the floor: b,implemented
+BlueprintAutocrafter,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintBedDoubleColored,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintContainer3,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintCookingStation,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintDeparturePlatform,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintDrone2,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintEquipmentIncrease2,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintEquipmentIncrease5,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintFireplace,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintFlare,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintFountainBig,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintHologramGenerator,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintLightBoxMedium,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintPod9xA,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintPod9xB,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintPod9xC,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintShower,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintSmartFabric,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintSofaColored,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintSolarQuartz,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintT1,item,Null,36,0,36,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintToxicityDiorama1,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintToxicityDiorama2,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintTradePlatform,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintTreePlanter,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintVehicleJetpack1,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintWallWaterLife,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BlueprintWardensChip,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_1, recycle",9,b,create on the floor: b,implemented
+BootsSpeed1,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle, use",12,b,create on the floor: b,implemented
+BootsSpeed2,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle, use",12,b,create on the floor: b,implemented
+BootsSpeed3,item,Equipment,1,0,1,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle, use",12,b,create on the floor: b,implemented
+Butterfly10Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly10Larvae,item,Larvae,1,0,1,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, autocraft_Incubator2_1, convert, craft_1, feed, items_1, recycle",16,b,create on the floor: b,implemented
+Butterfly11Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly11Larvae,item,Larvae,3,0,3,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, feed, items_1, recycle",10,b,create on the floor: b,implemented
+Butterfly12Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly12Larvae,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, feed, items_1, recycle",10,b,create on the floor: b,implemented
+Butterfly13Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly13Larvae,item,Larvae,2,0,2,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, feed, items_1, recycle",10,b,create on the floor: b,implemented
+Butterfly14Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly14Larvae,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, feed, items_1, recycle",10,b,create on the floor: b,implemented
+Butterfly15Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly15Larvae,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, feed, items_1, recycle",10,b,create on the floor: b,implemented
+Butterfly16Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly16Larvae,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, autocraft_Incubator2_1, convert, craft_1, feed, items_1, recycle",13,b,create on the floor: b,implemented
+Butterfly17Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly17Larvae,item,Larvae,9,0,9,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, autocraft_Incubator2_1, convert, craft_1, feed, items_1, recycle",13,b,create on the floor: b,implemented
+Butterfly18Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly18Larvae,item,Larvae,1,0,1,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, autocraft_Incubator2_1, convert, craft_1, feed, items_1, recycle",13,b,create on the floor: b,implemented
+Butterfly19Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly19Larvae,item,Larvae,5,0,5,,WorldObjectAssociated,,0,0,yes,"feed, items_1, recycle",9,b,create on the floor: b,implemented
+Butterfly1Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly1Larvae,item,Larvae,131,0,131,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, autocraft_Incubator2_1, convert, craft_1, feed, items_1, recycle",13,b,create on the floor: b,implemented
+Butterfly20Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly20Larvae,item,Larvae,8,0,8,,WorldObjectAssociated,,0,0,yes,"feed, items_1, recycle",9,b,create on the floor: b,implemented
+Butterfly21Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly21Larvae,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, autocraft_Incubator2_1, convert, craft_1, feed, items_1, recycle",13,b,create on the floor: b,implemented
+Butterfly2Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly2Larvae,item,Larvae,108,0,108,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, autocraft_Incubator2_1, convert, craft_1, feed, items_1, recycle",13,b,create on the floor: b,implemented
+Butterfly3Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly3Larvae,item,Larvae,102,0,102,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, autocraft_Incubator2_1, convert, craft_1, feed, items_1, recycle",13,b,create on the floor: b,implemented
+Butterfly4Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly4Larvae,item,Larvae,125,0,125,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, autocraft_Incubator2_1, convert, craft_1, feed, items_1, recycle",13,b,create on the floor: b,implemented
+Butterfly5Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly5Larvae,item,Larvae,101,0,101,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, autocraft_Incubator2_1, convert, craft_1, feed, items_1, recycle",13,b,create on the floor: b,implemented
+Butterfly6Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly6Larvae,item,Larvae,114,0,114,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, autocraft_Incubator2_1, convert, craft_1, feed, items_1, recycle",13,b,create on the floor: b,implemented
+Butterfly7Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly7Larvae,item,Larvae,113,0,113,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, autocraft_Incubator2_1, convert, craft_1, feed, items_1, recycle",13,b,create on the floor: b,implemented
+Butterfly8Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly8Larvae,item,Larvae,98,0,98,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, autocraft_Incubator2_1, convert, craft_1, feed, items_1, recycle",13,b,create on the floor: b,implemented
+Butterfly9Hatched,item,Null,0,0,0,,,,0,0,no,"items_1, recycle",8,b,create on the floor: b,implemented
+Butterfly9Larvae,item,Larvae,102,0,102,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, autocraft_Incubator2_1, convert, craft_1, feed, items_1, recycle",13,b,create on the floor: b,implemented
+ButterflyDisplayer1,constructible,Furnitures,2,2,0,Prime:1 Selenea:1,ConstructibleProxy InventoryAssociatedProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_1, feed",13,,all match,implemented
+ButterflyDome1,constructible,Biomass,3,3,0,Humble:1 Prime:1 Selenea:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy Panel RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_1, feed",14,,all match,implemented
+ButterflyFarm1,constructible,Biomass,0,0,0,,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_1, feed, optimizer",16,,all match,implemented
+ButterflyFarm2,constructible,Biomass,2,2,0,Prime:1 Selenea:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_1, feed",13,b,world object id: b,implemented
+ButterflyFarm3,constructible,Biomass,2,2,0,Aqualis:1 Humble:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_1, feed",13,,all match,implemented
+Chair1,constructible,Furnitures,3,3,0,Prime:3,ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+Chair2,constructible,Furnitures,16,16,0,Humble:1 Prime:9 Selenea:6,ColorProxy ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy WorldObjectColor,,0,0,yes,build_1,5,,all match,implemented
+ChlorineCapsule1,item,Null,1,0,1,,WorldObjectAssociated,,0,0,yes,"items_1, recycle",8,b,create on the floor: b,implemented
+CircuitBoard1,item,Null,351,0,351,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle",10,b,create on the floor: b,implemented
+Cobalt,item,Null,641,6,514,Humble:2 Prime:3 Toxicity:1,WorldObjectAssociated,,0,0,yes,"items_1, recycle, scene, transfer",10,b,create on the floor: b,implemented
+ComAntenna,constructible,Machines,2,2,0,Humble:1 Prime:1,ConstructibleProxy RequireEnergy WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+Container1,constructible,Furnitures,385,4,0,Prime:3 Selenea:1,ConstructibleProxy InventoryAssociatedProxy InventorySetFirstItemAsLinked LinkedGroupsProxy TextProxy,,4,32,yes,"build_1, scene",8,b,text: b,implemented
+Container2,constructible,Furnitures,34,7,0,Aqualis:1 Prime:4 Toxicity:2,ConstructibleProxy InventoryAssociatedProxy InventorySetFirstItemAsLinked LinkedGroupsProxy TextProxy,,0,4,yes,"autocraft_AutoCrafter1_1, autocraft_AutoCrafter1_2, autocraft_AutoCrafter1_3, autocraft_Incubator2_1, build_1, transfer",9,,all match,implemented
+Container3,constructible,Furnitures,419,419,0,Aqualis:6 Humble:126 Prime:217 Selenea:70,ConstructibleProxy InventoryAssociatedProxy InventorySetFirstItemAsLinked LinkedGroupsProxy TextProxy,,0,0,yes,"build_1, sharing.A, sharing.B",17,b,shared container: b,implemented
+ContainerAqualis,constructible,Null,95,0,0,,,,0,0,no,,1,,build: none: no prefab in the tables,no prefab in the game: nothing to host
+ContainerGoldenAqualis,constructible,Null,0,0,0,,,,0,0,no,,1,,build: none: no prefab in the tables,no prefab in the game: nothing to host
+ContainerToxic1,constructible,Purification,0,0,0,,ConstructibleProxy InventoryAssociatedProxy,,0,0,yes,"build_1, feed",9,,all match,implemented
+CookCake1,item,Null,1,1,0,Prime:1,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle, use",11,b,create on the floor: b; use: build: b,implemented
+CookChocolate,item,Null,26,0,26,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle",10,b,create on the floor: b,implemented
+CookCocoaGrowable,item,Food,94,7,94,Humble:5 Prime:2,WorldObjectAssociated,,0,0,yes,"feed, items_1, recycle, use",14,"b,d",create on the floor: b; harvest from Farm1: d; harvest from Farm2: d; harvest from VegetableGrower1: d; harvest from VegetableGrower2: d,implemented
+CookCocoaSeed,item,SeedVegetable,8,1,7,Prime:1,WorldObjectAssociated,,0,0,yes,"feed, items_1, recycle",12,"b,d",create on the floor: b; into Farm1: d; into Farm2: d; into VegetableGrower1: d; into VegetableGrower2: d,implemented
+CookCookie1,item,Food,102,0,102,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, feed, items_1, recycle, use",12,b,create on the floor: b,implemented
+CookCroissant,item,Food,32,0,32,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, feed, items_1, recycle, use",12,b,create on the floor: b,implemented
+CookFlour,item,Null,25,0,25,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle",10,b,create on the floor: b,implemented
+CookStew1,item,Food,116,0,116,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, feed, items_1, recycle, use",12,b,create on the floor: b,implemented
+CookStewFish1,item,Food,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, feed, items_1, recycle, use",12,b,create on the floor: b,implemented
+CookWheatGrowable,item,Food,171,12,171,Humble:10 Prime:2,WorldObjectAssociated,,0,0,yes,"feed, items_1, recycle, use",11,"b,d",create on the floor: b; harvest from VegetableGrower2: d,implemented
+CookWheatSeed,item,SeedVegetable,8,2,6,Prime:2,WorldObjectAssociated,,0,0,yes,"feed, items_1, recycle",9,"b,d",create on the floor: b; into VegetableGrower2: d,implemented
+CookingStation1,constructible,Furnitures,1,1,0,Prime:1,ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_1, craft_1",6,,all match,implemented
+CosmicQuartz,item,Null,25,0,24,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_1, recycle",10,b,create on the floor: b,implemented
+Counter1,constructible,Furnitures,18,18,0,Humble:8 Prime:10,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy WorldObjectAssociatedProxy,,0,0,yes,build_1,7,b,run: b,implemented
+Counter2,constructible,Furnitures,10,10,0,Humble:6 Prime:4,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy WorldObjectAssociatedProxy,,0,0,yes,build_1,7,,all match,implemented
+CraftStation1,constructible,Machines,3,3,0,Humble:1 Prime:1 Selenea:1,ConstructibleProxy RequireEnergy WorldObjectAssociatedProxy,,0,6,yes,"build_1, craft_1, craft_2",6,,all match,implemented
+CraftStation2,constructible,Machines,3,3,0,Humble:1 Prime:1 Selenea:1,ConstructibleProxy RequireEnergy WorldObjectAssociatedProxy,,0,0,yes,"build_1, craft_1, craft_2",6,,all match,implemented
+DNASequence,item,DNASequence,29,0,29,,WorldObjectAssociated,,2,2,yes,"feed, items_1, recycle",10,b,create on the floor: b; into AnimalShelter1: b,implemented
+DebrisContainer1,item,Null,0,0,0,,InventoryAssociated WorldObjectAssociated,,0,0,yes,"items_2, recycle",8,b,create on the floor: b,implemented
+DeparturePlatform,constructible,Machines,5,5,0,Aqualis:1 Humble:1 Prime:1 Selenea:1 Toxicity:1,ConstructibleProxy MachineDeparturePlatform MachineGetInRange,,0,5,yes,build_1,3,,all match,implemented
+Desktop1,constructible,Furnitures,6,6,0,Humble:4 Prime:2,ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+Desktop2,constructible,Furnitures,9,9,0,Prime:3 Selenea:6,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+Destructor1,constructible,Machines,5,5,0,Humble:2 Prime:2 Selenea:1,ConstructibleProxy InventoryAssociatedProxy SettingProxy,,0,1,yes,build_1,6,b,build: b,implemented
+DetoxificationMachine1,constructible,Purification,0,0,0,,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy TextProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,9,d,run: d,implemented
+DetoxificationMachine2,constructible,Purification,0,0,0,,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy TextProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,9,"b,d",run: b/d,implemented
+DetoxificationMachine3,constructible,Purification,0,0,0,,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy TextProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,9,b,inventory: b,implemented
+DisplayCase,constructible,Furnitures,4,4,0,Humble:1 Prime:1 Selenea:2,ConstructibleProxy InventoryAssociatedProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,7,,all match,implemented
+Dolomite,item,Null,287,0,287,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, items_2, recycle",9,b,create on the floor: b,implemented
+Drill0,constructible,Machines,0,0,0,,ConstructibleProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+Drill1,constructible,Machines,1,1,0,Toxicity:1,ConstructibleProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,7,yes,build_1,4,,all match,implemented
+Drill2,constructible,Machines,0,0,0,,ConstructibleProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+Drill3,constructible,Machines,4,4,0,Prime:4,ConstructibleProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+Drill4,constructible,Machines,18,18,0,Aqualis:4 Humble:5 Prime:3 Selenea:6,ConstructibleProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,1,yes,build_1,4,b,build: b,implemented
+Drone1,item,Null,21,10,11,Prime:10,Drone DroneNetworkVibility WorldObjectAssociated,,0,7,yes,"autocraft_AutoCrafter1_1, craft_world, items_2, recycle",10,,all match,implemented
+Drone2,item,Null,297,35,250,Aqualis:5 Humble:12 Prime:12 Selenea:6,Drone DroneNetworkVibility WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_world, items_2, recycle",10,,all match,implemented
+Drone3,item,Null,0,0,0,,Drone DroneNetworkVibility WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_world, items_2, recycle",10,,all match,implemented
+DroneExplodable,constructible,Null,0,0,0,,Exploded WorldObjectAssociated,,0,0,yes,"build_1, growth",10,b,build: b,implemented
+DroneLog,item,Null,11,0,11,,WorldObjectAssociated,,0,0,yes,"items_2, recycle",8,b,create on the floor: b,implemented
+DroneStation1,constructible,Machines,9,9,0,Aqualis:2 Humble:3 Prime:2 Selenea:2,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociatedProxy,,0,11,yes,"build_1, craft_world",9,,all match,implemented
+Ecosystem1,constructible,Biomass,12,12,0,Aqualis:3 Humble:3 Prime:3 Selenea:3,ConstructibleProxy GrowthProxy InventoryAssociated InventoryAssociatedProxy MachineGenerator RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_1, growth",9,d,run: d,implemented
+Elevator,constructible,Null,29,0,0,,WorldObjectAssociated,,0,0,yes,"build_1, growth, system",11,"b,c",colour: b; interactive state: b; scene interpolation: c,implemented
+EndingExplosives,constructible,Machines,0,0,0,,ActionnableInteractiveProxy ConstructibleProxy,,0,0,yes,build_1,3,,all match,implemented
+EnergyGenerator1,constructible,Machines,0,0,0,,ConstructibleProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,1,18,yes,build_1,4,,all match,implemented
+EnergyGenerator2,constructible,Machines,3,1,0,Aqualis:1,ConstructibleProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+EnergyGenerator3,constructible,Machines,13,2,0,Aqualis:2,ConstructibleProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_1, scene",5,,all match,implemented
+EnergyGenerator4,constructible,Machines,8,0,0,,ConstructibleProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+EnergyGenerator5,constructible,Machines,0,0,0,,ConstructibleProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+EnergyGenerator6,constructible,Machines,32,32,0,Aqualis:6 Humble:11 Prime:9 Selenea:5 Toxicity:1,ConstructibleProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,4,yes,"autocraft_AutoCrafter1_1, autocraft_AutoCrafter1_2, autocraft_AutoCrafter1_3, autocraft_Incubator2_1, build_1, build_2, build_3, convert, craft_1, craft_2, craft_world, feed, ground, growth, optimizer, recycle, transfer, vehicle.A, water",5,b,build: b,implemented
+EquipmentIncrease1,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_2, recycle, use",12,b,create on the floor: b,implemented
+EquipmentIncrease2,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_2, recycle, use",12,b,create on the floor: b,implemented
+EquipmentIncrease3,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_2, recycle, use",12,b,create on the floor: b,implemented
+EquipmentIncrease4,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_2, recycle, use",12,b,create on the floor: b,implemented
+EquipmentIncrease5,item,Equipment,3,0,3,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_1, craft_1, items_2, recycle, use",12,b,create on the floor: b,implemented
+EscapePod,constructible,Null,1,1,0,Prime:1,ConstructibleProxy InventoryAssociated WorldObjectAssociated,,1,6,yes,build_1,3,"b,e",build: b; deconstruct: e,implemented
+EscapePodHumble,constructible,Null,0,0,0,,ConstructibleProxy InventoryAssociated WorldObjectAssociated,,0,0,yes,build_1,3,e,deconstruct: e,implemented
+EscapePodInterplanetary,constructible,Null,4,4,0,Humble:1 Prime:1 Selenea:1 Toxicity:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_1,7,,all match,implemented
+EscapePodToxicity,constructible,Null,0,0,0,,ConstructibleProxy InventoryAssociated WorldObjectAssociated,,0,0,yes,build_1,3,e,deconstruct: e,implemented
+ExerciseBike1,constructible,Furnitures,2,2,0,Humble:1 Prime:1,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+Explosive,item,Null,102,0,102,,Explode WorldObjectAssociated,,0,1,yes,"autocraft_AutoCrafter1_2, craft_1, items_2, recycle, use",11,b,create on the floor: b,implemented
+FabricBlue,item,Null,188,0,188,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_1, items_2, recycle",10,b,create on the floor: b,implemented
+Farm1,constructible,Biomass,17,17,0,Aqualis:1 Humble:3 Prime:9 Selenea:4,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGrowerVegetationHarvestable RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,1,0,yes,"build_1, feed, ground",16,"b,d",grower start: b; input Vegetable3Seed: d,implemented
+Farm2,constructible,Biomass,6,6,0,Humble:6,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGrowerVegetationHarvestable RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,1,0,yes,"build_1, feed, ground",14,"b,d",build: b; input CookCocoaSeed: d,implemented
+Faucet1,constructible,Furnitures,6,6,0,Humble:3 Prime:3,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_1,4,,all match,implemented
+Fence,constructible,BaseBuilding,0,0,0,,ConstructibleProxy,,0,0,yes,build_1,2,,all match,implemented
+FenceRounded,constructible,BaseBuilding,0,0,0,,ConstructibleProxy,,0,0,yes,build_1,2,,all match,implemented
+Fertilizer1,item,Null,267,5,262,Prime:5,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_1, items_2, recycle",10,b,create on the floor: b,implemented
+Fertilizer2,item,Null,194,5,189,Humble:5,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_1, items_2, recycle",10,b,create on the floor: b,implemented
+Fertilizer3,item,Null,115,1,114,Humble:1,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_1, items_2, recycle",10,b,create on the floor: b,implemented
+Fireplace,constructible,Furnitures,1,1,0,Prime:1,ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,1,yes,build_1,4,,all match,implemented
+Fish10Eggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",15,b,create on the floor: b,implemented
+Fish10Hatched,item,Null,1,0,1,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Fish11Eggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Fish11Hatched,item,Null,1,0,1,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Fish12Eggs,item,Larvae,1,0,1,,WorldObjectAssociated,,0,0,yes,"feed, items_2, recycle",9,b,create on the floor: b,implemented
+Fish12Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Fish13Eggs,item,Larvae,89,0,89,,WorldObjectAssociated,,0,0,yes,"feed, items_2, recycle",9,b,create on the floor: b,implemented
+Fish13Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Fish14Eggs,item,Larvae,5,0,5,,WorldObjectAssociated,,0,0,yes,"feed, items_2, recycle",9,b,create on the floor: b,implemented
+Fish14Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Fish15Eggs,item,Larvae,12,0,12,,WorldObjectAssociated,,0,0,yes,"feed, items_2, recycle",9,b,create on the floor: b,implemented
+Fish15Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Fish1Eggs,item,Larvae,42,0,42,,WorldObjectAssociated,,0,2,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Fish1Hatched,item,Null,1,0,1,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Fish2Eggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Fish2Hatched,item,Null,1,0,1,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Fish3Eggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Fish3Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Fish4Eggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Fish4Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Fish5Eggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Fish5Hatched,item,Null,1,0,1,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Fish6Eggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Fish6Hatched,item,Null,1,0,1,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Fish7Eggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Fish7Hatched,item,Null,1,0,1,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Fish8Eggs,item,Larvae,81,0,81,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Fish8Hatched,item,Null,2,0,2,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Fish9Eggs,item,Larvae,63,0,63,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Fish9Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+FishDisplayer1,constructible,Furnitures,2,2,0,Prime:1 Selenea:1,ConstructibleProxy InventoryAssociatedProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_1, feed",14,b,world object details: b,implemented
+FishFarm1,constructible,Biomass,6,6,0,Prime:6,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGrowerBase RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,water,8,,all match,implemented
+FishFarm2,constructible,Biomass,2,2,0,Aqualis:1 Humble:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGrowerBase RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,water,8,,all match,implemented
+Flare,item,Null,111,5,106,Humble:5,WorldObjectAssociated WorldObjectColor,,0,1,yes,"autocraft_AutoCrafter1_2, craft_1, items_2, recycle, use",11,b,create on the floor: b,implemented
+FloorAngleGlass,constructible,BaseBuilding,0,0,0,,,,1,1,no,"build_1, growth",10,b,build: b,implemented
+FloorGlass,constructible,BaseBuilding,0,0,0,,,,1,0,no,"build_1, growth",10,,all match,implemented
+FlowerPot1,constructible,Furnitures,6,6,0,Humble:1 Prime:2 Selenea:3,ConstructibleProxy GrowthProxy InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_1, feed, ground, growth",18,d,deconstruct: d; grower start: d; grower start on the ground: d; input Seed6: d,implemented
+FlowerPot2,constructible,Furnitures,9,9,0,Humble:8 Prime:1,ConstructibleProxy GrowthProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_1, feed, ground, growth",18,"b,d",deconstruct: d; grower start: d; grower start on the ground: d; growth: b; input Seed7Humble: b/d; inventory: b,implemented
+FlowerPot3,constructible,Furnitures,0,0,0,,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_2, feed",10,,all match,implemented
+Foundation,constructible,BaseBuilding,43,43,0,Aqualis:1 Humble:3 Prime:25 Selenea:13 Toxicity:1,ConstructibleProxy,,0,0,yes,build_2,2,,all match,implemented
+FoundationAngle,constructible,BaseBuilding,0,0,0,,ConstructibleProxy,,0,0,yes,build_2,2,,all match,implemented
+FoundationSlope,constructible,BaseBuilding,16,16,0,Prime:7 Selenea:9,ConstructibleProxy,,0,0,yes,build_2,2,,all match,implemented
+FountainBig,constructible,Furnitures,3,3,0,Humble:2 Prime:1,ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+Fridge1,constructible,Furnitures,5,5,0,Humble:3 Prime:2,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy WorldObjectAssociatedProxy,,0,0,yes,build_2,7,,all match,implemented
+Frog10Eggs,item,Larvae,1,0,1,,WorldObjectAssociated,,0,0,yes,"feed, items_2, recycle",10,b,create on the floor: b,implemented
+Frog10Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Frog11Eggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"feed, items_2, recycle",9,b,create on the floor: b,implemented
+Frog11Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Frog12Eggs,item,Larvae,1,0,1,,WorldObjectAssociated,,0,0,yes,"feed, items_2, recycle",9,b,create on the floor: b,implemented
+Frog12Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Frog13Eggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"feed, items_2, recycle",9,b,create on the floor: b,implemented
+Frog13Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Frog14Eggs,item,Larvae,12,0,12,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Frog14Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Frog15Eggs,item,Larvae,5,0,5,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Frog15Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Frog16Eggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Frog16Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Frog1Eggs,item,Larvae,116,0,112,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Frog1Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Frog2Eggs,item,Larvae,2,0,2,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Frog2Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Frog3Eggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Frog3Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Frog4Eggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Frog4Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Frog5Eggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Frog5Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Frog6Eggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Frog6Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Frog7Eggs,item,Larvae,3,0,3,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Frog7Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Frog8Eggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Frog8Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+Frog9Eggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+Frog9Hatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+FrogDisplayer1,constructible,Furnitures,2,2,0,Humble:1 Prime:1,ConstructibleProxy InventoryAssociatedProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_2, feed",17,,all match,implemented
+FrogGoldEggs,item,Larvae,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_1, feed, items_2, recycle",13,b,create on the floor: b,implemented
+FrogGoldHatched,item,Null,0,0,0,,,,0,0,no,"items_2, recycle",8,b,create on the floor: b,implemented
+FuseAnimals1,item,Fuse,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_1, feed, items_2, optimizer, recycle",12,b,create on the floor: b,implemented
+FuseCartridge,item,Null,91,0,91,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_1, items_2, recycle",10,b,create on the floor: b,implemented
+FuseEnergy1,item,Fuse,69,0,69,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_1, feed, items_2, optimizer, recycle",12,b,create on the floor: b,implemented
+FuseGrowth1,item,Fuse,46,0,46,,WorldObjectAssociated,,0,1,yes,"autocraft_AutoCrafter1_2, craft_1, feed, items_2, optimizer, recycle",12,b,create on the floor: b,implemented
+FuseHeat1,item,Fuse,13,0,13,,WorldObjectAssociated,,0,0,yes,"feed, items_2, optimizer, recycle",10,b,create on the floor: b,implemented
+FuseInsects1,item,Fuse,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_1, feed, items_2, optimizer, recycle",12,b,create on the floor: b,implemented
+FuseOxygen1,item,Fuse,13,0,13,,WorldObjectAssociated,,0,1,yes,"feed, items_2, optimizer, recycle",10,b,create on the floor: b,implemented
+FusePlants1,item,Fuse,11,0,11,,WorldObjectAssociated,,0,0,yes,"feed, items_2, optimizer, recycle",10,b,create on the floor: b,implemented
+FusePressure1,item,Fuse,10,0,10,,WorldObjectAssociated,,0,0,yes,"feed, items_2, optimizer, recycle",10,b,create on the floor: b,implemented
+FuseProduction1,item,Fuse,74,0,74,,WorldObjectAssociated,,0,0,yes,"feed, items_2, optimizer, recycle",10,b,create on the floor: b,implemented
+FusePurification1,item,Fuse,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_1, feed, items_2, optimizer, recycle",12,b,create on the floor: b,implemented
+FuseTradeRocketsSpeed1,item,Fuse,118,0,118,,WorldObjectAssociated,,0,1,yes,"autocraft_AutoCrafter1_2, craft_1, feed, items_2, optimizer, recycle",12,b,create on the floor: b,implemented
+FusionEnergyCell,item,FusionEnergy,129,0,129,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_1, feed, items_2, recycle",12,b,create on the floor: b,implemented
+FusionGenerator1,constructible,Null,0,0,0,,InventoryAssociated WorldObjectAssociated,,0,1,yes,"build_2, feed, growth",14,,all match,implemented
+GasExtractor1,constructible,Machines,3,3,0,Humble:1 Prime:1 Selenea:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGenerator RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,7,d,run: d,implemented
+GasExtractor2,constructible,Machines,4,4,0,Humble:2 Prime:1 Selenea:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy LinkedGroupsProxy MachineGenerator RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,8,,all match,implemented
+GenerationGroupVein,constructible,Null,32,0,0,,,,1,1,no,,1,,build: none: no prefab in the tables,no prefab in the game: nothing to host
+GeneticExtractor1,constructible,Biomass,2,2,0,Humble:1 Prime:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,7,,all match,implemented
+GeneticManipulator1,constructible,Biomass,3,3,0,Humble:1 Prime:1 Selenea:1,ConstructibleProxy GrowthProxy InventoryAssociated InventoryAssociatedProxy LinkedGroupsProxy MachineConvertRecipe RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_2, growth",11,,all match,implemented
+GeneticSynthetizer1,constructible,Biomass,3,3,0,Humble:1 Prime:1 Selenea:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_2, feed",10,,all match,implemented
+GeneticTrait,item,GeneticTrait,511,3,508,Selenea:3,WorldObjectAssociated,,1,0,yes,"feed, items_2, recycle",9,b,create on the floor: b,implemented
+GoldenContainer,constructible,Null,7,0,0,,InventoryAssociated WorldObjectAssociated,,0,0,yes,"build_2, growth, scene",13,d,inventory: d; run: d,implemented
+GoldenEffigie1,constructible,Null,15,1,7,Prime:1,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,1,yes,build_2,4,,all match,implemented
+GoldenEffigie2,constructible,Null,17,0,2,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+GoldenEffigie3,constructible,Null,4,0,2,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+GoldenEffigie4,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+GoldenEffigie5,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+GoldenEffigie6,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+GoldenEffigie7,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+GoldenEffigie8,constructible,Null,1,0,1,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+GoldenEffigie9,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+GoldenToxicityEffigie1,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+GoldenToxicityEffigie2,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+GoldenToxicityEffigie3,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+GoldenToxicityEffigie4,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+GoldenToxicityEffigie5,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+GoldenToxicityEffigie6,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+GrassSpreader1,constructible,Biomass,7,7,0,Aqualis:1 Prime:4 Selenea:2,ConstructibleProxy GrowthProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_2, ground, growth",10,d,grower start: d; grower start on the ground: d,implemented
+HarvestingRobot1,constructible,Machines,7,7,0,Aqualis:3 Humble:1 Prime:3,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy LinkedGroupsProxy MachineGenerator RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,8,,all match,implemented
+Heater1,constructible,Machines,10,0,0,,ConstructibleProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,1,4,yes,"build_2, scene",5,,all match,implemented
+Heater2,constructible,Machines,11,0,0,,ConstructibleProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_2, optimizer, scene",6,,all match,implemented
+Heater3,constructible,Machines,10,0,0,,ConstructibleProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+Heater4,constructible,Machines,2,2,0,Prime:2,ConstructibleProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+Heater5,constructible,Machines,13,13,0,Aqualis:3 Humble:4 Prime:2 Selenea:4,ConstructibleProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+HologramGenerator,constructible,Furnitures,2,2,0,Humble:2,ConstructibleProxy InventoryAssociatedProxy RequireEnergy WorldObjectAssociatedProxy,,0,0,yes,build_2,7,,all match,implemented
+HudChipCleanConstruction,item,Equipment,1,0,1,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_1, items_2, recycle, use",12,b,create on the floor: b,implemented
+HudCompass,item,Equipment,5,0,5,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_1, items_2, recycle, use",12,b,create on the floor: b,implemented
+Incubator1,constructible,Biomass,5,5,0,Humble:3 Prime:2,ConstructibleProxy GrowthProxy InventoryAssociated InventoryAssociatedProxy LinkedGroupsProxy MachineConvertRecipe RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,1,yes,"build_2, growth",11,,all match,implemented
+Incubator2,constructible,Biomass,0,0,0,,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy LinkedGroupsProxy MachineAutoCrafter RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"autocraft_Incubator2_1, build_2",9,,all match,implemented
+InsideLamp1,constructible,Furnitures,8,8,0,Humble:2 Prime:6,ColorProxy ConstructibleProxy RequireEnergy WorldObjectAssociatedProxy WorldObjectColor,,0,0,yes,build_2,5,,all match,implemented
+InsideLamp2,constructible,Furnitures,0,0,0,,ColorProxy ConstructibleProxy RequireEnergy WorldObjectColor,,0,0,yes,build_2,3,,all match,implemented
+InteriorStairs1,constructible,BaseBuilding,3,3,0,Humble:2 Prime:1,ConstructibleProxy Panel RequireEnergy WorldObjectAssociatedProxy,,1,2,yes,build_2,5,,all match,implemented
+InterplanetaryExchangePlatform1,constructible,Machines,12,12,0,Aqualis:2 Humble:5 Prime:2 Selenea:3,ConstructibleProxy GrowthProxy InventoryAssociated InventoryAssociatedProxy LinkedGroupsProxy LinkedPlanetProxy MachineRocket SettingProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,2,yes,"build_2, growth",12,,all match,implemented
+Iridium,item,Null,666,18,532,Aqualis:3 Humble:14 Prime:1,WorldObjectAssociated,,0,2,yes,"items_2, recycle, scene",9,b,create on the floor: b,implemented
+Iron,item,Null,1338,533,539,Aqualis:4 Humble:201 Prime:260 Selenea:67 Toxicity:1,WorldObjectAssociated,,4,96,yes,"items_2, recycle, scene, transfer, use",11,b,create on the floor: b,implemented
+Ivy1,constructible,Furnitures,6,6,0,Humble:6,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+Jetpack1,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_1, items_2, recycle, use",12,b,create on the floor: b,implemented
+Jetpack2,item,Equipment,0,0,0,,WorldObjectAssociated,,0,1,yes,"autocraft_AutoCrafter1_2, craft_1, items_2, recycle, use",12,b,create on the floor: b,implemented
+Jetpack3,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_1, items_2, recycle, use",12,b,create on the floor: b,implemented
+Jetpack4,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_1, items_2, recycle, use",12,b,create on the floor: b,implemented
+Jetpack5,item,Equipment,3,0,3,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_1, items_2, recycle, use",12,b,create on the floor: b,implemented
+KeyCard2,item,KeyCard,32,0,23,,,,0,0,no,"autocraft_AutoCrafter1_2, feed, items_2, recycle",11,b,create on the floor: b,implemented
+Keycard1,item,KeyCard,12,0,12,,,,0,0,no,"autocraft_AutoCrafter1_2, feed, items_2, recycle",10,b,create on the floor: b,implemented
+Ladder,constructible,BaseBuilding,4,4,0,Humble:1 Prime:2 Selenea:1,ConstructibleProxy,,0,0,yes,build_2,2,,all match,implemented
+LarvaeBase1,item,Null,255,0,255,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_2, items_2, recycle",12,b,create on the floor: b,implemented
+LarvaeBase2,item,Null,146,0,146,,WorldObjectAssociated,,0,0,yes,"items_2, recycle",8,b,create on the floor: b,implemented
+LarvaeBase3,item,Null,184,0,184,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, autocraft_Incubator2_1, convert, craft_2, items_2, recycle",12,b,create on the floor: b,implemented
+LaunchPlatform,constructible,Machines,4,4,0,Aqualis:1 Humble:1 Prime:1 Selenea:1,ConstructibleProxy,,0,3,yes,"build_2, craft_world",4,,all match,implemented
+LavaLamp1,constructible,Furnitures,2,2,0,Humble:1 Prime:1,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+Library1,constructible,Furnitures,11,11,0,Humble:2 Prime:5 Selenea:4,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+LightBoxMedium,constructible,Furnitures,0,0,0,,ColorProxy ConstructibleProxy RequireEnergy WorldObjectAssociatedProxy WorldObjectColor,,0,0,yes,build_2,5,,all match,implemented
+Locker1,constructible,Furnitures,8,8,0,Humble:3 Prime:2 Selenea:3,ConstructibleProxy InventoryAssociatedProxy WorldObjectAssociatedProxy,,0,0,yes,build_2,7,,all match,implemented
+Magnesium,item,Null,607,22,513,Humble:3 Prime:17 Toxicity:2,WorldObjectAssociated,,0,1,yes,"items_2, recycle, scene",9,b,create on the floor: b,implemented
+MagnetarQuartz,item,Null,114,0,111,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_2, recycle",10,b,create on the floor: b,implemented
+MapChip,item,Equipment,3,0,3,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_2, recycle, use",12,b,create on the floor: b,implemented
+Megadome1,constructible,BaseBuilding,1,1,0,Humble:1,ConstructibleProxy Panel RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,5,,all match,implemented
+MethanCapsule1,item,Null,493,0,490,,WorldObjectAssociated,,0,0,yes,"items_2, recycle",8,b,create on the floor: b,implemented
+MicroPlastics,item,Null,1,0,1,,WorldObjectAssociated,,0,0,yes,"items_2, recycle",8,b,create on the floor: b,implemented
+Minable-Tungsten,item,Null,8,0,8,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+MultiBuild,item,Equipment,3,0,3,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+MultiDeconstruct,item,Equipment,1,0,1,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+MultiToolCleaningGooChip1,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+MultiToolCleaningGooChip2,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+MultiToolCleaningGooChip3,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+MultiToolCleaningGooChip4,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+MultiToolDeconstruct2,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+MultiToolDeconstruct3,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+MultiToolLight,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+MultiToolLight2,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+MultiToolLight3,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+MultiToolMineSpeed1,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+MultiToolMineSpeed2,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+MultiToolMineSpeed3,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+MultiToolMineSpeed4,item,Equipment,3,0,3,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,autocraft at AutoCrafter1: b; create on the floor: b,implemented
+Mutagen1,item,Null,174,14,160,Humble:12 Selenea:2,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle",10,b,create on the floor: b,implemented
+Mutagen2,item,Null,98,6,92,Humble:6,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle",10,b,create on the floor: b,implemented
+Mutagen3,item,Null,106,0,106,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle",10,b,create on the floor: b,implemented
+Mutagen4,item,Null,99,0,99,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle",10,b,create on the floor: b,implemented
+NitrogenCapsule1,item,Null,333,0,333,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Obsidian,item,Null,423,11,387,Humble:11,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Optimizer1,constructible,Machines,2,2,0,Prime:2,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineOptimizer RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,1,yes,"build_2, feed, optimizer",14,,all match,implemented
+Optimizer2,constructible,Machines,30,30,0,Aqualis:4 Humble:22 Prime:3 Selenea:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineOptimizer RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_2, feed, optimizer",14,,all match,implemented
+OreBreaker1,constructible,Machines,0,0,0,,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,1,yes,build_2,8,d,run: d,implemented
+OreBreaker2,constructible,Machines,0,0,0,,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,8,d,run: d,implemented
+OreBreaker3,constructible,Machines,4,4,0,Humble:4,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,8,d,run: d,implemented
+OreExtractor1,constructible,Machines,1,1,0,Selenea:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGenerator RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,4,yes,build_2,7,d,run: d,implemented
+OreExtractor2,constructible,Machines,0,0,0,,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGenerator RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_2, optimizer",9,d,run: d; run (optimized): d,implemented
+OreExtractor3,constructible,Machines,47,47,0,Humble:29 Prime:14 Selenea:4,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy LinkedGroupsProxy MachineGenerator RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,8,,all match,implemented
+Osmium,item,Null,657,19,594,Humble:19,WorldObjectAssociated,,0,0,yes,"items_3, recycle, scene",9,b,create on the floor: b,implemented
+OutsideLamp1,constructible,BaseBuilding,1,1,0,Prime:1,ColorProxy ConstructibleProxy RequireEnergy WorldObjectAssociatedProxy WorldObjectColor,,0,2,yes,build_2,5,,all match,implemented
+OxygenCapsule1,item,Null,284,3,281,Prime:3,WorldObjectAssociated,,1,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",11,b,create on the floor: b,implemented
+OxygenTank1,item,Equipment,0,0,0,,WorldObjectAssociated,,0,3,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,autocraft at AutoCrafter1: b; create on the floor: b,implemented
+OxygenTank2,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+OxygenTank3,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+OxygenTank4,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+OxygenTank5,item,Equipment,3,0,3,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+Phosphorus,item,Null,789,50,698,Aqualis:50,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Phytoplankton1,item,Null,125,0,125,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Phytoplankton2,item,Null,111,0,111,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Phytoplankton3,item,Null,175,0,175,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Phytoplankton4,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+PinChip1,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+PinChip2,item,Equipment,1,0,1,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+PinChip3,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",12,b,create on the floor: b,implemented
+PlanetViewer1,constructible,Furnitures,3,3,0,Prime:2 Selenea:1,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+PlanetaryDeliveryDepot1,constructible,Machines,15,15,0,Humble:3 Prime:11 Selenea:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy LinkedGroupsProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,2,yes,build_2,8,,all match,implemented
+PlasticPolymer,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle",10,b,create on the floor: b,implemented
+Pod4x,constructible,BaseBuilding,10,10,0,Prime:9 Selenea:1,ConstructibleProxy Panel RequireEnergy WorldObjectAssociatedProxy,,1,2,yes,build_2,5,,all match,implemented
+Pod9xA,constructible,BaseBuilding,0,0,0,,ConstructibleProxy Panel RequireEnergy WorldObjectAssociatedProxy,,1,0,yes,build_2,5,,all match,implemented
+Pod9xB,constructible,BaseBuilding,1,1,0,Humble:1,ConstructibleProxy Panel RequireEnergy WorldObjectAssociatedProxy,,1,0,yes,build_2,5,,all match,implemented
+Pod9xC,constructible,BaseBuilding,8,8,0,Aqualis:1 Humble:4 Selenea:3,ConstructibleProxy Panel RequireEnergy WorldObjectAssociatedProxy,,1,0,yes,build_2,5,,all match,implemented
+PodUnderground,constructible,BaseBuilding,0,0,0,,ConstructibleProxy Panel RequireEnergy WorldObjectAssociatedProxy,,1,0,yes,build_2,5,,all match,implemented
+Pooltable1,constructible,Furnitures,1,1,0,Humble:1,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+PortalGenerator1,constructible,Machines,2,2,0,Humble:1 Prime:1,ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy,,2,0,yes,build_2,4,,all match,implemented
+Poster1,constructible,Null,6,4,0,Humble:1 Prime:1 Selenea:2,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+Poster10,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+Poster11,constructible,Null,5,2,1,Humble:2,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+Poster12,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+Poster13,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+Poster2,constructible,Null,3,1,0,Humble:1,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+Poster3,constructible,Null,6,2,1,Humble:1 Prime:1,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+Poster4,constructible,Null,2,1,0,Humble:1,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+Poster5,constructible,Null,1,1,0,Humble:1,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+Poster6,constructible,Null,7,3,1,Selenea:3,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+Poster7,constructible,Null,2,1,0,Prime:1,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+Poster8,constructible,Null,2,0,2,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+Poster9,constructible,Null,4,2,1,Prime:2,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,4,,all match,implemented
+PristineMushroom,item,Null,6,0,6,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle",10,b,create on the floor: b,implemented
+ProceduralInstanceGenerator,constructible,Null,8,4,0,Humble:1 Prime:3,,,0,0,no,scene,2,,build: none: no prefab in the tables,no prefab in the game: nothing to host
+ProceduralWreckContainer1,item,Null,45,45,0,Humble:1 Prime:26 Selenea:18,InventoryAssociated WorldObjectAssociated,,0,1,yes,"autocraft_AutoCrafter1_2, items_3, recycle",9,b,create on the floor: b,implemented
+ProceduralWreckContainer2,item,Null,2,2,0,Prime:1 Selenea:1,InventoryAssociated WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, items_3, recycle",9,b,create on the floor: b,implemented
+ProceduralWreckSafe,constructible,Null,52,52,0,Humble:12 Prime:32 Selenea:8,InventoryAssociated WorldObjectAssociated,,1,2,yes,"build_2, growth",12,d,inventory: d; run: d,implemented
+PulsarQuartz,item,Null,394,0,372,,WorldObjectAssociated,,0,1,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, scene",11,b,create on the floor: b,implemented
+PurificationCapsule,item,Null,1,0,1,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",11,b,create on the floor: b,implemented
+PurificationGel,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle",10,b,create on the floor: b,implemented
+PurifiedWater,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_2, craft_2, items_3, recycle, use",11,b,create on the floor: b,implemented
+QuartzCraftStation1,constructible,Machines,2,2,0,Humble:1 Prime:1,ConstructibleProxy RequireEnergy WorldObjectAssociatedProxy,,0,1,yes,"build_2, craft_1, craft_2",6,,all match,implemented
+QuasarQuartz,item,Null,522,0,511,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_3, recycle",10,b,create on the floor: b,implemented
+RecyclingMachine,constructible,Machines,1,1,0,Prime:1,ConstructibleProxy InventoryAssociatedProxy RequireEnergy WorldObjectAssociatedProxy,,0,2,yes,"build_2, recycle",8,,all match,implemented
+RecyclingMachine2,constructible,Machines,4,4,0,Humble:2 Prime:1 Selenea:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy TextProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_2,9,d,run: d,implemented
+RedPowder1,item,Null,162,1,161,Aqualis:1,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_3, recycle",10,b,create on the floor: b,implemented
+RockExplodable,constructible,Null,46,0,0,,Exploded WorldObjectAssociated,,0,1,yes,"build_2, growth",10,,all match,implemented
+RocketAnimals1,item,Null,75,0,40,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,create on the floor: b,implemented
+RocketAnimals2,item,Null,0,0,0,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,create on the floor: b,implemented
+RocketBiomass1,item,Null,31,0,18,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,create on the floor: b,implemented
+RocketBiomass2,item,Null,64,0,33,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,create on the floor: b,implemented
+RocketDeparture1,item,Null,0,0,0,,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGetInRange MachineRocket WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"autocraft_AutoCrafter1_3, items_3, recycle",9,b,create on the floor: b,implemented
+RocketDrones1,item,Null,2,0,0,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,create on the floor: b,implemented
+RocketHeat1,item,Null,31,0,19,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,create on the floor: b,implemented
+RocketHeat2,item,Null,41,0,21,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,autocraft at AutoCrafter1: b; create on the floor: b,implemented
+RocketInformations1,item,Null,0,0,0,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,create on the floor: b,implemented
+RocketInformations2,item,Null,1,0,0,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,create on the floor: b,implemented
+RocketInsects1,item,Null,29,0,16,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,create on the floor: b,implemented
+RocketInsects2,item,Null,63,0,32,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,create on the floor: b,implemented
+RocketMap1,item,Null,0,0,0,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,create on the floor: b,implemented
+RocketMap2,item,Null,1,0,0,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,autocraft at AutoCrafter1: b; create on the floor: b,implemented
+RocketMap3,item,Null,1,0,0,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,create on the floor: b,implemented
+RocketMap4,item,Null,1,0,0,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,create on the floor: b,implemented
+RocketOxygen1,item,Null,47,0,29,,ConstructibleProxy MachineRocket,,0,4,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,autocraft at AutoCrafter1: b; create on the floor: b,implemented
+RocketOxygen2,item,Null,0,0,0,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,create on the floor: b,implemented
+RocketPressure1,item,Null,42,0,25,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,create on the floor: b,implemented
+RocketPressure2,item,Null,42,0,22,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,autocraft at AutoCrafter1: b; create on the floor: b,implemented
+RocketPurification1,item,Null,0,0,0,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,create on the floor: b,implemented
+RocketReactor,item,Null,156,0,153,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_3, recycle, scene",11,b,create on the floor: b,implemented
+RocketReactor2,item,Null,102,0,102,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_3, recycle",10,b,create on the floor: b,implemented
+RocketToxicInformations1,item,Null,0,0,0,,ConstructibleProxy MachineRocket,,0,0,yes,"autocraft_AutoCrafter1_3, craft_world, items_3, recycle",11,b,create on the floor: b,implemented
+RocketTravel1,item,Null,1,1,0,Humble:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGetInRange MachineRocket WorldObjectAssociated WorldObjectAssociatedProxy,,0,1,yes,"autocraft_AutoCrafter1_3, items_3, recycle",9,b,create on the floor: b,implemented
+Rod-alloy,item,Null,131,5,122,Aqualis:3 Humble:2,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_3, recycle",10,b,create on the floor: b,implemented
+Rod-iridium,item,Null,172,8,159,Aqualis:1 Humble:7,WorldObjectAssociated,,0,2,yes,"autocraft_AutoCrafter1_3, craft_2, items_3, recycle",10,b,create on the floor: b,implemented
+Rod-osmium,item,Null,161,3,153,Humble:3,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_3, recycle",10,b,autocraft at AutoCrafter1: b; create on the floor: b,implemented
+Rod-plastic,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_3, recycle",10,b,create on the floor: b,implemented
+Rod-tungsten,item,Null,9,0,9,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_3, recycle",10,b,autocraft at AutoCrafter1: b; create on the floor: b,implemented
+Rod-uranium,item,Null,208,1,200,Humble:1,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_3, recycle",10,b,create on the floor: b,implemented
+ScreenBiomass,constructible,Screens,6,6,0,Aqualis:1 Humble:2 Prime:1 Selenea:2,ConstructibleProxy RequireEnergy,,0,0,yes,build_2,2,,all match,implemented
+ScreenEnergy,constructible,Screens,6,6,0,Aqualis:1 Humble:1 Prime:2 Selenea:2,ConstructibleProxy RequireEnergy,,0,0,yes,build_3,2,,all match,implemented
+ScreenMap1,constructible,Screens,4,4,0,Humble:1 Prime:1 Selenea:2,ConstructibleProxy RequireEnergy,,0,0,yes,build_3,2,,all match,implemented
+ScreenMessage,constructible,Screens,3,3,0,Humble:1 Prime:1 Selenea:1,ConstructibleProxy RequireEnergy,,0,0,yes,build_3,2,,all match,implemented
+ScreenRockets,constructible,Screens,5,5,0,Aqualis:1 Humble:1 Prime:1 Selenea:2,ConstructibleProxy RequireEnergy,,0,0,yes,build_3,2,,all match,implemented
+ScreenSystem1,constructible,Screens,3,3,0,Humble:1 Prime:1 Selenea:1,ConstructibleProxy RequireEnergy,,0,0,yes,build_3,2,,all match,implemented
+ScreenTerraStage,constructible,Screens,5,5,0,Aqualis:1 Humble:1 Prime:1 Selenea:2,ConstructibleProxy RequireEnergy,,0,0,yes,build_3,2,,all match,implemented
+ScreenTerraformation,constructible,Screens,6,6,0,Aqualis:1 Humble:2 Prime:1 Selenea:2,ConstructibleProxy RequireEnergy,,0,0,yes,build_3,2,,all match,implemented
+ScreenToxic1,constructible,Purification,0,0,0,,ConstructibleProxy RequireEnergy,,0,0,yes,build_3,2,,all match,implemented
+ScreenUnlockables,constructible,Screens,4,4,0,Humble:1 Prime:1 Selenea:2,ConstructibleProxy RequireEnergy,,0,0,yes,build_3,2,,all match,implemented
+Seed0,item,SeedPlant,102,9,88,Prime:9,WorldObjectAssociated,,0,5,yes,"autocraft_AutoCrafter1_3, convert, craft_2, feed, items_3, recycle, scene",20,"b,d",create on the floor: b; into FlowerPot1: d; into FlowerPot2: d; into SeedSpreader1: d; into SeedSpreader2: d; into Vegetube1: d; into Vegetube2: d; into Vegetub,implemented
+Seed0Growable,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Seed1,item,SeedPlant,132,42,90,Humble:26 Prime:14 Selenea:2,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle",9,"b,d",create on the floor: b; into Vegetube2: d,implemented
+Seed10Humble,item,SeedPlant,11,0,11,,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle",9,"b,d",create on the floor: b; into VegetubeOutside1: d,implemented
+Seed10HumbleGrowable,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Seed11Humble,item,SeedPlant,11,0,10,,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle",9,"b,d",create on the floor: b; into FlowerPot1: d,implemented
+Seed11HumbleGrowable,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Seed1Growable,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Seed2,item,SeedPlant,117,25,91,Humble:19 Prime:6,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle, scene",10,"b,d",create on the floor: b; into FlowerPot2: d,implemented
+Seed2Growable,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Seed3,item,SeedPlant,122,24,98,Humble:15 Prime:9,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle, scene",10,b,create on the floor: b,implemented
+Seed3Growable,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Seed4,item,SeedPlant,140,20,120,Humble:11 Prime:6 Selenea:3,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle, scene",10,"b,d",create on the floor: b; into SeedSpreader1: d,implemented
+Seed4Growable,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Seed5,item,SeedPlant,28,1,27,Humble:1,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle",9,"b,d",create on the floor: b; into SeedSpreader2: d,implemented
+Seed5Growable,item,Null,1,0,1,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Seed6,item,SeedPlant,34,0,30,,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle",9,"b,d",create on the floor: b; into Vegetube1: d,implemented
+Seed6Growable,item,Null,1,0,1,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Seed7Humble,item,SeedPlant,35,7,28,Prime:7,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle",9,"b,d",create on the floor: b; into Vegetube2: d,implemented
+Seed7HumbleGrowable,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Seed8Humble,item,SeedPlant,30,4,26,Prime:4,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle",9,"b,d",create on the floor: b; into VegetubeOutside1: d,implemented
+Seed8HumbleGrowable,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Seed9Humble,item,SeedPlant,9,0,9,,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle",9,"b,d",create on the floor: b; into FlowerPot1: d,implemented
+Seed9HumbleGrowable,item,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+SeedGold,item,SeedPlant,16,0,16,,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle, scene",10,"b,d",create on the floor: b; into FlowerPot2: d,implemented
+SeedGoldGrowable,item,Null,1,0,1,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+SeedSpreader1,constructible,Biomass,2,2,0,Prime:2,ConstructibleProxy GrowthProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_3, feed, ground, growth",17,d,deconstruct: d; grower start: d; grower start on the ground: d; input Seed7Humble: d,implemented
+SeedSpreader2,constructible,Biomass,23,23,0,Prime:15 Selenea:8,ConstructibleProxy GrowthProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_3, feed, ground, growth",17,d,deconstruct: d; grower start: d; grower start on the ground: d; input Seed8Humble: d,implemented
+Selenium,item,Null,746,14,670,Prime:13 Selenea:1,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+Server1,constructible,Furnitures,8,8,0,Prime:5 Selenea:3,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+Shelves1,constructible,Furnitures,0,0,0,,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+Shower1,constructible,Furnitures,2,2,0,Humble:1 Prime:1,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+Sign,constructible,Screens,32,32,0,Humble:14 Prime:18,ColorProxy ConstructibleProxy TextProxy WorldObjectAssociatedProxy WorldObjectColor,,0,1,yes,build_3,6,,all match,implemented
+Silicon,item,Null,663,40,519,Humble:10 Prime:29 Selenea:1,WorldObjectAssociated,,0,0,yes,"items_3, recycle, scene, transfer",10,b,create on the floor: b,implemented
+Silk,item,Null,508,0,508,,WorldObjectAssociated,,0,0,yes,"items_3, recycle",8,b,create on the floor: b,implemented
+SilkGenerator,constructible,Biomass,6,6,0,Humble:4 Prime:1 Selenea:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGenerator RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_3,7,,all match,implemented
+SilkWorm,item,Larvae,168,0,168,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, autocraft_Incubator2_1, convert, craft_2, items_3, recycle",12,b,create on the floor: b,implemented
+Skin-01,item,Equipment,7,0,7,,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle, use",11,b,create on the floor: b,implemented
+Skin-02,item,Equipment,4,0,4,,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle, use",11,b,create on the floor: b,implemented
+Skin-03,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle, use",11,b,create on the floor: b,implemented
+Skin-04,item,Equipment,1,0,1,,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle, use",11,b,create on the floor: b,implemented
+Skin-05,item,Equipment,5,0,5,,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle, use",11,b,create on the floor: b,implemented
+Skin-06,item,Equipment,3,0,3,,WorldObjectAssociated,,0,0,yes,"feed, items_3, recycle, use",11,b,create on the floor: b,implemented
+Skin-07,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+Skin-08,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+Skin-09,item,Equipment,6,1,5,Prime:1,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+Skin-10,item,Equipment,5,0,5,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+Skin-11,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+Skin-12,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+Skin-13,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+Skin-14,item,Equipment,1,0,1,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+Skin-15,item,Equipment,1,0,1,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+Skin-16,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+Skin-17,item,Equipment,25,5,20,Humble:3 Selenea:2,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+Skin-18,item,Equipment,4,0,4,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+Skin-19,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+Skin-20,item,Equipment,5,0,5,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+Skin-21,item,Equipment,1,0,1,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+Skin-22,item,Equipment,1,0,1,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+Skin-23,item,Equipment,1,0,1,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+Skin-24,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,b,create on the floor: b,implemented
+SkinDisplayer,constructible,Furnitures,2,2,0,Humble:1 Prime:1,ConstructibleProxy InventoryAssociatedProxy WorldObjectAssociatedProxy,,0,0,yes,"build_3, feed",32,,all match,implemented
+SmartFabric,item,Null,62,0,62,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle",10,b,create on the floor: b,implemented
+Sofa,constructible,Furnitures,3,3,0,Prime:1 Selenea:2,ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+SofaAngle,constructible,Furnitures,2,2,0,Prime:1 Selenea:1,ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+SofaAngleColored,constructible,Furnitures,5,5,0,Humble:5,ColorProxy ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy WorldObjectColor,,0,0,yes,build_3,5,,all match,implemented
+SofaColored,constructible,Furnitures,7,7,0,Humble:7,ColorProxy ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy WorldObjectColor,,0,0,yes,build_3,5,,all match,implemented
+SolarQuartz,item,Null,329,0,325,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle",10,b,create on the floor: b,implemented
+SpaceMultiplierAnimals,constructible,Null,4,4,0,Aqualis:1 Humble:1 Prime:1 Selenea:1,ConstructibleProxy WorldObjectAssociated,,1,0,yes,build_3,2,,all match,implemented
+SpaceMultiplierBiomass,constructible,Null,0,0,0,,ConstructibleProxy WorldObjectAssociated,,1,0,yes,build_3,2,,all match,implemented
+SpaceMultiplierHeat,constructible,Null,4,4,0,Aqualis:1 Humble:1 Prime:1 Selenea:1,ConstructibleProxy WorldObjectAssociated,,1,0,yes,build_3,2,,all match,implemented
+SpaceMultiplierInsects,constructible,Null,4,4,0,Aqualis:1 Humble:1 Prime:1 Selenea:1,ConstructibleProxy WorldObjectAssociated,,1,0,yes,build_3,2,,all match,implemented
+SpaceMultiplierOxygen,constructible,Null,4,4,0,Aqualis:1 Humble:1 Prime:1 Selenea:1,ConstructibleProxy WorldObjectAssociated,,1,2,yes,build_3,2,,all match,implemented
+SpaceMultiplierPlants,constructible,Null,4,4,0,Aqualis:1 Humble:1 Prime:1 Selenea:1,ConstructibleProxy WorldObjectAssociated,,1,0,yes,build_3,2,,all match,implemented
+SpaceMultiplierPressure,constructible,Null,4,4,0,Aqualis:1 Humble:1 Prime:1 Selenea:1,ConstructibleProxy WorldObjectAssociated,,1,0,yes,build_3,2,,all match,implemented
+SpaceMultiplierPurification,constructible,Null,0,0,0,,ConstructibleProxy WorldObjectAssociated,,1,0,yes,build_3,2,,all match,implemented
+Stairs,constructible,BaseBuilding,27,27,0,Aqualis:1 Humble:12 Prime:3 Selenea:11,ConstructibleProxy,,0,0,yes,build_3,2,,all match,implemented
+StarformContainer,constructible,Null,0,0,0,,InventoryAssociated WorldObjectAssociated,,0,0,yes,"build_3, growth",12,d,inventory: d; run: d,implemented
+StarformEffigie1,constructible,Null,2,1,0,Humble:1,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+StarformEffigie2,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+StarformEffigie3,constructible,Null,2,1,0,Humble:1,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+StarformEffigie4,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+StarformEffigie5,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+StarformEffigie6,constructible,Null,0,0,0,,GroupNetworkContainer WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+Sulfur,item,Null,508,24,462,Aqualis:1 Prime:23,WorldObjectAssociated,,0,0,yes,"items_4, recycle, scene",9,b,create on the floor: b,implemented
+Table1,constructible,Furnitures,24,24,0,Humble:12 Prime:9 Selenea:3,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+TableSmall,constructible,Furnitures,0,0,0,,ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+TableSmall2,constructible,Furnitures,3,3,0,Humble:3,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+TableSmall3,constructible,Furnitures,21,21,0,Humble:1 Prime:2 Selenea:18,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+Teleporter1,constructible,Machines,7,7,0,Humble:2 Prime:5,ConstructibleProxy RequireEnergy SettingProxy TextProxy WorldObjectAssociatedProxy,,0,3,yes,build_3,6,,all match,implemented
+TerraTokens100,item,Null,75,0,75,,WorldObjectAssociated,,0,0,yes,"items_4, recycle, use",9,b,create on the floor: b,implemented
+TerraTokens1000,item,Null,9,0,9,,WorldObjectAssociated,,0,0,yes,"items_4, recycle, use",9,b,create on the floor: b,implemented
+TerraTokens500,item,Null,12,0,12,,WorldObjectAssociated,,0,0,yes,"items_4, recycle, use",9,b,create on the floor: b,implemented
+TerraTokens5000,item,Null,5,0,5,,WorldObjectAssociated,,0,0,yes,"items_4, recycle, use",9,b,create on the floor: b,implemented
+Titanium,item,Null,647,24,514,Aqualis:3 Humble:6 Prime:14 Selenea:1,WorldObjectAssociated,,0,0,yes,"items_4, recycle, scene, transfer",10,b,create on the floor: b,implemented
+Toilet1,constructible,Furnitures,2,2,0,Humble:1 Prime:1,ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+ToxicGoo,item,Toxic,9,0,6,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, feed, items_4, recycle",10,b,create on the floor: b,implemented
+ToxicRefinementCraftStation1,constructible,Purification,0,0,0,,ConstructibleProxy RequireEnergy WorldObjectAssociatedProxy,,0,0,yes,"build_3, craft_1, craft_2",6,,all match,implemented
+ToxicSpores,item,Toxic,19,0,19,,,,0,0,no,"autocraft_AutoCrafter1_3, feed, items_4, recycle",10,b,create on the floor: b,implemented
+ToxicWater,item,Toxic,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, feed, items_4, recycle",10,b,create on the floor: b,implemented
+ToxicWaterCollector1,constructible,Purification,0,0,0,,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGenerator RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,water,7,,all match,implemented
+ToxicWaterCollector2,constructible,Purification,0,0,0,,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGenerator RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,water,7,,all match,implemented
+ToxicWaterCollector3,constructible,Purification,0,0,0,,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGenerator RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,water,7,,all match,implemented
+ToxicZoneHudDisplayer,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use",12,b,create on the floor: b,implemented
+ToxicZoneHudDisplayer2,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use",12,b,create on the floor: b,implemented
+ToxicityAmmo,item,Null,0,0,0,,,,0,0,no,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle",10,b,create on the floor: b,implemented
+ToxicityAmmoPack,item,Null,0,0,0,,,,0,0,no,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle",10,b,create on the floor: b,implemented
+ToxicityDiorama1,constructible,Furnitures,0,0,0,,ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+ToxicityDiorama2,constructible,Furnitures,0,0,0,,ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+ToxicityMedecine,item,Null,0,0,0,,,,0,0,no,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle",10,b,create on the floor: b,implemented
+ToxicityMedecinePack,item,Null,0,0,0,,,,0,0,no,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle",10,b,create on the floor: b,implemented
+Toxins,item,Null,1,0,1,,WorldObjectAssociated,,0,0,yes,"items_4, recycle",8,b,create on the floor: b,implemented
+ToxinsFilter1,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use",12,b,create on the floor: b,implemented
+ToxinsFilter2,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use",12,b,create on the floor: b,implemented
+ToxinsFilter3,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use",12,b,create on the floor: b,implemented
+TradePlatform1,constructible,Machines,5,5,0,Humble:1 Prime:3 Selenea:1,ConstructibleProxy GrowthProxy InventoryAssociated InventoryAssociatedProxy LinkedGroupsProxy MachineRocket SettingProxy WorldObjectAssociated,,0,6,yes,"build_3, growth",9,,all match,implemented
+TrashAluminiumScraps1,constructible,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"build_3, growth",10,,all match,implemented
+TrashElectronics1,constructible,Null,4,0,0,,WorldObjectAssociated,,0,0,yes,"build_3, growth",10,,all match,implemented
+TrashMetalsCanisters1,constructible,Null,3,0,0,,WorldObjectAssociated,,0,0,yes,"build_3, growth",10,,all match,implemented
+TrashMetalsScraps1,constructible,Null,3,0,0,,WorldObjectAssociated,,0,0,yes,"build_3, growth",10,,all match,implemented
+TrashUraniumScraps1,constructible,Null,0,0,0,,WorldObjectAssociated,,0,0,yes,"build_3, growth",10,,all match,implemented
+Trashcan1,constructible,Furnitures,8,8,0,Humble:4 Prime:4,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy WorldObjectAssociatedProxy,,0,0,yes,build_3,7,,all match,implemented
+Treadmill1,constructible,Furnitures,2,2,0,Humble:1 Prime:1,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+Tree0Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree0Seed,item,SeedTree,1,0,1,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle",13,"b,d",create on the floor: b; into TreePlanter: d; into TreePlanter2: d; into TreePlanter3: d; into TreeSpreader1: d; into TreeSpreader2: d,implemented
+Tree10Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree10Seed,item,SeedTree,5,0,5,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, feed, items_4, recycle",10,"b,d",create on the floor: b; into TreePlanter3: d,implemented
+Tree11Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree11Seed,item,SeedTree,3,0,3,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, feed, items_4, recycle",10,"b,d",create on the floor: b; into TreeSpreader1: d,implemented
+Tree12Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree12Seed,item,SeedTree,2,0,2,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, feed, items_4, recycle",10,"b,d",create on the floor: b; into TreeSpreader2: d,implemented
+Tree13Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree13Seed,item,SeedTree,3,0,3,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle",9,"b,d",create on the floor: b; into TreePlanter: d,implemented
+Tree14Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree14Seed,item,SeedTree,1,0,1,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle",9,"b,d",create on the floor: b; into TreePlanter2: d,implemented
+Tree15Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree15Seed,item,SeedTree,4,0,4,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, convert, craft_2, feed, items_4, recycle",12,"b,d",create on the floor: b; into TreePlanter3: d,implemented
+Tree16Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree16Seed,item,SeedTree,3,0,3,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, convert, craft_2, feed, items_4, recycle",12,"b,d",create on the floor: b; into TreeSpreader1: d,implemented
+Tree17Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree17Seed,item,SeedTree,2,0,2,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, convert, craft_2, feed, items_4, recycle",12,"b,d",create on the floor: b; into TreeSpreader2: d,implemented
+Tree18Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree18Seed,item,SeedTree,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, convert, craft_2, feed, items_4, recycle",12,"b,d",create on the floor: b; into TreePlanter: d,implemented
+Tree1Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree1Seed,item,SeedTree,6,0,6,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, convert, craft_2, feed, items_4, recycle",12,"b,d",create on the floor: b; into TreePlanter2: d,implemented
+Tree2Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree2Seed,item,SeedTree,3,0,3,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, convert, craft_2, feed, items_4, recycle",12,"b,d",create on the floor: b; into TreePlanter3: d,implemented
+Tree3Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree3Seed,item,SeedTree,4,0,4,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, convert, craft_2, feed, items_4, recycle",12,"b,d",create on the floor: b; into TreeSpreader1: d,implemented
+Tree4Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree4Seed,item,SeedTree,8,0,8,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, convert, craft_2, feed, items_4, recycle",12,"b,d",create on the floor: b; into TreeSpreader2: d,implemented
+Tree5Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree5Seed,item,SeedTree,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, convert, craft_2, feed, items_4, recycle",12,"b,d",create on the floor: b; into TreePlanter: d,implemented
+Tree6Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree6Seed,item,SeedTree,4,0,4,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, convert, craft_2, feed, items_4, recycle",12,"b,d",create on the floor: b; into TreePlanter2: d,implemented
+Tree7Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree7Seed,item,SeedTree,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, convert, craft_2, feed, items_4, recycle",12,"b,d",create on the floor: b; into TreePlanter3: d,implemented
+Tree8Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree8Seed,item,SeedTree,7,0,7,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, convert, craft_2, feed, items_4, recycle",12,"b,d",create on the floor: b; into TreeSpreader1: d,implemented
+Tree9Growable,item,Null,0,0,0,,,,0,0,no,"items_4, recycle",8,b,create on the floor: b,implemented
+Tree9Seed,item,SeedTree,6,0,6,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, convert, craft_2, feed, items_4, recycle",12,"b,d",create on the floor: b; into TreeSpreader2: d,implemented
+TreePlanter,constructible,Furnitures,0,0,0,,ConstructibleProxy GrowthProxy InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_3, feed, ground, growth",19,"b,d",deconstruct: d; fed Tree5Seed: b; grower start: d; grower start on the ground: d; input Tree7Seed: d,implemented
+TreePlanter2,constructible,Furnitures,3,3,0,Humble:1 Prime:1 Selenea:1,ConstructibleProxy GrowthProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_3, feed, ground, growth",19,d,deconstruct: d; grower start: d; grower start on the ground: d; input Tree8Seed: d,implemented
+TreePlanter3,constructible,Furnitures,0,0,0,,ConstructibleProxy GrowthProxy InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_3, feed, ground, growth",20,d,deconstruct: d; grower start: d; grower start on the ground: d; input Tree9Seed: d,implemented
+TreeRoot,item,Null,539,32,507,Humble:28 Selenea:4,WorldObjectAssociated,,0,0,yes,"items_4, recycle",8,b,create on the floor: b,implemented
+TreeSpreader0,constructible,Biomass,0,0,0,,ConstructibleProxy GrowthProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,water,10,d,deconstruct: d; grower start: d; input Tree16Seed: d,implemented
+TreeSpreader1,constructible,Biomass,2,2,0,Prime:2,ConstructibleProxy GrowthProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_3, feed, ground, growth, optimizer",22,d,deconstruct: d; grower start: d; grower start on the ground: d; input Tree0Seed: d,implemented
+TreeSpreader2,constructible,Biomass,35,35,0,Aqualis:2 Humble:4 Prime:13 Selenea:16,ConstructibleProxy GrowthProxy InventoryAssociated InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_3, feed, ground, growth",20,d,deconstruct: d; grower start: d; grower start on the ground: d; input Tree10Seed: d,implemented
+Uranim,item,Null,530,14,490,Humble:14,WorldObjectAssociated,,0,0,yes,"items_4, recycle, scene",9,b,create on the floor: b,implemented
+Uraninite,item,Null,468,6,453,Humble:6,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, items_4, recycle",9,b,create on the floor: b,implemented
+Vault1,constructible,Furnitures,3,3,0,Humble:2 Selenea:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy WorldObjectAssociatedProxy,,0,0,yes,build_3,7,,all match,implemented
+Vegetable0Growable,item,Food,367,17,367,Humble:8 Prime:4 Selenea:5,WorldObjectAssociated,,0,5,yes,"feed, items_4, recycle, use",11,"b,d",create on the floor: b; harvest from VegetableGrower1: d,implemented
+Vegetable0Seed,item,SeedVegetable,140,14,120,Humble:7 Prime:6 Selenea:1,WorldObjectAssociated,,0,4,yes,"feed, items_4, recycle, scene",10,"b,d",create on the floor: b; into VegetableGrower1: d,implemented
+Vegetable1Growable,item,Food,452,27,441,Aqualis:11 Humble:8 Prime:3 Selenea:5,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,"b,d",create on the floor: b; harvest from Farm1: d,implemented
+Vegetable1Seed,item,SeedVegetable,138,28,106,Humble:9 Prime:17 Selenea:2,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, scene",10,"b,d",create on the floor: b; into Farm1: d,implemented
+Vegetable2Growable,item,Food,438,91,438,Aqualis:5 Humble:24 Prime:56 Selenea:6,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,"b,d",create on the floor: b; harvest from VegetableGrower1: d,implemented
+Vegetable2Seed,item,SeedVegetable,78,10,67,Humble:2 Prime:8,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, scene",10,"b,d",create on the floor: b; into VegetableGrower1: d,implemented
+Vegetable3Growable,item,Food,426,22,424,Humble:8 Prime:9 Selenea:5,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",11,"b,d",create on the floor: b; harvest from Farm1: d,implemented
+Vegetable3Seed,item,SeedVegetable,106,13,93,Humble:10 Prime:3,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle",9,"b,d",create on the floor: b; into Farm1: d,implemented
+VegetableGrower1,constructible,Machines,0,0,0,,ConstructibleProxy InventoryAssociatedProxy MachineGrowerVegetationHarvestable RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,2,4,yes,"build_3, feed, ground",16,d,input CookCocoaSeed: d,implemented
+VegetableGrower2,constructible,Machines,32,32,0,Prime:31 Selenea:1,ConstructibleProxy InventoryAssociatedProxy MachineGrowerVegetationHarvestable RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,2,0,yes,"build_3, feed, ground",15,d,input CookWheatSeed: d,implemented
+Vegetube1,constructible,Machines,0,0,0,,ConstructibleProxy GrowthProxy InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,11,yes,"build_3, feed, ground, growth",17,d,deconstruct: d; grower start: d; grower start on the ground: d; input Seed8Humble: d,implemented
+Vegetube2,constructible,Machines,67,67,0,Humble:18 Prime:42 Selenea:7,ConstructibleProxy GrowthProxy InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_3, feed, ground, growth, optimizer",21,d,deconstruct: d; grower start: d; grower start on the ground: d; input Seed0: d; input Seed9Humble: d,implemented
+VegetubeOutside1,constructible,Machines,9,9,0,Humble:3 Prime:6,ConstructibleProxy GrowthProxy InventoryAssociatedProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_3, feed, ground, growth",18,d,deconstruct: d; grower start: d; grower start on the ground: d; input SeedGold: d,implemented
+VehicleBeacon1,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use, vehicle.A",14,b,create on the floor: b,implemented
+VehicleCrafter1,constructible,Machines,3,3,0,Humble:1 Prime:1 Selenea:1,ConstructibleProxy VehicleBackToGarage WorldObjectAssociated WorldObjectAssociatedProxy,,0,1,yes,"build_3, craft_2, vehicle.A",7,,all match,implemented
+VehicleEquipmentSize1,item,Equipment,0,0,0,,WorldObjectAssociated,,0,1,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use, vehicle.A",14,b,create on the floor: b,implemented
+VehicleEquipmentSize2,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use, vehicle.A",14,b,create on the floor: b,implemented
+VehicleInventorySize1,item,Equipment,0,0,0,,WorldObjectAssociated,,0,1,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use, vehicle.A",14,b,create on the floor: b,implemented
+VehicleInventorySize2,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use, vehicle.A",14,b,create on the floor: b,implemented
+VehicleInventorySize3,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use, vehicle.A",14,b,create on the floor: b,implemented
+VehicleJetpack1,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use, vehicle.A",14,b,create on the floor: b,implemented
+VehicleLights1,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use, vehicle.A",14,b,create on the floor: b,implemented
+VehicleLights2,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use, vehicle.A",14,b,create on the floor: b,implemented
+VehicleLogistic1,item,Equipment,2,0,2,,WorldObjectAssociated,,0,1,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use, vehicle.A",14,b,create on the floor: b,implemented
+VehicleOxygen1,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use, vehicle.A",14,b,create on the floor: b,implemented
+VehicleSpeed1,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use, vehicle.A",14,b,create on the floor: b,implemented
+VehicleSpeed2,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use, vehicle.A",14,b,create on the floor: b,implemented
+VehicleSpeed3,item,Equipment,0,0,0,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use, vehicle.A",14,b,create on the floor: b,implemented
+VehicleSpeed4,item,Equipment,2,0,2,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use, vehicle.A",14,b,create on the floor: b,implemented
+VehicleTruck,item,Null,2,0,2,,ColorProxy GroupNetworkContainer InventoryAssociated InventoryAssociatedProxy LockNetworkPlayerPosition OwnershipSwitcher UpdateNetworkRigidBodyState VehicleEquipment VehicleShareData WorldObjectAssociated WorldObjectAssociatedProxy WorldObjectColor,,1,10,yes,"autocraft_AutoCrafter1_3, items_4, recycle, seat_0, seat_1, seat_2, use, vehicle.A, vehicle.B",32,b,craft at CraftVehicleT1: b; drive (owner transforms): b; recall to the garage: b; seat passenger 1: b; seat passenger 2: b; seat pilot: b; use: build: b,implemented
+VendingMachine1,constructible,Furnitures,1,1,0,Humble:1,ConstructibleProxy WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+WallInside,constructible,BaseBuilding,0,0,0,,,,1,0,no,"build_3, growth",10,,all match,implemented
+WallWaterLife,constructible,BaseBuilding,0,0,0,,,,1,0,no,"build_3, growth",10,,all match,implemented
+WardenAustel,constructible,Null,0,0,0,,InventoryAssociated WorldObjectAssociated,,0,0,yes,"build_3, feed, growth",14,,all match,implemented
+WardenKey,item,WardenKey,8,0,8,,WorldObjectAssociated,,0,2,yes,"feed, items_4, recycle",9,b,create: b; create on the floor: b; recycle: b,implemented
+WardensChip,item,Equipment,1,0,1,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle",10,b,create on the floor: b,implemented
+WaterBottle1,item,Null,537,8,526,Prime:6 Selenea:2,WorldObjectAssociated,,1,1,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle, use",11,b,create on the floor: b; use: Drinkable: b,implemented
+WaterCollector1,constructible,Machines,5,5,0,Humble:2 Prime:2 Selenea:1,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGenerator RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,2,yes,build_3,7,,all match,implemented
+WaterCollector2,constructible,Machines,3,3,0,Prime:3,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGenerator RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,water,7,,all match,implemented
+WaterFilter,item,Equipment,3,0,3,,WorldObjectAssociated,,0,0,yes,"autocraft_AutoCrafter1_3, craft_2, items_4, recycle",10,b,create on the floor: b,implemented
+WaterLifeCollector1,constructible,Biomass,4,4,0,Humble:1 Prime:3,ConstructibleProxy InventoryAssociated InventoryAssociatedProxy MachineGenerator RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,2,yes,water,7,,all match,implemented
+WindTurbine1,constructible,Machines,0,0,0,,ConstructibleProxy RequireEnergy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_3,4,,all match,implemented
+WreckEntryLocked1,constructible,Null,5,5,0,Prime:4 Selenea:1,InventoryAssociated WorldObjectAssociated,,0,1,yes,"build_3, feed, growth",14,,all match,implemented
+WreckEntryLocked2,constructible,Null,0,0,0,,InventoryAssociated WorldObjectAssociated,,0,0,yes,"build_3, feed, growth",15,,all match,implemented
+WreckFusionGenerator,constructible,Null,8,8,0,Humble:3 Prime:4 Selenea:1,InventoryAssociated WorldObjectAssociated,,0,0,yes,"build_3, feed, growth",14,,all match,implemented
+WreckRockExplodable,constructible,Null,2,2,0,Selenea:2,Exploded WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,build_3,3,,all match,implemented
+WreckSafe,constructible,Null,0,0,0,,InventoryAssociated WorldObjectAssociated,,0,1,yes,"build_3, growth",12,d,inventory: d; run: d,implemented
+WreckServer,constructible,Null,229,0,0,,,,0,0,no,,1,,build: none: no prefab in the tables,no prefab in the game: nothing to host
+WreckWardrobe,constructible,Null,0,0,0,,InventoryAssociated WorldObjectAssociated,,0,0,yes,"build_3, growth",12,d,inventory: d; run: d,implemented
+Zeolite,item,Null,579,24,521,Humble:24,WorldObjectAssociated,,0,0,yes,"items_4, recycle, scene",9,b,create on the floor: b,implemented
+astrofood,item,Food,97,7,82,Humble:2 Prime:3 Toxicity:2,WorldObjectAssociated,,1,1,yes,"feed, items_4, recycle, use",10,b,create on the floor: b,implemented
+astrofood2,item,Food,371,1,370,Prime:1,WorldObjectAssociated,,0,6,yes,"autocraft_AutoCrafter1_3, craft_2, feed, items_4, recycle, use",12,b,create on the floor: b,implemented
+biodome,constructible,BaseBuilding,2,2,0,Prime:2,ConstructibleProxy Panel RequireEnergy WorldObjectAssociatedProxy,,1,0,yes,build_3,5,,all match,implemented
+canister,constructible,Null,29,0,0,,InventoryAssociated WorldObjectAssociated,,0,0,yes,"build_3, growth, scene",11,,all match,implemented
+door,constructible,BaseBuilding,0,0,0,,,,0,0,no,"build_3, growth",10,,all match,implemented
+honey,item,Food,189,0,189,,WorldObjectAssociated,,0,0,yes,"feed, items_4, recycle, use",10,b,create on the floor: b,implemented
+ice,item,Null,219,0,174,,WorldObjectAssociated,,0,15,yes,"items_4, recycle, scene",9,b,create on the floor: b,implemented
+pod,constructible,BaseBuilding,14,14,0,Humble:3 Prime:10 Selenea:1,ConstructibleProxy Panel RequireEnergy WorldObjectAssociatedProxy,,1,3,yes,build_3,5,,all match,implemented
+podAngle,constructible,BaseBuilding,3,3,0,Prime:3,ConstructibleProxy Panel RequireEnergy WorldObjectAssociatedProxy,,1,0,yes,build_3,5,,all match,implemented
+wallplain,constructible,Null,0,0,0,,,,0,0,no,"build_3, growth",10,,all match,implemented
+window,constructible,BaseBuilding,0,0,0,,,,0,0,no,"build_3, growth",10,,all match,implemented
+wreckpilar,constructible,Null,202,35,0,Humble:6 Prime:15 Selenea:14,ConstructibleProxy WorldObjectAssociated WorldObjectAssociatedProxy,,0,0,yes,"build_3, scene",5,,all match,implemented

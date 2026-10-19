@@ -1,0 +1,73 @@
+class,host_checks,server_rpcs,client_rpcs,modules
+AIAnimalStateController,1,0,0,animals animals::spawn net
+ActionGroupSelector,1,0,0,
+ActionnableShowInfos,1,0,0,
+AnimalCustomizationController,1,0,0,animals animals::spawn
+AsteroidsHandler,1,0,0,meteo
+ChatHandler,3,0,0,bench chathooks handlers load objects players
+ColorProxy,2,0,0,handlers objects
+ConstructibleProxy,7,0,0,game handlers machines machines::growers machines::production meteo
+Drone,1,0,0,logistics logistics::motion objects
+DroneNetworkVibility,1,0,0,logistics
+EnvironmentDayNightCycle,1,0,0,meteo
+Explode,2,0,0,meteo meteo::explode
+Exploded,2,0,0,meteo::explode
+GameSettingsHandler,2,0,0,scene units unlocks
+GenerateOnTrigger,8,0,0,instances instances::generate native::wrecks
+GroupNetworkBase,4,0,0,data deconstruct ext handlers instances machines
+GroupNetworkContainer,2,0,0,animals animals::vehicles handlers logistics logistics::motion machines::growers
+GrowthProxy,2,0,0,animals animals::spawn game machines machines::growers rockets::back_and_forth
+InventoriesHandler,19,0,0,animals::spawn animals::vehicles bench game instances inventories
+InventoryAssociated,2,0,0,machines machines::production planets::loot
+InventoryAssociatedProxy,1,0,0,animals::vehicles game handlers machines::growers machines::production
+InventorySetFirstItemAsLinked,1,0,0,handlers
+InventorySpawnContent,6,0,0,animals animals::spawn
+LinkedGroupsProxy,2,0,0,handlers machines machines::growers objects rockets::back_and_forth
+LinkedPlanetProxy,2,0,0,handlers objects
+LockNetworkPlayerPosition,2,0,0,animals animals::vehicles handlers
+LogisticEntity,1,0,0,inventories logistics model
+LogisticManager,3,0,0,logistics logistics::motion rockets::back_and_forth
+MachineAutoCrafter,2,0,0,machines machines::production
+MachineConvertRecipe,1,0,0,machines machines::growers
+MachineGenerationGroupVein,1,0,0,game machines::veins native::scenes
+MachineGenerator,5,0,0,machines machines::production machines::veins
+MachineGetInRange,1,0,0,machines::production rockets
+MachineGrowerBase,1,0,0,machines machines::production
+MachineGrowerVegetationHarvestable,4,0,0,logistics machines machines::growers
+MachineOptimizer,6,0,0,machines machines::production rockets rockets::back_and_forth
+MachineRocket,1,0,0,rockets
+MachineRocketBackAndForth,8,0,0,game machines rockets rockets::back_and_forth
+MeteoHandler,6,0,0,meteo rockets
+OwnershipSwitcher,2,0,0,animals animals::vehicles
+PlanetNetworkLoader,1,0,0,planets rockets scene
+PlanetUnlocker,3,0,0,planets scene
+PlayerGaugesHandler,4,0,0,bench gauges load net
+PlayerMainController,4,0,0,game load players probe scenario
+PlayerStatus,4,0,0,handlers instances net players status
+PlayersDataManager,1,0,0,planets::loot players scene
+PlayersManager,1,0,0,animals handlers players
+PlaystationBlockedPlayersManager,5,0,0,
+PlaystationNetworkPlayersHandler,2,0,0,handlers
+ProceduralInstancesHandler,1,0,0,game instances instances::generate native::wrecks
+RequireEnergy,1,0,0,energy machines
+RequireEnergyHandler,1,0,0,energy machines::production units
+SceneInterpolationHandler,4,0,0,animals animals::interpolation game native::scenes
+SessionController,3,0,0,meteo planets rockets unlocks
+SettingProxy,2,0,0,handlers meteo::explode objects rockets::back_and_forth
+SteamRichPresence,1,0,0,
+StoryEventsHandler,5,0,0,meteo meteo::story scene
+TextProxy,2,0,0,handlers objects
+ToxicArea,2,0,0,toxic
+ToxicAreaHandler,4,0,0,game toxic
+UiWindowPause,2,0,0,
+UpdateNetworkRigidBodyState,4,0,0,animals animals::vehicles
+VehicleBackToGarage,1,0,0,animals animals::vehicles
+VehicleEquipment,2,0,0,animals animals::vehicles
+WorldInstanceHandler,7,0,0,instances native::scenes planets scene
+WorldObjectAssociated,1,0,0,machines objects
+WorldObjectAssociatedProxy,1,0,0,animals::spawn game handlers
+WorldObjectColor,1,0,0,handlers objects
+WorldObjectsHandler,9,0,0,bench game handlers load logistics machines
+WorldUnit,1,0,0,machines net rockets units
+WorldUnitsHandler,2,0,0,meteo native::tables scene units
+WorldUnitsPlanet,1,0,0,handlers native::tables units

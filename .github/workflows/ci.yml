@@ -22,6 +22,9 @@ jobs:
         env:
           PCDS_TEST_DATA: none
           PCDS_GAME_DIR: none
+      # The completeness map agrees with coverage.txt, the sweep matrix and docs/COMPLETENESS.md (no game data).
+      - run: python3 tests/parity/completeness/map.py check
+        working-directory: server
 
   # The plugin API crate (no dependencies, builds offline) and the example plugins: the modules are
   # built for WebAssembly, and the Rust one is tested on the PC with a mock host. The committed

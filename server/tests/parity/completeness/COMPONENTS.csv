@@ -1,0 +1,166 @@
+component,groups,host_side,named_in_code,modules
+AINavMeshSurfaceVolumeUpdater,1,no,no,
+ActionBeacons,1,no,no,
+ActionColorWorldObject,12,no,no,
+ActionCrafter,15,no,yes,machines::production
+ActionDeconstructible,232,no,yes,deconstruct machines
+ActionDestroyInventory,2,no,no,
+ActionDisplayTextAndValue,8,no,no,
+ActionDrink,1,no,no,
+ActionExplodable,3,no,no,
+ActionGrabable,368,no,yes,logistics machines
+ActionGroupSelectorAutoCrafter,1,no,no,
+ActionGroupSelectorIncubatorT2,1,no,no,
+ActionGroupSelectorInterplanetaryDepot,1,no,no,
+ActionGroupSelectorVeinExtractor,3,no,no,
+ActionInterpolator,1,no,no,
+ActionLaunchGameEvent,5,no,no,
+ActionMinable,22,no,no,
+ActionMovePlayer,4,no,no,
+ActionOpenUi,13,no,no,
+ActionOpenable,98,no,no,
+ActionPlayEmote,11,no,no,
+ActionReadble,4,no,no,
+ActionRecycle,1,no,no,
+ActionSendInSpace,1,no,yes,rockets
+ActionSleep,3,no,no,
+ActionTakeControl,1,no,no,
+ActionTextWorldObject,10,no,no,
+ActionTooltip,6,no,no,
+ActionUsePortalGenerator,1,no,no,
+ActionUseTeleporter,1,no,no,
+ActionVehicleBackToGarage,1,no,no,
+Actionnable,1,no,no,
+ActionnableChangeMaterialsOfWorldObjects,1,no,no,
+ActionnableDoNotHover,41,no,no,
+ActionnableInteractive,26,no,yes,machines::production
+ActionnableInteractiveProxy,1,yes,yes,handlers
+ActionnableShowInfos,112,no,no,
+ActionnableShowRange,4,no,no,
+AngleRotation,1,no,no,
+AudioSourceDisableBasedOnLOD,37,no,no,
+CleanGameObjectHierarchy,4,no,no,
+ColorProxy,11,yes,yes,handlers objects
+ConstraintAgainstPanel,16,no,no,
+ConstraintAgainstPanelSpecificReferencePanelUnderground,1,no,no,
+ConstraintCantBuildUnderground,3,no,no,
+ConstraintLookAtPlayer,68,no,no,
+ConstraintNotColliding,186,no,no,
+ConstraintOnAim,44,no,no,
+ConstraintOnGrid,107,no,no,
+ConstraintOnSurfaces,214,no,no,
+ConstraintSamePanel,10,no,no,
+ConstructibleProxy,224,yes,yes,game handlers machines machines::growers machines::production meteo
+CountdownDisplay,4,no,no,
+DamageZone,2,no,no,
+DestroyIfGhost,2,no,no,
+DestroyIfNotInGhost,77,no,no,
+Door,1,no,no,
+DoorsHandler,1,no,no,
+Drone,3,yes,yes,logistics logistics::motion objects
+DroneColliding,3,no,yes,logistics::motion
+DroneNetworkVibility,3,yes,yes,logistics
+DroneUpDown,3,no,no,
+EnvironmentVolume,14,no,no,
+Explode,3,yes,yes,meteo meteo::explode
+Exploded,3,yes,yes,meteo::explode
+ExplodedEvent,7,no,no,
+ExplodedForceToRigidBody,1,no,no,
+FlockChildInsect,37,no,no,
+FlockChildWalking,17,no,no,
+FlockController,18,no,no,
+GameEventBlink,4,no,no,
+GroupNetworkContainer,46,yes,yes,animals animals::vehicles handlers logistics logistics::motion machines::growers
+GrowthProxy,21,yes,yes,animals animals::spawn game machines machines::growers rockets::back_and_forth
+HideDependingOnTerraStage,3,no,yes,machines::veins native::scenes water
+HideIfGamePlatform,10,no,no,
+HideMeshRendererOnStart,2,no,no,
+HomemadeTag,197,no,yes,instances
+IgnoreForPanelBounds,7,no,yes,native::panels
+ImageAutoFill,26,no,no,
+InventoryAssociated,83,yes,yes,machines machines::production planets::loot
+InventoryAssociatedProxy,89,yes,yes,animals::vehicles game handlers machines::growers machines::production
+InventoryAuthorizedGroups,51,no,yes,machines
+InventoryAutoClose,2,no,no,
+InventoryChangeMaterial,1,no,no,
+InventoryEventIfFull,1,no,no,
+InventoryFromScene,16,no,yes,instances planets::loot
+InventoryHideIfFull,3,no,no,
+InventoryLockContent,4,no,no,
+InventoryLootDependingOnGameSettings,3,no,yes,planets::loot
+InventoryRegisterContent,12,no,no,
+InventorySetFirstItemAsLinked,3,yes,yes,handlers
+InventoryShowContent,11,no,no,
+InventorySpawnContent,1,yes,yes,animals animals::spawn
+InventoryStartGameEvent,1,no,no,
+LarvaeAllowedTag,6,no,no,
+LarvaeZone,8,no,no,
+LinkedGroupsProxy,13,yes,yes,handlers machines machines::growers objects rockets::back_and_forth
+LinkedPlanetProxy,1,yes,yes,handlers objects
+LocalizedText,3,no,no,
+LockNetworkPlayerPosition,1,yes,yes,animals animals::vehicles handlers
+MachineAutoCrafter,2,yes,yes,machines machines::production
+MachineBeaconUpdater,2,no,no,
+MachineConvertRecipe,2,yes,yes,machines machines::growers
+MachineDeparturePlatform,1,yes,yes,planets rockets
+MachineDepartureRocket,2,no,no,
+MachineDestructInventoryIfFull,1,no,yes,inventories logistics machines machines::production
+MachineDisintegrator,7,no,yes,machines machines::production
+MachineDroneStation,1,no,yes,logistics
+MachineFloater,11,no,yes,machines
+MachineFlockSpawner,15,no,yes,machines
+MachineFlockSpawnerCountConditions,2,no,no,
+MachineFlockSpawnerInteractive,2,no,no,
+MachineGenerator,17,yes,yes,machines machines::production machines::veins
+MachineGetInRange,3,yes,yes,machines::production rockets
+MachineGrowerBase,2,yes,yes,machines machines::production
+MachineGrowerIfLinkedGroup,2,no,yes,machines machines::growers
+MachineGrowerInteractive,2,no,no,
+MachineGrowerVegetationHarvestable,6,yes,yes,logistics machines machines::growers
+MachineGrowerVegetationStatic,16,no,yes,machines machines::growers
+MachineOptimizer,2,yes,yes,machines machines::production rockets rockets::back_and_forth
+MachinePlanetChanger,1,no,yes,rockets
+MachinePortal,1,no,no,
+MachinePortalGenerator,1,no,no,
+MachineRocket,25,yes,yes,rockets
+MachineRocketBackAndForthInterplanetaryExchange,1,no,yes,machines rockets::back_and_forth
+MachineRocketBackAndForthTrade,1,no,yes,machines rockets::back_and_forth
+MachineRocketLand,2,no,yes,rockets rockets::back_and_forth
+OwnershipSwitcher,1,yes,yes,animals animals::vehicles
+Panel,14,yes,yes,gamedata handlers native::panels objects panels
+PerformancerDisableIfFarAway,76,no,yes,machines
+PerformancerParticleReducer,46,no,no,
+RangeViewer,4,no,no,
+RequireEnergy,119,yes,yes,energy machines
+SceneInterpolation,1,no,no,
+ScreenShowLinkedGroup,8,no,no,
+ScreenTerraLevels,1,no,no,
+ScreenTerraStage,1,no,no,
+SettingProxy,4,yes,yes,handlers meteo::explode objects rockets::back_and_forth
+SnapPoint,23,no,no,
+SnapReceiver,24,no,no,
+SwitchVisibilityIfUnderground,7,no,no,
+TextProxy,10,yes,yes,handlers objects
+Turn_Move,74,no,no,
+UpdateNetworkRigidBodyState,1,yes,yes,animals animals::vehicles
+VegetationTree,20,no,no,
+VehicleBackToGarage,1,yes,yes,animals animals::vehicles
+VehicleCheckSurroundingRocks,1,no,no,
+VehicleEquipment,1,yes,yes,animals animals::vehicles
+VehicleJetpack,1,no,no,
+VehicleShareData,1,yes,yes,net
+VehicleWheelParticles,1,no,no,
+WorldAutoSpawnerOnFloor,1,no,no,
+WorldButtonPress,7,no,no,
+WorldObjectAssociated,539,yes,yes,machines objects
+WorldObjectAssociatedProxy,211,yes,yes,animals::spawn game handlers
+WorldObjectColor,12,yes,yes,handlers objects
+WorldObjectFromScene,62,no,yes,animals::spawn game
+WorldObjectMultipleStates,4,no,no,
+WorldObjectText,10,no,no,
+WorldUniqueId,77,no,yes,native::scenes
+WorldUnitGenerationViaInventory,18,no,yes,machines
+WorldUnitMultiplierViaInventory,26,no,yes,animals::spawn machines rockets
+WorldUnitsDisplayer,2,no,no,
+WorldUnitsGenerationDisplayer,2,no,no,
+ZoneNoGravityCheck,1,no,no,
