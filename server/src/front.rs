@@ -1471,11 +1471,14 @@ impl Front {
 
     /// The world (`name`, else the one it ran) started in the active bank: Idle. A world other
     /// than the last one takes this server's lock of it and is remembered in server.env
-    /// (PCDS_WORLD), so the next start runs it too.
+    /// (PCDS_WORLD), so the next start runs it too; but only once it runs: one that does not
+    /// start leaves the server as it was (stopped, on the world it stopped), and server.env
+    /// naming the world that last ran, so a restart does not fail on it.
     fn start_world(&mut self, name: Option<&str>) -> Result<String, String> {
         if self.phase != Phase::Stopped {
             return Err("the world runs: stop it first, or run another one".into());
         }
+        let mut moved = None;
         if let Some(name) = name.filter(|n| *n != self.world_name()) {
             let name = crate::dashboard::world_name(name)?;
             let save = std::path::Path::new(&self.save).with_file_name(format!("{name}.json")).to_string_lossy().to_string();
@@ -1483,14 +1486,28 @@ impl Front {
                 return Err(format!("no world {name}"));
             }
             let lock = crate::cli::hold(std::path::Path::new(&format!("{save}.lock")), "another server runs that world")?;
-            self.world_lock = Some(lock);
-            self.save = save;
-            if let Some(env) = crate::env("PCDS_ENV_FILE")
-                && let Err(e) = crate::cli::set_env_file(std::path::Path::new(&env), "PCDS_WORLD", &name)
-            {
-                eprintln!("world {name}: not remembered for the next start ({e})");
-            }
+            moved = Some((std::mem::replace(&mut self.save, save), self.world_lock.replace(lock), name));
         }
+        let started = self.start_bank();
+        match (started, moved) {
+            (Err(e), Some((save, lock, name))) => {
+                (self.save, self.world_lock) = (save, lock);
+                Err(format!("world {name} did not start: {e}; the server stays stopped on world {}: start it, or run another world", self.world_name()))
+            }
+            (Ok(world), Some((_, _, name))) => {
+                if let Some(env) = crate::env("PCDS_ENV_FILE")
+                    && let Err(e) = crate::cli::set_env_file(std::path::Path::new(&env), "PCDS_WORLD", &name)
+                {
+                    eprintln!("world {name}: not remembered for the next start ({e})");
+                }
+                Ok(world)
+            }
+            (started, None) => started,
+        }
+    }
+
+    /// The world of `self.save` booted in the active bank: Idle.
+    fn start_bank(&mut self) -> Result<String, String> {
         let bank = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
         let mut kept = self.kept_snapshot()?;
         let snapshot = kept.as_ref().map(|(fd, _)| fd.try_clone()).transpose().map_err(|e| e.to_string())?;
@@ -1773,6 +1790,36 @@ mod tests {
 
     fn snapshot_fd(text: &str) -> OwnedFd {
         ipc::memfd("test", |w| std::io::Write::write_all(w, text.as_bytes()).map_err(|e| e.to_string())).unwrap()
+    }
+
+    /// A world that does not start leaves the server stopped on the world it stopped, with its
+    /// lock, and server.env naming that world (a restart would fail on the other).
+    #[test]
+    fn a_world_that_does_not_start_is_not_remembered() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pcds-start-world-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("banks/a")).unwrap();
+        let program = dir.join("banks/a/pcds");
+        std::fs::write(&program, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (a, b, env) = (dir.join("a.json"), dir.join("b.json"), dir.join("server.env"));
+        std::fs::write(&a, "{}").unwrap();
+        std::fs::write(&b, "{}").unwrap();
+        std::fs::write(&env, "PCDS_WORLD=a\n").unwrap();
+        // SAFETY: only start_world reads it, and no other test calls that.
+        unsafe { std::env::set_var("PCDS_ENV_FILE", &env) };
+        let mut front = Front::new("data", &a.to_string_lossy(), Some(dir.join("banks")), None, 0, Arc::new(AtomicBool::new(false)));
+        front.phase = Phase::Stopped;
+        front.world_lock = Some(crate::cli::hold(&dir.join("a.json.lock"), "busy").unwrap());
+        let e = front.start_world(Some("b")).unwrap_err();
+        assert!(e.contains("world b did not start") && e.contains("stays stopped on world a"), "{e}");
+        assert_eq!((front.world_name(), front.phase), ("a".to_string(), Phase::Stopped));
+        assert_eq!(std::fs::read_to_string(&env).unwrap(), "PCDS_WORLD=a\n");
+        // The lock of a is still this server's; b's is free again.
+        assert!(crate::cli::hold(&dir.join("a.json.lock"), "busy").is_err());
+        assert!(crate::cli::hold(&dir.join("b.json.lock"), "busy").is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A panic in an update's thread is that update's failure, not a busy update for ever.
