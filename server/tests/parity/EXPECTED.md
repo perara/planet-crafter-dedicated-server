@@ -102,6 +102,11 @@ energy: the grower's random state).
 
 ## Safety rules (deliberate)
 
+- **StartInterpolation for world object id 0** is ignored. The game finds no world object of
+  that id and creates a fresh one of the interpolation group (an Elevator), marks it saved and
+  starts a move on it; each call after a move has ended makes one more, so a client could grow
+  the save at will. The reference does this (`sweep_system`: one more Elevator counted).
+
 - **Other players' backpacks and equipment** are refused (TransferAll, GetOrCreate,
   AddNewItem... on inventory 3 in `inventories.json`): AddOrRemoveItem false, an empty
   RetrieveInventory. The game's host takes them from anyone.

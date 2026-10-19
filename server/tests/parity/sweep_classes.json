@@ -204,5 +204,18 @@
   "script": "^sweep_vehicle\\.A$",
   "line": "^worldObjects(: \\d+ records| order at ref \\d+ / ours \\d+: ref \\[.\\d+.)",
   "why": "a failed AddNewItemToInventory leaves its object in the game and destroys it here (EXPECTED): the three adds the script makes to a full inventory"
+ },
+ {
+  "class": "c",
+  "script": "^sweep_system$",
+  "tag": "^Elevator\\|scene interpolation$",
+  "line": "StartInterpolationClientRpc\", \"object\": \"scene:WorldObjectsHandler\"|\"args\": \\[0, 0\\.0, 0\\.25",
+  "why": "a StartInterpolation for world object id 0 is not run here: the game creates a fresh scene world object for it (saved, not a scene object) on each such call once the last has finished; a client could grow the save at will (safety, EXPECTED.md)"
+ },
+ {
+  "class": "c",
+  "script": "^sweep_system$",
+  "line": "_allWorldObjectsGroups of Elevator: changed by ref 2 ours 1|_constructedWorldObjectsGroups",
+  "why": "the fresh Elevator world object of StartInterpolation for id 0 (see above): the reference counts one more"
  }
 ]
