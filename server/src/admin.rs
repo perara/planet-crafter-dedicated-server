@@ -140,8 +140,10 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
         return respond(stream, 411, "application/json", "{\"error\":\"send the body with a Content-Length\"}");
     }
     let Some(length) = length else { return respond(stream, 400, "application/json", "{\"error\":\"bad Content-Length\"}") };
-    if length as u64 > MAX_REQUEST {
-        let answered = respond(stream.try_clone()?, 413, "application/json", &format!("{{\"error\":\"a request body is at most {} KiB\"}}", MAX_REQUEST >> 10));
+    // What the head left of MAX_REQUEST: a body that fits the limit alone but not after its head
+    // would end in the read below, and the connection would close unanswered.
+    if length as u64 > reader.limit() {
+        let answered = respond(stream.try_clone()?, 413, "application/json", &format!("{{\"error\":\"a request (head and body) is at most {} KiB\"}}", MAX_REQUEST >> 10));
         // A lingering close: read (up to 1 MiB, 2 s) what the client still sends, so the kernel
         // does not reset the connection over unread bytes before the answer is read.
         let _ = stream.shutdown(std::net::Shutdown::Write);
@@ -234,6 +236,9 @@ mod tests {
         // the game loop.
         let big = [b"POST /api/save HTTP/1.1\r\nAuthorization: Bearer secret\r\nContent-Length: 100000\r\n\r\n".as_slice(), &[b' '; 100_000]].concat();
         assert!(ask(addr, &big).starts_with("HTTP/1.1 413"));
+        // A length within the limit alone, but not after the head: refused the same way.
+        let close = [b"POST /api/save HTTP/1.1\r\nAuthorization: Bearer secret\r\nContent-Length: 65500\r\n\r\n".as_slice(), &[b' '; 65_500]].concat();
+        assert!(ask(addr, &close).starts_with("HTTP/1.1 413"));
         assert!(ask(addr, b"POST /api/save HTTP/1.1\r\nAuthorization: Bearer secret\r\nContent-Length: ten\r\n\r\n").starts_with("HTTP/1.1 400"));
         assert!(rx.try_recv().is_err());
         // No other site may frame the page.
