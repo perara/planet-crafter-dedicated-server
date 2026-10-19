@@ -197,8 +197,6 @@ pub struct Game {
     /// the last one would write that one again.
     pub advanced: bool,
     pub rng: Rng,
-    #[serde(skip)]
-    pub trace: bool,
     /// The wreck layouts and the planets' scene dumps (main.rs scene_tables): static, given
     /// again to a restored game.
     #[serde(skip)]
@@ -211,6 +209,7 @@ pub struct Game {
     /// Clients the transport should drop, with the reason they are shown.
     pub kicks: Vec<(u64, String)>,
     pub access: crate::access::Access,
+    #[serde(serialize_with = "crate::rules::serialize_for_older_banks")]
     pub rules: crate::rules::Rules,
     /// Where set() keeps the rules (None: not kept, as in tests).
     pub rules_path: Option<String>,
@@ -324,7 +323,6 @@ impl Game {
             last_clock: 0.0,
             advanced: false,
             rng: Rng::seeded(),
-            trace: std::env::var_os("PCDS_TRACE").is_some(),
             scenes,
             timers: Default::default(),
             crafted_total: 0,
@@ -547,7 +545,7 @@ impl Game {
             if self.kicks.iter().any(|(c, _)| *c == client) {
                 return;
             }
-            if self.trace {
+            if self.rules.log.trace {
                 println!("trace client {client} -> {kind} {}", crate::util::to_hex(body));
             }
             let approved = self.clients.get(&client).is_some_and(|c| c.approved);
@@ -638,7 +636,7 @@ impl Game {
             return;
         };
         let Some(name) = self.net.spec.get(method).map(|r| r.name.clone()) else { return };
-        if self.trace {
+        if self.rules.log.trace {
             println!("trace client {client} rpc {name} on {object}/{behaviour} {}", Value::Array(args.clone()));
         }
         // Netcode runs an RPC on a behaviour of the object it is sent to: one of the RPC's class

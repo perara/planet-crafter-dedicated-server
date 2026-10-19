@@ -107,6 +107,7 @@ impl Ctx {
         let token = super::token()?;
         let text = format!(
             "# Planet Crafter dedicated server settings. Apply with: pcds restart
+# Saves, backups, updates and the rest of what is tuned are rules (run/rules.json, the admin page).
 # Direct IP (UDP): players join with HOST:PORT; \"off\" disables.
 PCDS_LISTEN=0.0.0.0:{port}
 # Invite codes through Steam (an anonymous Steam game server; needs steamclient.so,
@@ -117,10 +118,6 @@ PCDS_STEAM=on
 PCDS_STEAM_TOKEN=
 # Last four digits of the invite code.
 PCDS_SESSION=4242
-# Minutes between saves (0: only on stop), and the save backups kept in worlds/backups/.
-PCDS_AUTOSAVE=5
-PCDS_BACKUPS=24
-PCDS_BACKUP_MINUTES=60
 # Admin API and web page (pcds gui); keep it on 127.0.0.1 or behind a proxy. \"off\" disables.
 PCDS_ADMIN={admin}
 PCDS_ADMIN_TOKEN={token}
@@ -220,7 +217,7 @@ mod tests {
         let ctx = super::super::test_ctx(&dir);
         ctx.write_env().unwrap();
         let env = parse_env(&fs::read_to_string(&ctx.env_file).unwrap());
-        for key in ["PCDS_LISTEN", "PCDS_SESSION", "PCDS_AUTOSAVE", "PCDS_BACKUPS", "PCDS_BACKUP_MINUTES", "PCDS_WORLD", "PCDS_STEAM", "PCDS_ADMIN"] {
+        for key in ["PCDS_LISTEN", "PCDS_SESSION", "PCDS_WORLD", "PCDS_STEAM", "PCDS_ADMIN"] {
             let written = env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
             assert_eq!(written, Some(crate::config::knob_for(key).unwrap().default), "{key}");
         }

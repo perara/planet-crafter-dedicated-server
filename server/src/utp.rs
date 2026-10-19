@@ -46,7 +46,7 @@ const LAST: u16 = 0x4000;
 /// go without data.
 const MAX_BATCH: usize = 1 << 20;
 // Room for the world a late-game save sends on join (saves reach several MB); only approved
-// clients (PCDS_MAX_PLAYERS) get that much sent.
+// clients (the limits.maxPlayers rule) get that much sent.
 const MAX_QUEUED: usize = 64 << 20;
 const MAX_DATAGRAMS: usize = 4096;
 const MAX_CONNECTIONS: usize = 128;

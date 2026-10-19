@@ -243,9 +243,10 @@ pub fn run(args: &[String]) {
 impl Front {
     fn new(dir: &str, save: &str, banks: Option<PathBuf>, utp: Option<Utp>, port: u16, stop: Arc<AtomicBool>) -> Front {
         let (tx, rx) = std::sync::mpsc::channel();
-        let auto = crate::env("PCDS_AUTO_UPDATE").as_deref() == Some("on");
-        let every = Duration::from_secs(crate::config::env_number("PCDS_UPDATE_CHECK_HOURS") * 3600);
-        let autosave_minutes = crate::autosave_start();
+        // The rules' values (save, update) until the bank says what the rules file holds (OPS).
+        let rules = crate::rules::Rules::default();
+        let (auto, every) = (rules.update.auto, Duration::from_secs(u64::from(rules.update.check_hours) * 3600));
+        let autosave_minutes = u64::from(rules.save.autosave_minutes);
         Front {
             dir: dir.to_string(),
             save: save.to_string(),
@@ -816,6 +817,7 @@ impl Front {
                 Ok(event) => self.hooks.feed.push(event),
                 Err(e) => eprintln!("chat: an event the front cannot read ({e})"),
             },
+            ipc::OPS => self.ops(&f.body),
             ipc::CHATCFG => match chat_config(&f.body) {
                 Ok(chat) => self.hooks.configure(chat),
                 Err(e) => eprintln!("chat: {e}; the hooks keep their settings"),
@@ -1172,15 +1174,29 @@ impl Front {
         }
     }
 
-    fn answer(&mut self, id: u64, body: &[u8]) {
-        let Some((reply, path)) = self.answers.remove(&id) else { return };
-        let a: Value = serde_json::from_slice(body).unwrap_or_default();
-        if let Some(m) = a["autosaveMinutes"].as_u64()
-            && m != self.autosave_minutes
-        {
+    /// The rules the front acts on, as the live bank says them (ipc::OPS).
+    fn ops(&mut self, body: &[u8]) {
+        let o: Value = serde_json::from_slice(body).unwrap_or_default();
+        self.set_autosave(o["autosaveMinutes"].as_u64());
+        if let Some(auto) = o["autoUpdate"].as_bool() {
+            self.updates.auto = auto;
+        }
+        if let Some(hours) = o["updateCheckHours"].as_u64() {
+            self.updates.every = Duration::from_secs(hours.clamp(1, 8760) * 3600);
+        }
+    }
+
+    fn set_autosave(&mut self, minutes: Option<u64>) {
+        if let Some(m) = minutes.filter(|m| *m != self.autosave_minutes) {
             self.autosave_minutes = m;
             self.next_save = Instant::now() + Duration::from_secs(m.max(1) * 60);
         }
+    }
+
+    fn answer(&mut self, id: u64, body: &[u8]) {
+        let Some((reply, path)) = self.answers.remove(&id) else { return };
+        let a: Value = serde_json::from_slice(body).unwrap_or_default();
+        self.set_autosave(a["autosaveMinutes"].as_u64());
         let status = a["status"].as_u64().unwrap_or(500) as u16;
         let mut text = a["body"].as_str().unwrap_or("{}").to_string();
         if path == "/api/status"
@@ -1382,7 +1398,7 @@ impl Front {
                 let bank = updater::other(&live.name).to_string();
                 self.updates.seq += 1;
                 let seq = self.updates.seq;
-                println!("update: checking for a new release (PCDS_AUTO_UPDATE=on)");
+                println!("update: checking for a new release (the rule update.auto is on)");
                 self.download(seq, dir, bank, None, true, true);
             }
         }

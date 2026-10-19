@@ -105,12 +105,6 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-/// The autosave interval a start begins with: PCDS_AUTOSAVE, else 5 minutes (config.rs checks
-/// it at start).
-fn autosave_start() -> u64 {
-    config::env_number("PCDS_AUTOSAVE")
-}
-
 /// The game's tables in DATA_DIR (data/<version>/); without them nothing runs.
 fn tables(dir: &str) -> (NetData, GameData, Spec) {
     let (net, spec) = network_tables(dir);

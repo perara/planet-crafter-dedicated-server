@@ -32,8 +32,6 @@ pub enum Source {
     Rules,
     /// access.json; the key is "access.<list>".
     Access,
-    /// The running server's own, back to its start value at a restart.
-    Server,
     /// server.env, read at start: shown, never changed here.
     Env,
     /// A server.env secret: shows only whether it is set.
@@ -105,7 +103,7 @@ pub static KNOBS: &[Knob] = &[
     rule("death.consequences", Type::Enum, "", "What dying costs. Unset: the world's own setting.").values(&crate::rules::CONSEQUENCES),
     rule("death.dropChance", Type::Float, "%", "With DropSomeItems: the percent chance each item is dropped (with 4 items or fewer, all go). Unset: the game's 50.").range(0.0, 100.0),
     rule("loot.amount", Type::Float, "×", "Items in generated containers (wreck safes, crates), times this, up to the size of the container.").range(MULTIPLIER.0, MULTIPLIER.1),
-    rule("limits.maxPlayers", Type::Int, "players", "Players at once; more are refused with the game's session-full message. Unset: PCDS_MAX_PLAYERS, else 16.").range(1.0, 100.0),
+    rule("limits.maxPlayers", Type::Int, "players", "Players at once; more are refused with the game's session-full message. Unset: 16.").range(1.0, 100.0),
     rule("world.pauseWhenEmpty", Type::Bool, "", "With no player in the game (past PlayerReady, as the game counts players), the world stands still: its clock, and with it every timer, day and night, growth, production, terraformation, meteo, drone and vehicle. It goes on from there when a player is in."),
     rule("chat.webhooks", Type::List, "", "http:// or https:// URLs every chat message is POSTed to as JSON (see the README's chat hooks).").secret(),
     rule("chat.secret", Type::String, "", "Signs every webhook POST: X-PCDS-Signature: sha256=<HMAC-SHA256 of the body, hex>. Unset: unsigned.").secret(),
@@ -120,31 +118,135 @@ pub static KNOBS: &[Knob] = &[
     rule("backup.s3AccessKey", Type::String, "", "The access key id of a key that may write to the bucket.").secret(),
     rule("backup.s3SecretKey", Type::String, "", "Its secret access key.").secret(),
     rule("limits.buildings", Type::Map, "", "Building group id to how many the world may have (Drill1 = 3). One more is taken down at once and its materials go back to the builder.").range(0.0, u32::MAX as f64),
+    rule("save.autosaveMinutes", Type::Int, "min", "Minutes between saves; 0: only on stop and through the API.").range(0.0, crate::MAX_AUTOSAVE as f64),
+    rule("save.backupsKept", Type::Int, "", "Save backups kept in backups/ next to the world; 0 keeps none.").range(0.0, 10_000.0),
+    rule("save.backupMinutes", Type::Int, "min", "Minutes between those backups.").range(0.0, 525_600.0),
+    rule("update.auto", Type::Bool, "", "Install each new server release from GitHub as it comes out, into the standby bank, and hand the running world over to it (a hot update: players stay connected). A release that needs a front restart is not installed. Off: nothing contacts GitHub on its own."),
+    rule("update.checkHours", Type::Int, "h", "With update.auto: hours between the checks for a new release.").range(1.0, 8760.0),
+    rule("log.trace", Type::Bool, "", "Log every incoming message and RPC (debugging; a lot of output)."),
     list("access.allowedIPs", "Addresses or CIDR ranges (192.168.1.0/24) that may connect over direct IP; empty: everyone. Players who no longer qualify are kicked."),
     list("access.whitelist", "Names or SteamID64s that may play; empty: everyone. SteamIDs count only for invite-code players, where they are verified."),
     list("access.bannedNames", "Banned names and SteamID64s."),
     list("access.bannedIPs", "Banned addresses or CIDR ranges (direct-IP players)."),
-    knob(Source::Server, "server.autosaveMinutes", Type::Int, "min", "Minutes between saves; 0: only on stop and through the API. Until the next restart, which starts from PCDS_AUTOSAVE.").range(0.0, crate::MAX_AUTOSAVE as f64),
     env("PCDS_LISTEN", Type::String, "", "0.0.0.0:7777", "Direct-IP address (UDP) players join; off disables it."),
     env("PCDS_STEAM", Type::Enum, "", "on", "Invite codes through Steam; off disables them.").values(&["on", "off"]),
     Knob { source: Source::Secret, ..env("PCDS_STEAM_TOKEN", Type::String, "", "", "A Steam game server login token (app 1284190): keeps the invite code the same across restarts.") },
     env("PCDS_SESSION", Type::Int, "", "4242", "The last four digits of the invite code.").range(0.0, 9999.0),
-    env("PCDS_AUTOSAVE", Type::Int, "min", "5", "Minutes between saves at start (server.autosaveMinutes changes it until the next restart).").range(0.0, crate::MAX_AUTOSAVE as f64),
-    env("PCDS_BACKUPS", Type::Int, "", "24", "Save backups kept in backups/ next to the world; 0 keeps none.").range(0.0, 10_000.0),
-    env("PCDS_BACKUP_MINUTES", Type::Int, "min", "60", "Minutes between those backups.").range(0.0, 525_600.0),
     env("PCDS_ADMIN", Type::String, "", "127.0.0.1:7782", "The admin API and web page's address; off disables them."),
     Knob { source: Source::Secret, ..env("PCDS_ADMIN_TOKEN", Type::String, "", "", "The admin API's bearer token (pcds token).") },
-    env("PCDS_MAX_PLAYERS", Type::Int, "players", "16", "Players at once while the limits.maxPlayers rule is unset.").range(1.0, 100.0),
     env("PCDS_WORLD", Type::String, "", "world", "The world pcds starts: worlds/<name>.json (pcds world use NAME)."),
     env("PCDS_ACCESS", Type::String, "", "", "The access lists file; unset: run/access.json, the installation's (pcds run; a pcds serve started by hand: access.json next to the world)."),
     env("PCDS_RULES", Type::String, "", "", "The rules file; unset: run/rules.json, the installation's (pcds run; a pcds serve started by hand: rules.json next to the world)."),
     env("PCDS_WEB", Type::String, "", "", "This web page's file; unset: web/index.html next to the server binary."),
-    env("PCDS_TRACE", Type::String, "", "", "Set: log every incoming message and RPC."),
     env("PCDS_TRUST_LOOPBACK", Type::Enum, "", "0", "1: believe the SteamID a direct-IP client from 127.0.0.1 claims (tests, the load and probe tools). Never behind a UDP relay, where every player comes from 127.0.0.1.").values(&["0", "1"]),
-    env("PCDS_AUTO_UPDATE", Type::Enum, "", "off", "on: install each new server release from GitHub as it comes out, into the standby bank, and hand the running world over to it (a hot update: players stay connected). A release that needs a front restart is not installed.").values(&["off", "on"]),
-    env("PCDS_UPDATE_CHECK_HOURS", Type::Int, "h", "24", "With PCDS_AUTO_UPDATE=on: hours between checks for a new release.").range(1.0, 8760.0),
-    env("PCDS_RELEASES", Type::String, "", "", "Where pcds upgrade and PCDS_AUTO_UPDATE look up releases; unset: GitHub's API for this project. A mirror, or a test's server (plain http only for 127.0.0.1)."),
+    env("PCDS_RELEASES", Type::String, "", "", "Where pcds upgrade and update.auto look up releases; unset: GitHub's API for this project. A mirror, or a test's server (plain http only for 127.0.0.1)."),
 ];
+
+/// The process environment besides server.env's settings (the Env and Secret entries of KNOBS).
+/// `install` ones say where the installation is and are set by the image, the unit or the
+/// operator's shell; `internal` ones pass between this program's own processes; `dev` is the
+/// one door for developer hooks.
+pub struct Var {
+    pub name: &'static str,
+    pub scope: &'static str,
+    pub text: &'static str,
+}
+
+pub static PROCESS_ENV: &[Var] = &[
+    Var { name: "PCDS_HOME", scope: "install", text: "The folder the installation keeps everything in: worlds/, server.env, rules.json, access.json, data/ (the game tables) and bin/ (the banks). Default: run/ of the release or checkout folder; a second server on the machine gets its own." },
+    Var { name: "PCDS_GAME_DIR", scope: "install", text: "The game's folder (the one with Planet Crafter.exe). Default: the one used last (run/game-dir), else the Steam library that lists the game; --game DIR on the commands that need it." },
+    Var { name: "PCDS_CONTAINER", scope: "install", text: "Set by the Docker image: no systemd, the server is the container's own process, the admin address may be public inside it." },
+    Var { name: "PCDS_UNIT", scope: "install", text: "The systemd unit's name (default pcds): set it, with PCDS_HOME, for a second server on the same machine. The units pcds writes carry it." },
+    Var { name: "PCDS_IPC_FD", scope: "internal", text: "The front gives each bank its socket at this descriptor (always 3). Never set by hand." },
+    Var { name: "PCDS_DEV", scope: "dev", text: "Developer hooks, comma-separated (DEV_HOOKS). Tests and tools set it; never an installation." },
+];
+
+/// PCDS_DEV's hooks: what the end-to-end tests and the load and probe tools need from the
+/// production program. An unknown one stops the start.
+pub static DEV_HOOKS: &[(&str, &str)] = &[
+    ("flip-verify", "A bank that restores a snapshot checks its state equals the snapshot's (every flip)."),
+    ("test-faults", "POST /api/update takes failForTest, to make the next bank fail on purpose."),
+    ("trust-loopback", "Believe the SteamID a direct-IP client from 127.0.0.1 claims. Never behind a UDP relay, where every player comes from 127.0.0.1."),
+    ("bank-fail=restore|protocol", "The front sets it for a bank: it dies on RESTORE, or says another protocol."),
+];
+
+/// PCDS_DEV's value for a hook: Some("") for a bare one, Some(value) for hook=value.
+pub fn dev(hook: &str) -> Option<String> {
+    let all = crate::env("PCDS_DEV")?;
+    all.split(',').find_map(|t| {
+        let (name, value) = t.trim().split_once('=').unwrap_or((t.trim(), ""));
+        (name == hook).then(|| value.to_string())
+    })
+}
+
+/// How an old setting's text becomes its rule's value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Conv {
+    Number,
+    /// on or off.
+    OnOff,
+    /// Set (not empty): true.
+    Flag,
+}
+
+/// What became of a setting that is not read any more.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Fate {
+    /// It is this rule now (rules.json, the admin API and page): `pcds config migrate` moves it.
+    Rule(&'static str, Conv),
+    /// It is a file of the installation now: this one in PCDS_HOME.
+    File(&'static str),
+    /// A developer hook: PCDS_DEV=this.
+    Dev(&'static str),
+    /// It is gone, for this reason.
+    Gone(&'static str),
+}
+
+/// Every setting that was read once and is not now: a server started with one of them set
+/// refuses to start and says what replaces it (check_env), whichever way it was set. This table
+/// is the only place that knows them. Names that were never operator settings (the tests' and
+/// tools') are not here.
+pub static RETIRED: &[(&str, Fate)] = &[
+    ("PCDS_AUTOSAVE", Fate::Rule("save.autosaveMinutes", Conv::Number)),
+    ("PCDS_BACKUPS", Fate::Rule("save.backupsKept", Conv::Number)),
+    ("PCDS_BACKUP_MINUTES", Fate::Rule("save.backupMinutes", Conv::Number)),
+    ("PCDS_MAX_PLAYERS", Fate::Rule("limits.maxPlayers", Conv::Number)),
+    ("PCDS_AUTO_UPDATE", Fate::Rule("update.auto", Conv::OnOff)),
+    ("PCDS_UPDATE_CHECK_HOURS", Fate::Rule("update.checkHours", Conv::Number)),
+    ("PCDS_TRACE", Fate::Rule("log.trace", Conv::Flag)),
+];
+
+/// What a front before 0.7 hands its banks, in the environment they inherit: a bank of this
+/// version, started by one, ignores these without a word (it has no use for them). It never
+/// refuses to start on a retired setting, because the front it was started by has its own
+/// environment, which a hot update does not change; every other retired setting in its
+/// environment is said once in a line (inherited_note) and ignored. Always a subset of RETIRED.
+pub const OLD_FRONT_PLUMBING: &[&str] = &[];
+
+/// The most variables an operator meets: the settings of server.env plus the install ones.
+/// A new one is a decision (a rule if it is gameplay or tuning), not a habit.
+pub const OPERATOR_ENV_BUDGET: usize = 12;
+
+/// Why a retired setting is not read, and what to do.
+pub fn retired_message(name: &str, fate: Fate) -> String {
+    match fate {
+        Fate::Rule(key, _) => format!("{name} is now the rule {key}: edit rules.json or POST /api/config"),
+        Fate::File(file) => format!("{name} is gone: the file is {file} in PCDS_HOME (move yours there)"),
+        Fate::Dev(hook) => format!("{name} is now PCDS_DEV={hook} (a developer hook)"),
+        Fate::Gone(why) => format!("{name} is gone: {why}"),
+    }
+}
+
+/// The retired settings `get` has set (not empty), in the table's order, as their messages.
+pub fn retired_set(get: &impl Fn(&str) -> Option<String>) -> Vec<(&'static str, Fate)> {
+    RETIRED.iter().filter(|(name, _)| get(name).is_some_and(|v| !v.is_empty())).copied().collect()
+}
+
+/// A bank's one line about the settings it inherited from a front before 0.7 (None: none).
+pub fn inherited_note(get: &impl Fn(&str) -> Option<String>) -> Option<String> {
+    let names: Vec<&str> = retired_set(get).into_iter().map(|(n, _)| n).filter(|n| !OLD_FRONT_PLUMBING.contains(n)).collect();
+    (!names.is_empty()).then(|| format!("bank: the front that started it passes settings that are rules now ({}); they are ignored, the rules decide (pcds config migrate moves them)", names.join(", ")))
+}
 
 pub fn knob_for(key: &str) -> Option<&'static Knob> {
     KNOBS.iter().find(|k| k.key == key)
@@ -254,10 +356,11 @@ fn env_value(kind: Type, text: &str) -> Value {
 
 /// Every server.env setting the server reads (config::KNOBS' Env and Secret entries), checked
 /// once at start, as `get` (the environment, or the settings file) has them: Err naming each
-/// setting that is not what its entry takes (a secret's value never shown). The server refuses
-/// to start on it: a mistyped value is never read as the default.
+/// setting that is not what its entry takes (a secret's value never shown), each retired one
+/// (RETIRED) with what replaces it, and each PCDS_DEV hook that does not exist. The server
+/// refuses to start on it: a mistyped or old setting is never read as the default.
 pub fn check_env(get: impl Fn(&str) -> Option<String>) -> Result<(), String> {
-    let mut bad = Vec::new();
+    let mut bad: Vec<String> = retired_set(&get).into_iter().map(|(name, fate)| retired_message(name, fate)).collect();
     for k in KNOBS.iter().filter(|k| k.read_only()) {
         let Some(text) = get(k.key).filter(|t| !t.is_empty()) else { continue };
         let checked = match k.key {
@@ -267,7 +370,13 @@ pub fn check_env(get: impl Fn(&str) -> Option<String>) -> Result<(), String> {
         };
         bad.extend(checked.err());
     }
-    if bad.is_empty() { Ok(()) } else { Err(format!("server.env: {} (pcds config edits it)", bad.join("; "))) }
+    for hook in get("PCDS_DEV").unwrap_or_default().split(',').map(str::trim).filter(|h| !h.is_empty()) {
+        let name = hook.split_once('=').map_or(hook, |(n, _)| n);
+        if !DEV_HOOKS.iter().any(|(h, _)| h.split('=').next() == Some(name)) {
+            bad.push(format!("PCDS_DEV: no hook {name:?}"));
+        }
+    }
+    if bad.is_empty() { Ok(()) } else { Err(format!("server.env: {} (pcds config edits it, pcds config migrate moves the settings that are rules now)", bad.join("; "))) }
 }
 
 /// A whole-number server.env setting, or its default: what check_env() let through at start.
@@ -278,7 +387,7 @@ pub fn env_number(key: &str) -> u64 {
 }
 
 /// Every knob with its default and value: {"knobs": [...]}.
-pub fn get(game: &Game, autosave: u64) -> Value {
+pub fn get(game: &Game) -> Value {
     let rules = serde_json::to_value(&game.rules).unwrap_or_default();
     let defaults = serde_json::to_value(Rules::default()).unwrap_or_default();
     let access = serde_json::to_value(&game.access.lists).unwrap_or_default();
@@ -292,8 +401,6 @@ pub fn get(game: &Game, autosave: u64) -> Value {
                 }
                 Source::Rules => (at(&defaults, k.key), at(&rules, k.key)),
                 Source::Access => (json!([]), at(&access, &k.key["access.".len()..])),
-                // The one server knob: server.autosaveMinutes.
-                Source::Server => (crate::autosave_start().into(), autosave.into()),
                 Source::Env => (env_value(k.kind, k.default), env_value(k.kind, &crate::env(k.key).unwrap_or_default())),
                 Source::Secret => (Value::Null, crate::env(k.key).map(|_| "(set)").into()),
             };
@@ -320,13 +427,13 @@ pub fn get(game: &Game, autosave: u64) -> Value {
 
 /// A change from the API, {"key": value or null}: every value checked, then all applied (or
 /// none). Err: {"error", "key"} for the API's answer.
-pub fn set(game: &mut Game, autosave: &mut u64, body: &Value) -> Result<(), Value> {
+pub fn set(game: &mut Game, body: &Value) -> Result<(), Value> {
     let fail = |key: &str, error: String| json!({ "error": error, "key": key });
     let Some(changes) = body.as_object() else { return Err(fail("", "a JSON object of setting: value".into())) };
     let defaults = serde_json::to_value(Rules::default()).unwrap_or_default();
     let mut rules = serde_json::to_value(&game.rules).unwrap_or_default();
     let mut access = serde_json::to_value(&game.access.lists).unwrap_or_default();
-    let (mut access_changed, mut minutes) = (false, None);
+    let mut access_changed = false;
     for (key, value) in changes {
         let source = match knob_for(key) {
             Some(k) if k.read_only() => return Err(fail(key, format!("{key}: set in server.env (pcds config), not here"))),
@@ -350,7 +457,6 @@ pub fn set(game: &mut Game, autosave: &mut u64, body: &Value) -> Result<(), Valu
                 access[&key["access.".len()..]] = if value.is_null() { json!([]) } else { value.clone() };
                 access_changed = true;
             }
-            Source::Server => minutes = Some(value.as_u64().unwrap_or_else(crate::autosave_start)),
             Source::Env | Source::Secret => unreachable!("read-only knobs are refused above"),
         }
     }
@@ -378,9 +484,6 @@ pub fn set(game: &mut Game, autosave: &mut u64, body: &Value) -> Result<(), Valu
     }
     if access_changed {
         crate::bank::enforce(game);
-    }
-    if let Some(m) = minutes {
-        *autosave = m;
     }
     Ok(())
 }
@@ -523,28 +626,55 @@ mod tests {
         let defaults: Vec<(&str, &str)> = KNOBS.iter().filter(|k| k.read_only() && !k.default.is_empty()).map(|k| (k.key, k.default)).collect();
         with(&defaults).unwrap();
         with(&[]).unwrap();
-        with(&[("PCDS_LISTEN", "off"), ("PCDS_ADMIN", "[::1]:7782"), ("PCDS_AUTOSAVE", "0"), ("PCDS_SESSION", "0042")]).unwrap();
+        with(&[("PCDS_LISTEN", "off"), ("PCDS_ADMIN", "[::1]:7782"), ("PCDS_SESSION", "0042"), ("PCDS_DEV", "flip-verify, bank-fail=restore")]).unwrap();
         for (key, value, says) in [
-            ("PCDS_AUTOSAVE", "five", "PCDS_AUTOSAVE: \"five\" is not a whole number from 0 to 1440"),
-            ("PCDS_AUTOSAVE", "100000", "from 0 to 1440"),
-            ("PCDS_BACKUPS", "-1", "PCDS_BACKUPS: -1 is not"),
-            ("PCDS_BACKUP_MINUTES", "1h", "PCDS_BACKUP_MINUTES"),
+            ("PCDS_SESSION", "five", "PCDS_SESSION: \"five\" is not a whole number from 0 to 9999"),
             ("PCDS_SESSION", "12345", "PCDS_SESSION: 12345 is not a whole number from 0 to 9999"),
-            ("PCDS_MAX_PLAYERS", "0", "PCDS_MAX_PLAYERS"),
-            ("PCDS_AUTO_UPDATE", "yes", "PCDS_AUTO_UPDATE: \"yes\" is not one of"),
-            ("PCDS_UPDATE_CHECK_HOURS", "0", "PCDS_UPDATE_CHECK_HOURS"),
             ("PCDS_STEAM", "true", "PCDS_STEAM"),
             ("PCDS_LISTEN", "7777", "PCDS_LISTEN: \"7777\" is not an address"),
             ("PCDS_ADMIN", "localhost:7782", "PCDS_ADMIN"),
+            ("PCDS_DEV", "flip-verfy", "PCDS_DEV: no hook \"flip-verfy\""),
         ] {
             let e = with(&[(key, value)]).unwrap_err();
             assert!(e.contains(says) && e.starts_with("server.env: "), "{key}={value}: {e}");
         }
         // Two at once are both named.
-        let e = with(&[("PCDS_AUTOSAVE", "x"), ("PCDS_BACKUPS", "y")]).unwrap_err();
-        assert!(e.contains("PCDS_AUTOSAVE") && e.contains("PCDS_BACKUPS"), "{e}");
+        let e = with(&[("PCDS_SESSION", "x"), ("PCDS_STEAM", "y")]).unwrap_err();
+        assert!(e.contains("PCDS_SESSION") && e.contains("PCDS_STEAM"), "{e}");
         // The number readers take the default when unset.
-        assert_eq!((env_number("PCDS_SESSION"), env_number("PCDS_UPDATE_CHECK_HOURS")), (4242, 24));
+        assert_eq!(env_number("PCDS_SESSION"), 4242);
+    }
+
+    /// A retired setting stops the start with what replaces it, in one line; setting them
+    /// all to nothing (an empty value is no value) starts.
+    #[test]
+    fn retired_settings_are_refused_with_their_replacement() {
+        let with = |pairs: &[(&str, &str)]| {
+            let pairs: Vec<(String, String)> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            check_env(move |key| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()))
+        };
+        for (name, fate) in RETIRED {
+            let e = with(&[(name, "1")]).unwrap_err();
+            assert!(e.starts_with("server.env: ") && e.contains(&retired_message(name, *fate)) && !e.contains('\n'), "{name}: {e}");
+            assert!(with(&[(name, "")]).is_ok(), "{name} empty");
+        }
+        let e = with(&[("PCDS_AUTOSAVE", "10")]).unwrap_err();
+        assert!(e.contains("PCDS_AUTOSAVE is now the rule save.autosaveMinutes: edit rules.json or POST /api/config"), "{e}");
+        // Every name once; a rule fate names a rule, a bank is told nothing about plumbing.
+        let defaults = serde_json::to_value(Rules::default()).unwrap();
+        let mut seen = Vec::new();
+        for (name, fate) in RETIRED {
+            assert!(!seen.contains(name) && knob_for(name).is_none() && PROCESS_ENV.iter().all(|v| v.name != *name), "{name}");
+            seen.push(name);
+            if let Fate::Rule(key, _) = fate {
+                assert!(knob_for(key).is_some_and(|k| k.source == Source::Rules) && !at(&defaults, key).is_null() || *key == "limits.maxPlayers", "{name}: {key}");
+            }
+        }
+        assert!(OLD_FRONT_PLUMBING.iter().all(|n| RETIRED.iter().any(|(r, _)| r == n)));
+        let old_front = |pairs: &'static [&'static str]| inherited_note(&|k: &str| pairs.contains(&k).then(|| "1".to_string()));
+        assert_eq!(old_front(&["PCDS_BANK", "PCDS_BANKS", "PCDS_ENV_FILE", "PCDS_RULES", "PCDS_ACCESS"]), None, "the plumbing is no news");
+        let note = old_front(&["PCDS_BANK", "PCDS_AUTOSAVE", "PCDS_BACKUPS"]).unwrap();
+        assert!(note.contains("PCDS_AUTOSAVE, PCDS_BACKUPS") && !note.contains("PCDS_BANK,") && !note.contains('\n'), "{note}");
     }
 
     fn rule_knobs() -> impl Iterator<Item = &'static Knob> {

@@ -217,6 +217,26 @@ fn one_server_per_world() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A setting that moved to the rules, still set in server.env, stops the start in one line that
+/// says where it went; `pcds config migrate` is the way out (config_migrate below).
+#[test]
+fn retired_settings_stop_the_start_and_name_their_replacement() {
+    let dir = test_dir("retired");
+    let fake = fake_systemctl(&dir, "echo inactive");
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::write(dir.join("run/server.env"), "PCDS_ADMIN_TOKEN=s3cret-token\nPCDS_AUTOSAVE=10\nPCDS_BACKUPS=5\n").unwrap();
+    let out = pcds(&dir, &fake, &["run"]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(said.contains("PCDS_AUTOSAVE is now the rule save.autosaveMinutes: edit rules.json or POST /api/config") && said.contains("PCDS_BACKUPS is now the rule save.backupsKept"), "{said}");
+    assert!(!said.contains("s3cret-token") && said.matches("server.env: ").count() == 1, "one line, no secrets: {said}");
+    // The front refuses it too, set in its environment.
+    let out = Command::new(PCDS).arg("serve").arg(dir.join("no-tables")).arg(dir.join("world.json")).env("PCDS_TRACE", "1").output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(text(&out).contains("PCDS_TRACE is now the rule log.trace"), "{}", text(&out));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// A server.env value that is not what the setting takes stops the start, naming it (and
 /// never showing a secret's value).
 #[test]
@@ -224,13 +244,13 @@ fn bad_settings_stop_the_start() {
     let dir = test_dir("settings");
     let fake = fake_systemctl(&dir, "echo inactive");
     std::fs::create_dir_all(dir.join("run")).unwrap();
-    std::fs::write(dir.join("run/server.env"), "PCDS_AUTOSAVE=five\nPCDS_SESSION=12345\n").unwrap();
+    std::fs::write(dir.join("run/server.env"), "PCDS_STEAM=maybe\nPCDS_SESSION=12345\n").unwrap();
     let out = pcds(&dir, &fake, &["run"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));
-    assert!(text(&out).contains("server.env: ") && text(&out).contains("PCDS_AUTOSAVE: \"five\" is not a whole number") && text(&out).contains("PCDS_SESSION: 12345"), "{}", text(&out));
+    assert!(text(&out).contains("server.env: ") && text(&out).contains("PCDS_STEAM: \"maybe\" is not one of") && text(&out).contains("PCDS_SESSION: 12345"), "{}", text(&out));
     // The front itself checks its environment too.
-    let out = Command::new(PCDS).arg("serve").arg(dir.join("no-tables")).arg(dir.join("world.json")).env("PCDS_BACKUPS", "lots").output().unwrap();
+    let out = Command::new(PCDS).arg("serve").arg(dir.join("no-tables")).arg(dir.join("world.json")).env("PCDS_SESSION", "lots").output().unwrap();
     assert_eq!(out.status.code(), Some(2), "{}", text(&out));
-    assert!(text(&out).contains("PCDS_BACKUPS: \"lots\""), "{}", text(&out));
+    assert!(text(&out).contains("PCDS_SESSION: \"lots\""), "{}", text(&out));
     std::fs::remove_dir_all(&dir).unwrap();
 }

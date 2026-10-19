@@ -56,6 +56,10 @@ pub const CHAT: u8 = 17;
 pub const SAY: u8 = 18;
 // bank -> front: body JSON, the rules' chat section (the hooks' settings).
 pub const CHATCFG: u8 = 19;
+// bank -> front: body JSON {"autosaveMinutes", "autoUpdate", "updateCheckHours"}, the rules the
+// front acts on (save, update); at the start and whenever they change. A front before 0.7
+// ignores it (it has these from its environment), and a bank before 0.7 never sends it.
+pub const OPS: u8 = 20;
 
 /// The largest frame either side takes (a world's join batch is a few MiB; a snapshot never
 /// crosses the socket). A frame shorter than its header or longer than this breaks the link.

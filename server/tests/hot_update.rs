@@ -107,6 +107,8 @@ fn start(dir: &Path, data: &str, banks: &Path, releases: &str) -> Server {
     let (admin, udp) = (free_port(), free_port());
     let log = dir.join("front.log");
     let out = std::fs::File::create(&log).unwrap();
+    // No backups: the rule save.backupsKept.
+    std::fs::write(dir.join("rules.json"), "{\"save\": {\"backupsKept\": 0}}").unwrap();
     let child = Command::new(PCDS)
         .arg("serve")
         .arg(data)
@@ -115,7 +117,6 @@ fn start(dir: &Path, data: &str, banks: &Path, releases: &str) -> Server {
         .env("PCDS_ADMIN", format!("127.0.0.1:{admin}"))
         .env("PCDS_ADMIN_TOKEN", "t")
         .env("PCDS_STEAM", "off")
-        .env("PCDS_BACKUPS", "0")
         .env("PCDS_BANKS", banks)
         .env("PCDS_RELEASES", releases)
         .env("PCDS_FLIP_VERIFY", "1")

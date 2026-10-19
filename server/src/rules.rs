@@ -1,5 +1,5 @@
 //! Server rules: what this server changes about the game. They live in rules.json beside the
-//! world (PCDS_RULES for another path) and change live through the admin API (GET and POST
+//! world (or, in an installation, in PCDS_HOME) and change live through the admin API (GET and POST
 //! /api/rules, `pcds rules`). Every default is the game's own behaviour, so a missing or empty
 //! file changes nothing; a file with a typo or an out-of-range value stops the server at start
 //! (and is refused by the API) rather than being half applied.
@@ -28,6 +28,50 @@ pub struct Rules {
     pub world: World,
     pub chat: Chat,
     pub backup: Backup,
+    pub save: Save,
+    pub update: Update,
+    pub log: Log,
+}
+
+/// How often the world is saved and backed up (the backups' off-site copies are `Backup`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct Save {
+    /// Minutes between saves; 0: only on stop and through the API.
+    pub autosave_minutes: u32,
+    /// Save backups kept in backups/ next to the world; 0 keeps none.
+    pub backups_kept: u32,
+    /// Minutes between those backups.
+    pub backup_minutes: u32,
+}
+
+impl Default for Save {
+    fn default() -> Self {
+        Save { autosave_minutes: 5, backups_kept: 24, backup_minutes: 60 }
+    }
+}
+
+/// Server releases (updater.rs): off by default, and then nothing contacts GitHub on its own.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct Update {
+    /// Install each new release into the standby bank and hand the world over to it.
+    pub auto: bool,
+    /// Hours between the checks for a new release.
+    pub check_hours: u32,
+}
+
+impl Default for Update {
+    fn default() -> Self {
+        Update { auto: false, check_hours: 24 }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct Log {
+    /// Log every incoming message and RPC (a lot of output).
+    pub trace: bool,
 }
 
 /// Off-site copies of the save backups: each new backup is uploaded to an S3-compatible bucket
@@ -130,7 +174,7 @@ impl Default for Loot {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Limits {
-    /// None: PCDS_MAX_PLAYERS, else 16.
+    /// None: 16.
     pub max_players: Option<usize>,
     /// Building group id -> how many the world may have. One more is taken down at once and
     /// its materials go back to the builder.
@@ -213,6 +257,8 @@ fn unreadable(text: &str, e: &serde_json::Error) -> String {
     format!("not the rules' format (line {}, column {})", e.line(), e.column())
 }
 
+pub const DEFAULT_MAX_PLAYERS: usize = 16;
+
 pub const CONSEQUENCES: [&str; 4] = ["NoConsequences", "DropSomeItems", "DropAllItems", "DeleteSaveFile"];
 
 impl Rules {
@@ -291,12 +337,26 @@ impl Rules {
     }
 
     pub fn save(&self, path: &str) -> std::io::Result<()> {
-        crate::save::write_atomic(path, (serde_json::to_string_pretty(self).unwrap_or_default() + "\n").as_bytes())
+        crate::save::write_atomic(path, (serde_json::to_string_pretty(&self.for_older_banks()).unwrap_or_default() + "\n").as_bytes())
     }
 
-    /// limits.maxPlayers, else PCDS_MAX_PLAYERS, else 16.
+    /// The rules as JSON for a rules.json or a snapshot an older bank may have to read (a
+    /// rollback, docs/hot-update.md): the sections added in 0.7 stay out while they are the
+    /// defaults, since those banks refuse a section they do not know. ponytail: a rule set in
+    /// one of them still makes the file unreadable to a 0.6 bank; no later release adds to this list.
+    pub fn for_older_banks(&self) -> Value {
+        let (mut v, d) = (serde_json::to_value(self).unwrap_or_default(), serde_json::to_value(Rules::default()).unwrap_or_default());
+        for section in ["save", "update", "log"] {
+            if v[section] == d[section] {
+                v.as_object_mut().map(|o| o.remove(section));
+            }
+        }
+        v
+    }
+
+    /// limits.maxPlayers, else 16.
     pub fn max_players(&self) -> usize {
-        self.limits.max_players.unwrap_or_else(|| crate::config::env_number("PCDS_MAX_PLAYERS") as usize)
+        self.limits.max_players.unwrap_or(DEFAULT_MAX_PLAYERS)
     }
 }
 
@@ -317,6 +377,11 @@ fn merge(target: &mut Value, patch: &Value) {
             _ => merge(map.entry(k.clone()).or_insert(Value::Null), v),
         }
     }
+}
+
+/// serde's `serialize_with` for the rules in a snapshot (see Rules::for_older_banks).
+pub fn serialize_for_older_banks<S: serde::Serializer>(rules: &Rules, s: S) -> Result<S::Ok, S::Error> {
+    serde::Serialize::serialize(&rules.for_older_banks(), s)
 }
 
 /// The rules read at start (checked already), where set() keeps them.
