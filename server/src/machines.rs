@@ -32,6 +32,9 @@ pub struct Machines {
     listening: HashMap<i32, i32>,
     /// ActionGrabable.grabedEvent: grown item -> (harvesting machine, the item's network object).
     grab: crate::idmap::IdMap<i32, (i32, u64)>,
+    /// Net::removed when tick last looked for gone grab items; None: look again (a new item).
+    #[serde(skip)]
+    grab_seen: Option<u64>,
     /// Machines whose Start (or a coroutine's first `yield return null`) is due next tick.
     starting: Vec<i32>,
     /// MachineAutoCrafter._instancedAutocrafters.
@@ -363,7 +366,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     if root(game, group, "RequireEnergy").is_some() {
         let planet = game.wos[&wo].planet_hash();
         let enough = crate::energy::has_enough(game, planet);
-        let runs = crate::energy::check_energy_status(game, wo, enough, &mut None);
+        let runs = crate::energy::check_energy_status(game, wo, enough, &mut Default::default());
         game.ext.machines.energy.insert(wo, runs);
     }
     // MachineGrowerVegetationStatic.SetWorldObjectForGrower.
@@ -563,9 +566,14 @@ pub fn tick(game: &mut Game) {
         }
     }
     // ActionGrabable.OnDestroy fires grabedEvent when the item's game object goes.
-    let gone: Vec<i32> = game.ext.machines.grab.iter().filter(|(_, (_, net))| !game.net.objects.contains_key(net)).map(|(k, _)| *k).collect();
-    for item in gone {
-        grabbed(game, item);
+    // Only looked for when an object went since the last look, or an item came.
+    if game.ext.machines.grab_seen != Some(game.net.removed) {
+        // Set first: what the loop below removes or grows is looked for again next tick.
+        game.ext.machines.grab_seen = Some(game.net.removed);
+        let gone: Vec<i32> = game.ext.machines.grab.iter().filter(|(_, (_, net))| !game.net.objects.contains_key(net)).map(|(k, _)| *k).collect();
+        for item in gone {
+            grabbed(game, item);
+        }
     }
     let now = game.time;
     if now < game.ext.machines.next_due {

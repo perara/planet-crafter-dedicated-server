@@ -24,7 +24,7 @@ pub fn has_enough(game: &Game, planet: i32) -> bool {
 pub fn update_all_energy_requesters(game: &mut Game) {
     crate::units::define_energy(game);
     let machines: Vec<i32> = game.ext.machines.with_energy();
-    let mut water = None;
+    let mut water = Underwater::default();
     for wo in machines {
         let Some(planet) = game.wos.get(&wo).map(|w| w.planet_hash()) else { continue };
         let enough = has_enough(game, planet);
@@ -33,18 +33,25 @@ pub fn update_all_energy_requesters(game: &mut Game) {
     }
 }
 
+/// What the machines of one update share: the water boxes, and per group whether its machines
+/// work underwater (a lookup in the prefab's JSON, so once per group, not per machine).
+#[derive(Default)]
+pub struct Underwater {
+    boxes: Option<Vec<([f32; 3], [f32; 4], [f32; 3])>>,
+    works: std::collections::HashMap<usize, bool>,
+}
+
 /// RequireEnergy.CheckEnergyStatus for one machine: whether it runs. A machine underwater
 /// (unless it works there) gets no energy, on the planet the session is on. `water` caches
 /// the water boxes across the machines of one update.
-#[allow(clippy::type_complexity)]
-pub fn check_energy_status(game: &mut Game, wo: i32, enough: bool, water: &mut Option<Vec<([f32; 3], [f32; 4], [f32; 3])>>) -> bool {
+pub fn check_energy_status(game: &mut Game, wo: i32, enough: bool, water: &mut Underwater) -> bool {
     let Some((planet, position, group)) = game.wos.get(&wo).map(|w| (w.planet_hash(), w.position, w.group)) else { return enough };
     let current = game.planet_hash();
     let mut underwater = false;
     if planet == current {
-        let works = game.data.prefab_components(&game.data.groups[group].id, "RequireEnergy").first().and_then(|c| c["worksUnderWater"].as_bool()).unwrap_or(false);
+        let works = *water.works.entry(group).or_insert_with(|| game.data.prefab_components(&game.data.groups[group].id, "RequireEnergy").first().and_then(|c| c["worksUnderWater"].as_bool()).unwrap_or(false));
         if !works {
-            let boxes = water.get_or_insert_with(|| crate::water::underwater_boxes(game));
+            let boxes = water.boxes.get_or_insert_with(|| crate::water::underwater_boxes(game));
             underwater = crate::water::in_boxes(boxes, [position[0], position[1] + 2.0, position[2]]);
         }
         if underwater {
