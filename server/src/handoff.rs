@@ -145,7 +145,7 @@ pub fn restore_bytes(net_data: NetData, data: GameData, spec: Spec, snapshot: &[
     g.scenes = scenes;
     g.rebuild_holders();
     crate::machines::refresh_from_tables(&mut g);
-    g.trace = std::env::var_os("PCDS_TRACE").is_some();
+    g.trace = crate::env("PCDS_TRACE").is_some();
     // The tables are not quite static: Game::new scales the groups' generation by the
     // world's settings.
     g.change_generation_for_groups();

@@ -1456,20 +1456,20 @@ function renderStopped(s) {
   if (current === 'updates') renderUpdates(s);
 }
 async function startWorld(name, btn) {
-  const r = await act(r => `World ${r.world} is running`, () => api('POST', '/api/world/start', name ? { world: name } : {}, 150000), btn);
+  const r = await act(r => `World ${r.world} is running`, () => api('POST', '/api/world/start', name ? { world: name } : {}, 210000), btn);
   if (r) { banner(null); worldsData = null; refreshSoon(); if (current === 'world') loadWorlds(); }
 }
 async function runWorld(name, btn) {
   const stopped = status && status.state === 'stopped';
   if (!stopped && !await ask({ title: `Run world ${name}?`, body: `This world is saved and stopped, and ${name} starts. Players online are told and disconnected; they join again into ${name}. The server runs ${name} from now on, also after a restart.`, ok: `Run ${name}`, danger: true })) return;
-  const r = await act(r => `World ${r.world} is running`, () => api('POST', stopped ? '/api/world/start' : '/api/world/switch', { world: name }, 150000), btn);
+  const r = await act(r => `World ${r.world} is running`, () => api('POST', stopped ? '/api/world/start' : '/api/world/switch', { world: name }, 210000), btn);
   if (r) { banner(null); refreshSoon(); loadWorlds(); }
 }
 $('stopWorld').onclick = async e => {
   const btn = e.currentTarget;
   if (status && status.state === 'stopped') return startWorld(null, btn);
   if (!await ask({ title: 'Stop the world?', body: 'It is saved and players are disconnected. The server and this page stay up: start it, or another world, from here.', ok: 'Stop world', danger: true })) return;
-  const r = await act('World stopped', () => api('POST', '/api/world/stop', {}, 150000), btn);
+  const r = await act('World stopped', () => api('POST', '/api/world/stop', {}, 210000), btn);
   if (r) refreshSoon();
 };
 async function setPaused(paused, btn) {

@@ -233,8 +233,12 @@ impl Rules {
         let b = &self.backup;
         if let Some(url) = &b.s3_endpoint {
             let uri = url.parse::<ureq::http::Uri>().ok();
-            if !uri.is_some_and(|u| matches!(u.scheme_str(), Some("http" | "https")) && u.host().is_some() && u.path().trim_matches('/').is_empty()) {
+            if !uri.as_ref().is_some_and(|u| matches!(u.scheme_str(), Some("http" | "https")) && u.host().is_some() && u.path().trim_matches('/').is_empty()) {
                 return Err("backup.s3Endpoint: an http:// or https:// address without a path (the bucket is s3Bucket)".into());
+            }
+            // Never shown in the message or the log: the endpoint is not a secret, so no keys in it.
+            if uri.is_some_and(|u| u.authority().is_some_and(|a| a.as_str().contains('@'))) {
+                return Err("backup.s3Endpoint: no user:password@ in the address (the keys are s3AccessKey and s3SecretKey)".into());
             }
         }
         if let Some(bucket) = &b.s3_bucket
@@ -460,6 +464,7 @@ mod tests {
             serde_json::json!({"death": {"consequences": "Explode"}}),
             serde_json::json!({"limits": {"buildings": {"Iron": 1}}}),
             serde_json::json!({"meteo": {"materialDespawnSeconds": 1e9}}),
+            serde_json::json!({"backup": {"s3Endpoint": "https://key:secret@s3.example.com"}}),
             serde_json::json!({"chat": {"webhooks": ["ftp://example.com/"]}}),
             serde_json::json!({"chat": {"webhooks": ["not a url"]}}),
             serde_json::json!({"chat": {"exec": [""]}}),
@@ -635,6 +640,20 @@ mod tests {
         g.rules.world.pause_when_empty = false;
         run(&mut g, 1.0, 0.5);
         assert!((g.time - (held + 32.0)).abs() < 1e-3, "{}", g.time);
+    }
+
+    /// The admin's pause stops the clock, not the players: what they do in a paused world is
+    /// still to be autosaved (an empty one has nobody to change it).
+    #[test]
+    fn what_players_do_in_a_paused_world_is_autosaved() {
+        let Some(mut g) = test_game(save()) else { return };
+        g.held = true;
+        g.advanced = false;
+        g.tick();
+        assert!(!g.advanced, "paused and empty: nothing to save");
+        join(&mut g, 1, "Ann");
+        g.tick();
+        assert!(g.advanced, "paused with Ann in it: she may have changed the world");
     }
 
     #[test]

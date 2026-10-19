@@ -26,6 +26,11 @@ const MAX_CONNECTIONS: usize = 64;
 const MAX_REQUEST: u64 = 64 << 10;
 const HEAD: Duration = Duration::from_secs(3);
 const DEADLINE: Duration = Duration::from_secs(10);
+/// How long the game loop may take to answer: 10 s, but the world controls stop and start the
+/// bank inside that loop (a save and a stop of up to 60 s, a load of up to 120 s: front.rs
+/// STOP_GRACE and LOAD_DEADLINE), so a switch is answered up to 200 s after, not as failed at 10.
+const ANSWER: Duration = Duration::from_secs(10);
+const WORLD_ANSWER: Duration = Duration::from_secs(200);
 
 pub struct Request {
     pub method: String,
@@ -86,6 +91,11 @@ impl Read for Deadline {
     }
 }
 
+/// How long a request's answer is waited for.
+fn answer_wait(path: &str) -> Duration {
+    if path.starts_with("/api/world/") { WORLD_ANSWER } else { ANSWER }
+}
+
 /// Equal strings, in time that does not depend on where they differ.
 fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0, |d, (x, y)| d | (x ^ y)) == 0
@@ -140,8 +150,10 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
         return respond(stream, 411, "application/json", "{\"error\":\"send the body with a Content-Length\"}");
     }
     let Some(length) = length else { return respond(stream, 400, "application/json", "{\"error\":\"bad Content-Length\"}") };
-    if length as u64 > MAX_REQUEST {
-        let answered = respond(stream.try_clone()?, 413, "application/json", &format!("{{\"error\":\"a request body is at most {} KiB\"}}", MAX_REQUEST >> 10));
+    // What the head left of MAX_REQUEST: a body that fits the limit alone but not after its head
+    // would end in the read below, and the connection would close unanswered.
+    if length as u64 > reader.limit() {
+        let answered = respond(stream.try_clone()?, 413, "application/json", &format!("{{\"error\":\"a request (head and body) is at most {} KiB\"}}", MAX_REQUEST >> 10));
         // A lingering close: read (up to 1 MiB, 2 s) what the client still sends, so the kernel
         // does not reset the connection over unread bytes before the answer is read.
         let _ = stream.shutdown(std::net::Shutdown::Write);
@@ -174,14 +186,19 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
         return respond(stream, status, "application/json", &json);
     }
     let (reply, answer) = channel();
+    let wait = answer_wait(&path);
     if tx.send(Request { method, path, body, reply }).is_err() {
         return respond(stream, 500, "application/json", "{\"error\":\"server stopping\"}");
     }
-    match answer.recv_timeout(Duration::from_secs(10)) {
+    match answer.recv_timeout(wait) {
         Ok((status, json)) => respond(stream, status, "application/json", &json),
         Err(_) => respond(stream, 500, "application/json", "{\"error\":\"the game loop did not answer\"}"),
     }
 }
+
+/// How long journalctl may take: a journal that is huge or stuck must not keep a connection (and
+/// with enough of them every slot) for as long as it likes; the page asks again every 5 s.
+const LOGS_WAIT: Duration = Duration::from_secs(6);
 
 /// The server's recent output, from the journal of the systemd user unit pcds runs it as
 /// (PCDS_UNIT). Read on the HTTP thread: journalctl takes longer than a game tick.
@@ -189,11 +206,49 @@ fn logs() -> Value {
     let Some(unit) = std::env::var("PCDS_UNIT").ok().filter(|u| !u.is_empty()) else {
         return serde_json::json!({ "lines": [], "note": "Not running as a pcds systemd unit: the log is the server's own output (docker logs, the terminal)." });
     };
+    journal("journalctl", &unit, LOGS_WAIT)
+}
+
+fn journal(program: &str, unit: &str, wait: Duration) -> Value {
     let unit = format!("{unit}.service");
-    match std::process::Command::new("journalctl").args(["--user", "-u", &unit, "-n", "300", "-o", "short-iso", "--no-pager"]).output() {
-        Ok(out) if out.status.success() => serde_json::json!({ "lines": String::from_utf8_lossy(&out.stdout).lines().collect::<Vec<_>>(), "source": format!("journalctl --user -u {unit}") }),
-        Ok(out) => serde_json::json!({ "lines": [], "note": String::from_utf8_lossy(&out.stderr).trim() }),
-        Err(e) => serde_json::json!({ "lines": [], "note": format!("journalctl: {e}") }),
+    let spawned = std::process::Command::new(program)
+        .args(["--user", "-u", &unit, "-n", "300", "-o", "short-iso", "--no-pager"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(e) => return serde_json::json!({ "lines": [], "note": format!("journalctl: {e}") }),
+    };
+    // Read as it writes (a full pipe would stop it), while this thread watches the clock.
+    let reader = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let (out, err) = (reader(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>)), reader(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>)));
+    let deadline = Instant::now() + wait;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return serde_json::json!({ "lines": [], "note": format!("journalctl gave no answer within {} s (a very large or stuck journal): run `journalctl --user -u {unit}` on the server", wait.as_secs()) });
+            }
+        }
+    };
+    let (out, err) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
+    if status.success() {
+        serde_json::json!({ "lines": String::from_utf8_lossy(&out).lines().collect::<Vec<_>>(), "source": format!("journalctl --user -u {unit}") })
+    } else {
+        serde_json::json!({ "lines": [], "note": String::from_utf8_lossy(&err).trim() })
     }
 }
 
@@ -207,6 +262,38 @@ mod tests {
         let mut answer = String::new();
         let _ = s.read_to_string(&mut answer);
         answer
+    }
+
+    /// Stopping, starting and switching a world are answered when done, not failed at 10 s.
+    #[test]
+    fn world_controls_are_waited_for_as_long_as_they_may_take() {
+        let longest = crate::front::STOP_GRACE * 2 + crate::front::LOAD_DEADLINE;
+        for path in ["/api/world/stop", "/api/world/start", "/api/world/switch"] {
+            assert!(answer_wait(path) >= longest, "{path}");
+        }
+        for path in ["/api/status", "/api/worlds", "/api/worlds/file", "/api/save"] {
+            assert_eq!(answer_wait(path), ANSWER, "{path}");
+        }
+    }
+
+    /// A journalctl that never answers is killed at the limit, with a note that says what to do.
+    #[test]
+    fn a_stuck_journal_does_not_hold_the_connection() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pcds-journal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("journalctl");
+        std::fs::write(&program, "#!/bin/sh\nsleep 20\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = Instant::now();
+        let answer = journal(program.to_str().unwrap(), "pcds", Duration::from_millis(300));
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(answer["note"].as_str().unwrap().contains("no answer within"), "{answer}");
+        // One that answers is read whole.
+        std::fs::write(&program, "#!/bin/sh\necho one; echo two\n").unwrap();
+        let answer = journal(program.to_str().unwrap(), "pcds", Duration::from_secs(5));
+        assert_eq!(answer["lines"], serde_json::json!(["one", "two"]));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -234,6 +321,9 @@ mod tests {
         // the game loop.
         let big = [b"POST /api/save HTTP/1.1\r\nAuthorization: Bearer secret\r\nContent-Length: 100000\r\n\r\n".as_slice(), &[b' '; 100_000]].concat();
         assert!(ask(addr, &big).starts_with("HTTP/1.1 413"));
+        // A length within the limit alone, but not after the head: refused the same way.
+        let close = [b"POST /api/save HTTP/1.1\r\nAuthorization: Bearer secret\r\nContent-Length: 65500\r\n\r\n".as_slice(), &[b' '; 65_500]].concat();
+        assert!(ask(addr, &close).starts_with("HTTP/1.1 413"));
         assert!(ask(addr, b"POST /api/save HTTP/1.1\r\nAuthorization: Bearer secret\r\nContent-Length: ten\r\n\r\n").starts_with("HTTP/1.1 400"));
         assert!(rx.try_recv().is_err());
         // No other site may frame the page.

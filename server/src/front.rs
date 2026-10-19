@@ -68,7 +68,7 @@ pub const STOP_GRACE: Duration = Duration::from_secs(30);
 pub const BOOT_FAILED: i32 = 75;
 
 /// A new bank's tables and world load in seconds; the restore must be READY within this.
-const LOAD_DEADLINE: Duration = Duration::from_secs(120);
+pub const LOAD_DEADLINE: Duration = Duration::from_secs(120);
 const READY_DEADLINE: Duration = Duration::from_secs(5);
 /// An automatic check that failed (GitHub unreachable, rate limited) is made again after this
 /// (or the check interval, when that is shorter), not after the whole interval; one that
@@ -1137,6 +1137,9 @@ impl Front {
                     };
                     let _ = r.reply.send(answer);
                 }
+                ("POST", "/api/world/start") if !r.body["world"].is_null() && !r.body["world"].is_string() => {
+                    let _ = r.reply.send((400, "{\"error\":\"'world': a world's name (or leave it out for the world that ran)\"}".into()));
+                }
                 ("POST", "/api/world/start") => {
                     let name = r.body["world"].as_str().map(str::to_string);
                     let answer = match self.start_world(name.as_deref()) {
@@ -1500,11 +1503,14 @@ impl Front {
 
     /// The world (`name`, else the one it ran) started in the active bank: Idle. A world other
     /// than the last one takes this server's lock of it and is remembered in server.env
-    /// (PCDS_WORLD), so the next start runs it too.
+    /// (PCDS_WORLD), so the next start runs it too; but only once it runs: one that does not
+    /// start leaves the server as it was (stopped, on the world it stopped), and server.env
+    /// naming the world that last ran, so a restart does not fail on it.
     fn start_world(&mut self, name: Option<&str>) -> Result<String, String> {
         if self.phase != Phase::Stopped {
             return Err("the world runs: stop it first, or run another one".into());
         }
+        let mut moved = None;
         if let Some(name) = name.filter(|n| *n != self.world_name()) {
             let name = crate::dashboard::world_name(name)?;
             let save = std::path::Path::new(&self.save).with_file_name(format!("{name}.json")).to_string_lossy().to_string();
@@ -1512,14 +1518,28 @@ impl Front {
                 return Err(format!("no world {name}"));
             }
             let lock = crate::cli::hold(std::path::Path::new(&format!("{save}.lock")), "another server runs that world")?;
-            self.world_lock = Some(lock);
-            self.save = save;
-            if let Some(env) = crate::env("PCDS_ENV_FILE")
-                && let Err(e) = crate::cli::set_env_file(std::path::Path::new(&env), "PCDS_WORLD", &name)
-            {
-                eprintln!("world {name}: not remembered for the next start ({e})");
-            }
+            moved = Some((std::mem::replace(&mut self.save, save), self.world_lock.replace(lock), name));
         }
+        let started = self.start_bank();
+        match (started, moved) {
+            (Err(e), Some((save, lock, name))) => {
+                (self.save, self.world_lock) = (save, lock);
+                Err(format!("world {name} did not start: {e}; the server stays stopped on world {}: start it, or run another world", self.world_name()))
+            }
+            (Ok(world), Some((_, _, name))) => {
+                if let Some(env) = crate::env("PCDS_ENV_FILE")
+                    && let Err(e) = crate::cli::set_env_file(std::path::Path::new(&env), "PCDS_WORLD", &name)
+                {
+                    eprintln!("world {name}: not remembered for the next start ({e})");
+                }
+                Ok(world)
+            }
+            (started, None) => started,
+        }
+    }
+
+    /// The world of `self.save` booted in the active bank: Idle.
+    fn start_bank(&mut self) -> Result<String, String> {
         let bank = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
         let mut kept = self.kept_snapshot()?;
         let snapshot = kept.as_ref().map(|(fd, _)| fd.try_clone()).transpose().map_err(|e| e.to_string())?;
@@ -1835,6 +1855,59 @@ mod tests {
         front.updates.tx.send(UpdateDone::Failed { seq: 9, message: "x".into() }).unwrap();
         front.updates();
         assert!(front.updates.next_check <= Instant::now() + Duration::from_secs(1800));
+    }
+
+    /// A world that does not start leaves the server stopped on the world it stopped, with its
+    /// lock, and server.env naming that world (a restart would fail on the other).
+    #[test]
+    fn a_world_that_does_not_start_is_not_remembered() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pcds-start-world-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("banks/a")).unwrap();
+        let program = dir.join("banks/a/pcds");
+        std::fs::write(&program, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (a, b, env) = (dir.join("a.json"), dir.join("b.json"), dir.join("server.env"));
+        std::fs::write(&a, "{}").unwrap();
+        std::fs::write(&b, "{}").unwrap();
+        std::fs::write(&env, "PCDS_WORLD=a\n").unwrap();
+        // SAFETY: only start_world reads it, and no other test calls that.
+        unsafe { std::env::set_var("PCDS_ENV_FILE", &env) };
+        let mut front = Front::new("data", &a.to_string_lossy(), Some(dir.join("banks")), None, 0, Arc::new(AtomicBool::new(false)));
+        front.phase = Phase::Stopped;
+        front.world_lock = Some(crate::cli::hold(&dir.join("a.json.lock"), "busy").unwrap());
+        let e = front.start_world(Some("b")).unwrap_err();
+        assert!(e.contains("world b did not start") && e.contains("stays stopped on world a"), "{e}");
+        assert_eq!((front.world_name(), front.phase), ("a".to_string(), Phase::Stopped));
+        assert_eq!(std::fs::read_to_string(&env).unwrap(), "PCDS_WORLD=a\n");
+        // The lock of a is still this server's; b's is free again.
+        assert!(crate::cli::hold(&dir.join("a.json.lock"), "busy").is_err());
+        assert!(crate::cli::hold(&dir.join("b.json.lock"), "busy").is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A world control with a 'world' that is no name is refused, not read as "the world that ran".
+    #[test]
+    fn a_start_with_a_world_that_is_no_name_is_refused() {
+        let mut front = test_front();
+        front.phase = Phase::Stopped;
+        let (tx, rx) = std::sync::mpsc::channel();
+        front.admin = Some(rx);
+        let (reply, answer) = std::sync::mpsc::channel();
+        tx.send(admin::Request { method: "POST".into(), path: "/api/world/start".into(), body: json!({"world": 5}), reply }).unwrap();
+        front.admin_requests();
+        let (status, body) = answer.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(status == 400 && body.contains("a world's name"), "{status} {body}");
+    }
+
+    /// A stopped world says so to an update request, not that "an update or a flip is under way".
+    #[test]
+    fn an_update_of_a_stopped_world_says_it_is_stopped() {
+        let mut front = test_front();
+        front.phase = Phase::Stopped;
+        let (status, body) = front.update_request(&json!({"check": true}));
+        assert!(status == 409 && body.contains("the world is stopped"), "{status} {body}");
     }
 
     /// A panic in an update's thread is that update's failure, not a busy update for ever.

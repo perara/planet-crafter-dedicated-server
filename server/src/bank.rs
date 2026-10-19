@@ -285,8 +285,7 @@ impl Bank {
                         let ctx = Ctx { save_path: &self.save_path, build_id: self.build_id.as_deref(), data_dir: &self.data_dir, loop_rate: loops.2, busy: busy_last };
                         let request = || admin_request(game, r["method"].as_str().unwrap_or(""), r["path"].as_str().unwrap_or(""), &r["body"], &ctx, &mut autosave);
                         let (status, body) = contained("an admin request", request).unwrap_or_else(|| (500, "{\"error\":\"the server failed on this request\"}".to_string()));
-                        let answer = json!({"status": status, "body": body, "autosaveMinutes": autosave});
-                        self.link.send(ipc::ANSWER, f.n, answer.to_string().as_bytes());
+                        self.link.send(ipc::ANSWER, f.n, admin_answer(status, body, autosave).as_bytes());
                     }
                     ipc::SAVE => autosave(game, &self.save_path),
                     ipc::STOP => std::process::exit(final_save(game, &self.save_path)),
@@ -555,7 +554,11 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
             }
         }
         ("POST", "/api/unban") => match field("value") {
-            Some(v) => kept(game.access.unban(&v)),
+            Some(v) => match game.access.unban(&v) {
+                Ok(true) => ok(),
+                Ok(false) => (400, json!({"error": format!("{v} is not banned (the bans: GET /api/status, access; a range is unbanned by its own entry)")}).to_string()),
+                Err(e) => (500, json!({"error": e}).to_string()),
+            },
             None => (400, "{\"error\":\"'value' is required\"}".into()),
         },
         ("POST", "/api/access") => {
@@ -588,8 +591,12 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
             Err(e) => (400, json!({"error": e}).to_string()),
         },
         ("POST", "/api/settings") => {
-            if let Some(m) = body["autosaveMinutes"].as_u64() {
-                *autosave = m.min(crate::MAX_AUTOSAVE);
+            // Another key (the plugin API's own) is not this server's to refuse; a given
+            // autosaveMinutes that is no whole number must not be taken as done.
+            match body.get("autosaveMinutes").map(|m| m.as_u64()) {
+                Some(None) => return (400, "{\"error\":\"'autosaveMinutes': a whole number of minutes\"}".into()),
+                Some(Some(m)) => *autosave = m.min(crate::MAX_AUTOSAVE),
+                None => {}
             }
             ok()
         }
@@ -674,6 +681,18 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
         ("GET", "/api/map") => (200, dashboard::map(game).to_string()),
         _ => (404, "{\"error\":\"unknown endpoint\"}".into()),
     }
+}
+
+/// The ANSWER frame for an admin request. One past what a frame holds is never sent (the
+/// request would end in the front's 10 s timeout, "the game loop did not answer"): its place is
+/// an error that says what to do.
+fn admin_answer(status: u16, body: String, autosave: u64) -> String {
+    let answer = json!({"status": status, "body": body, "autosaveMinutes": autosave}).to_string();
+    if ipc::fits(answer.as_bytes()) {
+        return answer;
+    }
+    let error = json!({"error": format!("the answer is {} MiB, more than the link to the front carries ({} MiB): for a world's file, copy it from the worlds folder on the server", answer.len() >> 20, ipc::MAX_FRAME >> 20)});
+    json!({"status": 500, "body": error.to_string(), "autosaveMinutes": autosave}).to_string()
 }
 
 /// /api/status's "tables": the version and build these tables are for, the installed game's
@@ -986,6 +1005,16 @@ mod tests {
     }
 
     /// A ban and a rules change written after a snapshot are in the game restored from it.
+    /// An answer too large for a frame is an error the caller can read, not a lost answer.
+    #[test]
+    fn an_answer_past_a_frame_is_an_error() {
+        let small: Value = serde_json::from_str(&admin_answer(200, "{}".into(), 5)).unwrap();
+        assert_eq!((small["status"].as_u64(), small["body"].as_str()), (Some(200), Some("{}")));
+        let big: Value = serde_json::from_str(&admin_answer(200, "x".repeat(ipc::MAX_FRAME), 5)).unwrap();
+        assert_eq!((big["status"].as_u64(), big["autosaveMinutes"].as_u64()), (Some(500), Some(5)));
+        assert!(big["body"].as_str().unwrap().contains("copy it from the worlds folder"), "{big}");
+    }
+
     #[test]
     fn a_restored_game_takes_access_and_rules_from_their_files() {
         let Some(mut game) = game::test_game(game::tests::save()) else { return };
@@ -1059,6 +1088,25 @@ mod tests {
         let mut autosave = 5;
         call(&mut game, "POST", "/api/settings", json!({"autosaveMinutes": 160_000_000_000_000_000u64}), &mut autosave);
         assert_eq!(autosave, crate::MAX_AUTOSAVE);
+        // Not a whole number: refused, and the interval stays.
+        for bad in [json!(2.5), json!(-1), json!("5"), json!(null)] {
+            let (status, answer) = call(&mut game, "POST", "/api/settings", json!({"autosaveMinutes": bad}), &mut autosave);
+            assert!(status == 400 && answer["error"].as_str().unwrap().contains("whole number"), "{bad}: {status} {answer}");
+        }
+        assert_eq!(autosave, crate::MAX_AUTOSAVE);
+    }
+
+    #[test]
+    fn unbanning_what_is_not_banned_is_said() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let mut autosave = 5;
+        game.access.ban("Mallory", None, Some("10.9.9.9")).unwrap();
+        let (status, answer) = call(&mut game, "POST", "/api/unban", json!({"value": "Mellory"}), &mut autosave);
+        assert!(status == 400 && answer["error"].as_str().unwrap().contains("Mellory is not banned"), "{status} {answer}");
+        assert_eq!(game.access.lists.banned_names, ["Mallory"]);
+        assert_eq!(call(&mut game, "POST", "/api/unban", json!({"value": " mallory "}), &mut autosave).0, 200);
+        assert_eq!(call(&mut game, "POST", "/api/unban", json!({"value": "10.9.9.9"}), &mut autosave).0, 200);
+        assert!(game.access.lists.banned_names.is_empty() && game.access.lists.banned_ips.is_empty());
     }
 
     #[test]
