@@ -37,6 +37,7 @@ pub fn update_all_energy_requesters(game: &mut Game) {
 /// work underwater (a lookup in the prefab's JSON, so once per group, not per machine).
 #[derive(Default)]
 pub struct Underwater {
+    #[allow(clippy::type_complexity)]
     boxes: Option<Vec<([f32; 3], [f32; 4], [f32; 3])>>,
     works: crate::idmap::FxHashMap<usize, bool>,
 }
