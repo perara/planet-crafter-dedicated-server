@@ -210,6 +210,7 @@ pub const CONSEQUENCES: [&str; 4] = ["NoConsequences", "DropSomeItems", "DropAll
 impl Rules {
     /// Every rule as its entry in config::KNOBS says, and the building limits name buildings.
     pub fn validate(&self, data: &crate::gamedata::GameData) -> Result<(), String> {
+        self.finite()?;
         let rules = serde_json::to_value(self).map_err(|e| e.to_string())?;
         for knob in crate::config::KNOBS.iter().filter(|k| k.source == crate::config::Source::Rules) {
             knob.check(&crate::config::at(&rules, knob.key))?;
@@ -255,6 +256,26 @@ impl Rules {
         for group in self.limits.buildings.keys() {
             if !data.group(group).is_some_and(|g| data.groups[g].constructible) {
                 return Err(format!("limits.buildings: {group:?} is not a building's group id"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Every number rule is finite. A rules.json number past f32 (1e39) reads as infinity, which
+    /// serializes as null: `knob.check` then sees "unset", validation passes, the infinity runs
+    /// (a webhook timeout of it panics the hooks' thread) and the next save writes a file that
+    /// cannot be read back.
+    fn finite(&self) -> Result<(), String> {
+        let (now, default) = (serde_json::to_value(self).map_err(|e| e.to_string())?, serde_json::to_value(Rules::default()).map_err(|e| e.to_string())?);
+        for knob in crate::config::KNOBS.iter().filter(|k| k.source == crate::config::Source::Rules && k.kind == crate::config::Type::Float) {
+            if crate::config::at(&now, knob.key).is_null() && !crate::config::at(&default, knob.key).is_null() {
+                return Err(format!("{}: not a finite number", knob.key));
+            }
+        }
+        // An optional number that is infinity serializes as null, "unset", so the loop above cannot see it.
+        for (key, v) in [("meteo.materialDespawnSeconds", self.meteo.material_despawn_seconds), ("death.dropChance", self.death.drop_chance)] {
+            if v.is_some_and(|v| !v.is_finite()) {
+                return Err(format!("{key}: not a finite number"));
             }
         }
         Ok(())
@@ -383,6 +404,19 @@ mod tests {
         for big in [serde_json::json!({"speed": {"growth": 1e39}}), serde_json::json!({"chat": {"timeoutSeconds": 1e39}}), serde_json::json!({"death": {"dropChance": 1e39}})] {
             assert!(Rules::default().patched(&big).is_err(), "{big}");
         }
+    }
+
+    #[test]
+    fn a_rules_file_number_past_f32_is_refused() {
+        // Rules::load reads 1e39 as infinity; validate used to see null (unset) and accept it.
+        let r: Rules = serde_json::from_str(r#"{"chat": {"timeoutSeconds": 1e39}}"#).unwrap();
+        assert!(r.chat.timeout_seconds.is_infinite());
+        assert!(r.finite().unwrap_err().contains("chat.timeoutSeconds"));
+        let r: Rules = serde_json::from_str(r#"{"speed": {"growth": -1e39}}"#).unwrap();
+        assert!(r.finite().unwrap_err().contains("speed.growth"));
+        let r: Rules = serde_json::from_str(r#"{"death": {"dropChance": 1e39}}"#).unwrap();
+        assert!(r.finite().unwrap_err().contains("death.dropChance"));
+        assert!(Rules::default().finite().is_ok());
     }
 
     /// No rules file, or an empty one: the game's behaviour; a saved one reads back the same; an
@@ -656,3 +690,7 @@ mod tests {
         assert!(energy > 0.0 && energy == energy2, "{energy} {energy2}");
     }
 }
+
+#[cfg(fuzzing)]
+#[path = "../fuzz/targets/rules.rs"]
+pub mod fuzz;
