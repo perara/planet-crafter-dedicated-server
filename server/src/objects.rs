@@ -331,7 +331,12 @@ impl Game {
                 w.rotation = r;
             }
         }
-        self.net.rpc(Target::Only(owner), net, "GroupNetworkContainer.StartAndStopPhysicsAfterDelayClientRpc", &[json!(drop_size), json!(sound), json!(despawn > f32::EPSILON)]);
+        // The owner's own client runs the physics: an object the server keeps (a drone, a rover)
+        // has no player to tell.
+        let holder = self.net.objects.get(&net).map_or(0, |o| o.owner);
+        if holder != 0 {
+            self.net.rpc(Target::Only(holder), net, "GroupNetworkContainer.StartAndStopPhysicsAfterDelayClientRpc", &[json!(drop_size), json!(sound), json!(despawn > f32::EPSILON)]);
+        }
         if despawn > f32::EPSILON {
             crate::scene::schedule(self, despawn, crate::scene::Timer::Despawn(id, net));
         }
@@ -648,6 +653,21 @@ mod tests {
         let other = g.create_world_object(g.data.group("Iron").unwrap(), 0, true);
         g.drop_on_floor(other, [561.0, 3.0, 497.0], kept, 0.0, false, false, 0, 0.0, false, 1);
         assert_eq!(g.wos[&other].rotation, kept, "a rotation the caller gave stays");
+    }
+
+    /// A drop the server keeps (a drone has its own physics body) has no player to start the
+    /// physics: the real host sends nothing to the dropping client.
+    #[test]
+    fn a_drop_the_server_keeps_starts_no_physics_on_a_client() {
+        let Some((mut g, _)) = world() else { return };
+        for (name, told) in [("Iron", true), ("Drone1", false)] {
+            let item = g.create_world_object(g.data.group(name).unwrap(), 0, true);
+            g.net.out.clear();
+            g.drop_on_floor(item, [561.0, 3.0, 497.0], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 0.0, false, 1);
+            let net = g.wos[&item].net.unwrap();
+            assert_eq!(g.net.objects[&net].owner != 0, told, "{name}");
+            assert_eq!(!sent(&g, "GroupNetworkContainer.StartAndStopPhysicsAfterDelayClientRpc").is_empty(), told, "{name}");
+        }
     }
 
     /// The flags of the object a spawn message announced (the last one queued).
