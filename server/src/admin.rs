@@ -196,17 +196,59 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
     }
 }
 
+/// How long journalctl may take: a journal that is huge or stuck must not keep a connection (and
+/// with enough of them every slot) for as long as it likes; the page asks again every 5 s.
+const LOGS_WAIT: Duration = Duration::from_secs(6);
+
 /// The server's recent output, from the journal of the systemd user unit pcds runs it as
 /// (PCDS_UNIT). Read on the HTTP thread: journalctl takes longer than a game tick.
 fn logs() -> Value {
     let Some(unit) = std::env::var("PCDS_UNIT").ok().filter(|u| !u.is_empty()) else {
         return serde_json::json!({ "lines": [], "note": "Not running as a pcds systemd unit: the log is the server's own output (docker logs, the terminal)." });
     };
+    journal("journalctl", &unit, LOGS_WAIT)
+}
+
+fn journal(program: &str, unit: &str, wait: Duration) -> Value {
     let unit = format!("{unit}.service");
-    match std::process::Command::new("journalctl").args(["--user", "-u", &unit, "-n", "300", "-o", "short-iso", "--no-pager"]).output() {
-        Ok(out) if out.status.success() => serde_json::json!({ "lines": String::from_utf8_lossy(&out.stdout).lines().collect::<Vec<_>>(), "source": format!("journalctl --user -u {unit}") }),
-        Ok(out) => serde_json::json!({ "lines": [], "note": String::from_utf8_lossy(&out.stderr).trim() }),
-        Err(e) => serde_json::json!({ "lines": [], "note": format!("journalctl: {e}") }),
+    let spawned = std::process::Command::new(program)
+        .args(["--user", "-u", &unit, "-n", "300", "-o", "short-iso", "--no-pager"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(e) => return serde_json::json!({ "lines": [], "note": format!("journalctl: {e}") }),
+    };
+    // Read as it writes (a full pipe would stop it), while this thread watches the clock.
+    let reader = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let (out, err) = (reader(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>)), reader(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>)));
+    let deadline = Instant::now() + wait;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return serde_json::json!({ "lines": [], "note": format!("journalctl gave no answer within {} s (a very large or stuck journal): run `journalctl --user -u {unit}` on the server", wait.as_secs()) });
+            }
+        }
+    };
+    let (out, err) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
+    if status.success() {
+        serde_json::json!({ "lines": String::from_utf8_lossy(&out).lines().collect::<Vec<_>>(), "source": format!("journalctl --user -u {unit}") })
+    } else {
+        serde_json::json!({ "lines": [], "note": String::from_utf8_lossy(&err).trim() })
     }
 }
 
@@ -232,6 +274,26 @@ mod tests {
         for path in ["/api/status", "/api/worlds", "/api/worlds/file", "/api/save"] {
             assert_eq!(answer_wait(path), ANSWER, "{path}");
         }
+    }
+
+    /// A journalctl that never answers is killed at the limit, with a note that says what to do.
+    #[test]
+    fn a_stuck_journal_does_not_hold_the_connection() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pcds-journal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("journalctl");
+        std::fs::write(&program, "#!/bin/sh\nsleep 20\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = Instant::now();
+        let answer = journal(program.to_str().unwrap(), "pcds", Duration::from_millis(300));
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(answer["note"].as_str().unwrap().contains("no answer within"), "{answer}");
+        // One that answers is read whole.
+        std::fs::write(&program, "#!/bin/sh\necho one; echo two\n").unwrap();
+        let answer = journal(program.to_str().unwrap(), "pcds", Duration::from_secs(5));
+        assert_eq!(answer["lines"], serde_json::json!(["one", "two"]));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
