@@ -9,8 +9,10 @@ use serde_json::{Map, Value};
 
 use super::{Ctx, Result};
 
-/// The longest the admin API may take to answer (its own deadline is 10 s).
+/// The longest the admin API may take to answer (its own deadline is 10 s), and for the world
+/// controls (stop, start, switch), which it waits for up to 200 s (admin.rs WORLD_ANSWER).
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(60);
+const WORLD_TIMEOUT: Duration = Duration::from_secs(210);
 
 /// An HTTP/1.1 answer: its status and its body (Content-Length long, else to the end). The
 /// admin API sends a Content-Length (admin.rs): a chunked answer is refused rather than read as
@@ -108,7 +110,7 @@ impl Ctx {
             .and_then(|(_, port)| port.parse().ok())
             .ok_or_else(|| format!("PCDS_ADMIN={addr}: pcds reaches the admin API on 127.0.0.1 only (bind it to 127.0.0.1 or 0.0.0.0)"))?;
         let body = body.filter(|b| !b.is_empty()).unwrap_or(if method == "GET" { "" } else { "{}" });
-        request(port, &token, method, path, body, ADMIN_TIMEOUT)
+        request(port, &token, method, path, body, if path.starts_with("/api/world/") { WORLD_TIMEOUT } else { ADMIN_TIMEOUT })
     }
 
     fn api_json(&self, method: &str, path: &str) -> Result<Value> {
