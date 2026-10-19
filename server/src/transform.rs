@@ -71,9 +71,11 @@ pub fn position_rotation(body: &[u8]) -> Option<(u64, [f32; 3], Option<[f32; 4]>
 }
 
 impl Update {
-    /// Every value it carries is a number (NaN or infinity would end up in the save).
+    /// Every value it carries is a number (NaN or infinity would end up in the save) and within
+    /// rpcspec::SANE_FLOAT.
     pub fn finite(&self) -> bool {
-        self.position.iter().chain(&self.euler).flatten().chain(self.quaternion.iter().flatten()).all(|v| v.is_finite())
+        let sane = |v: &f32| v.is_finite() && v.abs() <= crate::rpcspec::SANE_FLOAT as f32;
+        self.position.iter().chain(&self.euler).flatten().chain(self.quaternion.iter().flatten()).all(sane)
     }
 
     /// `apply` on copies; None when the result is not all numbers. Every value the state carries
@@ -185,15 +187,17 @@ mod tests {
 
     #[test]
     fn a_finite_state_that_overflows_when_merged_is_refused() {
+        // Past SANE_FLOAT a state is refused outright ...
         let huge = update(&message(QUATERNION_SYNC | 16 | 32 | 64, &[3.0e38; 4])).unwrap();
-        assert!(huge.finite(), "each value is a number");
-        // The quaternion itself is kept as it came (still numbers) ...
-        let (_, q) = huge.applied([0.0; 3], [0.0, 0.0, 0.0, 1.0]).unwrap();
-        assert_eq!(q, [3.0e38; 4]);
-        // ... but a yaw merged onto it turns to NaN: refused.
+        assert!(!huge.finite());
+        // ... and a merge of sane values that still overflows (applied) is refused too.
+        let big = update(&message(QUATERNION_SYNC | 16 | 32 | 64, &[9.0e8; 4])).unwrap();
+        assert!(big.finite());
+        let (_, q) = big.applied([0.0; 3], [0.0, 0.0, 0.0, 1.0]).unwrap();
+        assert_eq!(q, [9.0e8; 4]);
         let yaw = update(&message(32, &[90.0])).unwrap();
         assert!(yaw.finite());
-        assert!(yaw.applied([0.0; 3], q).is_none());
+        assert!(yaw.applied([0.0; 3], [3.0e38; 4]).is_none(), "a state this big cannot be in the world, but the merge is checked anyway");
         assert!(yaw.applied([0.0; 3], [0.0, 0.0, 0.0, 1.0]).is_some());
     }
 
