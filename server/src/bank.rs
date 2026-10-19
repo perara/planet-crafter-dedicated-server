@@ -120,6 +120,10 @@ pub fn run(args: &[String]) {
     };
     let mut game = game;
     plugins::attach(&mut game, prepared);
+    // What the start freed (the save's JSON, a snapshot's text, the tables' text) goes back to
+    // the system, not to sit in the process.
+    // SAFETY: malloc_trim only returns free memory to the system.
+    unsafe { libc::malloc_trim(0) };
     let ready = json!({"restoreMs": started.elapsed().as_secs_f64() * 1000.0 - verify_ms, "verifyMs": verify_ms, "verified": verified});
     if fail_for_test("slow-ready") {
         println!("bank: holding its ready for 2 s (PCDS_DEV=bank-fail=slow-ready)");
@@ -322,7 +326,10 @@ impl Bank {
                                 // The world stays in memory until the new bank runs.
                                 match self.link.recv() {
                                     Some(f) if f.kind == ipc::RESUME => println!("bank: resumed, the new bank failed"),
-                                    Some(f) if f.kind == ipc::EXIT => std::process::exit(0),
+                                    Some(f) if f.kind == ipc::EXIT => {
+                                        settle(game, true);
+                                        std::process::exit(0)
+                                    }
                                     _ => std::process::exit(final_save(game, &self.save_path)),
                                 }
                             }
@@ -345,10 +352,10 @@ impl Bank {
             // Plugins appear, change and go while the world runs: the folder is looked at between ticks.
             if frame {
                 contained("the plugin folder's scan", || plugins::poll(game));
-                reap_writer(game, false);
             }
-            if std::mem::take(&mut game.save_requested) {
-                let _ = persist(game, &self.save_path);
+            settle(game, false);
+            if std::mem::take(&mut game.save_requested) && !persist_later(game, &self.save_path) {
+                game.save_requested = true;
             }
             // What a client's own packets brought it goes out now; the rest (other players'
             // movement and doings, the world's changes) every MOVEMENT_EVERY.
@@ -517,7 +524,7 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
     };
     // Whatever works on the world files waits for the autosave's write first.
     if method == "POST" && (path.starts_with("/api/worlds") || path.starts_with("/api/backup")) {
-        wait_for_writer(game);
+        settle(game, true);
     }
     match (method, path) {
         // The bank's part; the front adds its own (invite code, network, banks, traffic).
@@ -550,7 +557,7 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
                 "held": game.held,
                 "s3": crate::s3::status(&game.rules.backup),
                 "plugins": plugins::admin::summary(game),
-                "lastSave": last_save(),
+                "lastSave": LAST_SAVE.with_borrow(Value::clone),
             });
             (200, body.to_string())
         }
@@ -695,7 +702,7 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
             if game.rules.save.backups_kept == 0 {
                 return (400, "{\"error\":\"backups are off (the rule save.backupsKept is 0)\"}".into());
             }
-            if let Err(e) = game.snapshot().write(ctx.save_path) {
+            if let Err(e) = save::write_atomic(ctx.save_path, game.save_text().as_bytes()) {
                 return (500, json!({"error": format!("save failed: {e}")}).to_string());
             }
             if let Err(e) = save::backup(ctx.save_path, Duration::ZERO, game.rules.save.backups_kept as usize) {
@@ -798,115 +805,120 @@ pub(crate) fn contained<T>(what: &str, work: impl FnOnce() -> T) -> Option<T> {
     done.ok()
 }
 
-/// The saves: the last one's outcome for GET /api/status ({"ok", "at" (Unix seconds), "error"}),
-/// the autosave's writer thread, and whether its write failed (the next autosave then writes
-/// even a world that stood still). Per game loop thread: the loop saves and answers the API.
-#[derive(Default)]
-struct Saves {
-    last: std::sync::Arc<std::sync::Mutex<Value>>,
-    retry: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    writer: Option<std::thread::JoinHandle<Result<(), String>>>,
+
+/// A save is written in two parts: the game thread makes the text (the world as it is now: one
+/// ms for a 2.5k-object world, 36 for 100k objects) and a thread of its own makes the backup
+/// and writes the file (copies, fsyncs, a rename: tens to hundreds of ms on a busy disk), so
+/// the world does not stand still for the disk.
+struct Writing {
+    path: String,
+    done: std::sync::mpsc::Receiver<Result<(), String>>,
 }
 
 thread_local! {
-    static SAVES: std::cell::RefCell<Saves> = std::cell::RefCell::new(Saves::default());
+    /// The last save's outcome, for GET /api/status: {"ok", "at" (Unix seconds), "error"}. The
+    /// game loop's thread saves and answers the API.
+    static LAST_SAVE: std::cell::RefCell<Value> = const { std::cell::RefCell::new(Value::Null) };
+    /// The autosave being written, if any (at most one: a save never overtakes an older one).
+    static WRITING: std::cell::RefCell<Option<Writing>> = const { std::cell::RefCell::new(None) };
 }
 
-fn last_save() -> Value {
-    SAVES.with_borrow(|s| s.last.lock().unwrap_or_else(|e| e.into_inner()).clone())
+/// How long a test's save writes take (a slow disk).
+#[cfg(test)]
+pub static WRITE_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The backup and the write of a save's text (what persist does, in its order); `files` are the
+/// rules of the backups.
+fn write_save(path: &str, text: &[u8], files: &crate::rules::Save) -> Result<(), String> {
+    #[cfg(test)]
+    std::thread::sleep(Duration::from_millis(WRITE_DELAY_MS.load(std::sync::atomic::Ordering::SeqCst)));
+    if let Err(e) = save::backup(path, Duration::from_secs(u64::from(files.backup_minutes) * 60), files.backups_kept as usize) {
+        eprintln!("backup failed: {e}");
+    }
+    save::write_atomic(path, text).map_err(|e| format!("{path}: {e}"))
 }
 
-/// The plugins hear of a save (`ok`: it was written) and keep their state beside the world's.
-fn saved_hooks(game: &mut Game, ok: bool) {
+/// What a save's end does on the game thread: the status, the log, the newest backup
+/// off-site (on a thread), when S3 is set and it is not there yet, and the plugins: they hear
+/// of it and keep their state beside the world's.
+fn saved(game: &mut Game, path: &str, saved: &Result<(), String>) {
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    LAST_SAVE.set(json!({"ok": saved.is_ok(), "at": at, "error": saved.as_ref().err()}));
+    match saved {
+        Ok(()) => println!("saved {path}"),
+        Err(e) => eprintln!("save failed: {e}"),
+    }
+    if let Err(e) = crate::s3::after_backup(&game.rules.backup, path, false) {
+        eprintln!("backup: {e}");
+    }
     contained("the plugins' state", || {
-        crate::events::world_saved(game, ok);
+        crate::events::world_saved(game, saved.is_ok());
         plugins::saved(game);
     });
 }
 
-/// Takes the autosave's writer once it has ended, and tells the plugins how its write went.
-fn reap_writer(game: &mut Game, wait: bool) {
-    let Some(writer) = SAVES.with_borrow_mut(|s| s.writer.take_if(|w| wait || w.is_finished())) else { return };
-    let ok = writer.join().is_ok_and(|saved| saved.is_ok());
-    contained("the plugins' state", || crate::events::world_saved(game, ok));
-}
-
-/// Waits for the autosave's writer: a save in the loop must not cross its write (the older
-/// state would land last).
-fn wait_for_writer(game: &mut Game) {
-    reap_writer(game, true);
-}
-
-/// The file work of a save: the backup of what is there, the atomic write of `save`, and the S3
-/// copy of the newest backup.
-fn write_save(save: SaveFile, path: &str, files: &crate::rules::Save, rules: &crate::rules::Backup) -> Result<(), String> {
-    #[cfg(test)]
-    std::thread::sleep(Duration::from_millis(tests::WRITE_DELAY_MS.load(std::sync::atomic::Ordering::SeqCst)));
-    if let Err(e) = save::backup(path, Duration::from_secs(u64::from(files.backup_minutes) * 60), files.backups_kept as usize) {
-        eprintln!("backup failed: {e}");
+/// The save being written, once it has ended (`wait`: waiting for it). A failed one is tried
+/// again at the next autosave.
+fn settle(game: &mut Game, wait: bool) {
+    let Some(w) = WRITING.take() else { return };
+    let result = if wait {
+        w.done.recv().ok()
+    } else {
+        match w.done.try_recv() {
+            Ok(r) => Some(r),
+            Err(std::sync::mpsc::TryRecvError::Empty) => return WRITING.set(Some(w)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+        }
+    };
+    let result = result.unwrap_or_else(|| Err(format!("{}: the thread writing it ended", w.path)));
+    saved(game, &w.path, &result);
+    if result.is_err() {
+        game.advanced = true;
     }
-    let saved = save.write(path).map_err(|e| format!("{path}: {e}"));
-    match &saved {
-        Ok(()) => println!("saved {path}"),
-        Err(e) => eprintln!("save failed: {e}"),
-    }
-    // The newest backup off-site (on a thread), when S3 is set and it is not there yet.
-    if let Err(e) = crate::s3::after_backup(rules, path, false) {
-        eprintln!("backup: {e}");
-    }
-    saved
 }
 
-fn record_save(last: &std::sync::Mutex<Value>, saved: &Result<(), String>) {
-    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    *last.lock().unwrap_or_else(|e| e.into_inner()) = json!({"ok": saved.is_ok(), "at": at, "error": saved.as_ref().err()});
+/// A save written beside the game: the text now, the backup and the file by a thread. Nothing
+/// when one is being written (the caller asks again at its next turn).
+fn persist_later(game: &mut Game, path: &str) -> bool {
+    settle(game, false);
+    if WRITING.with_borrow(Option::is_some) {
+        return false;
+    }
+    let text = game.save_text();
+    let (tx, done) = std::sync::mpsc::channel();
+    let (to, files) = (path.to_string(), game.rules.save.clone());
+    let spawned = std::thread::Builder::new().name("pcds-save".into()).spawn(move || {
+        let r = std::panic::catch_unwind(|| write_save(&to, text.as_bytes(), &files)).unwrap_or_else(|_| Err(format!("{to}: the write panicked")));
+        let _ = tx.send(r);
+    });
+    match spawned {
+        Ok(_) => WRITING.set(Some(Writing { path: path.to_string(), done })),
+        Err(e) => {
+            // No thread to write in: the world stands still for it, as it always did.
+            eprintln!("save: no thread ({e}); writing here");
+            return persist(game, path).is_ok();
+        }
+    }
+    true
 }
 
+/// A save made and written before this returns (the admin's, a panic's, the last one). First
+/// the one being written, which it must not be overtaken by.
 fn persist(game: &mut Game, path: &str) -> Result<(), String> {
-    wait_for_writer(game);
-    let saved = write_save(game.snapshot(), path, &game.rules.save, &game.rules.backup);
-    SAVES.with_borrow(|s| record_save(&s.last, &saved));
-    saved_hooks(game, saved.is_ok());
-    saved
+    settle(game, true);
+    let result = write_save(path, game.save_text().as_bytes(), &game.rules.save.clone());
+    saved(game, path, &result);
+    result
 }
 
 /// The front's autosave. A world that stood still since the last one (rules:
 /// world.pauseWhenEmpty) is that save already: no write, and no backup that only repeats the
-/// one before. A save that failed is tried again at the next one.
-///
-/// The snapshot is made here, the file work (two atomic writes, four fsyncs: hundreds of
-/// milliseconds to seconds on a busy disk, with the whole world standing) on a thread of its
-/// own. A write still going at the next autosave holds that one back.
+/// one before. A save that failed is tried again at the next one. The text is made here and
+/// written by a thread (persist_later); a write still going holds this one back.
 fn autosave(game: &mut Game, path: &str) {
-    if SAVES.with_borrow(|s| s.writer.as_ref().is_some_and(|w| !w.is_finished())) {
-        return;
-    }
-    wait_for_writer(game);
-    if SAVES.with_borrow(|s| s.retry.swap(false, std::sync::atomic::Ordering::SeqCst)) {
+    settle(game, false);
+    if std::mem::take(&mut game.advanced) && !persist_later(game, path) {
         game.advanced = true;
-    }
-    if !std::mem::take(&mut game.advanced) {
-        return;
-    }
-    let save = game.snapshot();
-    // The plugins keep their state beside the world's as of this snapshot; they hear how the write went when it has ended.
-    contained("the plugins' state", || plugins::saved(game));
-    let (last, retry) = SAVES.with_borrow(|s| (s.last.clone(), s.retry.clone()));
-    let (path_owned, files, rules) = (path.to_string(), game.rules.save.clone(), game.rules.backup.clone());
-    let work = move || {
-        let saved = write_save(save, &path_owned, &files, &rules);
-        record_save(&last, &saved);
-        if saved.is_err() {
-            retry.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-        saved
-    };
-    match std::thread::Builder::new().name("pcds-save".into()).spawn(work) {
-        Ok(writer) => SAVES.with_borrow_mut(|s| s.writer = Some(writer)),
-        Err(e) => {
-            eprintln!("autosave: no thread for the write ({e}); saving here");
-            game.advanced = persist(game, path).is_err();
-        }
     }
 }
 
@@ -1123,13 +1135,10 @@ mod tests {
         // The autosave writes on a thread: its failure comes back as a retry at the next one.
         game.advanced = true;
         autosave(&mut game, &path);
-        wait_for_writer(&mut game);
-        assert!(!game.advanced);
+        settle(&mut game, true);
+        assert!(game.advanced, "the next autosave tries again");
         let (_, s) = admin_request(&mut game, "GET", "/api/status", &json!({}), &ctx);
         assert_eq!(serde_json::from_str::<Value>(&s).unwrap()["lastSave"]["ok"], false);
-        autosave(&mut game, &path);
-        assert!(game.advanced == false && SAVES.with_borrow(|s| s.writer.is_some()), "the next autosave tries again, though the world stood still");
-        wait_for_writer(&mut game);
         assert_eq!(final_save(&mut game, &path), 1);
         let kept = std::fs::read(crate::front::snapshot_path(&path)).unwrap();
         let tables = crate::test_data().unwrap();
@@ -1141,7 +1150,7 @@ mod tests {
         std::fs::remove_dir(&path).unwrap();
         game.advanced = true;
         autosave(&mut game, &path);
-        wait_for_writer(&mut game);
+        settle(&mut game, true);
         assert!(!game.advanced);
         let (_, s) = admin_request(&mut game, "GET", "/api/status", &json!({}), &ctx);
         assert_eq!(serde_json::from_str::<Value>(&s).unwrap()["lastSave"]["ok"], true);
@@ -1149,16 +1158,43 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// How long a test's save writes take (a slow disk).
-    pub static WRITE_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    /// An autosave is written beside the game: the call returns with the text made, the file
+    /// arrives, and a save made right after it (a stop) is never overtaken by it.
+    #[test]
+    fn an_autosave_is_written_by_a_thread_and_never_overtakes_a_later_save() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let dir = std::env::temp_dir().join(format!("pcds-autosave-thread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("world.json").to_string_lossy().to_string();
+        game.advanced = true;
+        autosave(&mut game, &path);
+        assert!(!game.advanced && WRITING.with_borrow(Option::is_some), "the write is under way");
+        // Asked again while it is: nothing starts, the next autosave tries again.
+        game.advanced = true;
+        autosave(&mut game, &path);
+        settle(&mut game, true);
+        let first = SaveFile::load(&path).unwrap().objects.len();
+        let group = game.data.group("Iron").unwrap();
+        game.create_world_object(group, 0, true);
+        game.advanced = true;
+        autosave(&mut game, &path);
+        // The stop's save waits for the autosave and is the last word.
+        assert_eq!(final_save(&mut game, &path), 0);
+        assert_eq!(SaveFile::load(&path).unwrap().objects.len(), first + 1);
+        assert!(WRITING.with_borrow(Option::is_none));
+        assert_eq!(LAST_SAVE.with_borrow(|l| l["ok"].clone()), true);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).count(), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
-    /// The autosave does not wait for the disk: the loop gets on while the file is written, a
+    /// The autosave does not wait for the disk: the loop gets on while a slow file is written, a
     /// save asked for meanwhile waits for that write and lands after it (the newer state wins),
     /// and a world that stood still writes nothing.
     #[test]
-    fn the_autosave_writes_on_a_thread_and_a_later_save_lands_last() {
+    fn the_autosave_does_not_wait_for_a_slow_disk_and_a_still_world_writes_nothing() {
         let Some(mut game) = game::test_game(game::tests::save()) else { return };
-        let dir = std::env::temp_dir().join(format!("pcds-autosave-thread-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pcds-autosave-slow-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("world.json").to_string_lossy().to_string();
@@ -1168,9 +1204,9 @@ mod tests {
         autosave(&mut game, &path);
         let returned = started.elapsed();
         assert!(returned < Duration::from_millis(300), "the autosave waited {returned:?} for a 600 ms write");
-        assert!(SAVES.with_borrow(|s| s.writer.as_ref().is_some_and(|w| !w.is_finished())));
-        // The world moves on, an autosave comes while the write goes on (held back), and a save asked for
-        // by the admin waits and writes the newer world last.
+        assert!(WRITING.with_borrow(Option::is_some));
+        // The world moves on, an autosave comes while the write goes on (held back, not lost),
+        // and a save asked for by the admin waits and writes the newer world last.
         let id = game.create_world_object(game.data.group("Iron").unwrap(), 0, true);
         game.advanced = true;
         autosave(&mut game, &path);
@@ -1183,7 +1219,7 @@ mod tests {
         game.advanced = false;
         let before = std::fs::metadata(&path).unwrap().modified().unwrap();
         autosave(&mut game, &path);
-        wait_for_writer(&mut game);
+        settle(&mut game, true);
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
         std::fs::remove_dir_all(dir).unwrap();
     }

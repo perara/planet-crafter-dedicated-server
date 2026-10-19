@@ -154,6 +154,89 @@ impl WorldObject {
             "linkedWo": self.linked_wo,
         })
     }
+
+    /// `to_json` as the save's text, the fields at their default cut out (SaveFile::to_text cuts
+    /// them from the JSON; this never writes them), appended to `out`: the same bytes, without
+    /// the JSON tree in between.
+    pub fn write_save(&self, data: &GameData, out: &mut String) {
+        use std::fmt::Write;
+        let _ = write!(out, "{{\"id\":{},\"gId\":", self.id);
+        push_json_str(out, &data.groups[self.group].id);
+        if self.linked_inventory != 0 {
+            let _ = write!(out, ",\"liId\":{}", self.linked_inventory);
+        }
+        if !self.secondary_inventories.is_empty() {
+            out.push_str(",\"siIds\":\"");
+            push_ints(out, &self.secondary_inventories);
+            out.push('"');
+        }
+        let groups = self.linked_groups.as_deref().map(|g| group_ids(g, data)).unwrap_or_default();
+        if !groups.is_empty() {
+            out.push_str(",\"liGrps\":");
+            push_json_str(out, &groups);
+        }
+        if self.position.iter().any(|v| *v != 0.0) {
+            out.push_str(",\"pos\":\"");
+            push_floats(out, &self.position);
+            out.push('"');
+        }
+        if self.rotation.iter().any(|v| *v != 0.0) {
+            out.push_str(",\"rot\":\"");
+            push_floats(out, &self.rotation);
+            out.push('"');
+        }
+        let planet = self.planet_hash();
+        if planet != 0 {
+            let _ = write!(out, ",\"planet\":{planet}");
+        }
+        if self.planet_linked != 0 {
+            let _ = write!(out, ",\"liPlanet\":{}", self.planet_linked);
+        }
+        if self.panels.as_deref().is_some_and(|p| !p.is_empty()) {
+            out.push_str(",\"pnls\":\"");
+            push_ints(out, self.panels.as_deref().unwrap_or_default());
+            out.push('"');
+        }
+        if self.color != [0.0; 4] {
+            out.push_str(",\"color\":\"");
+            for (i, c) in self.color.iter().enumerate() {
+                if i > 0 {
+                    out.push('-');
+                }
+                push_g7(out, *c);
+            }
+            out.push('"');
+        }
+        if !self.text.is_empty() {
+            out.push_str(",\"text\":");
+            push_json_str(out, &self.text);
+        }
+        let growth = self.growth.round_ties_even() as i32;
+        if growth != 0 {
+            let _ = write!(out, ",\"grwth\":{growth}");
+        }
+        if self.setting != 0 {
+            let _ = write!(out, ",\"set\":{}", self.setting);
+        }
+        if self.trait_type != 0 {
+            let _ = write!(out, ",\"trtInd\":{}", self.trait_type);
+        }
+        if self.trait_value != 0 {
+            let _ = write!(out, ",\"trtVal\":{}", self.trait_value);
+        }
+        // Only +0.0 is the default "0.0" (-0.0 is written "-0.0", NaN as null).
+        if self.hunger.to_bits() != 0 {
+            out.push_str(",\"hunger\":");
+            out.push_str(&serde_json::to_string(&JsonFloat(self.hunger)).unwrap_or_default());
+        }
+        if self.count != [0, 0] {
+            let _ = write!(out, ",\"count\":\"{},{}\"", self.count[0], self.count[1]);
+        }
+        if self.linked_wo != 0 {
+            let _ = write!(out, ",\"linkedWo\":{}", self.linked_wo);
+        }
+        out.push('}');
+    }
 }
 
 /// Inventory.LogisticEntity: what the inventory offers and asks drones for.
@@ -204,6 +287,24 @@ impl Inventory {
             "priority": self.logistic.priority,
         })
     }
+
+    /// `to_json` as the save's text with the defaults cut (see WorldObject::write_save): the
+    /// logistics fields go together, as SaveFile::to_text cuts them.
+    pub fn write_save(&self, data: &GameData, out: &mut String) {
+        use std::fmt::Write;
+        let _ = write!(out, "{{\"id\":{},\"woIds\":\"", self.id);
+        push_ints(out, &self.items);
+        let _ = write!(out, "\",\"size\":{}", self.size);
+        let (demand, supply) = (group_ids(&self.logistic.demand, data), group_ids(&self.logistic.supply, data));
+        if !(demand.is_empty() && supply.is_empty() && self.logistic.priority == 0) {
+            out.push_str(",\"demandGrps\":");
+            push_json_str(out, &demand);
+            out.push_str(",\"supplyGrps\":");
+            push_json_str(out, &supply);
+            let _ = write!(out, ",\"priority\":{}", self.logistic.priority);
+        }
+        out.push('}');
+    }
 }
 
 /// A float written the way Unity's JsonUtility does (always with a decimal point).
@@ -218,22 +319,117 @@ impl serde::Serialize for JsonFloat {
 /// float.ToString(InvariantCulture) on Mono: at most 7 significant digits, scientific notation
 /// for exponents below -5 or from 7 on ("G7").
 pub fn g7(v: f32) -> String {
+    let mut s = String::new();
+    push_g7(&mut s, v);
+    s
+}
+
+/// g7 appended to `out`, with no allocation of its own: the seven significant digits come from
+/// one exact "{:.6e}" and are laid out by their exponent.
+pub fn push_g7(out: &mut String, v: f32) {
+    use std::fmt::Write;
     if v == 0.0 {
-        return "0".into();
+        out.push('0');
+        return;
     }
     if !v.is_finite() {
-        return if v.is_nan() { "NaN".into() } else if v > 0.0 { "Infinity".into() } else { "-Infinity".into() };
+        out.push_str(if v.is_nan() { "NaN" } else if v > 0.0 { "Infinity" } else { "-Infinity" });
+        return;
     }
-    let sci = format!("{:.6e}", v);
-    let (mantissa, exp) = sci.split_once('e').unwrap();
-    let exp: i32 = exp.parse().unwrap();
+    // "-d.dddddde[-]x": at most 15 bytes.
+    let mut buf = Stack::default();
+    let _ = write!(buf, "{:.6e}", v);
+    let text = buf.as_str();
+    let (mantissa, exp) = text.split_once('e').unwrap_or((text, "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let (sign, mantissa) = mantissa.strip_prefix('-').map(|m| ("-", m)).unwrap_or(("", mantissa));
+    // The digits without the point, trailing zeros cut (at least one digit stays).
+    let mut digits = [0u8; 7];
+    let mut n = 0;
+    for d in mantissa.bytes().filter(|b| *b != b'.') {
+        digits[n] = d;
+        n += 1;
+    }
+    let digits = &digits[..n];
+    let digits = &digits[..digits.iter().rposition(|d| *d != b'0').map_or(1, |i| i + 1)];
+    out.push_str(sign);
+    let digits = std::str::from_utf8(digits).unwrap_or("0");
     if !(-5..7).contains(&exp) {
-        let m = mantissa.trim_end_matches('0').trim_end_matches('.');
-        return format!("{m}E{}{:02}", if exp < 0 { '-' } else { '+' }, exp.abs());
+        out.push_str(&digits[..1]);
+        if digits.len() > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        let _ = write!(out, "E{}{:02}", if exp < 0 { '-' } else { '+' }, exp.abs());
+    } else if exp < 0 {
+        out.push_str("0.");
+        (1..-exp).for_each(|_| out.push('0'));
+        out.push_str(digits);
+    } else {
+        let whole = exp as usize + 1;
+        if digits.len() <= whole {
+            out.push_str(digits);
+            (digits.len()..whole).for_each(|_| out.push('0'));
+        } else {
+            out.push_str(&digits[..whole]);
+            out.push('.');
+            out.push_str(&digits[whole..]);
+        }
     }
-    let decimals = (6 - exp).max(0) as usize;
-    let s = format!("{:.*}", decimals, v);
-    if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s }
+}
+
+/// A small text buffer on the stack for push_g7.
+#[derive(Default)]
+struct Stack {
+    bytes: [u8; 24],
+    len: usize,
+}
+
+impl Stack {
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
+    }
+}
+
+impl std::fmt::Write for Stack {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let end = self.len + s.len();
+        self.bytes.get_mut(self.len..end).ok_or(std::fmt::Error)?.copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+/// A JSON string as serde_json writes it (only quotes, backslashes and control characters are
+/// escaped).
+pub fn push_json_str(out: &mut String, s: &str) {
+    if s.bytes().all(|b| b >= 0x20 && b != b'"' && b != b'\\') {
+        out.push('"');
+        out.push_str(s);
+        out.push('"');
+    } else {
+        out.push_str(&serde_json::to_string(s).unwrap_or_default());
+    }
+}
+
+fn push_ints(out: &mut String, values: &[i32]) {
+    use std::fmt::Write;
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{v}");
+    }
+}
+
+/// floats_string appended to `out`.
+pub fn push_floats(out: &mut String, values: &[f32]) {
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        push_g7(out, *v);
+    }
 }
 
 pub fn floats_string(values: &[f32]) -> String {
@@ -319,6 +515,130 @@ mod tests {
     fn color_components_above_one_are_scaled_down_as_the_game_does() {
         assert_eq!(parse_color("0.5-1-10-100"), [0.5, 1.0, 0.1, 0.1]);
         assert_eq!(parse_color("2-25-1.5-0"), [0.2, 0.25, 0.15, 0.0]);
+    }
+
+    /// g7 as it was written first: three allocations and a second formatting per float.
+    fn g7_reference(v: f32) -> String {
+        if v == 0.0 {
+            return "0".into();
+        }
+        if !v.is_finite() {
+            return if v.is_nan() { "NaN".into() } else if v > 0.0 { "Infinity".into() } else { "-Infinity".into() };
+        }
+        let sci = format!("{:.6e}", v);
+        let (mantissa, exp) = sci.split_once('e').unwrap();
+        let exp: i32 = exp.parse().unwrap();
+        if !(-5..7).contains(&exp) {
+            let m = mantissa.trim_end_matches('0').trim_end_matches('.');
+            return format!("{m}E{}{:02}", if exp < 0 { '-' } else { '+' }, exp.abs());
+        }
+        let decimals = (6 - exp).max(0) as usize;
+        let s = format!("{:.*}", decimals, v);
+        if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s }
+    }
+
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+    }
+
+    #[test]
+    fn push_g7_writes_what_g7_always_wrote() {
+        let mut rng = Xorshift(0x9e37_79b9_7f4a_7c15);
+        let mut values = vec![0.0, -0.0, 1.0, -1.0, 9.9999995, 0.99999999, 9999999.5, 1234567.0, 12345678.0, 0.00001, 0.000009999999, 1e-5, 1e7, 1e-6, f32::MAX, f32::MIN_POSITIVE, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 558.2, 0.7071068, 100.0, 1e6, 1e-45];
+        // Every bit pattern class: random bits, and 7-digit decimals scaled over the whole range
+        // (the values a save holds), where the rounding of the 7th digit decides.
+        for _ in 0..400_000 {
+            values.push(f32::from_bits(rng.next() as u32));
+            let digits = (rng.next() % 90_000_000 + 10_000_000) as f32;
+            values.push(digits * 10f32.powi((rng.next() % 24) as i32 - 18) * if rng.next() % 2 == 0 { 1.0 } else { -1.0 });
+            values.push((rng.next() % 4_000_000) as f32 / 1000.0 - 2000.0);
+            values.push((rng.next() % 2_000_000) as f32 / 1_000_000.0);
+        }
+        for v in values {
+            let mut s = String::from("x");
+            push_g7(&mut s, v);
+            assert_eq!(&s[1..], g7_reference(v), "{v:e} {:#x}", v.to_bits());
+            assert_eq!(g7(v), g7_reference(v));
+        }
+    }
+
+    /// The world objects and inventories written straight to the save's text are the bytes the
+    /// JSON route gives, whatever the fields hold: odd floats, texts that need escaping, every
+    /// default and near miss.
+    #[test]
+    fn save_entries_written_directly_are_the_json_routes_bytes() {
+        let Some((_, data, _, _)) = crate::game::test_tables() else { return };
+        let mut rng = Xorshift(0x2545_f491_4f6c_dd1d);
+        let floats = [0.0f32, -0.0, 1.0, 558.2, -3.5e-9, 1.0e9, 0.07, f32::NAN, f32::INFINITY, 2.47, 0.7071068, 100.0];
+        let mut objects = Vec::new();
+        let mut inventories = Vec::new();
+        for id in 0..30_000 {
+            let mut w = WorldObject::new(id, (rng.next() % data.groups.len() as u64) as usize, &data);
+            let pick = |rng: &mut Xorshift| if rng.next() % 3 == 0 { f32::from_bits(rng.next() as u32) } else { floats[(rng.next() % floats.len() as u64) as usize] };
+            let r = rng.next();
+            if r % 2 == 0 {
+                w.position = [pick(&mut rng), pick(&mut rng), pick(&mut rng)];
+            }
+            if r % 3 == 0 {
+                w.rotation = [pick(&mut rng), pick(&mut rng), pick(&mut rng), pick(&mut rng)];
+            }
+            if r % 5 == 0 {
+                w.color = [pick(&mut rng), pick(&mut rng), pick(&mut rng), 1.0];
+            }
+            w.planet = if r % 7 == 0 { -1140328421 } else { 0 };
+            w.planet_linked = (r % 11) as i32 % 2;
+            w.linked_inventory = if r % 13 < 5 { 0 } else { (r % 1000) as i32 };
+            w.secondary_inventories = (0..r % 3).map(|i| i as i32 + 7).collect();
+            w.linked_groups = match r % 4 {
+                0 => None,
+                1 => Some(Vec::new()),
+                _ => Some((0..(r >> 8) % 4).map(|i| i as usize).collect()),
+            };
+            w.panels = match r % 5 {
+                0 => None,
+                1 => Some(Vec::new()),
+                _ => Some(vec![1, 2, 5]),
+            };
+            w.text = ["", "Iron", "a \"quoted\" \\ text", "line\nbreak\ttab\u{1}", ",\"set\":0", "\u{e5}\u{4e16}\u{1f30d}", "\u{7f}"][(r >> 16) as usize % 7].to_string();
+            w.growth = [0.0, 0.4, 0.5, 99.6, -2.5, f32::NAN][(r >> 20) as usize % 6];
+            w.setting = (r >> 24) as i32 % 3;
+            w.trait_type = (r >> 26) as i32 % 3;
+            w.trait_value = (r >> 28) as i32 % 3 * 5;
+            w.hunger = [0.0, -0.0, 0.07, 5.0, f32::NAN, 1e-9][(r >> 30) as usize % 6];
+            w.count = [[0, 0], [0, 1], [3, 0], [2, 2]][(r >> 33) as usize % 4];
+            w.linked_wo = (r >> 35) as i32 % 2 * 77;
+            w.dont_save = false;
+            objects.push(w);
+            let mut inv = Inventory::new(id, 12);
+            inv.items = (0..r % 4).map(|i| i as i32 * 3).collect();
+            inv.logistic.priority = (r >> 40) as i32 % 3;
+            inv.logistic.supply = if r % 3 == 0 { vec![] } else { vec![1, 2] };
+            inv.logistic.demand = if r % 5 == 0 { vec![] } else { vec![3] };
+            inventories.push(inv);
+        }
+        let mut json = crate::save::SaveFile::empty();
+        json.objects = objects.iter().map(|w| w.to_json(&data)).collect();
+        json.inventories = inventories.iter().map(|i| i.to_json(&data)).collect();
+        fn join(out: &mut String, n: usize, mut one: impl FnMut(usize, &mut String)) {
+            for i in 0..n {
+                if i > 0 {
+                    out.push_str("|\n");
+                }
+                one(i, out);
+            }
+        }
+        let direct = crate::save::SaveFile::empty().text_with(Some((
+            &|out: &mut String| join(out, objects.len(), |i, out| objects[i].write_save(&data, out)),
+            &|out: &mut String| join(out, inventories.len(), |i, out| inventories[i].write_save(&data, out)),
+        )));
+        assert!(json.to_text() == direct, "the direct text differs from the JSON route's");
     }
 
     #[test]

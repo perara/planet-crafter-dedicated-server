@@ -169,10 +169,13 @@ fn box_now(game: &Game, v: &Volume) -> Option<([f32; 3], [f32; 4])> {
     Some(([root[0] + c[0], root[1] + c[1], root[2] + c[2]], mul(v.root_rotation, v.local_rotation)))
 }
 
+/// Center, rotation and half size of each water box.
+pub type Boxes = Vec<([f32; 3], [f32; 4], [f32; 3])>;
+
 /// The boxes WaterHandler.IsUnderWater tests on the current planet now: world center,
 /// rotation and half size of each shown volume; empty before the water starts to rise. They
 /// only move with terraformation, so one set serves every check of an energy update.
-pub fn underwater_boxes(game: &mut Game) -> Vec<([f32; 3], [f32; 4], [f32; 3])> {
+pub fn underwater_boxes(game: &mut Game) -> Boxes {
     volumes(game);
     let game = &*game;
     let volumes = game.ext.water.planets[game.planet_id()].iter().filter(|v| !v.ignored);

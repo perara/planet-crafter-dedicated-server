@@ -76,6 +76,71 @@ const DEFAULTS: [&str; 18] = [
     ",\"linkedWo\":0",
 ];
 
+/// A section's entries written by a function (SaveFile::text_with).
+pub type Section<'a> = &'a dyn Fn(&mut String);
+
+/// JsonableGameState.CleanSaveStringOfVariables: ,"key":<digit> loses the key and that digit.
+const CLEANED: [&str; 3] = [",\"gameMode\":", ",\"gameDyingConsequences\":", ",\"gameStartLocation\":"];
+
+/// The save's text as the game writes it, entry by entry: each entry's JSON with DEFAULTS cut
+/// out (only whole fields: ",\"hunger\":0.0" must not cut ",\"hunger\":0.07"; every field starts
+/// with ",\"" and is followed by "," or "}" whatever else is cut), then CLEANED. One pass over
+/// each entry, so a save costs what it weighs however many fields are cut.
+struct TextWriter {
+    text: String,
+    /// Per CLEANED key: its cleaning ended. The text is cleaned from its start, and a key's
+    /// cleaning stops at the first of its occurrences that is not followed by a digit.
+    stopped: [bool; 3],
+}
+
+impl TextWriter {
+    /// "\r" + the entries joined by "|\n" + "\r@".
+    fn section(&mut self, entries: &[Value]) {
+        self.text.push('\r');
+        for (i, v) in entries.iter().enumerate() {
+            if i > 0 {
+                self.text.push_str("|\n");
+            }
+            self.entry(&serde_json::to_string(v).unwrap_or_default());
+        }
+        self.text.push_str("\r@");
+    }
+
+    /// A section whose entries are already as written (no defaults, nothing to clean).
+    fn raw_section(&mut self, entries: &dyn Fn(&mut String)) {
+        self.text.push('\r');
+        entries(&mut self.text);
+        self.text.push_str("\r@");
+    }
+
+    fn entry(&mut self, raw: &str) {
+        let (start, out) = (self.text.len(), &mut self.text);
+        let (mut from, mut i) = (0, 0);
+        while let Some(at) = raw[i..].find(",\"").map(|p| p + i) {
+            let rest = &raw[at..];
+            match DEFAULTS.iter().find(|d| rest.starts_with(**d) && rest[d.len()..].starts_with([',', '}'])) {
+                Some(d) => {
+                    out.push_str(&raw[from..at]);
+                    (from, i) = (at + d.len(), at + d.len());
+                }
+                None => i = at + 2,
+            }
+        }
+        out.push_str(&raw[from..]);
+        for (k, pattern) in CLEANED.iter().enumerate() {
+            let mut at = start;
+            while !self.stopped[k] && let Some(p) = out[at..].find(pattern).map(|p| p + at) {
+                if out[p + pattern.len()..].starts_with(|c: char| c.is_ascii_digit()) {
+                    out.replace_range(p..p + pattern.len() + 1, "");
+                    at = p;
+                } else {
+                    self.stopped[k] = true;
+                }
+            }
+        }
+    }
+}
+
 impl SaveFile {
     pub fn empty() -> SaveFile {
         SaveFile {
@@ -124,61 +189,39 @@ impl SaveFile {
     }
 
     pub fn to_text(&self) -> String {
-        let one = |v: &Value| serde_json::to_string(v).unwrap_or_default();
-        let list = |items: &[Value]| items.iter().map(one).collect::<Vec<_>>().join("|\n");
-        let sections = [
-            one(&self.world),
-            list(&self.planets),
-            list(&self.players),
-            list(&self.objects),
-            list(&self.inventories),
-            one(&self.stats),
-            list(&self.messages),
-            list(&self.story_events),
-            one(&self.settings),
-            list(&self.procedural),
-        ];
-        let mut text = String::from("\u{feff}");
-        for s in sections {
-            text.push('\r');
-            text.push_str(&s);
-            text.push_str("\r@");
-        }
-        for d in DEFAULTS {
-            text = cut_whole_field(&text, d);
-        }
-        for key in ["gameMode", "gameDyingConsequences", "gameStartLocation"] {
-            // JsonableGameState.CleanSaveStringOfVariables: ,"key":<digit>
-            let pattern = format!(",\"{key}\":");
-            while let Some(at) = text.find(&pattern).filter(|at| text[at + pattern.len()..].starts_with(|c: char| c.is_ascii_digit())) {
-                text.replace_range(at..at + pattern.len() + 1, "");
+        self.text_with(None)
+    }
+
+    /// to_text, with the world objects' and the inventories' sections written by the two
+    /// functions given (each appends its entries, "|\n" between them, already as the game
+    /// writes them) instead of taken from `self.objects` and `self.inventories`.
+    pub fn text_with(&self, raw: Option<(Section, Section)>) -> String {
+        let mut w = TextWriter { text: String::from("\u{feff}"), stopped: [false; 3] };
+        w.section(std::slice::from_ref(&self.world));
+        w.section(&self.planets);
+        w.section(&self.players);
+        match raw {
+            Some((objects, inventories)) => {
+                w.raw_section(objects);
+                w.raw_section(inventories);
+            }
+            None => {
+                w.section(&self.objects);
+                w.section(&self.inventories);
             }
         }
-        text
+        w.section(std::slice::from_ref(&self.stats));
+        w.section(&self.messages);
+        w.section(&self.story_events);
+        w.section(std::slice::from_ref(&self.settings));
+        w.section(&self.procedural);
+        w.text
     }
 
     /// Writes atomically (write_atomic).
     pub fn write(&self, path: &str) -> std::io::Result<()> {
         write_atomic(path, self.to_text().as_bytes())
     }
-}
-
-/// `text` without the field `d` (",\"hunger\":0.0"), where it is a whole field: ",\"hunger\":0.0" must
-/// not cut ",\"hunger\":0.07". One pass: cutting in place moved the rest of the text for every
-/// cut, so a save of 16,000 objects (1.7 MB) took 10 s in the game loop.
-fn cut_whole_field(text: &str, d: &str) -> String {
-    let (mut out, mut rest) = (String::with_capacity(text.len()), text);
-    while let Some(at) = rest.find(d) {
-        let after = &rest[at + d.len()..];
-        if after.starts_with([',', '}']) {
-            out.push_str(&rest[..at]);
-        } else {
-            out.push_str(&rest[..at + d.len()]);
-        }
-        rest = after;
-    }
-    out.push_str(rest);
-    out
 }
 
 /// Writes a file atomically: a crash mid-write leaves the previous one, and the rename is on
@@ -280,6 +323,99 @@ pub fn backup(path: &str, every: Duration, keep: usize) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The text as it was made before the one pass per entry: every default cut from the whole
+    /// text in turn (quadratic: minutes for a big world).
+    fn reference_text(save: &SaveFile) -> String {
+        let one = |v: &Value| serde_json::to_string(v).unwrap_or_default();
+        let list = |items: &[Value]| items.iter().map(one).collect::<Vec<_>>().join("|\n");
+        let sections = [one(&save.world), list(&save.planets), list(&save.players), list(&save.objects), list(&save.inventories), one(&save.stats), list(&save.messages), list(&save.story_events), one(&save.settings), list(&save.procedural)];
+        let mut text = String::from("\u{feff}");
+        for s in sections {
+            text.push('\r');
+            text.push_str(&s);
+            text.push_str("\r@");
+        }
+        for d in DEFAULTS {
+            let mut from = 0;
+            while let Some(at) = text[from..].find(d).map(|i| i + from) {
+                if text[at + d.len()..].starts_with([',', '}']) {
+                    text.replace_range(at..at + d.len(), "");
+                    from = at;
+                } else {
+                    from = at + d.len();
+                }
+            }
+        }
+        for key in ["gameMode", "gameDyingConsequences", "gameStartLocation"] {
+            let pattern = format!(",\"{key}\":");
+            while let Some(at) = text.find(&pattern).filter(|at| text[at + pattern.len()..].starts_with(|c: char| c.is_ascii_digit())) {
+                text.replace_range(at..at + pattern.len() + 1, "");
+            }
+        }
+        text
+    }
+
+    /// Cutting defaults in one pass writes the very bytes the whole-text cuts did, on fields in
+    /// every combination (default or not, last or not, in text that looks like a field), and on
+    /// the save PCDS_BENCH_SAVE names.
+    #[test]
+    fn the_text_is_what_the_whole_text_cuts_made() {
+        let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |n: u64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng % n
+        };
+        // Every default, a near miss of it, and a field that is not one, in one object's order.
+        let fields: Vec<(&str, Vec<Value>)> = vec![
+            ("liId", vec![json!(0), json!(5), json!(0)]),
+            ("siIds", vec![json!(""), json!("1,2")]),
+            ("pos", vec![json!("0,0,0"), json!("0,0,0.5"), json!("1,2,3")]),
+            ("rot", vec![json!("0,0,0,0"), json!("0,0,0,1")]),
+            ("planet", vec![json!(0), json!(-1140328421)]),
+            ("liPlanet", vec![json!(0), json!(3)]),
+            ("pnls", vec![json!(""), json!("1,2")]),
+            ("color", vec![json!(""), json!("1-0-0-1")]),
+            ("text", vec![json!(""), json!(",\"set\":0"), json!("a\"},\"pos\":\"0,0,0\"")]),
+            ("grwth", vec![json!(0), json!(100)]),
+            ("set", vec![json!(0), json!(1), json!(0)]),
+            ("trtInd", vec![json!(0), json!(2)]),
+            ("trtVal", vec![json!(0), json!(7)]),
+            ("hunger", vec![json!(0.0), json!(0.07), json!(5.0)]),
+            ("count", vec![json!("0,0"), json!("0,1")]),
+            ("linkedWo", vec![json!(0), json!(9)]),
+        ];
+        let mut save = SaveFile::empty();
+        save.world = json!({"terraTokens": 1});
+        for id in 0..400 {
+            let mut o = serde_json::Map::new();
+            o.insert("id".into(), json!(id));
+            o.insert("gId".into(), json!("Iron"));
+            for (k, values) in &fields {
+                if next(3) > 0 {
+                    o.insert((*k).into(), values[next(values.len() as u64) as usize].clone());
+                }
+            }
+            save.objects.push(Value::Object(o));
+            let (supply, demand) = (if next(2) == 0 { "" } else { "Iron" }, if next(2) == 0 { "" } else { "Iron,Cobalt" });
+            save.inventories.push(json!({"id": id, "woIds": "", "size": 4, "demandGrps": demand, "supplyGrps": supply, "priority": next(2)}));
+        }
+        save.players = vec![json!({"id": 1, "name": "A", "hunger": 0.0, "set": 0})];
+        for settings in [json!({"gameMode": 3, "gameDyingConsequences": 12, "gameStartLocation": 0, "x": 1}), json!({"gameMode": "a", "gameDyingConsequences": 1}), json!({"planetId": "Prime"})] {
+            save.settings = settings;
+            assert_eq!(save.to_text(), reference_text(&save));
+        }
+        // A cleaned key whose first occurrence is no digit stops the cleaning there, in either.
+        save.world = json!({"gameMode": "x"});
+        save.settings = json!({"gameMode": 3});
+        assert_eq!(save.to_text(), reference_text(&save));
+        if let Ok(path) = std::env::var("PCDS_BENCH_SAVE") {
+            let real = SaveFile::load(&path).unwrap();
+            assert_eq!(real.to_text(), reference_text(&real));
+        }
+    }
 
     /// Two writers of one save at once: every write lands whole, nothing is left beside it.
     #[test]
@@ -463,20 +599,6 @@ mod tests {
         std::fs::write(&path, good).unwrap();
         assert_eq!(SaveFile::load(path.to_str().unwrap()).err().map(|e| e.kind()), Some(std::io::ErrorKind::InvalidData));
         std::fs::remove_dir_all(dir).ok();
-    }
-
-    /// cut_whole_field makes the text the first version made (one default cut in place after the
-    /// other), and a save of 60,000 objects takes a moment, not minutes.
-    #[test]
-    fn cutting_defaults_is_linear_and_unchanged() {
-        let one = |i: u64| json!({"id": i, "gId": "Iron", "liId": 0, "siIds": "", "pos": if i % 3 == 0 { "0,0,0" } else { "1,2,3" }, "rot": "0,0,0,0", "planet": i % 2, "hunger": if i % 5 == 0 { 0.0 } else { 0.07 }, "count": "0,0", "linkedWo": 0, "text": ""});
-        let text = |n: u64| (0..n).map(|i| serde_json::to_string(&one(i)).unwrap()).collect::<Vec<_>>().join("|\n");
-        let small = text(500);
-        assert_eq!(DEFAULTS.iter().fold(small.clone(), |t, d| cut_whole_field(&t, d)), cut_one_by_one(small));
-        let big = text(60_000);
-        let started = std::time::Instant::now();
-        let cut = DEFAULTS.iter().fold(big.clone(), |t, d| cut_whole_field(&t, d));
-        assert!(cut.len() < big.len() && started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
     }
 
     #[test]

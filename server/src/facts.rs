@@ -32,8 +32,7 @@ pub fn check(data: &GameData, spec: &Spec) -> Result<(), String> {
     missing.extend(REQUIRED_GROUPS.iter().copied().chain(space).filter(|id| data.group(id).is_none()).map(|id| format!("group {id}")));
     missing.extend(crate::game::LOADING_RPCS.iter().filter(|name| spec.hash(name).is_none()).map(|name| format!("RPC {name}")));
     for class in crate::rockets::PLATFORM_CLASSES {
-        let on_a_prefab = data.group_prefabs.as_object().into_iter().flat_map(|o| o.values()).any(|p| p["components"].as_array().into_iter().flatten().any(|c| c["type"] == class));
-        if !on_a_prefab {
+        if !data.group_prefabs.any_component_of_type(class) {
             missing.push(format!("rocket platform class {class}"));
         }
     }
@@ -82,7 +81,9 @@ mod tests {
         let Some((_, data, spec, _)) = crate::game::test_tables() else { return };
         let mut data = data;
         let mut assets = (*data.assets).clone();
-        assets["AnimalList:AnimalList"]["animals"].as_array_mut().unwrap().push(serde_json::json!({"id": 99, "prefab": "GameObject:Dragon"}));
+        let mut list = (**assets.get("AnimalList:AnimalList").unwrap()).clone();
+        list["animals"].as_array_mut().unwrap().push(serde_json::json!({"id": 99, "prefab": "GameObject:Dragon"}));
+        assets.insert("AnimalList:AnimalList".into(), std::sync::Arc::new(list));
         data.assets = std::sync::Arc::new(assets);
         let e = check(&data, &spec).unwrap_err();
         assert!(e.contains("prefab hash of animal Dragon") && !e.contains("Sharky"), "{e}");

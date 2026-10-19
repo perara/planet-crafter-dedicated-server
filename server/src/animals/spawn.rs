@@ -716,7 +716,7 @@ fn pet(game: &mut Game, client: u64, object: u64) {
 
 /// GeneticTraitHandler.GetRandomGeneticTraitWithRarity.
 fn random_lootable_trait(game: &mut Game) -> Option<Value> {
-    let lootable: Vec<Value> = game.data.assets.iter().filter(|(k, v)| k.starts_with("GeneticTraitData:") && v["canBeLooted"].as_bool() == Some(true)).map(|(_, v)| v.clone()).collect();
+    let lootable: Vec<Value> = game.data.assets.iter().filter(|(k, v)| k.starts_with("GeneticTraitData:") && v["canBeLooted"].as_bool() == Some(true)).map(|(_, v)| (**v).clone()).collect();
     if lootable.is_empty() {
         return None;
     }

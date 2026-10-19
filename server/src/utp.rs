@@ -48,6 +48,8 @@ const MAX_BATCH: usize = 1 << 20;
 // Room for the world a late-game save sends on join (saves reach several MB); only approved
 // clients (the limits.maxPlayers rule) get that much sent.
 const MAX_QUEUED: usize = 64 << 20;
+/// The room an emptied send queue keeps.
+const QUEUE_KEPT: usize = 256 << 10;
 const MAX_DATAGRAMS: usize = 4096;
 const MAX_CONNECTIONS: usize = 128;
 const MAX_PER_IP: usize = 8;
@@ -469,6 +471,11 @@ impl Utp {
                 self.outbox.push((c.addr, packet(token, DATA, &[&[RELIABLE], &header, &[0]])));
             }
             c.ack_due = false;
+            // The world a joiner was sent (megabytes) leaves its room in the queue: give it back
+            // once it is sent, or every player that ever joined keeps it.
+            if c.queued.is_empty() && c.queued.capacity() > QUEUE_KEPT {
+                c.queued = VecDeque::new();
+            }
             if self.outbox.len() == before && now - c.last_send > HEARTBEAT_AFTER {
                 self.outbox.push((c.addr, packet(token, HEARTBEAT, &[])));
             }

@@ -66,9 +66,9 @@ pub struct GameData {
     /// Keyed by group id; "<id>#static" is the container variant for objects loaded from the save.
     /// Per group id (and "<id>#static"): the network object its world objects spawn as.
     pub layouts: Arc<HashMap<String, ObjectDef>>,
-    /// Every game asset, keyed "Type:name".
-    pub assets: Arc<serde_json::Map<String, Value>>,
-    pub group_prefabs: Arc<Value>,
+    /// Every game asset, keyed "Type:name" (a group's `fields` are its asset, shared).
+    pub assets: Arc<indexmap::IndexMap<String, Arc<Value>>>,
+    pub group_prefabs: Arc<Prefabs>,
     /// Habitat panels: per group, each Panel's transform, colliders and bounds; the bounds of
     /// every panel look (panels.rs).
     pub panels: Arc<Value>,
@@ -108,11 +108,90 @@ impl ObjectDef {
     }
 }
 
+/// groupPrefabs by group id. A prefab is 1.8 MB of JSON for all 727 and 18 MiB as parsed
+/// values, and a world reads those of the buildings it has: each is parsed the first time it
+/// is read (`prefabs[group]` is a Value, Null for a group without one).
+#[derive(Default, Clone)]
+pub struct Prefabs(HashMap<String, Prefab>);
+
+/// A prefab searched this often is parsed instead (the search is for the few asks of a start).
+const MENTIONS_BEFORE_PARSING: u32 = 8;
+
+struct Prefab {
+    raw: Box<serde_json::value::RawValue>,
+    parsed: std::sync::OnceLock<Value>,
+    /// How often `mentions` looked through the text: a prefab asked about again and again is
+    /// parsed, which is cheaper than searching it each time.
+    asked: std::sync::atomic::AtomicU32,
+}
+
+impl Clone for Prefab {
+    fn clone(&self) -> Prefab {
+        Prefab { raw: self.raw.clone(), parsed: self.parsed.clone(), asked: Default::default() }
+    }
+}
+
+impl Prefab {
+    fn value(&self) -> &Value {
+        self.parsed.get_or_init(|| serde_json::from_str(self.raw.get()).unwrap_or(Value::Null))
+    }
+}
+
+impl Prefabs {
+    /// Whether the prefab can hold `word` (a component type): false only when its text has no
+    /// such word, so that asking does not parse the prefabs that cannot answer.
+    pub fn mentions(&self, group: &str, word: &str) -> bool {
+        self.0.get(group).is_some_and(|p| p.parsed.get().is_some() || p.asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= MENTIONS_BEFORE_PARSING || p.raw.get().contains(word))
+    }
+
+    /// Whether any prefab has a component of type `ty`: only the prefabs whose text has the word
+    /// are parsed to see.
+    pub fn any_component_of_type(&self, ty: &str) -> bool {
+        self.0.values().filter(|p| p.parsed.get().is_some() || p.raw.get().contains(ty)).any(|p| p.value()["components"].as_array().into_iter().flatten().any(|c| c["type"] == ty))
+    }
+
+    /// (parsed, all): how many prefabs have been read.
+    #[cfg(test)]
+    pub fn parsed(&self) -> (usize, usize) {
+        (self.0.values().filter(|p| p.parsed.get().is_some()).count(), self.0.len())
+    }
+}
+
+impl std::ops::Index<&str> for Prefabs {
+    type Output = Value;
+    fn index(&self, group: &str) -> &Value {
+        static NULL: Value = Value::Null;
+        self.0.get(group).map_or(&NULL, Prefab::value)
+    }
+}
+
+impl std::ops::IndexMut<&str> for Prefabs {
+    fn index_mut(&mut self, group: &str) -> &mut Value {
+        let prefab = self.0.entry(group.to_string()).or_insert_with(|| Prefab { raw: serde_json::value::RawValue::NULL.to_owned(), parsed: Default::default(), asked: Default::default() });
+        prefab.value();
+        prefab.parsed.get_mut().expect("parsed above")
+    }
+}
+
+/// gamedata.json as it is read: the parts that are used whole parsed, the prefabs left as text.
+#[derive(serde::Deserialize)]
+struct Root {
+    #[serde(default)]
+    assets: indexmap::IndexMap<String, Value>,
+    #[serde(rename = "groupPrefabs", default)]
+    group_prefabs: HashMap<String, Box<serde_json::value::RawValue>>,
+    layouts: Box<serde_json::value::RawValue>,
+    #[serde(default)]
+    singletons: Value,
+    #[serde(default)]
+    panels: Value,
+}
+
 impl GameData {
     pub fn load(path: &str) -> Result<GameData, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-        let mut root: Value = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
-        let assets = root["assets"].as_object().cloned().unwrap_or_default();
+        let root: Root = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
+        let assets: indexmap::IndexMap<String, Arc<Value>> = root.assets.into_iter().map(|(k, v)| (k, Arc::new(v))).collect();
         // Group assets are referenced as "Type:name"; their id is the "id" field.
         let mut ref_to_id: HashMap<&str, &str> = HashMap::new();
         for (key, fields) in &assets {
@@ -122,7 +201,7 @@ impl GameData {
                 }
             }
         }
-        let mut entries: Vec<(&String, &Value)> = assets.iter().filter(|(k, _)| k.starts_with("GroupDataItem:") || k.starts_with("GroupDataConstructible:")).collect();
+        let mut entries: Vec<(&String, &Arc<Value>)> = assets.iter().filter(|(k, _)| k.starts_with("GroupDataItem:") || k.starts_with("GroupDataConstructible:")).collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
         let mut groups = Vec::new();
         for (key, fields) in entries {
@@ -138,7 +217,7 @@ impl GameData {
                 secondary_inventories: fields["secondaryInventoriesSize"].as_array().into_iter().flatten().filter_map(Value::as_i64).map(|v| v as i32).collect(),
                 units: UNIT_TYPES.map(|u| fields[format!("{prefix}{u}")].as_f64().unwrap_or(0.0) as f32),
                 has_prefab: fields["associatedGameObject"].is_string(),
-                fields: Arc::new(fields.clone()),
+                fields: fields.clone(),
             });
         }
         let by_id: HashMap<String, usize> = groups.iter().enumerate().map(|(i, g)| (g.id.clone(), i)).collect();
@@ -151,16 +230,16 @@ impl GameData {
                 .collect();
         }
         let by_hash = groups.iter().enumerate().map(|(i, g)| (g.hash, i)).collect();
-        let layouts = serde_json::from_value(root["layouts"].take()).map_err(|e| format!("{path}: layouts: {e}"))?;
+        let layouts = serde_json::from_str(root.layouts.get()).map_err(|e| format!("{path}: layouts: {e}"))?;
         Ok(GameData {
             groups,
             by_id,
             by_hash,
             layouts: Arc::new(layouts),
             assets: Arc::new(assets),
-            group_prefabs: Arc::new(root["groupPrefabs"].take()),
-            panels: Arc::new(root["panels"].take()),
-            singletons: Arc::new(root["singletons"].take()),
+            group_prefabs: Arc::new(Prefabs(root.group_prefabs.into_iter().map(|(k, raw)| (k, Prefab { raw, parsed: Default::default(), asked: Default::default() })).collect())),
+            panels: Arc::new(root.panels),
+            singletons: Arc::new(root.singletons),
         })
     }
 
@@ -179,11 +258,14 @@ impl GameData {
 
     /// The asset an asset reference points to.
     pub fn asset(&self, reference: &str) -> Option<&Value> {
-        self.assets.get(reference)
+        self.assets.get(reference).map(|a| &**a)
     }
 
     /// Components of a group's prefab with a given type (a group's machine parameters).
     pub fn prefab_components(&self, group: &str, ty: &str) -> Vec<&Value> {
+        if !self.group_prefabs.mentions(group, ty) {
+            return Vec::new();
+        }
         self.group_prefabs[group]["components"].as_array().into_iter().flatten().filter(|c| c["type"] == ty).map(|c| &c["fields"]).collect()
     }
 }

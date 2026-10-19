@@ -27,7 +27,7 @@ pcds-plugin-api = { path = "../plugin-api", features = ["std"] }
 # ring is rustls' own crypto (no new crate): HMAC-SHA256 for signed chat webhooks.
 ring = "0.17"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.154", features = ["preserve_order"] }
+serde_json = { version = "1.0.154", features = ["preserve_order", "raw_value"] }
 steamworks = "0.13.1"
 # plugin.toml and rules.toml: written by hand, so with comments (no default features: parser and serde only).
 toml = { version = "1", default-features = false, features = ["parse", "serde"] }

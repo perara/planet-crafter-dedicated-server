@@ -111,6 +111,7 @@ pub struct NetVar {
 }
 
 impl NetVar {
+    #[cfg(test)]
     fn full(&self) -> Vec<u8> {
         match &self.value {
             VarValue::Plain(b) => b.clone(),
@@ -349,28 +350,53 @@ impl NetObj {
     }
 
     /// Every behaviour's variables in order, then the custom sync data (transform state).
+    #[cfg(test)]
     pub fn sync(&self) -> Vec<u8> {
-        let mut out: Vec<u8> = self.behaviours.iter().flat_map(|b| b.vars.iter().flat_map(|v| v.full())).collect();
-        let mut tail = self.tail.clone();
+        let mut out = Vec::new();
+        self.sync_into(&mut out);
+        out
+    }
+
+    /// `sync`, appended to `out`: no Vec of its own for each variable and the tail.
+    pub fn sync_into(&self, out: &mut Vec<u8>) {
+        for v in self.behaviours.iter().flat_map(|b| &b.vars) {
+            match &v.value {
+                VarValue::Plain(b) => out.extend_from_slice(b),
+                VarValue::List(items) => {
+                    out.extend_from_slice(&(items.len() as u16).to_le_bytes());
+                    items.iter().for_each(|i| out.extend_from_slice(i));
+                }
+            }
+        }
+        let start = out.len();
+        out.extend_from_slice(&self.tail);
         if let Some(at) = self.tail_position {
-            if let Some(slot) = tail.get_mut(at..at + 12) {
-                slot.copy_from_slice(&self.position.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>());
+            if let Some(slot) = out.get_mut(start + at..start + at + 12).filter(|_| at + 12 <= self.tail.len()) {
+                for (i, v) in self.position.iter().enumerate() {
+                    slot[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+                }
             }
             // A world object container's state ends with its Euler angles after the position.
-            if let Some(slot) = tail.get_mut(at + 12..).filter(|s| s.len() == 12) {
-                slot.copy_from_slice(&crate::transform::euler_angles(self.rotation).iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>());
+            if self.tail.len() == at + 24 {
+                for (i, v) in crate::transform::euler_angles(self.rotation).iter().enumerate() {
+                    out[start + at + 12 + i * 4..start + at + 16 + i * 4].copy_from_slice(&v.to_le_bytes());
+                }
             }
         }
-        if tail.is_empty() {
-            tail.push(0);
+        if self.tail.is_empty() {
+            out.push(0);
         }
-        out.extend(tail);
-        out
     }
 
     /// NetworkObject.SceneObject as Netcode writes it.
     pub fn scene_object(&self, scene_handle: i32) -> Vec<u8> {
         let mut w = Writer::new();
+        self.scene_object_into(&mut w, scene_handle);
+        w.0
+    }
+
+    /// `scene_object` appended to `w` (a join writes every object of the world this way).
+    pub fn scene_object_into(&self, w: &mut Writer, scene_handle: i32) {
         w.u16(self.flags).u32(self.hash).packed_u64(self.id).packed_u64(self.owner);
         if self.flags & HAS_PARENT != 0 {
             w.packed_u64(self.parent.unwrap_or(0));
@@ -378,9 +404,13 @@ impl NetObj {
         if self.flags & HAS_TRANSFORM != 0 {
             w.vec3(self.position).quat(self.rotation).vec3(self.scale);
         }
-        let sync = self.sync();
-        w.i32(scene_handle).i32(sync.len() as i32).bytes(&sync);
-        w.0
+        w.i32(scene_handle);
+        // The length of the sync data comes before it: written once it is known.
+        let at = w.0.len();
+        w.i32(0);
+        self.sync_into(&mut w.0);
+        let len = (w.0.len() - at - 4) as i32;
+        w.0[at..at + 4].copy_from_slice(&len.to_le_bytes());
     }
 }
 
@@ -654,6 +684,51 @@ impl IntoTarget for (u32, Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scene object is written as it was when every variable and the tail had a Vec of their
+    /// own: the same bytes for every kind of object the tables have (dynamic containers carry
+    /// the position and Euler angles in their tail, static ones none).
+    #[test]
+    fn scene_objects_are_written_in_place_with_the_bytes_they_always_had() {
+        let Some(g) = crate::game::test_game(crate::game::tests::save()) else { return };
+        let reference = |o: &NetObj| {
+            let mut out: Vec<u8> = o.behaviours.iter().flat_map(|b| b.vars.iter().flat_map(|v| v.full())).collect();
+            let mut tail = o.tail.clone();
+            if let Some(at) = o.tail_position {
+                if let Some(slot) = tail.get_mut(at..at + 12) {
+                    slot.copy_from_slice(&o.position.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>());
+                }
+                if let Some(slot) = tail.get_mut(at + 12..).filter(|s| s.len() == 12) {
+                    slot.copy_from_slice(&crate::transform::euler_angles(o.rotation).iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>());
+                }
+            }
+            if tail.is_empty() {
+                tail.push(0);
+            }
+            out.extend(tail);
+            out
+        };
+        let (mut kinds, mut with_position) = (std::collections::HashSet::new(), 0);
+        for (name, def) in g.data.layouts.iter() {
+            let mut o = NetObj::from_layout(&def.layout(7));
+            o.id = 5;
+            o.owner = 3;
+            o.position = [1.5, -2.25, 300.0];
+            o.rotation = [0.1, 0.7, -0.2, 0.68];
+            let sync = reference(&o);
+            assert_eq!(o.sync(), sync, "{name}");
+            let mut w = Writer::new();
+            w.u8(9);
+            o.scene_object_into(&mut w, 0);
+            let tail = &w.0[1..];
+            assert_eq!(&tail[tail.len() - sync.len()..], &sync[..], "{name}: the object ends with its sync data");
+            assert_eq!(tail[tail.len() - sync.len() - 4..tail.len() - sync.len()], (sync.len() as i32).to_le_bytes(), "{name}: and the length before it");
+            assert_eq!(o.scene_object(0), tail, "{name}");
+            kinds.insert(o.tail.len());
+            with_position += o.tail_position.is_some() as usize;
+        }
+        assert!(kinds.len() >= 3 && with_position > 100, "{} tail sizes, {with_position} objects with a position in their tail", kinds.len());
+    }
 
     /// Every owner-written variable of a class the tables have is one of its variables (a
     /// renamed one would otherwise be refused without a word).
