@@ -468,6 +468,9 @@ class Transcript:
                 if l['name'] == 'WorldObjectsHandler.CreateAndInstantiateWorldObjectClientRpc' and args and args[0]:
                     net_ids[args[0]] = self.label(args[0])
                     args = [net_ids[args[0]]]
+                # The move's start time is server time, as the ticks are: masked.
+                if l['name'] == 'SceneInterpolationHandler.StartInterpolationClientRpc' and len(args) == 5:
+                    args = args[:4] + ['T']
                 e = {'msg': 'rpc', 'name': l['name'], 'object': self.label(l['object']), 'args': self.norm(args)}
                 if e['object'].startswith('net:'):
                     self.unnamed.setdefault(l['object'], []).append(e)
