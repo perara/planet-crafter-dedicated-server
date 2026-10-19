@@ -99,8 +99,9 @@ impl Game {
         true
     }
 
-    /// Inventory.DestroyAllItemsInside: everything but what cannot be destroyed.
-    fn destroy_all_items_inside(&mut self, inventory: i32, destroy: bool) -> Vec<i32> {
+    /// Inventory.DestroyAllItemsInside: everything but what cannot be destroyed leaves the
+    /// inventory (the caller tells the listeners, then destroys it).
+    fn remove_all_items_inside(&mut self, inventory: i32) -> Vec<i32> {
         let Some(inv) = self.inventories.get(&inventory) else { return Vec::new() };
         let mut removed = Vec::new();
         for i in (0..inv.items.len()).rev() {
@@ -109,9 +110,6 @@ impl Game {
             if !keep {
                 self.inventories.get_mut(&inventory).unwrap().items.remove(i);
                 self.release(wo);
-                if destroy {
-                    self.destroy_world_object(wo, false);
-                }
                 removed.push(wo);
             }
         }
@@ -526,10 +524,11 @@ impl Game {
                 let (wo, inv, destroy) = (a.i(0), a.i(1), a.b(2));
                 let ok = self.wos.contains_key(&wo) && self.inventory_remove(inv, wo);
                 if ok {
+                    // The listeners read the item (its group) as it leaves: before it is destroyed.
+                    self.propagate(inv, wo, false);
                     if destroy {
                         self.destroy_world_object(wo, false);
                     }
-                    self.propagate(inv, wo, false);
                     self.dirty_inventory(inv, client, false);
                 }
                 self.add_or_remove_result(client, ok);
@@ -540,11 +539,11 @@ impl Game {
                 if ok {
                     let groups: Vec<usize> = hashes.iter().filter_map(|h| self.data.group_by_hash(*h)).collect();
                     let removed = self.remove_items_of_groups(inv, &groups);
-                    if destroy {
-                        self.destroy_world_objects(&removed, false);
-                    }
                     for wo in &removed {
                         self.propagate(inv, *wo, false);
+                    }
+                    if destroy {
+                        self.destroy_world_objects(&removed, false);
                     }
                     self.dirty_inventory(inv, client, false);
                 }
@@ -554,11 +553,11 @@ impl Game {
                 let (ids, inv, destroy) = (a.ints(0).unwrap_or_default(), a.i(1), a.b(2));
                 let ok = self.remove_items_by_id(inv, &ids);
                 if ok {
-                    if destroy {
-                        self.destroy_world_objects(&ids, false);
-                    }
                     for wo in &ids {
                         self.propagate(inv, *wo, false);
+                    }
+                    if destroy {
+                        self.destroy_world_objects(&ids, false);
                     }
                     self.dirty_inventory(inv, client, false);
                 }
@@ -568,9 +567,11 @@ impl Game {
                 let inv = a.i(0);
                 let ok = self.inventories.contains_key(&inv);
                 if ok {
-                    for wo in self.destroy_all_items_inside(inv, true) {
-                        self.propagate(inv, wo, false);
+                    let removed = self.remove_all_items_inside(inv);
+                    for wo in &removed {
+                        self.propagate(inv, *wo, false);
                     }
+                    self.destroy_world_objects(&removed, false);
                     self.dirty_inventory(inv, client, false);
                 }
                 self.add_or_remove_result(client, ok);
@@ -972,6 +973,38 @@ mod tests {
         assert!(result(&mut g));
         assert!(!g.inventories[&bag].items.contains(&item) && g.inventories[&chest].items == vec![item]);
         assert_eq!(g.holders.get(&item), Some(&(chest, 1)));
+    }
+
+    /// Taking an item out and destroying it in one request still tells the inventory's listeners
+    /// what left: a Vegetube's multiplier from the seeds in it goes down with each one.
+    #[test]
+    fn what_is_destroyed_on_leaving_an_inventory_is_still_heard_to_leave() {
+        let Some((mut g, _)) = world() else { return };
+        let (_, net) = place(&mut g, "Vegetube1", [570.0, 3.0, 500.0]);
+        let tube = g.net.objects[&net].wo.unwrap();
+        let inv = g.wos[&tube].linked_inventory;
+        g.inventories.get_mut(&inv).unwrap().size = 5;
+        let oxygen = crate::model::unit_index("Oxygen").unwrap();
+        let (seed, seed_hash) = (g.data.group("Seed1").unwrap(), hash(&g, "Seed1"));
+        let each = g.data.groups[seed].units[oxygen] / 100.0;
+        assert!(each > 0.0);
+        let before = g.wos[&tube].unit_multiplier[oxygen];
+        let seeds: Vec<i32> = (0..4).map(|_| g.add_new_item(seed, inv, 1).1).collect();
+        let multiplier = |g: &Game| g.wos[&tube].unit_multiplier[oxygen];
+        assert_eq!(multiplier(&g), before + 4.0 * each);
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveItemFromInventoryServerRpc", &[json!(seeds[0]), json!(inv), json!(true)]);
+        assert!(result(&mut g) && !g.wos.contains_key(&seeds[0]));
+        assert_eq!(multiplier(&g), before + 3.0 * each, "RemoveItemFromInventory");
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveItemsFromInventoryServerRpc", &[json!([seed_hash]), json!(inv), json!(true)]);
+        assert!(result(&mut g));
+        assert_eq!(multiplier(&g), before + 2.0 * each, "RemoveItemsFromInventory");
+        let left = g.inventories[&inv].items[0];
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveWorldObjectsFromInventoryServerRpc", &[json!([left]), json!(inv), json!(true)]);
+        assert!(result(&mut g));
+        assert_eq!(multiplier(&g), before + each, "RemoveWorldObjectsFromInventory");
+        send_scene(&mut g, 1, "InventoriesHandler.RemoveAndDestroyAllItemsFromInventoryServerRpc", &[json!(inv)]);
+        assert!(result(&mut g) && g.inventories[&inv].items.is_empty());
+        assert_eq!(multiplier(&g), before, "RemoveAndDestroyAllItemsFromInventory");
     }
 
     #[test]

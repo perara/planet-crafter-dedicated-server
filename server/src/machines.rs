@@ -220,10 +220,10 @@ fn add_new(game: &mut Game, group: usize, inventory: i32) -> bool {
 fn remove_item(game: &mut Game, wo: i32, inventory: i32, destroy: bool) -> bool {
     let ok = game.wos.contains_key(&wo) && game.inventory_remove(inventory, wo);
     if ok {
+        game.propagate(inventory, wo, false);
         if destroy {
             game.destroy_world_object(wo, false);
         }
-        game.propagate(inventory, wo, false);
         game.dirty_inventory(inventory, 0, false);
     }
     ok
