@@ -1302,7 +1302,7 @@ impl Front {
         if body["rollback"] == true {
             if let Some(dir) = &self.banks {
                 let Some(info) = updater::info(dir, &target) else { return (400, json!({"error": format!("bank {target} holds no release to go back to")}).to_string()) };
-                if let Err(e) = updater::compatible(&info, &live.hello) {
+                if let Err(e) = updater::compatible_for(&info, &live.hello, true) {
                     return (400, json!({"error": e}).to_string());
                 }
             }

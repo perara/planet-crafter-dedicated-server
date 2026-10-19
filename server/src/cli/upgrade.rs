@@ -36,7 +36,7 @@ impl Ctx {
         let running = self.active()?;
         if running && !restart {
             let body = if rollback { json!({"rollback": true}) } else { json!({"version": version}) };
-            let answer: Value = serde_json::from_str(&self.api("POST", "/api/update", Some(&body.to_string()))?).map_err(|e| e.to_string())?;
+            let answer: Value = serde_json::from_str(&self.api("POST", "/api/update", Some(&body.to_string())).map_err(api_error)?).map_err(|e| e.to_string())?;
             let seq = answer["seq"].as_u64().ok_or("the server gave the update no number")?;
             say(if rollback { "handing the world back to the other bank".to_string() } else { format!("installing {} into the standby bank", version.as_deref().unwrap_or("the latest release")) });
             return self.wait_for_update(seq);
@@ -134,6 +134,12 @@ impl Ctx {
     }
 }
 
+/// What the server said in an error answer ("HTTP 400: {"error": "..."}"): the words, else the
+/// whole.
+fn api_error(e: String) -> String {
+    e.find("{\"error\"").and_then(|i| serde_json::from_str::<Value>(&e[i..]).ok()).and_then(|v| v["error"].as_str().map(str::to_string)).unwrap_or(e)
+}
+
 fn text(v: &Value) -> String {
     v.as_str().map_or_else(|| v.to_string(), str::to_string)
 }
@@ -157,6 +163,8 @@ mod tests {
             let args: Vec<String> = bad.iter().map(|s| s.to_string()).collect();
             assert_eq!(ctx.upgrade(&args).unwrap_err(), USAGE, "{bad:?}");
         }
+        assert_eq!(api_error("POST http://x/api/update: HTTP 400: {\"error\":\"it needs a restart\"}".into()), "it needs a restart");
+        assert_eq!(api_error("connection refused".into()), "connection refused");
         assert!(describe(&json!({"version": "0.6.0", "tag": "v0.6.0", "protocol": 2, "format": 1})).starts_with("pcds 0.6.0 (v0.6.0), front protocol 2, snapshot format 1"));
         std::fs::remove_dir_all(&dir).unwrap();
     }

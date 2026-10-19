@@ -112,12 +112,26 @@ only (http only for a `PCDS_RELEASES` on 127.0.0.1, which the tests use); versio
 must match `v?[0-9A-Za-z._-]+`; the unpacked tree may hold only plain files and folders;
 `bank-info` runs with only PATH, HOME and LANG in its environment. The sha256 guards against a
 damaged download, not a forged release: releases are not signed. Renames into the banks and
-writes of `active` take a lock on `run/bin/.lock`. `PCDS_AUTO_UPDATE=on` checks every
-`PCDS_UPDATE_CHECK_HOURS` (default 24, the first check 10 minutes after the start) and installs
+writes of `active` take a lock on `run/bin/.lock`. A later release is later than the live bank's
+release: its tag (bank.json) when the bank came from a release, else the program's version (a
+build, or a release folder's program), so a release whose program forgot to bump its version is
+installed once, not at every check. `PCDS_AUTO_UPDATE=on` checks every
+`PCDS_UPDATE_CHECK_HOURS` (default 24, the first check 10 minutes after the start; both
+settings are read once, at the front's start; a check that failed is tried again after an hour,
+one that found the world busy or stopped after 10 minutes) and installs
 and flips to a release later than the live bank's; it is off by default, and with it off the
 server never contacts GitHub on its own. A rollback writes `run/bin/rolled-back` (the bank it
 left and that bank's tag); the automatic check skips that tag, and a later release, an explicit
 update or the next rollback clears or replaces the note.
+
+**Rollback.** The other bank's release takes the world only if it passes the same check as an
+update (front protocol, tables format, and that it reads the running world's snapshot format).
+0.6.0 reads formats 1 and 2 and 0.6.1 writes 3, so after a live update from 0.6.0 to 0.6.1 the
+way back is `pcds upgrade --rollback --restart` (the server saves as it stops and 0.6.0 loads
+that save; every player joins again): `--rollback` alone answers with that, changes nothing, and
+the dashboard says so in the Updates section and when Roll back is clicked. While the world is
+stopped (`POST /api/world/stop`) no bank runs it: an update or a rollback is answered 409 "the
+world is stopped" (start it first, or use `--restart`), and the dashboard's buttons are off.
 
 **The CLI.** `pcds upgrade [VERSION] [--restart] | --rollback | --check`. Running: through the
 admin API (`POST /api/update`, then `GET /api/update` until its outcome). `--restart` installs

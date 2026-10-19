@@ -1516,7 +1516,7 @@ function renderUpdates(s) {
   $('updRollback').disabled = !!busy || stopped;
   $('updNow').textContent = u.available ? `Update to ${u.latest}` : 'Update now';
   $('updNote').textContent = stopped ? 'The world is stopped, so no release runs it and there is nothing to hand over: start the world first, then update. (pcds upgrade VERSION --restart on the host installs a release and restarts the server.)' : noBanks ? 'This server runs from a build, not from installed banks (pcds run): updates need pcds run; Roll back flips between two copies of this build.'
-    : `Automatic updates: ${u.auto ? `on, a check every ${u.checkHours} h` : 'off (PCDS_AUTO_UPDATE in Config)'}. Releases from ${u.releases || 'GitHub'}.`;
+    : `${rollbackBlocked(s) ? `Rolling back needs a restart (${rollbackBlocked(s)}): pcds upgrade --rollback --restart on the host. ` : ''}Automatic updates: ${u.auto ? `on, a check every ${u.checkHours} h` : 'off (PCDS_AUTO_UPDATE in Config)'}. Releases from ${u.releases || 'GitHub'}.`;
   const installed = (b.installed || []).length ? b.installed : (b.live ? [{ bank: b.live.bank, info: b.live }] : []);
   $('banks').replaceChildren(table(['Bank', 'Release', 'Protocol', 'Format', 'State'], installed.map(x => {
     const i = x.info || {}, running = b.live && b.live.bank === x.bank;
@@ -1556,7 +1556,19 @@ $('updInstall').onclick = async e => {
   const v = $('updVersion').value.trim(); if (!v) return toast('Give a release tag, e.g. v0.6.0', 'err');
   if (await ask({ title: `Install ${v}?`, body: 'It replaces the standby bank and the world is handed over to it, also when it is older than the running release.', ok: 'Install' })) updateCall({ version: v }, `Installing ${v}…`, e.currentTarget);
 };
+// Why the other bank's release cannot take the running world live (null: it can). It reads the
+// snapshot format the running one writes, speaks this front's protocol and reads its tables.
+function rollbackBlocked(s) {
+  const b = s.banks || {}, live = b.live;
+  const other = (b.installed || []).find(x => !live || x.bank !== live.bank), i = other && other.info;
+  if (!live || !i) return null;
+  if (i.protocol !== b.frontProtocol) return `pcds ${i.version} speaks another front protocol (${i.protocol}, this front speaks ${b.frontProtocol})`;
+  if (!(i.reads || []).includes(live.format)) return `pcds ${i.version} reads snapshot formats ${(i.reads || []).join(', ')}, and the running world is in format ${live.format}`;
+  return null;
+}
 $('updRollback').onclick = async e => {
+  const blocked = status && rollbackBlocked(status);
+  if (blocked) return void await ask({ title: 'Rolling back needs a restart', body: `The world cannot be handed back live: ${blocked}. On the host, pcds upgrade --rollback --restart goes back: the server saves the world, restarts on the other release and every player has to join again.`, ok: 'Understood' });
   if (await ask({ title: 'Roll back?', body: 'The world is handed back to the other bank\'s release. Players stay connected.', ok: 'Roll back', danger: true })) updateCall({ rollback: true }, 'Rolling back…', e.currentTarget);
 };
 

@@ -127,12 +127,20 @@ The server runs from one of two installed releases, the banks `run/bin/a` and `r
 release and its published sha256 into the bank that is not running, checks it, and hands the
 world over: the old release stops for about 15 ms, the new one takes the world and players see a
 short pause. If the new release fails, the old one goes on. The release before stays installed,
-so `--rollback` needs no download. A release that changes how the server's two processes talk
+so `--rollback` needs no download. A rollback is live only when that release reads the snapshot
+format the running one writes (0.6.0 does not read 0.6.1's): when it does not, `--rollback` says
+so and changes nothing, and `pcds upgrade --rollback --restart` goes back with a restart (the
+server saves the world as it stops; every player has to join again). While the world is stopped
+(dashboard: Stop world) there is nothing to hand over: start it first, or use `--restart`. A release that changes how the server's two processes talk
 (its "front protocol") cannot take over a running world: `pcds upgrade` says so, and
 `pcds upgrade --restart VERSION` installs it with a restart, which disconnects every player
 (Steam players get a new invite code unless `PCDS_STEAM_TOKEN` is set). With the server stopped,
 `pcds upgrade` makes the release the one the next start runs. `PCDS_AUTO_UPDATE=on` in
-`server.env` does this by itself for each new release (off by default).
+`server.env` does this by itself for each new release (off by default; the setting is read when
+the server starts, so a change takes a restart). It looks 10 minutes after the start and then
+every `PCDS_UPDATE_CHECK_HOURS`, tries again within the hour when GitHub could not be reached,
+and installs a release only when it is later than the one that runs (compared by its tag, or by
+the program's version for a build) and not the one you rolled back from.
 
 Other ways:
 - Run the installer again, or `./pcds up` in a newer release folder (move the old folder's `run/`

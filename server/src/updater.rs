@@ -106,13 +106,30 @@ fn hex(bytes: &[u8]) -> String {
 /// Whether the release in a bank can take over the world the running bank holds (its HELLO
 /// or bank.json: format), with this front. Err says what to do instead.
 pub fn compatible(info: &Value, live: &Value) -> Result<(), String> {
+    compatible_for(info, live, false)
+}
+
+/// The command that installs the release with a restart: for a rollback, going back to the
+/// bank that did not run (no download); else the release's own tag (a bank that holds a build
+/// has none: its version names it).
+fn restart_command(info: &Value, rollback: bool) -> String {
+    if rollback {
+        return "pcds upgrade --rollback --restart".into();
+    }
+    let tag = info["tag"].as_str().map(str::to_string).or_else(|| info["version"].as_str().map(tag)).unwrap_or_else(|| "VERSION".into());
+    format!("pcds upgrade --restart {tag}")
+}
+
+/// compatible(), for a rollback (`rollback`: the release is the other bank's, the one that ran
+/// before) or an update: the same checks, and the command to run instead says which.
+pub fn compatible_for(info: &Value, live: &Value, rollback: bool) -> Result<(), String> {
     let what = info["tag"].as_str().map(str::to_string).unwrap_or_else(|| format!("pcds {}", info["version"].as_str().unwrap_or("?")));
     let protocol = info["protocol"].as_u64().unwrap_or(0);
+    let restart = restart_command(info, rollback);
     if protocol != crate::ipc::PROTOCOL {
         return Err(format!(
-            "{what} speaks front protocol {protocol}, this front speaks {}: it cannot take over the running world. Such an update needs a front restart (pcds upgrade --restart {}), which disconnects every player; Steam players get a new invite code unless PCDS_STEAM_TOKEN is set",
-            crate::ipc::PROTOCOL,
-            info["tag"].as_str().unwrap_or("VERSION")
+            "{what} speaks front protocol {protocol}, this front speaks {}: it cannot take over the running world. Such an update needs a front restart ({restart}), which disconnects every player; Steam players get a new invite code unless PCDS_STEAM_TOKEN is set",
+            crate::ipc::PROTOCOL
         ));
     }
     // The tables on disk are the running bank's: a release that reads another format would
@@ -120,18 +137,21 @@ pub fn compatible(info: &Value, live: &Value) -> Result<(), String> {
     if !live.is_null() && info["tablesFormat"] != live["tablesFormat"] {
         let theirs = |v: &Value| v.as_u64().map_or("none (a pcds from before table formats)".to_string(), |f| f.to_string());
         return Err(format!(
-            "{what} reads game tables of format {}, the running server's are of format {}: it cannot take over the running world. pcds upgrade --restart {} installs it, reads the game tables again and restarts the server, which disconnects every player",
+            "{what} reads game tables of format {}, the running server's are of format {}: it cannot take over the running world. {restart} {} the game tables again and restarts the server, which disconnects every player",
             theirs(&info["tablesFormat"]),
             theirs(&live["tablesFormat"]),
-            info["tag"].as_str().unwrap_or("VERSION")
+            if rollback { "goes back, reads" } else { "installs it, reads" }
         ));
     }
     let format = live["format"].as_u64().unwrap_or(0);
     if !info["reads"].as_array().is_some_and(|r| r.iter().any(|f| f.as_u64() == Some(format))) {
+        // The release before cannot read what the release that runs writes: a rollback across
+        // a change of the snapshot format is a restart (the stop saves the world; the other
+        // release loads the save). No loss: players are disconnected, nothing is rolled back in the world.
         return Err(format!(
-            "{what} reads snapshot formats {}, the running world is in format {format}: it needs a restart (pcds upgrade --restart {}; the world then loads from the save), which disconnects every player",
+            "{what} reads snapshot formats {}, the running world is in format {format}: {} needs a restart ({restart}; the server saves the world as it stops and {what} loads that save), which disconnects every player",
             info["reads"],
-            info["tag"].as_str().unwrap_or("VERSION")
+            if rollback { "a rollback across a change of the snapshot format" } else { "it" }
         ));
     }
     Ok(())
@@ -158,7 +178,18 @@ fn ask(program: &Path) -> Result<Value, Asked> {
     }
     // A program that cannot be run (not executable, wrong architecture) is not "a release from
     // before hot updates".
-    let mut child = command.spawn().map_err(|e| Asked::Failed(format!("{} cannot be run: {e}", program.display())))?;
+    // ETXTBSY: another thread's fork holds the file's write descriptor until its exec (the tests
+    // run installs side by side); it passes at once.
+    let mut tries = 0;
+    let mut child = loop {
+        match command.spawn() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            other => break other.map_err(|e| Asked::Failed(format!("{} cannot be run: {e}", program.display())))?,
+        }
+    };
     let deadline = Instant::now() + Duration::from_secs(20);
     while child.try_wait().map_err(|e| Asked::Failed(e.to_string()))?.is_none() {
         if Instant::now() > deadline {
@@ -865,5 +896,33 @@ pub mod tests {
         assert_eq!(std::fs::read_to_string(banks.join("b/pcds")).unwrap(), "the old one");
         assert_eq!(names(&banks), ["b"], "nothing left beside the bank");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Going back to the release before, when it cannot read what the running one writes (0.6.1
+    /// writes snapshot format 3, 0.6.0 reads 1 and 2): refused with `--rollback --restart`, not
+    /// `--restart VERSION`, also for a bank that holds a build and has no tag; an update names
+    /// the release by its tag, or by its version when there is no tag.
+    #[test]
+    fn a_rollback_across_a_snapshot_format_is_a_restart_and_says_which() {
+        let before = json!({"version": "0.6.0", "protocol": crate::ipc::PROTOCOL, "reads": [1, 2], "tablesFormat": 2});
+        let live = json!({"format": 3, "tablesFormat": 2});
+        let e = compatible_for(&before, &live, true).unwrap_err();
+        assert!(e.contains("a rollback across a change of the snapshot format") && e.contains("pcds upgrade --rollback --restart") && !e.contains("VERSION") && e.contains("disconnects every player"), "{e}");
+        let e = compatible_for(&before, &live, false).unwrap_err();
+        assert!(e.contains("pcds upgrade --restart v0.6.0") && !e.contains("VERSION"), "{e}");
+        let mut tagged = before.clone();
+        tagged["tag"] = "v0.6.0".into();
+        assert!(compatible_for(&tagged, &live, false).unwrap_err().contains("pcds upgrade --restart v0.6.0"));
+        // The other refusals of a rollback name the same command.
+        let mut other = tagged.clone();
+        other["protocol"] = 2.into();
+        assert!(compatible_for(&other, &live, true).unwrap_err().contains("(pcds upgrade --rollback --restart)"));
+        let mut other = tagged.clone();
+        other["tablesFormat"] = 1.into();
+        assert!(compatible_for(&other, &live, true).unwrap_err().contains("pcds upgrade --rollback --restart goes back, reads"));
+        // The release that reads the format goes back hot.
+        let mut reads = before.clone();
+        reads["reads"] = json!([2, 3]);
+        assert!(compatible_for(&reads, &live, true).is_ok());
     }
 }
