@@ -1063,8 +1063,8 @@ def inventory(t, cs_dir):
 # ---- the report ---------------------------------------------------------------------------------
 
 def parse_diff(path):
-    """(tag, label, line) for every difference line parity.py printed."""
-    out, tag = [], None
+    """(tag, label, line, step) for every difference line parity.py printed."""
+    out, tag, step = [], None, None
     if not os.path.exists(path):
         return None
     for line in open(path):
@@ -1072,11 +1072,12 @@ def parse_diff(path):
         if line.startswith('## step'):
             m = re.search(r' \[(.*)\]$', line)
             tag = m.group(1) if m else 'player|join'
+            step = line.split(':')[0]
         elif line.startswith('# '):
-            tag = None
+            tag, step = None, line
         elif line.startswith(('- ', '+ ', '~ ')):
             m = re.match(r'~ (?:object )?(\S+)', line)
-            out.append((tag, None if tag else (m.group(1) if m else None), line))
+            out.append((tag, None if tag else (m.group(1) if m else None), line, step))
     return out
 
 
@@ -1109,7 +1110,7 @@ def noise_key(tag, line):
 
 def noise_keys(run, script):
     keys = set()
-    for tag, _, line in parse_diff(f'{run}/{script}.noise') or []:
+    for tag, _, line, _ in parse_diff(f'{run}/{script}.noise') or []:
         keys.add(noise_key(tag, line))
     base = script.split('.')[0]
     if os.path.exists(f'{run}/{base}.savenoise') and not script.endswith('.B'):
@@ -1118,11 +1119,13 @@ def noise_keys(run, script):
     return keys
 
 
-def classify(rules, script, tag, line, noise=()):
+def classify(rules, script, tag, line, noise=(), paired=True):
     for r in rules:
         if r.get('kind') == 'settled':
             if settled(line):
                 return r['class'], r['why']
+            continue
+        if r.get('paired') and not paired:
             continue
         if re.search(r.get('script', ''), script) and re.search(r.get('tag', ''), tag or '') and re.search(r['line'], line):
             return r['class'], r['why']
@@ -1148,13 +1151,22 @@ def report(t, out, run, rules_path, cs_dir=None):
             continue
         ran.add(script)
         noise = noise_keys(run, script)
-        for tag, label, line in diffs:
+        # An object both sides created in a step differs in how (who owns it, its physics); an object
+        # only one side created is a real difference, whatever its owner.
+        made = {}
+        for tag, label, line, step in diffs:
+            m = re.search(r'"msg": "create", "object": "([^"]+)"', line)
+            if m:
+                made.setdefault((step, m.group(1)), set()).add(line[0])
+        for tag, label, line, step in diffs:
+            m = re.search(r'"object": "(new:[^"]+)"', line)
+            paired = not m or made.get((step, m.group(1)), set()) >= {'-', '+'}
             if tag:
                 key = tuple(tag.split('|', 1))
             else:
                 m = re.match(r'new:([^#]+)#', label or '')
                 key = (prefab_group.get(m.group(1), m.group(1)), 'state') if m else ('world', 'state')
-            results.setdefault(key, []).append((script, *classify(rules, script, tag, line, noise), line))
+            results.setdefault(key, []).append((script, *classify(rules, script, tag, line, noise, paired), line))
         for line in open(f'{run}/{script.split(".")[0]}.savediff') if os.path.exists(f'{run}/{script.split(".")[0]}.savediff') and not script.endswith('.B') else []:
             line = line.rstrip('\n')
             if re.match(r'\d+ save difference', line):
