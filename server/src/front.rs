@@ -1125,6 +1125,9 @@ impl Front {
                     };
                     let _ = r.reply.send(answer);
                 }
+                ("POST", "/api/world/start") if !r.body["world"].is_null() && !r.body["world"].is_string() => {
+                    let _ = r.reply.send((400, "{\"error\":\"'world': a world's name (or leave it out for the world that ran)\"}".into()));
+                }
                 ("POST", "/api/world/start") => {
                     let name = r.body["world"].as_str().map(str::to_string);
                     let answer = match self.start_world(name.as_deref()) {
@@ -1820,6 +1823,20 @@ mod tests {
         assert!(crate::cli::hold(&dir.join("a.json.lock"), "busy").is_err());
         assert!(crate::cli::hold(&dir.join("b.json.lock"), "busy").is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A world control with a 'world' that is no name is refused, not read as "the world that ran".
+    #[test]
+    fn a_start_with_a_world_that_is_no_name_is_refused() {
+        let mut front = test_front();
+        front.phase = Phase::Stopped;
+        let (tx, rx) = std::sync::mpsc::channel();
+        front.admin = Some(rx);
+        let (reply, answer) = std::sync::mpsc::channel();
+        tx.send(admin::Request { method: "POST".into(), path: "/api/world/start".into(), body: json!({"world": 5}), reply }).unwrap();
+        front.admin_requests();
+        let (status, body) = answer.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(status == 400 && body.contains("a world's name"), "{status} {body}");
     }
 
     /// A panic in an update's thread is that update's failure, not a busy update for ever.
