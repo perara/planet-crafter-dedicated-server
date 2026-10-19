@@ -152,10 +152,13 @@ pub struct Units {
     /// The game's is a float, which stops counting at 2^24 changes (the units would then never
     /// be recounted); a u64 does not.
     pub constructed_index: u64,
-    /// When the next 0.1 s growth and 1 s rate step are due. f64: a clock that adds 0.1 to an f32
-    /// stops moving at 2^21 s (24 days of uptime), and the loop in `tick` then never ends.
-    next_compute: f64,
-    next_define: f64,
+    next_compute: f32,
+    next_define: f32,
+    /// The same due times in f64 once the game clock is past EXACT_AFTER (see `advance`).
+    #[serde(default)]
+    late_compute: Option<f64>,
+    #[serde(default)]
+    late_define: Option<f64>,
     /// The terraformation totals _unitSysTerraformation was last made from (bits).
     sys_from: Option<Vec<u32>>,
 }
@@ -341,16 +344,39 @@ fn multiplayer_factor(game: &Game, kind: Kind) -> f32 {
     1.0 / (1.0 + (players as f32 - 1.0) * modifier)
 }
 
+/// After this many game seconds a fixed-step due time (every 0.1 s, every 1 s) is kept in f64.
+/// In f32 the sum next + 0.1 rounds to a multiple of the clock's resolution: from 6 days of
+/// uptime a 0.1 s step is really 0.125 s (the world runs at 80% speed), and from 2^21 s (24
+/// days) it adds nothing, so a catch-up loop `while now >= next` never ends and the bank hangs.
+/// Below it the f32 arithmetic is kept exactly (the bench fingerprints depend on it).
+pub const EXACT_AFTER: f32 = 3600.0;
+
+/// Whether the due time `next` (and its f64 form `late`, once the clock is old) has come.
+pub fn is_due(next: f32, late: Option<f64>, now: f32) -> bool {
+    late.map_or(now >= next, |l| now as f64 >= l)
+}
+
+/// The due time after one more `step`: f32 while the clock is young, f64 after.
+pub fn advance(next: &mut f32, late: &mut Option<f64>, now: f32, step: f64) {
+    if late.is_none() && now < EXACT_AFTER {
+        *next += step as f32;
+    } else {
+        *late = Some(late.unwrap_or(*next as f64) + step);
+    }
+}
+
 pub fn tick(game: &mut Game) {
-    let now = game.time as f64;
-    while now >= game.units.next_define {
-        game.units.next_define += 1.0;
+    let now = game.time;
+    while is_due(game.units.next_define, game.units.late_define, now) {
+        let u = &mut game.units;
+        advance(&mut u.next_define, &mut u.late_define, now, 1.0);
         for i in 0..game.units.planets.len() {
             define(game, i);
         }
     }
-    while now >= game.units.next_compute {
-        game.units.next_compute += 0.1;
+    while is_due(game.units.next_compute, game.units.late_compute, now) {
+        let u = &mut game.units;
+        advance(&mut u.next_compute, &mut u.late_compute, now, 0.1);
         for i in 0..game.units.planets.len() {
             for k in 0..KINDS.len() {
                 let factor = multiplayer_factor(game, KINDS[k]);
@@ -529,5 +555,71 @@ mod tests {
         }
         assert_eq!((unit(&g, Kind::Heat).per_sec, unit(&g, Kind::Heat).total), (0.0, 20.0));
         assert_eq!(unit(&g, Kind::Energy).per_sec, unit(&g, Kind::Energy).decrease, "the heater only uses energy");
+    }
+
+    /// The 0.1 s and 1 s due times keep their pace for as long as the server runs: in f32 a 0.1 s
+    /// step was 0.125 s from 6 days of uptime (the world at 80% speed) and nothing at all from
+    /// 2^21 s (24 days), where `while now >= next` never ended and the bank hung.
+    #[test]
+    fn fixed_step_timers_keep_their_pace_after_weeks_of_uptime() {
+        for days in [0.0f64, 0.04, 2.0, 7.0, 13.0, 30.0, 60.0, 150.0, 220.0] {
+            let base = days * 86_400.0;
+            let (mut next, mut late) = (base as f32, None);
+            let mut steps = 0i64;
+            // 600 s of game time in 5 ms frames of the f32 clock, as tick() sees it.
+            for frame in 1..=120_000u64 {
+                let now = (base + frame as f64 * 0.005) as f32;
+                let mut catching_up = 0;
+                while is_due(next, late, now) {
+                    advance(&mut next, &mut late, now, 0.1);
+                    steps += 1;
+                    catching_up += 1;
+                    assert!(catching_up < 10_000, "stuck at {days} days");
+                }
+            }
+            // 6000 steps, less what the clock's resolution still hides at the end.
+            let resolution = f64::from(libm_spacing(base as f32)) / 0.1;
+            assert!((steps - 6000).abs() as f64 <= resolution + 2.0, "{days} days: {steps} steps in 600 s");
+        }
+    }
+
+    fn libm_spacing(x: f32) -> f32 {
+        f32::from_bits(x.to_bits() + 1) - x
+    }
+
+    /// The same in the game: the totals grow at the buildings' rate 30 days in, and tick returns.
+    #[test]
+    fn units_grow_at_their_rate_after_a_month_of_uptime() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = std::panic::catch_unwind(|| {
+                let Some(mut g) = crate::game::test_game(save()) else { return None };
+                join(&mut g, 1, "Ann");
+                place(&mut g, "Heater1", [570.0, 3.0, 500.0]);
+                place(&mut g, "EnergyGenerator1", [575.0, 3.0, 500.0]);
+                let heater = g.data.groups[g.data.group("Heater1").unwrap()].unit("Heat");
+                let start = 30.0 * 86_400.0f32;
+                g.time = start;
+                g.units.next_compute = start;
+                g.units.next_define = start;
+                let run = |g: &mut Game, seconds: f32| {
+                    let end = g.time + seconds;
+                    while g.time < end {
+                        g.time += 0.5;
+                        tick(g);
+                    }
+                };
+                run(&mut g, 2.0);
+                let before = unit(&g, Kind::Heat).total;
+                run(&mut g, 60.0);
+                Some((unit(&g, Kind::Heat).total - before, heater))
+            });
+            let _ = tx.send(outcome);
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(Ok(Some((grown, heater)))) => assert!((grown - 60.0 * heater).abs() < 0.05 * 60.0 * heater, "{grown} in 60 s at {heater}/s"),
+            Ok(Ok(None)) => {}
+            other => panic!("units::tick did not finish 30 days into the game: {other:?}"),
+        }
     }
 }
