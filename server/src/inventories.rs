@@ -659,8 +659,14 @@ impl Game {
                     }
                 }
                 let placed = self.wos.get(&id).is_some_and(|w| w.is_placed());
+                // An item dropped without leaving its inventory is in two once picked up.
+                let old = self.holder(id).filter(|h| *h != inv);
                 if (placed || created) && self.inventories.contains_key(&inv) && self.inventory_add(inv, id, true) {
                     self.propagate(inv, id, true);
+                    if let Some(old) = old.filter(|old| self.inventory_remove(*old, id)) {
+                        self.propagate(old, id, false);
+                        self.dirty_inventory(old, client, false);
+                    }
                     // The inventory's machine may have destroyed it already
                     // (MachineDestructInventoryIfFull).
                     if let Some(was_unsaved) = self.wos.get(&id).map(|w| w.dont_save) {
@@ -950,6 +956,22 @@ mod tests {
         // Already in an inventory (not placed): refused.
         send_scene(&mut g, 1, "InventoriesHandler.AddWorldObjectToInventoryServerRpc", &[json!(dropped), json!(ice), json!(bag), json!(true)]);
         assert!(!result(&mut g));
+    }
+
+    /// An item dropped without being taken out of its inventory first (the game's client takes
+    /// it out; a hostile one need not) and then picked up into another leaves the first one.
+    #[test]
+    fn a_picked_up_item_leaves_the_inventory_it_was_dropped_from() {
+        let Some((mut g, _)) = world() else { return };
+        let (bag, _) = backpack(&g, 1);
+        let chest = g.create_inventory(5, 0, 0, &[], &[]);
+        let item = give(&mut g, "Iron", bag);
+        let iron = hash(&g, "Iron");
+        send_scene(&mut g, 1, "WorldObjectsHandler.DropOnFloorServerRpc", &[json!(item), json!([561.0, 3.0, 497.0]), json!(0.0), json!(false), json!(false), json!(0), json!(0.0)]);
+        send_scene(&mut g, 1, "InventoriesHandler.AddWorldObjectToInventoryServerRpc", &[json!(item), json!(iron), json!(chest), json!(true)]);
+        assert!(result(&mut g));
+        assert!(!g.inventories[&bag].items.contains(&item) && g.inventories[&chest].items == vec![item]);
+        assert_eq!(g.holders.get(&item), Some(&(chest, 1)));
     }
 
     #[test]
