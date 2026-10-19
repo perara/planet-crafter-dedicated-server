@@ -290,7 +290,10 @@ impl Bank {
                                 // The world stays in memory until the new bank runs.
                                 match self.link.recv() {
                                     Some(f) if f.kind == ipc::RESUME => println!("bank: resumed, the new bank failed"),
-                                    Some(f) if f.kind == ipc::EXIT => std::process::exit(0),
+                                    Some(f) if f.kind == ipc::EXIT => {
+                                        settle(game, true);
+                                        std::process::exit(0)
+                                    }
                                     _ => std::process::exit(final_save(game, &self.save_path)),
                                 }
                             }
@@ -310,8 +313,9 @@ impl Bank {
                 let _ = persist(game, &self.save_path);
                 std::process::exit(1);
             }
-            if std::mem::take(&mut game.save_requested) {
-                let _ = persist(game, &self.save_path);
+            settle(game, false);
+            if std::mem::take(&mut game.save_requested) && !persist_later(game, &self.save_path) {
+                game.save_requested = true;
             }
             // What a client's own packets brought it goes out now; the rest (other players'
             // movement and doings, the world's changes) every MOVEMENT_EVERY.
@@ -726,36 +730,107 @@ pub(crate) fn contained<T>(what: &str, work: impl FnOnce() -> T) -> Option<T> {
     done.ok()
 }
 
+
+/// A save is written in two parts: the game thread makes the text (the world as it is now: one
+/// ms for a 2.5k-object world, 36 for 100k objects) and a thread of its own makes the backup
+/// and writes the file (copies, fsyncs, a rename: tens to hundreds of ms on a busy disk), so
+/// the world does not stand still for the disk.
+struct Writing {
+    path: String,
+    done: std::sync::mpsc::Receiver<Result<(), String>>,
+}
+
 thread_local! {
     /// The last save's outcome, for GET /api/status: {"ok", "at" (Unix seconds), "error"}. The
     /// game loop's thread saves and answers the API.
     static LAST_SAVE: std::cell::RefCell<Value> = const { std::cell::RefCell::new(Value::Null) };
+    /// The autosave being written, if any (at most one: a save never overtakes an older one).
+    static WRITING: std::cell::RefCell<Option<Writing>> = const { std::cell::RefCell::new(None) };
 }
 
-fn persist(game: &mut Game, path: &str) -> Result<(), String> {
+/// The backup and the write of a save's text (what persist does, in its order).
+fn write_save(path: &str, text: &[u8]) -> Result<(), String> {
     let every = config::env_number("PCDS_BACKUP_MINUTES");
     if let Err(e) = save::backup(path, Duration::from_secs(every.saturating_mul(60)), backups_kept()) {
         eprintln!("backup failed: {e}");
     }
-    let saved = save::write_atomic(path, game.save_text().as_bytes()).map_err(|e| format!("{path}: {e}"));
+    save::write_atomic(path, text).map_err(|e| format!("{path}: {e}"))
+}
+
+/// What a save's end does on the game thread: the status, the log, and the newest backup
+/// off-site (on a thread), when S3 is set and it is not there yet.
+fn saved(game: &Game, path: &str, saved: &Result<(), String>) {
     let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     LAST_SAVE.set(json!({"ok": saved.is_ok(), "at": at, "error": saved.as_ref().err()}));
-    match &saved {
+    match saved {
         Ok(()) => println!("saved {path}"),
         Err(e) => eprintln!("save failed: {e}"),
     }
-    // The newest backup off-site (on a thread), when S3 is set and it is not there yet.
     if let Err(e) = crate::s3::after_backup(&game.rules.backup, path, false) {
         eprintln!("backup: {e}");
     }
-    saved
+}
+
+/// The save being written, once it has ended (`wait`: waiting for it). A failed one is tried
+/// again at the next autosave.
+fn settle(game: &mut Game, wait: bool) {
+    let Some(w) = WRITING.take() else { return };
+    let result = if wait {
+        w.done.recv().ok()
+    } else {
+        match w.done.try_recv() {
+            Ok(r) => Some(r),
+            Err(std::sync::mpsc::TryRecvError::Empty) => return WRITING.set(Some(w)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+        }
+    };
+    let result = result.unwrap_or_else(|| Err(format!("{}: the thread writing it ended", w.path)));
+    saved(game, &w.path, &result);
+    if result.is_err() {
+        game.advanced = true;
+    }
+}
+
+/// A save written beside the game: the text now, the backup and the file by a thread. Nothing
+/// when one is being written (the caller asks again at its next turn).
+fn persist_later(game: &mut Game, path: &str) -> bool {
+    settle(game, false);
+    if WRITING.with_borrow(Option::is_some) {
+        return false;
+    }
+    let text = game.save_text();
+    let (tx, done) = std::sync::mpsc::channel();
+    let to = path.to_string();
+    let spawned = std::thread::Builder::new().name("pcds-save".into()).spawn(move || {
+        let r = std::panic::catch_unwind(|| write_save(&to, text.as_bytes())).unwrap_or_else(|_| Err(format!("{to}: the write panicked")));
+        let _ = tx.send(r);
+    });
+    match spawned {
+        Ok(_) => WRITING.set(Some(Writing { path: path.to_string(), done })),
+        Err(e) => {
+            // No thread to write in: the world stands still for it, as it always did.
+            eprintln!("save: no thread ({e}); writing here");
+            return persist(game, path).is_ok();
+        }
+    }
+    true
+}
+
+/// A save made and written before this returns (the admin's, a panic's, the last one). First
+/// the one being written, which it must not be overtaken by.
+fn persist(game: &mut Game, path: &str) -> Result<(), String> {
+    settle(game, true);
+    let result = write_save(path, game.save_text().as_bytes());
+    saved(game, path, &result);
+    result
 }
 
 /// The front's autosave. A world that stood still since the last one (rules:
 /// world.pauseWhenEmpty) is that save already: no write, and no backup that only repeats the
 /// one before. A save that failed is tried again at the next one.
 fn autosave(game: &mut Game, path: &str) {
-    if std::mem::take(&mut game.advanced) && persist(game, path).is_err() {
+    settle(game, false);
+    if std::mem::take(&mut game.advanced) && !persist_later(game, path) {
         game.advanced = true;
     }
 }
@@ -864,6 +939,7 @@ mod tests {
         assert!(last["ok"] == false && last["at"].as_u64() > Some(0) && last["error"].as_str().is_some_and(|e| e.contains("world.json")), "{last}");
         game.advanced = true;
         autosave(&mut game, &path);
+        settle(&mut game, true);
         assert!(game.advanced, "the next autosave tries again");
         assert_eq!(final_save(&mut game, &path), 1);
         let kept = std::fs::read(crate::front::snapshot_path(&path)).unwrap();
@@ -875,6 +951,7 @@ mod tests {
         // Written: the status says so.
         std::fs::remove_dir(&path).unwrap();
         autosave(&mut game, &path);
+        settle(&mut game, true);
         assert!(!game.advanced);
         let (_, s) = admin_request(&mut game, "GET", "/api/status", &json!({}), &ctx, &mut 5);
         assert_eq!(serde_json::from_str::<Value>(&s).unwrap()["lastSave"]["ok"], true);
