@@ -101,6 +101,11 @@
  },
  {
   "class": "b",
+  "line": "\"object\": \"player@client\\d\"",
+  "why": "network visibility by distance: another player's object reaches the reference's probe only while that player is in range (the host's own range check), so the reference creates or destroys it at other moments than this server (EXPECTED)"
+ },
+ {
+  "class": "b",
   "why": "inventory protection: another player's backpack and equipment are refused here, the game's host takes them from anyone (EXPECTED: safety rules)",
   "tag": "refused here|first player backpack|second player reads the first",
   "line": "."

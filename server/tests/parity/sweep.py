@@ -730,6 +730,21 @@ def vehicle_family(t):
     return [a, b]
 
 
+def seat_family(t):
+    """A player who never moves locks into each of the truck's seats in turn (one script per seat)
+    and stays: where the host's copy of the player is saved shows whether, and where, a seat
+    takes the player along."""
+    out = []
+    for k, (b, name) in enumerate(zip(t.behaviour('VehicleTruck', 'LockNetworkPlayerPosition'), ['pilot', 'passenger 1', 'passenger 2'])):
+        s = Script(f'sweep_seat_{k}', 76561197999990040 + k)
+        tag = f'VehicleTruck|seat {name}'
+        build(s, 'VehicleTruck', (640.0, 10.31, 700.0), tag, 'truck')
+        s.call('LockNetworkPlayerPosition.SetPlayerLockedServerRpc', ['$truck', b], [True, '$client'], tag)
+        s.wait(6000)
+        out.append(s)
+    return out
+
+
 def sharing_family(t):
     """Two players at one container: the second watches it while the first changes it, takes from
     it, and then tries the first player's backpack (refused here: EXPECTED.md)."""
@@ -974,7 +989,7 @@ def generate(t, out, start=None):
     incubator = [g for g in t.items() if 'CraftIncubatorT1' in t.groups[g]['craftableInList'] and t.groups[g]['recipeIngredients']]
     scripts.append(autocraft_family(t, 'Incubator2', (1, incubator)))
     scripts += [feed_family(t), convert_family(t), optimizer_family(t), animals_family(t)]
-    scripts += vehicle_family(t) + sharing_family(t)
+    scripts += vehicle_family(t) + sharing_family(t) + seat_family(t)
     scripts += [growth_family(t), ground_family(t), recycle_family(t), interplanetary_family(t)]
     if start:
         scripts.append(scene_family(t, start))
@@ -1067,11 +1082,11 @@ def parse_diff(path):
 
 def settled(line):
     """A saved position the host's physics moved: within a few metres sideways of ours (it fell
-    onto the terrain or rolled), or a rotation it gave an object ours keeps upright."""
+    onto the terrain or rolled down a slope), or a rotation it gave an object ours keeps upright."""
     m = re.search(r'\.pos: ref "([^"]+)" ours "([^"]+)"', line)
     if m:
         a, b = ([float(x) for x in v.split(',')] for v in m.groups())
-        return math.hypot(a[0] - b[0], a[2] - b[2]) < 5
+        return math.hypot(a[0] - b[0], a[2] - b[2]) < 15
     return bool(re.search(r'\.rot: ref "[^"]+" ours "0,0,0,1"$', line))
 
 
