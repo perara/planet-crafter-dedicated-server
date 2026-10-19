@@ -58,7 +58,8 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
                          format: read the tables and restart when they changed
   pcds selftest               a scripted player joins over direct IP and checks the answers
   pcds run                    run the server in the foreground (what the service runs)
-  pcds container              the Docker image's start (tables, world, then run)
+  pcds container [NEW OPTIONS]  the Docker image's start (tables, world, then run); the
+                         options make the first world when there is none
 
 The server and its tools:
   pcds serve DATA_DIR SAVE.json          the server itself, settings from the environment
@@ -179,6 +180,7 @@ impl Ctx {
                 self.check_owner()?;
                 // After `make build` or in a newer release folder: the unit runs the new program.
                 if *what != "stop" {
+                    self.check_settings()?;
                     self.install_newer()?;
                     self.refresh_unit()?;
                     // A newer bank may read another tables format.
@@ -223,7 +225,7 @@ impl Ctx {
             ["update", ..] => self.update(game_option(&a[1..])?.as_deref())?,
             ["selftest"] => self.selftest()?,
             ["run"] => self.run_server()?,
-            ["container"] => self.container()?,
+            ["container", ..] => self.container(&args[1..])?,
             _ => {
                 print!("{HELP}");
                 return Ok(1);

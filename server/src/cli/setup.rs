@@ -442,8 +442,9 @@ impl Ctx {
     }
 
     /// The Docker image's start: the game tables (from the game mounted at /game, or downloaded
-    /// with STEAM_USER), a world, steamclient for invite codes, then the server as this process.
-    pub fn container(&self) -> Result {
+    /// with STEAM_USER), a world (`new_world`: the options of the new one made when there is
+    /// none), steamclient for invite codes, then the server as this process.
+    pub fn container(&self, new_world: &[String]) -> Result {
         super::mkdir(&self.worlds)?;
         self.remove_leftovers();
         self.write_env()?;
@@ -479,8 +480,7 @@ impl Ctx {
                 }
                 _ => {
                     say(format!("no world yet: making a new one, {}", self.world_name()));
-                    let options: Vec<String> = crate::env("PCDS_NEW_WORLD").unwrap_or_default().split_whitespace().map(str::to_string).collect();
-                    self.new_world(&self.world_file(), &options)?;
+                    self.new_world(&self.world_file(), new_world)?;
                 }
             }
         }

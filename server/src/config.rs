@@ -153,9 +153,8 @@ pub static PROCESS_ENV: &[Var] = &[
     Var { name: "PCDS_GAME_DIR", scope: "install", text: "The game's folder (the one with Planet Crafter.exe). Default: the one used last (run/game-dir), else the Steam library that lists the game; --game DIR on the commands that need it." },
     Var { name: "PCDS_CONTAINER", scope: "install", text: "Set by the Docker image: no systemd, the server is the container's own process, the admin address may be public inside it." },
     Var { name: "PCDS_UNIT", scope: "install", text: "The systemd unit's name (default pcds): set it, with PCDS_HOME, for a second server on the same machine. The units pcds writes carry it." },
-    Var { name: "PCDS_NEW_WORLD", scope: "install", text: "Docker: the options of the new world (`--planet Aqualis`) made on the first start without a world." },
     Var { name: "PCDS_IPC_FD", scope: "internal", text: "The front gives each bank its socket at this descriptor (always 3). Never set by hand." },
-    Var { name: "PCDS_DEV", scope: "dev", text: "Developer hooks, comma-separated (DEV_HOOKS). Tests and tools set it; never an installation." },
+    Var { name: "PCDS_DEV", scope: "dev", text: "Developer hooks, comma-separated (the table below). Tests and tools set it; never an installation." },
 ];
 
 /// PCDS_DEV's hooks: what the end-to-end tests and the load and probe tools need from the
@@ -218,6 +217,7 @@ pub static RETIRED: &[(&str, Fate)] = &[
     ("PCDS_ENV_FILE", Fate::Gone("pcds run derives it from PCDS_HOME (server.env there)")),
     ("PCDS_BANKS", Fate::Gone("pcds run derives it from PCDS_HOME (bin/ there)")),
     ("PCDS_BANK", Fate::Gone("fronts before 0.7 set it for their banks; nothing reads it")),
+    ("PCDS_NEW_WORLD", Fate::Gone("the options of the first world are the container's arguments now: docker run IMAGE --planet Aqualis (Compose: command: [\"--planet\", \"Aqualis\"])")),
     ("PCDS_WEB", Fate::Gone("the page is web/index.html beside the program (a release or bank folder): change that file")),
     ("PCDS_TRUST_LOOPBACK", Fate::Dev("trust-loopback")),
     ("PCDS_FLIP_VERIFY", Fate::Dev("flip-verify")),
@@ -660,6 +660,104 @@ mod tests {
         }
         for (name, _) in TEST_ENV {
             assert!(read_in(name, &everything), "{name} is nowhere in the tests and scripts any more: remove it from TEST_ENV");
+        }
+    }
+
+    /// Variables of 0.6 that were only for debugging or one tool and are deleted, not moved.
+    const DELETED: &[(&str, &str)] = &[
+        ("PCDS_WRECKS_TRACE", "debug prints of the wreck layout in read-game: deleted"),
+        ("PCDS_REACH_IL", "`pcds native-reach ... --il`"),
+        ("PCDS_DIFF_SHOW", "the fourth argument of `pcds tables-diff`"),
+        ("PCDS_REVIEW_CHESTS, PCDS_REVIEW_LOOSE, PCDS_REVIEW_DEMANDS, PCDS_REVIEW_GROWING", "constants of the one perf test they sized"),
+        ("PCDS_FUZZ_TRACE", "debug prints of the fuzz test: deleted"),
+    ];
+
+    fn cell(text: &str) -> String {
+        text.replace('|', "\\|").replace('\n', " ")
+    }
+
+    /// docs/env.md, written from the tables.
+    fn env_doc() -> String {
+        let mut out = String::new();
+        let operator = KNOBS.iter().filter(|k| k.read_only()).count() + PROCESS_ENV.iter().filter(|v| v.scope == "install").count();
+        out += &format!("# Environment variables\n\nGenerated from the tables in `server/src/config.rs` by `cargo test config::tests::write_env_doc -- --ignored`; a test fails when it is out of date. Do not edit.\n\nAn operator meets {operator} variables, no more ({OPERATOR_ENV_BUDGET} is the budget, and a test keeps it): what the server must know before it can read any file. Everything else, gameplay and tuning alike, is a rule: `rules.json` and `access.json`, changed live through `pcds rules`, `POST /api/config` and the web page (README, \"Server rules\").\n\n");
+        out += "## Settings (run/server.env)\n\n| Variable | Default | What |\n|---|---|---|\n";
+        for k in KNOBS.iter().filter(|k| k.read_only()) {
+            let secret = if k.secret { " Never shown; `(set)` in the API." } else { "" };
+            out += &format!("| `{}` | {} | {}{secret} |\n", k.key, if k.default.is_empty() { "unset".to_string() } else { format!("`{}`", k.default) }, cell(k.description));
+        }
+        for (title, scope, intro) in [
+            ("Where the installation is", "install", "Set by the image or the unit that starts the server, or in the shell of every `pcds` command."),
+            ("Between this program's own processes", "internal", "Never set by hand."),
+            ("Developer hooks", "dev", "For the end-to-end tests and the load and probe tools; the hooks are in the next table."),
+        ] {
+            out += &format!("\n## {title}\n\n{intro}\n\n| Variable | What |\n|---|---|\n");
+            for v in PROCESS_ENV.iter().filter(|v| v.scope == scope) {
+                out += &format!("| `{}` | {} |\n", v.name, cell(v.text));
+            }
+        }
+        out += "\n`PCDS_DEV` takes these, comma-separated; one that does not exist stops the start.\n\n| Hook | What |\n|---|---|\n";
+        for (hook, what) in DEV_HOOKS {
+            out += &format!("| `{}` | {what} |\n", hook.replace('|', "\\|"));
+        }
+        out += "\n## Tests and tools\n\nRead by test builds and tools, never by an installation. Set by hand for the benchmark and the tests, or by a test for the process it starts.\n\n| Variable | What |\n|---|---|\n";
+        for (name, what) in TEST_ENV {
+            out += &format!("| `{name}` | {} |\n", cell(what));
+        }
+        out += "\n## Gone since 0.6\n\nA server started with one of these set (in `server.env` or its environment) stops, in one line that says what replaces it, and `pcds start` and `pcds restart` say so before asking systemd. `pcds config migrate` shows what it would change in `server.env` and `rules.json`; `--apply` writes it.\n\n| Was | Now |\n|---|---|\n";
+        for (name, fate) in RETIRED {
+            out += &format!("| `{name}` | {} |\n", cell(&retired_message(name, *fate).replacen(name, "", 1).trim_start_matches(" is now ").trim_start_matches(" is gone: ").to_string()));
+        }
+        for (names, now) in DELETED {
+            out += &format!("| {} | {now} |\n", names.split(", ").map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", "));
+        }
+        out += "\n## Hot updates from a release before 0.7\n\nA hot update replaces the bank, not the front, so the new bank runs under a front that still has the environment of 0.6: its whole `server.env` and the paths its launcher set. The bank never refuses to start on a retired setting; it ignores them and says so once in one line. The rules decide what they set, so run `pcds config migrate --apply` after the update (the old values are kept as `server.env.before-migrate`), before the next restart. These the old front or launcher sets for its child; this version takes them without a word when they say what `PCDS_HOME` gives anyway and stops on one that says otherwise:\n\n";
+        out += &OLD_PLUMBING.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+        out += ".\n\n`rules.json` and the snapshot of a bank leave the sections new in 0.7 (`save`, `update`, `log`) out while they hold the defaults, so a 0.6 bank can still read them for a rollback; once one of those rules is set, a rollback to a 0.6 bank needs it removed.\n";
+        out
+    }
+
+    #[test]
+    fn docs_env_md_is_generated_from_the_tables() {
+        let wanted = env_doc();
+        let have = include_str!("../../docs/env.md");
+        assert!(have == wanted, "docs/env.md is out of date: run `cargo test config::tests::write_env_doc -- --ignored`\n--- wanted\n{wanted}");
+    }
+
+    #[test]
+    #[ignore]
+    fn write_env_doc() {
+        std::fs::write(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/env.md"), env_doc()).unwrap();
+    }
+
+    /// The operator-facing variables (server.env's and the install ones) stay within the budget.
+    #[test]
+    fn the_operator_facing_variables_stay_within_the_budget() {
+        let operator: Vec<&str> = KNOBS.iter().filter(|k| k.read_only()).map(|k| k.key).chain(PROCESS_ENV.iter().filter(|v| v.scope == "install").map(|v| v.name)).collect();
+        assert!(operator.len() <= OPERATOR_ENV_BUDGET, "{} operator-facing variables, the budget is {OPERATOR_ENV_BUDGET}: make the new one a rule (rules.json, POST /api/config) or fold it into one that exists\n{operator:?}", operator.len());
+        // Gameplay and tuning are rules: no variable carries a number of minutes, players, hours.
+        assert!(KNOBS.iter().filter(|k| k.read_only()).all(|k| !["min", "h", "players", "×", "s"].contains(&k.unit)), "a tuning number in server.env: make it a rule");
+    }
+
+    /// The README outside its Settings section (where the retired ones are named, to say what
+    /// replaces them), the Docker image and compose.yaml set and tell of no variable that is gone,
+    /// and what they set exists.
+    #[test]
+    fn the_docker_files_and_the_readme_use_only_variables_that_exist() {
+        let readme = include_str!("../../README.md");
+        let outside: Vec<&str> = readme.split("\n## ").filter(|section| !section.starts_with("Settings\n")).collect();
+        assert!(outside.len() > 10);
+        let docker: Vec<String> = ["../Dockerfile", "../compose.yaml", "../docker/entrypoint.sh"].iter().map(|f| std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f)).unwrap()).collect();
+        for text in outside.iter().copied().chain(docker.iter().map(String::as_str)) {
+            for name in names(text) {
+                // PCDS_KEEP_ACTIVE: the parity reference's plugin in the game, not this program.
+                assert!((known(name) || name == "PCDS_KEEP_ACTIVE") && !RETIRED.iter().any(|(n, _)| *n == name), "the README or a Docker file uses {name}");
+            }
+        }
+        // The image sets what a container needs: where it lives, that it is one, and the admin page open to the host.
+        let dockerfile = &docker[0];
+        for var in ["PCDS_HOME=/data", "PCDS_CONTAINER=1", "PCDS_ADMIN=0.0.0.0:7782"] {
+            assert!(dockerfile.contains(var), "Dockerfile: {var}");
         }
     }
 

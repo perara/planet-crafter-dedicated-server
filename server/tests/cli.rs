@@ -267,8 +267,12 @@ fn config_migrate_moves_the_retired_settings() {
     assert!(!said.contains("SECRET"), "no secret in the output: {said}");
     assert_eq!(std::fs::read_to_string(run.join("server.env")).unwrap(), old, "a dry run writes nothing");
     assert!(!run.join("rules.json").exists());
-    // The server still stops at the old file.
+    // The server still stops at the old file, and `restart` says so before it asks systemd.
     assert!(text(&pcds(&dir, &fake, &["run"])).contains("PCDS_AUTOSAVE is now the rule save.autosaveMinutes"));
+    std::fs::create_dir_all(dir.join("home/.config/systemd/user")).unwrap();
+    std::fs::write(dir.join("home/.config/systemd/user/pcds-cli-itest.service"), "").unwrap();
+    let out = pcds(&dir, &fake, &["restart"]);
+    assert!(text(&out).contains("PCDS_AUTOSAVE is now the rule save.autosaveMinutes") && out.status.code() == Some(1), "{}", text(&out));
     let out = pcds(&dir, &fake, &["config", "migrate", "--apply"]);
     let said = text(&out);
     assert_eq!(out.status.code(), Some(0), "{said}");

@@ -205,8 +205,9 @@ above. The image's health check asks the admin API for the server's status (`doc
 it healthy once the world runs), so it needs `PCDS_ADMIN` on, as it is by default.
 `--stop-timeout 90` gives the server time to save the world at `docker stop` (Docker's default
 of 10 s would kill it during the save); Compose has `stop_grace_period: 90s`. `PUID`/`PGID` (default 1000) set who owns `data/` on the host. On the first start without
-a world, the newest save in `data/worlds/` runs, or a new world is made (`PCDS_NEW_WORLD`, for
-example `--planet Aqualis`, chooses its options). [compose.yaml](compose.yaml) does the same with
+a world, the newest save in `data/worlds/` runs, or a new world is made (the arguments of the
+container, for example `docker run ... IMAGE --planet Aqualis` or Compose's `command: ["--planet",
+"Aqualis"]`, choose its options). [compose.yaml](compose.yaml) does the same with
 `docker compose up -d`.
 
 ## Joining
@@ -249,7 +250,6 @@ every `pcds` command:
 | `PCDS_GAME_DIR` | the one used last, else the Steam library's | the game's folder (also `--game DIR`) |
 | `PCDS_UNIT` | `pcds` | the systemd unit's name; with `PCDS_HOME` for a second server on the machine |
 | `PCDS_CONTAINER` | unset | set by the Docker image: no systemd, the admin address may be public inside the container |
-| `PCDS_NEW_WORLD` | unset | Docker: options of the new world made on the first start without a world |
 
 **Moving from 0.6.** A setting that older releases read and this one does not (`PCDS_AUTOSAVE`,
 `PCDS_BACKUPS`, `PCDS_BACKUP_MINUTES`, `PCDS_MAX_PLAYERS`, `PCDS_AUTO_UPDATE`,

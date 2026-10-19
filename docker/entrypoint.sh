@@ -3,7 +3,8 @@
 # 1000:1000, so a bind-mounted folder and files copied into it from the host are the
 # server's), then pcds as that user. pcds container stays the parent of the server to its
 # end: tini ends with it, and the container's end kills every process left (pcds waits for
-# the banks of a front that crashed to save first).
+# the banks of a front that crashed to save first). Arguments (docker run IMAGE --planet
+# Aqualis) are the options of the new world made when there is none.
 set -e
 PUID="${PUID:-1000}"
 PGID="${PGID:-1000}"
@@ -18,6 +19,6 @@ if [ "$(id -u)" = 0 ]; then
   if ! find /data -xdev \( ! -uid "$PUID" -o ! -gid "$PGID" \) -exec chown -h "$PUID:$PGID" {} +; then
     echo "entrypoint: not every file in /data could be given to $PUID:$PGID (see above): the server cannot write those" >&2
   fi
-  exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups /opt/pcds/pcds container
+  exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups /opt/pcds/pcds container "$@"
 fi
-exec /opt/pcds/pcds container
+exec /opt/pcds/pcds container "$@"

@@ -240,6 +240,14 @@ impl Ctx {
         parse_env(&text).into_iter().rev().find(|(k, _)| k == key).map(|(_, v)| v).filter(|v| !v.is_empty())
     }
 
+    /// server.env, and the environment under it, as the server will check them at its start: Err
+    /// with what stops it (a setting that is gone, a value that is not what it takes). `pcds
+    /// start` and `restart` say so at once, not in the journal of a unit that fails.
+    pub fn check_settings(&self) -> Result {
+        let file = fs::read_to_string(&self.env_file).map(|t| parse_env(&t)).unwrap_or_default();
+        crate::config::check_env(|key| file.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.clone()).filter(|v| !v.is_empty()).or_else(|| crate::env(key)))
+    }
+
     /// One setting changed: the new file is written beside (only this user reads it, as it holds
     /// the admin token) and moved over, so a crash leaves the old one or the new one.
     pub fn set_env(&self, key: &str, value: &str) -> Result {
