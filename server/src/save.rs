@@ -165,16 +165,24 @@ impl SaveFile {
 pub fn write_atomic(path: &str, bytes: &[u8]) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = format!("{path}.{}-{n}.tmp", std::process::id());
     let mode = std::fs::metadata(path).map(|m| m.permissions().mode() & 0o7777).unwrap_or(0o600);
-    let written = std::fs::File::create_new(&tmp).and_then(|mut file| {
+    // A name of its own: a leftover of an earlier process with this pid (a container's pids repeat)
+    // and this counter is not ours to overwrite, nor a reason to fail the save: the next name.
+    let (mut tmp, mut created) = (String::new(), Err(std::io::ErrorKind::AlreadyExists.into()));
+    for _ in 0..1000 {
+        tmp = format!("{path}.{}-{}.tmp", std::process::id(), WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        created = std::fs::File::create_new(&tmp);
+        if created.as_ref().is_err_and(|e| e.kind() != std::io::ErrorKind::AlreadyExists) || created.is_ok() {
+            break;
+        }
+    }
+    let written = created.and_then(|mut file| {
         file.set_permissions(std::fs::Permissions::from_mode(mode))?;
         file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(&tmp, path)
     });
-    if written.is_err() {
+    if written.is_err() && !tmp.is_empty() {
         let _ = std::fs::remove_file(&tmp);
     }
     written?;
@@ -269,6 +277,23 @@ mod tests {
         assert!(world["who"] == "a".repeat(20_000) || world["who"] == "b".repeat(20_000));
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A leftover of an earlier process with this pid and a counter value is not a reason to
+    /// fail a write (containers start with the same pid every time), and it is not overwritten.
+    #[test]
+    fn a_leftover_temporary_file_of_the_same_pid_does_not_fail_the_write() {
+        let dir = std::env::temp_dir().join(format!("pcds-write-leftover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("world.json").to_string_lossy().to_string();
+        for n in 0..300 {
+            std::fs::write(format!("{path}.{}-{n}.tmp", std::process::id()), "left over").unwrap();
+        }
+        write_atomic(&path, b"{}").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
+        assert_eq!(std::fs::read_to_string(format!("{path}.{}-0.tmp", std::process::id())).unwrap(), "left over");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A file keeps its mode across writes, a new one is 0600, and the sweep removes only what
