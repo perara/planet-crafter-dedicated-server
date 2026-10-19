@@ -47,7 +47,10 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
                          installs it and restarts the server instead (everyone reconnects)
   pcds install-service | uninstall-service    start at login, check for game updates hourly
   pcds code | players | save | kick PLAYER | ban PLAYER | unban NAME_OR_IP
-  pcds gui | token | config | api METHOD PATH [JSON]
+  pcds gui | token | api METHOD PATH [JSON]
+  pcds config [migrate [--apply]]
+                         edit run/server.env; migrate: move the settings of releases before 0.7
+                         (PCDS_AUTOSAVE...) into rules.json (dry run unless --apply)
   pcds rules [set SECTION.RULE=VALUE ... | reset]
                          show or change the server rules (rules.json; README \"Server rules\")
   pcds extract [--game DIR]   read the game tables again (from the game's files, no Wine)
@@ -203,6 +206,8 @@ impl Ctx {
             ["unban", ..] => return usage("pcds unban NAME_OR_IP"),
             ["gui"] => println!("{}", self.gui_url()),
             ["token"] => println!("{}", self.env_get("PCDS_ADMIN_TOKEN").ok_or(format!("no PCDS_ADMIN_TOKEN in {}", self.env_file.display()))?),
+            ["config", "migrate"] => self.config_migrate(false)?,
+            ["config", "migrate", "--apply"] => self.config_migrate(true)?,
             ["config"] => {
                 // EDITOR may carry arguments ("code -w").
                 let editor = crate::env("EDITOR").unwrap_or_else(|| "nano".into());

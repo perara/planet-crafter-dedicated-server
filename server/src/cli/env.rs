@@ -72,6 +72,167 @@ pub fn build_id(game: &Path) -> Result<String> {
     Ok(format!("{:016x}", xxhash_rust::xxh64::xxh64(&code, 0)))
 }
 
+/// What `pcds config migrate` would do to a server.env and a rules.json.
+#[derive(Debug, Default, PartialEq)]
+pub struct Migration {
+    /// The new server.env.
+    pub env: String,
+    /// The new rules.json (None: unchanged).
+    pub rules: Option<serde_json::Value>,
+    /// One line per retired setting found: what became of it. Never a secret's value.
+    pub report: Vec<String>,
+    /// The names that stay in server.env.
+    pub kept: Vec<String>,
+    /// Retired settings it cannot move: left where they are, for the owner.
+    pub by_hand: usize,
+}
+
+/// A retired setting's text as its rule's JSON value (None: not what the rule takes).
+fn rule_value(conv: crate::config::Conv, text: &str) -> Option<serde_json::Value> {
+    use crate::config::Conv;
+    match conv {
+        Conv::Number => text.parse::<u64>().ok().map(Into::into),
+        Conv::OnOff => match text {
+            "on" => Some(true.into()),
+            "off" => Some(false.into()),
+            _ => None,
+        },
+        Conv::Flag => Some(true.into()),
+    }
+}
+
+/// The settings that were only ever read from the environment of a first `pcds setup`, or that
+/// a launcher sets: in a server.env they do nothing, so the line goes.
+const DEAD_IN_SERVER_ENV: &[&str] = &["PCDS_PORT", "PCDS_ADMIN_BIND", "PCDS_ENV_FILE", "PCDS_BANKS", "PCDS_BANK"];
+
+/// The retired settings of a server.env moved: into `rules` (the text of rules.json, if there is
+/// one) when they are rules, dropped when they did nothing there, and left, with what to do,
+/// when only the owner can say (a rules file elsewhere, a page of their own, a developer hook).
+/// A rule that rules.json sets already keeps its value there. `home` is PCDS_HOME.
+pub fn migrate_plan(env_text: &str, rules_text: Option<&str>, home: &Path) -> Result<Migration> {
+    use crate::config::{retired_message, Fate, RETIRED};
+    let mut rules: serde_json::Value = match rules_text.map(str::trim) {
+        None | Some("") => serde_json::json!({}),
+        Some(text) => serde_json::from_str(text).map_err(|e| format!("rules.json: not JSON ({e}); fix or move it away first"))?,
+    };
+    let defaults = serde_json::to_value(crate::rules::Rules::default()).unwrap_or_default();
+    let mut m = Migration::default();
+    let mut changed = false;
+    // The lines to drop, and those of their comments.
+    let lines: Vec<&str> = env_text.lines().collect();
+    let mut drop = vec![false; lines.len()];
+    let parsed = |line: &str| parse_env(line).into_iter().next();
+    for (i, line) in lines.iter().enumerate() {
+        let Some((key, value)) = parsed(line) else { continue };
+        let Some((name, fate)) = RETIRED.iter().find(|(n, _)| *n == key) else {
+            m.kept.push(key);
+            continue;
+        };
+        let said = retired_message(name, *fate);
+        match fate {
+            _ if value.is_empty() => {
+                m.report.push(format!("{name}= (empty)  -> removed: it set nothing"));
+                drop[i] = true;
+            }
+            Fate::Rule(rule, conv) => {
+                let (section, field) = rule.split_once('.').unwrap_or_default();
+                let Some(new) = rule_value(*conv, &value) else {
+                    m.report.push(format!("{name}={value}  -> NOT moved: {said}, and {value:?} is not what that rule takes; set it yourself"));
+                    m.by_hand += 1;
+                    continue;
+                };
+                let default = match crate::config::at(&defaults, rule) {
+                    serde_json::Value::Null if *rule == "limits.maxPlayers" => crate::rules::DEFAULT_MAX_PLAYERS.into(),
+                    d => d,
+                };
+                let set = crate::config::at(&rules, rule);
+                drop[i] = true;
+                if !set.is_null() {
+                    m.report.push(format!("{name}={value}  -> removed: rules.json sets {rule}={set} already, and that stays"));
+                } else if new == default {
+                    m.report.push(format!("{name}={value}  -> removed: {rule} is {value} by default, nothing to write"));
+                } else {
+                    rules[section][field] = new;
+                    changed = true;
+                    m.report.push(format!("{name}={value}  -> rules.json: {rule} = {value}"));
+                }
+            }
+            Fate::File(file) if std::path::Path::new(&value) == home.join(file) => {
+                m.report.push(format!("{name}={value}  -> removed: it is where {file} is anyway"));
+                drop[i] = true;
+            }
+            Fate::Gone(_) if DEAD_IN_SERVER_ENV.contains(name) => {
+                m.report.push(format!("{name}={value}  -> removed: {said}"));
+                drop[i] = true;
+            }
+            _ => {
+                m.report.push(format!("{name}={value}  -> NOT moved: {said}"));
+                m.by_hand += 1;
+            }
+        }
+    }
+    // A comment block right above a dropped line described it: it goes too.
+    for i in 0..lines.len() {
+        if drop[i] {
+            let mut j = i;
+            while j > 0 && lines[j - 1].trim_start().starts_with('#') && !drop[j - 1] {
+                drop[j - 1] = true;
+                j -= 1;
+            }
+        }
+    }
+    let kept: Vec<&str> = lines.iter().enumerate().filter(|(i, _)| !drop[*i]).map(|(_, l)| *l).collect();
+    m.env = if kept.is_empty() { String::new() } else { kept.join("\n") + "\n" };
+    if changed {
+        crate::rules::Rules::default().patched(&rules).map_err(|e| format!("the moved settings do not make valid rules: {e}"))?;
+        m.rules = Some(rules);
+    }
+    Ok(m)
+}
+
+impl Ctx {
+    /// `pcds config migrate [--apply]`: server.env's retired settings into the rules.json and
+    /// server.env of this version. Without --apply it only says what it would do.
+    pub fn config_migrate(&self, apply: bool) -> Result {
+        let text = fs::read_to_string(&self.env_file).map_err(|e| format!("{}: {e}", self.env_file.display()))?;
+        let rules_file = self.run.join("rules.json");
+        let rules_text = match fs::read_to_string(&rules_file) {
+            Ok(t) => Some(t),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("{}: {e}", rules_file.display())),
+        };
+        let plan = migrate_plan(&text, rules_text.as_deref(), &self.run)?;
+        if plan.report.is_empty() {
+            say(format!("{}: nothing to migrate", self.env_file.display()));
+            return Ok(());
+        }
+        say(format!("{} ({})", self.env_file.display(), if apply { "migrating" } else { "dry run: nothing is written, --apply writes it" }));
+        plan.report.iter().for_each(|line| println!("  {line}"));
+        // Names only: the values of the settings that stay are never shown (the admin token is one).
+        println!("  server.env keeps: {}", if plan.kept.is_empty() { "nothing".to_string() } else { plan.kept.join(", ") });
+        if let Some(rules) = &plan.rules {
+            println!("  {} gets: {}", rules_file.display(), serde_json::to_string(rules).unwrap_or_default());
+        }
+        if !apply {
+            return Ok(());
+        }
+        // rules.json first: a stop in between leaves the old settings in server.env, which the
+        // next run of this command finds again (rules.json then has them already).
+        if let Some(rules) = &plan.rules {
+            let body = serde_json::to_string_pretty(rules).unwrap_or_default() + "\n";
+            super::replace_file(&rules_file, body.as_bytes(), 0o644)?;
+        }
+        let backup = self.env_file.with_file_name("server.env.before-migrate");
+        super::replace_file(&backup, text.as_bytes(), 0o600)?;
+        super::replace_file(&self.env_file, plan.env.as_bytes(), 0o600)?;
+        say(format!("done; the old file is kept as {} (it holds the admin token: delete it when the server runs)", backup.display()));
+        if plan.by_hand > 0 {
+            return Err(format!("{} setting(s) are left in server.env for you (marked NOT moved above); the server refuses to start until they are gone", plan.by_hand));
+        }
+        Ok(())
+    }
+}
+
 impl Ctx {
     /// A setting from server.env (the last line for it); None when empty or missing.
     pub fn env_get(&self, key: &str) -> Option<String> {
@@ -211,6 +372,86 @@ pub fn find_tables(data: &Path, build: &str, format: u32) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server.env as pcds 0.6 wrote it (with the owner's changes) becomes a new server.env and a
+    /// rules.json patch; what only the owner can place stays, and no secret is in the report.
+    #[test]
+    fn migration_moves_what_it_can_and_leaves_the_rest() {
+        let old = "# Planet Crafter dedicated server settings. Apply with: pcds restart
+# Direct IP (UDP): players join with HOST:PORT; \"off\" disables.
+PCDS_LISTEN=0.0.0.0:7777
+PCDS_STEAM=on
+PCDS_STEAM_TOKEN=STEAMSECRET
+# Last four digits of the invite code.
+PCDS_SESSION=4242
+# Minutes between saves (0: only on stop), and the save backups kept in worlds/backups/.
+PCDS_AUTOSAVE=10
+PCDS_BACKUPS=24
+PCDS_BACKUP_MINUTES=30
+# Admin API and web page.
+PCDS_ADMIN=127.0.0.1:7782
+PCDS_ADMIN_TOKEN=ADMINSECRET
+PCDS_WORLD=world
+PCDS_MAX_PLAYERS=8
+PCDS_AUTO_UPDATE=on
+PCDS_UPDATE_CHECK_HOURS=24
+PCDS_TRACE=1
+PCDS_PORT=7778
+PCDS_RULES=/srv/run/rules.json
+PCDS_ACCESS=/elsewhere/access.json
+PCDS_WEB=/my/page.html
+";
+        let home = Path::new("/srv/run");
+        let m = migrate_plan(old, Some("{\"speed\": {\"growth\": 2}, \"save\": {\"backupMinutes\": 45}}"), home).unwrap();
+        // Moved into the rules: what differs from the default, and what rules.json does not set.
+        assert_eq!(
+            m.rules.unwrap(),
+            serde_json::json!({"speed": {"growth": 2}, "save": {"autosaveMinutes": 10, "backupMinutes": 45}, "limits": {"maxPlayers": 8}, "update": {"auto": true}, "log": {"trace": true}})
+        );
+        let report = m.report.join("\n");
+        for line in [
+            "PCDS_AUTOSAVE=10  -> rules.json: save.autosaveMinutes = 10",
+            "PCDS_BACKUPS=24  -> removed: save.backupsKept is 24 by default, nothing to write",
+            "PCDS_BACKUP_MINUTES=30  -> removed: rules.json sets save.backupMinutes=45 already, and that stays",
+            "PCDS_UPDATE_CHECK_HOURS=24  -> removed: update.checkHours is 24 by default",
+            "PCDS_PORT=7778  -> removed: PCDS_PORT is gone",
+            "PCDS_RULES=/srv/run/rules.json  -> removed: it is where rules.json is anyway",
+            "PCDS_ACCESS=/elsewhere/access.json  -> NOT moved: PCDS_ACCESS is gone: the file is access.json in PCDS_HOME",
+            "PCDS_WEB=/my/page.html  -> NOT moved: PCDS_WEB is gone",
+        ] {
+            assert!(report.contains(line), "{line}\n{report}");
+        }
+        assert_eq!(m.by_hand, 2);
+        assert!(!report.contains("SECRET") && !report.contains("PCDS_STEAM_TOKEN"), "{report}");
+        // The new server.env: the settings that stay, the owner's lines left, the comments of
+        // the moved ones gone.
+        assert_eq!(
+            m.env,
+            "# Planet Crafter dedicated server settings. Apply with: pcds restart
+# Direct IP (UDP): players join with HOST:PORT; \"off\" disables.
+PCDS_LISTEN=0.0.0.0:7777
+PCDS_STEAM=on
+PCDS_STEAM_TOKEN=STEAMSECRET
+# Last four digits of the invite code.
+PCDS_SESSION=4242
+# Admin API and web page.
+PCDS_ADMIN=127.0.0.1:7782
+PCDS_ADMIN_TOKEN=ADMINSECRET
+PCDS_WORLD=world
+PCDS_ACCESS=/elsewhere/access.json
+PCDS_WEB=/my/page.html
+"
+        );
+        assert_eq!(m.kept, ["PCDS_LISTEN", "PCDS_STEAM", "PCDS_STEAM_TOKEN", "PCDS_SESSION", "PCDS_ADMIN", "PCDS_ADMIN_TOKEN", "PCDS_WORLD"]);
+        // Nothing to move: nothing planned, and the new file is the old one.
+        let clean = "PCDS_LISTEN=off\n# kept\nPCDS_WORLD=a\n";
+        let m = migrate_plan(clean, None, home).unwrap();
+        assert!(m.report.is_empty() && m.rules.is_none() && m.env == clean);
+        // A moved value that is out of range is not written.
+        let m = migrate_plan("PCDS_AUTOSAVE=100000\nPCDS_BACKUPS=x\n", None, home);
+        assert!(m.is_err() || m.as_ref().is_ok_and(|m| m.rules.is_none() && m.by_hand >= 1), "{m:?}");
+        assert!(migrate_plan("PCDS_AUTOSAVE=7\n", Some("[1"), home).is_err(), "a rules.json that is not JSON is not touched");
+    }
 
     /// The settings file a first setup writes holds the defaults of config::KNOBS (nothing in
     /// the environment changes the port or the admin address here).
