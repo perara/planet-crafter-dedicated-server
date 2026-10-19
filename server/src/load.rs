@@ -217,7 +217,7 @@ impl Bot<'_> {
     }
 }
 
-fn play(n: usize, server: SocketAddr, data: &NetData, spec: &Spec, request: &[u8], seconds: f64, action_ms: u64, prefix: &str) -> Report {
+fn play(n: usize, server: SocketAddr, data: &NetData, spec: &Spec, request: &[u8], (seconds, action_ms): (f64, u64), prefix: &str) -> Report {
     let mut report = Report::default();
     let local: SocketAddr = format!("127.0.0.{}:0", 2 + n % 250).parse().unwrap();
     let (utp, token) = match Utp::connect(local, server, Duration::from_secs(10)) {
@@ -297,7 +297,7 @@ pub fn run(args: &[String]) {
                 let (data, spec, request) = (&data, &spec, &request);
                 // Joins spread over a moment, as players arrive.
                 std::thread::sleep(Duration::from_millis(50));
-                scope.spawn(move || play(n, server, data, spec, request, seconds, action_ms, prefix))
+                scope.spawn(move || play(n, server, data, spec, request, (seconds, action_ms), prefix))
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap_or_default()).collect()
