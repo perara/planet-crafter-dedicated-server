@@ -677,18 +677,6 @@ fn update_generation_multiplier(game: &mut Game, wo: i32, unit: &str, hunger: bo
     }
 }
 
-/// WorldUnitMultiplierViaInventory.RefreshGenerationMultiplier (animal shelters' hunger).
-#[allow(dead_code)]
-pub fn refresh_generation_multiplier(game: &mut Game, machine: i32, item: i32, multiplier: f32) {
-    let units = game.ext.machines.list.get(&machine).map(|m| m.unit_multipliers.clone()).unwrap_or_default();
-    let planet = game.wos.get(&machine).map(|w| w.planet_hash()).unwrap_or(0);
-    for (unit, hunger) in units {
-        update_generation_multiplier(game, machine, unit, hunger, item, false, multiplier);
-        update_generation_multiplier(game, machine, unit, hunger, item, true, multiplier);
-        force_reset(game, unit, planet);
-    }
-}
-
 // ---- ActionDeconstructible.CheckDeconstructOnServer ---------------------------------------
 
 /// DeconstructStatus.

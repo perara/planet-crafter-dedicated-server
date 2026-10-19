@@ -702,20 +702,6 @@ fn sig_text(sig: &super::dotnet::TypeSig) -> String {
     super::netvars::type_text(sig)
 }
 
-/// A type signature's debug text without assembly scopes.
-#[allow(dead_code)]
-fn sig_debug(sig: &super::dotnet::TypeSig) -> String {
-    let s = format!("{sig:?}");
-    let mut out = String::new();
-    let mut rest = s.as_str();
-    while let Some(i) = rest.find("scope: ") {
-        out.push_str(&rest[..i]);
-        rest = &rest[i + 7..];
-        rest = if let Some(r) = rest.strip_prefix("None, ") { r } else { &rest[rest.find("\", ").map_or(0, |j| j + 3)..] };
-    }
-    out + rest
-}
-
 /// Debug: the methods reachable from NS.CLASS.METHOD inside the given assemblies, with their IL
 /// sizes. Virtual calls reach the overrides of the types created on the way (newobj) and of the
 /// `+NS.CLASS` ones given (components Unity creates): rapid type analysis. `-TEXT` leaves out the
