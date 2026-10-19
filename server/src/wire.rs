@@ -245,11 +245,34 @@ pub struct Batch {
 }
 
 impl Batch {
-    pub fn push(&mut self, kind: u32, data: &[u8]) {
+    fn start(&mut self) {
         if self.out.0.is_empty() {
+            // A batch is often a few hundred bytes to a few KB: room for most of them at once
+            // (unless reserve() made room for exactly what is coming).
+            if self.out.0.capacity() == 0 {
+                self.out.0.reserve(1024);
+            }
             self.out.0.resize(16, 0);
         }
+    }
+
+    pub fn push(&mut self, kind: u32, data: &[u8]) {
+        self.start();
         self.out.packed_u32(kind).packed_u32(data.len() as u32).bytes(data);
+        self.count = self.count.wrapping_add(1);
+    }
+
+    /// Room for `more` bytes of messages (and the head, if nothing is in yet).
+    pub fn reserve(&mut self, more: usize) {
+        self.out.0.reserve(more + if self.out.0.is_empty() { 16 } else { 0 });
+    }
+
+    /// `push` with the header (the type and size, bit-packed) made once, for a message that
+    /// goes into many batches.
+    pub fn push_with(&mut self, header: &[u8], data: &[u8]) {
+        self.start();
+        self.out.0.extend_from_slice(header);
+        self.out.0.extend_from_slice(data);
         self.count = self.count.wrapping_add(1);
     }
 
