@@ -69,16 +69,18 @@
  },
  {
   "class": "d",
-  "why": "the produce a player picks at a harvestable grower: each crop grows on a random spot of the grower's ring (GetRandomPosition: NextFloat) and the probe takes the one nearest the machine, so each run picks another object, with another id, place and rank in its step; the crop that regrows lands on another random spot (EXPECTED: randomness)",
+  "why": "the produce a player picks at a harvestable grower: each crop grows on a random spot of the grower's ring (GetRandomPosition: NextFloat) and the probe takes the one nearest the machine, so each run picks another object, with another id, place and rank in its step; the crop that regrows lands on another random spot (EXPECTED: randomness) Only the order of the items may differ: an inventory that holds other groups or other counts on one side is not covered.",
   "script": "^sweep_feed$",
   "tag": "\\|harvest from |^player\\|final inventory$",
-  "line": "WorldObjectAssociatedProxy\\.GetWorldObjectId(Client|Server)Rpc|AddWorldObjectToInventoryServerRpc|\"msg\": \"(captured|create|destroy)\"|RetrieveInventoryClientRpc"
+  "line": "WorldObjectAssociatedProxy\\.GetWorldObjectId(Client|Server)Rpc|AddWorldObjectToInventoryServerRpc|\"msg\": \"(captured|create|destroy)\"|RetrieveInventoryClientRpc",
+  "same_items": true
  },
  {
   "class": "d",
-  "why": "a disintegrator gives back its ingredients in a random order, and a random part of them when it gives back fewer than the recipe has (MachineDisintegrator.TryToDesintegrateAnObjectInInventory: Random.Range(0, list.Count) and RemoveAt, giveXIngredientsBack times; EXPECTED: randomness)",
+  "why": "a disintegrator gives back its ingredients in a random order, and a random part of them when it gives back fewer than the recipe has (MachineDisintegrator.TryToDesintegrateAnObjectInInventory: Random.Range(0, list.Count) and RemoveAt, giveXIngredientsBack times; EXPECTED: randomness) Only the order of the items may differ: an inventory that holds other groups or other counts on one side is not covered.",
   "tag": "^(DetoxificationMachine[123]|OreBreaker[123]|RecyclingMachine2)\\|(inventory|run)$",
-  "line": "InventoriesHandler\\.RetrieveInventoryClientRpc"
+  "line": "InventoriesHandler\\.RetrieveInventoryClientRpc",
+  "same_items": true
  },
  {
   "class": "b",
@@ -174,13 +176,6 @@
   "script": "^sweep_autocraft_",
   "line": "^inventories\\[\\d+\\] \\(\\d+\\)\\.woIds: ref \"NEW#[0-9,NEW#]*\" ours \"NEW#[0-9,NEW#]*\"$",
   "why": "two items of one group at one place are paired in the order of the world object list, which the random ids decide, while the inventory lists them as they arrived; the pairing can cross (EXPECTED: randomness)"
- },
- {
-  "class": "e",
-  "script": "^sweep_water$",
-  "tag": "^AlgaeGenerator[12]\\|",
-  "line": ".",
-  "why": "algae are planted on water, which the start land has none of (the game lets a player place an algae generator only on SurfaceWater): the reference plants nothing there, this server fills the generator as if it stood on water"
  },
  {
   "class": "d",
