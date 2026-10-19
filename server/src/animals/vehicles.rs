@@ -42,7 +42,8 @@ struct Vehicle {
     /// UpdateNetworkRigidBodyState._rbEnabled.
     rb_enabled: bool,
     last_position: [f32; 3],
-    next_check: f32,
+    /// f64: adding 0.15 to an f32 stops changing it at 2^22 s (48 days).
+    next_check: f64,
     disable_distance: f32,
 }
 
@@ -99,7 +100,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     if has(game, object, "OwnershipSwitcher") {
         let disable_distance = component(game, w, "UpdateNetworkRigidBodyState").first().and_then(|c| c["_disableDistance"].as_f64()).unwrap_or(30.0) as f32;
         let (owner, p) = (game.net.objects[&object].owner, w.position);
-        let next_check = game.time + FIRST_CHECK;
+        let next_check = (game.time + FIRST_CHECK) as f64;
         game.ext.animals.vehicles.vehicles.insert(object, Vehicle { owner, kinematic: false, rb_enabled: true, last_position: p, next_check, disable_distance });
         // OnNetworkSpawn in behaviour order: OwnershipSwitcher hands a server-owned vehicle to
         // the nearest client, then UpdateNetworkRigidBodyState reads the body's state.
@@ -298,8 +299,8 @@ pub fn frame(game: &mut Game) {
     }
     let vehicles: Vec<u64> = game.ext.animals.vehicles.vehicles.keys().copied().collect();
     for object in vehicles {
-        if game.time >= game.ext.animals.vehicles.vehicles[&object].next_check {
-            game.ext.animals.vehicles.vehicles.get_mut(&object).unwrap().next_check += CHECK;
+        if game.time as f64 >= game.ext.animals.vehicles.vehicles[&object].next_check {
+            game.ext.animals.vehicles.vehicles.get_mut(&object).unwrap().next_check += CHECK as f64;
             rigidbody_check(game, object);
         }
         // LockNetworkPlayerPosition.LateUpdate: a seated player is where the seat is.
