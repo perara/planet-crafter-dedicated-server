@@ -144,28 +144,9 @@ impl SaveFile {
             text.push_str(&s);
             text.push_str("\r@");
         }
-        // Only whole fields: ",\"hunger\":0.0" must not cut ",\"hunger\":0.07". Found in the text as
-        // it is, cut in one pass: removing them one by one moved the rest of the text each time
-        // (40 000 objects took half a minute).
-        let mut cuts: Vec<(usize, usize)> = Vec::new();
         for d in DEFAULTS {
-            let mut from = 0;
-            while let Some(at) = text[from..].find(d).map(|i| i + from) {
-                from = at + d.len();
-                if text[from..].starts_with([',', '}']) {
-                    cuts.push((at, from));
-                }
-            }
+            text = cut_whole_field(&text, d);
         }
-        cuts.sort_unstable();
-        let mut kept = String::with_capacity(text.len());
-        let mut last = 0;
-        for (from, to) in cuts {
-            kept.push_str(&text[last..from]);
-            last = to;
-        }
-        kept.push_str(&text[last..]);
-        text = kept;
         for key in ["gameMode", "gameDyingConsequences", "gameStartLocation"] {
             // JsonableGameState.CleanSaveStringOfVariables: ,"key":<digit>
             let pattern = format!(",\"{key}\":");
@@ -180,6 +161,24 @@ impl SaveFile {
     pub fn write(&self, path: &str) -> std::io::Result<()> {
         write_atomic(path, self.to_text().as_bytes())
     }
+}
+
+/// `text` without the field `d` (",\"hunger\":0.0"), where it is a whole field: ",\"hunger\":0.0" must
+/// not cut ",\"hunger\":0.07". One pass: cutting in place moved the rest of the text for every
+/// cut, so a save of 16,000 objects (1.7 MB) took 10 s in the game loop.
+fn cut_whole_field(text: &str, d: &str) -> String {
+    let (mut out, mut rest) = (String::with_capacity(text.len()), text);
+    while let Some(at) = rest.find(d) {
+        let after = &rest[at + d.len()..];
+        if after.starts_with([',', '}']) {
+            out.push_str(&rest[..at]);
+        } else {
+            out.push_str(&rest[..at + d.len()]);
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Writes a file atomically: a crash mid-write leaves the previous one, and the rename is on
@@ -464,6 +463,20 @@ mod tests {
         std::fs::write(&path, good).unwrap();
         assert_eq!(SaveFile::load(path.to_str().unwrap()).err().map(|e| e.kind()), Some(std::io::ErrorKind::InvalidData));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// cut_whole_field makes the text the first version made (one default cut in place after the
+    /// other), and a save of 60,000 objects takes a moment, not minutes.
+    #[test]
+    fn cutting_defaults_is_linear_and_unchanged() {
+        let one = |i: u64| json!({"id": i, "gId": "Iron", "liId": 0, "siIds": "", "pos": if i % 3 == 0 { "0,0,0" } else { "1,2,3" }, "rot": "0,0,0,0", "planet": i % 2, "hunger": if i % 5 == 0 { 0.0 } else { 0.07 }, "count": "0,0", "linkedWo": 0, "text": ""});
+        let text = |n: u64| (0..n).map(|i| serde_json::to_string(&one(i)).unwrap()).collect::<Vec<_>>().join("|\n");
+        let small = text(500);
+        assert_eq!(DEFAULTS.iter().fold(small.clone(), |t, d| cut_whole_field(&t, d)), cut_one_by_one(small));
+        let big = text(60_000);
+        let started = std::time::Instant::now();
+        let cut = DEFAULTS.iter().fold(big.clone(), |t, d| cut_whole_field(&t, d));
+        assert!(cut.len() < big.len() && started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
     }
 
     #[test]
