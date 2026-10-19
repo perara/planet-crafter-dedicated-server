@@ -57,7 +57,7 @@ Steam's callbacks wait for the frame).
 out when (the immediate answers, the 16 ms movement batches), kicks (the reason as DATA, then
 KICK; the front closes the connection 300 ms later and says GONE), saves, and keeps the panic
 guard. It ignores SIGINT and SIGTERM: the front tells it to save and stop (STOP), and a bank
-whose front is gone saves and ends. Chat events go to the front as CHAT frames; the chat rules
+whose front is gone saves and ends. The autosave (SAVE) makes its snapshot in the loop and writes the file, the backup and the S3 copy on a thread of its own (the fsyncs are hundreds of milliseconds to seconds on a busy disk); every other save, and the stop, wait for that write first. Chat events go to the front as CHAT frames; the chat rules
 go as CHATCFG; replies come back as SAY. Replies that arrive while the world stands still
 (`world.pauseWhenEmpty`) are dropped with a log line.
 
