@@ -9,3 +9,7 @@
 __pycache__/
 # Coverage reports and other rebuildable output.
 /out/
+# The plugin API crate and the example plugins build into their own folders when built by hand.
+/plugin-api/target/
+/plugin-api/Cargo.lock
+/examples/plugins/*/target/

@@ -1,0 +1,16 @@
+[package]
+name = "pcds-plugin-api"
+# The API's own version: major.minor here is the ABI's (docs/plugins-api.md, "Versioning").
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "The plugin API of the Planet Crafter dedicated server: the events, queries and actions a WebAssembly plugin sees, and the codec both sides share"
+# Permissive on purpose: a plugin that includes this crate stays under its author's own licence
+# (docs/plugins.md, "Licensing"). The server itself is GPL-3.0-or-later.
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/perara/planet-crafter-dedicated-server"
+publish = false
+
+[features]
+# For the server and for tests on a PC: nothing here needs it (the crate is no_std + alloc).
+std = []
