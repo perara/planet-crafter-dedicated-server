@@ -449,17 +449,22 @@ impl Utp {
             if self.outbox.len() > before {
                 c.backoff += 1;
             }
-            while c.in_flight.len() < c.window && !c.queued.is_empty() {
+            // The chunks that fit the window, cut off the front of the queue in one move.
+            let mut taken = 0;
+            while c.in_flight.len() < c.window && taken < c.queued.len() {
                 if c.in_flight.is_empty() {
                     c.progress = now;
                 }
-                let payload: Vec<u8> = c.queued.drain(..CHUNK.min(c.queued.len())).collect();
+                let end = taken + CHUNK.min(c.queued.len() - taken);
+                let payload = c.queued[taken..end].to_vec();
+                taken = end;
                 let sequence = c.sequence;
                 c.sequence = c.sequence.wrapping_add(1);
                 let header = c.reliable_header(PAYLOAD, sequence);
                 self.outbox.push((c.addr, packet(token, DATA, &[&[RELIABLE], &header, &payload])));
                 c.in_flight.push_back((sequence, payload, now));
             }
+            c.queued.drain(..taken);
             if c.ack_due && self.outbox.len() == before {
                 let header = c.reliable_header(ACK, 0);
                 self.outbox.push((c.addr, packet(token, DATA, &[&[RELIABLE], &header, &[0]])));
