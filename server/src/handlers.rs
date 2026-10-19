@@ -284,6 +284,12 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
 /// Panel.ChangePanelServerRpc: the panel's look; the world object keeps every panel's type.
 /// The RPC addresses one of the object's Panel behaviours by index.
 pub fn change_panel(game: &mut Game, object: u64, index: u16, sub_type: i32, refresh: bool, disolve: bool) {
+    // Only the game's own panel types: any other number would be shown to every client, saved,
+    // and counted as a new entry of a list the wire cannot carry past 65535.
+    if !(0..crate::panels::SUB_TYPES.len() as i32).contains(&sub_type) {
+        eprintln!("panel type {sub_type} is not one of the game's (0 to {}): ignored", crate::panels::SUB_TYPES.len() - 1);
+        return;
+    }
     let current = game.net.behaviour_var(object, index, "_currentSubPanelType").cloned();
     if current.is_none() || matches!(current, Some(VarValue::Plain(ref v)) if *v == enc::enumeration(sub_type)) {
         return;
@@ -370,6 +376,12 @@ pub fn gain_tokens(game: &mut Game, gained: i32) {
 /// LinkedGroupsProxy.SetLinkedGroupsServerRpc: the list is cleared, then each group added;
 /// the world object follows the list (OnListChanged).
 pub fn set_linked_groups(game: &mut Game, object: u64, hashes: &[i32]) {
+    // A group each at most: a longer list is not the game's, and a NetworkList cannot carry
+    // 65536 events or items on the wire (its count is a ushort), which would break every client.
+    if hashes.len() > game.data.groups.len() {
+        eprintln!("linked groups: {} groups sent for object {object}, more than the game has ({}): ignored", hashes.len(), game.data.groups.len());
+        return;
+    }
     let mut events = vec![ListEvent::Clear];
     events.extend(hashes.iter().map(|h| ListEvent::Add(enc::int(*h))));
     game.net.list_events(object, "LinkedGroupsProxy", "_linkedGroupsHash", events);
@@ -608,6 +620,29 @@ mod tests {
         let Some((mut g, _)) = world() else { return };
         send_scene(&mut g, 1, "ChatHandler.SendChatMessageServerRpc", &[json!("hello")]);
         assert_eq!(sent(&g, "ChatHandler.ReceiveChatMessageClientRpc").into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(Target::All, vec![json!(1), json!("hello")])]);
+    }
+
+    /// What a client sends into a NetworkList is bounded: a panel type the game has none of
+    /// would be a new entry of the constructed-panels list every time (70000 RPCs overflow the
+    /// ushort count on the wire), and a linked-groups list longer than the game has groups
+    /// would do it at once; every client's and every later joiner's copy of the object breaks.
+    #[test]
+    fn lists_clients_write_cannot_outgrow_the_wire() {
+        let Some((mut g, _)) = world() else { return };
+        let container = group_with(&g, &["TextProxy", "LinkedGroupsProxy"], true);
+        let building = group_with(&g, &["Panel"], true);
+        let (_, net) = place(&mut g, &container, [570.0, 3.0, 500.0]);
+        let (_, panel) = place(&mut g, &building, [580.0, 3.0, 500.0]);
+        let index = g.net.objects[&panel].behaviours.iter().find(|b| b.class == "Panel").unwrap().index;
+        let (handler, _) = g.net.find_class("WorldObjectsHandler").unwrap();
+        let constructed = |g: &crate::game::Game| list(g, handler, "WorldObjectsHandler", "_constructedPanelTypes").len();
+        let before = constructed(&g);
+        for sub_type in [17, 999, -1, i32::MAX] {
+            send_rpc(&mut g, 1, panel, index, "Panel.ChangePanelServerRpc", &[json!(sub_type), json!(false), json!(false)]);
+        }
+        assert_eq!(constructed(&g), before, "no entry for a panel type the game has none of");
+        send_on(&mut g, 1, net, "LinkedGroupsProxy.SetLinkedGroupsServerRpc", &[json!((0..70_000).collect::<Vec<i32>>())]);
+        assert!(list(&g, net, "LinkedGroupsProxy", "_linkedGroupsHash").len() < 1000);
     }
 
     /// Story messages: received once (an unknown one not at all), read, and both saved.
