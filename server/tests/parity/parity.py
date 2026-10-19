@@ -292,6 +292,7 @@ class Transcript:
         self.wo = {}         # allocated world object id -> "WO@step.n"
         self.wo_in_step = {}  # step -> world object ids first seen there
         self.step = 0
+        self.recycle_call = None  # (step, [center, size]) of the last RecycleContentServerRpc
         self.state = {}      # (label, var) -> value
         self.writes = {}     # (label, var) -> deltas that wrote it
         self.series = {}     # (label, var) -> [(t, value)] of numbers that drift with time
@@ -328,6 +329,20 @@ class Transcript:
         if isinstance(v, dict):
             return {k: self.norm(x) for k, x in v.items()}
         return rnd(v)
+
+    def recycle_spot(self, position):
+        """An ingredient a recycler drops lands at a random spot of the bounds the call gave it
+        (ConstructibleProxy.RecycleContent: Random.Range per axis, EXPECTED: randomness). It may
+        arrive a step or two after the call (the machines' clocks). Inside the bounds and off
+        their centre (where items are dropped as they are) it reads the same on both servers;
+        elsewhere it is the position, a difference."""
+        c = self.recycle_call
+        if c and position and self.step - c[0] <= 2:
+            (cx, cy, cz), (sx, sy, sz) = c[1]
+            d = [abs(p - m) for p, m in zip(position, (cx, cy, cz))]
+            if all(x <= s / 2 + 1e-3 for x, s in zip(d, (sx, sy, sz))) and max(d) > 1e-3:
+                return 'in the bounds of the call'
+        return position
 
     def _object(self, l, created):
         hash_ = int(l['hash'], 16)
@@ -426,7 +441,7 @@ class Transcript:
             elif m == 'create':
                 label = self._object(l, created=True)
                 o = self.objects[label]
-                self.events.append((step, {'msg': 'create', 'object': label, 'owner': o['owner'], 'position': o['position']}))
+                self.events.append((step, {'msg': 'create', 'object': label, 'owner': o['owner'], 'position': self.recycle_spot(o['position'])}))
             elif m == 'transform':
                 self.events.append((step, {'msg': 'transform', 'object': self.label(l['object']), 'position': rnd(l['position'])}))
             elif m == 'destroy':
@@ -434,6 +449,8 @@ class Transcript:
             elif m == 'call':
                 step += 1
                 self.step = step
+                if l['name'] == 'ConstructibleProxy.RecycleContentServerRpc':
+                    self.recycle_call = (step, l['args'])
                 adding = l['args'][0] if l['name'] == 'InventoriesHandler.AddNewItemToInventoryServerRpc' and 'args' in l else None
                 if 'skipped' in l:
                     self.events.append((step, {'msg': 'call', 'name': l['name'], 'skipped': l['skipped'], 'tag': l.get('tag')}))
