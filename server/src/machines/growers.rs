@@ -680,6 +680,25 @@ mod tests {
         assert_eq!(game.wos[&incubator].linked_groups, Some(vec![]));
     }
 
+    /// The parity sweep (Farm2, deconstruct): RemoveAndDestroyAllItemsFromInventory destroys a
+    /// grower's plants, and the game sends no destroy for their game objects. A plain item whose
+    /// world object is destroyed with the flag false does lose its network object (objects.rs
+    /// a_destroyed_world_object_takes_its_network_object_along).
+    #[test]
+    fn a_growers_plants_keep_their_network_objects_when_their_inventory_is_destroyed() {
+        let Some(mut game) = game() else { return };
+        let grower = build(&mut game, "VegetableGrower1", [50.0, 5.0, 0.0]);
+        crate::machines::tick(&mut game);
+        let (seeds, second) = (game.wos[&grower].linked_inventory, game.wos[&grower].secondary_inventories[0]);
+        game.add_new_item(game.data.group("Vegetable0Seed").unwrap(), seeds, 0);
+        let plant = game.inventories[&second].items[0];
+        let net = game.wos[&plant].net.expect("a plant has a network object");
+        assert!(game.ext.machines.grabbable(plant));
+        game.inventories_rpc(0, "InventoriesHandler.RemoveAndDestroyAllItemsFromInventoryServerRpc", &crate::game::Args(vec![json!(second)]));
+        assert!(!game.wos.contains_key(&plant));
+        assert!(game.net.objects.contains_key(&net), "the game sends no destroy for it");
+    }
+
     #[test]
     fn vegetable_growers_fill_grow_and_replant_when_harvested() {
         let Some(mut game) = game() else { return };

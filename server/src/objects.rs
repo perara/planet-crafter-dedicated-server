@@ -263,8 +263,12 @@ impl Game {
         // The game destroys an object's GameObject before its world object (Explode alone keeps it,
         // see meteo::explode go_off); a client that asks for the world object only, or destroys one
         // it dropped without taking it out of its inventory, would leave a network object that
-        // stands for nothing, in every client's scene and in every join.
-        if let Some(net) = wo.net {
+        // stands for nothing, in every client's scene and in every join. Except a plant of a
+        // grower (a Farm's, a VegetableGrower's): its game object is the machine's, and the game
+        // leaves it when the items of the machine's inventory are destroyed (the parity sweep:
+        // RemoveAndDestroyAllItemsFromInventory at a Farm2's deconstruction sends no destroy). It
+        // going would also read as the plant being harvested (ActionGrabable.OnDestroy).
+        if let Some(net) = wo.net.filter(|_| destroy_go || !self.ext.machines.grabbable(id)) {
             self.net.despawn(net);
         }
         if wo.linked_inventory > 0 {

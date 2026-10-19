@@ -541,6 +541,13 @@ pub fn inventory_changed(game: &mut Game, inventory: i32, wo: i32, added: bool) 
     }
 }
 
+impl Machines {
+    /// Whether the item is a plant a grower holds for harvest (see `grabbed`).
+    pub fn grabbable(&self, wo: i32) -> bool {
+        self.grab.contains_key(&wo)
+    }
+}
+
 /// ActionGrabable.grabedEvent of a picked-up object.
 pub fn grabbed(game: &mut Game, wo: i32) {
     if let Some((machine, _)) = game.ext.machines.grab.shift_remove(&wo) {
