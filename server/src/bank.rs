@@ -107,6 +107,10 @@ pub fn run(args: &[String]) {
         }
         _ => return,
     };
+    // What the start freed (the save's JSON, a snapshot's text, the tables' text) goes back to
+    // the system, not to sit in the process.
+    // SAFETY: malloc_trim only returns free memory to the system.
+    unsafe { libc::malloc_trim(0) };
     let ready = json!({"restoreMs": started.elapsed().as_secs_f64() * 1000.0 - verify_ms, "verifyMs": verify_ms, "verified": verified});
     link.send(ipc::READY, 0, ready.to_string().as_bytes());
     Bank { game, link, save_path: save_path.clone(), build_id, data_dir: dir.clone() }.serve();

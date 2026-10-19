@@ -506,6 +506,10 @@ fn scale() {
     let t = Cpu::now();
     let mut g = Game::with_clock(net_data, data, spec, save, scenes, Some(0.0));
     println!("scale: Game::new {:?}, {} world objects, {} network objects, rss {} MiB (+{} MiB), heap {} MiB", t.elapsed(), g.wos.len(), g.net.objects.len(), rss_kib() >> 10, (rss_kib() - tables_rss) >> 10, heap_bytes() >> 20);
+    let (before, t) = (rss_kib(), Cpu::now());
+    // SAFETY: malloc_trim only returns free memory to the system.
+    unsafe { libc::malloc_trim(0) };
+    println!("scale: malloc_trim(0) after the load {:?}: rss {} MiB -> {} MiB", t.elapsed(), before >> 10, rss_kib() >> 10);
     let t = Cpu::now();
     let snapshot = g.snapshot();
     let took = t.elapsed();
