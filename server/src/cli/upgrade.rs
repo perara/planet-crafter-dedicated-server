@@ -63,12 +63,23 @@ impl Ctx {
         if running {
             // The release now active may read another tables format (a stopped server gets
             // them at 'pcds start').
-            self.ensure_tables(None)?;
+            self.tables_or_undo(None, &banks, &active)?;
             say("restarting the server: every player is disconnected and reconnects");
             return self.restart_if_running();
         }
         say("the server runs it from its next start ('pcds start')");
         Ok(())
+    }
+
+    /// The tables the now-active bank's release reads, read if there are none (`ensure_tables`).
+    /// When that fails, `active` goes back to `previous`, the bank that runs: the server is not
+    /// restarted, and a later start (a reboot, a crash) must not meet a bank whose tables cannot
+    /// be had, which `pcds run` cannot start and does not fall back from.
+    fn tables_or_undo(&self, game: Option<&std::path::Path>, banks: &std::path::Path, previous: &str) -> Result {
+        self.ensure_tables(game).map(|_| ()).map_err(|e| match updater::set_active(banks, previous) {
+            Ok(()) => format!("{e}\nthe server was not restarted, and bank {previous} is still the active one"),
+            Err(undo) => format!("{e}\nand bank {previous} could not be made the active one again ({undo}): fix run/bin/active before the server restarts"),
+        })
     }
 
     /// Where releases are looked up: PCDS_RELEASES from the environment, else from server.env
@@ -165,6 +176,12 @@ mod tests {
         }
         assert_eq!(api_error("POST http://x/api/update: HTTP 400: {\"error\":\"it needs a restart\"}".into()), "it needs a restart");
         assert_eq!(api_error("connection refused".into()), "connection refused");
+        // Tables that cannot be had: the bank that runs stays the active one.
+        let banks = ctx.banks();
+        updater::set_active(&banks, "b").unwrap();
+        let e = ctx.tables_or_undo(Some(&dir.join("no-game-here")), &banks, "a").unwrap_err();
+        assert!(e.contains("is still the active one") && e.contains("not restarted"), "{e}");
+        assert_eq!(updater::active(&banks), "a");
         assert!(describe(&json!({"version": "0.6.0", "tag": "v0.6.0", "protocol": 2, "format": 1})).starts_with("pcds 0.6.0 (v0.6.0), front protocol 2, snapshot format 1"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
