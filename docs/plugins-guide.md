@@ -234,7 +234,7 @@ WebAssembly target for `cargo build`).
 | `pending` in `pcds plugin list` | installed, never approved | `pcds plugin enable ID` |
 | `changed` | a file differs from what was approved (an update, an edit) | look at what changed, `pcds plugin enable ID` again |
 | `invalid: the module imports X.Y, which this server does not provide` | the module was built with WASI or another import | build for `wasm32-unknown-unknown`, not `wasm32-wasip1` |
-| `incompatible: built for plugin ABI 2` | made for a newer API than this server | update the server, or rebuild the plugin for ABI 1 |
+| `incompatible: built for plugin ABI 2` | made for another API major than this server speaks (a major bump breaks plugins: there is no shim) | update the server, or rebuild the plugin for this server's ABI |
 | `failed: start failed: ...` | the module trapped at its start, or wants more memory than allowed | read the message; raise `memory_pages` in `[budget]` up to 1024 |
 | `plugin ID: chat: out of fuel` | an event did more work than its budget | do less per event (move work to when it is needed), or ask for more `fuel_per_event` |
 | `plugin ID: chat: trap: wasm unreachable` | the plugin panicked | read the message above it; the plugin was restarted from its last saved state |

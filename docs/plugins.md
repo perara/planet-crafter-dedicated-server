@@ -38,7 +38,7 @@ is docs/architecture.md.
    per event (0.35 ns).
 10. **State survives a hot update**: each plugin hands over opaque bytes with a version, they ride
     in the snapshot in an additive part of `ext`, the new bank prepares its plugins before the
-    world stops and only starts them after the restore. `handoff::FORMAT` is unchanged.
+    world stops and only starts them after the restore. `handoff::FORMAT` is not bumped (and may be: there is no legacy support).
 
 ## What a plugin can and cannot be
 
@@ -377,23 +377,27 @@ The state is also written to `plugins/<id>/data/<world>.state` at every world sa
 or a crash keeps it. The snapshot's state wins over the file when both exist (it is newer), and
 removing a plugin's folder removes its state with it.
 
-### The exact compatibility rule
+### The compatibility rule
 
-- `handoff::FORMAT` is **not** changed (it is 3, as before). The plugin part is a new field of
-  `Ext`: `plugins` (`#[serde(default)]`), holding `{"saved": {"states": {ID: {"version": N, "hex":
-  "..."}}, "stream": {"epoch", "next", "events", "dropped"}}}`. Every field of it has a default.
-- **A new bank reading an older snapshot** (no `plugins` part): the default is used; plugins
-  start from their files on disk (the last world save), or empty.
-- **An older bank reading a newer snapshot**: the unknown `plugins` field is ignored (no type of
-  the snapshot denies unknown fields); such a bank has no plugin host, so nothing was lost that it
-  could have used. A hot update *to* an older release (rollback) therefore keeps the world and
-  drops plugin state from the snapshot; the file on disk still holds the last saved state.
-- **Inside the part**: adding a field needs `#[serde(default)]`; renaming or removing one needs a
-  `FORMAT` bump and a step in `handoff::migrate`, as for any state. The bytes of a plugin's state
-  are the plugin's business and its `load`'s.
-- The check `handoff::verify` (PCDS_FLIP_VERIFY) compares the restored state with the snapshot's,
-  including this part, and the tests restore into a second game and verify
-  (`plugins::game_tests`, and `tests/hot_update.rs` through real flips).
+The project has no legacy support (docs/plugins-api.md, "Versioning and compatibility"): the
+plugin part is a normal part of the current snapshot format, not a second format kept alive.
+
+- `handoff::FORMAT` is **not bumped** by the plugin part (it is 3 as before): it is a new field
+  of `Ext`, `plugins` (`#[serde(default)]`), holding `{"saved": {"states": {ID: {"version": N,
+  "hex": "..."}}, "stream": {"epoch", "next", "events", "dropped"}}}`, every field with a default.
+  That was the smaller change to code another agent is rewriting; bumping the number, with a
+  step in `handoff::migrate`, would have been just as allowed.
+- What follows from serde is a fact, not a promise: a snapshot without the part reads as no
+  state (plugins start from their files on disk, or empty), and no type of the snapshot denies
+  unknown fields.
+- A later change to the part's shape that an older reader cannot read **bumps `FORMAT`**; the front
+  then refuses the hot update and the server is restarted (`pcds upgrade --restart`). Nothing
+  keeps the old shape readable.
+- The bytes of a plugin's state are the plugin's business: it raises its state version and reads
+  the old one in `load`.
+- `handoff::verify` (PCDS_FLIP_VERIFY) compares the restored state with the snapshot's, including
+  this part, and the tests restore into a second game and verify (`plugins::game_tests`, and
+  `tests/hot_update.rs` through real flips).
 
 The change to the files another agent is rewriting is small and isolated in its own commit:
 `ext.rs` (one field) and `bank.rs` (the call to `plugins::checkpoint` before the snapshot, two
@@ -497,6 +501,9 @@ The server is GPL-3.0-or-later. What that means for a plugin, honestly:
 | Rules (`speed.*`, `gauges.*`...) | `rules.rs`, read by the game's code | stays core: it changes how the game computes, and parity depends on it | plugins change rules with `rules.write`; `rules::set` emits `rule_change` |
 | Backups to S3 | `s3.rs` called from `bank.rs`: network I/O and a thread in the game process, with process-wide statics that a flip resets | the first user of a future `net.http` capability, on `world_saved`, its status kept as plugin state | the event exists; the capability and the thread model do not. Until then it stays where it is |
 | `world.pauseWhenEmpty`, the pause | the clock | stays core | |
+
+Chat has one path (`events::chat`, with the chat hooks as its first subscriber); no parallel one was
+kept. When the front's worker moves onto the stream, the old worker is deleted, not kept beside it.
 
 Things that change how the game computes are never plugins. Things that tell the outside, or add
 behaviour next to the game, are.

@@ -13,7 +13,7 @@ Versions in this release:
 | plugin ABI | 1.0 (`ABI 1.0`; `pcds_plugin_api::ABI`, `0x0001_0000`) |
 | `pcds-plugin-api` crate | 0.1.0 |
 | manifest (`plugin.toml`) | the keys below; unknown keys are refused |
-| snapshot | `handoff::FORMAT` 3, with an optional `ext.plugins` part (docs/plugins.md, "The exact compatibility rule") |
+| snapshot | `handoff::FORMAT` 3, with the `ext.plugins` part (docs/plugins.md, "The compatibility rule") |
 
 ## A plugin is
 
@@ -287,37 +287,38 @@ restarts and the ids begin again: start from `after: 0` when it does.
 
 ## Versioning and compatibility
 
-Three numbers, each with its own rule.
+**The policy: semver-style, and a major bump breaks plugins.** There is no legacy support, no
+shim for an old API, no deprecation period. A plugin is built for one ABI major; the server checks
+that one number and refuses a plugin of another major with a plain message ("built for plugin ABI
+2; this server speaks 1"). The author rebuilds.
 
-**The ABI** (`major.minor`, in `pcds_abi`). *Minor* rises for additions that do not break a
-module built for the earlier minor: a new event kind, a new field at the end of an event, a new
-query kind, a new import, a new capability. *Major* rises for anything else: a changed or removed
-import or export, a changed meaning, a reordered field. The server runs a module of the same major
-and a minor not newer than its own. Because modules ignore bytes after the fields they know and
-answer 0 to kinds they do not know, a module built for 1.0 runs on every 1.x server; a module
-built for 1.3 refuses cleanly on a 1.1 server ("built for plugin ABI 1.3; this server speaks
-1.1"). A new import a module uses that an old server lacks is also named in the message.
-A new *major* is run by a server that carries both for one release before the old one is
-dropped; the release notes say so.
+**The ABI** (`major.minor`, in `pcds_abi` and `abi` in the manifest). *Minor* rises for additions
+that cost an old module nothing: a new event kind, a new field at the end of an event, a new query
+kind, a new import, a new capability. *Major* rises for anything else: a changed or removed import
+or export, a changed meaning, a reordered field, and whenever the project finds the old shape in
+the way. The server runs a module of the same major and a minor not newer than its own: a module
+built for 1.3 is refused cleanly by a 1.1 server ("built for plugin ABI 1.3; this server speaks
+1.1"). Modules ignore bytes after the fields they know and answer 0 to kinds they do not know,
+so a module built for 1.0 runs on every 1.x server.
 
-**The `pcds-plugin-api` crate** follows the ABI: `0.x` while the ABI is 1.x and the API is
-young (a `0.x` minor may change Rust signatures but never the ABI's meaning), then the crate's
-major follows the ABI's major.
+**The `pcds-plugin-api` crate** follows the ABI: `0.x` while the ABI is 1.x and the API is young
+(a `0.x` minor may change Rust signatures), then its major follows the ABI's major.
 
 **The server's release** (README, `pcds upgrade`) is separate. A plugin states the oldest server
-it runs on (`min_server`), and the newest it was tested on is the plugin's to say. Changes to the
-API are listed in the release notes under "Plugins". `pcds plugin check` on the new server tells an
-admin which installed plugins still hold up before a hot update. A hot update to a release with
-another ABI major starts the new bank with plugins that do not fit as `incompatible`; the world and
-the other plugins go on.
+it runs on (`min_server`). Changes to the API are listed in the release notes under "Plugins";
+`pcds plugin check` on the new server tells an admin which installed plugins still hold up. A
+release with another ABI major starts its plugins that do not fit as `incompatible` or `failed`;
+the world and the other plugins go on.
 
-**Deprecation**: a function or event kind is marked deprecated for at least one minor release
-before a major removes it; a deprecated one keeps working and logs once per start per plugin that
-uses it.
+**The snapshot.** The plugins' state is part of the current snapshot format (`ext.plugins`). A
+change to its shape that an older reader cannot read bumps `handoff::FORMAT`, which means the
+front refuses a hot update across it and the server is restarted (`pcds upgrade --restart`); there
+is no second reader kept for the old shape. A plugin's own state bytes are its author's: it raises
+its state version and reads the old one in `load`, or starts empty.
 
-**What does not change within a major**: the names and numbers of the kinds, the order of existing
-fields, the meaning of return codes, the capability names, the manifest keys that exist, the
-`approved.json` format, the endpoints above and their fields (new fields are added).
+**What does not change within a major**: the names and numbers of the kinds, the order of
+existing fields, the meaning of return codes, the capability names, the manifest keys that exist,
+the `approved.json` format, the endpoints above and their fields (new fields are added).
 
 ## Faults, in the log
 
