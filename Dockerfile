@@ -10,6 +10,9 @@ RUN cargo build --release --locked \
   && cp "$(ls -t target/release/build/steamworks-sys-*/out/libsteam_api.so | head -1)" target/release/
 
 FROM debian:trixie-slim
+LABEL org.opencontainers.image.source="https://github.com/perara/planet-crafter-dedicated-server" \
+      org.opencontainers.image.description="The Planet Crafter dedicated server: hot updates inside the container (docs/docker.md)" \
+      org.opencontainers.image.licenses="GPL-3.0-or-later"
 # curl and the 32-bit libraries: steamcmd (the game download, steamclient.so for invite codes).
 RUN apt-get update \
   && apt-get install -y --no-install-recommends curl ca-certificates lib32gcc-s1 lib32stdc++6 tini \
@@ -31,4 +34,8 @@ EXPOSE 7777/udp 7782/tcp
 # reads the game tables first). Needs PCDS_ADMIN on, as it is by default.
 HEALTHCHECK --interval=30s --timeout=15s --start-period=10m --retries=3 \
   CMD pcds api GET /api/status > /dev/null || exit 1
+# The stop (SIGTERM) saves the world: the server needs up to 80 s of the 90 that `docker stop`
+# must be given (--stop-timeout 90, Compose stop_grace_period, Kubernetes
+# terminationGracePeriodSeconds 120); an image cannot set that itself.
+STOPSIGNAL SIGTERM
 ENTRYPOINT ["tini", "--", "/opt/pcds/entrypoint.sh"]
