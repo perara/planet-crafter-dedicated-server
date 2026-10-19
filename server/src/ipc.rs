@@ -102,6 +102,8 @@ pub fn encode(kind: u8, n: u64, body: &[u8]) -> Vec<u8> {
 pub struct Link {
     pub stream: UnixStream,
     inbox: Vec<u8>,
+    /// Where the next frame starts: taken frames stay until fill() drops them in one move.
+    taken: usize,
     fds: VecDeque<OwnedFd>,
     outbox: VecDeque<Out>,
     /// Bytes queued per client (front only): the caller drops a client over its bound.
@@ -116,7 +118,7 @@ impl Link {
     pub fn new(stream: UnixStream) -> Link {
         // SAFETY: F_GETFL only reads the descriptor's flags.
         let blocking = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) & libc::O_NONBLOCK == 0 };
-        Link { stream, inbox: Vec::new(), fds: VecDeque::new(), outbox: VecDeque::new(), queued: Default::default(), blocking, broken: None }
+        Link { stream, inbox: Vec::new(), taken: 0, fds: VecDeque::new(), outbox: VecDeque::new(), queued: Default::default(), blocking, broken: None }
     }
 
     pub fn fd(&self) -> RawFd {
@@ -197,6 +199,8 @@ impl Link {
         if self.broken.is_some() {
             return false;
         }
+        self.inbox.drain(..self.taken);
+        self.taken = 0;
         let mut buf = vec![0u8; 1 << 16];
         let mut read = 0;
         while read < max {
@@ -224,15 +228,17 @@ impl Link {
         if self.broken.is_some() {
             return None;
         }
-        let n = u32::from_le_bytes(self.inbox.get(..4)?.try_into().ok()?) as usize;
+        let rest = &self.inbox[self.taken..];
+        let n = u32::from_le_bytes(rest.get(..4)?.try_into().ok()?) as usize;
         if !(9..=MAX_FRAME).contains(&n) {
             self.broken = Some(format!("a frame of {n} bytes (a frame is 9 to {MAX_FRAME})"));
             self.inbox.clear();
+            self.taken = 0;
             return None;
         }
-        let f = self.inbox.get(4..4 + n)?;
+        let f = rest.get(4..4 + n)?;
         let (kind, num, body) = (f[0], u64::from_le_bytes(f[1..9].try_into().ok()?), f[9..].to_vec());
-        self.inbox.drain(..4 + n);
+        self.taken += 4 + n;
         let fd = if carries_fd(kind, &body) { self.fds.pop_front() } else { None };
         Some(Frame { kind, n: num, body, fd })
     }
@@ -402,6 +408,25 @@ mod tests {
             bank.send(DATA, 1, b"x");
             assert!(!front.fill(usize::MAX) && front.next().is_none());
         }
+    }
+
+    /// A hostile client's datagrams hold hundreds of 1-byte batches each; the bank reads them
+    /// all at once, so taking a frame off the inbox must not move everything behind it.
+    #[test]
+    fn a_flood_of_tiny_frames_is_read_in_linear_time() {
+        let (a, _b) = UnixStream::pair().unwrap();
+        let mut link = Link::new(a);
+        let frames = 100_000;
+        for _ in 0..frames {
+            link.inbox.extend_from_slice(&encode(DATA, 1, b"x"));
+        }
+        let start = Instant::now();
+        let mut read = 0;
+        while link.next().is_some() {
+            read += 1;
+        }
+        assert_eq!(read, frames);
+        assert!(start.elapsed() < Duration::from_secs(2), "{frames} frames took {:?}", start.elapsed());
     }
 
     /// The socket's cost alone, between two processes (docs/hot-update.md, "Latency budget"):
