@@ -1130,7 +1130,15 @@ def noise_keys(run, script):
     return keys
 
 
-def classify(rules, script, tag, line, noise=(), paired=True, same_items=True):
+def alike(sides, ignore):
+    """Both sides created the object, and alike in everything but the fields in `ignore`."""
+    if set(sides) < {'-', '+'}:
+        return False
+    strip = lambda b: {k: v for k, v in b.items() if k not in ignore}
+    return strip(sides['-']) == strip(sides['+'])
+
+
+def classify(rules, script, tag, line, noise=(), sides=None, same_items=True):
     for r in rules:
         if r.get('kind') == 'settled':
             if settled(line):
@@ -1140,7 +1148,7 @@ def classify(rules, script, tag, line, noise=(), paired=True, same_items=True):
             if close_rates(line):
                 return r['class'], r['why']
             continue
-        if r.get('paired') and not paired:
+        if r.get('paired') and sides is not None and not alike(sides, {'owner', *r.get('ignore', [])}):
             continue
         if r.get('same_items') and not same_items and 'RetrieveInventoryClientRpc' in line:
             continue
@@ -1174,14 +1182,11 @@ def report(t, out, run, rules_path, cs_dir=None):
         for tag, label, line, step in diffs:
             m = re.search(r'"msg": "create", "object": "([^"]+)"', line)
             if m:
-                body = json.loads(line[line.index('{'):])
-                body.pop('owner', None)
-                made.setdefault((step, m.group(1)), {})[line[0]] = body
+                made.setdefault((step, m.group(1)), {})[line[0]] = json.loads(line[line.index('{'):])
         # What an inventory held on each side at a step: only the order of a random few may differ.
         held = {}
         for tag, label, line, step in diffs:
-            m = re.search(r'"name": "InventoriesHandler.RetrieveInventoryClientRpc".*', line)
-            if m and line[0] in '-+':
+            if 'RetrieveInventoryClientRpc' in line and line[0] in '-+':
                 a = json.loads(line[line.index('{'):])['args']
                 held.setdefault((step, a[1]), {})[line[0]] = sorted(a[2])
         for tag, label, line, step in diffs:
@@ -1190,17 +1195,17 @@ def report(t, out, run, rules_path, cs_dir=None):
                 a = json.loads(line[line.index('{'):])['args']
                 sides = held.get((step, a[1]), {})
                 same_items = set(sides) >= {'-', '+'} and sides['-'] == sides['+']
+            # An object both sides created in a step differs in how (who owns it, its physics); an
+            # object only one side created is a real difference, whatever its owner. A rule for the
+            # owner of a drop never covers a different hash, flags, rotation or place.
             m = re.search(r'"object": "(new:[^"]+)"', line)
-            sides = made.get((step, m.group(1)), {}) if m else {}
-            # Both sides created it, and alike in everything but who owns it (hash, flags, rotation,
-            # position): a rule for the owner of a drop never covers a different object.
-            paired = not m or (set(sides) >= {'-', '+'} and sides['-'] == sides['+'])
+            sides = made.get((step, m.group(1)), {}) if m else None
             if tag:
                 key = tuple(tag.split('|', 1))
             else:
                 m = re.match(r'new:([^#]+)#', label or '')
                 key = (prefab_group.get(m.group(1), m.group(1)), 'state') if m else ('world', 'state')
-            results.setdefault(key, []).append((script, *classify(rules, script, tag, line, noise, paired, same_items), line))
+            results.setdefault(key, []).append((script, *classify(rules, script, tag, line, noise, sides, same_items), line))
         for line in open(f'{run}/{script.split(".")[0]}.savediff') if os.path.exists(f'{run}/{script.split(".")[0]}.savediff') and not script.endswith('.B') else []:
             line = line.rstrip('\n')
             if re.match(r'\d+ save difference', line):
