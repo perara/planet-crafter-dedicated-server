@@ -47,6 +47,8 @@ frames with the autosave setting; the answer comes back as ANSWER, and the front
 with more than 16 MiB waiting for the game (held during a flip, or a stalled bank) is dropped.
 The bank writes blocking: a front that stopped reading stalls the world, which loses nothing.
 The frames queued together go out in one write (writev; a frame with a descriptor alone). The
+front loops every 5 ms; with nobody connected and no flip under way it loops every 20 ms (a
+connection, a bank frame or a signal wakes it at once; an admin request waits for the frame).
 
 **The bank** is the server loop's game half: it builds and parses batches, decides what goes
 out when (the immediate answers, the 16 ms movement batches), kicks (the reason as DATA, then
