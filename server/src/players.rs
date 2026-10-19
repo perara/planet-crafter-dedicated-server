@@ -178,6 +178,7 @@ impl Game {
             c.ready = Some(state);
         }
         crate::scene::player_count_changed(self);
+        crate::events::player_joined(self, client);
     }
 
     /// The player's object went away: their state goes back to the save list, the others see
@@ -194,6 +195,7 @@ impl Game {
             self.saved_players.retain(|p| p["id"].as_u64() != Some(state.id));
             self.saved_players.push(entry);
             self.net.rpc_scene(Target::Except(c.id), "ChatHandler.ReceiveServicePlayerLeftMessageClientRpc", &[json!(state.name)]);
+            crate::events::player_left(self, c.id, &state.name);
         }
         if let Some(object) = c.player {
             self.net.despawn(object);

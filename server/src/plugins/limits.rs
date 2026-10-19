@@ -1,0 +1,85 @@
+//! What a plugin may cost. The host's numbers are maxima: a manifest may ask for less than the
+//! default or for more up to the maximum, and the admin may lower either in approved.json. A
+//! plugin that goes over is stopped in that call (fuel, memory) and counts a fault; too many
+//! faults in a short time switch it off (docs/plugins.md, "Budgets and faults").
+//!
+//! Fuel is the interpreter's own count of work: about one unit per simple instruction. Measured
+//! on the development host, 1,000,000 fuel is a third of a millisecond of plain arithmetic;
+//! `plugins::bench` prints the rate of the machine it runs on.
+
+use std::time::Duration;
+
+/// Fuel for one event, by default and at most. 1,000,000 is 0.3 ms of plain arithmetic.
+pub const FUEL_PER_EVENT: u64 = 1_000_000;
+pub const MAX_FUEL_PER_EVENT: u64 = 20_000_000;
+/// Fuel for `pcds_save` (the state a hot update carries), by default and at most.
+pub const FUEL_PER_SAVE: u64 = 5_000_000;
+pub const MAX_FUEL_PER_SAVE: u64 = 50_000_000;
+/// Fuel for starting a plugin (the module's start function and `pcds_load`).
+pub const FUEL_LOAD: u64 = 100_000_000;
+
+/// 64 KiB pages of memory: 64 is 4 MiB; at most 1024 is 64 MiB.
+pub const MEMORY_PAGES: u32 = 64;
+pub const MAX_MEMORY_PAGES: u32 = 1024;
+/// A module bigger than this is not loaded.
+pub const MAX_MODULE_BYTES: usize = 8 << 20;
+
+/// How often a plugin that subscribed to `tick` is called, in game milliseconds, by default;
+/// the least a manifest may ask for is every game tick.
+pub const TICK_EVERY_MS: u32 = 1000;
+pub const MIN_TICK_MS: u32 = 5;
+/// All plugins together may spend this on ticks within one game tick; the plugins left over wait
+/// for the next one (they take turns), so a crowd of plugins never stretches a tick.
+pub const TICK_BUDGET: Duration = Duration::from_micros(2000);
+/// All plugins together may spend this on saving their state when the world is handed over to
+/// the next bank; one that is not done keeps the state of its last save.
+pub const FLIP_BUDGET: Duration = Duration::from_millis(25);
+/// A call that takes longer than this is counted as slow and logged (the fuel limit is what stops
+/// it; this is for finding it).
+pub const SLOW_CALL: Duration = Duration::from_millis(5);
+
+/// Actions a plugin may queue in one call, and in one second.
+pub const ACTIONS_PER_CALL: usize = 16;
+pub const ACTIONS_PER_SECOND: u32 = 200;
+/// Rule changes (each writes rules.json) per second per plugin.
+pub const RULE_CHANGES_PER_SECOND: u32 = 2;
+/// Log lines per second (the rest are counted), and the longest line.
+pub const LOG_LINES_PER_SECOND: u32 = 20;
+pub const LOG_LINE_CHARS: usize = 240;
+/// A chat line a plugin says, in characters (the chat's own limit).
+pub const SAY_CHARS: usize = 500;
+/// The state blob, at most (more is not kept; the plugin counts a fault).
+pub const MAX_STATE_BYTES: usize = 1 << 20;
+/// What a query answer or an event payload may hold.
+pub const MAX_PAYLOAD: usize = 1 << 20;
+
+/// This many faults within FAULT_WINDOW switch the plugin off until it is reloaded or enabled again.
+pub const MAX_FAULTS: usize = 5;
+pub const FAULT_WINDOW: Duration = Duration::from_secs(60);
+
+/// Plugins loaded at most.
+pub const MAX_PLUGINS: usize = 64;
+
+/// What one plugin may use, after the manifest and the admin's overrides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub fuel_per_event: u64,
+    pub fuel_per_save: u64,
+    pub memory_pages: u32,
+    pub tick_every_ms: u32,
+}
+
+impl Limits {
+    /// The manifest's request (or the defaults) under the host's maxima, then under the admin's
+    /// own lowering.
+    pub fn resolve(asked: &super::manifest::Budget, admin: &super::approvals::Overrides) -> Limits {
+        let low = |a: Option<u64>, o: Option<u64>, default: u64, max: u64| a.unwrap_or(default).min(max).min(o.unwrap_or(u64::MAX)).max(1);
+        Limits {
+            fuel_per_event: low(asked.fuel_per_event, admin.fuel_per_event, FUEL_PER_EVENT, MAX_FUEL_PER_EVENT),
+            fuel_per_save: low(asked.fuel_per_save, admin.fuel_per_save, FUEL_PER_SAVE, MAX_FUEL_PER_SAVE),
+            memory_pages: low(asked.memory_pages.map(u64::from), admin.memory_pages.map(u64::from), MEMORY_PAGES as u64, MAX_MEMORY_PAGES as u64) as u32,
+            // A tick interval is the other way round: the admin can only make it longer.
+            tick_every_ms: asked.tick_every_ms.unwrap_or(TICK_EVERY_MS).max(admin.tick_every_ms.unwrap_or(0)).max(MIN_TICK_MS),
+        }
+    }
+}

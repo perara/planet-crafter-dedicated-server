@@ -350,6 +350,7 @@ pub fn set(game: &mut Game, rules: Rules) -> Result<(), String> {
     }
     let old = std::mem::replace(&mut game.rules, rules);
     changed(game, &old);
+    crate::events::rules_changed(game);
     Ok(())
 }
 

@@ -21,7 +21,7 @@ use crate::game::Game;
 use crate::ipc::{self, Link};
 use crate::net::Target;
 use crate::save::SaveFile;
-use crate::{access, chathooks, config, dashboard, protocol, rules, save, status, units, wire};
+use crate::{access, chathooks, config, dashboard, plugins, protocol, rules, save, status, units, wire};
 
 /// What this bank says in its HELLO, and `pcds bank-info` prints: its version, the front
 /// protocol it speaks, the snapshot format it writes and the ones it reads, and the format of
@@ -60,6 +60,10 @@ pub fn run(args: &[String]) {
     let (net_data, data, spec) = crate::tables(dir);
     let scenes = crate::scene_tables(dir, &net_data, &data);
     let build_id = std::fs::read_to_string(format!("{dir}/buildid")).ok().map(|b| b.trim().to_string());
+    // The plugins are read and compiled now, with the tables, while the old bank still plays: after a
+    // restore only their start is left (a hot update stops the world for that, not for this).
+    let plugins = plugins_dir(save_path);
+    let prepared = plugins::prepare(&plugins, &world_name(save_path));
     let mut hello = info();
     hello["gameVersion"] = net_data.game_version.clone().into();
     let protocol = if fail_for_test("protocol") { 999 } else { ipc::PROTOCOL };
@@ -107,6 +111,8 @@ pub fn run(args: &[String]) {
         }
         _ => return,
     };
+    let mut game = game;
+    plugins::attach(&mut game, prepared);
     let ready = json!({"restoreMs": started.elapsed().as_secs_f64() * 1000.0 - verify_ms, "verifyMs": verify_ms, "verified": verified});
     link.send(ipc::READY, 0, ready.to_string().as_bytes());
     Bank { game, link, save_path: save_path.clone(), build_id, data_dir: dir.clone() }.serve();
@@ -160,6 +166,17 @@ fn beside_save(save_path: &str, name: &str) -> String {
 
 fn rules_path(save_path: &str) -> String {
     crate::env("PCDS_RULES").unwrap_or_else(|| beside_save(save_path, "rules.json"))
+}
+
+/// The plugins' folder: beside the rules file (run/plugins for an installation, next to the world for a
+/// server started by hand).
+fn plugins_dir(save_path: &str) -> std::path::PathBuf {
+    std::path::Path::new(&rules_path(save_path)).with_file_name("plugins")
+}
+
+/// The world's name: its save's file name without the extension.
+fn world_name(save_path: &str) -> String {
+    std::path::Path::new(save_path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "world".into())
 }
 
 fn access_path(save_path: &str) -> String {
@@ -496,11 +513,13 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
                 "objects": {"world": game.wos.len(), "network": game.net.objects.len(), "inventories": game.inventories.len()},
                 "held": game.held,
                 "s3": crate::s3::status(&game.rules.backup),
+                "plugins": plugins::admin::summary(game),
                 "lastSave": LAST_SAVE.with_borrow(Value::clone),
             });
             (200, body.to_string())
         }
         ("POST", "/api/save") => kept(persist(game, ctx.save_path)),
+        (_, p) if p.starts_with("/api/plugins") => plugins::admin::request(game, method, path, body),
         ("POST", "/api/kick") => match who(body).and_then(|w| find_client(game, &w)) {
             Ok(Some(c)) => {
                 game.kick(c, "Kicked");
@@ -740,6 +759,11 @@ fn persist(game: &mut Game, path: &str) -> Result<(), String> {
     let saved = game.snapshot().write(path).map_err(|e| format!("{path}: {e}"));
     let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     LAST_SAVE.set(json!({"ok": saved.is_ok(), "at": at, "error": saved.as_ref().err()}));
+    // The plugins hear of it, and keep their state beside the world's.
+    contained("the plugins' state", || {
+        crate::events::world_saved(game, saved.is_ok());
+        plugins::saved(game);
+    });
     match &saved {
         Ok(()) => println!("saved {path}"),
         Err(e) => eprintln!("save failed: {e}"),

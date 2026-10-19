@@ -29,6 +29,7 @@ pub fn tick(game: &mut Game) {
     crate::rockets::tick(game);
     crate::planets::tick(game);
     crate::animals::tick(game);
+    crate::events::tick(game);
 }
 
 pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str, a: &Args) -> bool {
@@ -48,6 +49,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     crate::rockets::on_instantiated(game, wo);
     crate::planets::on_instantiated(game, wo);
     crate::animals::on_instantiated(game, wo);
+    crate::events::object_placed(game, wo);
 }
 
 pub fn on_destroyed(game: &mut Game, wo: &WorldObject) {
@@ -57,6 +59,7 @@ pub fn on_destroyed(game: &mut Game, wo: &WorldObject) {
     crate::rockets::on_destroyed(game, wo);
     crate::planets::on_destroyed(game, wo);
     crate::animals::on_destroyed(game, wo);
+    crate::events::object_destroyed(game, wo);
 }
 
 pub fn inventory_changed(game: &mut Game, inventory: i32, wo: i32, added: bool) {

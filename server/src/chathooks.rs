@@ -198,7 +198,7 @@ pub fn drop_replies(game: &mut Game) {
 }
 
 /// "!tp home" with prefix "!": ("tp", ["home"]). None: no prefix, or not a command.
-fn command(prefix: Option<&str>, text: &str) -> Option<(String, Vec<String>)> {
+pub(crate) fn command(prefix: Option<&str>, text: &str) -> Option<(String, Vec<String>)> {
     let rest = text.trim_start().strip_prefix(prefix.filter(|p| !p.is_empty())?)?;
     if rest.starts_with(char::is_whitespace) {
         return None;
