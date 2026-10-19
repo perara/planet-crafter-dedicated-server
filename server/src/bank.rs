@@ -570,8 +570,12 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
             Err(e) => (400, json!({"error": e}).to_string()),
         },
         ("POST", "/api/settings") => {
-            if let Some(m) = body["autosaveMinutes"].as_u64() {
-                *autosave = m.min(crate::MAX_AUTOSAVE);
+            // Another key (the plugin API's own) is not this server's to refuse; a given
+            // autosaveMinutes that is no whole number must not be taken as done.
+            match body.get("autosaveMinutes").map(|m| m.as_u64()) {
+                Some(None) => return (400, "{\"error\":\"'autosaveMinutes': a whole number of minutes\"}".into()),
+                Some(Some(m)) => *autosave = m.min(crate::MAX_AUTOSAVE),
+                None => {}
             }
             ok()
         }
@@ -1062,6 +1066,12 @@ mod tests {
         let Some(mut game) = game::test_game(game::tests::save()) else { return };
         let mut autosave = 5;
         call(&mut game, "POST", "/api/settings", json!({"autosaveMinutes": 160_000_000_000_000_000u64}), &mut autosave);
+        assert_eq!(autosave, crate::MAX_AUTOSAVE);
+        // Not a whole number: refused, and the interval stays.
+        for bad in [json!(2.5), json!(-1), json!("5"), json!(null)] {
+            let (status, answer) = call(&mut game, "POST", "/api/settings", json!({"autosaveMinutes": bad}), &mut autosave);
+            assert!(status == 400 && answer["error"].as_str().unwrap().contains("whole number"), "{bad}: {status} {answer}");
+        }
         assert_eq!(autosave, crate::MAX_AUTOSAVE);
     }
 
