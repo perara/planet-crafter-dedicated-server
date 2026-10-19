@@ -132,7 +132,11 @@ impl Session {
                     None => json!({"msg": "create", "hex": hex_of(body)}),
                 }
             }
-            DESTROY_OBJECT => json!({"msg": "destroy", "id": Reader::new(body).packed_u64()}),
+            DESTROY_OBJECT => {
+                let id = Reader::new(body).packed_u64();
+                self.spawned.retain(|(o, _, _)| Some(*o) != id);
+                json!({"msg": "destroy", "id": id})
+            }
             NETWORK_VARIABLE_DELTA => {
                 let mut r = Reader::new(body);
                 json!({"msg": "delta", "object": r.packed_u64(), "behaviour": r.packed_u16(), "hex": hex_of(r.rest())})
