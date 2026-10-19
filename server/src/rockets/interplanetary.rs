@@ -75,7 +75,6 @@ pub fn inventory_changed(game: &mut Game, inventory: i32, wo: i32, added: bool) 
 }
 
 /// Inventory.inventoryContentGrowthFinished on a watched inventory (an item grown inside it).
-#[allow(dead_code)]
 pub fn inventory_growth_finished(game: &mut Game, inventory: i32, wo: i32) {
     let Some(&owner) = game.ext.rockets.interplanetary.inventories.get(&inventory) else { return };
     let Some(group) = game.wos.get(&wo).map(|w| w.group) else { return };

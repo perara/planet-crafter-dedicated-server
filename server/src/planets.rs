@@ -163,7 +163,6 @@ pub fn switch_to_planet(game: &mut Game, planet_hash: i32, rocket_wo: i32, spawn
 /// WorldRandomizer.GetReplacementForGroup: what a mineable group becomes in a world with
 /// randomized mineables (the world seed picks it, the same on every peer). Clients replace
 /// their scene minables themselves; the server needs it for ore veins (extractors).
-#[allow(dead_code)]
 pub fn randomized_group(game: &Game, group: usize) -> Option<usize> {
     if game.save.settings["randomizeMineables"].as_bool() != Some(true) {
         return None;

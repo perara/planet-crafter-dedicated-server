@@ -170,7 +170,6 @@ fn send_rocket(game: &mut Game, wo: i32, client: Option<u64>) {
 }
 
 /// AddToRocketBackAndForthSpeedMultiplier (MachineOptimizer's fuses).
-#[allow(dead_code)]
 pub fn add_speed_multiplier(game: &mut Game, wo: i32, delta: f32) {
     let Some(m) = machine(game, wo) else { return };
     m.speed_multiplier += delta;
