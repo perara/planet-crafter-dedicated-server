@@ -474,7 +474,6 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
             let planet_units: serde_json::Map<String, Value> = game.units.planet(game.planet_hash()).map(|p| p.units.iter().map(|u| (u.kind.unit_type().to_string(), json!({"value": u.total, "perSecond": u.per_sec}))).collect()).unwrap_or_default();
             let body = json!({
                 "state": "running",
-                "standalone": true,
                 "gameVersion": game.net_data.game_version,
                 "save": std::path::Path::new(ctx.save_path).file_stem().map(|s| s.to_string_lossy().to_string()),
                 "autosaveMinutes": *autosave,
