@@ -1280,6 +1280,9 @@ impl Front {
     /// or {"rollback": true}: back to the other bank. The answer comes at once with the
     /// request's "seq"; GET /api/update has its outcome in "history" when done.
     fn update_request(&mut self, body: &Value) -> (u16, String) {
+        if self.phase == Phase::Stopped {
+            return (409, json!({"error": "the world is stopped: start it first (an update hands the running world over to the new bank), or install it with a restart: pcds upgrade --restart"}).to_string());
+        }
         if self.updates.busy.is_some() || self.phase != Phase::Idle {
             return (409, json!({"error": "an update or a flip is under way", "doing": self.updates.busy.as_ref().map(|b| b.1.clone())}).to_string());
         }
@@ -1837,6 +1840,15 @@ mod tests {
         front.admin_requests();
         let (status, body) = answer.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(status == 400 && body.contains("a world's name"), "{status} {body}");
+    }
+
+    /// A stopped world says so to an update request, not that "an update or a flip is under way".
+    #[test]
+    fn an_update_of_a_stopped_world_says_it_is_stopped() {
+        let mut front = test_front();
+        front.phase = Phase::Stopped;
+        let (status, body) = front.update_request(&json!({"check": true}));
+        assert!(status == 409 && body.contains("the world is stopped"), "{status} {body}");
     }
 
     /// A panic in an update's thread is that update's failure, not a busy update for ever.
