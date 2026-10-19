@@ -102,6 +102,18 @@ energy: the grower's random state).
 
 ## Not comparable
 
+- **Water**: the start save's land has none (Prime's lake is still to rise). The ten buildings
+  the game lets a player place only on water (`ConstraintOnSurfaces` with SurfaceWater alone:
+  AlgaeGenerator1/2, FishFarm1/2, ToxicWaterCollector1..3, TreeSpreader0, WaterCollector2,
+  WaterLifeCollector1) are built on dry land in `sweep_water`; there a client could not place
+  them. Nine behave the same. An algae generator plants on the water surface below it: the
+  reference plants nothing on land, this server fills the generator as if it stood on water.
+- **A door on a floor** (Panel.ChangePanelServerRpc with a wall look for a floor panel, which no
+  client sends): the game then also resets, at deconstruction, one of two floor panels eight
+  metres apart that meet through the door look's large bounds; this server does not.
+- **Groups without a prefab** (ContainerAqualis, ContainerGoldenAqualis, GenerationGroupVein,
+  ProceduralInstanceGenerator, WreckServer): nothing to spawn in either host.
+
 - **A second escape pod**: its storage is the start save's scene object (WorldUniqueId
   103976415), which the game keeps inactive in the copy, so the copy cannot be deconstructed
   there; no client deconstructs a pod through GroupNetworkBase.
