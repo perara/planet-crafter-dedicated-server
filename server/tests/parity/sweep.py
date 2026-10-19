@@ -777,18 +777,22 @@ def bounds_family(t, fine=None):
     return s
 
 
-def bounds_floor_family(t):
+def bounds_floor_family(t, high=False):
     """Where a deconstruction volume's floor is: a container one metre to the side at falling
     heights (inside first, so the building stays until the first height outside)."""
     groups = sorted(g for g in t.constructibles() for c in t.components(g, 'ActionDeconstructible')
                     if c['fields'].get('checkInsideBeforeDeconstruction'))
-    s = Script('sweep_bounds_floor', 76561197999990018)
+    # high: the floors measured above the pivot (1 down to 0.5 m, in 1/16 m) of the groups where they are;
+    # the first height outside deconstructs the building, which ends the test
+    s = Script('sweep_bounds_floor' + ('_high' if high else ''), 76561197999990018)
+    if high:
+        groups = ['Biolab', 'Pod4x', 'Pod9xB', 'Pod9xC', 'biodome']
     spots = grid((1000.0, 1000.0), 10, 60.0)
     for k, g in enumerate(groups):
         base = (t.behaviour(g, 'ConstructibleProxy') or t.behaviour(g, 'GroupNetworkContainer'))[0]
         p = next(spots)
         build(s, g, p, f'{g}|deconstruct volume floor', f'g{k}', after=1000)
-        for n, dy in enumerate([1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.0, -0.03125, -0.0625]):
+        for n, dy in enumerate([1.0 - i / 16 for i in range(9)] if high else [1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.0, -0.03125, -0.0625]):
             tag = f'{g}|deconstruct volume floor {dy:g}'
             build(s, 'Container1', [p[0] + 1.0, p[1] + dy, p[2]], tag, f'c{k}_{n}', after=300)
             s.call('GroupNetworkBase.DeconstructServerRpc', [f'$g{k}', base], [0.0], tag, after=300)
@@ -806,6 +810,8 @@ def bounds_result(path):
             tag = l['tag']
         if l['msg'] == 'rpc' and l['name'] == 'GroupNetworkBase.DeconstructErrorClientRpc' and tag and l['args'] == [1]:
             g, rest = tag.split('|', 1)
+            if 'floor' in rest:
+                continue
             d, o = rest.rsplit(' ', 2)[1:]
             key = f'{g} {"xyz".index(d[0])} {1 if d[1] == "+" else -1}'
             out[key] = max(out.get(key, 0.0), abs(float(o)))
@@ -1065,7 +1071,7 @@ def main():
         json.dump(s.json(), open(f'{out}/{s.name}.json', 'w'), indent=0)
         print(f'{out}/{s.name}.json')
     elif cmd == 'bounds-floor':
-        s = bounds_floor_family(t)
+        s = bounds_floor_family(t, len(sys.argv) > 4)
         json.dump(s.json(), open(f'{out}/{s.name}.json', 'w'), indent=0)
         print(f'{out}/{s.name}.json')
     elif cmd == 'bounds-result':

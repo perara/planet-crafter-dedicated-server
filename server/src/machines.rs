@@ -758,26 +758,32 @@ impl Bounds {
 
 /// The deconstruction detection volume of the buildings that check what is inside them.
 // ponytail: the game uses collider (or renderer) bounds, which the data dump does not carry.
-// These boxes (local min, max) were measured on the game by placing a container at growing
-// offsets from an unrotated building and asking it to deconstruct (to ~0.2 m; axes not
-// measured are taken from the measured side). The biolab, Biodome2 and ButterflyDome1 keep their
-// volume away from the pivot and skip the check. Upgrade: dump each ActionDeconstructible's
+// These boxes (local min, max) were measured on the game (parity sweep, `sweep.py bounds`): a
+// container placed further and further out from an unrotated building, along each axis both ways
+// (1 m steps, then 1/16 m), until the building could be deconstructed, with everything near the
+// host kept active (PerformancerDisableIfFarAway hides a volume further than 20 to 120 m from the
+// host's player, which shrinks it). Each edge is the last offset inside plus 1/32 m; a floor
+// between two heights is its middle. Biodome2 and ButterflyDome1 have a volume of a few
+// decimetres around the pivot and skip the check. Upgrade: dump each ActionDeconstructible's
 // bounds from the game.
 fn inside_bounds(game: &Game, w: &WorldObject) -> Option<Bounds> {
-    const POD: ([f32; 3], [f32; 3]) = ([-4.03, -0.09, -3.84], [4.03, 6.02, 4.22]);
+    const POD: ([f32; 3], [f32; 3]) = ([-4.03, -0.02, -3.84], [4.03, 6.03, 4.16]);
+    const BIOLAB: ([f32; 3], [f32; 3]) = ([-11.53, 0.71, -0.28], [3.59, 5.28, 14.47]);
+    const DOME: ([f32; 3], [f32; 3]) = ([-8.66, 0.59, -8.72], [8.97, 6.28, 8.84]);
     const BOXES: &[(&str, ([f32; 3], [f32; 3]))] = &[
         ("pod", POD),
         ("podAngle", POD),
-        ("PodUnderground", POD),
-        ("InteriorStairs1", POD),
-        ("Pod4x", ([-11.56, -0.09, -0.31], [3.56, 5.23, 14.44])),
-        ("Pod9xA", ([-11.95, -0.09, -11.95], [11.95, 5.23, 11.95])),
-        ("Pod9xB", ([-8.67, -0.09, -8.67], [8.98, 5.23, 8.67])),
-        ("Pod9xC", ([-12.58, -0.09, -10.55], [10.55, 5.23, 10.55])),
-        ("biodome", ([-8.67, -0.09, -8.83], [8.98, 6.33, 8.98])),
-        ("Aquarium2", ([-7.73, -0.09, -7.73], [7.73, 6.0, 7.73])),
-        ("VegetableGrower1", ([-0.66, -0.09, -0.66], [0.66, 1.5, 0.66])),
-        ("VegetableGrower2", ([-0.66, -0.09, -0.66], [0.66, 1.5, 0.66])),
+        ("PodUnderground", ([-4.03, -17.03, -3.84], [4.03, 2.47, 4.16])),
+        ("InteriorStairs1", ([-4.03, -0.02, -3.84], [4.03, 12.03, 12.16])),
+        ("Pod4x", BIOLAB),
+        ("Biolab", BIOLAB),
+        ("Pod9xA", ([-12.03, -0.02, -12.03], [12.03, 6.03, 12.03])),
+        ("Pod9xB", DOME),
+        ("Pod9xC", ([-12.53, 0.71, -10.84], [10.47, 5.28, 12.09])),
+        ("biodome", DOME),
+        ("Aquarium2", ([-14.47, -1.22, -9.47], [7.66, 6.91, 9.66])),
+        ("VegetableGrower1", ([-0.66, -0.03, -0.59], [0.59, 2.78, 0.72])),
+        ("VegetableGrower2", ([-0.66, -0.03, -0.59], [0.59, 2.78, 0.72])),
     ];
     let id = game.data.groups[w.group].id.as_str();
     let (_, (min, max)) = BOXES.iter().find(|(g, _)| *g == id)?;
@@ -874,6 +880,31 @@ pub(crate) mod tests {
         let inv = game.wos[&chest].linked_inventory;
         game.add_new_item(game.data.group("Iron").unwrap(), inv, 0);
         assert_eq!(deconstruct_status(&game, chest), INVENTORY_NOT_EMPTY);
+    }
+
+    /// The volumes measured on the game (sweep.py bounds): a Biolab and a Pod4x see what stands
+    /// 0.75 m or more above their pivot, to 3.5 m east and 11.5 m west; the Aquarium2 reaches
+    /// 14.4 m west but 7.6 m east; an InteriorStairs1 12 m up.
+    #[test]
+    fn deconstruction_volumes_are_the_measured_ones() {
+        let Some(mut game) = game() else { return };
+        let mut inside = |group: &str, at: [f32; 3], offset: [f32; 3]| {
+            let b = build(&mut game, group, at);
+            let c = build(&mut game, "Container1", [at[0] + offset[0], at[1] + offset[1], at[2] + offset[2]]);
+            let status = deconstruct_status(&game, b);
+            game.destroy_world_object(c, true);
+            game.destroy_world_object(b, true);
+            status == SOMETHING_INSIDE
+        };
+        assert!(inside("Biolab", [100.0, 10.0, 100.0], [-11.4, 1.0, 5.0]), "a Biolab has a volume");
+        assert!(!inside("Biolab", [100.0, 10.0, 100.0], [-11.6, 1.0, 5.0]));
+        assert!(!inside("Biolab", [100.0, 10.0, 100.0], [0.0, 0.5, 5.0]), "its floor is 0.7 m up");
+        assert!(inside("Pod4x", [100.0, 10.0, 100.0], [3.5, 1.0, 5.0]));
+        assert!(!inside("Pod4x", [100.0, 10.0, 100.0], [3.7, 1.0, 5.0]));
+        assert!(inside("Aquarium2", [100.0, 10.0, 100.0], [-14.4, 1.0, 0.0]));
+        assert!(!inside("Aquarium2", [100.0, 10.0, 100.0], [7.8, 1.0, 0.0]));
+        assert!(inside("InteriorStairs1", [100.0, 10.0, 100.0], [0.0, 11.9, 0.0]));
+        assert!(!inside("InteriorStairs1", [100.0, 10.0, 100.0], [0.0, 12.2, 0.0]));
     }
 
     #[test]
