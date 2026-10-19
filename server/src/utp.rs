@@ -449,7 +449,11 @@ impl Utp {
             if self.outbox.len() > before {
                 c.backoff += 1;
             }
-            while c.in_flight.len() < c.window && !c.queued.is_empty() {
+            // Never more than WINDOW sequence numbers past the oldest packet not acknowledged (the
+            // peer neither accepts nor can acknowledge further): a packet the peer got but whose ack
+            // fell out of the 64-bit mask would else stay unacknowledged for good, and 65536
+            // packets on its resend would pass for a new one and get the session dropped.
+            while c.in_flight.len() < c.window && !c.queued.is_empty() && c.in_flight.front().is_none_or(|(oldest, _, _)| c.sequence.wrapping_sub(*oldest) < WINDOW as u16) {
                 if c.in_flight.is_empty() {
                     c.progress = now;
                 }
@@ -962,6 +966,34 @@ mod tests {
             }
         }
         assert!(acked > 65_536 && server.connections.contains_key(&token), "{acked} packets acknowledged");
+    }
+
+    /// The sender stays within WINDOW sequence numbers of the oldest packet not acknowledged: with
+    /// the first of 64 still open (its ack not in the mask), the 63 acknowledged ones make room
+    /// by count but nothing goes out past it. Without this a packet whose ack fell out of the mask
+    /// stayed in flight until the sequence wrapped and its resend looked like a new packet.
+    #[test]
+    fn the_sender_never_runs_a_window_past_the_oldest_unacknowledged_packet() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let (from, token) = ("127.0.0.1:9".parse().unwrap(), [16; 8]);
+        handshake(&mut server, from, token);
+        server.datagram(&[[DATA].as_slice(), &token].concat(), from, Instant::now(), &mut Vec::new());
+        server.connections.get_mut(&token).unwrap().window = WINDOW;
+        server.send(&token, &vec![0; 400 * CHUNK]);
+        server.flush();
+        assert_eq!(server.connections[&token].in_flight.len(), WINDOW);
+        // The peer acknowledges 1..=63 and not 0 (bit i of the mask is sequence 63 - i).
+        let ack = [[DATA].as_slice(), &token, &[RELIABLE, ACK, 0, 0, 0, 0, 0], &63u16.to_le_bytes(), &(u64::MAX >> 1).to_le_bytes()].concat();
+        server.datagram(&ack, from, Instant::now(), &mut Vec::new());
+        server.flush();
+        let c = &server.connections[&token];
+        assert_eq!(c.in_flight.iter().map(|p| p.0).collect::<Vec<_>>(), [0], "only the first is left");
+        assert_eq!(c.sequence, WINDOW as u16, "nothing went out past it");
+        // Once it is acknowledged the stream goes on.
+        let ack = [[DATA].as_slice(), &token, &[RELIABLE, ACK, 0, 0, 0, 0, 0], &63u16.to_le_bytes(), &u64::MAX.to_le_bytes()].concat();
+        server.datagram(&ack, from, Instant::now(), &mut Vec::new());
+        server.flush();
+        assert!(server.connections[&token].sequence > WINDOW as u16);
     }
 
     /// No client acks what was never sent: a blind spoofer guessing ahead loses its session.
