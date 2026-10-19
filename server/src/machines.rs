@@ -148,6 +148,24 @@ fn root(game: &Game, group: usize, ty: &str) -> Option<Value> {
     components(game, group, ty, true).first().map(|v| (*v).clone())
 }
 
+/// What a machine takes from the tables and a snapshot does not carry, set again from the tables
+/// after a restore (a snapshot of an earlier release does not have what a later one added).
+pub fn refresh_from_tables(game: &mut Game) {
+    let harvestables: Vec<(i32, Value)> = game
+        .ext
+        .machines
+        .list
+        .iter()
+        .filter(|(_, m)| m.harvestable.is_some())
+        .filter_map(|(wo, _)| Some((*wo, root(game, game.wos.get(wo)?.group, "MachineGrowerVegetationHarvestable")?)))
+        .collect();
+    for (wo, f) in harvestables {
+        if let Some(h) = game.ext.machines.list.get_mut(&wo).and_then(|m| m.harvestable.as_mut()) {
+            h.refresh(&f);
+        }
+    }
+}
+
 /// GetComponent<MachineRocketBackAndForth>() (its trade and interplanetary subclasses).
 fn is_rocket_platform(game: &Game, group: usize) -> bool {
     root(game, group, "MachineRocketBackAndForthTrade").is_some() || root(game, group, "MachineRocketBackAndForthInterplanetaryExchange").is_some()

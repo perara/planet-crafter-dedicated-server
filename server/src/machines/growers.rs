@@ -332,12 +332,24 @@ pub struct Harvestable {
     spawn_on_this: bool,
     down_value: f32,
     /// allowedLayers is the Water layer alone (1 << 4): a spot is where a ray down meets water.
+    /// From the tables, so not in a snapshot (a snapshot of a release before it has none):
+    /// `refresh` sets it again after a restore.
+    #[serde(skip)]
     water_only: bool,
     things: Vec<String>,
     model_to_override: Option<String>,
 }
 
 impl Harvestable {
+    fn water_only_of(f: &Value) -> bool {
+        f["allowedLayers"].as_i64() == Some(1 << 4)
+    }
+
+    /// What comes from the tables and is not in a snapshot, set again after a restore.
+    pub fn refresh(&mut self, f: &Value) {
+        self.water_only = Self::water_only_of(f);
+    }
+
     pub fn new(f: &Value) -> Harvestable {
         Harvestable {
             second: None,
@@ -350,7 +362,7 @@ impl Harvestable {
             radius: f32_of(f, "radius"),
             spawn_on_this: f["spawnOnThis"].is_string(),
             down_value: f32_of(f, "downValue"),
-            water_only: f["allowedLayers"].as_i64() == Some(1 << 4),
+            water_only: Self::water_only_of(f),
             things: f["thingsToGrow"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect(),
             model_to_override: f["modelToOverride"].as_str().map(str::to_string),
         }
@@ -706,6 +718,28 @@ mod tests {
             assert!((y - (57.23 - 0.1)).abs() < 0.02, "{y}: a tenth of a meter under the surface (downValue)");
         }
         assert!(dry_crops.is_empty(), "no water under the ring, no spot, no crop (CreateNewGrowable gives up)");
+    }
+
+    /// Hot update from 0.6.0 to 0.6.1 failed with "missing field water_only": the snapshot of
+    /// the release before had no such field. What the tables give is not in a snapshot, and a
+    /// restored algae generator still knows it needs water.
+    #[test]
+    fn a_restored_algae_generator_still_needs_water() {
+        let Some(mut game) = game() else { return };
+        let wo = build(&mut game, "AlgaeGenerator1", [50.0, 5.0, 0.0]);
+        let snapshot = crate::handoff::snapshot(&game).unwrap();
+        assert!(!snapshot.contains("water_only"), "the flag is not part of a snapshot, so an older snapshot restores");
+        let water_only = |g: &Game| g.ext.machines.list.get(&wo).and_then(|m| m.harvestable.as_ref()).map(|h| h.water_only);
+        assert_eq!(water_only(&game), Some(true));
+        let (net_data, data, spec, scenes) = crate::game::test_tables().unwrap();
+        let restored = crate::handoff::restore(net_data, data, spec, &snapshot, scenes).unwrap();
+        assert_eq!(water_only(&restored), Some(true), "set again from the tables after the restore");
+        // The vegetable grower on the same restore does not need water.
+        let grower = build(&mut game, "VegetableGrower1", [60.0, 5.0, 0.0]);
+        let snapshot = crate::handoff::snapshot(&game).unwrap();
+        let (net_data, data, spec, scenes) = crate::game::test_tables().unwrap();
+        let restored = crate::handoff::restore(net_data, data, spec, &snapshot, scenes).unwrap();
+        assert_eq!(restored.ext.machines.list.get(&grower).and_then(|m| m.harvestable.as_ref()).map(|h| h.water_only), Some(false));
     }
 
     #[test]
