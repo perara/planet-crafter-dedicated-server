@@ -1491,3 +1491,7 @@ pub mod tests {
         assert!(g.wos.contains_key(&id) && g.inventories[&inventory].items.contains(&id), "the despawn timer went with the dropped object");
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/game.rs"]
+pub mod fuzz;

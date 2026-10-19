@@ -9,3 +9,6 @@
 __pycache__/
 # Coverage reports and other rebuildable output.
 /out/
+/server/fuzz/artifacts/
+/server/fuzz/target/
+/server/fuzz/coverage/

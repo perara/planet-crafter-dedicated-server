@@ -463,6 +463,6 @@ mod tests {
     }
 }
 
-#[cfg(fuzzing)]
+#[cfg(any(fuzzing, pcds_corpus))]
 #[path = "../fuzz/targets/ipc.rs"]
 pub mod fuzz;

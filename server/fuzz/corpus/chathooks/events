@@ -1,0 +1,4 @@
+GET
+/api/chat/events
+after=0&limit=3
+{}

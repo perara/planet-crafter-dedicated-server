@@ -691,6 +691,6 @@ mod tests {
     }
 }
 
-#[cfg(fuzzing)]
+#[cfg(any(fuzzing, pcds_corpus))]
 #[path = "../fuzz/targets/rules.rs"]
 pub mod fuzz;

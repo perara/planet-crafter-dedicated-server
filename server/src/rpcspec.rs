@@ -399,3 +399,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/rpcspec.rs"]
+pub mod fuzz;

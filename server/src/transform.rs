@@ -206,3 +206,7 @@ mod tests {
         assert!((euler_angles(crate::geometry::from_euler_y(73.0))[1] - 73.0).abs() < 0.01);
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/transform.rs"]
+pub mod fuzz;

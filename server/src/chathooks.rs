@@ -724,3 +724,7 @@ pub mod tests {
         assert!(h.feed.after(1, Duration::ZERO).0.is_empty(), "the server's own messages are not events");
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/chathooks.rs"]
+pub mod fuzz;

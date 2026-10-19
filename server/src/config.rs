@@ -485,3 +485,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/config.rs"]
+pub mod fuzz;

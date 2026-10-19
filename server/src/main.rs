@@ -58,6 +58,11 @@
     clippy::some_filter
 )]
 
+#![cfg_attr(fuzzing, no_main)]
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/entry.rs"]
+mod fuzz_entry;
 mod animals;
 #[cfg(test)]
 mod bench;

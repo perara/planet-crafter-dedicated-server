@@ -234,3 +234,7 @@ mod tests {
         assert!(super::snapshot(&g).unwrap_err().contains(&format!("world object {pod}")));
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/handoff.rs"]
+pub mod fuzz;

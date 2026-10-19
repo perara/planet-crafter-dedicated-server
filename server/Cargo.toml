@@ -14,6 +14,10 @@ publish = false
 name = "pcds"
 path = "src/main.rs"
 
+# fuzz/ builds this crate with --cfg fuzzing (see fuzz/Cargo.toml).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)', 'cfg(pcds_corpus)'] }
+
 [dependencies]
 ctrlc = { version = "3.5.2", features = ["termination"] }
 indexmap = { version = "2", features = ["serde"] }
