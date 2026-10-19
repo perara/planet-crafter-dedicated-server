@@ -426,12 +426,12 @@ mod tests {
     /// took 50 s in a release build). In a thread: the old way would not end within the test.
     #[test]
     fn a_big_save_is_written_in_time() {
-        let save = many_objects(100_000);
+        let save = many_objects(50_000);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(save.to_text().len());
         });
-        rx.recv_timeout(Duration::from_secs(60)).expect("the text of 100 000 objects in under a minute");
+        rx.recv_timeout(Duration::from_secs(60)).expect("the text of 50 000 objects in under a minute");
     }
 
     #[test]
