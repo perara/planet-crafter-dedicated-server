@@ -1,0 +1,75 @@
+# The layering of the server's modules (docs/architecture.md), checked by tests/layers.rs
+# (scripts/check-layers). A module is in one layer; a layer may use itself and the layers named.
+#
+#   layer NAME: modules          which modules are in the layer
+#   may NAME -> layers           what a layer may use (itself always)
+#   only MODULE <- modules       a module only these may use
+#   debt A -> B                  an edge that breaks the rules today, to be removed (the test fails
+#                                when the edge is gone: delete the line then). Say why on the line before.
+
+# Formats and primitives: bytes, ids, geometry, the game's tables as data, the transport framing.
+# No game, no process, no sockets: they use each other and nothing above.
+layer base: wire idmap geometry world save data protocol rpcspec transform gamedata model ipc utp
+# The game's network state: objects, variables, RPC messages. Uses base only.
+layer world: net
+# The game logic, ported class by class, free of I/O: the game, its handlers and subsystems, the
+# rules and access policies, the snapshot of a flip. A subsystem is free functions over `&mut Game`.
+layer core: game handlers hooks ext scene status gauges units energy water machines logistics meteo rockets planets animals genetics players inventories instances objects panels deconstruct equipment toxic unlocks access rules config chathooks handoff
+# What the world tells the outside (events, hooks of plugins and streams) and the hosts that listen.
+layer extension: events plugins
+# Reading the game's own files into tables (pcds read-game): a program of its own.
+layer reader: native
+# Scripted players for tests and load: clients of a server, not part of one.
+layer tools: probe load
+# The bank's side of the process split: the game loop and what it serves (the admin requests it
+# answers, the world listing, the off-site backups, new worlds).
+layer bank: bank dashboard s3 newworld
+# The front's side: sockets, Steam, supervising the banks, the admin HTTP threads, the updater. It
+# moves bytes for the game and knows nothing of it (docs/hot-update.md).
+layer front: front admin updater
+# The command line ties everything together and may use anything; nothing may use it.
+layer cli: cli
+
+may base -> base
+may world -> base world
+may core -> base world core extension
+may extension -> base world core extension
+may reader -> base reader
+may tools -> base world tools
+may bank -> base world core extension reader bank
+may front -> base front
+may cli -> base world core extension reader tools bank front cli
+
+# Only the bank hosts plugins; the game reaches them through events (hooks.rs and the call sites
+# in game.rs, players.rs, handlers.rs and rules.rs call events::*), ext.rs holds their state, the
+# command line lists and checks them.
+only plugins <- events bank ext cli
+
+# ---- debts ---------------------------------------------------------------------------------------
+# Each is an edge that is there today and should not be. The number is the step of the refactor list
+# in docs/architecture.md that removes it.
+
+# The admin HTTP threads serve /api/chat from the chat feed that lives in chathooks.rs, a file that
+# also holds the bank's chat state (6: split chathooks into the bank's state and the front's feed).
+debt admin -> chathooks
+debt front -> chathooks
+# The table folder's contract (build id, find_tables) lives in cli, and the table reader uses an
+# encoder of net (7: a `tables` module owns the contract; native stops importing cli and net).
+debt bank -> cli
+debt native -> cli
+debt native -> net
+# Files of the filesystem (hold, replace_file, set_env_file) live in cli (13: one place for the
+# file primitives).
+debt front -> cli
+debt updater -> cli
+# The kick batch (DISCONNECT_REASON) is built by bank.rs, and the front asks it (4: into protocol.rs);
+# bank.rs asks front.rs for the snapshot's path (4: next to the other paths).
+debt front -> bank
+debt bank -> front
+# The access policy `enforce` sits in bank.rs and config.rs calls it (4: into access.rs).
+debt config -> bank
+# The front reads settings and rules by name, and process metrics from the dashboard (8: typed
+# settings; 6: the front's own metrics).
+debt front -> config
+debt front -> rules
+debt front -> dashboard
