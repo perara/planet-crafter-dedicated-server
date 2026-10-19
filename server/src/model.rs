@@ -267,11 +267,14 @@ fn parse_color(s: &str) -> [f32; 4] {
     let mut c = [0.0; 4];
     for (i, p) in parts.iter().enumerate() {
         let mut v: f32 = p.replace(',', ".").parse().unwrap_or(0.0);
-        for _ in 0..50 {
-            if v <= 1.0 {
-                break;
+        // ParseStringColor: divides once before it looks, so 10 and 100 come out 0.1.
+        if v > 1.0 {
+            for _ in 0..50 {
+                v /= 10.0;
+                if v < 1.0 {
+                    break;
+                }
             }
-            v /= 10.0;
         }
         c[i] = v;
     }
@@ -309,6 +312,13 @@ mod tests {
             g.wos.get_mut(&id).unwrap().growth = growth;
             assert_eq!(g.wos[&id].to_json(&g.data)["grwth"], saved, "growth {growth}");
         }
+    }
+
+    /// DataTreatments.ParseStringColor: a component above 1 is divided by ten until it is below 1.
+    #[test]
+    fn color_components_above_one_are_scaled_down_as_the_game_does() {
+        assert_eq!(parse_color("0.5-1-10-100"), [0.5, 1.0, 0.1, 0.1]);
+        assert_eq!(parse_color("2-25-1.5-0"), [0.2, 0.25, 0.15, 0.0]);
     }
 
     #[test]
