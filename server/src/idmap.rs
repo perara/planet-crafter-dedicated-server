@@ -116,6 +116,7 @@ impl<K: Copy + Eq + Hash, V> Slots<K, V> {
 
 impl<K: Copy + Eq + Hash, V> Slots<K, V> {
     /// The slots as they are (None: free), for a snapshot's writer to serialize in parts.
+    #[cfg(test)]
     pub fn slots(&self) -> &[Option<(K, V)>] {
         &self.slots
     }

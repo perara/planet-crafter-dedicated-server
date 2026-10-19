@@ -565,5 +565,6 @@ fn flipbench() {
             println!("flipbench:   {:<18} {}", key.trim_end_matches("Ms"), spread(&|r| r["timeline"][key].as_f64()));
         }
         println!("flipbench:   {:<18} {}", "held frames", spread(&|r| r["held"].as_f64()));
+        println!("flipbench:   {:<18} {}", "restore faults", spread(&|r| r["restoreFaults"].as_f64()));
     }
 }

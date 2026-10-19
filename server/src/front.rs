@@ -903,6 +903,15 @@ impl Front {
                 if hello["gameVersion"] != live["gameVersion"] {
                     return self.fail_flip(&format!("it has game {}'s tables, the world runs on {}'s", hello["gameVersion"], live["gameVersion"]));
                 }
+                if let (Some(n), Some(l)) = (self.next.as_ref(), self.live.as_ref()) {
+                    println!(
+                        "flip: bank {} has loaded its tables after {:.0} ms and holds {:.0} MiB; the live bank holds {:.0} MiB",
+                        n.name,
+                        n.started.elapsed().as_secs_f64() * 1000.0,
+                        crate::dashboard::process_of(n.child.id()).1 as f64 / 1048576.0,
+                        crate::dashboard::process_of(l.child.id()).1 as f64 / 1048576.0
+                    );
+                }
                 // Quiesce: from here the world stands.
                 if let Some(flip) = self.flip.as_mut() {
                     flip.stopped = Some(Instant::now());
@@ -985,7 +994,7 @@ impl Front {
             "releaseMs": gap(ready_at, released_at),
         });
         println!("flip timeline (ms): {timeline}");
-        let extra = json!({"from": from, "to": to, "stoodMs": ms(stood), "snapshotBytes": flip.snapshot["bytes"], "snapshotMs": flip.snapshot["ms"], "restoreMs": ready["restoreMs"], "held": held, "verified": ready["verified"], "version": version, "timeline": timeline});
+        let extra = json!({"from": from, "to": to, "stoodMs": ms(stood), "snapshotBytes": flip.snapshot["bytes"], "snapshotMs": flip.snapshot["ms"], "restoreMs": ready["restoreMs"], "held": held, "verified": ready["verified"], "version": version, "timeline": timeline, "restoreFaults": ready["faults"]});
         self.persist_flip(&to, rolled_back, Some((flip.seq, message, extra)));
     }
 

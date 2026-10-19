@@ -20,11 +20,11 @@ use serde::{ser, Deserialize, Serialize};
 /// One pointer wide: a `Result<f32, Error>` then travels in registers, which the happy path of
 /// every value read depends on.
 #[derive(Debug)]
-pub struct Error(Box<String>);
+pub struct Error(Box<str>);
 
 impl Error {
     fn new(m: impl Into<String>) -> Error {
-        Error(Box::new(m.into()))
+        Error(m.into().into_boxed_str())
     }
 }
 
@@ -54,6 +54,7 @@ fn err<T>(m: &str) -> Result<T> {
 
 // ---- writing ----------------------------------------------------------------------------------
 
+#[cfg(test)]
 pub fn to_vec<T: Serialize + ?Sized>(v: &T) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     v.serialize(&mut Writer(&mut out))?;

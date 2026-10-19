@@ -79,6 +79,7 @@ pub const KINDS: usize = 6;
 /// What flipbench calls the CPU time of each kind of part (names with a dot are inside a step).
 pub const WRITE_CPU: [&str; KINDS] = [".write cpu rest", ".write cpu world objects", ".write cpu inventories", ".write cpu network objects", ".write cpu machines", ".write cpu water"];
 pub const READ_CPU: [&str; KINDS] = [".read cpu rest", ".read cpu world objects", ".read cpu inventories", ".read cpu network objects", ".read cpu machines", ".read cpu water"];
+#[cfg(test)]
 pub const NAMES: [&str; KINDS] = ["rest", "world objects", "inventories", "network objects", "machines", "water"];
 
 /// Entries per chunk: about 0.4 ms of work to write and 1 ms to read.
@@ -295,7 +296,8 @@ fn decode(body: &[u8], phases: &mut Vec<(&'static str, f64)>) -> Result<Game, St
         Other,
     }
     let (mut wos_free, mut inventories_free) = (wos.spare_capacity_mut(), inventories.spare_capacity_mut());
-    let jobs: Vec<(u8, &[u8], std::sync::Mutex<Option<Out>>)> = parts
+    type Job<'a> = (u8, &'a [u8], std::sync::Mutex<Option<Out<'a>>>);
+    let jobs: Vec<Job> = parts
         .iter()
         .map(|&(kind, entries, bytes)| {
             let out = match kind {

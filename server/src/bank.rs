@@ -30,6 +30,15 @@ pub fn info() -> Value {
     json!({"version": env!("CARGO_PKG_VERSION"), "protocol": ipc::PROTOCOL, "format": crate::handoff::FORMAT, "reads": [crate::handoff::FORMAT], "tablesFormat": crate::native::tables::TABLES_FORMAT})
 }
 
+/// The page faults this process (all its threads) has had without reading a disk: a restore into
+/// a new process touches every page of the world for the first time.
+fn minor_faults() -> u64 {
+    // SAFETY: getrusage fills the struct it is given.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    usage.ru_minflt as u64
+}
+
 /// What a client may be sent before it is a player (PlayerReady): the world in its
 /// ConnectionApproved and this much more (the world's changes while it loads). A session from a
 /// forged address never gets further: its world is all a spoofer can have sent to the victim.
@@ -66,12 +75,13 @@ pub fn run(args: &[String]) {
     link.send(ipc::HELLO, protocol, hello.to_string().as_bytes());
     let (mut verified, mut verify_ms) = (Value::Null, 0.0);
     let mut started = Instant::now();
-    let mut got_at = 0;
+    let (mut got_at, mut faults_before) = (0, 0);
     let game = match link.recv() {
         Some(f) if f.kind == ipc::START => load(dir, save_path, net_data, data, spec, scenes),
         Some(f) if f.kind == ipc::RESTORE => {
             started = Instant::now();
             got_at = ipc::now_ns();
+            faults_before = minor_faults();
             if fail_for_test("restore") {
                 eprintln!("bank: dying on the restore (PCDS_BANK_FAIL=restore)");
                 std::process::exit(3);
@@ -110,7 +120,7 @@ pub fn run(args: &[String]) {
         _ => return,
     };
     // gotAt and readyAt (the monotonic clock, ns) put the restore on the flip's timeline in the front.
-    let ready = json!({"restoreMs": started.elapsed().as_secs_f64() * 1000.0 - verify_ms, "verifyMs": verify_ms, "verified": verified, "gotAt": got_at, "readyAt": ipc::now_ns()});
+    let ready = json!({"restoreMs": started.elapsed().as_secs_f64() * 1000.0 - verify_ms, "verifyMs": verify_ms, "verified": verified, "gotAt": got_at, "readyAt": ipc::now_ns(), "faults": minor_faults() - faults_before});
     link.send(ipc::READY, 0, ready.to_string().as_bytes());
     Bank { game, link, save_path: save_path.clone(), build_id, data_dir: dir.clone() }.serve();
 }

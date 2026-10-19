@@ -454,6 +454,16 @@ fn flipbench() {
             g.tick();
             g.net.out.clear();
         }
+        // What a new bank does before the stand, and what it holds: its tables.
+        {
+            let rss = || std::fs::read_to_string("/proc/self/status").ok().and_then(|t| t.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok())).unwrap_or(0.0) / 1024.0;
+            let (before, started) = (rss(), Instant::now());
+            let (net_data, data, spec) = crate::tables(dir);
+            let tables = started.elapsed();
+            let scenes = crate::scene_tables(dir, &net_data, &data);
+            println!("flipbench:   a new bank loads the tables in {tables:?}, the scenes in {:?}; its memory grows by {:.0} MiB (this process holds {:.0} MiB with the world loaded)", started.elapsed() - tables, rss() - before, before);
+            drop((net_data, data, spec, scenes));
+        }
         let mut samples: BTreeMap<&'static str, Vec<f64>> = BTreeMap::new();
         let (mut bytes, mut sizes) = (0, [0; crate::handoff::KINDS]);
         let (front_end, bank_end) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -506,6 +516,56 @@ fn flipbench() {
             v.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let at = |q: f64| v[((v.len() - 1) as f64 * q).round() as usize];
             println!("flipbench:   {name:<16} {:>8.2} {:>8.2} {:>8.2} {:>8.2}", at(0.5), at(0.95), v[v.len() - 1], v[0]);
+        }
+    }
+}
+
+/// How much of a big world changes while a pre-copy would be under way (docs/hot-update.md, "Flip
+/// speed"): the same players act (PCDS_BENCH_ACTION_MS, default 200) over PCDS_FLIPBENCH_PLAYERS
+/// (default 8); the entries of the world objects, inventories and network objects are digested at
+/// two moments `delta` seconds apart (0.25, 1 and 5), and the entries and the 2048-entry chunks
+/// that differ are counted.
+///
+///   PCDS_FLIPBENCH_SAVES=a.json cargo test --release --bin pcds bench::dirtybench -- --ignored --nocapture
+#[test]
+#[ignore]
+fn dirtybench() {
+    use std::hash::{Hash, Hasher};
+    let Some(dir) = crate::test_data() else { return };
+    let players = std::env::var("PCDS_FLIPBENCH_PLAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8u64);
+    let action_ms = std::env::var("PCDS_BENCH_ACTION_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(200u64);
+    let saves = std::env::var("PCDS_FLIPBENCH_SAVES").expect("dirtybench: set PCDS_FLIPBENCH_SAVES");
+    /// Each entry's digest, keyed by its id, per collection.
+    fn digests(g: &Game) -> [Vec<(u64, u64)>; 3] {
+        let digest = |v: &[u8]| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            v.hash(&mut h);
+            h.finish()
+        };
+        let wos = g.wos.slots().iter().enumerate().map(|(i, s)| (i as u64, s.as_ref().map(|(k, v)| digest(&crate::bincodec::to_vec(&(k, v)).unwrap())).unwrap_or(0))).collect();
+        let inventories = g.inventories.slots().iter().enumerate().map(|(i, s)| (i as u64, s.as_ref().map(|(k, v)| digest(&crate::bincodec::to_vec(&(k, v)).unwrap())).unwrap_or(0))).collect();
+        let net = g.net.objects.iter().map(|(k, v)| (*k, digest(&crate::bincodec::to_vec(v).unwrap()))).collect();
+        [wos, inventories, net]
+    }
+    for path in saves.split(',') {
+        for delta in [0.25, 1.0, 5.0] {
+            let e = Env { path: path.to_string(), dir, seconds: 2.0 * delta + 0.01, players, action_ms, dump: None };
+            let taken = std::cell::RefCell::new(Vec::<[Vec<(u64, u64)>; 3]>::new());
+            run(load(&e), &e, delta, |g| {
+                taken.borrow_mut().push(digests(&g));
+                g
+            }, None);
+            let taken = taken.into_inner();
+            let [a, b] = [&taken[0], &taken[1]];
+            let mut line = format!("dirtybench: {path}: {players} players, {delta} s apart:");
+            for (name, (x, y)) in ["world objects", "inventories", "network objects"].iter().zip(a.iter().zip(b.iter())) {
+                let y: std::collections::HashMap<u64, u64> = y.iter().copied().collect();
+                let changed: Vec<usize> = x.iter().enumerate().filter(|(_, (k, d))| y.get(k) != Some(d)).map(|(i, _)| i).collect();
+                let new = y.len().saturating_sub(x.len());
+                let chunks: std::collections::BTreeSet<usize> = changed.iter().map(|i| i / 2048).collect();
+                line += &format!(" {name} {}/{} entries (+{new} new), {}/{} chunks;", changed.len(), x.len(), chunks.len(), x.len().div_ceil(2048));
+            }
+            println!("{line}");
         }
     }
 }
