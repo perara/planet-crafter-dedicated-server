@@ -32,8 +32,11 @@ pub struct Limits {
     /// Per client: when it last sent motion and the units it may still send.
     #[serde(skip)]
     motion: HashMap<u64, (std::time::Instant, f64)>,
-    /// Per client: the game time of its last chat message and the messages it may still send.
-    chat: HashMap<u64, (f32, f32)>,
+    /// Per client: the clock of its last chat message and the messages it may still send. Still
+    /// written (the previous release reads it), never read by a handoff: the next bank's clock
+    /// starts again, and a fresh burst is the worst that gives.
+    #[serde(skip_deserializing)]
+    chat: HashMap<u64, (f64, f32)>,
     /// RPC work done this tick per client, and its RPCs waiting for the next ticks.
     #[serde(skip)]
     used: HashMap<u64, u32>,
@@ -51,9 +54,9 @@ impl Limits {
     }
 
     /// Whether a client's chat message goes out now (a client's, not the server's own).
-    pub fn chat(&mut self, client: u64, now: f32) -> bool {
+    pub fn chat(&mut self, client: u64, now: f64) -> bool {
         let (last, left) = self.chat.entry(client).or_insert((now, CHAT_BURST));
-        *left = (*left + (now - *last).max(0.0) / CHAT_EVERY).min(CHAT_BURST);
+        *left = (*left + (now - *last).max(0.0) as f32 / CHAT_EVERY).min(CHAT_BURST);
         *last = now;
         if *left < 1.0 {
             self.warn(client, "chat messages over the rate, dropped");

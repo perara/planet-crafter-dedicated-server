@@ -626,7 +626,7 @@ impl Game {
             }
             return;
         }
-        if self.net.spec.get(method).is_some_and(|r| r.name == "ChatHandler.SendChatMessageServerRpc") && !self.limits.chat(client, self.time) {
+        if self.net.spec.get(method).is_some_and(|r| r.name == "ChatHandler.SendChatMessageServerRpc") && !self.limits.chat(client, self.clock()) {
             return;
         }
         // A tick's work per client is bounded; the rest waits for the next ticks (tick()).
@@ -1154,8 +1154,12 @@ pub mod tests {
             assert_eq!(said(&mut g, "hi"), Some(2));
         }
         assert_eq!(said(&mut g, "hi"), None, "the 11th at once");
-        g.time += 1.0;
-        assert_eq!(said(&mut g, "hi"), Some(2), "one a second after that");
+        // The clock runs on while the world is held (the game's time stands): players still chat.
+        g.held = true;
+        g.sim_time = Some(g.clock() + 1.0);
+        g.tick();
+        assert_eq!(said(&mut g, "hi"), Some(2), "one a second after that, held or not");
+        assert_eq!(said(&mut g, "hi"), None);
     }
 
     /// 100 RPCs in one batch: 32 now, the rest in the next ticks, in order. A lookup over the
