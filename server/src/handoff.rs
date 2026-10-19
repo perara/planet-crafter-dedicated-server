@@ -12,7 +12,9 @@ pub mod instant {
     }
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Instant, D::Error> {
         let since: f64 = serde::Deserialize::deserialize(d)?;
-        Ok(Instant::now().checked_sub(Duration::from_secs_f64(since.max(0.0))).unwrap_or_else(Instant::now))
+        // A corrupt snapshot (1e20 s) is an error to refuse, not a panic of Duration::from_secs_f64.
+        let ago = Duration::try_from_secs_f64(since.max(0.0)).map_err(serde::de::Error::custom)?;
+        Ok(Instant::now().checked_sub(ago).unwrap_or_else(Instant::now))
     }
 }
 
@@ -194,6 +196,17 @@ pub fn verify(g: &Game, snapshot: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use crate::game::{test_game, tests::{join, save}};
+
+    /// A snapshot whose clock is 1e20 seconds old is refused with an error; it panicked.
+    #[test]
+    fn a_corrupt_clock_is_an_error_not_a_panic() {
+        #[derive(serde::Deserialize)]
+        struct Clock(#[serde(with = "super::instant")] #[allow(dead_code)] std::time::Instant);
+        assert!(serde_json::from_str::<Clock>("1e20").is_err());
+        assert!(serde_json::from_str::<Clock>("1e300").is_err());
+        assert!(serde_json::from_str::<Clock>("12.5").is_ok());
+        assert!(serde_json::from_str::<Clock>("-3.0").is_ok(), "a clock before its start counts as now");
+    }
 
     #[test]
     fn a_snapshot_restores_only_in_its_format_and_on_its_tables() {
