@@ -682,8 +682,14 @@ fn a_hot_update_from_the_release_before_works() {
     // And back, which is a rollback of the update just made: said, not asserted (a release that
     // adds a field to the state cannot be handed a world written without it live; the old bank
     // then goes on, and the way back is --rollback --restart).
-    let back = server.update(json!({"rollback": true}));
-    println!("gate: and back into pcds {}: {}", before["version"], if back["ok"] == true { "live".to_string() } else { back["message"].to_string() });
+    let (status, answer) = server.api("POST", "/api/update", json!({"rollback": true}));
+    let back = if status == 200 {
+        let done = server.update_end(answer["seq"].as_u64().unwrap());
+        if done["ok"] == true { "live".to_string() } else { done["message"].to_string() }
+    } else {
+        answer["error"].to_string()
+    };
+    println!("gate: and back into pcds {}: {back}", before["version"]);
     assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
     let mut server = server;
     assert!(server.child.wait().unwrap().success(), "{}", server.log());

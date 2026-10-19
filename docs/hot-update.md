@@ -152,8 +152,11 @@ serialized is a change to what the next release must read. The rules:
   format and the one before (`reads` in `pcds bank-info`, bank.json): that list is all the front
   checks before a flip (`updater::compatible`), so a field added with a default is invisible to
   it, and a release before cannot restore what a later one wrote if the later one added a
-  field without which it fails (the way back from 0.6.2 to 0.6.1 is checked by the gate's last
-  line, and `--rollback --restart` always works: the stop saves and the world loads from the save).
+  field without which it fails. That is the case of the way back from 0.6.2 to 0.6.1: 0.6.1
+  needs `water_only`, which 0.6.2 no longer writes, so the live rollback is accepted by the front
+  and fails at the restore (the new bank ends, the running one goes on, nobody is disconnected).
+  The gate prints that as its last line; `--rollback --restart` always works (the stop saves and
+  the world loads from the save).
 - `rules` are `deny_unknown_fields`: a rule a later release added makes the release before
   refuse a snapshot that has it, at the restore (the old bank then goes on).
 
