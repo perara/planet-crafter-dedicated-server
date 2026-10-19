@@ -92,6 +92,14 @@ energy: the grower's random state).
   game's seed. Two reference runs of `instances.json` generate the same objects; ours differ.
   Opening the instance itself (seed 400000032) matches.
 
+- **Scene objects inside a built prefab**: ToxicityDiorama2 holds two wreck doors
+  (WorldObjectFromScene, group WreckPilar). The game registers them as world objects when the
+  diorama is built (not saved, no network object) and counts them in
+  `_constructedWorldObjectsGroups`, where they stayed counted after the diorama was deconstructed in the
+  reference run (measured, not read from the code). This server makes neither, so that count of
+  WreckPilar is 2 lower per diorama built. Nothing else the server sends or saves differs; the
+  doors would need world object ids of their own for a number nobody reads.
+
 ## Safety rules (deliberate)
 
 - **Other players' backpacks and equipment** are refused (TransferAll, GetOrCreate,

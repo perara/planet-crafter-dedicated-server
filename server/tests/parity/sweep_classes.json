@@ -100,6 +100,12 @@
   "line": "^~ scene:WorldObjectsHandler WorldObjectsHandler\\._(allWorldObjectsGroups of EscapePod(Humble|Toxicity)?: changed by ref 1 ours 0|constructedWorldObjectsGroups: ref )"
  },
  {
+  "class": "c",
+  "why": "a built ToxicityDiorama2 holds two wreck doors that the game registers as constructed WreckPilar world objects (WorldObjectFromScene children, neither saved nor networked); this server makes none, so the constructed count of WreckPilar stays 2 lower (EXPECTED: approximations)",
+  "script": "^sweep_build_3$",
+  "line": "^~ scene:WorldObjectsHandler WorldObjectsHandler\\._constructedWorldObjectsGroups: ref "
+ },
+ {
   "class": "b",
   "why": "time: the same message, a few script steps earlier or later (machine coroutines and the 30-frame host run on their own clocks; EXPECTED: Time)",
   "line": "^~ shifted"
