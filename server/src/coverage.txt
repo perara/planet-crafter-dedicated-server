@@ -201,7 +201,7 @@ module native::tessera  native::tessera::tests::rotations_compose_invert_and_mov
 module native::typetree  native::typetree::tests::packed_floats_must_fit_their_data
 module native::unity  native::unity::tests::only_format_22_files_of_unity_6000_3_with_objects_inside_open native::unity::tests::the_build_lists_its_scenes_and_scripts native::unity::tests::the_shipped_class_ids_are_named
 manual native::wrecks  native::tables::tests::read_game_writes_the_test_tables
-module net  net::tests::fixed_strings_cut_at_capacity net::tests::fixed_string_deltas_carry_the_whole_string_flag
+module net  net::tests::fixed_strings_cut_at_capacity net::tests::scene_objects_are_written_in_place_with_the_bytes_they_always_had net::tests::fixed_string_deltas_carry_the_whole_string_flag
 module newworld  newworld::tests::a_new_save_has_the_pod_the_inventories_and_the_settings
 module objects  objects::tests::deconstruction_gives_the_recipe_to_the_backpack_or_the_floor objects::tests::energy_group_data_sums_each_groups_generation_on_this_planet objects::tests::genetics_details_list_each_traits_type_and_value_or_nothing objects::tests::objects_are_built_dropped_and_destroyed_as_in_the_game objects::tests::scene_objects_players_change_stay_changed_after_a_reload objects::tests::world_object_queries_answer_the_asking_client objects::tests::prefabs_without_a_root_group_base_keep_group_hash_zero objects::tests::a_client_creating_a_drone_or_rover_on_the_floor_is_not_told_to_start_its_physics
 module panels  panels::tests::compartments_side_by_side_open_into_each_other_and_close_again

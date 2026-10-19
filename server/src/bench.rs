@@ -506,6 +506,20 @@ fn scale() {
     let t = Cpu::now();
     let mut g = Game::with_clock(net_data, data, spec, save, scenes, Some(0.0));
     println!("scale: Game::new {:?}, {} world objects, {} network objects, rss {} MiB (+{} MiB), heap {} MiB", t.elapsed(), g.wos.len(), g.net.objects.len(), rss_kib() >> 10, (rss_kib() - tables_rss) >> 10, heap_bytes() >> 20);
+    {
+        // A player joining: ConnectionApproved with the whole world, then PlayerReady.
+        let t = Cpu::now();
+        join(&mut g, 90, "Scale1");
+        let first = t.elapsed();
+        let bytes: usize = g.net.out.iter().filter(|(to, _, _)| *to == crate::net::Target::Only(90)).map(|(_, _, b)| b.len()).sum();
+        g.net.out.clear();
+        let t = Cpu::now();
+        join(&mut g, 91, "Scale2");
+        println!("scale: a player joins in {first:?} (the second {:?}), {} KiB sent to it", t.elapsed(), bytes >> 10);
+        g.disconnect(90);
+        g.disconnect(91);
+        g.net.out.clear();
+    }
     let (before, t) = (rss_kib(), Cpu::now());
     // SAFETY: malloc_trim only returns free memory to the system.
     unsafe { libc::malloc_trim(0) };

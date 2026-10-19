@@ -543,7 +543,7 @@ impl Game {
         });
         w.u32(self.net.objects.len() as u32);
         for o in self.net.objects.values() {
-            w.bytes(&o.scene_object(self.net.scene_handle));
+            o.scene_object_into(&mut w, self.net.scene_handle);
         }
         w.0
     }
