@@ -329,7 +329,7 @@ impl Game {
             last_clock: 0.0,
             advanced: false,
             rng: Rng::seeded(),
-            trace: std::env::var_os("PCDS_TRACE").is_some(),
+            trace: crate::env("PCDS_TRACE").is_some(),
             scenes,
             timers: Default::default(),
             crafted_total: 0,
@@ -1291,6 +1291,19 @@ pub mod tests {
         }
         let ids: Vec<&str> = g.save.messages.iter().filter_map(|m| m["stringId"].as_str()).collect();
         assert!(ids.contains(&"Message_YouAreAConvict") && !ids.contains(&"Message_NoLongerInTheGame"), "{ids:?}");
+    }
+
+    /// PCDS_TRACE is "set" as every setting is: an empty value (the README's default, as
+    /// server.env may hold it) is not set, and does not log every message.
+    #[test]
+    fn an_empty_pcds_trace_does_not_trace() {
+        // SAFETY: only this test sets it, and to the empty value, which no reader takes as set.
+        unsafe { std::env::set_var("PCDS_TRACE", "") };
+        let g = test_game(crate::save::SaveFile::empty());
+        unsafe { std::env::remove_var("PCDS_TRACE") };
+        if let Some(g) = g {
+            assert!(!g.trace);
+        }
     }
 
     #[test]
