@@ -152,7 +152,9 @@ pcds plugin install .
 ```
 
 This copies `plugin.toml` and the module to `run/plugins/greeter/`. It does nothing yet: a plugin
-waits for you to approve it.
+waits for you to approve it. The server does not need to be told: it looks at the folder every few
+seconds, so a plugin folder copied there by hand (or a `plugin.wasm` you build over and copy again)
+is found within a few seconds with the server running. No restart, no hot update.
 
 ### 8. Approve it
 
@@ -176,7 +178,9 @@ reads the change at once; otherwise at its next start. The same is on the web pa
 (key 9).
 
 The approval is for these files: the digest above is what you approved. If the plugin's files
-change, the plugin waits for you again.
+change, the plugin waits for you again, and the version you approved keeps running meanwhile
+(`pcds plugin list` shows the notice). Approving the new files replaces it, with its state handed
+over; if the new version does not start, the old one goes on and the listing says why.
 
 ### 9. Try it in the game
 
@@ -219,6 +223,20 @@ fn load(host: &dyn Host, state: Option<State<'_>>) -> Self {
 
 `examples/plugins/hello-stats` does this (its version 1 had one counter, version 2 has two).
 
+### Switching off, replacing and removing, live
+
+`pcds plugin disable greeter`, deleting `run/plugins/greeter/`, or approving a rebuilt module all
+take effect with the server running. When a plugin is switched off or removed it gets one last
+call, `Plugin::unload`, and then `save`, each with a budget, before its instance and memory are
+dropped; its commands are gone at once. Replacing it (a reload) does not call `unload`: `save` and
+the new version's `load` carry the state over.
+
+```rust
+fn unload(&mut self) {
+    // Optional. Put the last things into your state; nothing you queue here is applied.
+}
+```
+
 ## Testing on your PC
 
 A plugin is Rust against the `Host` trait, so its tests need no server and no WebAssembly: write
@@ -239,6 +257,7 @@ WebAssembly target for `cargo build`).
 | `plugin ID: chat: out of fuel` | an event did more work than its budget | do less per event (move work to when it is needed), or ask for more `fuel_per_event` |
 | `plugin ID: chat: trap: wasm unreachable` | the plugin panicked | read the message above it; the plugin was restarted from its last saved state |
 | `failed: switched off after 5 faults in 60 s` | it keeps faulting | fix it, `pcds plugin reload` |
+| `running` with a notice `a reload failed: ...` | the new version did not start; the old one goes on | read the reason, rebuild, approve again |
 | commands do nothing | the chat prefix, or the capability | `pcds rules` shows `chat.commandPrefix` (unset means `!`); `pcds plugin list` shows what is granted |
 
 ## Rules for a good plugin
@@ -309,7 +328,7 @@ PCDS_ADMIN_TOKEN=$(pcds token) WEBHOOK_URL=https://discord.com/api/webhooks/... 
 The core of any such program is a loop:
 
 ```python
-answer = post(api + "/api/plugins/events", {"after": after, "types": ["chat", "player_join"]},
+answer = post(api + "/api/plugins/events", {"consumer": "my-bridge", "after": after, "types": ["chat", "player_join"]},
               {"Authorization": "Bearer " + token})
 for event in answer["events"]:
     ...                       # {"id", "time", "type": "chat", "client", "name", "text"}
@@ -317,8 +336,10 @@ for event in answer["events"]:
 ```
 
 and, to act, the endpoints that exist: `POST /api/chat {"text"}`, `/api/kick`, `/api/teleport`,
-`/api/rules`. The first call turns the recording on for the kinds you name, for the minute after each
-call; poll every second or two. If `epoch` in an answer is not the one you saw, the server
+`/api/rules`. The first call registers you (by the `consumer` name) and turns the recording on for the kinds
+you name, for the minute after each call; poll every second or two. Leave with
+`{"consumer": "my-bridge", "unregister": true}` when you stop (`relay.py` does, on exit and on SIGTERM);
+silent for a minute, you are dropped anyway. `pcds plugin list` and the dashboard show who is registered. If `epoch` in an answer is not the one you saw, the server
 restarted: start again from `after: 0`. Such a program has the admin token and so every power the
 admin API has: run it as a service of its own, as a user of its own, and keep the token out of its
 logs.

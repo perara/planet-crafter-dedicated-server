@@ -420,6 +420,10 @@ pcds plugin list                      # state, capabilities, calls, faults
 pcds plugin disable greeter
 ```
 
+Plugins are loaded, switched off, replaced and removed with the server running: a folder put in
+`run/plugins/` is found within a few seconds, and an approved plugin starts without a restart or a
+hot update.
+
 A plugin asks for **capabilities** (read chat, read the world, say in the chat, kick, move
 players, change gameplay rules, refuse an RPC) and does nothing until you grant them; it is
 approved for the files as they are, so a changed plugin waits for you again. It can never write the

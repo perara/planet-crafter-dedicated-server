@@ -558,19 +558,151 @@ fn a_plugins_state_goes_through_hot_updates_and_a_restart() {
     let said = say_in_chat(&server, &data, &dir, "Restarted", &["!uses"]);
     assert!(said.contains("!stats was used 1 times, !uses 4 times on this world"), "{said}\n{}", server.log());
 
-    // A file of the plugin changed on disk: the next reload shows it waiting for the admin, and
-    // nothing of it runs; approving it again brings it back.
+    // A file of the plugin changed on disk: the next reload shows the new files waiting for the admin,
+    // while the approved version goes on; approving it again replaces it.
     let wasm = dir.join("plugins/hello-stats/plugin.wasm");
     let mut bytes = std::fs::read(&wasm).unwrap();
     bytes.extend_from_slice(&[0, 6, 4, b'n', b'o', b't', b'e', 0]);
     std::fs::write(&wasm, bytes).unwrap();
     let (status, _) = server.api("POST", "/api/plugins/reload", json!({}));
     let (_, list) = server.api("GET", "/api/plugins", json!({}));
-    assert_eq!((status, list["plugins"][0]["status"].as_str()), (200, Some("changed")), "{list}");
+    assert_eq!((status, list["plugins"][0]["status"].as_str()), (200, Some("running")), "{list}");
+    assert!(list["plugins"][0]["notice"].as_str().is_some_and(|n| n.contains("wait for approval")), "{list}");
     let said = say_in_chat(&server, &data, &dir, "Waiting", &["!uses"]);
-    assert!(!said.contains("!stats was used"), "an unapproved plugin does not answer: {said}");
+    assert!(said.contains("!stats was used 1 times, !uses 5 times"), "the approved version goes on: {said}");
     let (status, answer) = server.api("POST", "/api/plugins/enable", json!({"id": "hello-stats"}));
     assert_eq!((status, answer["plugin"]["status"].as_str()), (200, Some("running")), "{answer}");
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Waits until `GET /api/plugins` satisfies `ok` (the folder scan runs every two seconds and acts
+/// on a change it has seen twice), at most `secs`; the listing it last saw.
+fn wait_for_plugins(server: &Server, secs: u64, ok: impl Fn(&Value) -> bool) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        let (_, list) = server.api("GET", "/api/plugins", json!({}));
+        if ok(&list) || Instant::now() > deadline {
+            assert!(ok(&list), "the plugin listing never became what was waited for: {list}\n{}", server.log());
+            return list;
+        }
+        std::thread::sleep(Duration::from_millis(400));
+    }
+}
+
+/// Plugins come and go while the server runs, with no reload asked and no restart: a folder dropped
+/// in and approved starts by itself; switched off, it stops and its command is gone; changed
+/// files wait for approval while the old version goes on, and approved they take over with the
+/// state; one is switched off while the world is handed over to the other bank; a removed folder
+/// is unloaded; a program reading the stream registers and leaves.
+#[test]
+fn plugins_load_and_unload_while_the_server_runs() {
+    let Some(data) = tables() else { return };
+    let dir = std::env::temp_dir().join(format!("pcds-liveplugins-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    assert!(Command::new(PCDS).arg("new-save").arg(dir.join("world.json")).arg(&data).stdout(Stdio::null()).status().unwrap().success());
+    let cli = |args: &[&str]| {
+        let out = Command::new(PCDS).arg("plugin").args(args).env("PCDS_HOME", &dir).env("HOME", dir.join("home")).env_remove("PCDS_UNIT").env_remove("PCDS_CONTAINER").output().unwrap();
+        assert!(out.status.success(), "plugin {args:?}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    };
+    let banks = banks(&dir);
+    // There is no plugins folder at all.
+    let server = start(&dir, &data, &banks, "http://127.0.0.1:9/releases");
+    assert!(!say_in_chat(&server, &data, &dir, "Before", &["!uses"]).contains("was used"));
+
+    // A folder is dropped in, as an admin would copy it, and approved with the server not asked
+    // (the command line here has no admin address to ask): the scan finds both.
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins/hello-stats");
+    let to = dir.join("plugins/hello-stats");
+    std::fs::create_dir_all(&to).unwrap();
+    for f in ["plugin.toml", "plugin.wasm"] {
+        std::fs::copy(example.join(f), to.join(f)).unwrap();
+    }
+    let list = wait_for_plugins(&server, 20, |l| l["plugins"][0]["status"] == "pending");
+    assert_eq!(list["plugins"][0]["detail"], "discovered, awaiting approval: pcds plugin enable ID");
+    assert!(!say_in_chat(&server, &data, &dir, "Waiting", &["!uses"]).contains("was used"), "nothing runs before the approval");
+    cli(&["enable", "hello-stats", "--yes"]);
+    wait_for_plugins(&server, 20, |l| l["plugins"][0]["status"] == "running");
+    let said = say_in_chat(&server, &data, &dir, "Live", &["!stats", "!uses"]);
+    assert!(said.contains("!stats was used 1 times, !uses 1 times on this world"), "{said}\n{}", server.log());
+    let (_, list) = server.api("GET", "/api/plugins", json!({}));
+    assert_eq!(list["runtime"]["instances"], 1);
+
+    // Switched off (the file only; nobody asks the server): the command is gone, the state kept.
+    cli(&["disable", "hello-stats"]);
+    wait_for_plugins(&server, 20, |l| l["plugins"][0]["status"] == "disabled");
+    assert!(!say_in_chat(&server, &data, &dir, "Off", &["!uses"]).contains("was used"));
+    let (_, list) = server.api("GET", "/api/plugins", json!({}));
+    assert_eq!((list["runtime"]["instances"].as_u64(), list["runtime"]["memoryPages"].as_u64()), (Some(0), Some(0)), "{list}");
+    assert!(to.join("data/world.state").is_file(), "its last save was written");
+    // On again: a new instance with that state.
+    cli(&["enable", "hello-stats", "--yes"]);
+    wait_for_plugins(&server, 20, |l| l["plugins"][0]["status"] == "running");
+    let said = say_in_chat(&server, &data, &dir, "On", &["!uses"]);
+    assert!(said.contains("!stats was used 1 times, !uses 2 times on this world"), "{said}");
+
+    // Changed code: its files wait for approval, the approved version goes on; approved, the new
+    // version takes over with the state (the same length of text, so the module stays valid).
+    let wasm = to.join("plugin.wasm");
+    let bytes = std::fs::read(&wasm).unwrap();
+    let at = bytes.windows(16).position(|w| w == b"!stats was used ").expect("the module holds its text");
+    let mut changed = bytes.clone();
+    changed[at] = b'?';
+    std::fs::write(&wasm, changed).unwrap();
+    let list = wait_for_plugins(&server, 20, |l| l["plugins"][0]["notice"].is_string());
+    assert_eq!(list["plugins"][0]["status"], "running");
+    assert!(list["plugins"][0]["notice"].as_str().unwrap().contains("wait for approval"), "{list}");
+    assert!(say_in_chat(&server, &data, &dir, "Old", &["!uses"]).contains("!stats was used 1 times, !uses 3 times"), "still the old version");
+    let (status, answer) = server.api("POST", "/api/plugins/enable", json!({"id": "hello-stats"}));
+    assert_eq!((status, answer["plugin"]["notice"].is_null()), (200, true), "{answer}");
+    let said = say_in_chat(&server, &data, &dir, "New", &["!uses"]);
+    assert!(said.contains("?stats was used 1 times, !uses 4 times on this world"), "new behaviour, state kept: {said}\n{}", server.log());
+
+    // Switched off while the world is handed over to the other bank: the set that runs afterwards
+    // is the folder's, and the plugin is off in the new bank.
+    let admin = server.admin;
+    let disabler = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        let body = json!({"id": "hello-stats"}).to_string();
+        let mut s = TcpStream::connect(("127.0.0.1", admin)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        write!(s, "POST /api/plugins/disable HTTP/1.1\r\nAuthorization: Bearer t\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        let mut answer = String::new();
+        let _ = s.read_to_string(&mut answer);
+        answer
+    });
+    let done = server.update(json!({"rollback": true}));
+    let answered = disabler.join().unwrap();
+    assert_eq!((done["ok"].as_bool(), done["verified"].as_bool()), (Some(true), Some(true)), "{done}\n{}", server.log());
+    assert!(answered.starts_with("HTTP/1.1 200") || answered.starts_with("HTTP/1.1 409") || answered.starts_with("HTTP/1.1 500"), "{answered}");
+    wait_for_plugins(&server, 20, |l| l["plugins"][0]["status"] == "disabled");
+    assert!(!say_in_chat(&server, &data, &dir, "AfterFlip", &["!uses"]).contains("was used"));
+    cli(&["enable", "hello-stats", "--yes"]);
+    wait_for_plugins(&server, 20, |l| l["plugins"][0]["status"] == "running");
+    assert!(say_in_chat(&server, &data, &dir, "Again", &["!uses"]).contains("!uses 5 times"), "the state went through the flip and the unload");
+
+    // A program reading the stream registers and leaves.
+    let (status, _) = server.api("POST", "/api/plugins/events", json!({"consumer": "tester", "types": ["chat"]}));
+    assert_eq!(status, 200);
+    let (_, list) = server.api("GET", "/api/plugins", json!({}));
+    assert_eq!(list["stream"]["consumers"][0]["name"], "tester");
+    server.api("POST", "/api/plugins/events", json!({"consumer": "tester", "unregister": true}));
+    let (_, list) = server.api("GET", "/api/plugins", json!({}));
+    assert!(list["stream"]["consumers"].as_array().unwrap().is_empty());
+
+    // The folder removed: unloaded, nothing written back, no command.
+    std::fs::remove_dir_all(&to).unwrap();
+    wait_for_plugins(&server, 20, |l| l["plugins"].as_array().is_some_and(|p| p.is_empty()));
+    assert!(!to.exists(), "its folder was not made again for its state");
+    assert!(!say_in_chat(&server, &data, &dir, "Gone", &["!uses"]).contains("was used"));
+    let log = server.log();
+    for line in ["plugin hello-stats: pending", "plugin hello-stats: running", "plugin hello-stats: unloading (disabled)", "plugin hello-stats: disabled", "plugin hello-stats: unloading (its folder was removed)", "plugin hello-stats: removed"] {
+        assert!(log.contains(line), "the log lacks {line:?}\n{log}");
+    }
     assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
     let mut server = server;
     assert!(server.child.wait().unwrap().success(), "{}", server.log());

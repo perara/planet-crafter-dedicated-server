@@ -302,6 +302,90 @@ game would refuse itself in some situations (chat, a build over a limit), or for
 tells the player why (`tell`). The capability `rpc.veto` is listed with the RPC names in the
 dashboard's approval, so the admin sees which requests the plugin may stop.
 
+## Loading and unloading while the world runs
+
+Plugins come, change and go with the server running: no restart, no hot update. Everything below
+happens on the bank's game thread **between two events**, never inside a plugin's call, so nothing
+is torn down while it runs.
+
+**States.** One word for each, in `pcds plugin list`, `GET /api/plugins` and the dashboard, and
+each change of state is one line in the log (`plugin ID: running`):
+
+| State | Meaning |
+|---|---|
+| `pending` | discovered (its folder is there) and awaiting approval; nothing of it runs |
+| `running` | approved and loaded; may carry a `notice` (below) |
+| `disabled` | approved once, switched off; its state is kept |
+| `changed` | its files differ from the approved ones and nothing is running (after a start) |
+| `unloading` | its last call and last save are running (a moment; seen in the log) |
+| `failed` | switched off for faults, or it did not start (the faulted state) |
+| `invalid`, `incompatible` | its manifest, module or rules do not hold up; built for another ABI major |
+
+**Discovery.** The bank looks at the plugins folder every 2 seconds: the folder, `approved.json`,
+and each plugin's manifest and entry file, by size and modification time (about 45 µs for ten
+plugins: a few dozen `stat`s, every 2 s, which is 0.002 % of one core). A change is acted on when two looks in a row see the same new state,
+so a folder still being copied in is not read half written; so a plugin dropped in is `pending`
+within about 4 seconds, and starts within about 4 seconds of its approval being written, whoever
+wrote it (`pcds plugin enable` with the server stopped or running, the admin API, the dashboard, an
+editor). The admin API, the command line and the dashboard act at once (they ask for a reload).
+A plugin that is a rules file is loaded and unloaded exactly like a module. A program that reads
+the event stream registers by asking and is listed (name, kinds, last poll); it leaves by saying
+so (`"unregister": true`) or after a minute of silence, and what only it wanted stops being recorded.
+
+**Loading.** A new folder is read and, once approved, compiled, started with its state (from the
+snapshot's part, else the file beside it) and its commands and event kinds are registered, all in
+one step between events (about 1 ms for a 44 KB module). A new version of an approved plugin is
+started first; the old one is replaced only when the new one has started.
+
+**Unloading** (switched off, folder removed, or switched off for faults), in this order:
+
+1. no event reaches the plugin from now on (the state is `unloading`);
+2. its optional `pcds_unload` (ABI 1.1: `Plugin::unload`) is called, and then `pcds_save`, each with
+   the fuel of a save (at most 50,000,000, so a loop in it is stopped within milliseconds; a trap
+   in it is a line in the log, not a fault of the plugin; the state of the last good save is then
+   kept instead);
+3. the state goes into the snapshot's part and, unless the folder is gone, beside the plugin;
+4. the instance is dropped: its memory, its capabilities and everything it had queued are gone
+   (what it asked for in its unload call is never applied), its timers with it;
+5. its commands, its event kinds and its limits leave the host's tables.
+
+A plugin switched off for faults is held (its instance, for the last call only) until the
+current event is done, then goes through the same steps. A plugin whose folder was removed is
+unloaded the same way, but nothing is written back, so removing it removes its state too.
+
+**Reload** is unloading and loading of the changed files with the state handed over: the old
+instance is asked for its state (`pcds_save`, not `pcds_unload`: it is not going away, a new
+version takes over), the new one starts with it and `pcds_load(state, version)` is the
+plugin's own migration. If the new version cannot start (its `load` traps on the old state, its
+module is invalid), **the old version keeps running** and the plugin carries a `notice` saying why
+(`a reload failed: ...; the old version keeps running`), in the log, the listing and the dashboard.
+Files that changed on disk and are not approved yet do the same: the approved version, in
+memory, goes on with the notice `its files changed and wait for approval`, until the admin approves
+(it is replaced) or disables it. A plugin switched off for faults is started again by an explicit
+reload, not by the folder merely changing elsewhere.
+
+**While the world runs.**
+
+- *During a tick*: the folder is looked at after the tick, never in it; a plugin is never loaded
+  or unloaded during an event, because both happen on the one thread that runs the events.
+- *During a flip*: the old bank, from its `HANDOFF` until the new bank has taken over, does not
+  answer requests or look at the folder, so its plugin set cannot change under the snapshot: **the
+  snapshot holds the set that was running at the `HANDOFF`.** The new bank read and compiled the
+  folder earlier, before its hello; **when it attaches it looks at the folder once more and, if
+  anything changed since (an approval or a disable during the flip), reads it again at once.** So
+  the plugin set the new bank runs is the folder's at the moment it takes over, never the compile's.
+  A plugin switched off during a flip is started with its state from the snapshot and unloaded
+  straight after, its state written; nothing is lost.
+- *While players chat commands*: a command is delivered to the plugin that owns it when the message
+  is handled; after the unload nobody owns it, and it is only a chat message.
+- *Repeatedly*: a test loads and unloads a plugin 100 times and finds the same instances, memory
+  pages, registered commands and subscribed kinds as before, and the same tick cost (the host counts
+  its instances and pages; `GET /api/plugins` shows `runtime`).
+- *A hostile plugin*: a trap or an endless loop in `pcds_unload` cannot stop the unloading (above).
+
+The cost of a reload or load is paid on the game thread (compiling: about 1 ms for 44 KB, up to
+0.2 s for the 8 MiB limit); a hot update's is not (the new bank compiles before the world stops).
+
 ## Capabilities and approval
 
 A manifest (`plugin.toml`) asks for capabilities by name; the table is in docs/plugins-api.md.
@@ -430,7 +514,7 @@ any serde format; only the hex text of the states (`state.rs`, `hex_blobs`) shou
 | install (copies the manifest and the entry; waits) | `pcds plugin install PATH [--force]` | |
 | approve | `pcds plugin enable ID [--grant ...] [--yes]` | `POST /api/plugins/enable`, dashboard |
 | switch off | `pcds plugin disable ID` | `POST /api/plugins/disable`, dashboard |
-| read the folder again; start one that failed | `pcds plugin reload` | `POST /api/plugins/reload`, dashboard |
+| read the folder again now; start one that failed | `pcds plugin reload` | `POST /api/plugins/reload`, dashboard (the bank also looks every 2 s by itself) |
 
 For each plugin the listing shows: its state (`running`, `pending`, `disabled`, `changed`,
 `invalid`, `incompatible`, `failed`), the capabilities asked, granted and not granted, its limits,
@@ -526,6 +610,10 @@ above 100, so every figure has noise of about 20 %:
   tarball (+0.8 MB, +19 %), of which wasmi is 2.0 MB and 0.7 MB. Build time of the new
   dependencies: wasmi 25 s, the TOML reader a few seconds, on 4 loaded cores. Docker: the image is
   the program, so +0.8 MB compressed; the build copies `plugin-api/` into the build stage.
+- **Loading and unloading**: the idle scan of a folder with 10 plugins takes 46 µs every 2 s. 100
+  load/unload cycles of a plugin on a host with a second, steady plugin: the same instances, pages,
+  commands and subscribed kinds at the end, and the tick cost 824 ns before, 782 ns after (best of
+  three rounds of 20,000 ticks; the noise on this host is larger than the difference).
 - **Starting a plugin**: 1.0 ms to read, validate and compile a 44 KB module (done before the
   world stops, in the new bank), 25 µs to make an instance (inside the stop). Ten plugins add
   about 0.3 ms to the stop.
