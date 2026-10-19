@@ -69,6 +69,9 @@ const DEFAULTS: [&str; 18] = [
     ",\"linkedWo\":0",
 ];
 
+/// A section's entries written by a function (SaveFile::text_with).
+pub type Section<'a> = &'a dyn Fn(&mut String);
+
 /// JsonableGameState.CleanSaveStringOfVariables: ,"key":<digit> loses the key and that digit.
 const CLEANED: [&str; 3] = [",\"gameMode\":", ",\"gameDyingConsequences\":", ",\"gameStartLocation\":"];
 
@@ -177,7 +180,7 @@ impl SaveFile {
     /// to_text, with the world objects' and the inventories' sections written by the two
     /// functions given (each appends its entries, "|\n" between them, already as the game
     /// writes them) instead of taken from `self.objects` and `self.inventories`.
-    pub fn text_with(&self, raw: Option<(&dyn Fn(&mut String), &dyn Fn(&mut String))>) -> String {
+    pub fn text_with(&self, raw: Option<(Section, Section)>) -> String {
         let mut w = TextWriter { text: String::from("\u{feff}"), stopped: [false; 3] };
         w.section(std::slice::from_ref(&self.world));
         w.section(&self.planets);

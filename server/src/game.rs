@@ -234,7 +234,7 @@ pub struct Game {
     /// loading, each check makes its own; Some(None): not made yet). They only move with
     /// terraformation, which stands still while the world is placed.
     #[serde(skip)]
-    pub load_water: Option<Option<Vec<([f32; 3], [f32; 4], [f32; 3])>>>,
+    pub load_water: Option<Option<crate::water::Boxes>>,
 }
 
 /// An RPC message's method hash (after sender, object and behaviour).
