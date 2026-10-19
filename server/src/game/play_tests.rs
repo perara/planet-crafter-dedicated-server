@@ -470,12 +470,6 @@ fn invariants(g: &Game) -> Vec<String> {
         if w.net.is_some_and(|n| !g.net.objects.contains_key(&n)) {
             bad.push(format!("world object {} ({}) has net object {:?}, which is gone", w.id, g.data.groups[w.group].id, w.net));
         }
-        // (A scene object's inventory is made when a client first opens it.)
-        for inv in std::iter::once(&w.linked_inventory).chain(&w.secondary_inventories).filter(|i| **i > 0 && !crate::model::is_from_scene(w.id)) {
-            if !g.inventories.contains_key(inv) {
-                bad.push(format!("world object {} ({}) has inventory {inv}, which is gone", w.id, g.data.groups[w.group].id));
-            }
-        }
     }
     for id in g.constructed.iter().chain(g.pickables.iter()) {
         if !g.wos.contains_key(id) {

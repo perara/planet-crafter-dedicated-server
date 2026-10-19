@@ -201,13 +201,15 @@ pub fn write_atomic(path: &str, bytes: &[u8]) -> std::io::Result<()> {
             break;
         }
     }
+    // Only a file this call made is removed again if the write fails.
+    let ours = created.is_ok();
     let written = created.and_then(|mut file| {
         file.set_permissions(std::fs::Permissions::from_mode(mode))?;
         file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(&tmp, path)
     });
-    if written.is_err() && !tmp.is_empty() {
+    if written.is_err() && ours {
         let _ = std::fs::remove_file(&tmp);
     }
     written?;
