@@ -281,12 +281,17 @@ pub fn apply_delta(net: &mut Net, client: u64, body: &[u8]) -> bool {
     true
 }
 
+/// A number within rpcspec::SANE_FLOAT.
+fn sane(v: f64) -> bool {
+    v.is_finite() && v.abs() <= crate::rpcspec::SANE_FLOAT
+}
+
 /// Whether a value of a floating-point type (float, double, vectors, quaternion, color) is all
-/// numbers; values of other types are.
+/// numbers within rpcspec::SANE_FLOAT; values of other types are.
 fn finite(ty: &str, bytes: &[u8]) -> bool {
     match ty.strip_prefix("NetworkVariable<").and_then(|t| t.strip_suffix('>')) {
-        Some("Double") => bytes.chunks_exact(8).all(|c| f64::from_le_bytes(c.try_into().unwrap()).is_finite()),
-        Some("Single" | "Vector2" | "Vector3" | "Vector4" | "Quaternion" | "Color") => bytes.chunks_exact(4).all(|c| f32::from_le_bytes(c.try_into().unwrap()).is_finite()),
+        Some("Double") => bytes.chunks_exact(8).all(|c| sane(f64::from_le_bytes(c.try_into().unwrap()))),
+        Some("Single" | "Vector2" | "Vector3" | "Vector4" | "Quaternion" | "Color") => bytes.chunks_exact(4).all(|c| sane(f32::from_le_bytes(c.try_into().unwrap()) as f64)),
         _ => true,
     }
 }
@@ -685,6 +690,17 @@ mod tests {
         let (_, kind, body) = g.net.out.last().unwrap();
         assert_eq!(*kind, NETWORK_VARIABLE_DELTA);
         assert!(body.windows(8).any(|w| w == [1, 1, 2, 0, 0, 0, b'h', b'i']), "dirty, flag, string: {body:?}");
+    }
+
+    #[test]
+    fn owner_written_floats_must_be_numbers_in_range() {
+        let v3 = |a: f32, b: f32, c: f32| [a, b, c].iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>();
+        let ty = "NetworkVariable<Vector3>";
+        assert!(finite(ty, &v3(1.0, -2.5e5, 3.0)));
+        assert!(!finite(ty, &v3(1.0, f32::NAN, 3.0)));
+        assert!(!finite(ty, &v3(1.0, 1.0e30, 3.0)), "finite, but past what the server's arithmetic holds");
+        assert!(!finite("NetworkVariable<Double>", &1.0e300f64.to_le_bytes()));
+        assert!(finite("NetworkVariable<Int32>", &i32::MAX.to_le_bytes()), "other types are not floats");
     }
 
     #[test]
