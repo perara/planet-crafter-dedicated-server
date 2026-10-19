@@ -1851,6 +1851,23 @@ mod tests {
         }
     }
 
+    /// What the live bank says of the rules the front acts on (OPS) sets the autosave timer and
+    /// the updater, and a value out of range is clamped, not trusted.
+    #[test]
+    fn the_rules_the_bank_sends_set_the_autosave_and_the_updater() {
+        let mut front = test_front();
+        assert_eq!((front.autosave_minutes, front.updates.auto, front.updates.every), (5, false, Duration::from_secs(24 * 3600)));
+        let ops = |front: &mut Front, body: &str| front.on_live(Frame { kind: ipc::OPS, n: 0, body: body.as_bytes().to_vec(), fd: None });
+        ops(&mut front, r#"{"autosaveMinutes": 0, "autoUpdate": true, "updateCheckHours": 6}"#);
+        assert_eq!((front.autosave_minutes, front.updates.auto, front.updates.every), (0, true, Duration::from_secs(6 * 3600)));
+        ops(&mut front, r#"{"autosaveMinutes": 10, "updateCheckHours": 100000}"#);
+        assert_eq!((front.autosave_minutes, front.updates.auto, front.updates.every), (10, true, Duration::from_secs(8760 * 3600)));
+        // Not JSON, or other fields: nothing changes.
+        ops(&mut front, "no");
+        ops(&mut front, r#"{"somethingElse": 1}"#);
+        assert_eq!((front.autosave_minutes, front.updates.auto), (10, true));
+    }
+
     #[test]
     fn a_bank_of_another_protocol_is_refused_on_every_path() {
         let hello = |kind, n, body: &str| hello_of(&Frame { kind, n, body: body.as_bytes().to_vec(), fd: None });

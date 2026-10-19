@@ -17,9 +17,10 @@
 //!        pcds load HOST:PORT DATA_DIR [PLAYERS] [SECONDS]   (a load test, see load.rs)
 //!        pcds read-game GAME_DIR OUT_DIR   (a game version's tables, see native/)
 //!        pcds COMMAND ...   (installing and running a server: cli/)
-//! Environment: the PCDS_* settings are in config.rs (KNOBS: type, range, default, what each does;
-//! the README's Settings table repeats them, and a test keeps the two equal). The other PCDS_*
-//! names the program reads or sets (installation, internal, test) are listed there too.
+//! Environment: a dozen PCDS_* variables, all in config.rs (KNOBS for server.env, PROCESS_ENV for
+//! the installation, DEV_HOOKS, RETIRED for the ones that are gone; docs/env.md is written from
+//! them, the README's Settings tables repeat them, and tests keep all of it equal). Gameplay
+//! and tuning are rules (rules.rs), not variables.
 
 mod animals;
 #[cfg(test)]

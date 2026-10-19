@@ -413,7 +413,9 @@ memory. `restore` (spike: `handoff.rs`):
   as firmware migrates its data sector on boot;
 - refuses anything else, and the old bank goes on. A unit test checks the refusals.
 
-Rules for releases: a new field gets `#[serde(default)]` and needs no new format; a field
+Rules for releases: a new field gets `#[serde(default)]` and needs no new format (a rules section new
+in a release stays out of `rules.json` and of the snapshot while it holds the defaults, `Rules::for_older_banks`,
+so the release before can still read both; `deny_unknown_fields` would refuse it); a field
 renamed, removed or changed in meaning bumps `FORMAT` and adds its step to `migrate`. CI keeps
 a snapshot written by the previous release and restores it in the new build (the acceptance
 test, across versions). Flipping back after a confirmed flip (B to A) needs A to read B's

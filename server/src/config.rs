@@ -142,12 +142,14 @@ pub static KNOBS: &[Knob] = &[
 /// `install` ones say where the installation is and are set by the image, the unit or the
 /// operator's shell; `internal` ones pass between this program's own processes; `dev` is the
 /// one door for developer hooks.
+#[cfg(test)]
 pub struct Var {
     pub name: &'static str,
     pub scope: &'static str,
     pub text: &'static str,
 }
 
+#[cfg(test)]
 pub static PROCESS_ENV: &[Var] = &[
     Var { name: "PCDS_HOME", scope: "install", text: "The folder the installation keeps everything in: worlds/, server.env, rules.json, access.json, data/ (the game tables) and bin/ (the banks). Default: run/ of the release or checkout folder; a second server on the machine gets its own." },
     Var { name: "PCDS_GAME_DIR", scope: "install", text: "The game's folder (the one with Planet Crafter.exe). Default: the one used last (run/game-dir), else the Steam library that lists the game; --game DIR on the commands that need it." },
@@ -236,6 +238,7 @@ pub const OLD_PLUMBING: &[&str] = &["PCDS_BANK", "PCDS_BANKS", "PCDS_ENV_FILE", 
 
 /// The most variables an operator meets: the settings of server.env plus the install ones.
 /// A new one is a decision (a rule if it is gameplay or tuning), not a habit.
+#[cfg(test)]
 pub const OPERATOR_ENV_BUDGET: usize = 12;
 
 /// Why a retired setting is not read, and what to do.
@@ -288,7 +291,7 @@ pub fn check_old_plumbing(get: &impl Fn(&str) -> Option<String>, save_path: &str
 /// A bank's one line about the settings it inherited from a front before 0.7 (None: none).
 pub fn inherited_note(get: &impl Fn(&str) -> Option<String>) -> Option<String> {
     let names: Vec<&str> = retired_set(get).into_iter().map(|(n, _)| n).filter(|n| !OLD_PLUMBING.contains(n)).collect();
-    (!names.is_empty()).then(|| format!("bank: the front that started it passes settings this version does not read ({}); they are ignored, and what they set is a rule now (pcds config migrate moves them, docs/env.md)", names.join(", ")))
+    (!names.is_empty()).then(|| format!("bank: the front that started it passes settings this version does not read ({}); the bank ignores them and takes rules.json (pcds config migrate moves them there, docs/env.md)", names.join(", ")))
 }
 
 pub fn knob_for(key: &str) -> Option<&'static Knob> {
@@ -706,7 +709,7 @@ mod tests {
         }
         out += "\n## Gone since 0.6\n\nA server started with one of these set (in `server.env` or its environment) stops, in one line that says what replaces it, and `pcds start` and `pcds restart` say so before asking systemd. `pcds config migrate` shows what it would change in `server.env` and `rules.json`; `--apply` writes it.\n\n| Was | Now |\n|---|---|\n";
         for (name, fate) in RETIRED {
-            out += &format!("| `{name}` | {} |\n", cell(&retired_message(name, *fate).replacen(name, "", 1).trim_start_matches(" is now ").trim_start_matches(" is gone: ").to_string()));
+            out += &format!("| `{name}` | {} |\n", cell(&retired_message(name, *fate).replacen(name, "", 1).trim_start_matches(" is now ").trim_start_matches(" is gone: ")));
         }
         for (names, now) in DELETED {
             out += &format!("| {} | {now} |\n", names.split(", ").map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", "));

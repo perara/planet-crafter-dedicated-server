@@ -927,6 +927,37 @@ mod tests {
         assert_eq!(frames, [(ipc::DATA, 4), (ipc::KICK, 4), (ipc::DATA, 5), (ipc::GONE, 0)]);
     }
 
+    /// The rules the front acts on go to it once, and again only when they change.
+    #[test]
+    fn the_rules_the_front_acts_on_are_sent_once_and_when_they_change() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let (a, b) = UnixStream::pair().unwrap();
+        a.set_nonblocking(true).unwrap();
+        let (mut front, mut bank) = (Link::new(a), Link::new(b));
+        let mut last = Value::Null;
+        forward_ops(&game, &mut bank, &mut last);
+        forward_ops(&game, &mut bank, &mut last);
+        game.rules.save.autosave_minutes = 7;
+        game.rules.update.auto = true;
+        forward_ops(&game, &mut bank, &mut last);
+        bank.send(ipc::GONE, 0, &[]);
+        let mut bodies = Vec::new();
+        while bodies.last() != Some(&(ipc::GONE, String::new())) {
+            assert!(front.fill(usize::MAX));
+            while let Some(f) = front.next() {
+                bodies.push((f.kind, String::from_utf8(f.body).unwrap()));
+            }
+        }
+        assert_eq!(
+            bodies,
+            [
+                (ipc::OPS, r#"{"autosaveMinutes":5,"autoUpdate":false,"updateCheckHours":24}"#.to_string()),
+                (ipc::OPS, r#"{"autosaveMinutes":7,"autoUpdate":true,"updateCheckHours":24}"#.to_string()),
+                (ipc::GONE, String::new())
+            ]
+        );
+    }
+
     /// An admin API call as the bank answers it: (status, JSON answer).
     fn call(game: &mut Game, method: &str, path: &str, body: Value) -> (u16, Value) {
         let ctx = Ctx { save_path: "", build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };

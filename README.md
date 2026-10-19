@@ -133,6 +133,10 @@ so `--rollback` needs no download. A release that changes how the server's two p
 (Steam players get a new invite code unless `PCDS_STEAM_TOKEN` is set). With the server stopped,
 `pcds upgrade` makes the release the one the next start runs. The rule `update.auto` does this
 by itself for each new release (off by default; `./pcds rules set update.auto=true`).
+Coming from a release before 0.7, whose `server.env` still holds settings that are rules now, run
+`./pcds config migrate --apply` right after the update (see [Settings](#settings); in Docker,
+`docker exec pcds /data/bin/pcds config migrate --apply`, since the image's own `pcds` is the old
+one until the image is replaced): the server refuses to start with them at its next restart.
 
 Other ways:
 - Run the installer again, or `./pcds up` in a newer release folder (move the old folder's `run/`
