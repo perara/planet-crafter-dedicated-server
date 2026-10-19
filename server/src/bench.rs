@@ -413,3 +413,96 @@ fn handoff() {
     }
     assert!(equal, "the handed-off run must send and save exactly what the straight run does");
 }
+
+/// The flip's stand on worlds of several sizes, phase by phase (docs/hot-update.md, "Flip
+/// speed"). The old bank snapshots into a memfd, the descriptor crosses a unix socket as the
+/// front passes it on, the new bank reads it and restores (its tables loaded beforehand), and
+/// the restored game is the next flip's old bank: N flips in a row.
+///
+///   tools/grow-world.py SAVE OUT N        a save grown to about N world objects
+///   PCDS_FLIPBENCH_SAVES=a.json,b.json [PCDS_FLIPBENCH_N=20] [PCDS_FLIPBENCH_PLAYERS=8] \
+///     [PCDS_FLIPBENCH_FROM=old.snapshot] cargo test --release flipbench -- --ignored --nocapture
+///
+/// PCDS_FLIPBENCH_FROM: a snapshot file (an older release's) restored every round instead of
+/// the live game's own (the migration path; its game version must be the tables').
+/// Prints, per save, p50 / p95 / max (ms) of: serialize, memfd write, fd pass, memfd read, each
+/// restore step, and the stand (the sum). The verify check is not run (PCDS_FLIP_VERIFY is a
+/// test aid). The front's own part (held frames, READY) is in its log line and record.
+#[test]
+#[ignore]
+fn flipbench() {
+    use std::collections::BTreeMap;
+    use std::io::Write;
+    let Some(dir) = crate::test_data() else { return };
+    let var = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (rounds, players) = (var("PCDS_FLIPBENCH_N", 20), var("PCDS_FLIPBENCH_PLAYERS", 8) as u64);
+    let saves = std::env::var("PCDS_FLIPBENCH_SAVES").or_else(|_| std::env::var("PCDS_BENCH_SAVE")).expect("flipbench: set PCDS_FLIPBENCH_SAVES");
+    let from = std::env::var("PCDS_FLIPBENCH_FROM").ok().map(|p| std::fs::read(&p).unwrap_or_else(|e| panic!("{p}: {e}")));
+    for path in saves.split(',') {
+        let e = Env { path: path.to_string(), dir, seconds: 0.0, players, action_ms: 0, dump: None };
+        let loading = Instant::now();
+        let mut g = load(&e);
+        let loaded = loading.elapsed();
+        g.sim_time = Some(0.0);
+        for c in 1..=players {
+            join(&mut g, c, &format!("Bench{c}"));
+        }
+        g.net.out.clear();
+        // Some play: a second of ticks, so that timers and queues hold state.
+        for i in 1..=200 {
+            g.sim_time = Some(i as f64 * 0.005);
+            g.tick();
+            g.net.out.clear();
+        }
+        let mut samples: BTreeMap<&'static str, Vec<f64>> = BTreeMap::new();
+        let mut bytes = 0;
+        let (front_end, bank_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (mut front, mut bank) = (crate::ipc::Link::new(front_end), crate::ipc::Link::new(bank_end));
+        for round in 0..rounds + 1 {
+            let (net_data, data, spec) = crate::tables(dir);
+            let scenes = crate::scene_tables(dir, &net_data, &data);
+            let mut phases: Vec<(&'static str, f64)> = Vec::new();
+            let fd = match &from {
+                None => crate::handoff::snapshot_memfd(&g, &mut phases).unwrap(),
+                Some(s) => crate::ipc::memfd("pcds-snapshot", |w| w.write_all(s).map_err(|e| e.to_string())).unwrap(),
+            };
+            // The front passes the descriptor on: the old bank's link to the front's, then the front's to the new bank's.
+            let t = Instant::now();
+            bank.send_fd(crate::ipc::SNAPSHOT, 1, b"{}", Some(fd));
+            let f = front.recv().unwrap();
+            front.queue(crate::ipc::RESTORE, 0, b"{}", f.fd, 0);
+            front.flush().unwrap();
+            let f = bank.recv().unwrap();
+            phases.push(("fd pass", t.elapsed().as_secs_f64() * 1000.0));
+            let t = Instant::now();
+            let text = crate::ipc::read_memfd(f.fd.as_ref().unwrap()).unwrap();
+            phases.push(("memfd read", t.elapsed().as_secs_f64() * 1000.0));
+            bytes = text.len();
+            let new = crate::handoff::restore_timed(net_data, data, spec, &text, scenes, &mut phases).unwrap_or_else(|err| panic!("restore: {err}"));
+            let stand: f64 = phases.iter().map(|p| p.1).sum();
+            phases.push(("stand", stand));
+            drop(text);
+            // The old bank ends (EXIT): its world is freed after the stand, not in it.
+            let old = std::mem::replace(&mut g, new);
+            drop(old);
+            // Round 0 warms the allocator and the page cache.
+            if round > 0 {
+                for (k, v) in phases {
+                    samples.entry(k).or_default().push(v);
+                }
+            }
+            g.net.out.clear();
+            g.sim_time = Some(1.0 + round as f64 * 0.005);
+            g.tick();
+            g.net.out.clear();
+        }
+        println!("flipbench: {path}: {} world objects, {} network objects, {} inventories; loaded in {loaded:?}; snapshot {bytes} bytes; {rounds} flips (ms: p50 / p95 / max / min)", g.wos.len(), g.net.objects.len(), g.inventories.len());
+        let order = ["snapshot", "serialize", "memfd write", "fd pass", "memfd read", "head", "parse value", "migrate", "parse", "rebuild holders", "refresh tables", "generation", "stand"];
+        for name in order {
+            let Some(v) = samples.get_mut(name) else { continue };
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let at = |q: f64| v[((v.len() - 1) as f64 * q).round() as usize];
+            println!("flipbench:   {name:<16} {:>8.2} {:>8.2} {:>8.2} {:>8.2}", at(0.5), at(0.95), v[v.len() - 1], v[0]);
+        }
+    }
+}

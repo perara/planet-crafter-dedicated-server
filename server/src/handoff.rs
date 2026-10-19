@@ -76,6 +76,15 @@ pub fn snapshot_to(g: &Game, w: &mut impl std::io::Write) -> Result<(), String> 
     serde_json::to_writer(w, g).map_err(|e| e.to_string())
 }
 
+/// The state in a sealed memfd, as the old bank sends it to the new one; the milliseconds of
+/// its steps are appended to `phases` (flipbench).
+pub fn snapshot_memfd(g: &Game, phases: &mut Vec<(&'static str, f64)>) -> Result<std::os::fd::OwnedFd, String> {
+    let t = std::time::Instant::now();
+    let fd = crate::ipc::memfd("pcds-snapshot", |w| snapshot_to(g, w))?;
+    phases.push(("snapshot", t.elapsed().as_secs_f64() * 1000.0));
+    Ok(fd)
+}
+
 #[cfg(test)]
 pub fn snapshot(g: &Game) -> Result<String, String> {
     let mut out = Vec::new();
@@ -131,24 +140,45 @@ fn split(snapshot: &[u8]) -> Result<(Head, &[u8]), String> {
 }
 
 pub fn restore_bytes(net_data: NetData, data: GameData, spec: Spec, snapshot: &[u8], scenes: crate::Scenes) -> Result<Game, String> {
+    restore_timed(net_data, data, spec, snapshot, scenes, &mut Vec::new())
+}
+
+/// restore_bytes, with the milliseconds each step took appended to `phases` (flipbench).
+pub fn restore_timed(net_data: NetData, data: GameData, spec: Spec, snapshot: &[u8], scenes: crate::Scenes, phases: &mut Vec<(&'static str, f64)>) -> Result<Game, String> {
+    let mut clock = std::time::Instant::now();
+    let mut lap = |name: &'static str| {
+        phases.push((name, clock.elapsed().as_secs_f64() * 1000.0));
+        clock = std::time::Instant::now();
+    };
     let (head, state) = split(snapshot)?;
     if head.game_version != net_data.game_version {
         return Err(format!("a snapshot on game {}'s tables, these are {}'s", head.game_version, net_data.game_version));
     }
+    lap("head");
     let mut g: Game = match head.format {
         FORMAT => serde_json::from_slice(state).map_err(|e| e.to_string())?,
-        f => serde_json::from_value(migrate(f, serde_json::from_slice(state).map_err(|e| e.to_string())?)?).map_err(|e| e.to_string())?,
+        f => {
+            let value = serde_json::from_slice(state).map_err(|e| e.to_string())?;
+            lap("parse value");
+            let value = migrate(f, value)?;
+            lap("migrate");
+            serde_json::from_value(value).map_err(|e| e.to_string())?
+        }
     };
+    lap("parse");
     g.net_data = net_data;
     g.data = data;
     g.net.spec = spec;
     g.scenes = scenes;
     g.rebuild_holders();
+    lap("rebuild holders");
     crate::machines::refresh_from_tables(&mut g);
     g.trace = std::env::var_os("PCDS_TRACE").is_some();
+    lap("refresh tables");
     // The tables are not quite static: Game::new scales the groups' generation by the
     // world's settings.
     g.change_generation_for_groups();
+    lap("generation");
     Ok(g)
 }
 

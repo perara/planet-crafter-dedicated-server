@@ -282,7 +282,7 @@ impl Bank {
                         send(&mut self.link, &mut mail, &all, &mut loading);
                         forward_chat(game, &mut self.link);
                         let t = Instant::now();
-                        match ipc::memfd("pcds-snapshot", |w| crate::handoff::snapshot_to(game, w)) {
+                        match crate::handoff::snapshot_memfd(game, &mut Vec::new()) {
                             Ok(fd) => {
                                 let len = std::fs::File::from(fd.try_clone().expect("dup")).metadata().map(|m| m.len()).unwrap_or(0);
                                 let head = json!({"bytes": len, "ms": t.elapsed().as_secs_f64() * 1000.0});
