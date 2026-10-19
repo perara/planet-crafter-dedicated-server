@@ -17,8 +17,7 @@ pub const TIME_SYNC: u32 = 21;
 
 /// NetworkObject.SceneObject flag bits.
 pub const HAS_PARENT: u16 = 1 << 1;
-const HAS_TRANSFORM: u16 = 1 << 3;
-
+pub const HAS_TRANSFORM: u16 = 1 << 3;
 
 /// A NetworkObject.SceneObject as read off the wire.
 pub struct SceneObjectInfo {

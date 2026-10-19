@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::data::BehaviourDef;
 use crate::gamedata::Layout;
-use crate::protocol::{self, CHANGE_OWNERSHIP, CLIENT_RPC, NETWORK_VARIABLE_DELTA};
+use crate::protocol::{self, CHANGE_OWNERSHIP, CLIENT_RPC, HAS_PARENT, HAS_TRANSFORM, NETWORK_VARIABLE_DELTA};
 use crate::rpcspec::Spec;
 use crate::wire::Writer;
 use crate::world::hex;
@@ -365,8 +365,6 @@ impl NetObj {
 
     /// NetworkObject.SceneObject as Netcode writes it.
     pub fn scene_object(&self, scene_handle: i32) -> Vec<u8> {
-        const HAS_PARENT: u16 = 1 << 1;
-        const HAS_TRANSFORM: u16 = 1 << 3;
         let mut w = Writer::new();
         w.u16(self.flags).u32(self.hash).packed_u64(self.id).packed_u64(self.owner);
         if self.flags & HAS_PARENT != 0 {
