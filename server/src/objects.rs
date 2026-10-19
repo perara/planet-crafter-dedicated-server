@@ -364,7 +364,10 @@ impl Game {
     /// be built first returns the materials whatever the client took for it.)
     fn over_building_limit(&mut self, client: u64, id: i32, group: usize) {
         let Some(&max) = self.rules.limits.buildings.get(&self.data.groups[group].id) else { return };
-        if !self.wos.contains_key(&id) || self.group_count(true, group) <= max as i32 {
+        // The buildings that stand: the game's count of them (group_count) stays one too high for good
+        // for each one made without being saved, and so would block the limit for everyone.
+        let standing = self.wos.values().filter(|w| w.group == group && w.is_placed() && !is_from_scene(w.id)).count();
+        if !self.wos.contains_key(&id) || standing <= max as usize {
             return;
         }
         if let Some(inventory) = self.clients.get(&client).and_then(|c| c.ready.as_ref()).map(|s| s.inventory) {
