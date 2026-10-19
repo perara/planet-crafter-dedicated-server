@@ -29,9 +29,9 @@ const MOTION_PER_SECOND: f64 = 8000.0;
 /// What one client may do how often: chat, RPC work and motion.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Limits {
-    /// Per client: when it last sent motion and the units it may still send.
+    /// Per client: the clock when it last sent motion and the units it may still send.
     #[serde(skip)]
-    motion: HashMap<u64, (std::time::Instant, f64)>,
+    motion: HashMap<u64, (f64, f64)>,
     /// Per client: the clock of its last chat message and the messages it may still send. Still
     /// written (the previous release reads it), never read by a handoff: the next bank's clock
     /// starts again, and a fresh burst is the worst that gives.
@@ -67,10 +67,9 @@ impl Limits {
     }
 
     /// Whether a transform state or variable delta of `bytes` bytes is taken and passed on.
-    pub fn motion(&mut self, client: u64, bytes: usize) -> bool {
-        let now = std::time::Instant::now();
+    pub fn motion(&mut self, client: u64, bytes: usize, now: f64) -> bool {
         let (last, left) = self.motion.entry(client).or_insert((now, MOTION_PER_SECOND));
-        *left = (*left + now.duration_since(*last).as_secs_f64() * MOTION_PER_SECOND).min(MOTION_PER_SECOND);
+        *left = (*left + (now - *last).max(0.0) * MOTION_PER_SECOND).min(MOTION_PER_SECOND);
         *last = now;
         let cost = 1.0 + (bytes / 64) as f64;
         if *left < cost {
@@ -655,7 +654,7 @@ mod tests {
     fn a_client_that_left_leaves_nothing_in_the_limits() {
         let mut l = super::Limits::default();
         for client in 1..=3u64 {
-            assert!(l.chat(client, 0.0) && l.motion(client, 10) && l.spend(client, 1, b"rpc"));
+            assert!(l.chat(client, 0.0) && l.motion(client, 10, 0.0) && l.spend(client, 1, b"rpc"));
             l.warn(client, "over the rate");
         }
         l.forget(2);

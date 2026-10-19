@@ -563,7 +563,8 @@ impl Game {
                 println!("trace client {client} -> {kind} {}", body.iter().map(|b| format!("{b:02x}")).collect::<String>());
             }
             let approved = self.clients.get(&client).is_some_and(|c| c.approved);
-            if approved && matches!(kind, NETWORK_TRANSFORM | NETWORK_VARIABLE_DELTA) && !self.limits.motion(client, body.len()) {
+            let now = self.clock();
+            if approved && matches!(kind, NETWORK_TRANSFORM | NETWORK_VARIABLE_DELTA) && !self.limits.motion(client, body.len(), now) {
                 continue;
             }
             match kind {
@@ -1477,6 +1478,7 @@ pub mod tests {
         let Some(mut g) = test_game(save()) else { return };
         let ann = join(&mut g, 1, "Ann");
         join(&mut g, 2, "Bob");
+        g.sim_time = Some(100.0);
         g.net.out.clear();
         let mut state = Writer::new();
         state.packed_u64(ann).packed_i32(0).packed_u32(2).packed_i32(1).bytes(&1.0f32.to_le_bytes());
@@ -1497,6 +1499,13 @@ pub mod tests {
         g.limits.forget(1);
         g.receive(1, &wire::batch(&[(NETWORK_TRANSFORM, state.0.clone())]));
         assert_eq!(relayed(&g), 1);
+        // And the budget comes back with the clock: a second's worth after a second.
+        g.net.out.clear();
+        g.receive(1, &flood);
+        g.net.out.clear();
+        g.sim_time = Some(101.0);
+        g.receive(1, &flood);
+        assert!(relayed(&g) > 7_000 && relayed(&g) < 9_000, "{} relayed a second after", relayed(&g));
     }
 
     #[test]
