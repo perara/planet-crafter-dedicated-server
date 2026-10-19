@@ -482,7 +482,8 @@ mod tests {
         let documented = rows(section);
         let mut keys: Vec<&str> = documented.iter().map(|(k, _)| k.as_str()).collect();
         let mut wanted: Vec<&str> = KNOBS.iter().filter(|k| k.read_only()).map(|k| k.key).collect();
-        (keys.sort(), wanted.sort());
+        keys.sort();
+        wanted.sort();
         assert_eq!(keys, wanted, "README Settings table and config::KNOBS");
         for (key, default) in &documented {
             let knob = knob_for(key).unwrap();
@@ -497,7 +498,8 @@ mod tests {
         let documented: Vec<(String, String)> = rows(include_str!("../../README.md")).into_iter().filter(|(k, _)| !k.starts_with("PCDS_")).collect();
         let mut keys: Vec<&str> = documented.iter().map(|(k, _)| k.as_str()).collect();
         let mut wanted: Vec<&str> = KNOBS.iter().filter(|k| k.source == Source::Rules).map(|k| k.key).collect();
-        (keys.sort(), wanted.sort());
+        keys.sort();
+        wanted.sort();
         assert_eq!(keys, wanted, "README rule tables and config::KNOBS");
         let defaults = serde_json::to_value(Rules::default()).unwrap();
         for (key, shown) in &documented {
