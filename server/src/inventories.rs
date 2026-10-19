@@ -305,7 +305,7 @@ impl Game {
         if self.inventory_player(id).is_some() {
             return;
         }
-        let Some(inv) = self.inventories.shift_remove(&id) else { return };
+        let Some(inv) = self.inventories.remove(&id) else { return };
         inv.items.iter().for_each(|wo| self.release(*wo));
         self.destroy_world_objects(&inv.items, destroy_go);
         crate::logistics::remove_inventory(self, id);

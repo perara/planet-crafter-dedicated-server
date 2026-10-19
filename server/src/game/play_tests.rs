@@ -226,6 +226,25 @@ fn world_objects_keep_the_dictionary_order() {
     assert_eq!(h.wos.keys().copied().filter(|id| [c, d, e].contains(id)).collect::<Vec<_>>(), vec![e, d, c]);
 }
 
+/// The save lists the inventories in the order of the game's Dictionary, as it does the world
+/// objects: a destroyed one's place goes to the next created, the most recently freed first (the
+/// sweep's truck, whose two inventories come after two destroyed ones, lists its second first).
+#[test]
+fn inventories_keep_the_dictionary_order() {
+    let Some(mut g) = test_game(save()) else { return };
+    let [a, b, c] = [0; 3].map(|_| g.create_inventory(5, 0, 0, &[], &[]));
+    g.destroy_inventory(a, true);
+    g.destroy_inventory(c, true);
+    let [d, e] = [0; 2].map(|_| g.create_inventory(5, 0, 0, &[], &[]));
+    let ours = |g: &mut Game| g.snapshot().inventories.iter().filter_map(|i| i["id"].as_i64()).map(|i| i as i32).filter(|i| [b, d, e].contains(i)).collect::<Vec<_>>();
+    // c's place went first to d, then a's to e: e comes before b, d after.
+    assert_eq!(ours(&mut g), vec![e, b, d]);
+    let text = crate::handoff::snapshot(&g).unwrap();
+    let (net_data, data, spec, scenes) = test_tables().unwrap();
+    let mut h = crate::handoff::restore(net_data, data, spec, &text, scenes).unwrap();
+    assert_eq!(ours(&mut h), vec![e, b, d]);
+}
+
 /// H3: a snapshot of the previous format (world objects as a map, the sets as lists) restores.
 #[test]
 fn a_format_1_snapshot_restores() {
@@ -238,6 +257,8 @@ fn a_format_1_snapshot_restores() {
     let pairs = |v: &Value| v["slots"].as_array().unwrap().iter().filter(|s| !s.is_null()).map(|s| (s[0].clone(), s[1].clone())).collect::<Vec<_>>();
     let wos: serde_json::Map<String, Value> = pairs(&state["wos"]).into_iter().map(|(k, v)| (k.to_string(), v)).collect();
     state["wos"] = Value::Object(wos);
+    let inventories: serde_json::Map<String, Value> = pairs(&state["inventories"]).into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    state["inventories"] = Value::Object(inventories);
     for set in ["constructed", "pickables"] {
         state[set] = Value::Array(pairs(&state[set]).into_iter().map(|(k, _)| k).collect());
     }
@@ -362,7 +383,7 @@ fn player_inventory_ids_stay_theirs() {
     g.destroy_inventory(bob_inv, true);
     assert!(g.inventories.contains_key(&bob_inv), "a player's inventory is never destroyed");
     // As an older server could leave it: gone.
-    let gone = g.inventories.shift_remove(&bob_inv).unwrap();
+    let gone = g.inventories.remove(&bob_inv).unwrap();
     gone.items.iter().for_each(|wo| g.release(*wo));
     for _ in 0..3 {
         assert_ne!(g.create_inventory(5, 0, 0, &[], &[]), bob_inv);

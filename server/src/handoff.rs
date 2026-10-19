@@ -48,7 +48,7 @@ use crate::rpcspec::Spec;
 /// The snapshot's format. A release that changes the state's shape (a field renamed, removed
 /// or meaning something else; a new field only needs `#[serde(default)]`) bumps it and adds
 /// the step from the previous format to `migrate`: each build reads its own and the previous.
-pub const FORMAT: u32 = 2;
+pub const FORMAT: u32 = 3;
 
 /// The snapshot's first line: its format, and the tables it is for (state holds indices into
 /// them, so it is only valid on the same game version).
@@ -104,6 +104,14 @@ fn migrate(from: u32, state: serde_json::Value) -> Result<serde_json::Value, Str
             for p in state["units"]["planets"].as_array_mut().into_iter().flatten() {
                 p["units"].as_array_mut().into_iter().flatten().for_each(|u| int(&mut u["previous_index"]));
             }
+            migrate(2, state)
+        }
+        // 3: the inventories (an id -> inventory map) became Slots, in their order and with no
+        // slot free yet.
+        2 => {
+            let inventories = std::mem::take(&mut state["inventories"]);
+            let slots: Vec<serde_json::Value> = inventories.as_object().into_iter().flatten().map(|(id, inv)| serde_json::json!([id.parse::<i32>().unwrap_or(0), inv])).collect();
+            state["inventories"] = serde_json::json!({"slots": slots, "free": []});
             Ok(state)
         }
         _ => Err(format!("snapshot format {from}: this build reads format {FORMAT} and the one before")),

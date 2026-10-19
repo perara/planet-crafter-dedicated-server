@@ -98,6 +98,9 @@ impl<K: Copy + Eq + Hash, V> Slots<K, V> {
     pub fn values(&self) -> impl Iterator<Item = &V> {
         self.iter().map(|(_, v)| v)
     }
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
+        self.slots.iter_mut().flatten().map(|(_, v)| v)
+    }
     /// Removes, in slot order, what `keep` refuses.
     pub fn retain(&mut self, mut keep: impl FnMut(&K, &mut V) -> bool) {
         for i in 0..self.slots.len() {
