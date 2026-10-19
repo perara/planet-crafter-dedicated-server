@@ -631,7 +631,7 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
             if backups_kept() == 0 {
                 return (400, "{\"error\":\"backups are off (PCDS_BACKUPS=0)\"}".into());
             }
-            if let Err(e) = game.snapshot().write(ctx.save_path) {
+            if let Err(e) = save::write_atomic(ctx.save_path, game.save_text().as_bytes()) {
                 return (500, json!({"error": format!("save failed: {e}")}).to_string());
             }
             if let Err(e) = save::backup(ctx.save_path, Duration::ZERO, backups_kept()) {
@@ -737,7 +737,7 @@ fn persist(game: &mut Game, path: &str) -> Result<(), String> {
     if let Err(e) = save::backup(path, Duration::from_secs(every.saturating_mul(60)), backups_kept()) {
         eprintln!("backup failed: {e}");
     }
-    let saved = game.snapshot().write(path).map_err(|e| format!("{path}: {e}"));
+    let saved = save::write_atomic(path, game.save_text().as_bytes()).map_err(|e| format!("{path}: {e}"));
     let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     LAST_SAVE.set(json!({"ok": saved.is_ok(), "at": at, "error": saved.as_ref().err()}));
     match &saved {

@@ -440,7 +440,14 @@ fn scale() {
     let peak = rss_kib();
     let t = Instant::now();
     let text = snapshot.to_text();
-    println!("scale: snapshot {took:?}, to_text {:?}, {} bytes, rss {} MiB", t.elapsed(), text.len(), peak >> 10);
+    println!("scale: snapshot (JSON trees) {took:?}, to_text {:?}, {} bytes, rss {} MiB", t.elapsed(), text.len(), peak >> 10);
+    drop(snapshot);
+    let before = rss_kib();
+    let t = Instant::now();
+    let direct = g.save_text();
+    println!("scale: save_text (no trees) {:?}, rss {} MiB (+{} MiB)", t.elapsed(), rss_kib() >> 10, rss_kib().saturating_sub(before) >> 10);
+    assert!(direct == text, "save_text is the snapshot's text");
+    let snapshot = g.snapshot();
     let dir = std::env::temp_dir().join(format!("pcds-scale-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("world.json").to_string_lossy().to_string();

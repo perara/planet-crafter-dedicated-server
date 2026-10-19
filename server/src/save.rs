@@ -96,6 +96,13 @@ impl TextWriter {
         self.text.push_str("\r@");
     }
 
+    /// A section whose entries are already as written (no defaults, nothing to clean).
+    fn raw_section(&mut self, entries: &dyn Fn(&mut String)) {
+        self.text.push('\r');
+        entries(&mut self.text);
+        self.text.push_str("\r@");
+    }
+
     fn entry(&mut self, raw: &str) {
         let (start, out) = (self.text.len(), &mut self.text);
         let (mut from, mut i) = (0, 0);
@@ -164,12 +171,27 @@ impl SaveFile {
     }
 
     pub fn to_text(&self) -> String {
+        self.text_with(None)
+    }
+
+    /// to_text, with the world objects' and the inventories' sections written by the two
+    /// functions given (each appends its entries, "|\n" between them, already as the game
+    /// writes them) instead of taken from `self.objects` and `self.inventories`.
+    pub fn text_with(&self, raw: Option<(&dyn Fn(&mut String), &dyn Fn(&mut String))>) -> String {
         let mut w = TextWriter { text: String::from("\u{feff}"), stopped: [false; 3] };
         w.section(std::slice::from_ref(&self.world));
         w.section(&self.planets);
         w.section(&self.players);
-        w.section(&self.objects);
-        w.section(&self.inventories);
+        match raw {
+            Some((objects, inventories)) => {
+                w.raw_section(objects);
+                w.raw_section(inventories);
+            }
+            None => {
+                w.section(&self.objects);
+                w.section(&self.inventories);
+            }
+        }
         w.section(std::slice::from_ref(&self.stats));
         w.section(&self.messages);
         w.section(&self.story_events);
