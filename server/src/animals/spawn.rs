@@ -424,7 +424,7 @@ fn sequence_trait(game: &mut Game, sequence: i32, ty: i32) -> (i32, [f32; 4]) {
 }
 
 fn animal_layout(hash: u32, tick: i32) -> Layout {
-    let var = |name: &str, ty: &str, bytes: Vec<u8>| VarDef { name: name.into(), ty: ty.into(), bytes: Some(bytes.iter().map(|b| format!("{b:02x}")).collect()) };
+    let var = |name: &str, ty: &str, bytes: Vec<u8>| VarDef { name: name.into(), ty: ty.into(), bytes: Some(crate::util::to_hex(&bytes)) };
     let behaviour = |class: &str, id: u16, vars: Vec<VarDef>| BehaviourDef { class: class.into(), behaviour_id: id, vars };
     let behaviours = vec![
         behaviour(

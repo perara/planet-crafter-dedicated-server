@@ -348,7 +348,7 @@ fn http_agent(timeout: Duration) -> ureq::Agent {
 /// HMAC-SHA256 of the body with the secret, hex.
 fn sign(secret: &str, body: &str) -> String {
     let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
-    ring::hmac::sign(&key, body.as_bytes()).as_ref().iter().map(|b| format!("{b:02x}")).collect()
+    crate::util::to_hex(ring::hmac::sign(&key, body.as_bytes()).as_ref())
 }
 
 /// POSTs the event, tried again `retries` times (1 s, 2 s... apart) without an answer or on

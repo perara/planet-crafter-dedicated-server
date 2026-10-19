@@ -106,7 +106,7 @@ pub fn player(game: &Game, c: &crate::game::Client, via: String) -> Value {
 pub fn worlds(save_path: &str) -> Value {
     let path = Path::new(save_path);
     let current = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let dir = crate::util::parent_dir(path);
     let list = |dir: &Path, keep: &dyn Fn(&str) -> bool| {
         let mut out: Vec<Value> = std::fs::read_dir(dir)
             .into_iter()
@@ -139,7 +139,7 @@ pub fn world_name(name: &str) -> Result<String, String> {
 }
 
 fn worlds_dir(save_path: &str) -> &Path {
-    Path::new(save_path).parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."))
+    crate::util::parent_dir(Path::new(save_path))
 }
 
 fn running(save_path: &str) -> String {

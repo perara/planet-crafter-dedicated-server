@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::util::modified;
+
 /// Every failure ends the command with this message.
 pub type Result<T = ()> = std::result::Result<T, String>;
 
@@ -386,7 +388,7 @@ fn is_tty() -> bool {
 fn token() -> Result<String> {
     let mut bytes = [0u8; 16];
     fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)).map_err(|e| format!("/dev/urandom: {e}"))?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(crate::util::to_hex(&bytes))
 }
 
 /// "YYYY-MM-DD HH:MM" in local time (date -r FILE '+%Y-%m-%d %H:%M').
@@ -399,10 +401,6 @@ fn local_time(t: SystemTime) -> String {
         tm
     };
     format!("{:04}-{:02}-{:02} {:02}:{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min)
-}
-
-fn modified(path: &Path) -> SystemTime {
-    fs::metadata(path).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
 /// A file size as du -h writes it (1024s, one decimal under 10).

@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::{json, Value};
 
 use crate::rules::Backup;
+use crate::util::to_hex;
 
 /// The last upload's outcome, and the backup file it was.
 static LAST: Mutex<Option<Value>> = Mutex::new(None);
@@ -99,7 +100,7 @@ pub fn after_backup(b: &Backup, save_path: &str, force: bool) -> Result<Option<S
 }
 
 fn record(ok: bool, file: &str, error: &str) {
-    let at = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let at = crate::util::now_secs();
     *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some(json!({"ok": ok, "file": file, "error": (!ok).then_some(error), "at": at}));
 }
 
@@ -108,16 +109,12 @@ fn encode(s: &str, keep_slash: bool) -> String {
     s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) || (keep_slash && b == b'/') { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 fn hmac(key: &[u8], data: &str) -> Vec<u8> {
     ring::hmac::sign(&ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key), data.as_bytes()).as_ref().to_vec()
 }
 
 fn sha256(data: &[u8]) -> String {
-    hex(ring::digest::digest(&ring::digest::SHA256, data).as_ref())
+    to_hex(ring::digest::digest(&ring::digest::SHA256, data).as_ref())
 }
 
 /// The Authorization header of a request (AWS Signature Version 4, service s3). `headers`:
@@ -133,7 +130,7 @@ fn authorization(method: &str, path: &str, headers: &[(&str, String)], payload_h
     let scope = format!("{date}/{region}/s3/aws4_request");
     let to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}", sha256(request.as_bytes()));
     let key = ["s3", "aws4_request"].iter().fold(hmac(&hmac(format!("AWS4{secret}").as_bytes(), date), region), |k, part| hmac(&k, part));
-    format!("AWS4-HMAC-SHA256 Credential={access}/{scope}, SignedHeaders={signed}, Signature={}", hex(&hmac(&key, &to_sign)))
+    format!("AWS4-HMAC-SHA256 Credential={access}/{scope}, SignedHeaders={signed}, Signature={}", to_hex(&hmac(&key, &to_sign)))
 }
 
 /// PUT one object (path-style: <endpoint>/<bucket>/<key>, which every S3-compatible service takes).

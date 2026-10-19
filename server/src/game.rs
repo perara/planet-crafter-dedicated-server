@@ -548,7 +548,7 @@ impl Game {
                 return;
             }
             if self.trace {
-                println!("trace client {client} -> {kind} {}", body.iter().map(|b| format!("{b:02x}")).collect::<String>());
+                println!("trace client {client} -> {kind} {}", crate::util::to_hex(body));
             }
             let approved = self.clients.get(&client).is_some_and(|c| c.approved);
             match kind {

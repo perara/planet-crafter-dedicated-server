@@ -30,6 +30,7 @@ use serde_json::{json, Value};
 use crate::data::NetData;
 use crate::protocol::{self, CLIENT_RPC, CONNECTION_APPROVED, CONNECTION_REQUEST, CREATE_OBJECT, DESTROY_OBJECT, NETWORK_TRANSFORM, NETWORK_VARIABLE_DELTA, RPC, TIME_SYNC};
 use crate::rpcspec::Spec;
+use crate::util::to_hex;
 use crate::utp::{Event, Utp};
 use crate::wire::{self, Reader, Writer};
 use crate::world::hex;
@@ -118,7 +119,7 @@ impl Session {
                     }
                 }
                 json!({"msg": "rpc", "name": name.unwrap_or_else(|| format!("{method:?}")), "object": object, "behaviour": behaviour,
-                       "args": args.unwrap_or_else(|| vec![json!(hex_of(r.rest()))])})
+                       "args": args.unwrap_or_else(|| vec![json!(to_hex(r.rest()))])})
             }
             CREATE_OBJECT => {
                 let mut r = Reader::new(body);
@@ -129,7 +130,7 @@ impl Session {
                         self.spawned.push((o.id, o.hash, o.position.unwrap_or([f32::MAX; 3])));
                         object_line(&o, "create")
                     }
-                    None => json!({"msg": "create", "hex": hex_of(body)}),
+                    None => json!({"msg": "create", "hex": to_hex(body)}),
                 }
             }
             DESTROY_OBJECT => {
@@ -139,7 +140,7 @@ impl Session {
             }
             NETWORK_VARIABLE_DELTA => {
                 let mut r = Reader::new(body);
-                json!({"msg": "delta", "object": r.packed_u64(), "behaviour": r.packed_u16(), "hex": hex_of(r.rest())})
+                json!({"msg": "delta", "object": r.packed_u64(), "behaviour": r.packed_u16(), "hex": to_hex(r.rest())})
             }
             // Transforms of the objects the script watches ("transforms": ["$var", ...]).
             NETWORK_TRANSFORM => match crate::transform::update(body) {
@@ -147,7 +148,7 @@ impl Session {
                 _ => return,
             },
             TIME_SYNC => return,
-            _ => json!({"msg": kind, "hex": hex_of(body)}),
+            _ => json!({"msg": kind, "hex": to_hex(body)}),
         };
         print(self.started, line);
     }
@@ -169,11 +170,7 @@ fn approved_header(body: &[u8]) -> Value {
 
 fn object_line(o: &protocol::SceneObjectInfo, msg: &str) -> Value {
     json!({"msg": msg, "id": o.id, "hash": format!("{:08x}", o.hash), "owner": o.owner, "flags": o.flags,
-           "position": o.position, "rotation": o.rotation, "sync": hex_of(&o.sync)})
-}
-
-fn hex_of(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+           "position": o.position, "rotation": o.rotation, "sync": to_hex(&o.sync)})
 }
 
 /// Resolves a script target to (object id, behaviour index).

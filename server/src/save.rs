@@ -178,7 +178,7 @@ pub fn write_atomic(path: &str, bytes: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     written?;
-    let dir = Path::new(path).parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let dir = crate::util::parent_dir(Path::new(path));
     std::fs::File::open(dir)?.sync_all()
 }
 
