@@ -243,13 +243,14 @@ small world the stand is 6 to 11 ms with the check (1 to 2 ms without it).
   runs Steam: every run above had `PCDS_STEAM=off`. That a Steam player stays connected through a
   flip, and that the invite code survives a bank crash, follows from the design and is not
   measured.
-- **A real GitHub release.** The updater ran only against the release server on 127.0.0.1
-  (the same JSON fields and asset names as GitHub's API and `make dist`); GitHub was not
-  contacted. Its redirects to the asset storage go through ureq's default redirect handling,
-  untested here.
-- **Across releases.** Every flip ran between two banks of the same build; `migrate` has no
-  step yet, and a release from before this one has no `bank-info`, so the first hot update
-  possible is from this release to a later one.
+- **A real GitHub release**: run since (0.6.0 to 0.6.1 and 0.6.2 through `pcds upgrade`, the
+  admin API and `PCDS_AUTO_UPDATE=on`, with load players; GitHub's redirect to the asset storage
+  works). What is not driven: GitHub's rate limit (a 403 or 429 is an error with its status, tried
+  again within the hour) and a mirror that serves a release without `.sha256`.
+- **Across releases**: the first real update failed on a snapshot field the release before did
+  not write (see "State and the release before"). The gate and the fixtures now restore the
+  release before's world on every release; a release before 0.6.0 has no `bank-info` and no
+  fixture.
 - **Front restarts.** Updating the front is a restart (`pcds upgrade --restart`): every player
   reconnects. Keeping the UDP socket and the sessions across it (see (d)) is not built.
 - **The systemd unit** with the front and bank (KillMode=mixed, the stop through the front)
