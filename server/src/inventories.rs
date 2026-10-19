@@ -465,6 +465,7 @@ impl Game {
         let (touched, items): (Vec<i32>, Vec<i32>) = match name {
             "InventoriesHandler.TransferItemServerRpc" | "InventoriesHandler.TransferAllSameGroupServerRpc" | "InventoriesHandler.TransferAllItemsServerRpc" => (vec![a.i(0), a.i(1)], vec![]),
             "InventoriesHandler.AddNewItemToInventoryServerRpc" | "InventoriesHandler.RemoveItemsFromInventoryServerRpc" => (vec![a.i(1)], vec![]),
+            "InventoriesHandler.GetOrCreateNewInventoryServerRpc" => (vec![a.i(2)], vec![]),
             "InventoriesHandler.AddExistingItemToInventoryServerRpc" | "InventoriesHandler.RemoveItemFromInventoryServerRpc" => (vec![a.i(1)], vec![a.i(0)]),
             "InventoriesHandler.RemoveWorldObjectsFromInventoryServerRpc" => (vec![a.i(1)], a.ints(0).unwrap_or_default()),
             "InventoriesHandler.RemoveAndDestroyAllItemsFromInventoryServerRpc"
@@ -478,6 +479,8 @@ impl Game {
         if touched.iter().any(|i| self.others_inventory(client, *i)) || items.iter().any(|w| self.others_item(client, *w)) {
             match name {
                 "InventoriesHandler.AddNewItemToInventoryServerRpc" => self.net.rpc_scene(Target::Only(client), "InventoriesHandler.AddNewItemClientRpc", &[json!(false), json!(0)]),
+                // Neither its content nor a change of what it takes: an empty inventory.
+                "InventoriesHandler.GetOrCreateNewInventoryServerRpc" => self.retrieve_inventory(Target::Only(client), None),
                 "InventoriesHandler.DirtyInventoryLogisticsServerRpc" | "InventoriesHandler.SortInventoryServerRpc" => {}
                 _ => self.add_or_remove_result(client, false),
             }
@@ -1005,6 +1008,29 @@ mod tests {
         send_scene(&mut g, 1, "InventoriesHandler.RemoveAndDestroyAllItemsFromInventoryServerRpc", &[json!(inv)]);
         assert!(result(&mut g) && g.inventories[&inv].items.is_empty());
         assert_eq!(multiplier(&g), before, "RemoveAndDestroyAllItemsFromInventory");
+    }
+
+    /// Asking for another player's backpack or equipment as an inventory gets the empty answer
+    /// the game gives for none, and does not set what it takes (a client sends the groups an
+    /// inventory authorizes; only the first one to ask sets them).
+    #[test]
+    fn another_players_inventory_is_neither_read_nor_changed_by_getting_it() {
+        let Some((mut g, _)) = world() else { return };
+        join(&mut g, 2, "Bob");
+        let (bag, equipment) = backpack(&g, 2);
+        let iron = hash(&g, "Iron");
+        let before = g.inventories[&bag].clone();
+        assert!(!before.items.is_empty() && before.authorized.is_empty());
+        for id in [bag, equipment] {
+            let authorized = g.inventories[&id].authorized.clone();
+            send_scene(&mut g, 1, "InventoriesHandler.GetOrCreateNewInventoryServerRpc", &[json!(false), json!(0), json!(id), json!(0), json!(null), json!([iron])]);
+            assert_eq!(retrieved(&mut g), vec![json!(0), json!(-1), json!([]), json!([]), json!(false)]);
+            assert_eq!(g.inventories[&id].authorized, authorized, "{id}");
+        }
+        assert!(g.inventories[&bag].authorized.is_empty());
+        // Bob's own request is answered.
+        send_scene(&mut g, 2, "InventoriesHandler.GetOrCreateNewInventoryServerRpc", &[json!(false), json!(0), json!(bag), json!(0), json!(null), json!(null)]);
+        assert_eq!(retrieved(&mut g)[1], json!(bag));
     }
 
     #[test]
