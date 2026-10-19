@@ -32,6 +32,15 @@ GROUND_Y = 3.0
 # starts to rise over this land (up to about 30 m), and RequireEnergy turns off what is under water.
 BUILD_Y = 60.0
 PRIME = 'Prime'
+# DataConfig.BuildPanelSubType: WallDoor, FloorGlass, FloorAngleGlass.
+PANEL_LOOK = {'Wall': 4, 'Floor': 6, 'FloorAngle': 15}
+# Flat ground in the start save, heights measured on the real host with items dropped on a 20 m
+# grid (x, y, z): the outside growers need terrain under them to plant on.
+GROUND = [(520, 1.5, 560), (520, 0.9, 580), (520, 0.8, 600), (520, 1.0, 620), (520, 1.0, 640),
+          (540, 1.7, 560), (540, 1.2, 580), (540, 0.8, 600), (540, 1.0, 620), (540, 1.3, 640), (540, 1.1, 660),
+          (560, 1.5, 560), (560, 1.2, 580), (560, 0.9, 620),
+          (580, 1.4, 620), (580, 1.1, 640), (580, 0.9, 660), (580, 1.2, 680), (580, 1.5, 700),
+          (600, 1.7, 660), (600, 1.7, 680), (600, 0.8, 700), (600, 1.1, 720)]
 # A fusion generator: 1485 units of energy each; every build script adds enough of them that the
 # planet's energy stays positive with all its machines running.
 GENERATOR = 'EnergyGenerator6'
@@ -43,6 +52,7 @@ class Tables:
         self.assets = d['assets']
         self.layouts = d['layouts']
         self.prefabs = d['groupPrefabs']
+        self.panels = d['panels']['groups']
         self.groups = {}
         for key, v in self.assets.items():
             kind = key.split(':')[0]
@@ -75,8 +85,14 @@ class Tables:
     def items(self):
         return sorted(g for g, v in self.groups.items() if v['kind'] == 'item')
 
-    def constructibles(self):
-        return sorted(g for g, v in self.groups.items() if v['kind'] == 'constructible')
+    def water_only(self, gid):
+        """A building the game lets a player place only on water (ConstraintOnSurfaces): the
+        start save's land has none, so these are built together in sweep_water."""
+        return any(c['fields']['allowedTaggedSurfaces'] == ['SurfaceWater'] for c in self.components(gid, 'ConstraintOnSurfaces'))
+
+    def constructibles(self, wet=False):
+        """Every constructible; the buildings for water only when `wet` (and only they then)."""
+        return sorted(g for g, v in self.groups.items() if v['kind'] == 'constructible' and self.water_only(g) == wet)
 
 
 # Where the probe player stands: by the escape pod, a little towards the build land, so the
@@ -295,7 +311,7 @@ def stations(t):
     """craftableIdentifier -> the constructible with an ActionCrafter for it (the escape pods'
     T1 crafter: the save's own pod)."""
     out = {}
-    for g in t.constructibles():
+    for g in t.constructibles() + t.constructibles(wet=True):
         for c in t.components(g, 'ActionCrafter'):
             ident = c['fields']['craftableIdentifier']
             if ident != 'Null' and not g.startswith('EscapePod'):
@@ -445,7 +461,8 @@ def build_family(t, name, groups, wait_ms, player_id, feed=True):
         for b in t.behaviour(g, 'ActionnableInteractiveProxy'):
             s.call('ActionnableInteractiveProxy.BroadcastToAllClientsServerRpc', [f'${o}', b], [], f'{g}|interactive state')
         for k, b in enumerate(t.behaviour(g, 'Panel')):
-            s.call('Panel.ChangePanelServerRpc', [f'${o}', b], [4, True, False], f'{g}|panel')
+            # A look the panel can wear: doors on walls, glass on floors (BuildPanelSubType).
+            s.call('Panel.ChangePanelServerRpc', [f'${o}', b], [PANEL_LOOK[t.panels[g][k]['panelType']], True, False], f'{g}|panel')
         cp = t.behaviour(g, 'ConstructibleProxy')
         if cp and t.components(g, 'ActionCrafter'):
             s.call('ConstructibleProxy.StartCraftAnimationServerRpc', [f'${o}', cp[0]], ['#Iron'], f'{g}|craft animation')
@@ -840,6 +857,29 @@ def growth_family(t):
     return s
 
 
+def ground_family(t):
+    """Every outside grower built on the ground (not in the air), started, and left to plant."""
+    s = Script('sweep_ground', 76561197999990021)
+    prelude(s)
+    groups = [g for g in t.constructibles() if g in t.layouts
+              and (t.components(g, 'MachineGrowerVegetationHarvestable') or t.components(g, 'MachineGrowerVegetationStatic'))]
+    assert len(groups) <= len(GROUND), 'more growers than measured ground spots'
+    power(s, t, groups, (630.0, 790.0))
+    placed = []
+    for k, (g, (x, y, z)) in enumerate(zip(groups, GROUND)):
+        build(s, g, (x, y + 0.1, z), f'{g}|build on the ground', f'o{k}')
+        invs = inventory_of(s, t, g, f'o{k}', f'{g}|inventory on the ground', f'inv{k}_')
+        placed.append((g, f'o{k}', invs))
+        cp = t.behaviour(g, 'ConstructibleProxy')
+        if cp:
+            s.call('ConstructibleProxy.MachineOutsideGrowerUpdateStartServerRpc', [f'$o{k}', cp[0]], [], f'{g}|grower start on the ground')
+    s.wait(120000)
+    for g, o, invs in placed:
+        for inv in invs:
+            retrieve(s, f'${inv}', f'{g}|planted on the ground')
+    return s
+
+
 def recycle_family(t):
     """Every item put in a recycling machine and recycled (ConstructibleProxy.RecycleContent): its
     ingredients dropped, or itself when it has none or cannot be recycled."""
@@ -935,10 +975,12 @@ def generate(t, out, start=None):
     scripts.append(autocraft_family(t, 'Incubator2', (1, incubator)))
     scripts += [feed_family(t), convert_family(t), optimizer_family(t), animals_family(t)]
     scripts += vehicle_family(t) + sharing_family(t)
-    scripts += [growth_family(t), recycle_family(t), interplanetary_family(t)]
+    scripts += [growth_family(t), ground_family(t), recycle_family(t), interplanetary_family(t)]
     if start:
         scripts.append(scene_family(t, start))
     buildable = [g for g in t.constructibles() if g in t.layouts]
+    wet = [g for g in t.constructibles(wet=True) if g in t.layouts]
+    scripts.append(build_family(t, 'sweep_water', wet, 300000, 76561197999990030))
     for c in chunks(buildable, 3):
         scripts.append(build_family(t, f'sweep_build_{c[0]}', c[1], 300000, 76561197999990010 + c[0]))
     for s in scripts:
