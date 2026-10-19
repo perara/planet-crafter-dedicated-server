@@ -96,6 +96,8 @@ impl Session {
                     for o in &objects {
                         *by_hash.entry(format!("{:08x}", o.hash)).or_default() += 1;
                         self.vars.entry(format!("hash:{:08x}", o.hash)).or_insert(json!(o.id));
+                        // "$near:" finds the world's own objects too (a script on a real save).
+                        self.spawned.push((o.id, o.hash, o.position.unwrap_or([f32::MAX; 3])));
                     }
                     // Every object the approval carries, as a spawn would show it (PROBE_OBJECTS=0: counts only).
                     if std::env::var("PROBE_OBJECTS").as_deref() != Ok("0") {
