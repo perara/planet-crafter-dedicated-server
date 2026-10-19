@@ -38,7 +38,7 @@ pub fn update_all_energy_requesters(game: &mut Game) {
 #[derive(Default)]
 pub struct Underwater {
     boxes: Option<Vec<([f32; 3], [f32; 4], [f32; 3])>>,
-    works: std::collections::HashMap<usize, bool>,
+    works: crate::idmap::FxHashMap<usize, bool>,
 }
 
 /// RequireEnergy.CheckEnergyStatus for one machine: whether it runs. A machine underwater

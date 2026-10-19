@@ -172,7 +172,7 @@ pub struct Game {
     /// InventoriesHandler._clientInventoryWatchers: inventory -> client -> count.
     pub watchers: HashMap<i32, IndexMap<u64, u32>>,
     pub tmp_inventory_id: i32,
-    pub clients: IndexMap<u64, Client>,
+    pub clients: crate::idmap::IdMap<u64, Client>,
     /// SavedDataHandler._playersData: saved players not in the game right now.
     pub saved_players: Vec<Value>,
     pub total_crafted: HashMap<u64, u32>,
@@ -311,7 +311,7 @@ impl Game {
             holders: Default::default(),
             watchers: HashMap::new(),
             tmp_inventory_id: -2,
-            clients: IndexMap::new(),
+            clients: Default::default(),
             saved_players: Vec::new(),
             total_crafted: HashMap::new(),
             all_time_tokens: HashMap::new(),
