@@ -33,15 +33,15 @@ when they do not: see "Restarting in place").
 
 | What you do | Players | What changes | Next start runs |
 |---|---|---|---|
-| `docker exec C pcds upgrade [vX.Y.Z]`, the admin page's **Update now**, `POST /api/update`, or `PCDS_AUTO_UPDATE=on` | stay connected, the world pauses for the flip (measured: 24 ms on a world of 2500 objects on an idle host, up to 0.8 s while the host was busy compiling, 1.0 s on a world of 100000 objects) | the game (the bank), not the front | the hot-updated release, not the image's |
+| `docker exec C pcds upgrade [vX.Y.Z]`, the admin page's **Update now**, `POST /api/update`, or the rule `update.auto` | stay connected, the world pauses for the flip (measured: 24 ms on a world of 2500 objects on an idle host, up to 0.8 s while the host was busy compiling, 1.0 s on a world of 100000 objects) | the game (the bank), not the front | the hot-updated release, not the image's |
 | `docker exec C pcds upgrade vX.Y.Z --restart` (also `--rollback --restart`) | disconnected; the server restarts in place, about 2 s | game and front, container untouched (same start time, restart count, PID 1) | the release you installed |
 | `docker compose pull && docker compose up -d`, `docker run` of a new tag, `kubectl set image` | disconnected; the container is replaced | the image's program, which goes into `/data/bin` only when newer (next section) | see the rule |
 | `docker restart C` | disconnected | nothing installed; the front of the active bank starts | the same banks |
 
 A hot update needs the container to reach `api.github.com` and GitHub's release downloads over
-https (or a mirror: `PCDS_RELEASES`, https only, except `http://127.0.0.1`). `PCDS_AUTO_UPDATE=on`
-(in the container's environment or in `data/server.env`) checks 10 minutes after the start and
-then every `PCDS_UPDATE_CHECK_HOURS` (default 24), installs a later release and flips to it; it is
+https (or a mirror: `PCDS_RELEASES`, https only, except `http://127.0.0.1`). The rule `update.auto`
+(`docker exec C pcds rules set update.auto=true`) checks 10 minutes after the start and
+then every `update.checkHours` (default 24), installs a later release and flips to it; it is
 off by default and the server never contacts GitHub on its own with it off. `pcds upgrade --check`
 shows the latest release without installing it.
 
@@ -159,7 +159,7 @@ docker compose pull && docker compose up -d  # a new image: every player disconn
 docker compose exec pcds pcds upgrade --check
 ```
 
-Set `PCDS_AUTO_UPDATE: "on"` under `environment` for updates by themselves. With it, or after any
+Set the rule `update.auto` (`docker compose exec pcds pcds rules set update.auto=true`) for updates by themselves. With it, or after any
 `pcds upgrade`, `docker compose pull` no longer changes what runs until the image is newer than
 the banks; if you would rather the image decide, leave auto updates off and update by pulling.
 Measured: image 0.6.3 with auto updates on, a release found 10 minutes after the start, installed

@@ -1372,7 +1372,7 @@ function renderWorlds() {
           isRunning ? null : h('button', { class: 'small danger', onclick: () => removeWorld(x.name) }, 'Remove'))];
     }), 'No worlds found'));
     const kept = w.backupsKept;
-    $('backupsNote').textContent = kept === undefined ? '' : kept ? `The newest ${kept} are kept (PCDS_BACKUPS)` : 'Backups are off (PCDS_BACKUPS=0)';
+    $('backupsNote').textContent = kept === undefined ? '' : kept ? `The newest ${kept} are kept (rule save.backupsKept)` : 'Backups are off (rule save.backupsKept is 0)';
     $('backupNow').disabled = !kept;
     $('backups').replaceChildren(table(['Backup', 'Size', 'Made', ''], w.backups.slice().reverse().map(x => [h('td', { class: 'mono' }, x.name), cell(bytes(x.bytes), 'num'), ago(x.modified),
       h('td', { class: 'row', style: 'justify-content:flex-end' },
@@ -1518,7 +1518,7 @@ function renderUpdates(s) {
   $('updRollback').disabled = !!busy || stopped;
   $('updNow').textContent = u.available ? `Update to ${u.latest}` : 'Update now';
   $('updNote').textContent = stopped ? 'The world is stopped, so no release runs it and there is nothing to hand over: start the world first, then update. (pcds upgrade VERSION --restart on the host installs a release and restarts the server.)' : noBanks ? 'This server runs from a build, not from installed banks (pcds run): updates need pcds run; Roll back flips between two copies of this build.'
-    : `${rollbackBlocked(s) ? `Rolling back needs a restart (${rollbackBlocked(s)}): pcds upgrade --rollback --restart on the host. ` : ''}Automatic updates: ${u.auto ? `on, a check every ${u.checkHours} h` : 'off (PCDS_AUTO_UPDATE in Config)'}. Releases from ${u.releases || 'GitHub'}.`;
+    : `${rollbackBlocked(s) ? `Rolling back needs a restart (${rollbackBlocked(s)}): pcds upgrade --rollback --restart on the host. ` : ''}Automatic updates: ${u.auto ? `on, a check every ${u.checkHours} h` : 'off (rule update.auto in Config)'}. Releases from ${u.releases || 'GitHub'}.`;
   const installed = (b.installed || []).length ? b.installed : (b.live ? [{ bank: b.live.bank, info: b.live }] : []);
   $('banks').replaceChildren(table(['Bank', 'Release', 'Protocol', 'Format', 'State'], installed.map(x => {
     const i = x.info || {}, running = b.live && b.live.bank === x.bank;

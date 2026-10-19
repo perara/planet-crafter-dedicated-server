@@ -32,8 +32,6 @@ pub enum Source {
     Rules,
     /// access.json; the key is "access.<list>".
     Access,
-    /// The running server's own, back to its start value at a restart.
-    Server,
     /// server.env, read at start: shown, never changed here.
     Env,
     /// A server.env secret: shows only whether it is set.
@@ -105,7 +103,7 @@ pub static KNOBS: &[Knob] = &[
     rule("death.consequences", Type::Enum, "", "What dying costs. Unset: the world's own setting.").values(&crate::rules::CONSEQUENCES),
     rule("death.dropChance", Type::Float, "%", "With DropSomeItems: the percent chance each item is dropped (with 4 items or fewer, all go). Unset: the game's 50.").range(0.0, 100.0),
     rule("loot.amount", Type::Float, "×", "Items in generated containers (wreck safes, crates), times this, up to the size of the container.").range(MULTIPLIER.0, MULTIPLIER.1),
-    rule("limits.maxPlayers", Type::Int, "players", "Players at once; more are refused with the game's session-full message. Unset: PCDS_MAX_PLAYERS, else 16.").range(1.0, 100.0),
+    rule("limits.maxPlayers", Type::Int, "players", "Players at once; more are refused with the game's session-full message. Unset: 16.").range(1.0, 100.0),
     rule("world.pauseWhenEmpty", Type::Bool, "", "With no player in the game (past PlayerReady, as the game counts players), the world stands still: its clock, and with it every timer, day and night, growth, production, terraformation, meteo, drone and vehicle. It goes on from there when a player is in."),
     rule("chat.webhooks", Type::List, "", "http:// or https:// URLs every chat message is POSTed to as JSON (see the README's chat hooks).").secret(),
     rule("chat.secret", Type::String, "", "Signs every webhook POST: X-PCDS-Signature: sha256=<HMAC-SHA256 of the body, hex>. Unset: unsigned.").secret(),
@@ -120,31 +118,87 @@ pub static KNOBS: &[Knob] = &[
     rule("backup.s3AccessKey", Type::String, "", "The access key id of a key that may write to the bucket.").secret(),
     rule("backup.s3SecretKey", Type::String, "", "Its secret access key.").secret(),
     rule("limits.buildings", Type::Map, "", "Building group id to how many the world may have (Drill1 = 3). One more is taken down at once and its materials go back to the builder.").range(0.0, u32::MAX as f64),
+    rule("save.autosaveMinutes", Type::Int, "min", "Minutes between saves; 0: only on stop and through the API.").range(0.0, crate::MAX_AUTOSAVE as f64),
+    rule("save.backupsKept", Type::Int, "", "Save backups kept in backups/ next to the world; 0 keeps none.").range(0.0, 10_000.0),
+    rule("save.backupMinutes", Type::Int, "min", "Minutes between those backups.").range(0.0, 525_600.0),
+    rule("update.auto", Type::Bool, "", "Install each new server release from GitHub as it comes out, into the standby bank, and hand the running world over to it (a hot update: players stay connected). A release that needs a front restart is not installed. Off: nothing contacts GitHub on its own."),
+    rule("update.checkHours", Type::Int, "h", "With update.auto: hours between the checks for a new release.").range(1.0, 8760.0),
+    rule("log.trace", Type::Bool, "", "Log every incoming message and RPC (debugging; a lot of output)."),
     list("access.allowedIPs", "Addresses or CIDR ranges (192.168.1.0/24) that may connect over direct IP; empty: everyone. Players who no longer qualify are kicked."),
     list("access.whitelist", "Names or SteamID64s that may play; empty: everyone. SteamIDs count only for invite-code players, where they are verified."),
     list("access.bannedNames", "Banned names and SteamID64s."),
     list("access.bannedIPs", "Banned addresses or CIDR ranges (direct-IP players)."),
-    knob(Source::Server, "server.autosaveMinutes", Type::Int, "min", "Minutes between saves; 0: only on stop and through the API. Until the next restart, which starts from PCDS_AUTOSAVE.").range(0.0, crate::MAX_AUTOSAVE as f64),
     env("PCDS_LISTEN", Type::String, "", "0.0.0.0:7777", "Direct-IP address (UDP) players join; off disables it."),
     env("PCDS_STEAM", Type::Enum, "", "on", "Invite codes through Steam; off disables them.").values(&["on", "off"]),
     Knob { source: Source::Secret, ..env("PCDS_STEAM_TOKEN", Type::String, "", "", "A Steam game server login token (app 1284190): keeps the invite code the same across restarts.") },
     env("PCDS_SESSION", Type::Int, "", "4242", "The last four digits of the invite code.").range(0.0, 9999.0),
-    env("PCDS_AUTOSAVE", Type::Int, "min", "5", "Minutes between saves at start (server.autosaveMinutes changes it until the next restart).").range(0.0, crate::MAX_AUTOSAVE as f64),
-    env("PCDS_BACKUPS", Type::Int, "", "24", "Save backups kept in backups/ next to the world; 0 keeps none.").range(0.0, 10_000.0),
-    env("PCDS_BACKUP_MINUTES", Type::Int, "min", "60", "Minutes between those backups.").range(0.0, 525_600.0),
     env("PCDS_ADMIN", Type::String, "", "127.0.0.1:7782", "The admin API and web page's address; off disables them."),
     Knob { source: Source::Secret, ..env("PCDS_ADMIN_TOKEN", Type::String, "", "", "The admin API's bearer token (pcds token).") },
-    env("PCDS_MAX_PLAYERS", Type::Int, "players", "16", "Players at once while the limits.maxPlayers rule is unset.").range(1.0, 100.0),
     env("PCDS_WORLD", Type::String, "", "world", "The world pcds starts: worlds/<name>.json (pcds world use NAME)."),
-    env("PCDS_ACCESS", Type::String, "", "", "The access lists file; unset: run/access.json, the installation's (pcds run; a pcds serve started by hand: access.json next to the world)."),
-    env("PCDS_RULES", Type::String, "", "", "The rules file; unset: run/rules.json, the installation's (pcds run; a pcds serve started by hand: rules.json next to the world)."),
-    env("PCDS_WEB", Type::String, "", "", "This web page's file; unset: web/index.html next to the server binary."),
-    env("PCDS_TRACE", Type::String, "", "", "Set: log every incoming message and RPC."),
-    env("PCDS_TRUST_LOOPBACK", Type::Enum, "", "0", "1: believe the SteamID a direct-IP client from 127.0.0.1 claims (tests, the load and probe tools). Never behind a UDP relay, where every player comes from 127.0.0.1.").values(&["0", "1"]),
-    env("PCDS_AUTO_UPDATE", Type::Enum, "", "off", "on: install each new server release from GitHub as it comes out, into the standby bank, and hand the running world over to it (a hot update: players stay connected). A release that needs a front restart is not installed.").values(&["off", "on"]),
-    env("PCDS_UPDATE_CHECK_HOURS", Type::Int, "h", "24", "With PCDS_AUTO_UPDATE=on: hours between checks for a new release.").range(1.0, 8760.0),
-    env("PCDS_RELEASES", Type::String, "", "", "Where pcds upgrade and PCDS_AUTO_UPDATE look up releases; unset: GitHub's API for this project. A mirror, or a test's server (plain http only for 127.0.0.1)."),
+    env("PCDS_RELEASES", Type::String, "", "", "Where pcds upgrade and update.auto look up releases; unset: GitHub's API for this project. A mirror, or a test's server (plain http only for 127.0.0.1)."),
 ];
+
+/// The process environment besides server.env's settings (the Env and Secret entries of KNOBS).
+/// `install` ones say where the installation is and are set by the image, the unit or the
+/// operator's shell; `internal` ones pass between this program's own processes; `dev` is the
+/// one door for developer hooks.
+#[cfg(test)]
+pub struct Var {
+    pub name: &'static str,
+    pub scope: &'static str,
+    pub text: &'static str,
+}
+
+#[cfg(test)]
+pub static PROCESS_ENV: &[Var] = &[
+    Var { name: "PCDS_HOME", scope: "install", text: "The folder the installation keeps everything in: worlds/, server.env, rules.json, access.json, data/ (the game tables) and bin/ (the banks). Default: run/ of the release or checkout folder; a second server on the machine gets its own." },
+    Var { name: "PCDS_GAME_DIR", scope: "install", text: "The game's folder (the one with Planet Crafter.exe). Default: the one used last (run/game-dir), else the Steam library that lists the game; --game DIR on the commands that need it." },
+    Var { name: "PCDS_CONTAINER", scope: "install", text: "Set by the Docker image: no systemd, the server is the container's own process, the admin address may be public inside it." },
+    Var { name: "PCDS_UNIT", scope: "install", text: "The systemd unit's name (default pcds): set it, with PCDS_HOME, for a second server on the same machine. The units pcds writes carry it." },
+    Var { name: "PCDS_IPC_FD", scope: "internal", text: "The front gives each bank its socket at this descriptor (always 3). Never set by hand." },
+    Var { name: "PCDS_DEV", scope: "dev", text: "Developer hooks, comma-separated (the table below). Tests and tools set it; never an installation." },
+];
+
+/// PCDS_DEV's hooks: what the end-to-end tests and the load and probe tools need from the
+/// production program. An unknown one stops the start.
+pub static DEV_HOOKS: &[(&str, &str)] = &[
+    ("flip-verify", "A bank that restores a snapshot checks its state equals the snapshot's (every flip)."),
+    ("test-faults", "POST /api/update takes failForTest, to make the next bank fail on purpose."),
+    ("trust-loopback", "Believe the SteamID a direct-IP client from 127.0.0.1 claims. Never behind a UDP relay, where every player comes from 127.0.0.1."),
+    ("bank-fail=WHAT", "The front sets it for a bank (a test's failForTest): WHAT is restore (dies on RESTORE), protocol (says another protocol), slow-hello (holds its HELLO 4 s), slow-ready (holds its READY 2 s) or die-after-ready (ends 1 s after READY)."),
+    ("check-seconds=N", "The automatic update check every N seconds, not every update.checkHours hours."),
+];
+
+/// PCDS_DEV's value for a hook: Some("") for a bare one, Some(value) for hook=value.
+pub fn dev(hook: &str) -> Option<String> {
+    let all = crate::env("PCDS_DEV")?;
+    all.split(',').find_map(|t| {
+        let (name, value) = t.trim().split_once('=').unwrap_or((t.trim(), ""));
+        (name == hook).then(|| value.to_string())
+    })
+}
+
+/// The most variables an operator meets: the settings of server.env plus the install ones.
+/// A new one is a decision (a rule if it is gameplay or tuning), not a habit.
+#[cfg(test)]
+pub const OPERATOR_ENV_BUDGET: usize = 12;
+
+/// A file of the installation (rules.json, access.json): in PCDS_HOME, which pcds run gives the
+/// front and so its banks; a server started by hand without it keeps them beside the world.
+pub fn installation_file(get: &impl Fn(&str) -> Option<String>, save_path: &str, name: &str) -> String {
+    match get("PCDS_HOME") {
+        Some(home) => std::path::Path::new(&home).join(name),
+        None => std::path::Path::new(save_path).with_file_name(name),
+    }
+    .to_string_lossy()
+    .to_string()
+}
+
+/// The PCDS_ names of a server.env that are no setting: Err naming the file and each one.
+pub fn check_keys(file: &str, keys: impl IntoIterator<Item = String>) -> Result<(), String> {
+    let unknown: Vec<String> = keys.into_iter().filter(|k| k.starts_with("PCDS_") && !knob_for(k).is_some_and(|n| n.read_only())).collect();
+    if unknown.is_empty() { Ok(()) } else { Err(format!("{file}: unknown setting {}", unknown.join(", "))) }
+}
 
 pub fn knob_for(key: &str) -> Option<&'static Knob> {
     KNOBS.iter().find(|k| k.key == key)
@@ -254,10 +308,11 @@ fn env_value(kind: Type, text: &str) -> Value {
 
 /// Every server.env setting the server reads (config::KNOBS' Env and Secret entries), checked
 /// once at start, as `get` (the environment, or the settings file) has them: Err naming each
-/// setting that is not what its entry takes (a secret's value never shown). The server refuses
-/// to start on it: a mistyped value is never read as the default.
+/// setting that is not what its entry takes (a secret's value never shown) and each PCDS_DEV
+/// hook that does not exist. The server refuses to start on it: a mistyped setting is never
+/// read as the default.
 pub fn check_env(get: impl Fn(&str) -> Option<String>) -> Result<(), String> {
-    let mut bad = Vec::new();
+    let mut bad: Vec<String> = Vec::new();
     for k in KNOBS.iter().filter(|k| k.read_only()) {
         let Some(text) = get(k.key).filter(|t| !t.is_empty()) else { continue };
         let checked = match k.key {
@@ -266,6 +321,12 @@ pub fn check_env(get: impl Fn(&str) -> Option<String>) -> Result<(), String> {
             _ => k.check(&env_value(k.kind, &text)),
         };
         bad.extend(checked.err());
+    }
+    for hook in get("PCDS_DEV").unwrap_or_default().split(',').map(str::trim).filter(|h| !h.is_empty()) {
+        let name = hook.split_once('=').map_or(hook, |(n, _)| n);
+        if !DEV_HOOKS.iter().any(|(h, _)| h.split('=').next() == Some(name)) {
+            bad.push(format!("PCDS_DEV: no hook {name:?}"));
+        }
     }
     if bad.is_empty() { Ok(()) } else { Err(format!("server.env: {} (pcds config edits it)", bad.join("; "))) }
 }
@@ -278,7 +339,7 @@ pub fn env_number(key: &str) -> u64 {
 }
 
 /// Every knob with its default and value: {"knobs": [...]}.
-pub fn get(game: &Game, autosave: u64) -> Value {
+pub fn get(game: &Game) -> Value {
     let rules = serde_json::to_value(&game.rules).unwrap_or_default();
     let defaults = serde_json::to_value(Rules::default()).unwrap_or_default();
     let access = serde_json::to_value(&game.access.lists).unwrap_or_default();
@@ -292,8 +353,6 @@ pub fn get(game: &Game, autosave: u64) -> Value {
                 }
                 Source::Rules => (at(&defaults, k.key), at(&rules, k.key)),
                 Source::Access => (json!([]), at(&access, &k.key["access.".len()..])),
-                // The one server knob: server.autosaveMinutes.
-                Source::Server => (crate::autosave_start().into(), autosave.into()),
                 Source::Env => (env_value(k.kind, k.default), env_value(k.kind, &crate::env(k.key).unwrap_or_default())),
                 Source::Secret => (Value::Null, crate::env(k.key).map(|_| "(set)").into()),
             };
@@ -320,13 +379,13 @@ pub fn get(game: &Game, autosave: u64) -> Value {
 
 /// A change from the API, {"key": value or null}: every value checked, then all applied (or
 /// none). Err: {"error", "key"} for the API's answer.
-pub fn set(game: &mut Game, autosave: &mut u64, body: &Value) -> Result<(), Value> {
+pub fn set(game: &mut Game, body: &Value) -> Result<(), Value> {
     let fail = |key: &str, error: String| json!({ "error": error, "key": key });
     let Some(changes) = body.as_object() else { return Err(fail("", "a JSON object of setting: value".into())) };
     let defaults = serde_json::to_value(Rules::default()).unwrap_or_default();
     let mut rules = serde_json::to_value(&game.rules).unwrap_or_default();
     let mut access = serde_json::to_value(&game.access.lists).unwrap_or_default();
-    let (mut access_changed, mut minutes) = (false, None);
+    let mut access_changed = false;
     for (key, value) in changes {
         let source = match knob_for(key) {
             Some(k) if k.read_only() => return Err(fail(key, format!("{key}: set in server.env (pcds config), not here"))),
@@ -350,7 +409,6 @@ pub fn set(game: &mut Game, autosave: &mut u64, body: &Value) -> Result<(), Valu
                 access[&key["access.".len()..]] = if value.is_null() { json!([]) } else { value.clone() };
                 access_changed = true;
             }
-            Source::Server => minutes = Some(value.as_u64().unwrap_or_else(crate::autosave_start)),
             Source::Env | Source::Secret => unreachable!("read-only knobs are refused above"),
         }
     }
@@ -379,9 +437,6 @@ pub fn set(game: &mut Game, autosave: &mut u64, body: &Value) -> Result<(), Valu
     if access_changed {
         crate::bank::enforce(game);
     }
-    if let Some(m) = minutes {
-        *autosave = m;
-    }
     Ok(())
 }
 
@@ -389,51 +444,77 @@ pub fn set(game: &mut Game, autosave: &mut u64, body: &Value) -> Result<(), Valu
 mod tests {
     use super::*;
 
-    /// The PCDS_* names the source uses that are not KNOBS, so not server.env settings read at
-    /// start: install (the installer and the commands read or set them), internal (the
-    /// processes of this program talk through them, or a diagnostic of the table reader) and
-    /// test (hooks and fixtures; some are honoured by the production binary because the end-to-end
-    /// tests run it).
-    const OTHER_ENV: &[(&str, &str)] = &[
-        ("PCDS_ADMIN_BIND", "install"),
-        ("PCDS_CONTAINER", "install"),
-        ("PCDS_ENV_FILE", "install"),
-        ("PCDS_GAME_DIR", "install"),
-        ("PCDS_HOME", "install"),
-        ("PCDS_NEW_WORLD", "install"),
-        ("PCDS_PORT", "install"),
-        ("PCDS_UNIT", "install"),
-        ("PCDS_BANKS", "internal"),
-        ("PCDS_DIFF_SHOW", "internal"),
-        ("PCDS_IPC_FD", "internal"),
-        ("PCDS_REACH_IL", "internal"),
-        ("PCDS_WRECKS_TRACE", "internal"),
-        ("PCDS_BANK_FAIL", "test"),
-        ("PCDS_FLIP_VERIFY", "test"),
-        ("PCDS_RNG_SEED", "test"),
-        ("PCDS_TEST_DATA", "test"),
-        ("PCDS_TEST_FAULTS", "test"),
+    /// The names the tests and the installer use, which an installation never sets: each in the
+    /// code that reads it (a test's own, or a tool's), with what it is for. Set by hand for the
+    /// tests and benchmarks (TEST_DATA, RNG_SEED, BENCH_*, FUZZ_*) or by a test for the child
+    /// process it starts (the others).
+    pub const TEST_ENV: &[(&str, &str)] = &[
+        ("PCDS_TEST_DATA", "The game tables the tests run on (default run/data/2.103); none skips the tests that need them (CI)."),
+        ("PCDS_RNG_SEED", "A fixed seed for the game's random numbers: benchmarks and replays compare runs. Read by test builds only."),
+        ("PCDS_BENCH_SAVE", "bench: the save the benchmark runs on (required)."),
+        ("PCDS_BENCH_SECONDS", "bench: game seconds to run (default 300)."),
+        ("PCDS_BENCH_PLAYERS", "bench: scripted players (default 0)."),
+        ("PCDS_BENCH_ACTION_MS", "bench: each player acts this often (default: only moves)."),
+        ("PCDS_BENCH_DUMP", "bench: a file for every message and the final save, to compare two runs."),
+        ("PCDS_BENCH_HANDOFF", "bench handoff: seconds between handoffs (default half the run)."),
+        ("PCDS_FUZZ_ROUNDS", "The RPC fuzz test's rounds (default 1500)."),
+        ("PCDS_FUZZ_SEED", "The RPC fuzz test's seed."),
+        ("PCDS_IPC_ECHO", "ipc test: the child process's socket file."),
+        ("PCDS_BACKUP_CUT_DIR", "save test: the child process's folder."),
+        ("PCDS_SUPERVISE_TEST", "supervise test: the child process's folder."),
+        ("PCDS_SUPERVISE_WHAT", "supervise test: how the child front ends."),
+        ("PCDS_ADMIN_TOKEN_EXEC_TEST", "chat hook test: a secret the exec program must not see."),
+        ("PCDS_TARBALL_URL", "install.sh: a release tarball to install instead of GitHub's latest (with its .sha256 beside it)."),
     ];
 
-    /// (file, text) of every source file's non-test part: up to its `#[cfg(test)] mod ...tests`,
-    /// without the files that are test code only and without this one (which names them all).
+    /// (file, text) of every program source file's non-test part: up to its `#[cfg(test)] mod
+    /// ...tests`, without the files that are test code only and without this one (which names
+    /// them all).
     fn sources() -> Vec<(String, String)> {
-        fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        files(true)
+    }
+
+    /// The same, with the test code, the integration tests and the scripts and images around the
+    /// program: everywhere the program or its tests are told something through PCDS_*.
+    fn everything() -> Vec<(String, String)> {
+        files(false)
+    }
+
+    fn files(program_only: bool) -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, program_only: bool, out: &mut Vec<(String, String)>) {
             for entry in std::fs::read_dir(dir).unwrap().flatten() {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
-                if path.is_dir() {
-                    walk(&path, out);
-                } else if name.ends_with(".rs") && !["bench.rs", "coverage.rs", "scenario.rs", "testkit.rs", "tests.rs", "play_tests.rs", "config.rs"].contains(&name.as_str()) {
+                if path.is_dir() && !["target", "web", ".git", "probes"].contains(&name.as_str()) {
+                    walk(&path, program_only, out);
+                } else if ["rs", "sh", "yaml"].contains(&path.extension().and_then(|e| e.to_str()).unwrap_or("")) || ["Makefile", "Dockerfile"].contains(&name.as_str()) {
                     let text = std::fs::read_to_string(&path).unwrap();
+                    if name == "config.rs" {
+                        continue;
+                    }
                     let lines: Vec<&str> = text.lines().collect();
-                    let end = (0..lines.len()).find(|&i| lines[i] == "#[cfg(test)]" && lines.get(i + 1).is_some_and(|l| l.contains("mod ") && l.contains("tests"))).unwrap_or(lines.len());
+                    let tests_only = ["bench.rs", "coverage.rs", "scenario.rs", "testkit.rs", "tests.rs", "play_tests.rs"].contains(&name.as_str());
+                    if program_only && (tests_only || path.starts_with(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests"))) {
+                        continue;
+                    }
+                    let end = if program_only { (0..lines.len()).find(|&i| lines[i] == "#[cfg(test)]" && lines.get(i + 1).is_some_and(|l| l.contains("mod ") && l.contains("tests"))).unwrap_or(lines.len()) } else { lines.len() };
                     out.push((path.display().to_string(), lines[..end].join("\n")));
                 }
             }
         }
         let mut out = Vec::new();
-        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut out);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        if program_only {
+            walk(&root.join("src"), true, &mut out);
+        } else {
+            walk(root, false, &mut out);
+            for sibling in ["Makefile", "Dockerfile", "compose.yaml", "install.sh"] {
+                if let Ok(text) = std::fs::read_to_string(root.join("..").join(sibling)) {
+                    out.push((sibling.to_string(), text));
+                }
+            }
+            walk(&root.join("../docker"), false, &mut out);
+        }
         out
     }
 
@@ -441,7 +522,7 @@ mod tests {
     fn names(text: &str) -> Vec<&str> {
         let mut out = Vec::new();
         for (at, _) in text.match_indices("PCDS_") {
-            let len = text[at..].find(|c: char| !(c.is_ascii_uppercase() || c == '_')).unwrap_or(text.len() - at);
+            let len = text[at..].find(|c: char| !(c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())).unwrap_or(text.len() - at);
             if len > 5 {
                 out.push(&text[at..at + len]);
             }
@@ -449,21 +530,111 @@ mod tests {
         out
     }
 
-    /// A PCDS_ name in the program is a KNOBS entry or on the list above with its scope, and
-    /// the list holds no name that is gone.
+    fn known(name: &str) -> bool {
+        knob_for(name).is_some() || PROCESS_ENV.iter().any(|v| v.name == name) || TEST_ENV.iter().any(|(n, _)| *n == name)
+    }
+
+    /// A PCDS_ name anywhere in the program, its tests, the scripts and the images is a KNOBS
+    /// entry, a process variable or a test's;
+    /// and what the tables list is read somewhere.
     #[test]
     fn every_environment_name_in_the_source_is_in_the_schema_or_the_list() {
-        let sources = sources();
-        assert!(sources.len() > 40);
-        for (file, text) in &sources {
+        let (sources, everything) = (sources(), everything());
+        assert!(sources.len() > 40 && everything.len() > sources.len());
+        for (file, text) in &everything {
             for name in names(text) {
-                assert!(knob_for(name).is_some() || OTHER_ENV.iter().any(|(n, _)| *n == name), "{file} uses {name}: a KNOBS entry (config.rs) if it is a setting, else OTHER_ENV with its scope");
+                assert!(known(name), "{file} uses {name}: a KNOBS entry (config.rs) if it is a setting, PROCESS_ENV or TEST_ENV");
             }
         }
-        for (name, scope) in OTHER_ENV {
-            assert!(["install", "internal", "test"].contains(scope), "{name}: scope {scope}");
-            assert!(knob_for(name).is_none(), "{name} is a KNOBS entry");
-            assert!(sources.iter().any(|(_, text)| names(text).contains(name)), "{name} is in no source file any more: remove it from OTHER_ENV");
+        let read_in = |name: &str, files: &[(String, String)]| files.iter().any(|(_, text)| names(text).contains(&name));
+        for v in PROCESS_ENV {
+            assert!(["install", "internal", "dev"].contains(&v.scope), "{}: scope {}", v.name, v.scope);
+            assert!(knob_for(v.name).is_none() && read_in(v.name, &sources), "{} is in no program source file: remove it from PROCESS_ENV", v.name);
+        }
+        for k in KNOBS.iter().filter(|k| k.read_only()) {
+            assert!(read_in(k.key, &sources), "{} is in no program source file: remove its entry", k.key);
+        }
+        for (name, _) in TEST_ENV {
+            assert!(read_in(name, &everything), "{name} is nowhere in the tests and scripts any more: remove it from TEST_ENV");
+        }
+    }
+
+    fn cell(text: &str) -> String {
+        text.replace('|', "\\|").replace('\n', " ")
+    }
+
+    /// docs/env.md, written from the tables.
+    fn env_doc() -> String {
+        let mut out = String::new();
+        let operator = KNOBS.iter().filter(|k| k.read_only()).count() + PROCESS_ENV.iter().filter(|v| v.scope == "install").count();
+        out += &format!("# Environment variables\n\nGenerated from the tables in `server/src/config.rs` by `cargo test config::tests::write_env_doc -- --ignored`; a test fails when it is out of date. Do not edit.\n\nAn operator meets {operator} variables, no more ({OPERATOR_ENV_BUDGET} is the budget, and a test keeps it): what the server must know before it can read any file. Everything else, gameplay and tuning alike, is a rule: `rules.json` and `access.json`, changed live through `pcds rules`, `POST /api/config` and the web page (README, \"Server rules\").\n\n");
+        out += "## Settings (run/server.env)\n\n| Variable | Default | What |\n|---|---|---|\n";
+        for k in KNOBS.iter().filter(|k| k.read_only()) {
+            let secret = if k.secret { " Never shown; `(set)` in the API." } else { "" };
+            out += &format!("| `{}` | {} | {}{secret} |\n", k.key, if k.default.is_empty() { "unset".to_string() } else { format!("`{}`", k.default) }, cell(k.description));
+        }
+        for (title, scope, intro) in [
+            ("Where the installation is", "install", "Set by the image or the unit that starts the server, or in the shell of every `pcds` command."),
+            ("Between this program's own processes", "internal", "Never set by hand."),
+            ("Developer hooks", "dev", "For the end-to-end tests and the load and probe tools; the hooks are in the next table."),
+        ] {
+            out += &format!("\n## {title}\n\n{intro}\n\n| Variable | What |\n|---|---|\n");
+            for v in PROCESS_ENV.iter().filter(|v| v.scope == scope) {
+                out += &format!("| `{}` | {} |\n", v.name, cell(v.text));
+            }
+        }
+        out += "\n`PCDS_DEV` takes these, comma-separated; one that does not exist stops the start.\n\n| Hook | What |\n|---|---|\n";
+        for (hook, what) in DEV_HOOKS {
+            out += &format!("| `{}` | {what} |\n", hook.replace('|', "\\|"));
+        }
+        out += "\n## Tests and tools\n\nRead by test builds and tools, never by an installation. Set by hand for the benchmark and the tests, or by a test for the process it starts.\n\n| Variable | What |\n|---|---|\n";
+        for (name, what) in TEST_ENV {
+            out += &format!("| `{name}` | {} |\n", cell(what));
+        }
+        out += "\n## Hot updates\n\nThe new bank runs under the environment of the running front, which a hot update does not replace, and reads the files in `PCDS_HOME` itself. A release that changes what the front and the bank share is installed with `pcds upgrade --restart`.\n";
+        out
+    }
+
+    #[test]
+    fn docs_env_md_is_generated_from_the_tables() {
+        let wanted = env_doc();
+        let have = include_str!("../../docs/env.md");
+        assert!(have == wanted, "docs/env.md is out of date: run `cargo test config::tests::write_env_doc -- --ignored`\n--- wanted\n{wanted}");
+    }
+
+    #[test]
+    #[ignore]
+    fn write_env_doc() {
+        std::fs::write(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/env.md"), env_doc()).unwrap();
+    }
+
+    /// The operator-facing variables (server.env's and the install ones) stay within the budget.
+    #[test]
+    fn the_operator_facing_variables_stay_within_the_budget() {
+        let operator: Vec<&str> = KNOBS.iter().filter(|k| k.read_only()).map(|k| k.key).chain(PROCESS_ENV.iter().filter(|v| v.scope == "install").map(|v| v.name)).collect();
+        assert!(operator.len() <= OPERATOR_ENV_BUDGET, "{} operator-facing variables, the budget is {OPERATOR_ENV_BUDGET}: make the new one a rule (rules.json, POST /api/config) or fold it into one that exists\n{operator:?}", operator.len());
+        // Gameplay and tuning are rules: no variable carries a number of minutes, players, hours.
+        assert!(KNOBS.iter().filter(|k| k.read_only()).all(|k| !["min", "h", "players", "×", "s"].contains(&k.unit)), "a tuning number in server.env: make it a rule");
+    }
+
+    /// The README outside its Settings section, the Docker image, compose.yaml and the entrypoint
+    /// name only variables that exist, and the image sets what a container needs.
+    #[test]
+    fn the_docker_files_and_the_readme_use_only_variables_that_exist() {
+        let readme = include_str!("../../README.md");
+        let outside: Vec<&str> = readme.split("\n## ").filter(|section| !section.starts_with("Settings\n")).collect();
+        assert!(outside.len() > 10);
+        let docker: Vec<String> = ["../Dockerfile", "../compose.yaml", "../docker/entrypoint.sh"].iter().map(|f| std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f)).unwrap()).collect();
+        for text in outside.iter().copied().chain(docker.iter().map(String::as_str)) {
+            for name in names(text) {
+                // PCDS_KEEP_ACTIVE: the parity reference's plugin in the game, not this program.
+                assert!((known(name) || name == "PCDS_KEEP_ACTIVE"), "the README or a Docker file uses {name}");
+            }
+        }
+        // The image sets what a container needs: where it lives, that it is one, and the admin page open to the host.
+        let dockerfile = &docker[0];
+        for var in ["PCDS_HOME=/data", "PCDS_CONTAINER=1", "PCDS_ADMIN=0.0.0.0:7782"] {
+            assert!(dockerfile.contains(var), "Dockerfile: {var}");
         }
     }
 
@@ -473,20 +644,20 @@ mod tests {
         readme.lines().filter(|l| l.starts_with("| `")).map(cells).filter(|c| c.len() >= 2).filter_map(|c| Some((c[0].strip_prefix('`')?.strip_suffix('`')?.to_string(), c[1].clone()))).collect()
     }
 
-    /// The README's Settings table lists the server.env knobs and nothing else; where it gives
-    /// a default and the knob has one, they are the same.
+    /// The README's Settings tables list the server.env knobs and the install variables and
+    /// nothing else; where it gives a default and the knob has one, they are the same.
     #[test]
     fn the_readme_settings_are_the_server_env_knobs() {
         let readme = include_str!("../../README.md");
         let section = readme.split("\n## Settings\n").nth(1).unwrap().split("\n## ").next().unwrap();
         let documented = rows(section);
         let mut keys: Vec<&str> = documented.iter().map(|(k, _)| k.as_str()).collect();
-        let mut wanted: Vec<&str> = KNOBS.iter().filter(|k| k.read_only()).map(|k| k.key).collect();
+        let mut wanted: Vec<&str> = KNOBS.iter().filter(|k| k.read_only()).map(|k| k.key).chain(PROCESS_ENV.iter().filter(|v| v.scope == "install").map(|v| v.name)).collect();
         keys.sort();
         wanted.sort();
-        assert_eq!(keys, wanted, "README Settings table and config::KNOBS");
+        assert_eq!(keys, wanted, "README Settings tables and config::KNOBS and PROCESS_ENV");
         for (key, default) in &documented {
-            let knob = knob_for(key).unwrap();
+            let Some(knob) = knob_for(key) else { continue };
             assert!(knob.default.is_empty() || *default == format!("`{}`", knob.default), "{key}: README says {default}, KNOBS {:?}", knob.default);
         }
     }
@@ -523,28 +694,36 @@ mod tests {
         let defaults: Vec<(&str, &str)> = KNOBS.iter().filter(|k| k.read_only() && !k.default.is_empty()).map(|k| (k.key, k.default)).collect();
         with(&defaults).unwrap();
         with(&[]).unwrap();
-        with(&[("PCDS_LISTEN", "off"), ("PCDS_ADMIN", "[::1]:7782"), ("PCDS_AUTOSAVE", "0"), ("PCDS_SESSION", "0042")]).unwrap();
+        with(&[("PCDS_LISTEN", "off"), ("PCDS_ADMIN", "[::1]:7782"), ("PCDS_SESSION", "0042"), ("PCDS_DEV", "flip-verify, bank-fail=restore")]).unwrap();
         for (key, value, says) in [
-            ("PCDS_AUTOSAVE", "five", "PCDS_AUTOSAVE: \"five\" is not a whole number from 0 to 1440"),
-            ("PCDS_AUTOSAVE", "100000", "from 0 to 1440"),
-            ("PCDS_BACKUPS", "-1", "PCDS_BACKUPS: -1 is not"),
-            ("PCDS_BACKUP_MINUTES", "1h", "PCDS_BACKUP_MINUTES"),
+            ("PCDS_SESSION", "five", "PCDS_SESSION: \"five\" is not a whole number from 0 to 9999"),
             ("PCDS_SESSION", "12345", "PCDS_SESSION: 12345 is not a whole number from 0 to 9999"),
-            ("PCDS_MAX_PLAYERS", "0", "PCDS_MAX_PLAYERS"),
-            ("PCDS_AUTO_UPDATE", "yes", "PCDS_AUTO_UPDATE: \"yes\" is not one of"),
-            ("PCDS_UPDATE_CHECK_HOURS", "0", "PCDS_UPDATE_CHECK_HOURS"),
             ("PCDS_STEAM", "true", "PCDS_STEAM"),
             ("PCDS_LISTEN", "7777", "PCDS_LISTEN: \"7777\" is not an address"),
             ("PCDS_ADMIN", "localhost:7782", "PCDS_ADMIN"),
+            ("PCDS_DEV", "flip-verfy", "PCDS_DEV: no hook \"flip-verfy\""),
         ] {
             let e = with(&[(key, value)]).unwrap_err();
             assert!(e.contains(says) && e.starts_with("server.env: "), "{key}={value}: {e}");
         }
         // Two at once are both named.
-        let e = with(&[("PCDS_AUTOSAVE", "x"), ("PCDS_BACKUPS", "y")]).unwrap_err();
-        assert!(e.contains("PCDS_AUTOSAVE") && e.contains("PCDS_BACKUPS"), "{e}");
+        let e = with(&[("PCDS_SESSION", "x"), ("PCDS_STEAM", "y")]).unwrap_err();
+        assert!(e.contains("PCDS_SESSION") && e.contains("PCDS_STEAM"), "{e}");
         // The number readers take the default when unset.
-        assert_eq!((env_number("PCDS_SESSION"), env_number("PCDS_UPDATE_CHECK_HOURS")), (4242, 24));
+        assert_eq!(env_number("PCDS_SESSION"), 4242);
+    }
+
+    /// A name in server.env that is no setting is one line naming the file and the key; a hook
+    /// of PCDS_DEV that does not exist stops the start; the files of the installation are in
+    /// PCDS_HOME, else beside the world.
+    #[test]
+    fn unknown_settings_and_the_installations_files() {
+        let e = check_keys("/srv/run/server.env", ["PCDS_LISTEN".to_string(), "PCDS_AUTOSAVE".to_string(), "PATH".to_string(), "PCDS_HOME".to_string()]).unwrap_err();
+        assert_eq!(e, "/srv/run/server.env: unknown setting PCDS_AUTOSAVE, PCDS_HOME");
+        check_keys("f", KNOBS.iter().filter(|k| k.read_only()).map(|k| k.key.to_string())).unwrap();
+        let env = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string());
+        assert_eq!(installation_file(&env(&[]), "/w/world.json", "access.json"), "/w/access.json");
+        assert_eq!(installation_file(&env(&[("PCDS_HOME", "/h")]), "/w/world.json", "rules.json"), "/h/rules.json");
     }
 
     fn rule_knobs() -> impl Iterator<Item = &'static Knob> {

@@ -25,7 +25,7 @@ COPY docker/entrypoint.sh /opt/pcds/entrypoint.sh
 RUN useradd --uid 1000 --home-dir /data/home --no-create-home pcds \
   && mkdir -p /data/home && chown -R pcds:pcds /data
 # The game is the one mounted at /game, or the one STEAM_USER downloaded (pcds container).
-ENV PCDS_HOME=/data PCDS_CONTAINER=1 PCDS_ADMIN_BIND=0.0.0.0:7782 \
+ENV PCDS_HOME=/data PCDS_CONTAINER=1 PCDS_ADMIN=0.0.0.0:7782 \
   HOME=/data/home PATH=/opt/pcds:$PATH
 VOLUME /data
 WORKDIR /data

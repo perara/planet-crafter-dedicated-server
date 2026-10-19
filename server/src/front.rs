@@ -18,8 +18,9 @@
 //! told to join again (they have seen newer state than either).
 //!
 //!   pcds serve DATA_DIR SAVE.json   (pcds run starts it from the active bank)
-//!     PCDS_BANKS        the banks' folder (run/bin: a/, b/, active); unset: both banks are
-//!                       this program (a checkout build), and there is nothing to update
+//!     PCDS_HOME         (pcds run sets it) the installation: server.env, rules.json and
+//!                       access.json in it, the banks in bin/ (a/, b/, active); without it both
+//!                       banks are this program (a checkout build), and there is nothing to update
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -75,6 +76,13 @@ const READY_DEADLINE: Duration = Duration::from_secs(5);
 /// found the world busy (a flip, a crash restart, a stopped world) after BUSY_RETRY.
 const CHECK_RETRY: Duration = Duration::from_secs(3600);
 const BUSY_RETRY: Duration = Duration::from_secs(600);
+
+/// The time between the automatic checks for hours (the rule update.checkHours); the hook
+/// PCDS_DEV=check-seconds=N makes them seconds (the end-to-end tests).
+fn check_every(hours: impl Into<u64>) -> Duration {
+    let seconds = crate::config::dev("check-seconds").and_then(|s| s.parse::<u64>().ok());
+    seconds.map_or_else(|| Duration::from_secs(hours.into().clamp(1, 8760) * 3600), Duration::from_secs)
+}
 /// Kicked: the reason first, the connection closed this much later.
 const KICK_DELAY: Duration = Duration::from_millis(300);
 /// More crashes than this within CRASH_WINDOW and the front gives up (systemd restarts it).
@@ -201,6 +209,12 @@ struct Front {
     world_lock: Option<std::fs::File>,
 }
 
+/// The banks' folder: bin/ of PCDS_HOME, which pcds run gives the front. Without one (a front
+/// started by hand, the tests') both banks are this program.
+fn banks_dir() -> Option<PathBuf> {
+    crate::env("PCDS_HOME").map(|home| PathBuf::from(home).join("bin")).filter(|dir| dir.is_dir())
+}
+
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -241,7 +255,7 @@ pub fn run(args: &[String]) {
         }
     };
     let port = listen.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
-    let mut front = Front::new(dir, save, crate::env("PCDS_BANKS").map(PathBuf::from), utp, port, stop);
+    let mut front = Front::new(dir, save, banks_dir(), utp, port, stop);
     front.world_lock = Some(world);
     front.boot();
     front.start_admin();
@@ -252,11 +266,10 @@ pub fn run(args: &[String]) {
 impl Front {
     fn new(dir: &str, save: &str, banks: Option<PathBuf>, utp: Option<Utp>, port: u16, stop: Arc<AtomicBool>) -> Front {
         let (tx, rx) = std::sync::mpsc::channel();
-        let auto = crate::env("PCDS_AUTO_UPDATE").as_deref() == Some("on");
-        // The e2e tests' schedule (seconds, not hours); off unless the front was started with PCDS_TEST_FAULTS=1.
-        let test_seconds = crate::env("PCDS_TEST_CHECK_SECONDS").filter(|_| crate::env("PCDS_TEST_FAULTS").as_deref() == Some("1")).and_then(|s| s.parse::<u64>().ok());
-        let every = test_seconds.map_or_else(|| Duration::from_secs(crate::config::env_number("PCDS_UPDATE_CHECK_HOURS") * 3600), Duration::from_secs);
-        let autosave_minutes = crate::autosave_start();
+        // The rules' values (save, update) until the bank says what the rules file holds (OPS).
+        let rules = crate::rules::Rules::default();
+        let (auto, every) = (rules.update.auto, check_every(rules.update.check_hours));
+        let autosave_minutes = u64::from(rules.save.autosave_minutes);
         Front {
             dir: dir.to_string(),
             save: save.to_string(),
@@ -306,9 +319,6 @@ impl Front {
     }
 
     fn web_page(&self, bank: &str) -> Option<String> {
-        if let Some(web) = crate::env("PCDS_WEB") {
-            return Some(web);
-        }
         let dir = self.exe(bank);
         Some(dir.with_file_name("web").join("index.html").to_string_lossy().to_string())
     }
@@ -321,7 +331,7 @@ impl Front {
         let mut command = Command::new(&exe);
         command.arg("bank").arg(&self.dir).arg(&self.save).env("PCDS_IPC_FD", "3");
         if let Some(f) = fail {
-            command.env("PCDS_BANK_FAIL", f);
+            command.env("PCDS_DEV", format!("{},bank-fail={f}", crate::env("PCDS_DEV").unwrap_or_default()));
         }
         let fd = theirs.as_raw_fd();
         // SAFETY: between fork and exec only async-signal-safe calls: dup2 and fcntl. fd 3 then
@@ -629,7 +639,7 @@ impl Front {
                     println!("client {client}: connected from {addr}");
                     self.ip_clients.insert(token, client);
                     self.conns.insert(client, Conn::Ip(token));
-                    let c = json!({"ip": addr.ip().to_string(), "trusted": trusted(addr.ip(), crate::env("PCDS_TRUST_LOOPBACK").as_deref() == Some("1"))});
+                    let c = json!({"ip": addr.ip().to_string(), "trusted": trusted(addr.ip(), crate::config::dev("trust-loopback").is_some())});
                     self.to_bank(ipc::CONNECTED, client, c.to_string().as_bytes(), 0);
                 }
                 utp::Event::Data(token, batch) => {
@@ -827,6 +837,7 @@ impl Front {
                 Ok(event) => self.hooks.feed.push(event),
                 Err(e) => eprintln!("chat: an event the front cannot read ({e})"),
             },
+            ipc::OPS => self.ops(&f.body),
             ipc::CHATCFG => match chat_config(&f.body) {
                 Ok(chat) => self.hooks.configure(chat),
                 Err(e) => eprintln!("chat: {e}; the hooks keep their settings"),
@@ -1186,7 +1197,7 @@ impl Front {
                 _ => {
                     let id = self.next_request;
                     self.next_request += 1;
-                    let body = json!({"method": r.method, "path": r.path, "body": r.body, "autosaveMinutes": self.autosave_minutes});
+                    let body = json!({"method": r.method, "path": r.path, "body": r.body});
                     self.answers.insert(id, (r.reply, r.path));
                     self.to_bank(ipc::ADMIN, id, body.to_string().as_bytes(), 0);
                 }
@@ -1194,15 +1205,28 @@ impl Front {
         }
     }
 
-    fn answer(&mut self, id: u64, body: &[u8]) {
-        let Some((reply, path)) = self.answers.remove(&id) else { return };
-        let a: Value = serde_json::from_slice(body).unwrap_or_default();
-        if let Some(m) = a["autosaveMinutes"].as_u64()
-            && m != self.autosave_minutes
-        {
+    /// The rules the front acts on, as the live bank says them (ipc::OPS).
+    fn ops(&mut self, body: &[u8]) {
+        let o: Value = serde_json::from_slice(body).unwrap_or_default();
+        self.set_autosave(o["autosaveMinutes"].as_u64());
+        if let Some(auto) = o["autoUpdate"].as_bool() {
+            self.updates.auto = auto;
+        }
+        if let Some(hours) = o["updateCheckHours"].as_u64() {
+            self.updates.every = check_every(hours);
+        }
+    }
+
+    fn set_autosave(&mut self, minutes: Option<u64>) {
+        if let Some(m) = minutes.filter(|m| *m != self.autosave_minutes) {
             self.autosave_minutes = m;
             self.next_save = Instant::now() + Duration::from_secs(m.max(1) * 60);
         }
+    }
+
+    fn answer(&mut self, id: u64, body: &[u8]) {
+        let Some((reply, path)) = self.answers.remove(&id) else { return };
+        let a: Value = serde_json::from_slice(body).unwrap_or_default();
         let status = a["status"].as_u64().unwrap_or(500) as u16;
         let mut text = a["body"].as_str().unwrap_or("{}").to_string();
         if path == "/api/status"
@@ -1308,8 +1332,8 @@ impl Front {
         }
         let Some(live) = &self.live else { return (503, "{\"error\":\"the game is starting\"}".into()) };
         let target = updater::other(&live.name).to_string();
-        // The e2e tests' fault injection; off unless the front was started with PCDS_TEST_FAULTS=1.
-        let fail = body["failForTest"].as_str().filter(|_| crate::env("PCDS_TEST_FAULTS").as_deref() == Some("1")).map(str::to_string);
+        // The e2e tests' fault injection; off unless the front was started with PCDS_DEV=test-faults.
+        let fail = body["failForTest"].as_str().filter(|_| crate::config::dev("test-faults").is_some()).map(str::to_string);
         self.updates.seq += 1;
         let seq = self.updates.seq;
         if body["rollback"] == true {
@@ -1325,7 +1349,7 @@ impl Front {
             };
         }
         let Some(dir) = self.banks.clone() else {
-            return (400, "{\"error\":\"no banks: this server runs from a build, not from pcds run (PCDS_BANKS); rollback flips between two copies of it\"}".into());
+            return (400, "{\"error\":\"no banks: this server runs from a build, not from pcds run (PCDS_HOME/bin); rollback flips between two copies of it\"}".into());
         };
         if body["check"] == true {
             self.check(seq);
@@ -1421,7 +1445,7 @@ impl Front {
                 let bank = updater::other(&live.name).to_string();
                 self.updates.seq += 1;
                 let seq = self.updates.seq;
-                println!("update: checking for a new release (PCDS_AUTO_UPDATE=on)");
+                println!("update: checking for a new release (the rule update.auto is on)");
                 self.updates.auto_seq = Some(seq);
                 self.download(seq, dir, bank, None, true, true);
             } else {
@@ -1538,8 +1562,8 @@ impl Front {
                 Err(format!("world {name} did not start: {e}; the server stays stopped on world {}: start it, or run another world", self.world_name()))
             }
             (Ok(world), Some((_, _, name))) => {
-                if let Some(env) = crate::env("PCDS_ENV_FILE")
-                    && let Err(e) = crate::cli::set_env_file(std::path::Path::new(&env), "PCDS_WORLD", &name)
+                if let Some(home) = crate::env("PCDS_HOME")
+                    && let Err(e) = crate::cli::set_env_file(&std::path::Path::new(&home).join("server.env"), "PCDS_WORLD", &name)
                 {
                     eprintln!("world {name}: not remembered for the next start ({e})");
                 }
@@ -1613,7 +1637,7 @@ fn disconnected(user_data: i64, peer: u64, joined_now: &[(u64, u64)]) -> Vec<u64
 }
 
 /// Whether the SteamID a direct-IP client reports is believed: only from this machine, and
-/// only when asked (PCDS_TRUST_LOOPBACK=1: tests, the load and probe tools). Behind a UDP
+/// only when asked (PCDS_DEV=trust-loopback: tests, the load and probe tools). Behind a UDP
 /// relay (playit.gg, frp, ssh -R) every player comes from 127.0.0.1.
 fn trusted(ip: std::net::IpAddr, opted_in: bool) -> bool {
     opted_in && utp::is_loopback(ip)
@@ -1860,7 +1884,7 @@ mod tests {
         front.updates.tx.send(UpdateDone::Failed { seq: 8, message: "sha256".into() }).unwrap();
         front.updates();
         assert!(front.updates.next_check > Instant::now() + Duration::from_secs(23 * 3600));
-        // Never longer than the interval itself (PCDS_UPDATE_CHECK_HOURS=1 stays at an hour).
+        // Never longer than the interval itself (update.checkHours=1 stays at an hour).
         front.updates.every = Duration::from_secs(1800);
         front.updates.auto_seq = Some(9);
         front.updates.tx.send(UpdateDone::Failed { seq: 9, message: "x".into() }).unwrap();
@@ -1884,7 +1908,7 @@ mod tests {
         std::fs::write(&b, "{}").unwrap();
         std::fs::write(&env, "PCDS_WORLD=a\n").unwrap();
         // SAFETY: only start_world reads it, and no other test calls that.
-        unsafe { std::env::set_var("PCDS_ENV_FILE", &env) };
+        unsafe { std::env::set_var("PCDS_HOME", &dir) };
         let mut front = Front::new("data", &a.to_string_lossy(), Some(dir.join("banks")), None, 0, Arc::new(AtomicBool::new(false)));
         front.phase = Phase::Stopped;
         front.world_lock = Some(crate::cli::hold(&dir.join("a.json.lock"), "busy").unwrap());
@@ -1975,6 +1999,23 @@ mod tests {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+
+    /// What the live bank says of the rules the front acts on (OPS) sets the autosave timer and
+    /// the updater, and a value out of range is clamped, not trusted.
+    #[test]
+    fn the_rules_the_bank_sends_set_the_autosave_and_the_updater() {
+        let mut front = test_front();
+        assert_eq!((front.autosave_minutes, front.updates.auto, front.updates.every), (5, false, Duration::from_secs(24 * 3600)));
+        let ops = |front: &mut Front, body: &str| front.on_live(Frame { kind: ipc::OPS, n: 0, body: body.as_bytes().to_vec(), fd: None });
+        ops(&mut front, r#"{"autosaveMinutes": 0, "autoUpdate": true, "updateCheckHours": 6}"#);
+        assert_eq!((front.autosave_minutes, front.updates.auto, front.updates.every), (0, true, Duration::from_secs(6 * 3600)));
+        ops(&mut front, r#"{"autosaveMinutes": 10, "updateCheckHours": 100000}"#);
+        assert_eq!((front.autosave_minutes, front.updates.auto, front.updates.every), (10, true, Duration::from_secs(8760 * 3600)));
+        // Not JSON, or other fields: nothing changes.
+        ops(&mut front, "no");
+        ops(&mut front, r#"{"somethingElse": 1}"#);
+        assert_eq!((front.autosave_minutes, front.updates.auto), (10, true));
     }
 
     #[test]

@@ -15,14 +15,14 @@ fn rpc(g: &mut Game, client: u64, object: u64, name: &str, args: Vec<Value>) {
 }
 
 /// Tick cost of the logistics task search and of destroys in a world with many stored items.
-/// The review's setup: PCDS_REVIEW_CHESTS=1000 PCDS_REVIEW_GROWING=1 (32k stored items, 2000
-/// vegetables growing), 30 demand containers, 20 s of game time.
+/// The review's setup: 1000 chests of 30 items (32k stored items), 2000 loose vegetables (set
+/// GROWING for them to grow, in a grower), 30 demand containers, 20 s of game time.
 #[test]
 #[ignore]
 fn perf_logistics_and_destroy() {
     let Some(mut g) = crate::machines::tests::game() else { return };
-    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
-    let (chests, loose, demands) = (env("PCDS_REVIEW_CHESTS", 1000), env("PCDS_REVIEW_LOOSE", 2000), env("PCDS_REVIEW_DEMANDS", 30));
+    const GROWING: bool = false;
+    let (chests, loose, demands) = (1000, 2000, 30);
     g.sim_time = Some(1.0);
     g.tick();
     crate::machines::tests::build(&mut g, "DroneStation1", [600.0, 5.0, 600.0]);
@@ -34,7 +34,7 @@ fn perf_logistics_and_destroy() {
     for i in 0..loose {
         let id = g.create_world_object(veg, 0, true);
         g.drop_on_floor(id, [500.0 + (i % 50) as f32, 5.0, 500.0 + (i / 50) as f32], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 0.0, false, 0);
-        if std::env::var_os("PCDS_REVIEW_GROWING").is_some() {
+        if GROWING {
             // Growing in a grower's inventory: placed, held, not grown.
             let inv = g.create_inventory(1, 0, 0, &[], &[]);
             g.inventory_add(inv, id, false);

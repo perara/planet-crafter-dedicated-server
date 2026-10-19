@@ -145,7 +145,6 @@ pub fn restore_bytes(net_data: NetData, data: GameData, spec: Spec, snapshot: &[
     g.scenes = scenes;
     g.rebuild_holders();
     crate::machines::refresh_from_tables(&mut g);
-    g.trace = crate::env("PCDS_TRACE").is_some();
     // The tables are not quite static: Game::new scales the groups' generation by the
     // world's settings.
     g.change_generation_for_groups();
@@ -155,7 +154,7 @@ pub fn restore_bytes(net_data: NetData, data: GameData, spec: Spec, snapshot: &[
 /// Whether a restored game holds exactly the state of the snapshot it came from: both written
 /// as text and read back, compared without the two clocks (seconds since an Instant, which go
 /// on) and without the order of sets and maps (a HashSet's order differs between processes).
-/// Err names the first part that differs. PCDS_FLIP_VERIFY runs it at every flip (tests).
+/// Err names the first part that differs. PCDS_DEV=flip-verify runs it at every flip (tests).
 pub fn verify(g: &Game, snapshot: &[u8]) -> Result<(), String> {
     use serde_json::Value;
     fn canon(v: &mut Value) {

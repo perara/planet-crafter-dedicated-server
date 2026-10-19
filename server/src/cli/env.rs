@@ -79,6 +79,21 @@ impl Ctx {
         parse_env(&text).into_iter().rev().find(|(k, _)| k == key).map(|(_, v)| v).filter(|v| !v.is_empty())
     }
 
+    /// server.env, and the environment under it, as the server will check them at its start: Err
+    /// with what stops it (a name that is no setting, a value that is not what it takes). `pcds
+    /// start` and `restart` say so at once, not in the journal of a unit that fails.
+    pub fn check_settings(&self) -> Result {
+        self.check_settings_file()?;
+        let file = fs::read_to_string(&self.env_file).map(|t| parse_env(&t)).unwrap_or_default();
+        crate::config::check_env(|key| file.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.clone()).filter(|v| !v.is_empty()).or_else(|| crate::env(key)))
+    }
+
+    /// Err when server.env names a PCDS_ setting that does not exist.
+    pub fn check_settings_file(&self) -> Result {
+        let file = fs::read_to_string(&self.env_file).map(|t| parse_env(&t)).unwrap_or_default();
+        crate::config::check_keys(&self.env_file.display().to_string(), file.into_iter().map(|(k, _)| k))
+    }
+
     /// One setting changed: the new file is written beside (only this user reads it, as it holds
     /// the admin token) and moved over, so a crash leaves the old one or the new one.
     pub fn set_env(&self, key: &str, value: &str) -> Result {
@@ -102,13 +117,17 @@ impl Ctx {
             return Ok(());
         }
         super::mkdir(&self.run)?;
-        let port = crate::env("PCDS_PORT").unwrap_or_else(|| "7777".into());
-        let admin = crate::env("PCDS_ADMIN_BIND").unwrap_or_else(|| "127.0.0.1:7782".into());
+        // The first file starts from the environment's addresses (the Docker image sets PCDS_ADMIN,
+        // a second server gets PCDS_LISTEN), so a setting that moved is refused here too.
+        crate::config::check_env(crate::env)?;
+        let listen = crate::env("PCDS_LISTEN").unwrap_or_else(|| "0.0.0.0:7777".into());
+        let admin = crate::env("PCDS_ADMIN").unwrap_or_else(|| "127.0.0.1:7782".into());
         let token = super::token()?;
         let text = format!(
             "# Planet Crafter dedicated server settings. Apply with: pcds restart
+# Saves, backups, updates and the rest of what is tuned are rules (run/rules.json, the admin page).
 # Direct IP (UDP): players join with HOST:PORT; \"off\" disables.
-PCDS_LISTEN=0.0.0.0:{port}
+PCDS_LISTEN={listen}
 # Invite codes through Steam (an anonymous Steam game server; needs steamclient.so,
 # see README); \"off\" disables.
 PCDS_STEAM=on
@@ -117,10 +136,6 @@ PCDS_STEAM=on
 PCDS_STEAM_TOKEN=
 # Last four digits of the invite code.
 PCDS_SESSION=4242
-# Minutes between saves (0: only on stop), and the save backups kept in worlds/backups/.
-PCDS_AUTOSAVE=5
-PCDS_BACKUPS=24
-PCDS_BACKUP_MINUTES=60
 # Admin API and web page (pcds gui); keep it on 127.0.0.1 or behind a proxy. \"off\" disables.
 PCDS_ADMIN={admin}
 PCDS_ADMIN_TOKEN={token}
@@ -220,7 +235,7 @@ mod tests {
         let ctx = super::super::test_ctx(&dir);
         ctx.write_env().unwrap();
         let env = parse_env(&fs::read_to_string(&ctx.env_file).unwrap());
-        for key in ["PCDS_LISTEN", "PCDS_SESSION", "PCDS_AUTOSAVE", "PCDS_BACKUPS", "PCDS_BACKUP_MINUTES", "PCDS_WORLD", "PCDS_STEAM", "PCDS_ADMIN"] {
+        for key in ["PCDS_LISTEN", "PCDS_SESSION", "PCDS_WORLD", "PCDS_STEAM", "PCDS_ADMIN"] {
             let written = env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
             assert_eq!(written, Some(crate::config::knob_for(key).unwrap().default), "{key}");
         }

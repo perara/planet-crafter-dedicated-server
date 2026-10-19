@@ -200,6 +200,7 @@ impl Ctx {
             settings.extend(parse_env(&fs::read_to_string(&self.env_file).map_err(|e| format!("{}: {e}", self.env_file.display()))?));
         }
         let get = |key: &str| settings.get(key).filter(|v| !v.is_empty()).cloned().or_else(|| crate::env(key));
+        self.check_settings_file()?;
         crate::config::check_env(get)?;
         let world = self.world_file();
         if !world.is_file() {
@@ -226,12 +227,11 @@ impl Ctx {
         let banks = self.banks();
         let front = |bank: &str| {
             let mut server = Command::new(banks.join(bank).join("pcds"));
-            server.arg("serve").arg(&data).arg(&world).env("PCDS_BANKS", &banks).envs(&settings);
-            // Access lists and rules are the installation's, whichever world runs.
-            server.env("PCDS_ACCESS", get("PCDS_ACCESS").unwrap_or_else(|| self.run.join("access.json").display().to_string()));
-            server.env("PCDS_RULES", get("PCDS_RULES").unwrap_or_else(|| self.run.join("rules.json").display().to_string()));
-            // The front remembers there which world it runs (the dashboard can run another).
-            server.env("PCDS_ENV_FILE", &self.env_file);
+            server.arg("serve").arg(&data).arg(&world).envs(&settings);
+            // The installation's folder: the front finds server.env (where it remembers which
+            // world it runs: the dashboard can run another), the rules and access lists (the
+            // installation's, whichever world runs) and the banks (bin/) in it.
+            server.env("PCDS_HOME", &self.run);
             // The game the tables are for: /api/status says when it has changed (bank.rs).
             server.env("PCDS_GAME_DIR", &game);
             server
@@ -459,8 +459,9 @@ impl Ctx {
     }
 
     /// The Docker image's start: the game tables (from the game mounted at /game, or downloaded
-    /// with STEAM_USER), a world, steamclient for invite codes, then the server as this process.
-    pub fn container(&self) -> Result {
+    /// with STEAM_USER), a world (`new_world`: the options of the new one made when there is
+    /// none), steamclient for invite codes, then the server as this process.
+    pub fn container(&self, new_world: &[String]) -> Result {
         super::mkdir(&self.worlds)?;
         self.remove_leftovers();
         self.write_env()?;
@@ -499,8 +500,7 @@ impl Ctx {
                 }
                 _ => {
                     say(format!("no world yet: making a new one, {}", self.world_name()));
-                    let options: Vec<String> = crate::env("PCDS_NEW_WORLD").unwrap_or_default().split_whitespace().map(str::to_string).collect();
-                    self.new_world(&self.world_file(), &options)?;
+                    self.new_world(&self.world_file(), new_world)?;
                 }
             }
         }

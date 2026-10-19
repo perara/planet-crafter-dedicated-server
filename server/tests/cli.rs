@@ -217,6 +217,31 @@ fn one_server_per_world() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A name in server.env that is no setting stops the start in one line that names the file and
+/// the key (never a value), at `pcds run` and before `pcds restart` asks systemd.
+#[test]
+fn an_unknown_setting_stops_the_start() {
+    let dir = test_dir("unknown");
+    let fake = fake_systemctl(&dir, "echo inactive");
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    // Names of settings that older releases had (not spelled out: the guard test of config.rs reads this file).
+    let (autosave, backups) = (concat!("PCDS_", "AUTOSAVE"), concat!("PCDS_", "BACKUPS"));
+    std::fs::write(dir.join("run/server.env"), format!("PCDS_ADMIN_TOKEN=s3cret-token\n{autosave}=10\n{backups}=5\n")).unwrap();
+    let out = pcds(&dir, &fake, &["run"]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(said.contains(&format!("{}: unknown setting {autosave}, {backups}", dir.join("run/server.env").display())), "{said}");
+    assert!(!said.contains("s3cret-token") && said.trim().lines().count() == 1, "one line, no secrets: {said}");
+    std::fs::create_dir_all(dir.join("home/.config/systemd/user")).unwrap();
+    std::fs::write(dir.join("home/.config/systemd/user/pcds-cli-itest.service"), "").unwrap();
+    let out = pcds(&dir, &fake, &["restart"]);
+    assert!(text(&out).contains(&format!("unknown setting {autosave}")) && out.status.code() == Some(1), "{}", text(&out));
+    // Without them the start goes on, to the missing world.
+    std::fs::write(dir.join("run/server.env"), "PCDS_ADMIN_TOKEN=s3cret-token\n").unwrap();
+    assert!(text(&pcds(&dir, &fake, &["run"])).contains("no world at"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// A server.env value that is not what the setting takes stops the start, naming it (and
 /// never showing a secret's value).
 #[test]
@@ -224,13 +249,13 @@ fn bad_settings_stop_the_start() {
     let dir = test_dir("settings");
     let fake = fake_systemctl(&dir, "echo inactive");
     std::fs::create_dir_all(dir.join("run")).unwrap();
-    std::fs::write(dir.join("run/server.env"), "PCDS_AUTOSAVE=five\nPCDS_SESSION=12345\n").unwrap();
+    std::fs::write(dir.join("run/server.env"), "PCDS_STEAM=maybe\nPCDS_SESSION=12345\n").unwrap();
     let out = pcds(&dir, &fake, &["run"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));
-    assert!(text(&out).contains("server.env: ") && text(&out).contains("PCDS_AUTOSAVE: \"five\" is not a whole number") && text(&out).contains("PCDS_SESSION: 12345"), "{}", text(&out));
+    assert!(text(&out).contains("server.env: ") && text(&out).contains("PCDS_STEAM: \"maybe\" is not one of") && text(&out).contains("PCDS_SESSION: 12345"), "{}", text(&out));
     // The front itself checks its environment too.
-    let out = Command::new(PCDS).arg("serve").arg(dir.join("no-tables")).arg(dir.join("world.json")).env("PCDS_BACKUPS", "lots").output().unwrap();
+    let out = Command::new(PCDS).arg("serve").arg(dir.join("no-tables")).arg(dir.join("world.json")).env("PCDS_SESSION", "lots").output().unwrap();
     assert_eq!(out.status.code(), Some(2), "{}", text(&out));
-    assert!(text(&out).contains("PCDS_BACKUPS: \"lots\""), "{}", text(&out));
+    assert!(text(&out).contains("PCDS_SESSION: \"lots\""), "{}", text(&out));
     std::fs::remove_dir_all(&dir).unwrap();
 }

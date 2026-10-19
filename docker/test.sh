@@ -133,13 +133,14 @@ printf '%s' "$build" >"$W/d2/data/test/buildid"
 cat >"$W/d2/server.env" <<EOF
 PCDS_LISTEN=127.0.0.1:$UDP
 PCDS_STEAM=off
-PCDS_BACKUPS=0
 PCDS_ADMIN=127.0.0.1:$ADMIN
 PCDS_ADMIN_TOKEN=test
 PCDS_WORLD=world
 PCDS_RELEASES=http://127.0.0.1:$FEED/releases
 EOF
 chmod 600 "$W/d2/server.env"
+# No backups: the rule save.backupsKept.
+echo '{"save": {"backupsKept": 0}}' >"$W/d2/rules.json"
 
 C="$NAME"
 docker run -d --name "$C" --network host --read-only --tmpfs /tmp --restart unless-stopped --stop-timeout 90 \

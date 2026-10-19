@@ -620,12 +620,6 @@ impl Model {
         Ok(model)
     }
 
-    /// Debug: the model's size.
-    pub fn stats(&self) -> String {
-        let adjacencies: usize = self.propagator.iter().map(|p| p.iter().map(Vec::len).sum::<usize>()).sum();
-        format!("{} tiles, {} patterns, {} adjacencies", self.tiles.len(), self.patterns.len(), adjacencies)
-    }
-
     /// AdjacentModel.GetPattern.
     fn pattern(&mut self, m: ModelTile) -> usize {
         if let Some(p) = self.patterns.get(&m) {

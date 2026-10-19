@@ -5,14 +5,15 @@
 # `docker compose exec pcds pcds worlds | world use NAME | players | rules | gui`.
 #
 # Updates (docs/docker.md): `docker compose exec pcds pcds upgrade` installs the latest release into
-# ./data/bin and hands the running world over to it, players stay connected; PCDS_AUTO_UPDATE
-# below does that by itself. `docker compose pull && docker compose up -d` recreates the
+# ./data/bin and hands the running world over to it, players stay connected; the rule
+# update.auto does that by itself (`docker compose exec pcds pcds rules set update.auto=true`). `docker compose pull && docker compose up -d` recreates the
 # container (every player disconnects): the image's release runs unless ./data/bin holds a
 # newer one (the container's log and `pcds status` say which runs).
 services:
   pcds:
     image: ghcr.io/perara/planet-crafter-dedicated-server:latest
     restart: unless-stopped
+    # command: ["--planet", "Aqualis"]   # the options of the first world, when there is none yet
     ports:
       - "7777:7777/udp"        # direct IP: players join HOST:7777
       - "127.0.0.1:7782:7782"  # the admin page, on this machine only
@@ -23,7 +24,6 @@ services:
     environment:
       PUID: "1000"   # the owner of ./data on the host (id -u)
       PGID: "1000"
-      # PCDS_AUTO_UPDATE: "on"   # install each new release and hand the world over (checked daily)
     stop_grace_period: 90s
     # The server writes only /data (and /game is read-only), so the rest can be locked down:
     # read_only: true

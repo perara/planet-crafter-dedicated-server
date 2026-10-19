@@ -76,8 +76,6 @@ spec:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
           env:
-            # Updates inside the running pod (off by default; see docs/docker.md).
-            # - { name: PCDS_AUTO_UPDATE, value: "on" }
             # Invite codes need Steam; "off" leaves direct IP only.
             - { name: PCDS_STEAM, value: "on" }
           ports:

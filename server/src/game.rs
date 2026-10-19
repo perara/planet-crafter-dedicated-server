@@ -135,8 +135,10 @@ pub struct PlayerState {
 pub struct Rng(u64);
 
 impl Rng {
-    /// PCDS_RNG_SEED fixes the sequence (benchmarks and replays compare runs).
+    /// In a test build, PCDS_RNG_SEED fixes the sequence (benchmarks and replays compare runs);
+    /// the server itself never reads it.
     pub fn seeded() -> Rng {
+        #[cfg(test)]
         if let Some(seed) = std::env::var("PCDS_RNG_SEED").ok().and_then(|s| s.parse::<u64>().ok()) {
             return Rng(seed | 1);
         }
@@ -209,8 +211,6 @@ pub struct Game {
     /// the last one would write that one again.
     pub advanced: bool,
     pub rng: Rng,
-    #[serde(skip)]
-    pub trace: bool,
     /// The wreck layouts and the planets' scene dumps (main.rs scene_tables): static, given
     /// again to a restored game.
     #[serde(skip)]
@@ -352,7 +352,6 @@ impl Game {
             last_clock: 0.0,
             advanced: false,
             rng: Rng::seeded(),
-            trace: crate::env("PCDS_TRACE").is_some(),
             scenes,
             timers: Default::default(),
             crafted_total: 0,
@@ -575,7 +574,7 @@ impl Game {
             if self.kicks.iter().any(|(c, _)| *c == client) {
                 return;
             }
-            if self.trace {
+            if self.rules.log.trace {
                 println!("trace client {client} -> {kind} {}", crate::util::to_hex(body));
             }
             let approved = self.clients.get(&client).is_some_and(|c| c.approved);
@@ -670,7 +669,7 @@ impl Game {
             return;
         };
         let Some(name) = self.net.spec.get(method).map(|r| r.name.clone()) else { return };
-        if self.trace {
+        if self.rules.log.trace {
             println!("trace client {client} rpc {name} on {object}/{behaviour} {}", Value::Array(args.clone()));
         }
         // Netcode runs an RPC on a behaviour of the object it is sent to: one of the RPC's class
@@ -1330,19 +1329,6 @@ pub mod tests {
         assert!(ids.contains(&"Message_YouAreAConvict") && !ids.contains(&"Message_NoLongerInTheGame"), "{ids:?}");
     }
 
-    /// PCDS_TRACE is "set" as every setting is: an empty value (the README's default, as
-    /// server.env may hold it) is not set, and does not log every message.
-    #[test]
-    fn an_empty_pcds_trace_does_not_trace() {
-        // SAFETY: only this test sets it, and to the empty value, which no reader takes as set.
-        unsafe { std::env::set_var("PCDS_TRACE", "") };
-        let g = test_game(crate::save::SaveFile::empty());
-        unsafe { std::env::remove_var("PCDS_TRACE") };
-        if let Some(g) = g {
-            assert!(!g.trace);
-        }
-    }
-
     #[test]
     fn saves_with_only_the_old_game_mode_are_refused() {
         assert!(check_save_format(&json!({"mode": "Hardcore"})).unwrap_err().contains("Hardcore"));
@@ -1442,9 +1428,6 @@ pub mod tests {
             let mut w = Writer::new();
             w.packed_u64(client).packed_u64(object).packed_u16(behaviour).packed_u32(hash).bytes(&body);
             let message = w.0;
-            if std::env::var_os("PCDS_FUZZ_TRACE").is_some() {
-                eprintln!("FUZZ {round} {name} {}", Value::Array(args.clone()).to_string().chars().take(200).collect::<String>());
-            }
             let mut outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.incoming_rpc(client, &message))).err().map(|e| (name.clone(), e));
             if outcome.is_none() && round % 50 == 0 {
                 g.time += 0.7;
@@ -1452,11 +1435,6 @@ pub mod tests {
             }
             // The main loop sends and clears the queue every tick.
             g.net.out.clear();
-            if std::env::var_os("PCDS_FUZZ_TRACE").is_some() && round % 500 == 0 {
-                let texts: usize = g.wos.values().map(|w| w.text.len()).sum();
-                let items: usize = g.inventories.values().map(|i| i.items.len()).sum();
-                eprintln!("SIZES {round} wos={} inventories={} items={items} net={} timers={} watchers={} saved={} texts={texts} unhandled={}", g.wos.len(), g.inventories.len(), g.net.objects.len(), g.timers.0.len(), g.watchers.len(), g.saved_players.len(), g.unhandled.len());
-            }
             if let Some((what, e)) = outcome {
                 let why = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
                 let at = WHERE.lock().unwrap().clone();

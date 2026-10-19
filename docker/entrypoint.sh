@@ -5,7 +5,8 @@
 # runAsUser), nothing is given away: /data must be writable by that user already. pcds
 # container stays the parent of the server to its end: tini ends with it, and the container's
 # end kills every process left (pcds waits for the banks of a front that crashed to save
-# first).
+# first). Arguments (docker run IMAGE --planet Aqualis) are the options of the new world made
+# when there is none.
 set -e
 PUID="${PUID:-1000}"
 PGID="${PGID:-1000}"
@@ -23,11 +24,11 @@ if [ "$(id -u)" = 0 ]; then
   if ! find /data -xdev \( ! -uid "$PUID" -o ! -gid "$PGID" \) -exec chown -h "$PUID:$PGID" {} +; then
     echo "entrypoint: not every file in /data could be given to $PUID:$PGID (see above): the server cannot write those" >&2
   fi
-  exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups /opt/pcds/pcds container
+  exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups /opt/pcds/pcds container "$@"
 fi
 # Not root: /data is written as this user or not at all, and the server says so now.
 mkdir -p /data/home || {
   echo "entrypoint: /data is not writable by uid $(id -u): give it to that user (a Kubernetes fsGroup, chown on the host), or start the container as root with PUID and PGID set" >&2
   exit 1
 }
-exec /opt/pcds/pcds container
+exec /opt/pcds/pcds container "$@"

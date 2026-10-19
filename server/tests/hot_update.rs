@@ -136,7 +136,7 @@ fn start(dir: &Path, data: &str, banks: &Path, releases: &str) -> Server {
 }
 
 /// A front of `program` (a release's or this build's) on the world in `dir`; `verify`:
-/// PCDS_FLIP_VERIFY, which compares a restored state with its own snapshot (only for banks of
+/// PCDS_DEV=flip-verify, which compares a restored state with its own snapshot (only for banks of
 /// one build: a release before this one writes a state this build reads and adds to).
 fn start_with(program: &Path, dir: &Path, data: &str, banks: &Path, releases: &str, verify: bool) -> Server {
     start_env(program, dir, data, banks, releases, verify, &[])
@@ -158,11 +158,34 @@ fn start_once(program: &Path, dir: &Path, data: &str, banks: &Path, releases: &s
     let (admin, udp) = (free_port(), free_port());
     let log = dir.join("front.log");
     let out = std::fs::File::create(&log).unwrap();
-    let mut command = Command::new(program);
+    // The front finds the banks in bin/ of PCDS_HOME.
+    assert_eq!(banks, dir.join("bin"));
+    // This build's front reads the rules and hooks; a release before this one (the gate's
+    // front) still reads its own environment, so it gets that too.
+    let current = program == Path::new(PCDS);
+    let mut dev = String::from("test-faults");
     if verify {
-        command.env("PCDS_FLIP_VERIFY", "1");
+        dev += ",flip-verify";
     }
-    command.envs(extra.iter().copied());
+    let mut command = Command::new(program);
+    for (name, value) in extra {
+        match *name {
+            "PCDS_DEV" => dev = format!("{dev},{value}"),
+            _ => {
+                command.env(name, value);
+            }
+        }
+    }
+    if current {
+        // No backups: the rule save.backupsKept.
+        std::fs::write(dir.join("rules.json"), "{\"save\": {\"backupsKept\": 0}}").unwrap();
+        command.env("PCDS_DEV", &dev);
+    } else {
+        command.env("PCDS_BACKUPS", "0").env("PCDS_BANKS", banks).env("PCDS_TEST_FAULTS", "1").env("PCDS_ENV_FILE", dir.join("server.env")).env("PCDS_ACCESS", dir.join("access.json")).env("PCDS_RULES", dir.join("rules.json"));
+        if verify {
+            command.env("PCDS_FLIP_VERIFY", "1");
+        }
+    }
     let child = command
         .arg("serve")
         .arg(data)
@@ -171,13 +194,8 @@ fn start_once(program: &Path, dir: &Path, data: &str, banks: &Path, releases: &s
         .env("PCDS_ADMIN", format!("127.0.0.1:{admin}"))
         .env("PCDS_ADMIN_TOKEN", "t")
         .env("PCDS_STEAM", "off")
-        .env("PCDS_BACKUPS", "0")
-        .env("PCDS_BANKS", banks)
+        .env("PCDS_HOME", dir)
         .env("PCDS_RELEASES", releases)
-        .env("PCDS_TEST_FAULTS", "1")
-        .env("PCDS_ENV_FILE", dir.join("server.env"))
-        .env("PCDS_ACCESS", dir.join("access.json"))
-        .env("PCDS_RULES", dir.join("rules.json"))
         .stdout(out.try_clone().unwrap())
         .stderr(out)
         .spawn()
@@ -208,7 +226,7 @@ fn load(server: &Server, data: &str, players: u32, seconds: u32) -> Child {
 
 /// `load` with players named `name`0, `name`1... (two groups of players may not share names).
 fn load_named(server: &Server, data: &str, name: &str, players: u32, seconds: u32) -> Child {
-    Command::new(PCDS).args(["load", &format!("127.0.0.1:{}", server.udp), data, &players.to_string(), &seconds.to_string(), "200"]).env("PCDS_LOAD_NAME", name).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap()
+    Command::new(PCDS).args(["load", &format!("127.0.0.1:{}", server.udp), data, &players.to_string(), &seconds.to_string(), "200", name]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap()
 }
 
 fn finish(load: Child) -> (bool, String) {
@@ -743,7 +761,7 @@ fn make_the_snapshot_fixture_of_a_release() {
 // ---- a flip, and what kills the processes in it ------------------------------------------------
 //
 // Each test stops the flip in one of its phases (a bank that holds its HELLO or its READY:
-// PCDS_BANK_FAIL slow-hello and slow-ready, by "failForTest"; a bank frozen with SIGSTOP for the
+// PCDS_DEV=bank-fail=slow-hello and slow-ready, by "failForTest"; a bank frozen with SIGSTOP for the
 // phase in which the running bank snapshots), kills a process with SIGKILL there, and checks the
 // world: saved or resumed, one bank running or none left, nobody orphaned, run/bin/active right.
 
@@ -1027,8 +1045,7 @@ fn live_release_server(routes: std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<
     format!("{base}/releases")
 }
 
-/// PCDS_AUTO_UPDATE=on (the check every 4 s here: PCDS_TEST_CHECK_SECONDS, only with
-/// PCDS_TEST_FAULTS=1): a release later than the running one is installed and flipped to under
+/// The rule update.auto (the check every 4 s here: PCDS_DEV=check-seconds=4): a release later than the running one is installed and flipped to under
 /// players; the same release is not fetched again; the release rolled back from is left out;
 /// a later one is taken. The release's tag is not the program's version (v9.9.9 is this build,
 /// which says 0.6.2): the bank that came from it is compared by its tag.
@@ -1050,7 +1067,9 @@ fn the_automatic_update_takes_a_new_release_once_and_leaves_the_rolled_back_one(
     };
     publish("v9.9.9", true);
     let releases = live_release_server(routes.clone());
-    let server = start_env(Path::new(PCDS), &dir, &data, &banks, &releases, true, &[("PCDS_AUTO_UPDATE", "on"), ("PCDS_TEST_CHECK_SECONDS", "4")]);
+    let server = start_env(Path::new(PCDS), &dir, &data, &banks, &releases, true, &[("PCDS_DEV", "check-seconds=4")]);
+    // The rule, live: the front hears of it from the bank.
+    assert_eq!(server.api("POST", "/api/config", json!({"update.auto": true})).0, 200, "{}", server.log());
     let flips = |server: &Server| server.api("GET", "/api/status", json!({})).1["banks"]["flips"].as_u64().unwrap_or(0);
     let players = load(&server, &data, 3, 60);
     // The first check: v9.9.9 is later than 0.6.2: installed, flipped to.

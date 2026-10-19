@@ -42,9 +42,9 @@ pub const SNAPSHOT: u8 = 10;
 pub const EXIT: u8 = 11;
 // front -> old bank: the new one failed, go on.
 pub const RESUME: u8 = 12;
-// front -> bank: n request id; body JSON {"method", "path", "body", "autosaveMinutes"}.
+// front -> bank: n request id; body JSON {"method", "path", "body"}.
 pub const ADMIN: u8 = 13;
-// bank -> front: n request id; body JSON {"status", "body", "autosaveMinutes"}.
+// bank -> front: n request id; body JSON {"status", "body"}.
 pub const ANSWER: u8 = 14;
 // front -> bank: the autosave is due.
 pub const SAVE: u8 = 15;
@@ -56,6 +56,9 @@ pub const CHAT: u8 = 17;
 pub const SAY: u8 = 18;
 // bank -> front: body JSON, the rules' chat section (the hooks' settings).
 pub const CHATCFG: u8 = 19;
+// bank -> front: body JSON {"autosaveMinutes", "autoUpdate", "updateCheckHours"}, the rules the
+// front acts on (save, update); at the start and whenever they change.
+pub const OPS: u8 = 20;
 
 /// The largest frame either side takes (a world's join batch is a few MiB; a snapshot never
 /// crosses the socket). A frame shorter than its header or longer than this breaks the link.

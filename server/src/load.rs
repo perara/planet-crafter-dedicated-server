@@ -4,8 +4,8 @@
 //! drinks, mines, chats, sorts or throws an item away. At the end it prints the round trip of
 //! each call the server answers (craft, build, chat) as percentiles, and what players received.
 //!
-//! Usage: pcds load HOST:PORT DATA_DIR [PLAYERS=8] [SECONDS=60] [ACTION_MS=200]
-//! (the players are named Load0, Load1...; PCDS_LOAD_NAME gives another prefix, for a second group)
+//! Usage: pcds load HOST:PORT DATA_DIR [PLAYERS=8] [SECONDS=60] [ACTION_MS=200] [NAME=Load]
+//! (the players are named Load0, Load1...; NAME gives another prefix, for a second group)
 //! Each player connects from its own 127.0.0.N address (the server allows 8 per address), so
 //! HOST must be a loopback address of this machine.
 
@@ -217,7 +217,7 @@ impl Bot<'_> {
     }
 }
 
-fn play(n: usize, server: SocketAddr, data: &NetData, spec: &Spec, request: &[u8], seconds: f64, action_ms: u64) -> Report {
+fn play(n: usize, server: SocketAddr, data: &NetData, spec: &Spec, request: &[u8], seconds: f64, action_ms: u64, prefix: &str) -> Report {
     let mut report = Report::default();
     let local: SocketAddr = format!("127.0.0.{}:0", 2 + n % 250).parse().unwrap();
     let (utp, token) = match Utp::connect(local, server, Duration::from_secs(10)) {
@@ -238,7 +238,7 @@ fn play(n: usize, server: SocketAddr, data: &NetData, spec: &Spec, request: &[u8
         }
         if bot.player != 0 && !ready_sent {
             ready_sent = true;
-            bot.call("PlayerMainController.PlayerReadyServerRpc", &[json!(0), json!(format!("{}{n}", crate::env("PCDS_LOAD_NAME").unwrap_or_else(|| "Load".into())))], None);
+            bot.call("PlayerMainController.PlayerReadyServerRpc", &[json!(0), json!(format!("{prefix}{n}"))], None);
         }
         bot.flush();
         std::thread::sleep(Duration::from_millis(2));
@@ -282,11 +282,12 @@ fn percentiles(mut v: Vec<f64>) -> String {
 
 pub fn run(args: &[String]) {
     let (Some(addr), Some(dir)) = (args.first(), args.get(1)) else {
-        eprintln!("usage: pcds load HOST:PORT DATA_DIR [PLAYERS] [SECONDS] [ACTION_MS]");
+        eprintln!("usage: pcds load HOST:PORT DATA_DIR [PLAYERS] [SECONDS] [ACTION_MS] [NAME]");
         std::process::exit(2);
     };
     let number = |i: usize, default: u64| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(default);
     let (players, seconds, action_ms) = (number(2, 8) as usize, number(3, 60) as f64, number(4, 200));
+    let prefix = args.get(5).map_or("Load", String::as_str);
     let server: SocketAddr = addr.parse().expect("HOST:PORT");
     let (data, spec) = crate::network_tables(dir);
     let request = crate::world::hex(std::fs::read_to_string(format!("{dir}/connection-request.hex")).expect("connection-request.hex").trim());
@@ -296,7 +297,7 @@ pub fn run(args: &[String]) {
                 let (data, spec, request) = (&data, &spec, &request);
                 // Joins spread over a moment, as players arrive.
                 std::thread::sleep(Duration::from_millis(50));
-                scope.spawn(move || play(n, server, data, spec, request, seconds, action_ms))
+                scope.spawn(move || play(n, server, data, spec, request, seconds, action_ms, prefix))
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap_or_default()).collect()

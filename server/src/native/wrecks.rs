@@ -565,9 +565,6 @@ impl Ctx {
             let generator = matrix_mul(&root_inverse, &self.ltw(tessera_node)?);
             let container_m = matrix_mul(&root_inverse, &self.ltw(container)?);
             let model = tessera::Model::new(self.tessera_generator(tessera)?)?;
-            if std::env::var_os("PCDS_WRECKS_TRACE").is_some() {
-                eprintln!("{prefab}: {}", model.stats());
-            }
             // The tiles in the prefab copy, in the generator's space.
             let generator_inverse = tessera::inverse(&generator);
             let mut fixed = Vec::new();
@@ -659,13 +656,8 @@ impl Ctx {
 /// Generation.Layouts for one seed: Tessera from the seed, the next one while it fails, up to
 /// 50 seeds.
 fn layout(model: &tessera::Model, scene: &[tessera::SceneTile], seed: u32, prefab: &str) -> Result<Vec<tessera::Instance>, String> {
-    let started = std::time::Instant::now();
     for current in seed..seed + 50 {
-        let l = tessera::generate(model, scene, current as i32)?;
-        if std::env::var_os("PCDS_WRECKS_TRACE").is_some() {
-            eprintln!("{prefab} seed {seed}: Tessera seed {current} {} in {:?} ({} scene tiles)", if l.is_some() { "laid out" } else { "failed" }, started.elapsed(), scene.len());
-        }
-        if let Some(l) = l {
+        if let Some(l) = tessera::generate(model, scene, current as i32)? {
             return Ok(l);
         }
     }
@@ -871,8 +863,8 @@ pub fn reach(args: &[String]) {
     for (t, (n, b)) in &by_type {
         println!("{b:7} {n:4} {t}");
     }
-    // PCDS_REACH_IL=1: the reached methods' IL too, by type.
-    if std::env::var_os("PCDS_REACH_IL").is_some() {
+    // --il: the reached methods' IL too, by type.
+    if args.iter().any(|a| a == "--il") {
         let mut all: Vec<_> = seen.iter().copied().collect();
         all.sort();
         let mut last = None;

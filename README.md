@@ -135,10 +135,9 @@ server saves the world as it stops; every player has to join again). While the w
 (its "front protocol") cannot take over a running world: `pcds upgrade` says so, and
 `pcds upgrade --restart VERSION` installs it with a restart, which disconnects every player
 (Steam players get a new invite code unless `PCDS_STEAM_TOKEN` is set). With the server stopped,
-`pcds upgrade` makes the release the one the next start runs. `PCDS_AUTO_UPDATE=on` in
-`server.env` does this by itself for each new release (off by default; the setting is read when
-the server starts, so a change takes a restart). It looks 10 minutes after the start and then
-every `PCDS_UPDATE_CHECK_HOURS`, tries again within the hour when GitHub could not be reached,
+`pcds upgrade` makes the release the one the next start runs. The rule `update.auto` does this
+by itself for each new release (off by default; `./pcds rules set update.auto=true`, which counts at once). It looks 10 minutes after the start
+and then every `update.checkHours`, tries again within the hour when GitHub could not be reached,
 and installs a release only when it is later than the one that runs (compared by its tag, or by
 the program's version for a build) and not the one you rolled back from. In Docker, see
 [Updating in Docker](#updating-in-docker).
@@ -214,8 +213,9 @@ above. The image's health check asks the admin API for the server's status (`doc
 it healthy once the world runs), so it needs `PCDS_ADMIN` on, as it is by default.
 `--stop-timeout 90` gives the server time to save the world at `docker stop` (Docker's default
 of 10 s would kill it during the save); Compose has `stop_grace_period: 90s`. `PUID`/`PGID` (default 1000) set who owns `data/` on the host. On the first start without
-a world, the newest save in `data/worlds/` runs, or a new world is made (`PCDS_NEW_WORLD`, for
-example `--planet Aqualis`, chooses its options). [compose.yaml](compose.yaml) does the same with
+a world, the newest save in `data/worlds/` runs, or a new world is made (the arguments of the
+container, for example `docker run ... IMAGE --planet Aqualis` or Compose's `command: ["--planet",
+"Aqualis"]`, choose its options). [compose.yaml](compose.yaml) does the same with
 `docker compose up -d`.
 
 ### Updating in Docker
@@ -227,8 +227,9 @@ docker exec pcds pcds upgrade          # a hot update inside the running contain
 docker compose pull && docker compose up -d   # a new image: the container is replaced, every player disconnects
 ```
 
-- **Hot update.** `pcds upgrade` (also the admin page's **Update now**, or `PCDS_AUTO_UPDATE=on`
-  in the container's environment, which checks daily and does it by itself) downloads the release
+- **Hot update.** `pcds upgrade` (also the admin page's **Update now**, or the rule `update.auto`
+  (`docker exec pcds pcds rules set update.auto=true`), which checks daily and
+  does it by itself) downloads the release
   into `data/bin` and hands the running world over to it; the world pauses for the flip. The
   container keeps running, so it needs the network to GitHub (`api.github.com` over https). It
   replaces the game; the part that holds the sockets and Steam keeps running until the next restart
@@ -256,7 +257,13 @@ container end to end.
 
 ## Settings
 
-`./pcds config` edits `run/server.env`; `./pcds restart` applies it.
+Settings are of two kinds. What the server must know before it can read any file is an
+environment variable, the lines of `run/server.env` (`./pcds config` edits it, `./pcds restart`
+applies it). Everything else, gameplay and tuning alike (saves, backups, updates, speeds,
+limits, access lists), is a [rule](#server-rules): it lives in `run/rules.json` and
+`run/access.json` and changes while the server runs, through `pcds rules`, `POST /api/config`
+and the web page's Config tab. [docs/env.md](docs/env.md) lists every variable, including the
+ones for tests and tools.
 
 | Setting | Default | |
 |---|---|---|
@@ -264,29 +271,26 @@ container end to end.
 | `PCDS_STEAM` | `on` | invite codes through Steam; `off` disables them |
 | `PCDS_STEAM_TOKEN` | empty | a [game server login token](https://steamcommunity.com/dev/managegameservers) (app 1284190) keeps the invite code the same across restarts |
 | `PCDS_SESSION` | `4242` | the last four digits of the invite code |
-| `PCDS_AUTOSAVE` | `5` | minutes between saves; `0` saves only on stop |
-| `PCDS_BACKUPS` | `24` | save backups kept in `run/worlds/backups/`; `0` keeps none |
-| `PCDS_BACKUP_MINUTES` | `60` | minutes between backups |
 | `PCDS_ADMIN` | `127.0.0.1:7782` | admin API and web page; `off` disables them. Plain HTTP: keep it on 127.0.0.1 and reach it from elsewhere through an SSH tunnel (`ssh -L 7782:127.0.0.1:7782 HOST`) or an HTTPS proxy; another address logs a warning |
 | `PCDS_ADMIN_TOKEN` | generated | the admin API's bearer token |
-| `PCDS_MAX_PLAYERS` | `16` | players at once; more are refused with the game's session-full message (the `limits.maxPlayers` rule overrides it) |
 | `PCDS_WORLD` | `world` | the world the server runs: `run/worlds/<name>.json` (`pcds world use NAME`) |
-| `PCDS_RULES` | `run/rules.json` | the server rules file (see [Server rules](#server-rules)) |
-| `PCDS_AUTO_UPDATE` | `off` | `on`: install each new server release and hand the world over to it (see [Upgrading](#upgrading)) |
-| `PCDS_UPDATE_CHECK_HOURS` | `24` | hours between those checks |
-| `PCDS_ACCESS` | `run/access.json` | the access lists file (see [Administration](#administration)) |
-| `PCDS_WEB` | the bank's `web/index.html` | the admin web page's file (for a page of your own) |
-| `PCDS_TRACE` | empty | set: log every incoming message and RPC (debugging; a lot of output) |
-| `PCDS_TRUST_LOOPBACK` | `0` | `1`: believe the SteamID a direct-IP client from 127.0.0.1 claims (tests, load and probe tools); never behind a UDP relay (see Known limits) |
-| `PCDS_RELEASES` | GitHub's API for this project | where `pcds upgrade` and `PCDS_AUTO_UPDATE` look up releases (a mirror) |
+| `PCDS_RELEASES` | GitHub's API for this project | where `pcds upgrade` and the rule `update.auto` look up releases (a mirror) |
 
-A value that is not what the setting takes (`PCDS_AUTOSAVE=five`, a port out of range) stops
-the server at start, with the setting named in `./pcds logs`.
+A value that is not what the setting takes (`PCDS_SESSION=five`, an address without a port)
+stops the server at start, with the setting named in `./pcds logs`.
 
-Two more are read only when `pcds setup` first writes `run/server.env`, from the environment:
-`PCDS_PORT` (default `7777`, the port of `PCDS_LISTEN`) and `PCDS_ADMIN_BIND` (default
-`127.0.0.1:7782`, the first `PCDS_ADMIN`; the Docker image sets `0.0.0.0:7782`). For example
-`PCDS_PORT=7778 ./pcds setup ...` for a second server.
+Where the installation is, set by the image or the unit that starts it, or in your shell for
+every `pcds` command:
+
+| Variable | Default | |
+|---|---|---|
+| `PCDS_HOME` | `run/` of the release or checkout folder | the folder the installation keeps everything in: `worlds/`, `server.env`, `rules.json`, `access.json`, `data/` and `bin/`. A second server on the machine gets its own |
+| `PCDS_GAME_DIR` | the one used last, else the Steam library's | the game's folder (also `--game DIR`) |
+| `PCDS_UNIT` | `pcds` | the systemd unit's name; with `PCDS_HOME` for a second server on the machine |
+| `PCDS_CONTAINER` | unset | set by the Docker image: no systemd, the admin address may be public inside the container |
+
+A name in `server.env` that is not a setting stops the server at start, in one line that names the
+file and the name.
 
 `run/server.env` holds the admin token and is readable by your user only.
 
@@ -313,7 +317,7 @@ someone there (the height comes from the nearest building). **Chat**: the chat a
 messages to everyone. **World**: save now, save and stop, the world settings, the worlds beside
 this one and this world's backups. **Updates**: the running and latest release, check, update
 now, install a given release or roll back (each a hand-over without disconnecting anyone), the
-two banks and the update history. **Config**: every setting (rules, access lists, autosave; the
+two banks and the update history. **Config**: every setting (rules, access lists; the
 `server.env` settings read-only), drawn from the server's configuration schema, with search.
 **Tools**: kick, ban and unban by name, the ban list, and the server log, live and filterable
 (from the journal when it runs as the `pcds` unit). The page uses the admin API: `GET /api/config` lists every setting with its type, range,
@@ -342,8 +346,9 @@ The admin API listens on 127.0.0.1. To reach the web page from another machine, 
 tunnel (`ssh -L 7782:127.0.0.1:7782 server`) rather than exposing it.
 
 To run a second server on the same machine, give it its own folder and unit names:
-`PCDS_HOME=/srv/world2 PCDS_UNIT=pcds-world2 ./pcds setup ...` (and the same two variables for
-every later `pcds` command), with other ports in its `server.env`.
+`PCDS_HOME=/srv/world2 PCDS_UNIT=pcds-world2 PCDS_LISTEN=0.0.0.0:7778 PCDS_ADMIN=127.0.0.1:7783
+./pcds setup ...` (the two ports only seed its first `server.env`; `PCDS_HOME` and `PCDS_UNIT`
+again for every later `pcds` command).
 
 ## Server rules
 
@@ -378,7 +383,13 @@ reason in `./pcds logs`.
 | `death.consequences` | world's | `NoConsequences`, `DropSomeItems`, `DropAllItems` or `DeleteSaveFile` |
 | `death.dropChance` | `50` | with `DropSomeItems`: the percent chance each item drops (with 4 items or fewer, all drop) |
 | `loot.amount` | `1` | items in generated containers (wreck safes, crates), times this, up to the container's size |
-| `limits.maxPlayers` | `PCDS_MAX_PLAYERS` | players at once |
+| `limits.maxPlayers` | `16` | players at once; more are refused with the game's session-full message |
+| `save.autosaveMinutes` | `5` | minutes between saves; `0` saves only on stop |
+| `save.backupsKept` | `24` | save backups kept in `run/worlds/backups/`; `0` keeps none |
+| `save.backupMinutes` | `60` | minutes between those backups |
+| `update.auto` | `false` | install each new server release and hand the world over to it (see [Upgrading](#upgrading)); off: nothing contacts GitHub on its own |
+| `update.checkHours` | `24` | hours between those checks |
+| `log.trace` | `false` | log every incoming message and RPC (debugging; a lot of output) |
 | `limits.buildings` | none | building group id to how many the world may have; one more is taken down at once and its materials go back to the builder |
 | `world.pauseWhenEmpty` | `false` | with no player in the game the world stands still (time, day and night, growth, production, terraformation, meteo, timers and despawns, drones and vehicles) and goes on from there, with no catching up, when one is. A player counts once loaded in, as the game counts its players; one still loading sees the world as it stopped. An autosave of a world that stood still since the last one is skipped (no write, no backup) |
 
@@ -468,8 +479,8 @@ cannot download (`--steam-user` installs) fails `pcds update`, so the hourly uni
   `--set modifierGaugeDrain=0.5 --set dyingConsequencesLabel=NoConsequences`);
   `./pcds world remove NAME` moves one into `run/worlds/backups/`.
 - `./pcds new [OPTIONS] --force` replaces the running world with a new one; the old one is kept.
-- `run/worlds/backups/` keeps timestamped copies of each world (one per `PCDS_BACKUP_MINUTES`,
-  the newest `PCDS_BACKUPS`), named by UTC time. Each start also backs up the world as it was
+- `run/worlds/backups/` keeps timestamped copies of each world (one per `save.backupMinutes`,
+  the newest `save.backupsKept`), named by UTC time. Each start also backs up the world as it was
   before the server touched it, at most once per 10 minutes. To restore one, stop the server and
   copy it over the world's file.
 - A server that keeps crashing stops after 5 starts in 10 minutes, so the older backups stay.
@@ -498,7 +509,7 @@ for the network; one upload runs at a time, and a backup made meanwhile follows 
 never logged, and `/api/rules` and `/api/status` show them as `(set)`. `GET /api/status` has an
 `s3` part (whether it is on, what is still to set, whether an upload is running, the last
 outcome). `POST /api/backup` saves the world and makes a backup now (answers 400 when
-`PCDS_BACKUPS` is `0`) and copies it to the bucket; `POST /api/backup/s3` copies the newest
+`save.backupsKept` is `0`) and copies it to the bucket; `POST /api/backup/s3` copies the newest
 backup again (answers 400 when S3 is off or incomplete, or there is no backup yet). The web
 page's World tab has both as buttons.
 
@@ -532,7 +543,7 @@ platform, landing spots, seats, machine ranges), the code says so in a `ponytail
   Invite codes (Steam networking) do not have this problem.
 - **Behind a UDP relay** (playit.gg, frp, `ssh -R`) every player comes from 127.0.0.1: the
   per-address limits do not apply to loopback, and the SteamID a direct-IP client reports is
-  believed from 127.0.0.1 only with `PCDS_TRUST_LOOPBACK=1` (for tests and the load and probe
+  believed from 127.0.0.1 only with `PCDS_DEV=trust-loopback` (for tests and the load and probe
   tools; never set it behind a relay).
 - **Connection slots can be flooded.** The server caps connections (128 in all, 8 per IP, 10
   seconds to send data) to protect its memory; a flood can still keep new players out while it
@@ -595,8 +606,9 @@ each sends back is compared.
    log, then until `GET /api/status` shows the world units' rates standing still. Give the
    save a host record of its own (id 0, name Extractor, `"host": true`, at the escape pod), or
    the hidden host takes the saved host player's place. Without Steam the game owns no DLC.
-2. **This server** on a copy of the same save: `PCDS_LISTEN=127.0.0.1:PORT PCDS_STEAM=off
-   PCDS_ADMIN=off PCDS_AUTOSAVE=0 PCDS_TRUST_LOOPBACK=1 pcds serve DATA_DIR world.json`.
+2. **This server** on a copy of the same save, with `{"save": {"autosaveMinutes": 0}}` as
+   `rules.json` beside it: `PCDS_LISTEN=127.0.0.1:PORT PCDS_STEAM=off PCDS_ADMIN=off
+   PCDS_DEV=trust-loopback pcds serve DATA_DIR world.json`.
 3. **Run a script** against both: `server/tests/parity/run.sh REF_ADDR OURS_ADDR DATA_DIR
    START_SAVE server/tests/parity/scripts/NAME.json OUT_DIR`. `parity.py` decodes every
    network variable with the tables and prints what differs: the approval (objects and their
