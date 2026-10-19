@@ -2,8 +2,6 @@
 //! order with their fields, methods, custom attributes and IL, so the game's serialization
 //! layouts and Netcode RPC hashes come from its DLLs instead of from running it.
 
-#![allow(dead_code)] // the table reader uses it; until that lands, only the tests do
-
 use std::cell::Cell;
 use std::io;
 use std::ops::Range;
@@ -26,8 +24,6 @@ pub struct TypeDef {
     pub name: String,
     /// TypeAttributes (0x2000 Serializable, 0x20 Interface, 0x100 Sealed, 0x80 Abstract, ...).
     pub flags: u32,
-    /// NestedClass: the enclosing type's index.
-    pub enclosing: Option<usize>,
     pub extends: Option<TypeSig>,
     pub interfaces: Vec<TypeSig>,
     pub generic_params: Vec<String>,
@@ -298,7 +294,6 @@ impl Assembly {
                     namespace,
                     name,
                     flags: img.cell(TYPE_DEF, i as u32 + 1, 0),
-                    enclosing: enclosing[i],
                     extends: None,
                     interfaces: Vec::new(),
                     generic_params: Vec::new(),
