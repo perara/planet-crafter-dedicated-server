@@ -344,6 +344,8 @@ fn other_players_inventories_are_theirs() {
         ("InventoriesHandler.LockInventoryContentServerRpc", vec![json!(bob_inv), json!(true), json!(1.0e6)]),
         ("InventoriesHandler.AddNewItemToInventoryServerRpc", vec![json!(iron), json!(bob_eq)]),
         ("WorldObjectsHandler.DestroyWorldObjectServerRpc", vec![json!(item), json!(true)]),
+        // Decoding uses the item up (a chip, or any item: the game does not look).
+        ("UnlockedGroupsHandler.DecodeBlueprintServerRpc", vec![json!(item)]),
         ("WorldObjectsHandler.DropOnFloorServerRpc", vec![json!(item), json!([1.0, 2.0, 3.0]), json!(0.0), json!(false), json!(false), json!(0), json!(0.0)]),
         // An object linked to Bob's backpack, then destroyed: it would take the backpack along.
         ("WorldObjectsHandler.GenerateRandomAppearanceObjectServerRpc", vec![json!(100.0), json!(iron), json!(205_555_555), json!(bob_inv), json!([1.0, 2.0, 3.0]), json!([0.0, 0.0, 0.0, 1.0])]),
