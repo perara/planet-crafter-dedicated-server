@@ -546,7 +546,9 @@ game tables (every item, every constructible with each interaction its prefab ca
 vehicle, the animals, the farms, two players sharing a container), `sweep.sh` runs them against
 both and compares, and the matrix of group x interaction with the result of each row is in
 `SWEEP.matrix.md`. The reference there runs with the extractor plugin's `PCDS_KEEP_ACTIVE=1`
-(SWEEP.md says what that is).
+(SWEEP.md says what that is). The sweep starts from `mkstart.py`'s start save (`start_full.json`
+there: the user's save with a host record and every ore extractor filled), never `start.json`;
+after a fix `sweep.sh ours` replays only this server against the stored reference runs.
 
 Start both again from the start save for every script. `server/tests/parity/EXPECTED.md` lists
 what still differs on purpose (the reference's host player, time, the game's randomness, the

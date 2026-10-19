@@ -15,10 +15,12 @@
 #
 # Environment: REF_DIR (the reference: game/ with BepInEx and the extractor plugin with its
 # POST /api/save, prefix/ the Wine prefix), DATA_DIR (the tables), START (the start save, with
-# the reference's host record), PCDS (default: this checkout's release build). Ports
-# REF_PORT (7951), REF_API (7952) and OURS_PORT (7953). One reference at a time: it is heavy.
+# the reference's host record: mkstart.py's output, the same file for the reference runs a sweep
+# is compared with; a different start save makes hundreds of differences), PCDS (default: this
+# checkout's release build). Ports REF_PORT (7951), REF_API (7952) and OURS_PORT (7953); parallel
+# `ours` workers each take an OURS_PORT and a folder of their own. One reference at a time.
 set -u
-[[ $# -ge 3 ]] || { sed -n '2,20p' "$0"; exit 2; }
+[[ $# -ge 3 ]] || { sed -n '2,22p' "$0"; exit 2; }
 mode=$1 out=$2; shift 2
 here=$(cd "$(dirname "$0")" && pwd)
 : "${REF_DIR:?}" "${DATA_DIR:?}" "${START:?}"
