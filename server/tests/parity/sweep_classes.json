@@ -70,6 +70,12 @@
   "line": "WorldObjectAssociatedProxy\\.GetWorldObjectId(Client|Server)Rpc|AddWorldObjectToInventoryServerRpc|\"msg\": \"(captured|create|destroy)\"|RetrieveInventoryClientRpc"
  },
  {
+  "class": "d",
+  "why": "a disintegrator gives back its ingredients in a random order, and a random part of them when it gives back fewer than the recipe has (MachineDisintegrator.TryToDesintegrateAnObjectInInventory: Random.Range(0, list.Count) and RemoveAt, giveXIngredientsBack times; EXPECTED: randomness)",
+  "tag": "^(DetoxificationMachine[123]|OreBreaker[123]|RecyclingMachine2)\\|(inventory|run)$",
+  "line": "InventoriesHandler\\.RetrieveInventoryClientRpc"
+ },
+ {
   "class": "b",
   "why": "time: the start save is just below TerraformStage4-Water; Prime's lake rises over the build land a little earlier on the reference (it ran before the probe joined), and RequireEnergy sets what is under water to energy 0 (EXPECTED: Time)",
   "tag": "world object details",

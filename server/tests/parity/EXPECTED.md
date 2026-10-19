@@ -68,7 +68,7 @@ the escape pod) so it does not take over a saved player.
   picks, and the chance it launches: the help messages come at other moments), recycler drop
   spots, genetic traits of spawned animals, portal choices (UpdateChoices).
 - What ore extractors, harvesting robots and disintegrators make (one of their groups at
-  random), so the save's own machines change different groups' counts on each run; where a
+  random; a disintegrator also gives its ingredients back in a random order), so the save's own machines change different groups' counts on each run; where a
   harvestable grower places its produce (so which crop a player picks near it, and where the
   next one grows); the trait a petted animal gives; the animal a DNA
   sequence without a species trait becomes (InventorySpawnContent: a random one of the
