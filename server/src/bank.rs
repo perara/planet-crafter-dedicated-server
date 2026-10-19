@@ -959,6 +959,36 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// An autosave is written beside the game: the call returns with the text made, the file
+    /// arrives, and a save made right after it (a stop) is never overtaken by it.
+    #[test]
+    fn an_autosave_is_written_by_a_thread_and_never_overtakes_a_later_save() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let dir = std::env::temp_dir().join(format!("pcds-autosave-thread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("world.json").to_string_lossy().to_string();
+        game.advanced = true;
+        autosave(&mut game, &path);
+        assert!(!game.advanced && WRITING.with_borrow(Option::is_some), "the write is under way");
+        // Asked again while it is: nothing starts, the next autosave tries again.
+        game.advanced = true;
+        autosave(&mut game, &path);
+        settle(&mut game, true);
+        let first = SaveFile::load(&path).unwrap().objects.len();
+        let group = game.data.group("Iron").unwrap();
+        game.create_world_object(group, 0, true);
+        game.advanced = true;
+        autosave(&mut game, &path);
+        // The stop's save waits for the autosave and is the last word.
+        assert_eq!(final_save(&mut game, &path), 0);
+        assert_eq!(SaveFile::load(&path).unwrap().objects.len(), first + 1);
+        assert!(WRITING.with_borrow(Option::is_none));
+        assert_eq!(LAST_SAVE.with_borrow(|l| l["ok"].clone()), true);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).count(), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// A batch over the frame limit never reaches the socket (the front would end the link and
     /// the bank with it): its client is told why and dropped; the link goes on.
     #[test]
