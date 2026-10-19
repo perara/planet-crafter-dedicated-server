@@ -141,7 +141,23 @@ impl<K: serde::Serialize, V: serde::Serialize> serde::Serialize for Slots<K, V> 
 impl<'de, K: serde::Deserialize<'de> + Copy + Eq + Hash, V: serde::Deserialize<'de>> serde::Deserialize<'de> for Slots<K, V> {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let r: SlotsRepr<(K, V)> = serde::Deserialize::deserialize(d)?;
-        let index = r.slots.iter().enumerate().filter_map(|(i, s)| s.as_ref().map(|(k, _)| (*k, i))).collect();
+        // What a corrupt snapshot could say and a later insert would trip over: a free slot out of
+        // range, occupied, or listed twice (its entry overwritten, or an index out of bounds); a
+        // hole nobody lists (never reused); a key in two slots.
+        let mut listed = vec![false; r.slots.len()];
+        for i in &r.free {
+            match (listed.get_mut(*i), r.slots.get(*i)) {
+                (Some(seen), Some(None)) if !*seen => *seen = true,
+                _ => return Err(serde::de::Error::custom(format!("free slot {i} is out of range, occupied or listed twice"))),
+            }
+        }
+        if r.slots.iter().zip(&listed).any(|(s, l)| s.is_none() && !l) {
+            return Err(serde::de::Error::custom("a free slot is not in the free list"));
+        }
+        let index: FxHashMap<K, usize> = r.slots.iter().enumerate().filter_map(|(i, s)| s.as_ref().map(|(k, _)| (*k, i))).collect();
+        if index.len() != r.slots.len() - r.free.len() {
+            return Err(serde::de::Error::custom("a key is in two slots"));
+        }
         Ok(Slots { slots: r.slots, free: r.free, index })
     }
 }
@@ -182,5 +198,42 @@ impl<'a, K: Copy + Eq + Hash> IntoIterator for &'a SlotSet<K> {
     type IntoIter = std::iter::Map<std::iter::Flatten<std::slice::Iter<'a, Option<(K, ())>>>, fn(&'a (K, ())) -> &'a K>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.slots.iter().flatten().map(key as fn(&'a (K, ())) -> &'a K)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read(json: &str) -> Result<Slots<i32, String>, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    #[test]
+    fn slots_round_trip_and_a_corrupt_free_list_is_refused() {
+        let mut s: Slots<i32, String> = Slots::default();
+        for k in [5, 6, 7] {
+            s.insert(k, format!("v{k}"));
+        }
+        s.remove(&6);
+        let back: Slots<i32, String> = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.keys().copied().collect::<Vec<_>>(), [5, 7]);
+        // A hole is reused by the next key, as it was before the round trip.
+        let (mut s, mut back) = (s, back);
+        s.insert(9, "n".into());
+        back.insert(9, "n".into());
+        assert_eq!(s.keys().collect::<Vec<_>>(), back.keys().collect::<Vec<_>>());
+        // Out of range, occupied, listed twice, a hole nobody lists, a key twice: each would panic
+        // or overwrite an entry at some later insert.
+        for bad in [
+            r#"{"slots": [[1, "a"]], "free": [5]}"#,
+            r#"{"slots": [[1, "a"]], "free": [0]}"#,
+            r#"{"slots": [null, [1, "a"]], "free": [0, 0]}"#,
+            r#"{"slots": [null, [1, "a"]], "free": []}"#,
+            r#"{"slots": [[1, "a"], [1, "b"]], "free": []}"#,
+        ] {
+            assert!(read(bad).is_err(), "{bad}");
+        }
+        assert!(read(r#"{"slots": [null, [1, "a"]], "free": [0]}"#).is_ok());
     }
 }
