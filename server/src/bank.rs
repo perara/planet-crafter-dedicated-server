@@ -400,9 +400,11 @@ fn send(link: &mut Link, mail: &mut crate::idmap::FxHashMap<u64, wire::Batch>, c
             if let Some(left) = loading.get_mut(c) {
                 *left -= batch.len() as i64;
             }
-            link.send(ipc::DATA, *c, &batch);
+            link.queue(ipc::DATA, *c, &batch, None, 0);
         }
     }
+    // All the clients' batches in one write.
+    link.drain();
 }
 
 /// Who an API call names: {"id": N} is that client id exactly; {"name": S} (or the plugin

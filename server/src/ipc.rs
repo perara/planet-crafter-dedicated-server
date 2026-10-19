@@ -102,6 +102,11 @@ pub fn encode(kind: u8, n: u64, body: &[u8]) -> Vec<u8> {
 pub struct Link {
     pub stream: UnixStream,
     inbox: Vec<u8>,
+    /// How much of the inbox's start next() has taken (dropped in one move before the next fill,
+    /// not after every frame).
+    taken: usize,
+    /// fill's read buffer, made on first use and kept.
+    scratch: Vec<u8>,
     fds: VecDeque<OwnedFd>,
     outbox: VecDeque<Out>,
     /// Bytes queued per client (front only): the caller drops a client over its bound.
@@ -116,7 +121,7 @@ impl Link {
     pub fn new(stream: UnixStream) -> Link {
         // SAFETY: F_GETFL only reads the descriptor's flags.
         let blocking = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) & libc::O_NONBLOCK == 0 };
-        Link { stream, inbox: Vec::new(), fds: VecDeque::new(), outbox: VecDeque::new(), queued: Default::default(), blocking, broken: None }
+        Link { stream, inbox: Vec::new(), taken: 0, scratch: Vec::new(), fds: VecDeque::new(), outbox: VecDeque::new(), queued: Default::default(), blocking, broken: None }
     }
 
     pub fn fd(&self) -> RawFd {
@@ -141,7 +146,8 @@ impl Link {
         !self.outbox.is_empty()
     }
 
-    /// Writes what the socket takes now; Err once the peer is gone.
+    /// Writes what the socket takes now; Err once the peer is gone. Frames queued together go in
+    /// one system call (a frame with a descriptor goes alone).
     pub fn flush(&mut self) -> std::io::Result<()> {
         while let Some(o) = self.outbox.front_mut() {
             let n = match o.fd.take() {
@@ -152,27 +158,53 @@ impl Link {
                         return if e.kind() == ErrorKind::WouldBlock { Ok(()) } else { Err(e) };
                     }
                 },
-                None => match (&self.stream).write(&o.bytes[o.at..]) {
+                None => match self.write_queued() {
                     Ok(n) => n,
                     Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
                     Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                     Err(e) => return Err(e),
                 },
             };
-            o.at += n;
-            if o.at == o.bytes.len() {
-                let o = self.outbox.pop_front().unwrap();
-                if o.client != 0
-                    && let Some(q) = self.queued.get_mut(&o.client)
-                {
-                    *q = q.saturating_sub(o.bytes.len());
-                    if *q == 0 {
-                        self.queued.remove(&o.client);
-                    }
+            self.written(n);
+        }
+        Ok(())
+    }
+
+    /// One writev of the frames at the front of the queue that carry no descriptor.
+    fn write_queued(&self) -> std::io::Result<usize> {
+        const FRAMES: usize = 64;
+        let mut iov = [libc::iovec { iov_base: std::ptr::null_mut(), iov_len: 0 }; FRAMES];
+        let mut count = 0;
+        for (slot, o) in iov.iter_mut().zip(self.outbox.iter().take_while(|o| o.fd.is_none())) {
+            *slot = libc::iovec { iov_base: o.bytes[o.at..].as_ptr() as *mut libc::c_void, iov_len: o.bytes.len() - o.at };
+            count += 1;
+        }
+        // SAFETY: the first `count` iovecs point into frames of the queue, which stays untouched
+        // until the call returns; writev only reads them.
+        let n = unsafe { libc::writev(self.stream.as_raw_fd(), iov.as_ptr(), count as libc::c_int) };
+        if n < 0 { Err(std::io::Error::last_os_error()) } else { Ok(n as usize) }
+    }
+
+    /// `n` bytes of the queue went out: the frames they complete leave it.
+    fn written(&mut self, mut n: usize) {
+        while n > 0 {
+            let Some(o) = self.outbox.front_mut() else { return };
+            let left = o.bytes.len() - o.at;
+            if n < left {
+                o.at += n;
+                return;
+            }
+            n -= left;
+            let o = self.outbox.pop_front().unwrap();
+            if o.client != 0
+                && let Some(q) = self.queued.get_mut(&o.client)
+            {
+                *q = q.saturating_sub(o.bytes.len());
+                if *q == 0 {
+                    self.queued.remove(&o.client);
                 }
             }
         }
-        Ok(())
     }
 
     /// A frame written at once, waiting for the socket (a bank's writes).
@@ -182,6 +214,11 @@ impl Link {
 
     pub fn send_fd(&mut self, kind: u8, n: u64, body: &[u8], fd: Option<OwnedFd>) -> bool {
         self.queue(kind, n, body, fd, 0);
+        self.drain()
+    }
+
+    /// Writes everything queued, waiting for the socket; false once the peer is gone.
+    pub fn drain(&mut self) -> bool {
         loop {
             match self.flush() {
                 Ok(()) if !self.pending() => return true,
@@ -197,25 +234,33 @@ impl Link {
         if self.broken.is_some() {
             return false;
         }
-        let mut buf = vec![0u8; 1 << 16];
+        self.inbox.drain(..std::mem::take(&mut self.taken));
+        let mut buf = std::mem::take(&mut self.scratch);
+        buf.resize(1 << 16, 0);
         let mut read = 0;
-        while read < max {
+        let alive = loop {
+            if read >= max {
+                break true;
+            }
             match recv_with_fds(self.stream.as_raw_fd(), &mut buf, &mut self.fds) {
-                Ok(0) => return false,
+                Ok(0) => break false,
                 Ok(n) => {
                     self.inbox.extend_from_slice(&buf[..n]);
                     read += n;
-                    // A blocking socket would wait for more: what came is enough.
-                    if self.blocking {
-                        return true;
+                    // A blocking socket would wait for more: what came is enough. So is a read
+                    // that did not fill the buffer: the socket is empty now (what comes after is
+                    // read in the next loop, the descriptor stays readable).
+                    if self.blocking || n < buf.len() {
+                        break true;
                     }
                 }
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) if e.kind() == ErrorKind::WouldBlock => return true,
-                Err(_) => return false,
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break true,
+                Err(_) => break false,
             }
-        }
-        true
+        };
+        self.scratch = buf;
+        alive
     }
 
     /// The next whole frame read, if any. A length out of bounds breaks the link (`broken`):
@@ -224,15 +269,17 @@ impl Link {
         if self.broken.is_some() {
             return None;
         }
-        let n = u32::from_le_bytes(self.inbox.get(..4)?.try_into().ok()?) as usize;
+        let inbox = &self.inbox[self.taken..];
+        let n = u32::from_le_bytes(inbox.get(..4)?.try_into().ok()?) as usize;
         if !(9..=MAX_FRAME).contains(&n) {
             self.broken = Some(format!("a frame of {n} bytes (a frame is 9 to {MAX_FRAME})"));
             self.inbox.clear();
+            self.taken = 0;
             return None;
         }
-        let f = self.inbox.get(4..4 + n)?;
+        let f = inbox.get(4..4 + n)?;
         let (kind, num, body) = (f[0], u64::from_le_bytes(f[1..9].try_into().ok()?), f[9..].to_vec());
-        self.inbox.drain(..4 + n);
+        self.taken += 4 + n;
         let fd = if carries_fd(kind, &body) { self.fds.pop_front() } else { None };
         Some(Frame { kind, n: num, body, fd })
     }
@@ -297,7 +344,9 @@ fn recv_with_fds(sock: RawFd, buf: &mut [u8], fds: &mut VecDeque<OwnedFd>) -> st
     unsafe {
         let mut iov = libc::iovec { iov_base: buf.as_mut_ptr() as *mut libc::c_void, iov_len: buf.len() };
         let space = libc::CMSG_SPACE((CMSG_FDS * std::mem::size_of::<RawFd>()) as u32) as usize;
-        let mut control = vec![0u8; space];
+        // u64s: aligned for a cmsghdr; room for CMSG_FDS descriptors (checked below).
+        let mut control = [0u64; 8];
+        assert!(space <= std::mem::size_of_val(&control));
         let mut msg: libc::msghdr = std::mem::zeroed();
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
@@ -384,6 +433,32 @@ mod tests {
         assert!(front.pending() && front.queued[&3] > 0);
         drop(bank);
         assert!(front.flush().is_err(), "the peer is gone");
+    }
+
+    /// Many frames queued together cross in order and whole (writev stops mid-frame when the
+    /// socket is full), with a descriptor-carrying one among them going alone; the per-client
+    /// count falls to zero.
+    #[test]
+    fn frames_queued_together_arrive_in_order() {
+        let (a, b) = UnixStream::pair().unwrap();
+        a.set_nonblocking(true).unwrap();
+        let (mut front, mut bank) = (Link::new(a), Link::new(b));
+        let reader = std::thread::spawn(move || (0..600u64).map(|_| bank.recv().map(|f| (f.kind, f.n, f.body.len(), f.fd.is_some())).unwrap()).collect::<Vec<_>>());
+        for i in 0..600u64 {
+            let body = vec![i as u8; 1 + (i as usize * 37) % 9000];
+            if i == 300 {
+                let fd = memfd("test", |w| w.write_all(b"x").map_err(|e| e.to_string())).unwrap();
+                front.queue(RESTORE, i, &body, Some(fd), 0);
+            } else {
+                front.queue(DATA, i, &body, None, 5);
+            }
+        }
+        assert!(front.drain());
+        let got = reader.join().unwrap();
+        assert!(front.queued.is_empty() && !front.pending());
+        for (i, (kind, n, len, fd)) in got.into_iter().enumerate() {
+            assert_eq!((kind, n, len, fd), (if i == 300 { RESTORE } else { DATA }, i as u64, 1 + (i * 37) % 9000, i == 300));
+        }
     }
 
     #[test]
