@@ -23,7 +23,7 @@
  {
   "class": "b",
   "why": "what the owner of a vehicle or lamp writes: its default colour, VehicleShareData, its rigidbody state by distance to the host (EXPECTED)",
-  "line": "ColorProxy\\._color: ref \\[[^]]*\\] ours \\[0\\.0, 0\\.0, 0\\.0, 0\\.0\\]|VehicleShareData\\.|UpdateNetworkRigidBodyState\\.Set(RigidBody|VehicleController)EnabledClientRpc"
+  "line": "ColorProxy\\._color: ref \\[[^]]*\\] ours \\[0\\.0, 0\\.0, 0\\.0, 0\\.0\\]|VehicleShareData\\.|UpdateNetworkRigidBodyState\\.Set(RigidBody|VehicleController)EnabledClientRpc|^worldObjects\\[\\d+\\] field order: ref \\[.*'planet', 'color'\\] ours \\[.*'planet'\\]$"
  },
  {
   "class": "b",
@@ -60,7 +60,7 @@
  {
   "class": "d",
   "why": "genetic traits: those of spawned animals and the random trait a petted animal gives (EXPECTED: randomness in the game)",
-  "line": "\\(GeneticTrait\\)\\.trt(Ind|Val)"
+  "line": "\\(GeneticTrait\\)\\.(trt(Ind|Val)|color)|^worldObjects\\[\\d+\\] field order: ref \\['id', 'gId', ('color'|'trtInd')"
  },
  {
   "class": "b",
@@ -128,5 +128,22 @@
   "tag": "^AlgaeGenerator[12]\\|",
   "line": ".",
   "why": "algae are planted on water, which the start land has none of (the game lets a player place an algae generator only on SurfaceWater): the reference plants nothing there, this server fills the generator as if it stood on water"
+ },
+ {
+  "class": "d",
+  "kind": "rate",
+  "why": "the growth rate from a few polls: each poll lands at its own moment, so two runs of the game differ by as much (a quarter) as this server does from it"
+ },
+ {
+  "class": "b",
+  "script": "^sweep_sharing",
+  "line": "\\.woIds: ref|^worldObjects(: \\d+ records| order at)|_allWorldObjectsGroups of Iron",
+  "why": "inventory protection: the second player's take from and add to the first player's backpack are refused here, the game's host does them (the first player's backpack and what the second added to it differ)"
+ },
+ {
+  "class": "b",
+  "script": "^sweep_vehicle\\.A$",
+  "line": "^worldObjects(: \\d+ records| order at ref \\d+ / ours \\d+: ref \\[.\\d+.)",
+  "why": "a failed AddNewItemToInventory leaves its object in the game and destroys it here (EXPECTED): the three adds the script makes to a full inventory"
  }
 ]
