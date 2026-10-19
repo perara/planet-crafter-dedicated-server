@@ -12,7 +12,13 @@
  {
   "class": "b",
   "why": "items the server drops and buildable items: the host owns them and simulates their physics, here the nearest player (EXPECTED: the reference has a host player)",
-  "line": "GroupNetworkContainer.StartAndStopPhysicsAfterDelayClientRpc|\"msg\": \"create\".*\"owner\": (0|\"me\")|^~ \\S+ GroupNetworkContainer\\.(_scale|_transformSync)"
+  "line": "GroupNetworkContainer.StartAndStopPhysicsAfterDelayClientRpc|\"msg\": \"create\".*\"owner\": (0|\"me\")",
+  "paired": true
+ },
+ {
+  "class": "b",
+  "line": "^~ \\S+ GroupNetworkContainer\\.(_scale|_transformSync)",
+  "why": "items the server drops and buildable items: the host owns them and simulates their physics, here the nearest player (EXPECTED: the reference has a host player)"
  },
  {
   "class": "b",
@@ -115,5 +121,12 @@
   "why": "what a recycler drops lands on random spots of its drop bounds (ConstructibleProxy.RecycleContent: Random.Range; EXPECTED: randomness)",
   "tag": "\\|recycle$",
   "line": "\"msg\": \"create\""
+ },
+ {
+  "class": "e",
+  "script": "^sweep_water$",
+  "tag": "^AlgaeGenerator[12]\\|",
+  "line": ".",
+  "why": "algae are planted on water, which the start land has none of (the game lets a player place an algae generator only on SurfaceWater): the reference plants nothing there, this server fills the generator as if it stood on water"
  }
 ]
