@@ -103,6 +103,7 @@ impl Limits {
     pub fn forget(&mut self, client: u64) {
         self.chat.remove(&client);
         self.motion.remove(&client);
+        self.warned.retain(|(c, _)| *c != client);
         self.used.remove(&client);
         self.pending.remove(&client);
     }
@@ -646,6 +647,19 @@ mod tests {
         assert_eq!(constructed(&g), before, "no entry for a panel type the game has none of");
         send_on(&mut g, 1, net, "LinkedGroupsProxy.SetLinkedGroupsServerRpc", &[json!((0..70_000).collect::<Vec<i32>>())]);
         assert!(list(&g, net, "LinkedGroupsProxy", "_linkedGroupsHash").len() < 1000);
+    }
+
+    /// What the limits remember of a client goes with it: a client id is never used again, so
+    /// a flood of short connections would otherwise leave an entry for each, for ever.
+    #[test]
+    fn a_client_that_left_leaves_nothing_in_the_limits() {
+        let mut l = super::Limits::default();
+        for client in 1..=3u64 {
+            assert!(l.chat(client, 0.0) && l.motion(client, 10) && l.spend(client, 1, b"rpc"));
+            l.warn(client, "over the rate");
+        }
+        l.forget(2);
+        assert_eq!((l.chat.len(), l.motion.len(), l.used.len(), l.warned.len()), (2, 2, 2, 2));
     }
 
     /// Story messages: received once (an unknown one not at all), read, and both saved.
