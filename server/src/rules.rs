@@ -337,21 +337,7 @@ impl Rules {
     }
 
     pub fn save(&self, path: &str) -> std::io::Result<()> {
-        crate::save::write_atomic(path, (serde_json::to_string_pretty(&self.for_older_banks()).unwrap_or_default() + "\n").as_bytes())
-    }
-
-    /// The rules as JSON for a rules.json or a snapshot an older bank may have to read (a
-    /// rollback, docs/hot-update.md): the sections added in 0.7 stay out while they are the
-    /// defaults, since those banks refuse a section they do not know. ponytail: a rule set in
-    /// one of them still makes the file unreadable to a 0.6 bank; no later release adds to this list.
-    pub fn for_older_banks(&self) -> Value {
-        let (mut v, d) = (serde_json::to_value(self).unwrap_or_default(), serde_json::to_value(Rules::default()).unwrap_or_default());
-        for section in ["save", "update", "log"] {
-            if v[section] == d[section] {
-                v.as_object_mut().map(|o| o.remove(section));
-            }
-        }
-        v
+        crate::save::write_atomic(path, (serde_json::to_string_pretty(self).unwrap_or_default() + "\n").as_bytes())
     }
 
     /// limits.maxPlayers, else 16.
@@ -377,11 +363,6 @@ fn merge(target: &mut Value, patch: &Value) {
             _ => merge(map.entry(k.clone()).or_insert(Value::Null), v),
         }
     }
-}
-
-/// serde's `serialize_with` for the rules in a snapshot (see Rules::for_older_banks).
-pub fn serialize_for_older_banks<S: serde::Serializer>(rules: &Rules, s: S) -> Result<S::Ok, S::Error> {
-    serde::Serialize::serialize(&rules.for_older_banks(), s)
 }
 
 /// The rules read at start (checked already), where set() keeps them.

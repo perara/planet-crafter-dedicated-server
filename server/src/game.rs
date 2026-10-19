@@ -211,7 +211,6 @@ pub struct Game {
     /// Clients the transport should drop, with the reason they are shown.
     pub kicks: Vec<(u64, String)>,
     pub access: crate::access::Access,
-    #[serde(serialize_with = "crate::rules::serialize_for_older_banks")]
     pub rules: crate::rules::Rules,
     /// Where set() keeps the rules (None: not kept, as in tests).
     pub rules_path: Option<String>,
