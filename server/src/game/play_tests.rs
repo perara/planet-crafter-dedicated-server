@@ -466,6 +466,16 @@ fn invariants(g: &Game) -> Vec<String> {
         }
     }
     bad.extend(holders_mismatch(g));
+    // (An animal stands for its DNA sequence, which has no network object of its own.)
+    for o in g.net.objects.values().filter(|o| !o.scene && !crate::animals::spawn::is_animal(g, o.id)) {
+        if let Some(w) = o.wo {
+            match g.wos.get(&w) {
+                None => bad.push(format!("net object {} stands for world object {w}, which is gone", o.id)),
+                Some(wo) if wo.net != Some(o.id) => bad.push(format!("net object {} stands for world object {w} ({}), whose net is {:?}", o.id, g.data.groups[wo.group].id, wo.net)),
+                _ => {}
+            }
+        }
+    }
     bad
 }
 
