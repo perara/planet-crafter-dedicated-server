@@ -16,6 +16,17 @@
   "paired": true
  },
  {
+  "class": "d",
+  "script": "^sweep_(feed|build_[123])$",
+  "tag": "\\|(into|input) \\w*VegetableGrower|\\|input \\w+Seed",
+  "paired": true,
+  "ignore": [
+   "rotation"
+  ],
+  "line": "\"msg\": \"create\", \"object\": \"new:GroupNetworkContainer#\\d+\"",
+  "why": "a crop of a vegetable grower: its place on the grower's spot is the same, its turn about the soil's normal is a random angle (GetRandomPosition: NextFloat; EXPECTED: randomness)"
+ },
+ {
   "class": "b",
   "line": "^~ \\S+ GroupNetworkContainer\\.(_scale|_transformSync)",
   "why": "items the server drops and buildable items: the host owns them and simulates their physics, here the nearest player (EXPECTED: the reference has a host player)"
