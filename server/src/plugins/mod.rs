@@ -436,6 +436,9 @@ pub fn prepare(dir: &Path, world: &str) -> Host {
     };
     let mut folders: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir() && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'))).collect();
     folders.sort();
+    if folders.len() > limits::MAX_PLUGINS {
+        eprintln!("plugins: {} folders in {}; only the first {} (by name) are read", folders.len(), dir.display(), limits::MAX_PLUGINS);
+    }
     for folder in folders.into_iter().take(limits::MAX_PLUGINS) {
         let id = folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let approval = approvals.0.get(&id).filter(|_| host.approvals_error.is_none());

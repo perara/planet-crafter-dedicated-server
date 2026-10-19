@@ -77,8 +77,7 @@ Ask what the code is, in this order.
    If it is a new class of the game, a subsystem module with the six entry points of `hooks.rs`
    (`init`, `tick`, `rpc`, `on_instantiated`, `on_destroyed`, `inventory_changed`) and its
    state in `ext.rs`. It does no I/O. It must behave as the game's own code does: parity with
-   the game is the reason the server exists, and `docs/parity` (README, "Parity with the game")
-   is how it is kept.
+   the game is the reason the server exists, and `server/tests/parity` and the README's "Parity with the game" are how it is kept.
 2. **A fact about the game's files** (a table, a hash, a layout): the tables. Read once at
    start, never in the tick. A fact that is only known when the game updates belongs in what
    `pcds read-game` writes, so a game update fails at the start, not in the middle of a game.

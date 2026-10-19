@@ -137,18 +137,18 @@ wasmer* is the real decision:
 
 | | wasmtime 49 (Cranelift) | wasmi 2.0 | wasmer 7.5 |
 |---|---|---|---|
-| program size, stripped, added (alone: a hello program) | 11.6 MB | **2.0 MB** | not built (it carries Cranelift or LLVM as wasmtime does, and its own runtime) |
-| compressed in the release tarball | +3.7 MB | **+0.7 MB** | |
-| first build of the engine on 4 loaded cores | 3 min 40 s | **25 s** | |
-| module of 44 KB, ready | 70 ms | **1.0 ms** | |
-| a new instance | 5 µs | 25 µs | |
-| an empty call, an event | 15 ns, 67 ns | 61 ns, 270 ns | |
-| 10,000 steps of arithmetic | 8.5 µs | 27 µs | |
-| machine code generated at run time | yes | **no** | yes (or an interpreter-like single pass) |
-| fuel | yes | yes | yes |
-| wall-clock interruption | **yes (epochs)** | no | partly |
-| component model, WIT | **yes** | no | no |
-| memory limit, table limit | yes | yes | yes |
+| program size, stripped, added (alone: a hello program) | 11.6 MB | **2.0 MB** | not built or measured |
+| compressed in the release tarball | +3.7 MB | **+0.7 MB** | not measured |
+| first build of the engine on 4 loaded cores | 3 min 40 s | **25 s** | not measured |
+| module of 44 KB, ready | 70 ms | **1.0 ms** | not measured |
+| a new instance | 5 µs | 25 µs | not measured |
+| an empty call, an event | 15 ns, 67 ns | 61 ns, 270 ns | not measured |
+| 10,000 steps of arithmetic | 8.5 µs | 27 µs | not measured |
+| machine code generated at run time | yes | **no** | yes (Singlepass, Cranelift or LLVM) |
+| fuel | yes | yes | yes (a metering middleware) |
+| wall-clock interruption | **yes (epochs)** | no | not checked |
+| component model, WIT | **yes** | no | not checked |
+| memory limit, table limit | yes | yes | not checked |
 | licence | Apache-2.0 with LLVM exception | MIT or Apache-2.0 | MIT |
 
 On the server, the program (stripped) went from 9.9 MB to 12.1 MB with the plugin host, wasmi and
@@ -159,8 +159,9 @@ a JIT makes that 0.2. What a JIT is worth is *heavy* computation in a plugin (pa
 generating terrain each tick), and no plugin in sight does that; if one comes, `wasm.rs` is the one
 file that names the engine (about 250 lines), and the interface is engine-neutral core
 WebAssembly, so wasmtime can replace wasmi behind a Cargo feature without a plugin changing.
-Wasmer is not built on: it is a third engine of the same weight as wasmtime with a smaller
-following. This was not measured and is a judgement.
+Wasmer was not built or measured: it carries a compiler back end (Singlepass, Cranelift or LLVM)
+as wasmtime does, so it would sit with wasmtime on size and start-up and with a smaller following;
+that is a judgement from what it is, not a figure, and the column above says so.
 
 Two things wasmi cannot do and the design lives without: **wall-clock interruption** (fuel is
 the limit, and fuel is an exact count of work, so a loop is stopped after a fixed amount of it
@@ -550,5 +551,10 @@ These are for the owner.
 8. **A panel for plugins in the web page** (a sandboxed iframe served from the plugin's files).
 9. **The snapshot becoming binary** (the flip-speed work): `Saved`'s hex strings should become
    bytes then.
-10. **`opt-level = "s"` for wasmi** (`[profile.release.package.wasmi]`) would save some of the
+10. **A reload compiles on the game thread**: `POST /api/plugins/reload` and the dashboard's buttons
+    read and compile the approved plugins inside the admin request, which the game loop answers
+    between ticks: about 1 ms for a 44 KB module, up to 0.2 s for the biggest allowed (8 MiB).
+    A hot update does not have this (the new bank compiles before the world stops). Moving the
+    compile to a thread is a small change; it was left out for its extra state.
+11. **`opt-level = "s"` for wasmi** (`[profile.release.package.wasmi]`) would save some of the
     2.2 MB for some speed; not measured.
