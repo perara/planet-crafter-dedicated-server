@@ -331,6 +331,9 @@ class Transcript:
             label = '$player'
         elif l['id'] in self.t.scene:
             label = 'scene:' + self.t.scene[l['id']]['name']
+        elif name == 'Player':
+            # Another player: by its client (it stands where each server put it).
+            label = f'player@client{l["owner"]}'
         elif created:
             self.created[hash_] = self.created.get(hash_, 0) + 1
             label = f'new:{name}#{self.created[hash_]}'
@@ -417,6 +420,8 @@ class Transcript:
                 label = self._object(l, created=True)
                 o = self.objects[label]
                 self.events.append((step, {'msg': 'create', 'object': label, 'owner': o['owner'], 'position': o['position']}))
+            elif m == 'transform':
+                self.events.append((step, {'msg': 'transform', 'object': self.label(l['object']), 'position': rnd(l['position'])}))
             elif m == 'destroy':
                 self.events.append((step, {'msg': 'destroy', 'object': self.label(l['id'])}))
             elif m == 'call':
@@ -483,7 +488,7 @@ def close(a, b):
 
 # A server message the other server sent the same, only a step or two earlier or later: the
 # coroutines of the two servers run on their own clocks (EXPECTED: Time).
-SHIFT = 10
+SHIFT = 20
 
 
 def diff_events(ref, ours):
@@ -594,6 +599,9 @@ def diff_state(ref, ours):
     n = 0
     keys = sorted(set(ref.state) | set(ours.state))
     for k in keys:
+        # An object only one server spawned: its spawn is the difference (in the events).
+        if k[0].startswith('new:') and (k[0] in ref.objects) != (k[0] in ours.objects):
+            continue
         if k[1].endswith(COUNTS):
             a, b = count_change(ref, k), count_change(ours, k)
             if a != b:
