@@ -5,7 +5,7 @@
 A save is sections joined by "@", each a "|"-joined list of JSON records. Records with ids are
 compared by id, and the order of the ids on its own; others in order. World object ids the
 servers allocated (not in START.json) are paired: the same id, else group and position, else
-group in order. The reference's host player (the hidden avatar
+group in order. The objects a failed AddNewItemToInventory left on the reference are left out. The reference's host player (the hidden avatar
 the plugin hosts with) and the game's per-run counters are left out.
 """
 import difflib
@@ -37,6 +37,11 @@ def close(a, b):
 def main():
     start, ref, ours = (load(p) for p in sys.argv[1:4])
     known = {int(x) for x in re.findall(r'"id":(\d+)', open(sys.argv[1], encoding='utf-8-sig').read())}
+    # The game leaves the object a failed AddNewItemToInventory made lying in the world, saved as
+    # {"id":..,"gId":..} with no position and in no inventory; this server destroys it (EXPECTED:
+    # safety rules). Left out of the reference's objects; ours having one is a difference.
+    in_inventory = {int(w) for i in ref[4] for w in str(i.get('woIds', '')).split(',') if w}
+    ref[3] = [o for o in ref[3] if o.get('id') in known or 'pos' in o or o.get('id') in in_inventory]
     # Pair the ids each server allocated: same group and position, else order of appearance.
     def new_objects(save):
         return [o for o in save[3] if o.get('id') not in known]
