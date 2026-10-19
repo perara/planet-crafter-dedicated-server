@@ -593,6 +593,20 @@ mod tests {
         assert!((g.time - (held + 32.0)).abs() < 1e-3, "{}", g.time);
     }
 
+    /// The admin's pause stops the clock, not the players: what they do in a paused world is
+    /// still to be autosaved (an empty one has nobody to change it).
+    #[test]
+    fn what_players_do_in_a_paused_world_is_autosaved() {
+        let Some(mut g) = test_game(save()) else { return };
+        g.held = true;
+        g.advanced = false;
+        g.tick();
+        assert!(!g.advanced, "paused and empty: nothing to save");
+        join(&mut g, 1, "Ann");
+        g.tick();
+        assert!(g.advanced, "paused with Ann in it: she may have changed the world");
+    }
+
     #[test]
     fn a_building_past_its_limit_comes_down_and_pays_back() {
         let Some(mut g) = test_game(save()) else { return };

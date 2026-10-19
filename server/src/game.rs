@@ -728,6 +728,9 @@ impl Game {
             if empty {
                 crate::chathooks::drop_replies(self);
             } else {
+                // Players in a world the admin paused still act (run_pending above): the
+                // autosave must not skip what they did.
+                self.advanced |= self.clients.values().any(|c| c.ready.is_some());
                 crate::chathooks::tick(self);
             }
             if clock.floor() > last.floor() {
