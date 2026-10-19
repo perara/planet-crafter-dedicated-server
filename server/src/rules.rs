@@ -225,8 +225,12 @@ impl Rules {
         let b = &self.backup;
         if let Some(url) = &b.s3_endpoint {
             let uri = url.parse::<ureq::http::Uri>().ok();
-            if !uri.is_some_and(|u| matches!(u.scheme_str(), Some("http" | "https")) && u.host().is_some() && u.path().trim_matches('/').is_empty()) {
+            if !uri.as_ref().is_some_and(|u| matches!(u.scheme_str(), Some("http" | "https")) && u.host().is_some() && u.path().trim_matches('/').is_empty()) {
                 return Err("backup.s3Endpoint: an http:// or https:// address without a path (the bucket is s3Bucket)".into());
+            }
+            // Never shown in the message or the log: the endpoint is not a secret, so no keys in it.
+            if uri.is_some_and(|u| u.authority().is_some_and(|a| a.as_str().contains('@'))) {
+                return Err("backup.s3Endpoint: no user:password@ in the address (the keys are s3AccessKey and s3SecretKey)".into());
             }
         }
         if let Some(bucket) = &b.s3_bucket
@@ -416,6 +420,7 @@ mod tests {
             serde_json::json!({"death": {"consequences": "Explode"}}),
             serde_json::json!({"limits": {"buildings": {"Iron": 1}}}),
             serde_json::json!({"meteo": {"materialDespawnSeconds": 1e9}}),
+            serde_json::json!({"backup": {"s3Endpoint": "https://key:secret@s3.example.com"}}),
             serde_json::json!({"chat": {"webhooks": ["ftp://example.com/"]}}),
             serde_json::json!({"chat": {"webhooks": ["not a url"]}}),
             serde_json::json!({"chat": {"exec": [""]}}),
