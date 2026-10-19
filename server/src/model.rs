@@ -144,7 +144,8 @@ impl WorldObject {
             "pnls": self.panels.as_deref().map(int_list_string).unwrap_or_default(),
             "color": color_string(self.color),
             "text": self.text,
-            "grwth": self.growth.round() as i32,
+            // Mathf.RoundToInt: halves to even.
+            "grwth": self.growth.round_ties_even() as i32,
             "set": self.setting,
             "trtInd": self.trait_type,
             "trtVal": self.trait_value,
@@ -297,6 +298,18 @@ pub fn unit_index(unit: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The save keeps a growth the way Mathf.RoundToInt does: 2.5 is 2, 3.5 is 4.
+    #[test]
+    fn growth_is_saved_rounded_to_even_like_mathf_round_to_int() {
+        let Some((mut g, _)) = crate::testkit::world() else { return };
+        let group = g.data.group("Iron").unwrap();
+        for (growth, saved) in [(2.5, 2), (3.5, 4), (0.5, 0), (12.4, 12), (12.6, 13)] {
+            let id = g.create_world_object(group, 0, true);
+            g.wos.get_mut(&id).unwrap().growth = growth;
+            assert_eq!(g.wos[&id].to_json(&g.data)["grwth"], saved, "growth {growth}");
+        }
+    }
 
     #[test]
     fn g7_matches_mono_float_formatting() {
