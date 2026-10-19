@@ -125,11 +125,7 @@ impl Game {
         let Some(mut items) = self.inventories.get(&inventory).map(|i| i.items.clone()) else { return };
         items.sort_by(|a, b| {
             let (Some(x), Some(y)) = (self.wos.get(a), self.wos.get(b)) else { return Ordering::Equal };
-            let by_group = culture_cmp(&self.data.groups[x.group].id, &self.data.groups[y.group].id);
-            if by_group != Ordering::Equal || x.trait_type == 0 {
-                return by_group;
-            }
-            x.trait_type.cmp(&y.trait_type).then(x.trait_value.cmp(&y.trait_value)).then_with(|| format!("{:?}", x.color).cmp(&format!("{:?}", y.color)))
+            culture_cmp(&self.data.groups[x.group].id, &self.data.groups[y.group].id).then_with(|| trait_order((x.trait_type, x.trait_value, x.color), (y.trait_type, y.trait_value, y.color)))
         });
         self.inventories.get_mut(&inventory).unwrap().items = items;
     }
@@ -685,6 +681,20 @@ impl Game {
     }
 }
 
+/// The order of two items of one group by their genetic trait. Items without a trait (type 0)
+/// are equal to each other and come before those with one, which go by type, value and color.
+/// (The game's comparer called a trait-less item equal to everything it was compared with first:
+/// no order, and Rust's sort panics on that from 21 items on, mixed traits in one inventory being
+/// something a client can make with CreateNewTraitWorldObject.)
+fn trait_order(x: (i32, i32, [f32; 4]), y: (i32, i32, [f32; 4])) -> Ordering {
+    match (x.0, y.0) {
+        (0, 0) => Ordering::Equal,
+        (0, _) => Ordering::Less,
+        (_, 0) => Ordering::Greater,
+        _ => x.0.cmp(&y.0).then(x.1.cmp(&y.1)).then_with(|| format!("{:?}", x.2).cmp(&format!("{:?}", y.2))),
+    }
+}
+
 /// .NET culture-aware string order for ASCII ids: letters compare case-insensitively first,
 /// then lower case before upper case.
 pub fn culture_cmp(a: &str, b: &str) -> Ordering {
@@ -704,6 +714,25 @@ mod tests {
     use super::*;
     use crate::testkit::*;
     use serde_json::Value;
+
+    #[test]
+    fn items_with_and_without_traits_sort_without_panicking() {
+        // A comparer that is not an order makes Rust's sort panic from 21 items on.
+        let mut seed = 7u64;
+        let mut next = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as i32
+        };
+        for n in [5, 21, 22, 40, 100, 400] {
+            for _ in 0..200 {
+                let mut items: Vec<(i32, i32, [f32; 4])> = (0..n).map(|_| (if next() % 2 == 0 { 0 } else { next() % 9 }, next() % 5, [(next() % 3) as f32, 0.0, 0.0, 1.0])).collect();
+                items.sort_by(|x, y| trait_order(*x, *y));
+                assert!(items.windows(2).all(|w| trait_order(w[0], w[1]) != Ordering::Greater));
+            }
+        }
+        assert_eq!(trait_order((0, 5, [0.0; 4]), (0, 9, [1.0; 4])), Ordering::Equal, "no trait: equal, as before");
+        assert_eq!(trait_order((2, 1, [0.0; 4]), (2, 3, [0.0; 4])), Ordering::Less);
+    }
 
     /// The one AddOrRemoveItemClientRpc result each request gets.
     fn result(g: &mut Game) -> bool {
