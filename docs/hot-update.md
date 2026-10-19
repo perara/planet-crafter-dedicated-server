@@ -133,6 +133,55 @@ the dashboard says so in the Updates section and when Roll back is clicked. Whil
 stopped (`POST /api/world/stop`) no bank runs it: an update or a rollback is answered 409 "the
 world is stopped" (start it first, or use `--restart`), and the dashboard's buttons are off.
 
+**State and the release before.** A snapshot is the whole serialized `Game`. The release that
+restores it is another program than the one that wrote it, so every change to what is
+serialized is a change to what the next release must read. The rules:
+- A new field in serialized state needs `#[serde(default)]` (or a default of its own type) when
+  an older snapshot lacks it; without it the restore of the release before's snapshot fails with
+  "missing field": that is the failure the first real update (0.6.0 to 0.6.1, `water_only`) had.
+- What the tables give is not state. Do not store it, or store it and set it again after a
+  restore: `machines::refresh_from_tables` (called by `handoff::restore_bytes`) sets again every
+  table value a machine part keeps beside its state (Harvestable, Vegetation, LinkedGrower,
+  AutoCrafter, Disintegrator, Optimizer); the flag a snapshot lacks, and a value the release that
+  wrote it derived differently, are then this release's. A part that mixes both and is not
+  refreshed (Generator: spawn_every, speed, groups) must be added there when its table values are
+  read differently. State (timers, what is growing, a random sequence, what the rays found) stays
+  the snapshot's.
+- A field renamed, removed or meaning something else bumps `handoff::FORMAT` and adds the step
+  from the previous format to `migrate` (a new field alone does not). Each build reads its own
+  format and the one before (`reads` in `pcds bank-info`, bank.json): that list is all the front
+  checks before a flip (`updater::compatible`), so a field added with a default is invisible to
+  it, and a release before cannot restore what a later one wrote if the later one added a
+  field without which it fails (the way back from 0.6.2 to 0.6.1 is checked by the gate's last
+  line, and `--rollback --restart` always works: the stop saves and the world loads from the save).
+- `rules` are `deny_unknown_fields`: a rule a later release added makes the release before
+  refuse a snapshot that has it, at the restore (the old bank then goes on).
+
+Two checks stand for these rules, both of the release before and not of this build against itself:
+- **Fixtures** (`server/tests/fixtures/snapshot-<release>.json.gz`): the snapshot each release
+  since the first with snapshots wrote for a world with one of every building the game has (277
+  groups, 6 machines that grow, floaters, generators, autocrafters...) and 4 players, made with
+  that release's own program on a new save with the buildings added (nothing of a real world).
+  `handoff::tests::the_snapshot_of_every_release_restores` restores each in this build, runs it
+  for a minute of game time and writes and reads it again. Make the fixture of a new release,
+  once, when it is out: `PCDS_TEST_DATA=... PCDS_FIXTURE_RELEASE=<its folder> PCDS_FIXTURE_OUT=
+  server/tests/fixtures/snapshot-vX.Y.Z.json.gz cargo test --release --test hot_update
+  make_the_snapshot_fixture_of_a_release -- --ignored`. A release that no longer reads a
+  fixture's format (FORMAT bumped twice) must have the test say so: it does for a format
+  older than the previous one. With `water_only` taken out again, it fails on the 0.6.0 fixture
+  with "missing field `water_only`".
+- **The gate** (`make gate`, `tools/flip-gate.sh`): the last published release that is not this
+  version runs a front and a bank on that world with 6 players, and this build's bank takes the
+  world over live (`hot_update::a_hot_update_from_the_release_before_works`, ignored by default
+  because it needs the download). It fails when the flip fails after the front accepted it, or a
+  player drops, or a building is lost; a release that declares it cannot (front protocol, tables
+  format, snapshot formats) is a restart by design and is printed. The last line says whether
+  the way back works live. The release workflow runs it before the tag's tarball is built
+  (`flip-gate` job): it needs game tables, which are not in the repository, as the secret
+  `PCDS_TEST_TABLES_URL` (a .tar.gz of a tables folder); without it the job and the release
+  fail, unless the repository variable `PCDS_FLIP_GATE` is `off`, which only warns. Run
+  `make gate` by hand before tagging either way.
+
 **The CLI.** `pcds upgrade [VERSION] [--restart] | --rollback | --check`. Running: through the
 admin API (`POST /api/update`, then `GET /api/update` until its outcome). `--restart` installs
 into the standby bank without the protocol check, makes it active and restarts the unit (the

@@ -104,10 +104,21 @@ fn banks(dir: &Path) -> PathBuf {
 }
 
 fn start(dir: &Path, data: &str, banks: &Path, releases: &str) -> Server {
+    start_with(Path::new(PCDS), dir, data, banks, releases, true)
+}
+
+/// A front of `program` (a release's or this build's) on the world in `dir`; `verify`:
+/// PCDS_FLIP_VERIFY, which compares a restored state with its own snapshot (only for banks of
+/// one build: a release before this one writes a state this build reads and adds to).
+fn start_with(program: &Path, dir: &Path, data: &str, banks: &Path, releases: &str, verify: bool) -> Server {
     let (admin, udp) = (free_port(), free_port());
     let log = dir.join("front.log");
     let out = std::fs::File::create(&log).unwrap();
-    let child = Command::new(PCDS)
+    let mut command = Command::new(program);
+    if verify {
+        command.env("PCDS_FLIP_VERIFY", "1");
+    }
+    let child = command
         .arg("serve")
         .arg(data)
         .arg(dir.join("world.json"))
@@ -118,7 +129,6 @@ fn start(dir: &Path, data: &str, banks: &Path, releases: &str) -> Server {
         .env("PCDS_BACKUPS", "0")
         .env("PCDS_BANKS", banks)
         .env("PCDS_RELEASES", releases)
-        .env("PCDS_FLIP_VERIFY", "1")
         .env("PCDS_TEST_FAULTS", "1")
         .env("PCDS_ENV_FILE", dir.join("server.env"))
         .env("PCDS_ACCESS", dir.join("access.json"))
@@ -497,6 +507,167 @@ fn the_world_stops_starts_and_another_one_runs() {
     assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
     let mut server = server;
     assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ---- the release before: what a hot update from the last release meets -----------------------
+//
+// Every flip above is between banks of this build, which write and read the same state. The first
+// real update (0.6.0 to 0.6.1) failed on a field the release before did not write
+// ("missing field water_only"), which only a state written by that release shows. These tests
+// run the release before: PCDS_PREVIOUS_RELEASE is the folder of its tarball (its pcds beside
+// libsteam_api.so; `make gate` fetches the last release that is not this version). They are
+// ignored, so a plain `cargo test` does not need a download; `make gate` runs them with
+// --ignored, where a missing release is a failure and not a skip.
+
+/// The program of the release before, from PCDS_PREVIOUS_RELEASE (a failure when it is not given).
+fn previous_release() -> PathBuf {
+    let dir = std::env::var("PCDS_PREVIOUS_RELEASE").unwrap_or_else(|_| panic!("PCDS_PREVIOUS_RELEASE: the folder of the previous release (its pcds in it): `make gate` fetches it"));
+    let program = Path::new(&dir).join("pcds");
+    assert!(program.is_file(), "no pcds in PCDS_PREVIOUS_RELEASE={dir}");
+    program
+}
+
+/// `save` (a new world) with one of every building the game has: every constructible group of
+/// the tables, in a field beside the start. A bank that loads it makes every kind of machine
+/// there is, so its snapshot holds the state of each (an algae generator among them). Nothing
+/// of a real world: the tables' own group names, on a new save. How many were placed.
+fn rich_world(save: &Path, data: &str) -> usize {
+    let gamedata: Value = serde_json::from_str(&std::fs::read_to_string(format!("{data}/gamedata.json")).unwrap()).unwrap();
+    let mut groups: Vec<String> = gamedata["assets"].as_object().unwrap().iter().filter(|(k, _)| k.starts_with("GroupDataConstructible:")).filter_map(|(_, v)| v["id"].as_str().map(str::to_string)).collect();
+    groups.sort();
+    // The game's save: sections divided by @, the world objects one of them (a gId in each), divided by |.
+    let text = std::fs::read_to_string(save).unwrap();
+    let mut sections: Vec<String> = text.split('@').map(str::to_string).collect();
+    let at = sections.iter().position(|s| s.contains("\"gId\"")).expect("a section of world objects");
+    let first: Value = serde_json::from_str(sections[at].split('|').next().unwrap().trim_start_matches('\u{feff}')).unwrap();
+    let planet = first["planet"].clone();
+    for (i, group) in groups.iter().enumerate() {
+        sections[at] += &format!("|{{\"id\":{},\"gId\":\"{group}\",\"pos\":\"{},20,{}\",\"rot\":\"0,0,0,1\",\"planet\":{planet}}}", 400_000_000 + i, 300 + (i % 17) * 30, 300 + (i / 17) * 30);
+    }
+    std::fs::write(save, sections.join("@")).unwrap();
+    groups.len()
+}
+
+/// Banks a and b made of two programs (their bank-info as bank.json), a the active one.
+fn banks_of(dir: &Path, a: &Path, b: &Path) -> PathBuf {
+    let banks = dir.join("bin");
+    for (bank, program) in [("a", a), ("b", b)] {
+        std::fs::create_dir_all(banks.join(bank)).unwrap();
+        std::os::unix::fs::symlink(program, banks.join(bank).join("pcds")).unwrap();
+        let info = Command::new(program).arg("bank-info").output().unwrap();
+        assert!(info.status.success(), "{} bank-info", program.display());
+        std::fs::write(banks.join(bank).join("bank.json"), info.stdout).unwrap();
+    }
+    std::fs::write(banks.join("active"), "a\n").unwrap();
+    banks
+}
+
+fn rich_dir(name: &str, data: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("pcds-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(Command::new(PCDS).arg("new-save").arg(dir.join("world.json")).arg(data).stdout(Stdio::null()).status().unwrap().success());
+    let placed = rich_world(&dir.join("world.json"), data);
+    assert!(placed > 200, "{placed} groups placed");
+    dir
+}
+
+/// The release before runs a world with one of every building and players; this build's bank
+/// takes the world over from it, live: the restore works, the players stay, the world goes on.
+/// A release that declares it cannot (front protocol, game tables, snapshot formats it does not
+/// read) is told so by the front before anything stops: that is a restart by design, and
+/// said here, not a failure.
+#[test]
+#[ignore = "needs the release before: make gate"]
+fn a_hot_update_from_the_release_before_works() {
+    let Some(data) = tables() else { panic!("PCDS_TEST_DATA=none: the gate needs game tables") };
+    let previous = previous_release();
+    let dir = rich_dir("previous-release", &data);
+    // The build the world is handed to: this one (PCDS_GATE_CANDIDATE: another program, to see
+    // that the gate fails for a release that cannot take the release before's world).
+    let candidate = std::env::var("PCDS_GATE_CANDIDATE").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(PCDS));
+    let version = |program: &Path| serde_json::from_slice::<Value>(&Command::new(program).arg("bank-info").output().unwrap().stdout).unwrap()["version"].clone();
+    let banks = banks_of(&dir, &previous, &candidate);
+    let before = Command::new(&previous).arg("bank-info").output().unwrap();
+    let before: Value = serde_json::from_slice(&before.stdout).unwrap();
+    // The front is the release before too: what runs on a server when its owner updates.
+    let server = start_with(&previous, &dir, &data, &banks, "http://127.0.0.1:9/releases", false);
+    assert_eq!(server.live()["version"], before["version"], "the release before runs the world");
+    let players = load(&server, &data, 6, 30);
+    std::thread::sleep(Duration::from_secs(8));
+    let (_, status) = server.api("GET", "/api/status", json!({}));
+    let objects = status["objects"]["world"].as_u64().unwrap();
+    assert!(objects > 250, "one of every building is in the world: {}", status["objects"]);
+    let done = server.update(json!({"rollback": true}));
+    let message = done["message"].as_str().unwrap_or("");
+    if done["ok"] == false && ["front restart", "game tables of format", "needs a restart"].iter().any(|w| message.contains(w)) {
+        println!("gate: this build declares it cannot take over the world of pcds {} live (a restart by design): {message}", before["version"]);
+        let _ = finish(players);
+        std::fs::remove_dir_all(&dir).unwrap();
+        return;
+    }
+    assert_eq!(done["ok"], true, "the flip from pcds {} into this build failed: {done}\n{}", before["version"], server.log());
+    assert_eq!(server.live()["version"], version(&candidate), "this build runs the world");
+    let (ok, said) = finish(players);
+    assert!(ok, "every player stayed connected through the flip:\n{said}\n{}", server.log());
+    let (_, status) = server.api("GET", "/api/status", json!({}));
+    assert!(status["objects"]["world"].as_u64().unwrap() >= objects, "no building lost in the flip: {} before, {}", objects, status["objects"]);
+    // The world saves from its new bank, and goes on.
+    assert_eq!(server.api("POST", "/api/save", json!({})).0, 200, "{}", server.log());
+    let log = server.log();
+    assert!(!log.contains("restore failed") && !log.contains("panicked"), "{log}");
+    // And back, which is a rollback of the update just made: said, not asserted (a release that
+    // adds a field to the state cannot be handed a world written without it live; the old bank
+    // then goes on, and the way back is --rollback --restart).
+    let back = server.update(json!({"rollback": true}));
+    println!("gate: and back into pcds {}: {}", before["version"], if back["ok"] == true { "live".to_string() } else { back["message"].to_string() });
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    println!("gate: pcds {} -> pcds {}, {objects} world objects, the world stood {} ms", before["version"], version(&candidate), done["stoodMs"]);
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Makes the fixture of a release: the state its bank writes for the world with one of every
+/// building, kept as server/tests/fixtures/snapshot-<release>.json.gz and restored by
+/// handoff::tests::the_snapshot_of_every_release_restores. PCDS_FIXTURE_RELEASE: its folder;
+/// PCDS_FIXTURE_OUT: the file. Both banks are that release; a flip makes its snapshot, the
+/// bank that took it is killed, and the stop keeps the last snapshot beside the save
+/// (docs/hot-update.md, "a crash"). 4 players are in it.
+#[test]
+#[ignore = "run by hand to make a fixture: docs/hot-update.md, The release before"]
+fn make_the_snapshot_fixture_of_a_release() {
+    let Some(data) = tables() else { panic!("PCDS_TEST_DATA=none: a fixture needs game tables") };
+    let program = std::env::var("PCDS_FIXTURE_RELEASE").map(|d| Path::new(&d).join("pcds")).expect("PCDS_FIXTURE_RELEASE: the folder of the release");
+    let out = PathBuf::from(std::env::var("PCDS_FIXTURE_OUT").expect("PCDS_FIXTURE_OUT: the .json.gz to write"));
+    let dir = rich_dir("fixture", &data);
+    let banks = banks_of(&dir, &program, &program);
+    let server = start_with(&program, &dir, &data, &banks, "http://127.0.0.1:9/releases", false);
+    let players = load(&server, &data, 4, 25);
+    std::thread::sleep(Duration::from_secs(10));
+    assert_eq!(server.update(json!({"rollback": true}))["ok"], true, "{}", server.log());
+    std::thread::sleep(Duration::from_secs(2));
+    let pid = server.live()["pid"].as_u64().unwrap();
+    // SAFETY: the live bank of the front this test started, by the pid that front reports.
+    assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGKILL) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !server.log().contains("restarting bank") {
+        assert!(Instant::now() < deadline, "no restart\n{}", server.log());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    server.child.wait().unwrap();
+    let _ = finish(players);
+    let snapshot = std::fs::read(dir.join("world.json.snapshot")).expect("the snapshot kept beside the save");
+    let head: Value = serde_json::from_slice(snapshot.split(|b| *b == b'\n').next().unwrap()).unwrap();
+    println!("fixture: format {} on game {}, {} bytes", head["format"], head["game_version"], snapshot.len());
+    let mut gzip = Command::new("gzip").args(["-9", "-n", "-c"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    gzip.stdin.take().unwrap().write_all(&snapshot).unwrap();
+    std::fs::write(&out, gzip.wait_with_output().unwrap().stdout).unwrap();
     drop(server);
     std::fs::remove_dir_all(&dir).unwrap();
 }
