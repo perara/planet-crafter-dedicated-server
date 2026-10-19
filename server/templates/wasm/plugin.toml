@@ -1,0 +1,22 @@
+[plugin]
+id = "{id}"
+name = "{id}"
+version = "0.1.0"
+description = "What this plugin does, in one sentence"
+authors = ["You"]
+license = "MIT"
+kind = "wasm"
+# What `cargo build --release` writes (see .cargo/config.toml); `pcds plugin install .` copies it.
+entry = "target/wasm32-unknown-unknown/release/{crate}.wasm"
+abi = 1
+# Ask for what you use and nothing more: the admin sees this list and approves it.
+capabilities = ["event.chat", "chat.say"]
+
+# The budget you ask for; the server has maxima, and the admin may lower them.
+[budget]
+fuel_per_event = 500000
+
+# Chat commands: !hello in the chat is delivered to this plugin.
+[[command]]
+name = "hello"
+help = "says hello"

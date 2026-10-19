@@ -234,3 +234,81 @@ fn bad_settings_stop_the_start() {
     assert!(text(&out).contains("PCDS_BACKUPS: \"lots\""), "{}", text(&out));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `pcds plugin ARGS` in the folder `cwd`, in the installation dir/run.
+fn plugin(dir: &Path, cwd: &Path, args: &[&str]) -> Output {
+    let mut cmd = Command::new(PCDS);
+    cmd.arg("plugin").args(args).current_dir(cwd).env("PCDS_HOME", dir.join("run")).env("HOME", dir.join("home")).env_remove("XDG_CONFIG_HOME").env_remove("PCDS_CONTAINER").env_remove("PCDS_UNIT");
+    for _ in 0..100 {
+        match cmd.output() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => std::thread::sleep(std::time::Duration::from_millis(20)),
+            out => return out.unwrap(),
+        }
+    }
+    panic!("text file busy")
+}
+
+#[test]
+fn a_plugin_is_made_checked_installed_approved_and_listed_without_a_server() {
+    let dir = test_dir("plugin");
+    let work = dir.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    let out = plugin(&dir, &work, &["new", "demo", "--kind", "data"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(work.join("demo/plugin.toml").is_file() && work.join("demo/rules.toml").is_file());
+    let out = plugin(&dir, &work, &["check", "demo"]);
+    assert!(out.status.success() && text(&out).contains("command sample: ok"), "{}", text(&out));
+    // From inside the folder, as the guide does.
+    let out = plugin(&dir, &work.join("demo"), &["check", "."]);
+    assert!(out.status.success() && text(&out).contains("command sample: ok"), "{}", text(&out));
+    let out = plugin(&dir, &work, &["install", "demo"]);
+    assert!(out.status.success() && text(&out).contains("it does nothing until you approve it"), "{}", text(&out));
+    assert!(dir.join("run/plugins/demo/plugin.toml").is_file() && !dir.join("run/plugins/approved.json").exists());
+    // Installed twice needs --force; listed as waiting for approval.
+    assert!(!plugin(&dir, &work, &["install", "demo"]).status.success());
+    let out = plugin(&dir, &work, &["list"]);
+    assert!(text(&out).contains("demo") && text(&out).contains("pending"), "{}", text(&out));
+    // Approving needs an answer: no terminal here, so --yes.
+    let out = plugin(&dir, &work, &["enable", "demo"]);
+    assert!(!out.status.success() && text(&out).contains("--yes"), "{}", text(&out));
+    let out = plugin(&dir, &work, &["enable", "demo", "--grant", "player.kick", "--yes"]);
+    assert!(!out.status.success() && text(&out).contains("does not ask for player.kick"), "{}", text(&out));
+    let out = plugin(&dir, &work, &["enable", "demo", "--yes"]);
+    assert!(out.status.success() && text(&out).contains("grant: chat.say"), "{}", text(&out));
+    assert!(text(&plugin(&dir, &work, &["list"])).contains("running"));
+    // A file changed after the approval waits for the admin again.
+    std::fs::write(dir.join("run/plugins/demo/rules.toml"), "[[command]]\nname = \"hello\"\nreply = \"changed\"\n").unwrap();
+    assert!(text(&plugin(&dir, &work, &["list"])).contains("changed"));
+    assert!(plugin(&dir, &work, &["enable", "demo", "--yes"]).status.success());
+    assert!(plugin(&dir, &work, &["disable", "demo"]).status.success());
+    assert!(text(&plugin(&dir, &work, &["list"])).contains("disabled"));
+    // A plugin that does not pass the check is not installed.
+    std::fs::write(work.join("demo/rules.toml"), "[[command]]\nname = \"x\"\nreply = \"{nope}\"\n").unwrap();
+    let out = plugin(&dir, &work, &["check", "demo"]);
+    assert!(!out.status.success() && text(&out).contains("{nope} is not a variable"), "{}", text(&out));
+    assert!(!plugin(&dir, &work, &["install", "demo", "--force"]).status.success());
+}
+
+#[test]
+fn the_wasm_template_builds_against_the_api_crate() {
+    let dir = test_dir("plugin-template");
+    let work = dir.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    let api = Path::new(env!("CARGO_MANIFEST_DIR")).join("../plugin-api");
+    let out = plugin(&dir, &work, &["new", "my-plugin", "--api-path", api.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out));
+    let made = work.join("my-plugin");
+    for f in ["Cargo.toml", "plugin.toml", "src/lib.rs", ".cargo/config.toml", "README.md"] {
+        assert!(made.join(f).is_file(), "{f}");
+    }
+    let toml = std::fs::read_to_string(made.join("Cargo.toml")).unwrap();
+    assert!(toml.contains("name = \"my_plugin\"") && toml.contains("pcds-plugin-api = { path = "), "{toml}");
+    // The template compiles (for this machine: the wasm target is not needed to know it is right).
+    std::fs::remove_dir_all(made.join(".cargo")).unwrap();
+    let check = Command::new("cargo").args(["check", "--offline", "--manifest-path"]).arg(made.join("Cargo.toml")).env("CARGO_TARGET_DIR", dir.join("target")).output().unwrap();
+    assert!(check.status.success(), "{}", text(&check));
+    // The id must be one.
+    assert!(!plugin(&dir, &work, &["new", "Bad Name"]).status.success());
+}

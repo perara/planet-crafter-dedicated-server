@@ -148,6 +148,7 @@ module cli  cli::tests::options_of_extract_and_update cli::tests::sizes_read_lik
 module cli::api  cli::api::tests::http_answers_are_read_by_their_length cli::api::tests::requests_go_to_127_0_0_1_with_the_token cli::api::tests::rule_arguments_become_a_merge_patch cli::api::tests::status_reads_as_a_few_lines
 module cli::env  cli::env::tests::a_setting_is_changed_by_replacing_the_file cli::env::tests::settings_are_read_and_edited_line_by_line cli::env::tests::the_build_id_is_a_hash_of_the_game_code cli::env::tests::world_names
 untested cli::extract  pcds extract: native::tables::read_game into run/data/<version> under a lock; the reading itself is checked by native::tables::tests::read_game_writes_the_test_tables (by hand)
+module cli::plugin cli::a_plugin_is_made_checked_installed_approved_and_listed_without_a_server cli::the_wasm_template_builds_against_the_api_crate  # pcds plugin
 module cli::setup  cli::setup::tests::builds_go_into_the_standby_bank_once cli::setup::tests::the_banks_of_a_front_that_ended_get_to_save_first cli::setup::tests::the_current_world_is_not_copied_over_itself
 module cli::steam  cli::steam::tests::every_steam_root_is_looked_in cli::steam::tests::the_library_that_lists_the_game
 module cli::systemd  cli::systemd::tests::a_stopped_server_stays_stopped_after_an_update cli::systemd::tests::starting_and_stopping_count_as_running cli::systemd::tests::the_units_run_the_installed_program cli::systemd::tests::unit_values_are_escaped cli::systemd::tests::units_of_another_installation_are_left_alone
@@ -213,7 +214,9 @@ untested probe  pcds probe, a scripted player for a live host: compared by hand 
 module plugins plugins::tests::a_plugin_that_loops_forever_is_stopped_by_its_fuel_and_the_host_goes_on plugins::tests::five_faults_in_a_minute_switch_the_plugin_off_until_it_is_reloaded plugins::tests::a_crashed_plugin_restarts_from_its_last_checkpoint plugins::tests::commands_go_to_their_owner_only_and_a_second_claim_is_told plugins::tests::state_survives_a_hot_update_a_crash_and_a_restart  # the plugin host
 module plugins::actions plugins::actions::tests::a_plugin_can_not_reach_the_rules_that_run_code_or_choose_players plugins::data::tests::commands_joins_announcements_and_rule_changes_act
 module plugins::admin plugins::tests::the_admin_json_shows_what_was_asked_what_was_granted_and_what_went_wrong
-module plugins::approvals plugins::tests::a_changed_file_waits_for_the_admin_again plugins::tests::capabilities_are_enforced_at_the_call_and_at_the_events
+module plugins::approvals plugins::tests::a_changed_file_waits_for_the_admin_again plugins::tests::capabilities_are_enforced_at_the_call_and_at_the_events plugins::tests::an_installed_folder_is_named_for_the_plugin_id_and_a_source_folder_may_be_named_as_it_likes
+module plugins::check cli::a_plugin_is_made_checked_installed_approved_and_listed_without_a_server
+manual plugins::cost plugins::cost::events_per_second plugins::cost::start_cost plugins::cost::zero_plugins_cost_nothing plugins::cost::tick_cost_on_a_real_world  # make plugin-bench
 module plugins::ctx plugins::ctx::tests::capabilities_gate_every_call_and_actions_wait_in_the_queue plugins::ctx::tests::the_queue_and_the_log_are_bounded_and_text_is_cleaned plugins::tests::actions_are_bounded_per_call_and_applied_after_it
 module plugins::data plugins::data::tests::a_rules_file_says_what_it_needs plugins::data::tests::commands_joins_announcements_and_rule_changes_act plugins::data::tests::mistakes_in_a_rules_file_are_named
 module plugins::limits plugins::tests::a_crowd_of_plugins_cannot_stretch_a_tick_and_takes_turns plugins::tests::memory_is_limited_and_a_module_that_asks_for_too_much_does_not_start plugins::tests::the_flip_budget_leaves_a_slow_saver_with_its_last_state

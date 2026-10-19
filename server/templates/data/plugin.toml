@@ -1,0 +1,12 @@
+[plugin]
+id = "{id}"
+name = "{id}"
+version = "0.1.0"
+description = "What this plugin does, in one sentence"
+authors = ["You"]
+license = "MIT"
+kind = "data"
+entry = "rules.toml"
+abi = 1
+# What rules.toml needs: `pcds plugin check .` tells when this list and the file disagree.
+capabilities = ["event.chat", "event.player", "chat.say"]

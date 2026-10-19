@@ -228,6 +228,26 @@ fn capabilities_are_enforced_at_the_call_and_at_the_events() {
 }
 
 #[test]
+fn an_installed_folder_is_named_for_the_plugin_id_and_a_source_folder_may_be_named_as_it_likes() {
+    let dir = fresh_dir("name");
+    install(&dir, "right", &module("(i32.const 0)", ""), &CHAT_SAY, SUBSCRIBE_CHAT, None);
+    // As a source folder it is fine, whatever it is called (pcds plugin check .).
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::copy(dir.join("right/plugin.toml"), dir.join("src/plugin.toml")).unwrap();
+    std::fs::copy(dir.join("right/plugin.wasm"), dir.join("src/plugin.wasm")).unwrap();
+    // (The check has its say about the imports of this test module, which the manifest does not ask for; not about the name.)
+    let report = check::check_folder(&dir.join("src"), None);
+    assert!(report.errors.iter().all(|e| !e.contains("folder")) && report.errors.iter().any(|e| e.contains("needs world.read")), "{:?}", report.errors);
+    assert_eq!(read_folder(&dir.join("src")).id, "right");
+    std::fs::remove_dir_all(dir.join("src")).unwrap();
+    // Installed under another name it is not run, and says why.
+    std::fs::rename(dir.join("right"), dir.join("wrong")).unwrap();
+    let host = boot(&dir);
+    assert!(matches!(&host.plugins[0].status, Status::Invalid(why) if why.contains("the folder is wrong but the manifest's id is right")), "{:?}", host.plugins[0].status);
+    assert!(host.plugins[0].id == "wrong" && host.interest == 0);
+}
+
+#[test]
 fn a_changed_file_waits_for_the_admin_again() {
     let dir = fresh_dir("digest");
     install(&dir, "p", &module("(i32.const 0)", ""), &CHAT_SAY, SUBSCRIBE_CHAT, None);

@@ -1,0 +1,21 @@
+[package]
+name = "{crate}"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Its own build, not part of any other workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+pcds-plugin-api = { {api} }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

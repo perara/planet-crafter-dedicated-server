@@ -6,6 +6,7 @@
 #   make test        the tests (PCDS_TEST_DATA: game tables to test on, else run/data/2.103)
 #   make bench       the tick benchmark: make bench SAVE=run/worlds/world.json [PLAYERS=4]
 #                    (PCDS_BENCH_SECONDS: the game time it runs, default 300)
+#   make plugin-bench  what plugins cost (needs the game tables; PCDS_BENCH_SAVE adds the tick cost on a world)
 #   make lint        clippy and shellcheck
 #   make docker      the Docker image (IMAGE=...)
 #   make dist        the release tarball, as the release workflow makes it (VERSION=vX.Y.Z)
@@ -24,7 +25,7 @@ IMAGE ?= planet-crafter-dedicated-server
 SAVE ?= run/worlds/world.json
 PLAYERS ?= 4
 
-.PHONY: build install test bench lint docker dist clean
+.PHONY: build install test bench plugin-bench lint docker dist clean
 
 # The program finds libsteam_api.so next to itself; copied then renamed, so a running copy keeps its own.
 build:
@@ -43,6 +44,10 @@ test: build
 bench: build
 	LD_LIBRARY_PATH="$(STEAM_LIB_DIR)" PCDS_BENCH_SAVE=$(abspath $(SAVE)) PCDS_RNG_SEED=1 PCDS_BENCH_PLAYERS=$(PLAYERS) \
 	  $(LIMIT) cargo test $(MANIFEST) --release --locked bench -- --ignored --nocapture
+
+plugin-bench: build
+	LD_LIBRARY_PATH="$(STEAM_LIB_DIR)" PCDS_BENCH_SAVE=$(abspath $(SAVE)) PCDS_RNG_SEED=1 \
+	  $(LIMIT) cargo test $(MANIFEST) --release --locked plugins::cost -- --ignored --nocapture --test-threads=1
 
 lint:
 	$(LIMIT) cargo clippy $(MANIFEST) --release --locked

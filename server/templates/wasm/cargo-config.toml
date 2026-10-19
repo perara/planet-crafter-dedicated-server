@@ -1,0 +1,3 @@
+# `cargo build --release` builds for WebAssembly. One time: rustup target add wasm32-unknown-unknown
+[build]
+target = "wasm32-unknown-unknown"

@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 pub mod actions;
 pub mod admin;
 pub mod approvals;
+pub mod check;
 pub mod ctx;
 mod data;
 pub mod limits;
@@ -41,6 +42,8 @@ pub mod stream;
 mod view;
 mod wasm;
 
+#[cfg(test)]
+mod cost;
 #[cfg(test)]
 mod tests;
 
