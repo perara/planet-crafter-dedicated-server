@@ -421,6 +421,9 @@ pub fn default_color_instantiated(game: &mut Game, wo: i32) {
 
 pub fn default_colors_tick(game: &mut Game) {
     let now = game.time;
+    if game.ext.default_colors.pending.iter().all(|(t, _)| *t > now) {
+        return;
+    }
     let (due, pending): (Vec<_>, Vec<_>) = std::mem::take(&mut game.ext.default_colors.pending).into_iter().partition(|(t, _)| *t <= now);
     game.ext.default_colors.pending = pending;
     for (_, wo) in due {

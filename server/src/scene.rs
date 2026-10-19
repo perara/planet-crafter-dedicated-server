@@ -123,10 +123,15 @@ pub fn player_count_changed(game: &mut Game) {
 
 pub fn tick(game: &mut Game) {
     let now = game.time;
+    // Nothing due (nearly every tick): the list stays as it is, no new one is made.
     let due: Vec<Timer> = section!("timers", {
-        let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut game.timers.0).into_iter().partition(|(t, _)| *t <= now);
-        game.timers.0 = waiting;
-        ready.into_iter().map(|(_, t)| t).collect()
+        if game.timers.0.iter().all(|(t, _)| *t > now) {
+            Vec::new()
+        } else {
+            let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut game.timers.0).into_iter().partition(|(t, _)| *t <= now);
+            game.timers.0 = waiting;
+            ready.into_iter().map(|(_, t)| t).collect()
+        }
     });
     for timer in due {
         match timer {
