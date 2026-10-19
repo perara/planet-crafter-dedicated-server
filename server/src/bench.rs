@@ -419,6 +419,62 @@ fn rss_kib() -> u64 {
     std::fs::read_to_string("/proc/self/statm").ok().and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok()).unwrap_or(0) * 4
 }
 
+/// Bytes malloc has handed out and not had back (glibc's mallinfo2): what the program holds,
+/// not what the process keeps resident after a free.
+fn heap_bytes() -> u64 {
+    // SAFETY: mallinfo2 only reads malloc's counters.
+    let m = unsafe { libc::mallinfo2() };
+    (m.uordblks + m.hblkhd) as u64
+}
+
+/// The memory each of the tables takes (PCDS_TEST_DATA), and what a start's load leaves of
+/// them: `cargo test --release tables_memory -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn tables_memory() {
+    let Some(dir) = crate::test_data() else { return };
+    let mib = |b: u64| format!("{:.1} MiB", b as f64 / 1048576.0);
+    let (start, t) = (heap_bytes(), Instant::now());
+    let net_data = crate::data::NetData::load(&format!("{dir}/netdata.json")).unwrap();
+    let after_net = heap_bytes();
+    let spec = crate::rpcspec::Spec::load(&format!("{dir}/rpcs.json")).unwrap();
+    let after_spec = heap_bytes();
+    let t_game = Instant::now();
+    let data = crate::gamedata::GameData::load(&format!("{dir}/gamedata.json")).unwrap();
+    let after_game = heap_bytes();
+    let t_scenes = Instant::now();
+    let scenes = crate::scene_tables(dir, &net_data, &data);
+    let after_scenes = heap_bytes();
+    println!(
+        "tables: netdata {} ({:?} with rpcs), rpcs {}, gamedata {} ({:?}), scenes {} ({:?}); total {}, rss {} MiB",
+        mib(after_net - start),
+        t_game.duration_since(t),
+        mib(after_spec - after_net),
+        mib(after_game - after_spec),
+        t_scenes.duration_since(t_game),
+        mib(after_scenes - after_game),
+        t_scenes.elapsed(),
+        mib(after_scenes - start),
+        rss_kib() >> 10
+    );
+    drop((spec, scenes));
+    // What each part of the game data holds: the heap before and after it is dropped.
+    let mut data = data;
+    let mut parts = Vec::new();
+    let mut measure = |name: &str, drop_it: &mut dyn FnMut()| {
+        let before = heap_bytes();
+        drop_it();
+        parts.push(format!("{name} {}", mib(before.saturating_sub(heap_bytes()))));
+    };
+    measure("layouts", &mut || data.layouts = Default::default());
+    measure("assets", &mut || data.assets = Default::default());
+    measure("group_prefabs", &mut || data.group_prefabs = Default::default());
+    measure("panels", &mut || data.panels = Default::default());
+    measure("singletons", &mut || data.singletons = Default::default());
+    measure("group fields", &mut || data.groups.iter_mut().for_each(|g| g.fields = Default::default()));
+    println!("tables: gamedata by part: {}; left {}", parts.join(", "), mib(heap_bytes().saturating_sub(start)));
+}
+
 /// Load, save and memory of a world of any size (PCDS_BENCH_SAVE): the times of each step of a
 /// start and of an autosave, and the memory they leave. `cargo test --release scale -- --ignored --nocapture`.
 #[test]
@@ -430,10 +486,10 @@ fn scale() {
     let tables_rss = rss_kib();
     let t = Instant::now();
     let save = SaveFile::load(&e.path).unwrap();
-    println!("scale: tables {} MiB; read+parse save {:?}, {} objects", tables_rss >> 10, t.elapsed(), save.objects.len());
+    println!("scale: heap after tables {} MiB; tables {} MiB rss; read+parse save {:?}, {} objects", heap_bytes() >> 20, tables_rss >> 10, t.elapsed(), save.objects.len());
     let t = Instant::now();
     let mut g = Game::with_clock(net_data, data, spec, save, scenes, Some(0.0));
-    println!("scale: Game::new {:?}, {} world objects, {} network objects, rss {} MiB (+{} MiB)", t.elapsed(), g.wos.len(), g.net.objects.len(), rss_kib() >> 10, (rss_kib() - tables_rss) >> 10);
+    println!("scale: Game::new {:?}, {} world objects, {} network objects, rss {} MiB (+{} MiB), heap {} MiB", t.elapsed(), g.wos.len(), g.net.objects.len(), rss_kib() >> 10, (rss_kib() - tables_rss) >> 10, heap_bytes() >> 20);
     let t = Instant::now();
     let snapshot = g.snapshot();
     let took = t.elapsed();
@@ -463,5 +519,27 @@ fn scale() {
     let t = Instant::now();
     let h = crate::handoff::snapshot(&g).unwrap();
     println!("scale: handoff snapshot {:?}, {} bytes", t.elapsed(), h.len());
+    println!("scale: prefabs parsed (of all): {:?}", g.data.group_prefabs.parsed());
+    // What each part of the game holds: the heap before and after it is dropped (last: the rest
+    // of the game is not whole after it).
+    let mut parts = Vec::new();
+    let mut measure = |name: &str, drop_it: &mut dyn FnMut()| {
+        let before = heap_bytes();
+        drop_it();
+        parts.push(format!("{name} {:.1}", before.saturating_sub(heap_bytes()) as f64 / 1048576.0));
+    };
+    let (wos, net, invs, holders) = (g.wos.len(), g.net.objects.len(), g.inventories.len(), g.holders.len());
+    measure("net.objects", &mut || drop(std::mem::take(&mut g.net.objects)));
+    measure("wos", &mut || drop(std::mem::take(&mut g.wos)));
+    measure("inventories", &mut || drop(std::mem::take(&mut g.inventories)));
+    measure("holders", &mut || g.holders = Default::default());
+    measure("constructed+pickables", &mut || {
+        g.constructed = Default::default();
+        g.pickables = Default::default();
+    });
+    measure("timers", &mut || g.timers = Default::default());
+    measure("ext", &mut || g.ext = Default::default());
+    measure("units", &mut || g.units = Default::default());
+    println!("scale: heap MiB by part ({wos} world objects, {net} network objects, {invs} inventories, {holders} holders): {}", parts.join(", "));
     std::fs::remove_dir_all(dir).ok();
 }

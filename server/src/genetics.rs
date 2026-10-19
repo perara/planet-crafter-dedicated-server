@@ -31,7 +31,7 @@ pub fn trait_value(_game: &Game, w: &WorldObject) -> i32 {
 
 /// GetRandomGeneticTraitWithRarity, applied to a new trait object.
 pub fn randomize_trait(game: &mut Game, wo: &mut WorldObject) {
-    let lootable: Vec<Value> = game.data.assets.iter().filter(|(k, v)| k.starts_with("GeneticTraitData:") && v["canBeLooted"].as_bool() == Some(true)).map(|(_, v)| v.clone()).collect();
+    let lootable: Vec<Value> = game.data.assets.iter().filter(|(k, v)| k.starts_with("GeneticTraitData:") && v["canBeLooted"].as_bool() == Some(true)).map(|(_, v)| (**v).clone()).collect();
     if lootable.is_empty() {
         return;
     }
