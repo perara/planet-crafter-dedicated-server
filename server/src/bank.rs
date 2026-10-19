@@ -537,7 +537,11 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
             }
         }
         ("POST", "/api/unban") => match field("value") {
-            Some(v) => kept(game.access.unban(&v)),
+            Some(v) => match game.access.unban(&v) {
+                Ok(true) => ok(),
+                Ok(false) => (400, json!({"error": format!("{v} is not banned (the bans: GET /api/status, access; a range is unbanned by its own entry)")}).to_string()),
+                Err(e) => (500, json!({"error": e}).to_string()),
+            },
             None => (400, "{\"error\":\"'value' is required\"}".into()),
         },
         ("POST", "/api/access") => {
@@ -1073,6 +1077,19 @@ mod tests {
             assert!(status == 400 && answer["error"].as_str().unwrap().contains("whole number"), "{bad}: {status} {answer}");
         }
         assert_eq!(autosave, crate::MAX_AUTOSAVE);
+    }
+
+    #[test]
+    fn unbanning_what_is_not_banned_is_said() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let mut autosave = 5;
+        game.access.ban("Mallory", None, Some("10.9.9.9")).unwrap();
+        let (status, answer) = call(&mut game, "POST", "/api/unban", json!({"value": "Mellory"}), &mut autosave);
+        assert!(status == 400 && answer["error"].as_str().unwrap().contains("Mellory is not banned"), "{status} {answer}");
+        assert_eq!(game.access.lists.banned_names, ["Mallory"]);
+        assert_eq!(call(&mut game, "POST", "/api/unban", json!({"value": " mallory "}), &mut autosave).0, 200);
+        assert_eq!(call(&mut game, "POST", "/api/unban", json!({"value": "10.9.9.9"}), &mut autosave).0, 200);
+        assert!(game.access.lists.banned_names.is_empty() && game.access.lists.banned_ips.is_empty());
     }
 
     #[test]

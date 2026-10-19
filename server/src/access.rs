@@ -149,11 +149,17 @@ impl Access {
         self.save(Lists { banned_names: clean(names), banned_ips: clean(ips), ..self.lists.clone() })
     }
 
-    pub fn unban(&mut self, value: &str) -> Result<(), String> {
+    /// Removes a name, SteamID or IP from the bans; whether there was one to remove (nothing is
+    /// written when there was not).
+    pub fn unban(&mut self, value: &str) -> Result<bool, String> {
         let mut lists = self.lists.clone();
         lists.banned_names.retain(|n| !n.eq_ignore_ascii_case(value));
         lists.banned_ips.retain(|ip| ip != value);
-        self.save(lists)
+        let found = lists.banned_names.len() + lists.banned_ips.len() < self.lists.banned_names.len() + self.lists.banned_ips.len();
+        if found {
+            self.save(lists)?;
+        }
+        Ok(found)
     }
 }
 
@@ -184,8 +190,8 @@ mod tests {
         assert!(!a.name_allowed("Someone", None));
         a.ban("Alice", None, Some("10.1.2.3")).unwrap();
         assert!(!a.name_allowed("Alice", None) && !a.ip_allowed("10.1.2.3"));
-        a.unban("Alice").unwrap();
-        a.unban("10.1.2.3").unwrap();
+        assert!(a.unban("Alice").unwrap() && a.unban("10.1.2.3").unwrap());
+        assert!(!a.unban("Alice").unwrap(), "nothing left to remove");
         assert!(a.name_allowed("Alice", None) && a.ip_allowed("10.1.2.3"));
     }
 
