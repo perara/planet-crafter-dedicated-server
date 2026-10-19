@@ -6,6 +6,8 @@
 #
 #   both   the reference and this server at once: NAME.ref.jsonl, NAME.ours.jsonl, NAME.diff,
 #          NAME.savediff, NAME.ref.player.log (the game's log), NAME.ours.log
+#   ours   only this server, against the reference's transcript and save already in OUT_DIR
+#          (after a fix: no game host is started; the same files as `both`, with a new .ours.*)
 #   ref2   the reference once more: NAME.ref2.jsonl, NAME.noise (two runs of the game against each
 #          other: its own randomness and timing), NAME.savenoise
 #
@@ -16,7 +18,7 @@
 # the reference's host record), PCDS (default: this checkout's release build). Ports
 # REF_PORT (7951), REF_API (7952) and OURS_PORT (7953). One reference at a time: it is heavy.
 set -u
-[[ $# -ge 3 ]] || { sed -n '2,18p' "$0"; exit 2; }
+[[ $# -ge 3 ]] || { sed -n '2,20p' "$0"; exit 2; }
 mode=$1 out=$2; shift 2
 here=$(cd "$(dirname "$0")" && pwd)
 : "${REF_DIR:?}" "${DATA_DIR:?}" "${START:?}"
@@ -85,8 +87,12 @@ for script in "$@"; do
   name=$(basename "$script" .json); name=${name%.A}
   base=$out/$name
   echo "== $name $mode $(date +%T)"
-  ref_start
-  if [[ $mode == both ]]; then
+  [[ $mode == ours ]] || ref_start
+  if [[ $mode == ours ]]; then
+    ours_start
+    probe "$OURS_PORT" "$script" "$base" ours
+    ours_stop; cp "$out/ours/world.json" "$base.ours.save.json"; cp "$out/ours/server.log" "$base.ours.log"
+  elif [[ $mode == both ]]; then
     ours_start
     probe "$REF_PORT" "$script" "$base" ref & pr=$!
     probe "$OURS_PORT" "$script" "$base" ours
@@ -95,12 +101,14 @@ for script in "$@"; do
   else
     probe "$REF_PORT" "$script" "$base" ref2
   fi
-  sfx=$([[ $mode == both ]] && echo ref || echo ref2)
-  cp "$REF_DIR/player.log" "$base.$sfx.player.log"
-  api POST /api/save "" 120 > /dev/null; cp "$SAVES/Parity-1.json" "$base.$sfx.save.json"
-  ref_stop
+  if [[ $mode != ours ]]; then
+    sfx=$([[ $mode == both ]] && echo ref || echo ref2)
+    cp "$REF_DIR/player.log" "$base.$sfx.player.log"
+    api POST /api/save "" 120 > /dev/null; cp "$SAVES/Parity-1.json" "$base.$sfx.save.json"
+    ref_stop
+  fi
   for p in "" .A .B; do
-    if [[ $mode == both && -f $base$p.ours.jsonl ]]; then
+    if [[ $mode != ref2 && -f $base$p.ours.jsonl ]]; then
       python3 "$here/parity.py" "$DATA_DIR" "$START" "$base$p.ref.jsonl" "$base$p.ours.jsonl" > "$base$p.diff" 2>&1
       echo "   $name$p: $(tail -1 "$base$p.diff")"
     elif [[ $mode == ref2 && -f $base$p.ref2.jsonl ]]; then
@@ -108,7 +116,7 @@ for script in "$@"; do
       echo "   $name$p noise: $(tail -1 "$base$p.noise")"
     fi
   done
-  if [[ $mode == both ]]; then
+  if [[ $mode != ref2 ]]; then
     python3 "$here/savediff.py" "$START" "$base.ref.save.json" "$base.ours.save.json" > "$base.savediff" 2>&1
     echo "   save: $(tail -1 "$base.savediff")"
   else
