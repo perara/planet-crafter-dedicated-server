@@ -157,6 +157,10 @@ pub struct LinkedGrower {
 const LINKED_UPDATE_EVERY: f32 = 2.0;
 
 impl LinkedGrower {
+    pub fn refresh(&mut self, f: &Value) {
+        self.rate = LinkedGrower::new(f, 0.0).rate;
+    }
+
     /// Awake: the update loop starts once the local player has (on the server: at once).
     pub fn new(f: &Value, now: f32) -> LinkedGrower {
         let time_to_grow = f32_of(f, "timeToGrow");
@@ -227,6 +231,13 @@ pub struct Vegetation {
 }
 
 impl Vegetation {
+    /// The table's values, set again after a restore (machines::refresh_from_tables); what the
+    /// seeds inside make it grow (things), the random sequence and the coroutine are state.
+    pub fn refresh(&mut self, f: &Value) {
+        let fresh = Vegetation::new(f, 0, 0.0);
+        (self.original, self.grow_speed, self.interval, self.min_growth) = (fresh.original, fresh.grow_speed, fresh.interval, fresh.min_growth);
+    }
+
     /// SetWorldObjectForGrower: the random sequence seeded by the world object id, the growth
     /// from the world object, then the first LaunchGrowingProcess (wait 2 s for init).
     pub fn new(f: &Value, wo: i32, now: f32) -> Vegetation {
@@ -345,9 +356,13 @@ impl Harvestable {
         f["allowedLayers"].as_i64() == Some(1 << 4)
     }
 
-    /// What comes from the tables and is not in a snapshot, set again after a restore.
+    /// What comes from the tables, set again after a restore (machines::refresh_from_tables):
+    /// the flag a snapshot does not have, and the values it has from the release that wrote it,
+    /// which this release may read differently. What is state (growings, next) stays.
     pub fn refresh(&mut self, f: &Value) {
-        self.water_only = Self::water_only_of(f);
+        let state = (self.second, std::mem::take(&mut self.growings), self.next);
+        *self = Harvestable::new(f);
+        (self.second, self.growings, self.next) = state;
     }
 
     pub fn new(f: &Value) -> Harvestable {

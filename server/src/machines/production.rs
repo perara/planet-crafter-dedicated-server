@@ -269,6 +269,11 @@ pub struct AutoCrafter {
 }
 
 impl AutoCrafter {
+    /// The table's values, set again after a restore (machines::refresh_from_tables).
+    pub fn refresh(&mut self, f: &Value) {
+        (self.period, self.range) = (f32_of(f, "craftEveryXSec"), f32_of(f, "range"));
+    }
+
     /// Awake: TryToCraft waits (instance count % 50) / 10 s before its loop.
     pub fn new(f: &Value, now: f32, instanced: i32) -> AutoCrafter {
         AutoCrafter { next: now + (instanced % 50) as f32 / 10.0, period: f32_of(f, "craftEveryXSec"), range: f32_of(f, "range") }
@@ -367,6 +372,11 @@ pub struct Disintegrator {
 }
 
 impl Disintegrator {
+    pub fn refresh(&mut self, f: &Value) {
+        let fresh = Disintegrator::new(f, 0.0);
+        (self.period, self.give) = (fresh.period, fresh.give);
+    }
+
     /// SetDisintegratorInventory: the loop starts once the second inventory is known (the frame
     /// after the spawn), then breaks an object every breakEveryXSec.
     pub fn new(f: &Value, now: f32) -> Disintegrator {
@@ -417,6 +427,11 @@ pub struct Optimizer {
 }
 
 impl Optimizer {
+    pub fn refresh(&mut self, f: &Value) {
+        let fresh = Optimizer::new(f);
+        (self.range, self.max) = (fresh.range, fresh.max);
+    }
+
     pub fn new(f: &Value) -> Optimizer {
         Optimizer { range: f32_of(f, "range"), max: f["maxWorldObjectPerFuse"].as_i64().unwrap_or(0).max(0) as usize, modified: Vec::new() }
     }
