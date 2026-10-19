@@ -933,6 +933,36 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(1), "{sent} packets took {:?}", start.elapsed());
     }
 
+    /// Sequence numbers are 16 bits: a session that lasts past 65536 packets each way (80 MB
+    /// at the full size) goes on delivering and acknowledging across the wrap.
+    #[test]
+    fn sequences_wrap_around() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let (from, token) = ("127.0.0.1:9".parse().unwrap(), [22; 8]);
+        handshake(&mut server, from, token);
+        let mut events = Vec::new();
+        let one = [1i32.to_le_bytes().as_slice(), b"x"].concat();
+        for i in 0..70_000u32 {
+            let packet = [[DATA].as_slice(), &token, &[RELIABLE, PAYLOAD, 0, 0, 0], &(i as u16).to_le_bytes(), &u16::MAX.to_le_bytes(), &u64::MAX.to_le_bytes(), &one].concat();
+            server.datagram(&packet, from, Instant::now(), &mut events);
+        }
+        assert_eq!(events.len(), 70_000);
+        assert!(events.iter().all(|e| matches!(e, Event::Data(_, b) if b == b"x")));
+        server.datagram(&[[DATA].as_slice(), &token].concat(), from, Instant::now(), &mut Vec::new());
+        let mut acked = 0;
+        for _ in 0..11 {
+            server.send(&token, &vec![0; 8 << 20]);
+            while !server.connections[&token].queued.is_empty() || !server.connections[&token].in_flight.is_empty() {
+                server.flush();
+                let c = &server.connections[&token];
+                acked += c.in_flight.len();
+                let ack = [[DATA].as_slice(), &token, &[RELIABLE, ACK, 0, 0, 0, 0, 0], &c.sequence.wrapping_sub(1).to_le_bytes(), &u64::MAX.to_le_bytes()].concat();
+                server.datagram(&ack, from, Instant::now(), &mut Vec::new());
+            }
+        }
+        assert!(acked > 65_536 && server.connections.contains_key(&token), "{acked} packets acknowledged");
+    }
+
     /// No client acks what was never sent: a blind spoofer guessing ahead loses its session.
     #[test]
     fn an_ack_of_a_packet_never_sent_drops_the_session() {
