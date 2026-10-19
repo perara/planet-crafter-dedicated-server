@@ -325,6 +325,11 @@ impl Game {
             let turn = self.rng.range(90, 180) as f32;
             let r = crate::geometry::rotate_y(rotation, turn);
             self.net.move_object(net, position, Some(r));
+            // WorldObjectAssociated.AutoSavePositionContinuously: a second later the object's
+            // transform is the world object's, until the owner moves it.
+            if let Some(w) = self.wos.get_mut(&id) {
+                w.rotation = r;
+            }
         }
         self.net.rpc(Target::Only(owner), net, "GroupNetworkContainer.StartAndStopPhysicsAfterDelayClientRpc", &[json!(drop_size), json!(sound), json!(despawn > f32::EPSILON)]);
         if despawn > f32::EPSILON {
@@ -626,6 +631,24 @@ mod tests {
     const POD: i32 = 208217122;
     /// A scene object's id (below the player-made ids) that the save does not hold.
     const SCENE: i32 = 101_234_567;
+
+    /// DropOnFloorImplentation turns an unrotated drop by 90 to 179 degrees about Y, and the
+    /// object's autosave keeps that turn in the world object (and so in the save).
+    #[test]
+    fn an_unrotated_drop_is_saved_turned_about_y() {
+        let Some((mut g, _)) = world() else { return };
+        let iron = g.create_world_object(g.data.group("Iron").unwrap(), 0, true);
+        g.drop_on_floor(iron, [561.0, 3.0, 497.0], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 0.0, false, 1);
+        let net = g.wos[&iron].net.unwrap();
+        let r = g.wos[&iron].rotation;
+        assert_eq!(r, g.net.objects[&net].rotation);
+        let degrees = 2.0 * r[1].atan2(r[3]).to_degrees();
+        assert!((r[0], r[2]) == (0.0, 0.0) && (90.0..180.0).contains(&degrees), "{r:?}");
+        let kept = [0.0, 0.70710677, 0.0, 0.70710677];
+        let other = g.create_world_object(g.data.group("Iron").unwrap(), 0, true);
+        g.drop_on_floor(other, [561.0, 3.0, 497.0], kept, 0.0, false, false, 0, 0.0, false, 1);
+        assert_eq!(g.wos[&other].rotation, kept, "a rotation the caller gave stays");
+    }
 
     /// The flags of the object a spawn message announced (the last one queued).
     fn spawned_flags(g: &crate::game::Game) -> u16 {
