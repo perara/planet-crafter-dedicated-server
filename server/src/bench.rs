@@ -468,6 +468,14 @@ fn soak_growth() {
                 *orphans.entry(g.data.groups[w.group].id.as_str()).or_default() += 1;
             }
             println!("soak orphans: {orphans:?}");
+            // Load then save twice: the second load is the fixpoint (the first recomputes what the game does at a load).
+            let (net_data, data, spec) = crate::tables(e.dir);
+            let scenes = crate::scene_tables(e.dir, &net_data, &data);
+            let first = g.snapshot().to_text();
+            let second = Game::new(net_data.clone(), data.clone(), spec.clone(), SaveFile::from_text(&first), scenes.clone()).snapshot().to_text();
+            let third = Game::new(net_data, data, spec, SaveFile::from_text(&second), scenes).snapshot().to_text();
+            let differs = |a: &str, b: &str| a.split(['\n']).zip(b.split(['\n'])).filter(|(x, y)| x != y).map(|(x, y)| format!("{} / {}", x.chars().take(240).collect::<String>(), y.chars().take(240).collect::<String>())).take(3).collect::<Vec<_>>();
+            println!("soak save fixpoint: live vs loaded {} lines differ, loaded vs loaded-again {} lines differ {:?}", first.split('\n').zip(second.split('\n')).filter(|(x, y)| x != y).count(), second.split('\n').zip(third.split('\n')).filter(|(x, y)| x != y).count(), differs(&second, &third));
             println!("soak t={t:.0}s: wos {} inv {} net {} strays {strays} total {} bytes; grown: {}", g.wos.len(), g.inventories.len(), g.net.objects.len(), sizes.values().sum::<usize>(), grown.join(", "));
         }
     }
