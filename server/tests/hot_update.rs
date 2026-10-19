@@ -160,9 +160,6 @@ fn start_once(program: &Path, dir: &Path, data: &str, banks: &Path, releases: &s
     let out = std::fs::File::create(&log).unwrap();
     // The front finds the banks in bin/ of PCDS_HOME.
     assert_eq!(banks, dir.join("bin"));
-    // This build's front reads the rules and hooks; a release before this one (the gate's
-    // front) still reads its own environment, so it gets that too.
-    let current = program == Path::new(PCDS);
     let mut dev = String::from("test-faults");
     if verify {
         dev += ",flip-verify";
@@ -176,16 +173,9 @@ fn start_once(program: &Path, dir: &Path, data: &str, banks: &Path, releases: &s
             }
         }
     }
-    if current {
-        // No backups: the rule save.backupsKept.
-        std::fs::write(dir.join("rules.json"), "{\"save\": {\"backupsKept\": 0}}").unwrap();
-        command.env("PCDS_DEV", &dev);
-    } else {
-        command.env("PCDS_BACKUPS", "0").env("PCDS_BANKS", banks).env("PCDS_TEST_FAULTS", "1").env("PCDS_ENV_FILE", dir.join("server.env")).env("PCDS_ACCESS", dir.join("access.json")).env("PCDS_RULES", dir.join("rules.json"));
-        if verify {
-            command.env("PCDS_FLIP_VERIFY", "1");
-        }
-    }
+    // No backups: the rule save.backupsKept.
+    std::fs::write(dir.join("rules.json"), "{\"save\": {\"backupsKept\": 0}}").unwrap();
+    command.env("PCDS_DEV", &dev);
     let child = command
         .arg("serve")
         .arg(data)
