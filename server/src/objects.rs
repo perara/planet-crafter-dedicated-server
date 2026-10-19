@@ -217,11 +217,22 @@ impl Game {
             crate::panels::change_contiguous_panels(self, &mut o);
         }
         let keep_server_ownership = !own_prefab && crate::objects::container_keeps_server_ownership(self, group);
+        // SpawnWithOwnership, then DontDestroyWithOwner: the spawn message goes out without the flag,
+        // a client joining later gets it. A vehicle's GroupNetworkContainer.OnNetworkSpawn sets it
+        // inside the spawn, so its message has it.
+        let mut set_after_spawn = false;
         if owner != 0 && !keep_server_ownership {
             o.owner = owner;
-            o.flags |= DONT_DESTROY_WITH_OWNER;
+            if self.data.prefab_components(&self.data.groups[group].id, "GroupNetworkContainer").first().is_some_and(|c| c["_alwaysKeepRigidBodyAndNetworkTransformActive"] == true) {
+                o.flags |= DONT_DESTROY_WITH_OWNER;
+            } else {
+                set_after_spawn = true;
+            }
         }
         let net_id = self.net.spawn(o);
+        if set_after_spawn {
+            self.net.objects.get_mut(&net_id).unwrap().flags |= DONT_DESTROY_WITH_OWNER;
+        }
         self.wos.get_mut(&id).unwrap().net = Some(net_id);
         if constructible && !from_db && energy != 0.0 {
             crate::energy::update_all_energy_requesters(self);
@@ -615,6 +626,30 @@ mod tests {
     const POD: i32 = 208217122;
     /// A scene object's id (below the player-made ids) that the save does not hold.
     const SCENE: i32 = 101_234_567;
+
+    /// The flags of the object a spawn message announced (the last one queued).
+    fn spawned_flags(g: &crate::game::Game) -> u16 {
+        let body = &g.net.out.iter().rev().find(|m| m.1 == crate::protocol::CREATE_OBJECT).unwrap().2;
+        let mut r = crate::wire::Reader::new(body);
+        r.u8().unwrap();
+        crate::protocol::read_scene_object(&mut r).unwrap().flags
+    }
+
+    /// SpawnWithOwnership sends the spawn without DontDestroyWithOwner, which the game sets right
+    /// after (a client joining later gets it); a vehicle's OnNetworkSpawn sets it inside the spawn.
+    #[test]
+    fn dont_destroy_with_owner_follows_the_spawn_message_for_items_but_not_vehicles() {
+        let Some((mut g, _)) = world() else { return };
+        let iron = g.create_world_object(g.data.group("Iron").unwrap(), 0, true);
+        g.drop_on_floor(iron, [561.0, 3.0, 497.0], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 0.0, false, 1);
+        let net = g.wos[&iron].net.unwrap();
+        assert_eq!(g.net.objects[&net].owner, 1);
+        assert_eq!(spawned_flags(&g) & super::DONT_DESTROY_WITH_OWNER, 0, "the message");
+        assert_ne!(g.net.objects[&net].flags & super::DONT_DESTROY_WITH_OWNER, 0, "the object, for a late joiner");
+        let (_, truck) = g.create_and_instantiate(g.data.group("VehicleTruck").unwrap(), [570.0, 3.0, 500.0], [0.0, 0.0, 0.0, 1.0], false, true, false);
+        assert_eq!(g.net.objects[&truck].owner, 1);
+        assert_ne!(spawned_flags(&g) & super::DONT_DESTROY_WITH_OWNER, 0);
+    }
 
     /// The escape pod's prefab gives its group to no GroupNetworkBase on its root: the real
     /// host spawns it with group hash 0, other buildings with theirs.
