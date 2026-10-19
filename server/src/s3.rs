@@ -19,6 +19,16 @@ static UPLOADED: Mutex<Option<String>> = Mutex::new(None);
 static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The upload under way: BUSY is freed when its thread ends, panic or not (it stayed set for ever
+/// after a panic, and no backup was copied off-site again).
+struct Upload;
+
+impl Drop for Upload {
+    fn drop(&mut self) {
+        BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// What /api/status shows: off, or the bucket and the last upload.
 pub fn status(b: &Backup) -> Value {
     let last = LAST.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -73,7 +83,8 @@ pub fn after_backup(b: &Backup, save_path: &str, force: bool) -> Result<Option<S
         return Ok(Some(answer));
     }
     let (b, save_path) = (b.clone(), save_path.to_string());
-    std::thread::spawn(move || {
+    let spawned = std::thread::Builder::new().name("pcds-s3".into()).spawn(move || {
+        let _busy = Upload;
         let mut file = file;
         loop {
             let name = file.file_name().unwrap_or_default().to_string_lossy().to_string();
@@ -93,8 +104,12 @@ pub fn after_backup(b: &Backup, save_path: &str, force: bool) -> Result<Option<S
                 _ => break,
             }
         }
-        BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
     });
+    if let Err(e) = spawned {
+        // Never ran, so nothing frees BUSY: and this runs on the game loop, which must not panic on it.
+        BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+        return Err(format!("no thread for the upload: {e}"));
+    }
     Ok(Some(answer))
 }
 
@@ -182,6 +197,18 @@ mod tests {
             "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;range;x-amz-content-sha256;x-amz-date, Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41"
         );
         assert_eq!(encode("pcds/world 1+2.json", true), "pcds/world%201%2B2.json");
+    }
+
+    #[test]
+    fn a_panicking_upload_does_not_keep_the_next_ones_out() {
+        BUSY.store(true, std::sync::atomic::Ordering::SeqCst);
+        let done = std::thread::spawn(|| {
+            let _busy = Upload;
+            panic!("the upload thread died");
+        })
+        .join();
+        assert!(done.is_err());
+        assert!(!BUSY.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
