@@ -199,6 +199,79 @@ mod tests {
         assert!(hit_down([4.0, 25.0, 0.0], &turned).is_some());
     }
 
+    /// A DLC planet's ground is a scene dump like a free planet's: the veins of a Humble (a dump
+    /// written here, so that no DLC data is needed) are mined by the extractors above them, and
+    /// one with content (as Toxicity's toxic water) gets its world object and counts.
+    #[test]
+    fn a_dlc_planets_veins_are_mined_like_a_free_planets() {
+        use serde_json::json;
+        let Some(mut game) = crate::machines::tests::game() else { return };
+        let tier1 = game.scenes.planets["Prime"].ore_veins.iter().find(|v| v["fields"]["oreVeinIdentifer"] == "tier1").expect("a tier 1 vein").clone();
+        let vein = |id: i64, count: i64, at: [f64; 3]| {
+            let mut v = tier1.clone();
+            v["id"] = json!(id);
+            v["active"] = json!(true);
+            v["activators"] = json!([]);
+            v["fields"]["oreVeinContentCount"] = json!(count);
+            v["colliders"][0]["box"] = json!({"center": [0.0, 0.0, 0.0], "size": [100.0, 5.0, 100.0], "position": at, "rotation": [0.0, 0.0, 0.0, 1.0], "scale": [1.0, 1.0, 1.0]});
+            v
+        };
+        let mut scene = game.scenes.planets["Prime"].clone();
+        scene.water_volumes.clear();
+        scene.ore_veins = vec![vein(0, 0, [500.0, -50.0, 500.0]), vein(7_000_001, 40, [900.0, -50.0, 900.0])];
+        game.scenes.planets.insert("Humble".into(), scene);
+        game.planet = game.net_data.planet_index("Humble").unwrap();
+        let groups: Vec<usize> = tier1["fields"]["groups"].as_array().unwrap().iter().map(|r| game.data.group_of_ref(r.as_str().unwrap()).unwrap()).collect();
+
+        let open = crate::machines::tests::build(&mut game, "OreExtractor1", [500.0, 30.0, 500.0]);
+        assert_eq!(game.wos[&open].linked_groups, Some(groups.clone()), "the open vein's groups");
+        assert_eq!(game.wos[&open].linked_wo, 0);
+        let finite = crate::machines::tests::build(&mut game, "OreExtractor1", [900.0, 30.0, 900.0]);
+        assert_eq!(game.wos[&finite].linked_wo, 7_000_001, "the vein with content is the extractor's world object");
+        let vein_wo = &game.wos[&7_000_001];
+        assert_eq!((vein_wo.count, vein_wo.growth), ([0, 40], 0.0), "nothing mined yet, 40 to mine");
+        let nowhere = crate::machines::tests::build(&mut game, "OreExtractor1", [-500.0, 30.0, 500.0]);
+        assert_eq!(game.wos[&nowhere].linked_groups, Some(vec![]));
+        // On the free planet the same place is bare ground.
+        game.planet = game.net_data.planet_index("Prime").unwrap();
+        let prime = crate::machines::tests::build(&mut game, "OreExtractor1", [500.0, 30.0, 500.0]);
+        assert_ne!(game.wos[&prime].linked_groups, Some(groups));
+    }
+
+    /// The veins read from an install's DLC planets hold together: every vein has groups the
+    /// game knows, a place on the planet (within the span the free planets' veins and water
+    /// spread over), and a world object exactly when it has content.
+    #[test]
+    fn the_dlc_planets_veins_read_from_an_install_hold_together() {
+        let Some(game) = crate::machines::tests::game() else { return };
+        let grounds = crate::testkit::dlc_grounds(&game, "the_dlc_planets_veins_read_from_an_install_hold_together");
+        let free: Vec<f64> = game.scenes.planets.iter().filter(|(id, _)| !grounds.iter().any(|(g, _)| g == *id)).flat_map(|(_, s)| s.ore_veins.iter().flat_map(|v| v["colliders"].as_array().into_iter().flatten().flat_map(|c| c["boundsCenter"].as_array().cloned().unwrap_or_default())).filter_map(|c| c.as_f64())).collect();
+        let span = free.iter().fold(0.0f64, |m, c| m.max(c.abs())) * 2.0;
+        assert!(span > 1000.0, "the free planets' span: {span}");
+        for (planet, scene) in grounds {
+            assert!(!scene.ore_veins.is_empty() && !scene.water_volumes.is_empty(), "{planet}: no veins or no water");
+            for (i, v) in scene.ore_veins.iter().enumerate() {
+                let f = &v["fields"];
+                assert!(f["groups"].as_array().is_some_and(|g| !g.is_empty() && g.iter().all(|r| r.as_str().and_then(|r| game.data.group_of_ref(r)).is_some())), "{planet} vein {i}: groups");
+                let (id, count) = (v["id"].as_i64().unwrap(), f["oreVeinContentCount"].as_i64().unwrap());
+                assert!(count >= 0 && (id != 0) == (count > 0), "{planet} vein {i}: id {id} with content {count}");
+                let colliders = v["colliders"].as_array().unwrap();
+                assert!(!colliders.is_empty(), "{planet} vein {i}: no collider for an extractor's ray to find");
+                for c in colliders {
+                    let (center, size): (Vec<f64>, Vec<f64>) = (c["boundsCenter"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect(), c["boundsSize"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect());
+                    assert!(center.iter().all(|x| x.abs() < span) && size.iter().all(|x| *x >= 0.0 && *x < span), "{planet} vein {i}: {center:?} {size:?} outside {span}");
+                }
+            }
+            let ids: Vec<i64> = scene.ore_veins.iter().map(|v| v["id"].as_i64().unwrap()).filter(|i| *i != 0).collect();
+            let unique: std::collections::HashSet<_> = ids.iter().collect();
+            assert_eq!(unique.len(), ids.len(), "{planet}: two veins share a world object");
+            for (i, w) in scene.water_volumes.iter().enumerate() {
+                let p = w["root"]["position"].as_array().unwrap();
+                assert!(p.iter().all(|x| x.as_f64().unwrap().abs() < span), "{planet} water {i}: {p:?}");
+            }
+        }
+    }
+
     #[test]
     fn extractors_mine_the_vein_below_them() {
         let Some(mut game) = crate::machines::tests::game() else { return };

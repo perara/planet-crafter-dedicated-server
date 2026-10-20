@@ -570,10 +570,11 @@ acceptance test passed):
 | the machines' unit names (`&'static str`) | cannot be read back into a static | read as strings, mapped back to the static names |
 | the tables inside `Game` and `Net` | not state | skipped (given `Default`), reloaded |
 | the scaled generation in the tables | derived from the world's settings at load | `restore` runs `change_generation_for_groups` again |
+| `ext.toxic` (format 7) | the toxic areas are derived from a planet's scene and the world objects | only the clients' registrations are in the snapshot; the areas are `#[serde(skip)]` and read again at the first tick after the restore, the cleaned scene objects counted from the world objects as at a start |
 
 ### The snapshot format and its versions
 
-A snapshot is a head line `{"format":6,"game_version":"2.103"}` and the state in the binary
+A snapshot is a head line `{"format":7,"game_version":"2.103"}` and the state in the binary
 codec of `bincodec.rs` (serde's data model with no names and no tags: a struct is its fields back
 to back; integers of two bytes and more, lengths and variants are LEB128, zigzag when signed;
 floats and bytes are fixed width; a float array that is all zeros is one byte; a `Value` is its

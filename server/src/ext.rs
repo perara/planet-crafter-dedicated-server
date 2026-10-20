@@ -18,6 +18,7 @@ pub struct Ext {
     pub logistics: crate::logistics::Logistics,
     pub rockets: crate::rockets::State,
     pub planets: crate::planets::State,
+    pub toxic: crate::toxic::State,
     pub animals: crate::animals::State,
     pub first_item_linked: crate::handlers::FirstItemLinked,
     pub default_colors: crate::handlers::DefaultColors,

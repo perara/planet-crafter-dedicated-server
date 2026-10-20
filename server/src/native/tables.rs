@@ -16,7 +16,7 @@ use super::unity::{self, Data, Id};
 /// file it writes changes (a field, a section, a value read another way). A server loads only
 /// tables of its own format (main.rs), and `pcds update` reads them again with the active
 /// bank's program when the format differs.
-pub const TABLES_FORMAT: u32 = 3;
+pub const TABLES_FORMAT: u32 = 4;
 
 /// GameData.MaxDepth.
 const MAX_DEPTH: usize = 6;
@@ -369,7 +369,7 @@ pub fn read_game(game: &Path, out: &Path) -> Result<String, String> {
     let gamedata = json!({"assets": assets, "groupPrefabs": group_prefabs, "layouts": layouts, "singletons": singletons, "panels": panels});
     // scenes/<planet>.json for the planets anyone can play (no DLC app id).
     let mut scenes = Vec::new();
-    for planet in planets.iter().filter(|p| p["steamAppId"] == 0) {
+    for planet in planets.iter() {
         let id = planet["id"].as_str().unwrap_or_default();
         let data = assets.get(&format!("PlanetData:PlanetData-{id}")).ok_or(format!("no PlanetData-{id}"))?;
         scenes.push((id.to_string(), ctx.planet_scenes(&assets, data).map_err(|e| format!("scenes/{id}.json: {e}"))?));

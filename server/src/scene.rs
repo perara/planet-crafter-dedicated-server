@@ -43,10 +43,15 @@ fn list_i32(items: impl Iterator<Item = i32>) -> Vec<Vec<u8>> {
     items.map(enc::int).collect()
 }
 
-/// Planet indices players may travel to: the free ones (DLC planets need an owner, which a
-/// standalone server cannot check).
+/// Planet indices players may travel to (PlanetNetworkLoader._availablePlanets): the free ones,
+/// and a DLC planet the world already has, the one it is on or one its save lists. The game
+/// fills the list with the planets its host owns (PlanetList.GetIsPlanetPurchased: Steam asks
+/// about the host's account). This server has no account to ask, and a world's host owned its
+/// DLC planets when it got there, so the world's own file stands for the ownership; a world
+/// that never had a DLC planet is not given one (the server checks nothing and bypasses nothing).
 pub fn available_planets(game: &Game) -> Vec<usize> {
-    game.net_data.planets.iter().enumerate().filter(|(_, p)| p.steam_app_id == 0).map(|(i, _)| i).collect()
+    let has = |id: &str| game.save.planets.iter().any(|s| s["planetId"].as_str() == Some(id));
+    game.net_data.planets.iter().enumerate().filter(|(i, p)| p.steam_app_id == 0 || *i == game.planet || has(&p.id)).map(|(i, _)| i).collect()
 }
 
 pub fn init(game: &mut Game) {
@@ -145,6 +150,7 @@ pub fn tick(game: &mut Game) {
         }
     }
     section!("gauges", crate::gauges::tick(game));
+    section!("toxic", crate::toxic::tick(game));
     section!("units", crate::units::tick(game));
     section!("energy", crate::energy::tick(game));
     crate::hooks::tick(game);
@@ -181,9 +187,11 @@ pub fn pod_group(data: &crate::gamedata::GameData, planet: &str) -> Option<usize
 
 pub fn on_world_object_from_scene_destroyed(game: &mut Game, wo: i32) {
     crate::machines::scene_object_removed(game, wo);
+    crate::toxic::scene_object_removed(game, wo);
 }
 
 pub fn on_world_object_from_scene_retrieved(game: &mut Game, wo: i32) {
     crate::machines::scene_object_removed(game, wo);
+    crate::toxic::scene_object_removed(game, wo);
 }
 

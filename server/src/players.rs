@@ -214,6 +214,7 @@ impl Game {
         }
         self.total_crafted.remove(&c.id);
         self.all_time_tokens.remove(&c.id);
+        crate::toxic::client_left(self, c.id);
         crate::scene::player_count_changed(self);
     }
 
