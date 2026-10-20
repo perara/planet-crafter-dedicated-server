@@ -191,6 +191,17 @@ CI has: it is part of the release checklist below, not a CI job.
 4. `make gate`. Read its output: "SKIPPED - format changed" is expected after a bump in step 2
    and nothing else; anything else must pass.
 
+**Changes in the front** are the ones a flip does not bring: the front survives the flip, so what
+changed in `front.rs`, `admin.rs`, `ipc.rs`'s frames or the admin threads takes effect after
+`pcds upgrade --restart` (or any restart of the unit). The release notes of a release that has one
+say "requires `pcds upgrade --restart`" and name it; the bank's side of the change works at once
+and the old front ignores what it does not know (an unknown frame is skipped; an unknown token is
+a 401). This list is what the next release's notes are made from:
+
+- *Scoped tokens* (`admin.rs`, `tokens.rs`): the admin thread accepts `Authorization: Bearer
+  pcdst_...` for the requests of the token's scopes. Requires `pcds upgrade --restart` for tokens
+  to work; the endpoints that make them (`/api/plugins/tokens`) are the bank's and work at once.
+
 **The CLI.** `pcds upgrade [VERSION] [--restart] | --rollback | --check`. Running: through the
 admin API (`POST /api/update`, then `GET /api/update` until its outcome). `--restart` installs
 into the standby bank without the protocol check, makes it active and restarts the unit (the

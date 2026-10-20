@@ -28,6 +28,10 @@ pcds plugin trust KEY [--name NAME] [--grant CAP,CAP] [--force]
                                       trust a publisher: KEY is a .pub file or its 64 hex digits; --grant is the most it vouches for
 pcds plugin untrust KEY               stop trusting a key (its id or the start of it); its plugins stop at the next look at run/plugins/
 pcds plugin keys                      the trusted keys and what each vouches for, and the revoked ones
+pcds plugin token create NAME --scope SCOPE,SCOPE [--rate PER_MINUTE]
+                                      a token for a program that reads the event stream / chats / kicks (shown once)
+pcds plugin token revoke NAME_OR_ID   refuse a token from its next request
+pcds plugin tokens                    the tokens, their scopes and rates (never the tokens themselves)
 pcds plugin config list [ID]          the values a plugin's manifest declares and whether they are set
 pcds plugin config set ID KEY [VALUE] set a value; a secret one is read from the terminal (or stdin), not from the command line
 pcds plugin config unset ID KEY       remove a value";
@@ -64,6 +68,13 @@ impl Ctx {
             ["trust", key, rest @ ..] => self.plugin_trust(key, rest),
             ["untrust", key] => self.plugin_untrust(key),
             ["keys"] => self.plugin_keys(),
+            ["token", "create", name, rest @ ..] => self.plugin_token_create(name, rest),
+            ["token", "revoke", which] => {
+                let gone = crate::tokens::revoke(&self.plugins_dir(), which)?;
+                println!("pcds: the token {} ({}) is revoked; it is refused from its next request", gone.name, gone.id);
+                Ok(())
+            }
+            ["tokens"] => self.plugin_tokens(),
             _ => Err(USAGE.to_string()),
         }
     }
@@ -282,6 +293,34 @@ impl Ctx {
         keys.save(&dir)?;
         println!("pcds: {} ({}) is no longer trusted; plugins that run only because it signed them stop", revoked.name, revoked.id);
         self.plugin_reload_running();
+        Ok(())
+    }
+
+    fn plugin_token_create(&self, name: &str, rest: &[&str]) -> Result {
+        let (mut scopes, mut rate) = (Vec::new(), None);
+        let mut it = rest.iter();
+        while let Some(o) = it.next() {
+            match *o {
+                "--scope" => scopes = it.next().ok_or("--scope SCOPE,SCOPE")?.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect(),
+                "--rate" => rate = Some(it.next().and_then(|r| r.parse::<u32>().ok()).ok_or("--rate PER_MINUTE")?),
+                other => return Err(format!("unknown option {other}\n{USAGE}")),
+            }
+        }
+        let (made, token) = crate::tokens::create(&self.plugins_dir(), name, &scopes, rate)?;
+        println!("pcds: made the token {} ({}) for: {}, at most {} requests a minute", made.name, made.id, made.scopes.join(", "), made.rate_per_minute);
+        println!("\n    {token}\n");
+        println!("It is shown this once; the server keeps only its hash. Send it as `Authorization: Bearer TOKEN`. It opens only the requests of its scopes; everything else needs the admin token.");
+        Ok(())
+    }
+
+    fn plugin_tokens(&self) -> Result {
+        let all = crate::tokens::Tokens::load(&self.plugins_dir())?;
+        if all.tokens.is_empty() {
+            println!("no scoped tokens (pcds plugin token create NAME --scope events.read); scopes: {}", crate::tokens::SCOPES.map(|(n, _)| n).join(", "));
+        }
+        for t in &all.tokens {
+            println!("{}  {:<20} {:>5}/min  {}", t.id, t.name, t.rate_per_minute, t.scopes.join(" "));
+        }
         Ok(())
     }
 

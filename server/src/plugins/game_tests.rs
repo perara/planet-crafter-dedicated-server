@@ -365,3 +365,32 @@ fn the_admin_api_trusts_a_key_and_takes_it_away_and_the_listing_says_who_signed(
     assert!(listing["trustedKeys"].as_array().unwrap().is_empty());
     assert_eq!(g.ext.plugins.interest & Kind::Chat.bit(), 0);
 }
+
+#[test]
+fn the_admin_api_makes_lists_and_revokes_scoped_tokens_and_shows_a_token_once() {
+    let Some((mut g, _)) = world() else { return };
+    let dir = fresh_dir("tokens");
+    start(&mut g, &dir);
+    let (status, body) = admin::request(&mut g, "POST", "/api/plugins/tokens", &json!({"name": "relay", "scopes": ["events.read", "chat.send"], "ratePerMinute": 120}));
+    assert_eq!(status, 200, "{body}");
+    let made: Value = serde_json::from_str(&body).unwrap();
+    let token = made["token"].as_str().unwrap().to_string();
+    assert!(token.starts_with("pcdst_") && made["info"]["name"] == "relay" && made["info"]["ratePerMinute"] == 120);
+    // The listing has the scopes the server knows, the tokens without their hash, and never the token.
+    let (_, body) = admin::request(&mut g, "GET", "/api/plugins/tokens", &json!({}));
+    let hash = crate::tokens::Tokens::load(&dir).unwrap().tokens[0].hash.clone();
+    assert!(!body.contains(&token) && !body.contains(&hash), "{body}");
+    let listed: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!((listed["tokens"][0]["name"].as_str(), listed["tokens"][0]["scopes"].as_array().map(Vec::len), listed["scopes"].as_array().map(Vec::len)), (Some("relay"), Some(2), Some(5)));
+    assert!(!std::fs::read_to_string(dir.join("tokens.json")).unwrap().contains(&token), "the file keeps the hash only");
+    // A bad request is a 400 that says what is wrong; a name is used once.
+    for bad in [json!({}), json!({"name": "x"}), json!({"name": "x", "scopes": ["root"]}), json!({"name": "relay", "scopes": ["events.read"]}), json!({"name": "x", "scopes": ["events.read"], "ratePerMinute": 0})] {
+        assert_eq!(admin::request(&mut g, "POST", "/api/plugins/tokens", &bad).0, 400, "{bad}");
+    }
+    assert_eq!(admin::request(&mut g, "POST", "/api/plugins/tokens/revoke", &json!({})).0, 400);
+    assert_eq!(admin::request(&mut g, "POST", "/api/plugins/tokens/revoke", &json!({"id": "nobody"})).0, 400);
+    let (status, _) = admin::request(&mut g, "POST", "/api/plugins/tokens/revoke", &json!({"id": "relay"}));
+    assert_eq!(status, 200);
+    let (_, body) = admin::request(&mut g, "GET", "/api/plugins/tokens", &json!({}));
+    assert!(serde_json::from_str::<Value>(&body).unwrap()["tokens"].as_array().unwrap().is_empty());
+}

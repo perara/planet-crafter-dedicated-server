@@ -537,7 +537,7 @@ fn the_api_document_matches_the_code() {
     assert!(doc.contains("`SLOW_CALL` (5 ms)") && limits::SLOW_CALL.as_millis() == 5);
     assert!(doc.contains("`FAULT_WINDOW` is 60 seconds") && limits::FAULT_WINDOW.as_secs() == 60);
     let admin = include_str!("admin.rs");
-    for route in ["GET /api/plugins", "POST /api/plugins/reload", "POST /api/plugins/enable", "POST /api/plugins/disable", "POST /api/plugins/events", "POST /api/plugins/trust", "POST /api/plugins/untrust"] {
+    for route in ["GET /api/plugins", "POST /api/plugins/reload", "POST /api/plugins/enable", "POST /api/plugins/disable", "POST /api/plugins/events", "POST /api/plugins/trust", "POST /api/plugins/untrust", "GET /api/plugins/tokens", "POST /api/plugins/tokens", "POST /api/plugins/tokens/revoke"] {
         assert!(doc.contains(&format!("`{route}`")), "{route} in the document");
         let (method, path) = route.split_once(' ').unwrap();
         assert!(admin.contains(&format!("(\"{method}\", \"{path}\")")), "{route} in admin.rs");

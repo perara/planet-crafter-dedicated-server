@@ -346,6 +346,30 @@ fn a_publisher_signs_a_plugin_and_an_admin_trusts_the_key_instead_of_the_digest(
 }
 
 #[test]
+fn a_scoped_token_is_made_shown_once_listed_and_revoked_from_the_command_line() {
+    let dir = test_dir("plugin-token");
+    let work = dir.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    assert!(text(&plugin(&dir, &work, &["tokens"])).contains("no scoped tokens"));
+    let out = plugin(&dir, &work, &["token", "create", "relay", "--scope", "events.read,chat.send", "--rate", "90"]);
+    let shown = text(&out);
+    assert!(out.status.success() && shown.contains("shown this once"), "{shown}");
+    let token = shown.split_whitespace().find(|w| w.starts_with("pcdst_")).unwrap().to_string();
+    let listed = text(&plugin(&dir, &work, &["tokens"]));
+    assert!(listed.contains("relay") && listed.contains("90/min") && listed.contains("chat.send events.read") && !listed.contains(&token), "{listed}");
+    assert!(!std::fs::read_to_string(dir.join("run/plugins/tokens.json")).unwrap().contains(&token));
+    // Wrong forms: no scope, an unknown scope, the same name again.
+    for args in [vec!["token", "create", "x"], vec!["token", "create", "x", "--scope", "root"], vec!["token", "create", "relay", "--scope", "events.read"], vec!["token", "create", "x", "--scope", "events.read", "--rate", "0"]] {
+        assert!(!plugin(&dir, &work, &args).status.success(), "{args:?}");
+    }
+    let out = plugin(&dir, &work, &["token", "revoke", "relay"]);
+    assert!(out.status.success() && text(&out).contains("is revoked"), "{}", text(&out));
+    assert!(!plugin(&dir, &work, &["token", "revoke", "relay"]).status.success());
+    assert!(text(&plugin(&dir, &work, &["tokens"])).contains("no scoped tokens"));
+}
+
+#[test]
 fn a_plugins_config_values_are_set_without_the_command_line_and_a_secret_is_never_shown() {
     use std::io::Write;
     let dir = test_dir("plugin-config");

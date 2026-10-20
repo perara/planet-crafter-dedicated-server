@@ -391,6 +391,9 @@ All answer JSON; the bearer token is the admin token (docs/hot-update.md, README
 | `POST /api/plugins/disable` | `{"id"}` | `{"ok": true, "plugin": {...}}` |
 | `POST /api/plugins/trust` | `{"publicKey": "(64 hex or a .pub file's text)", "name", "grant": [...], "force"}` | `{"ok": true, "key": {...}}`; 400 for a key that is none, a grant that is no capability, or a revoked key without `force`. The plugins are read again |
 | `POST /api/plugins/untrust` | `{"id"}` (the id, or its first 8 characters or more) | `{"ok": true, "revoked": {...}}`; 400 for a key that is not trusted |
+| `GET /api/plugins/tokens` | | `{"tokens": [{"id","name","scopes","ratePerMinute","createdAt"}], "scopes": [{"name","allows"}], "defaultRatePerMinute", "maxRatePerMinute"}`: never a token or its hash |
+| `POST /api/plugins/tokens` | `{"name", "scopes": [...], "ratePerMinute"}` | `{"ok": true, "token": "pcdst_...", "info": {...}}`: **the only time the token is shown**; 400 for a name used, an unknown scope, a rate out of range |
+| `POST /api/plugins/tokens/revoke` | `{"id"}` (the id or the name) | `{"ok": true, "revoked": {...}}`; the token is refused from its next request |
 | `POST /api/plugins/events` | `{"consumer": "relay", "after": 0, "types": ["chat","player_join"], "limit": 200}` or `{"consumer": "relay", "unregister": true}` | `{"epoch", "events": [...], "last", "dropped"}`, or `{"ok", "registered": false, "was"}` |
 
 Status values: `running`, `pending` (discovered, never approved), `disabled`, `changed` (files differ
@@ -403,6 +406,30 @@ running modules hold; it is zero once they are all unloaded. `scanEverySeconds` 
 bank looks at the folder by itself (2); a change is acted on when two looks in a row see it.
 
 `GET /api/status` has a `plugins` object: `loaded`, `running`, `faults`.
+
+### Scoped tokens
+
+A program that reads the stream or says something in the chat should not hold the admin token. A
+**scoped token** (`pcds plugin token create NAME --scope events.read,chat.send`, or the dashboard) is
+sent as `Authorization: Bearer pcdst_...` and opens the requests of its scopes and nothing else:
+
+| Scope | Allows |
+|---|---|
+| `events.read` | read the plugin event stream (`POST /api/plugins/events`) |
+| `chat.read` | read the chat (`GET /api/chat/events`) |
+| `chat.send` | write to the chat as the server (`POST /api/chat`) |
+| `player.kick` | kick a player (`POST /api/kick`) |
+| `player.teleport` | move a player (`POST /api/teleport`) |
+
+Every other request, the endpoints that manage tokens, keys and approvals among them, takes the
+admin token only; a token asking for one is answered `403` and the scope it lacks. `401`: no such
+token (or revoked, or the list does not read: then none is valid). `429` with `Retry-After`: the
+token is over its rate (`ratePerMinute`, 600 by default, 6000 at most; a window of a minute). The
+server keeps only the sha256 of a token in `tokens.json` (0600, beside `approved.json`), compares
+it in constant time, and never writes a token to the log, a listing or an answer. A revocation is
+read from the file at the token's next request. The admin thread of the front checks tokens, so a
+front that was started before this change does not know them: they work after `pcds upgrade
+--restart` (docs/hot-update.md).
 
 ### The event stream
 

@@ -6,6 +6,8 @@
 //! - `POST /api/plugins/enable {"id", "grant": [...]}`: approve (default: all it asks for) and reload.
 //! - `POST /api/plugins/disable {"id"}`.
 //! - `POST /api/plugins/events {"after", "types", "limit"}`: the event stream (stream.rs).
+//! - `GET /api/plugins/tokens`, `POST /api/plugins/tokens {"name", "scopes", "ratePerMinute"}` (the
+//!   token is in the answer once) and `POST /api/plugins/tokens/revoke {"id"}`: scoped tokens (tokens.rs).
 //! - `POST /api/plugins/trust {"publicKey", "name", "grant": [...], "force"}` and
 //!   `POST /api/plugins/untrust {"id"}`: the signing keys the admin trusts (sign.rs).
 
@@ -133,6 +135,37 @@ pub fn request(game: &mut Game, method: &str, path: &str, body: &Value) -> (u16,
                 return error(400, e);
             }
             reload_answer(game, &id)
+        }
+        ("GET", "/api/plugins/tokens") => {
+            let Some(dir) = dir else { return error(500, "the plugin host has not started") };
+            match crate::tokens::Tokens::load(&dir) {
+                Ok(t) => (200, json!({"tokens": t.tokens.iter().map(|t| t.public()).collect::<Vec<_>>(), "scopes": crate::tokens::SCOPES.iter().map(|(n, d)| json!({"name": n, "allows": d})).collect::<Vec<_>>(), "defaultRatePerMinute": crate::tokens::DEFAULT_RATE, "maxRatePerMinute": crate::tokens::MAX_RATE}).to_string()),
+                Err(e) => error(500, e),
+            }
+        }
+        ("POST", "/api/plugins/tokens") => {
+            let Some(dir) = dir else { return error(500, "the plugin host has not started") };
+            let scopes: Vec<String> = body["scopes"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+            let rate = body["ratePerMinute"].as_u64().map(|r| r.min(u32::MAX as u64) as u32);
+            match crate::tokens::create(&dir, body["name"].as_str().unwrap_or(""), &scopes, rate) {
+                // The one time the token is shown: it is kept nowhere (the file holds its hash).
+                Ok((made, token)) => {
+                    println!("plugins: scoped token {} ({}) made: {}", made.name, made.id, made.scopes.join(" "));
+                    (200, json!({"ok": true, "token": token, "info": made.public()}).to_string())
+                }
+                Err(e) => error(400, e),
+            }
+        }
+        ("POST", "/api/plugins/tokens/revoke") => {
+            let Some(dir) = dir else { return error(500, "the plugin host has not started") };
+            let Some(id) = body["id"].as_str().map(str::trim).filter(|s| !s.is_empty()) else { return error(400, "'id' is required (the id or the name)") };
+            match crate::tokens::revoke(&dir, id) {
+                Ok(gone) => {
+                    println!("plugins: scoped token {} ({}) revoked", gone.name, gone.id);
+                    (200, json!({"ok": true, "revoked": gone.public()}).to_string())
+                }
+                Err(e) => error(400, e),
+            }
         }
         ("POST", "/api/plugins/trust") => {
             let Some(dir) = dir else { return error(500, "the plugin host has not started") };

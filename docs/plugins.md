@@ -647,8 +647,44 @@ asks for nothing more. Verification is of the files as they are, at every load a
   a technical one and is not started; `pcds plugin install URL` for a release asset with a
   published sha256 (as `pcds upgrade` does) is not either.
 
-Plugins that are programs have no permissions at all beyond the admin token. Scoped tokens exist
-for them (section "Scoped tokens"); the unscoped admin token remains what everything else uses.
+Plugins that are programs have no manifest and no capabilities; what they may do is what their token
+may do. The admin token may do everything, so a program should hold a **scoped token** instead
+(next section).
+
+## Scoped tokens
+
+A program that reads the event stream and says something in the chat (the Discord bridge of
+`examples/plugins/webhook-relay`) used to need the admin token: with it, a bug or a leak of that
+program is the whole server (stop, ban, rules, the Steam settings). A scoped token is the same
+bearer header with less in it.
+
+- **What a token is.** `pcds plugin token create NAME --scope events.read,chat.send [--rate 600]`
+  makes 24 random bytes (`pcdst_` and 48 hex digits), prints them once, and stores only their sha256 in
+  `run/plugins/tokens.json` (0600) with the name, the scopes and the rate. The dashboard lists them
+  and makes and revokes them (`GET/POST /api/plugins/tokens`, admin token only); `pcds plugin tokens`
+  lists. A token is high-entropy, so a fast hash is the right one, as for an API key.
+- **What a token opens.** Five scopes, each a (method, path) of the existing API: the stream
+  (`events.read`), the chat feed (`chat.read`), saying in the chat (`chat.send`), `player.kick`,
+  `player.teleport`. They are the endpoints a bridge needs and the ones that act on one player;
+  the settings, the rules, the world controls, the logs, the status (which holds the access lists),
+  the plugins' approvals, keys and tokens are not scoped to anything: **admin token only**,
+  and a test asks every one of them with a token that has every scope and expects 403.
+- **Checks.** The front's admin thread looks at `tokens.json` for each request (one `stat`; the file is
+  read again when it changed), so a revocation is effective at the token's next request, from the
+  command line, the dashboard or an editor. A file that does not read makes no token valid. The
+  hash is compared in constant time with every stored hash; the token is never logged, echoed,
+  listed or kept by the server; a refused request is `401` (no such token), `403` (not its
+  scope; the answer names the scope that is missing) or `429` (its rate, with `Retry-After`).
+- **Rates.** A token has its own requests per minute (default 600, at most 6000), counted in the
+  front, in a window of a minute, only for requests its scopes allow: a flood from one program
+  does not use another's budget, and a long poll is one request.
+- **What it does not do.** No expiry (revoke), no per-address restriction, no counters of use in
+  the listing (the front keeps its counts in memory and the bank does not see them), and it does not
+  make the admin API safe on a network: it is still plain HTTP on 127.0.0.1 unless the admin puts a
+  tunnel or an HTTPS proxy in front (README, "Administration").
+- **Hot update.** The check is in the front, which a hot update does not replace: the tokens work
+  after `pcds upgrade --restart`; a front that was started before them answers `401` to a token
+  (the admin token keeps working). The bank's endpoints (`/api/plugins/tokens`) work at once.
 
 ## Licensing
 
@@ -743,7 +779,7 @@ These are for the owner.
    the same (old banks never send it). Worth doing before the first release with plugins?
 4. **Signed plugins**: built (section "Distribution, signing, permissions"). A list of them
    somebody curates, and `pcds plugin install URL`, are not.
-5. **Scoped tokens** for out-of-process plugins.
+5. **Scoped tokens** for out-of-process plugins: built (section "Scoped tokens").
 6. **The component model.** Trigger: wasmi implements it, or a plugin appears that needs
    wasmtime's speed. Then a WIT file and `Runtime` for components.
 7. **The `net.http` capability**: built (section "`net.http`: a plugin's way out"). Left: a request
