@@ -20,7 +20,7 @@ fn v3(v: [f32; 3]) -> Value {
 impl Ctx {
     /// A node's position, rotation and lossy scale in its root's frame, the root standing at the
     /// origin unrotated (as InstantiateWorldObject and the look instance put it) with its scale.
-    fn in_root(&self, root: Id, node: Id) -> Result<([f32; 3], [f32; 4], [f32; 3]), String> {
+    pub(super) fn in_root(&self, root: Id, node: Id) -> Result<([f32; 3], [f32; 4], [f32; 3]), String> {
         let (rp, rr, _) = self.graph.world(root)?;
         let (p, r, s) = self.graph.world(node)?;
         let inverse = conj(rr);

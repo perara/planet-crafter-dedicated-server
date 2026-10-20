@@ -99,6 +99,12 @@ struct Drone {
     transform: motion::Transform,
     /// The ClientNetworkTransform behaviour of the container.
     behaviour: u16,
+    #[serde(skip)]
+    route: VecDeque<V3>,
+    #[serde(skip)]
+    route_goal: Option<V3>,
+    #[serde(skip)]
+    route_epoch: u64,
     /// Clients the drone is hidden from (NetworkHide).
     hidden: Vec<u64>,
 }
@@ -128,8 +134,7 @@ pub struct Logistics {
     entities: HashMap<i32, Entity>,
     /// _taskPriorities: planet -> group hash -> priority.
     priorities: HashMap<i32, HashMap<i32, i32>>,
-    /// _allLogisticTasks: world object to move -> task. (Slots: which task a drone gets and
-    /// which station answers first depend on .NET's Dictionary order.)
+    /// _allLogisticTasks: world object to move -> task; slot order breaks equal-distance ties.
     all_tasks: Slots<i32, u32>,
     tasks: HashMap<u32, Task>,
     next_task: u32,
@@ -144,6 +149,12 @@ pub struct Logistics {
     min_target_distance: f32,
     /// Drones whose CheckBusy runs next frame.
     check_busy: Vec<i32>,
+    #[serde(skip)]
+    navigation: HashMap<i32, crate::geometry::navigation::Grid>,
+    #[serde(skip)]
+    navigation_dirty: bool,
+    #[serde(skip)]
+    navigation_epoch: u64,
 }
 
 // ---- small lookups ------------------------------------------------------------------------
@@ -351,6 +362,7 @@ pub fn rpc(game: &mut Game, client: u64, _object: u64, _behaviour: u16, name: &s
 /// registers (MachineDroneStation.SetDroneStationInventory).
 pub fn on_instantiated(game: &mut Game, wo: i32) {
     let Some(w) = game.wos.get(&wo) else { return };
+    if game.data.groups[w.group].constructible { game.ext.logistics.navigation_dirty = true; }
     let id = game.data.groups[w.group].id.clone();
     if let Some(c) = game.data.prefab_components(&id, "Drone").first().map(|c| (*c).clone()) {
         let vis = game.data.prefab_components(&id, "DroneNetworkVibility").first().map(|c| (*c).clone()).unwrap_or(Doc::Null);
@@ -378,6 +390,7 @@ pub fn on_go_destroyed(game: &mut Game, wo: i32) {
 
 /// A world object was destroyed: its drone (Drone.OnDestroy) or station goes.
 pub fn on_destroyed(game: &mut Game, wo: &WorldObject) {
+    if game.data.groups[wo.group].constructible { game.ext.logistics.navigation_dirty = true; }
     if game.ext.logistics.drones.contains_key(&wo.id) {
         drone_on_destroy(game, wo.id);
         game.ext.logistics.drones.shift_remove(&wo.id);
@@ -453,9 +466,27 @@ fn frame(game: &mut Game, tick: u64) {
     visibility(game);
 }
 
+/// Rebuild only after construction/destruction; routes are cached between target changes.
+fn refresh_navigation(game: &mut Game) {
+    let Some(data) = game.data.drone_navigation.as_ref() else { return };
+    if !game.ext.logistics.navigation_dirty && !game.ext.logistics.navigation.is_empty() { return; }
+    let mut planets = data.planets.clone();
+    for id in &game.constructed {
+        let Some(w) = game.wos.get(id).filter(|w| w.net.is_some()) else { continue };
+        if let Some(bounds) = data.buildings.get(&game.data.groups[w.group].id) {
+            planets.entry(w.planet_hash()).or_default().extend(bounds.iter().map(|b| b.transformed(w.position, w.rotation)));
+        }
+    }
+    let l = &mut game.ext.logistics;
+    l.navigation = planets.into_iter().map(|(p, bounds)| (p, crate::geometry::navigation::Grid::new(bounds))).collect();
+    l.navigation_dirty = false;
+    l.navigation_epoch = l.navigation_epoch.wrapping_add(1);
+}
+
 /// LogisticManager.Update: drones the job found at their target act, then the job moves the
 /// others (DroneTransformUpdateJob) on planets with enough energy.
 fn update(game: &mut Game) {
+    refresh_navigation(game);
     let l = &game.ext.logistics;
     if !l.enabled || !l.access_created {
         return;
@@ -486,11 +517,23 @@ fn update(game: &mut Game) {
         if motion::length_sq(a.target) <= motion::EPSILON || !powered.contains(&a.planet) {
             continue;
         }
-        if motion::distance(a.target, dr.position) < l.min_target_distance {
+        if motion::distance_sq(a.target, dr.position) < dr.distance_min * dr.distance_min {
             l.at_target.push_back(i);
             continue;
         }
-        (dr.position, dr.rotation) = motion::step(dr.position, dr.rotation, a.target, a.forward, a.angular, dt);
+        if let Some(grid) = l.navigation.get(&a.planet) {
+            if dr.route_goal != Some(a.target) || dr.route_epoch != l.navigation_epoch {
+                dr.route = grid.route(dr.position, a.target).into();
+                dr.route_goal = Some(a.target);
+                dr.route_epoch = l.navigation_epoch;
+            }
+            if let Some(target) = dr.route.front().copied() {
+                (dr.position, dr.rotation) = motion::guided_step(dr.position, dr.rotation, target, a.forward, a.angular, dt);
+                if motion::distance_sq(dr.position, target) < 1e-6 { dr.route.pop_front(); }
+            }
+        } else {
+            (dr.position, dr.rotation) = motion::step(dr.position, dr.rotation, a.target, a.forward, a.angular, dt);
+        }
     }
 }
 
@@ -838,9 +881,8 @@ fn assign_idle_drones(game: &mut Game) {
     game.ext.logistics.updating = 2;
     let mut i = 0;
     while i < game.ext.logistics.access.len() {
-        if let Some(d) = game.ext.logistics.access[i] {
-            let Some(task) = non_attributed_task(game, planet_of(game, d)) else { break };
-            if drone_task(game, d).is_none() {
+        if let Some(d) = game.ext.logistics.access[i].filter(|d| drone_task(game, *d).is_none()) {
+            if let Some(task) = next_task_for_drone(game, d) {
                 set_task(game, d, Some(task));
             }
         }
@@ -855,31 +897,32 @@ fn release_drones(game: &mut Game) {
     if non_attributed_task(game, 0).is_none() {
         return;
     }
+    // Count compatible parked drones once, rather than sorting all stations for every item.
+    let mut available: Vec<_> = game.ext.logistics.stations.iter().filter_map(|(st, s)| {
+        let count = items(game, s.inventory).iter().filter(|wo| game.wos.get(wo).is_some_and(|w| s.groups.contains(&w.group))).count();
+        (count > 0).then(|| (*st, s.planet, station_position(game, *st), count))
+    }).collect();
     let tasks: Vec<u32> = game.ext.logistics.all_tasks.iter().map(|(_, uid)| *uid).collect();
     for uid in tasks {
-        let Some(t) = game.ext.logistics.tasks.get(&uid).cloned() else { continue };
+        let Some(t) = game.ext.logistics.tasks.get(&uid) else { continue };
         if t.state != State::NotAttributed || (!t.spawned && t.supply_wo.is_none()) {
             continue;
         }
-        let planet = task_planet(game, &t);
+        let planet = task_planet(game, t);
         let from = wo_position(game, if t.spawned { t.wo } else { t.supply_wo.unwrap() });
-        let mut distances: Vec<(i32, i32)> = game
-            .ext
-            .logistics
-            .stations
-            .iter()
-            .filter(|(_, s)| s.planet == planet)
-            .map(|(st, _)| (*st, motion::distance(station_position(game, *st), from).round_ties_even() as i32))
-            .collect();
-        // _stationsDistancesBuffer.Sort(): LogisticStationDistanceToTask.CompareTo, nearest first.
-        let _ = crate::dotnet_sort::sort_by(&mut distances, |a, b| a.1.cmp(&b.1));
-        for (st, _) in distances {
-            if let Some(d) = release_one_drone(game, st) {
+        while let Some(i) = available.iter().enumerate().filter(|(_, s)| s.1 == planet)
+            .min_by(|(_, a), (_, b)| motion::distance_sq(a.2, from).total_cmp(&motion::distance_sq(b.2, from)))
+            .map(|(i, _)| i) {
+            if let Some(d) = release_one_drone(game, available[i].0) {
+                available[i].3 -= 1;
+                if available[i].3 == 0 { available.remove(i); }
                 add_to_fleet(game, d, false);
                 set_task(game, d, Some(uid));
                 break;
             }
+            available.remove(i);
         }
+        if available.is_empty() { break; }
     }
 }
 
@@ -893,6 +936,22 @@ fn non_attributed_task(game: &Game, planet: i32) -> Option<u32> {
         let t = &l.tasks[uid];
         t.state == State::NotAttributed && (planet == 0 || task_planet(game, t) == planet)
     })
+}
+
+/// Explicit demand priority first, then shortest empty flight; ties retain task slot order.
+fn next_task_for_drone(game: &Game, d: i32) -> Option<u32> {
+    let l = &game.ext.logistics;
+    if l.paused { return None; }
+    let position = l.drones.get(&d)?.position;
+    let planet = planet_of(game, d);
+    l.all_tasks.iter().filter_map(|(_, uid)| {
+        let t = &l.tasks[uid];
+        if t.state != State::NotAttributed || task_planet(game, t) != planet { return None; }
+        let source = if t.spawned { t.wo } else { t.supply_wo? };
+        let source = go_position(game, source)?;
+        let priority = game.inventories.get(&t.demand)?.logistic.priority;
+        Some((*uid, priority, motion::distance_sq(position, source)))
+    }).min_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.total_cmp(&b.2))).map(|t| t.0)
 }
 
 /// GetDronesInLogistics: drones in stations and flying, on the current planet.
@@ -1090,6 +1149,9 @@ fn awake_drone(game: &mut Game, wo: i32, c: &Doc, vis: &Doc) {
         rotation,
         transform: motion::Transform::default(),
         behaviour,
+        route: VecDeque::new(),
+        route_goal: None,
+        route_epoch: 0,
         hidden: Vec::new(),
     };
     game.ext.logistics.drones.insert(wo, drone);
@@ -1138,7 +1200,7 @@ fn add_to_fleet(game: &mut Game, d: i32, then_assign: bool) {
         manager_add_drone(game, d);
     }
     if then_assign && game.ext.logistics.drones.contains_key(&d) {
-        let task = non_attributed_task(game, planet_of(game, d));
+        let task = next_task_for_drone(game, d);
         set_task(game, d, task);
     }
 }
@@ -1263,7 +1325,7 @@ fn end_assignment(game: &mut Game, d: i32) {
             dr.task = None;
         }
     }
-    let next = non_attributed_task(game, planet_of(game, d));
+    let next = next_task_for_drone(game, d);
     set_task(game, d, next);
     if game.ext.logistics.drones.contains_key(&d) && drone_task(game, d).is_none() {
         go_to_station(game, d);

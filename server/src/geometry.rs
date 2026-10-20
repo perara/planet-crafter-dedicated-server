@@ -187,3 +187,5 @@ mod tests {
         assert!((euler_y(r) - 30.0).abs() < 0.01);
     }
 }
+
+pub mod navigation;

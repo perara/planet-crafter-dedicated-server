@@ -411,6 +411,7 @@ fn drone_farm_runs_for_hours() {
     }
     assert!(crate::energy::has_enough(&game, game.planet_hash()));
     let rss = || std::fs::read_to_string("/proc/self/status").unwrap().lines().find(|l| l.starts_with("VmRSS")).map(|l| l.split_whitespace().nth(1).unwrap().to_string()).unwrap_or_default();
+    let benchmark_start = std::time::Instant::now();
     let (mut t, mut worst, mut all_worst, mut delivered) = (2.0, 0.0f64, 0.0f64, 0usize);
     game.sim_time = Some(t);
     game.tick();
@@ -438,7 +439,7 @@ fn drone_farm_runs_for_hours() {
             worst = 0.0;
         }
     }
-    println!("{seconds} s of game, {stations} stations x {drones} drones, {pairs} pairs: worst tick {:.1} ms, {delivered} items delivered", all_worst * 1000.0);
+    println!("{seconds} s of game, {stations} stations x {drones} drones, {pairs} pairs: worst tick {:.1} ms, {delivered} items delivered, {:.3} s wall time", all_worst * 1000.0, benchmark_start.elapsed().as_secs_f64());
 }
 
 /// The search for tasks as the port first had it (every demand through every supply and every
@@ -673,4 +674,173 @@ fn cancelled_drone_cargo_is_saved_on_its_own_planet() {
     assert!(!g.wos[&cargo].dont_save);
     let net = g.wos[&cargo].net.unwrap();
     assert!(matches!(g.net.get(net, "GroupNetworkContainer", "_active"), Some(crate::net::VarValue::Plain(v)) if *v == enc::bool(false)));
+}
+
+#[test]
+fn supplies_are_chosen_nearest_the_destination() {
+    let Some(mut game) = game() else { return };
+    build(&mut game, "DroneStation1", [10.0, 2.0, 10.0]);
+    let far = build(&mut game, "Container1", [1000.0, 2.0, 20.0]);
+    let near = build(&mut game, "Container1", [30.0, 2.0, 20.0]);
+    let demand = build(&mut game, "Container1", [35.0, 2.0, 20.0]);
+    let [far, near, demand] = [far, near, demand].map(|w| game.wos[&w].linked_inventory);
+    let iron = game.data.group("Iron").unwrap();
+    for supply in [far, near] {
+        add(&mut game, "Iron", supply);
+        game.inventories.get_mut(&supply).unwrap().logistic.supply = vec![iron];
+        set_dirty(&mut game, supply);
+    }
+    game.inventories.get_mut(&demand).unwrap().size = 1;
+    game.inventories.get_mut(&demand).unwrap().logistic.demand = vec![iron];
+    set_dirty(&mut game, demand);
+    set_logistic_tasks(&mut game);
+    let tasks: Vec<_> = game.ext.logistics.all_tasks.iter().map(|(_, u)| &game.ext.logistics.tasks[u]).collect();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].supply, Some(near));
+    println!("loaded leg: 5 m selected, versus 965 m from the first registered supply");
+}
+
+/// A live airborne drone plus tasks deliberately ordered far before near.
+fn dispatch_scenario(game: &mut Game) -> (i32, u32, u32) {
+    let far = build(game, "Container1", [1000.0, 2.0, 10.0]);
+    let near = build(game, "Container1", [25.0, 2.0, 10.0]);
+    let demand = build(game, "Container1", [40.0, 2.0, 10.0]);
+    let [far, near, demand] = [far, near, demand].map(|w| game.wos[&w].linked_inventory);
+    for i in [far, near, demand] {
+        set_dirty(game, i);
+    }
+    let far_item = add(game, "Iron", far);
+    let near_item = add(game, "Iron", near);
+    let far_task = create_task(game, Some(far), demand, far_item, false).unwrap();
+    let near_task = create_task(game, Some(near), demand, near_item, false).unwrap();
+    let drone = build(game, "Drone1", [10.0, 4.0, 10.0]);
+    add_to_fleet(game, drone, false);
+    (drone, far_task, near_task)
+}
+
+#[test]
+fn idle_drones_choose_nearby_work_and_preserve_priority_pause_and_reservations() {
+    let Some(mut game) = game() else { return };
+    let (drone, far, near) = dispatch_scenario(&mut game);
+    assign_idle_drones(&mut game);
+    assert_eq!(drone_task(&game, drone), Some(near));
+    assert_eq!(task_state(&game, near), Some(State::ToSupply));
+    assert_eq!(task_state(&game, far), Some(State::NotAttributed));
+    // A second drone cannot take an already reserved item.
+    let second = build(&mut game, "Drone1", [10.0, 4.0, 10.0]);
+    add_to_fleet(&mut game, second, false);
+    assert_eq!(next_task_for_drone(&game, second), Some(far));
+    let high = build(&mut game, "Container1", [1100.0, 2.0, 10.0]);
+    let high = game.wos[&high].linked_inventory;
+    game.inventories.get_mut(&high).unwrap().logistic.priority = 2;
+    set_dirty(&mut game, high);
+    let source = game.ext.logistics.tasks[&far].supply;
+    let other = add(&mut game, "Iron", source.unwrap());
+    let high_task = create_task(&mut game, source, high, other, false).unwrap();
+    assert_eq!(next_task_for_drone(&game, second), Some(high_task));
+    game.ext.logistics.paused = true;
+    assert_eq!(next_task_for_drone(&game, second), None);
+}
+
+#[test]
+fn an_idle_drone_on_another_planet_does_not_stop_dispatch() {
+    let Some(mut game) = game() else { return };
+    let (first, _, _) = dispatch_scenario(&mut game);
+    // This drone's planet has no work. The later access slot still must be considered.
+    game.wos.get_mut(&first).unwrap().planet = stable_hash("Humble");
+    let second = build(&mut game, "Drone1", [10.0, 4.0, 10.0]);
+    add_to_fleet(&mut game, second, false);
+    assign_idle_drones(&mut game);
+    assert_eq!(drone_task(&game, first), None);
+    assert!(drone_task(&game, second).is_some());
+}
+
+#[test]
+fn clearance_routes_deliver_cargo_and_rebuild_after_construction_and_snapshot() {
+    use crate::geometry::navigation::{Bounds, Data};
+    let Some(mut game) = game() else { return };
+    build(&mut game, "EnergyGenerator6", [40.0, 2.0, 0.0]);
+    let station = build(&mut game, "DroneStation1", [10.0, 2.0, 10.0]);
+    let supply = build(&mut game, "Container1", [25.0, 2.0, 10.0]);
+    let demand = build(&mut game, "Container1", [25.0, 2.0, 60.0]);
+    let [station_inv, supply_inv, demand_inv] = [station, supply, demand].map(|w| game.wos[&w].linked_inventory);
+    let iron = game.data.group("Iron").unwrap();
+    let cargo = add(&mut game, "Iron", supply_inv);
+    game.inventories.get_mut(&supply_inv).unwrap().logistic.supply = vec![iron];
+    game.inventories.get_mut(&demand_inv).unwrap().logistic.demand = vec![iron];
+    set_dirty(&mut game, supply_inv);
+    set_dirty(&mut game, demand_inv);
+    let drone = add(&mut game, "Drone1", station_inv);
+    let planet = game.planet_hash();
+    let map = Data {
+        format: 1,
+        build_id: "test".into(),
+        planets: HashMap::from([(
+            planet,
+            vec![Bounds {
+                min: [20.0, 0.0, 30.0],
+                max: [30.0, 20.0, 40.0],
+            }],
+        )]),
+        buildings: HashMap::from([(
+            "Container1".into(),
+            vec![Bounds {
+                min: [-2.0, 0.0, -2.0],
+                max: [2.0, 3.0, 2.0],
+            }],
+        )]),
+    };
+    game.data.drone_navigation = Some(std::sync::Arc::new(map));
+    let start = game.ext.logistics.last_tick;
+    let mut checked_cruise = false;
+    for tick in 1..=80 * 30 {
+        frame(&mut game, start + tick);
+        if let Some(d) = game.ext.logistics.drones.get(&drone) {
+            assert!(d.position.iter().chain(&d.rotation).all(|v| v.is_finite()));
+            if d.position[2] > 27.0 && d.position[2] < 43.0 && (d.position[0] - 25.0).abs() < 3.0 {
+                assert!(d.position[1] >= 23.0, "cruise crossed the terrain: {:?}", d.position);
+                checked_cruise = true;
+            }
+        }
+        game.net.out.clear();
+    }
+    assert!(checked_cruise);
+    assert!(items(&game, demand_inv).contains(&cargo));
+    assert!(items(&game, station_inv).contains(&drone));
+    let epoch = game.ext.logistics.navigation_epoch;
+    let building = build(&mut game, "Container1", [50.0, 2.0, 40.0]);
+    refresh_navigation(&mut game);
+    assert_eq!(game.ext.logistics.navigation_epoch, epoch + 1);
+    refresh_navigation(&mut game);
+    assert_eq!(game.ext.logistics.navigation_epoch, epoch + 1, "unchanged world reuses the index");
+    game.destroy_world_objects(&[building], false);
+    refresh_navigation(&mut game);
+    assert_eq!(game.ext.logistics.navigation_epoch, epoch + 2);
+    let snapshot = crate::handoff::snapshot(&mut game).unwrap();
+    let (_, _, spec) = crate::tables(crate::test_data().unwrap());
+    let mut restored = crate::handoff::restore(game.net_data.clone(), game.data.clone(), spec, &snapshot, game.scenes.clone()).unwrap();
+    assert!(restored.ext.logistics.navigation.is_empty());
+    refresh_navigation(&mut restored);
+    assert!(!restored.ext.logistics.navigation.is_empty());
+    assert!(items(&restored, demand_inv).contains(&cargo));
+}
+
+#[test]
+fn mixed_drone_types_use_their_own_arrival_distance() {
+    let Some(mut game) = game() else { return };
+    build(&mut game, "EnergyGenerator6", [40.0, 2.0, 0.0]);
+    let a = build(&mut game, "Drone1", [10.0, 4.0, 10.0]);
+    let b = build(&mut game, "Drone1", [20.0, 4.0, 10.0]);
+    for d in [a, b] {
+        add_to_fleet(&mut game, d, false);
+    }
+    game.ext.logistics.enabled = true;
+    game.ext.logistics.drones.get_mut(&a).unwrap().distance_min = 3.0;
+    game.ext.logistics.drones.get_mut(&b).unwrap().distance_min = 0.5;
+    game.ext.logistics.min_target_distance = 0.1;
+    set_target(&mut game, a, [12.0, 2.0, 10.0]);
+    set_target(&mut game, b, [22.0, 2.0, 10.0]);
+    update(&mut game);
+    assert!(game.ext.logistics.at_target.contains(&(game.ext.logistics.drones[&a].access as usize)));
+    assert!(!game.ext.logistics.at_target.contains(&(game.ext.logistics.drones[&b].access as usize)));
 }

@@ -882,3 +882,37 @@ The Planet Crafter is a trademark of Miju Games. Steam and the Steamworks SDK be
 
 Reporting a vulnerability: [SECURITY.md](SECURITY.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
 Changes by release: [CHANGELOG.md](CHANGELOG.md).
+
+## Drone scheduling and optional obstacle clearance
+
+Drones choose nearby supplies for each destination, then give idle airborne drones the closest
+pickup at the highest demand priority. Supplies and tasks at equal distance retain their queue
+order. Station dispatch scans available stations without sorting the entire station list for
+every item. These changes run on the server with ordinary game clients.
+
+For terrain and building clearance, generate an optional collision map from your own game,
+using the same game installation that produced the tables:
+
+```bash
+pcds drone-map "/path/to/The Planet Crafter" "/path/to/data/2.103"
+```
+
+The map is loaded at server start from `drone-navigation.json` beside `gamedata.json`. Its game
+build must match the tables; a stale or malformed map is refused. Remove the map and restart to
+return to the game's original flight. The command leaves the ordinary tables unchanged and
+never writes a game save. The optional map must be generated again after a game update or a
+fresh table extraction. It contains game-derived geometry; keep it with your private tables.
+
+With a map, drones follow straight clearance segments: climb vertically, cruise above the
+collider bounds on the route, then descend vertically to dock. A clear route stays direct.
+Indoor pickup and docking deliberately permit passage through walls, so enclosed storage
+continues working. This uses conservative bounding boxes, including inactive scene colliders
+that may appear as terraformation progresses; large terrain meshes can therefore cause high,
+longer flights. This is aerial clearance, not a shortest-path or doorway navigation system.
+TerrainCollider geometry is refused by the reader rather than silently omitted. Procedural
+wreck interiors, moving vehicles, players and temporary meteor debris are outside this map.
+
+The server indexes obstacles by location, caches each drone's route, and rebuilds the index
+after buildings are constructed or destroyed. Navigation caches are rebuilt after snapshot
+restore and add no saved-world or snapshot-format fields. Collision maps are opt-in; without
+one the server keeps the original flight model, while using the improved scheduling.

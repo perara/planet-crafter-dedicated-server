@@ -60,7 +60,7 @@ impl Ctx {
     /// the planet's scene, and every sector a SectorEnter of those can load (Sector.LoadSector,
     /// called only from SectorEnter.OnTriggerEnter, loads the scene named as the sector's game
     /// object), sectors entered from sectors included.
-    fn planet_files(&mut self, scene: &str) -> Result<Vec<usize>, String> {
+    pub(super) fn planet_files(&mut self, scene: &str) -> Result<Vec<usize>, String> {
         let mut files = Vec::new();
         let mut queue: Vec<String> = ["BootScene", "GameMainScene", scene].map(String::from).to_vec();
         let mut i = 0;

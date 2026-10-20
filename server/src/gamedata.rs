@@ -84,6 +84,7 @@ pub struct GameData {
     /// every panel look (panels.rs).
     pub panels: Arc<Doc>,
     pub singletons: Arc<Doc>,
+    pub drone_navigation: Option<Arc<crate::geometry::navigation::Data>>,
 }
 
 /// NetworkTransformState's position bits (x, y, z).
@@ -271,6 +272,17 @@ impl GameData {
         }
         let by_hash = groups.iter().enumerate().map(|(i, g)| (g.hash, i)).collect();
         let layouts = serde_json::from_str(root.layouts.get()).map_err(|e| format!("{path}: layouts: {e}"))?;
+        let map_path = std::path::Path::new(path).with_file_name("drone-navigation.json");
+        let drone_navigation = match std::fs::read_to_string(&map_path) {
+            Ok(text) => {
+                let map: crate::geometry::navigation::Data = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", map_path.display()))?;
+                let build = std::fs::read_to_string(map_path.with_file_name("buildid")).map_err(|e| format!("collision map buildid: {e}"))?;
+                map.validate(&build)?;
+                Some(Arc::new(map))
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("{}: {e}", map_path.display())),
+        };
         Ok(GameData {
             groups,
             by_id,
@@ -280,6 +292,7 @@ impl GameData {
             group_prefabs: Arc::new(Prefabs(root.group_prefabs.into_iter().map(|(k, raw)| (k, Prefab { raw: crate::util::compact_json(raw.get()), parsed: Default::default(), asked: Default::default(), kinds: Default::default() })).collect())),
             panels: Arc::new(root.panels),
             singletons: Arc::new(root.singletons),
+            drone_navigation,
         })
     }
 
@@ -351,4 +364,22 @@ mod tests {
         };
         assert_eq!(state("VehicleTruck"), state("FloorAngleGlass"));
     }
+    #[test]
+    fn optional_drone_maps_load_only_for_matching_tables() {
+        let dir = std::env::temp_dir().join(format!("pcds-drone-map-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("gamedata.json");
+        std::fs::write(&path, r#"{"layouts":{}}"#).unwrap();
+        let load = || GameData::load(path.to_str().unwrap());
+        assert!(load().unwrap().drone_navigation.is_none());
+        std::fs::write(dir.join("buildid"), "abc").unwrap();
+        std::fs::write(dir.join("drone-navigation.json"), r#"{"format":1,"build_id":"abc","planets":{},"buildings":{}}"#).unwrap();
+        assert!(load().unwrap().drone_navigation.is_some());
+        std::fs::write(dir.join("buildid"), "different").unwrap();
+        assert!(load().is_err());
+        std::fs::write(dir.join("drone-navigation.json"), "bad json").unwrap();
+        assert!(load().is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
 }

@@ -427,6 +427,7 @@ fn main() {
         Some("bank-info") => println!("{}", msg::json(&bank::info())),
         Some("probe") => probe::run(&args[2..]),
         Some("load") => load::run(&args[2..]),
+        Some("drone-map") => native::navigation::run(&args[2..]),
         Some("read-game") => native::tables::run(&args[2..]),
         Some("tables-diff") => native::diff::run(&args[2..]),
         Some("native-layout") => native::tables::layout(&args[2..]),

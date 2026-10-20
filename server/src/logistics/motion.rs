@@ -1,9 +1,9 @@
 //! Drone flight as LogisticManager.DroneTransformUpdateJob computes it (Unity.Mathematics
 //! quaternion math in floats), and the NetworkTransform state the server sends for a drone.
 //!
-//! Drones fly straight through everything: the job never asks the physics engine (the game's
+//! The original flight job flies through everything: it never asks the physics engine (the game's
 //! DroneColliding only tints a drone that passes through something, on clients). So there is
-//! no collision avoidance to approximate.
+//! no vanilla collision avoidance to approximate. guided_step serves the optional clearance map.
 
 use crate::wire::Writer;
 
@@ -124,6 +124,21 @@ pub fn step(position: V3, rotation: Q, target: V3, forward_velocity: f32, angula
     let turned = slerp(rotation, look_rotation(sub(target, position), [0.0, 1.0, 0.0]), angular_velocity * dt);
     let ahead = rotate(rotation, [0.0, 0.0, dt * forward_velocity]);
     ([position[0] + ahead[0], position[1] + ahead[1], position[2] + ahead[2]], turned)
+}
+
+/// Follow a clearance segment exactly: curved steering could cut through an obstacle.
+pub fn guided_step(position: V3, rotation: Q, target: V3, speed: f32, angular: f32, dt: f32) -> (V3, Q) {
+    let delta = sub(target, position);
+    let length = length_sq(delta).sqrt();
+    if length <= EPSILON { return (target, rotation); }
+    let fraction = (speed * dt / length).clamp(0.0, 1.0);
+    let next = std::array::from_fn(|i| position[i] + delta[i] * fraction);
+    let horizontal = (delta[0] * delta[0] + delta[2] * delta[2]).sqrt();
+    let turned = if horizontal > EPSILON {
+        let forward = [delta[0] / horizontal, 0.0, delta[2] / horizontal];
+        slerp(rotation, look_rotation(forward, [0.0, 1.0, 0.0]), (angular * dt).clamp(0.0, 1.0))
+    } else { rotation };
+    (next, turned)
 }
 
 // ---- NetworkTransform ---------------------------------------------------------------------

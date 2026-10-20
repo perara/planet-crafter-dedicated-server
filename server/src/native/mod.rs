@@ -11,3 +11,4 @@ pub mod tables;
 pub mod typetree;
 pub mod unity;
 pub mod wrecks;
+pub mod navigation;

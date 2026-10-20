@@ -90,6 +90,7 @@ The server and its tools:
   pcds new-save SAVE.json DATA_DIR [NEW OPTIONS]
   pcds probe HOST:PORT DATA_DIR SCRIPT.json
   pcds load HOST:PORT DATA_DIR [PLAYERS] [SECONDS] [ACTION_MS] [NAME]
+  pcds drone-map GAME_DIR TABLES_DIR    optional drone obstacle bounds
   pcds read-game GAME_DIR OUT_DIR        the game tables, read from its files
   pcds --version [DATA_DIR]
 
