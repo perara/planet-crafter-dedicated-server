@@ -75,6 +75,7 @@ mod access;
 mod admin;
 mod bank;
 mod bincodec;
+mod compact;
 mod clock;
 mod chathooks;
 mod cli;

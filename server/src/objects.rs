@@ -204,7 +204,7 @@ impl Game {
                     if !matches!(&v.value, VarValue::Plain(b) if *b == new) {
                         changed.push(*p);
                     }
-                    v.value = VarValue::Plain(new);
+                    v.value = VarValue::Plain(new.into());
                 }
                 i += 1;
             }

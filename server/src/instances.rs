@@ -206,7 +206,7 @@ fn spawn_generator(game: &mut Game, index: usize, position: [f32; 3], rotation: 
                 var("_planetHash", "NetworkVariable<Int32>", "01"),
             ],
         }],
-        tail: Vec::new(),
+        tail: Default::default(),
         tail_position: None,
     };
     let mut o = NetObj::from_layout(&layout);

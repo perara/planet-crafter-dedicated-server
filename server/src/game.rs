@@ -1559,7 +1559,7 @@ pub mod tests {
         assert!(g.net.out.is_empty(), "nothing passed on");
         let d = delta(&g, player, "PlayerShareState", "_emote", &crate::net::enc::short(3));
         g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, d.clone())]));
-        assert_eq!(var(&g, "PlayerShareState", "_emote"), format!("{:?}", Some(crate::net::VarValue::Plain(crate::net::enc::short(3)))));
+        assert_eq!(var(&g, "PlayerShareState", "_emote"), format!("{:?}", Some(crate::net::VarValue::Plain(crate::net::enc::short(3).into()))));
         assert!(matches!(&g.net.out[..], [(Target::Except(1), NETWORK_VARIABLE_DELTA, body)] if *body == d));
         g.net.out.clear();
         let d = delta(&g, bob, "PlayerShareState", "_emote", &crate::net::enc::short(3));

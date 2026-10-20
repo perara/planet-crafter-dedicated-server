@@ -1066,7 +1066,7 @@ fn respawn_drone(game: &mut Game, d: i32) -> bool {
     let Some(mut o) = dr.parked.take() else { return false };
     o.position = dr.position;
     o.rotation = dr.rotation;
-    o.tail = motion::Transform::sync_tail(dr.behaviour, dr.position, dr.rotation, tick);
+    o.tail = motion::Transform::sync_tail(dr.behaviour, dr.position, dr.rotation, tick).into();
     // Spawn() without destroyWithScene, unlike InstantiateWorldObject's first spawn.
     o.flags &= !DESTROY_WITH_SCENE;
     dr.transform = motion::Transform::default();
@@ -1117,7 +1117,7 @@ fn awake_drone(game: &mut Game, wo: i32, c: &Value, vis: &Value) {
     let handle = game.net.scene_handle;
     let o = game.net.objects.get_mut(&net).unwrap();
     o.rotation = rotation;
-    o.tail = motion::Transform::sync_tail(behaviour, position, rotation, tick);
+    o.tail = motion::Transform::sync_tail(behaviour, position, rotation, tick).into();
     o.tail_position = None;
     let body = [vec![1], o.scene_object(handle)].concat();
     let spawned = |b: &[u8]| {
@@ -1363,7 +1363,7 @@ fn send_transforms(game: &mut Game, tick: i32) {
         let Some(o) = game.net.objects.get_mut(&net) else { continue };
         o.position = dr.position;
         o.rotation = dr.rotation;
-        o.tail = motion::Transform::sync_tail(dr.behaviour, dr.position, dr.rotation, tick);
+        o.tail = motion::Transform::sync_tail(dr.behaviour, dr.position, dr.rotation, tick).into();
         if !active || o.owner != 0 {
             continue;
         }

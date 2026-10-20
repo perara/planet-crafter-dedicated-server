@@ -55,17 +55,17 @@ pub struct TransformDef {
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct BehaviourDef {
-    pub class: String,
+    pub class: crate::compact::Sym,
     pub behaviour_id: u16,
     pub vars: Vec<VarDef>,
 }
 
 #[derive(Deserialize, Clone)]
 pub struct VarDef {
-    pub name: String,
+    pub name: crate::compact::Sym,
     /// Netcode type, e.g. "NetworkVariable<Int32>".
     #[serde(rename = "type", default)]
-    pub ty: String,
+    pub ty: crate::compact::Sym,
     /// The value it starts with (hex), as the game's constructor gives it; None when the server
     /// must set it (types with their own serializer).
     pub bytes: Option<String>,

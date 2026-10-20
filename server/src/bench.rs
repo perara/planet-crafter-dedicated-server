@@ -835,7 +835,7 @@ fn scale() {
     let (before, t) = (rss_kib(), Cpu::now());
     // SAFETY: malloc_trim only returns free memory to the system.
     unsafe { libc::malloc_trim(0) };
-    println!("scale: malloc_trim(0) after the load {:?}: rss {} MiB -> {} MiB", t.elapsed(), before >> 10, rss_kib() >> 10);
+    println!("scale: malloc_trim(0) after the load {:?}: rss {} MiB -> {} MiB, malloc in use {:.1} MiB", t.elapsed(), before >> 10, rss_kib() >> 10, heap_bytes() as f64 / 1048576.0);
     let t = Cpu::now();
     let snapshot = g.snapshot();
     let took = t.elapsed();
@@ -917,7 +917,22 @@ fn scale() {
         g.pickables = Default::default();
     });
     measure("timers", &mut || g.timers = Default::default());
-    measure("ext", &mut || g.ext = Default::default());
+    measure("ext.machines", &mut || g.ext.machines = Default::default());
+    measure("ext.logistics", &mut || g.ext.logistics = Default::default());
+    measure("ext.water", &mut || g.ext.water = Default::default());
+    measure("ext.meteo", &mut || g.ext.meteo = Default::default());
+    measure("ext.energy", &mut || g.ext.energy = Default::default());
+    measure("ext.planets", &mut || g.ext.planets = Default::default());
+    measure("ext.animals", &mut || g.ext.animals = Default::default());
+    measure("ext.toxic", &mut || g.ext.toxic = Default::default());
+    measure("ext.rockets", &mut || g.ext.rockets = Default::default());
+    measure("ext.gauges", &mut || g.ext.gauges = Default::default());
+    measure("ext.status", &mut || g.ext.status = Default::default());
+    measure("ext.chat", &mut || g.ext.chat = Default::default());
+    measure("ext.rest", &mut || g.ext = Default::default());
+    measure("save", &mut || g.save = SaveFile::empty());
+    measure("saved_players", &mut || g.saved_players = Vec::new());
+    measure("net_wos", &mut || g.net_wos = Default::default());
     measure("units", &mut || g.units = Default::default());
     println!("scale: heap MiB by part ({wos} world objects, {net} network objects, {invs} inventories, {holders} holders): {}", parts.join(", "));
     std::fs::remove_dir_all(dir).ok();

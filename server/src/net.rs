@@ -4,6 +4,7 @@
 
 use serde_json::Value;
 
+use crate::compact::{Bytes, Sym};
 use crate::data::BehaviourDef;
 use crate::gamedata::Layout;
 use crate::protocol::{self, CHANGE_OWNERSHIP, CLIENT_RPC, HAS_PARENT, HAS_TRANSFORM, NETWORK_VARIABLE_DELTA};
@@ -84,24 +85,24 @@ fn encode_events(events: &[ListEvent]) -> Vec<u8> {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum VarValue {
-    Plain(#[serde(with = "crate::bincodec::bytes")] Vec<u8>),
+    Plain(#[serde(with = "crate::compact::bytes")] Bytes),
     List(#[serde(with = "crate::bincodec::byte_lists")] Vec<Vec<u8>>),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NetVar {
-    pub name: String,
-    pub ty: String,
+    pub name: Sym,
+    pub ty: Sym,
     pub value: VarValue,
     /// Pending delta: the new value, or the list events since the last flush.
-    dirty: Option<Vec<ListEvent>>,
+    dirty: Option<Box<Vec<ListEvent>>>,
 }
 
 impl NetVar {
     #[cfg(test)]
     fn full(&self) -> Vec<u8> {
         match &self.value {
-            VarValue::Plain(b) => b.clone(),
+            VarValue::Plain(b) => b.to_vec(),
             VarValue::List(items) => {
                 let mut w = Writer::new();
                 w.u16(items.len() as u16);
@@ -116,7 +117,7 @@ impl NetVar {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NetBehaviour {
-    pub class: String,
+    pub class: Sym,
     pub index: u16,
     pub vars: Vec<NetVar>,
 }
@@ -133,8 +134,8 @@ pub struct NetObj {
     pub rotation: [f32; 4],
     pub scale: [f32; 3],
     pub behaviours: Vec<NetBehaviour>,
-    #[serde(with = "crate::bincodec::bytes")]
-    pub tail: Vec<u8>,
+    #[serde(with = "crate::compact::bytes")]
+    pub tail: Bytes,
     pub tail_position: Option<usize>,
     /// The world object it stands for.
     pub wo: Option<i32>,
@@ -162,7 +163,7 @@ fn value_of(ty: &str, bytes: Vec<u8>) -> VarValue {
             return VarValue::List(items);
         }
     }
-    VarValue::Plain(bytes)
+    VarValue::Plain(bytes.into())
 }
 
 /// One full value of a variable of Netcode type `ty`, read off `r`; None for types this server
@@ -267,7 +268,7 @@ pub fn apply_delta(net: &mut Net, client: u64, body: &[u8]) -> bool {
         writes.push((i, bytes));
     }
     for (i, bytes) in writes {
-        b.vars[i].value = VarValue::Plain(bytes);
+        b.vars[i].value = VarValue::Plain(bytes.into());
     }
     true
 }
@@ -299,7 +300,7 @@ impl NetObj {
             rotation: [0.0, 0.0, 0.0, 1.0],
             scale: layout.scale,
             behaviours: behaviours(&layout.behaviours),
-            tail: layout.tail.clone(),
+            tail: Bytes::new(&layout.tail),
             tail_position: layout.tail_position,
             wo: None,
             scene: false,
@@ -407,7 +408,7 @@ impl NetObj {
 pub fn behaviours(defs: &[BehaviourDef]) -> Vec<NetBehaviour> {
     defs.iter()
         .map(|b| NetBehaviour {
-            class: b.class.clone(),
+            class: b.class,
             index: b.behaviour_id,
             vars: b
                 .vars
@@ -415,7 +416,7 @@ pub fn behaviours(defs: &[BehaviourDef]) -> Vec<NetBehaviour> {
                 .map(|v| {
                     // No bytes: the server sets the value (an empty value is none, see check).
                     let bytes = v.bytes.as_deref().map(hex).unwrap_or_default();
-                    NetVar { name: v.name.clone(), ty: v.ty.clone(), value: value_of(&v.ty, bytes), dirty: None }
+                    NetVar { name: v.name, ty: v.ty, value: value_of(&v.ty, bytes), dirty: None }
                 })
                 .collect(),
         })
@@ -565,8 +566,8 @@ impl Net {
         if matches!(&v.value, VarValue::Plain(b) if *b == bytes) {
             return;
         }
-        v.value = VarValue::Plain(bytes);
-        v.dirty = Some(Vec::new());
+        v.value = VarValue::Plain(bytes.into());
+        v.dirty = Some(Box::default());
         self.dirty.push(object);
     }
 
@@ -579,8 +580,8 @@ impl Net {
         if matches!(&v.value, VarValue::Plain(b) if *b == bytes) {
             return;
         }
-        v.value = VarValue::Plain(bytes);
-        v.dirty = Some(Vec::new());
+        v.value = VarValue::Plain(bytes.into());
+        v.dirty = Some(Box::default());
         self.dirty.push(object);
     }
 
@@ -604,7 +605,7 @@ impl Net {
                 ListEvent::Clear => items.clear(),
             }
         }
-        v.dirty.get_or_insert_with(Vec::new).extend(events);
+        v.dirty.get_or_insert_with(Box::default).extend(events);
         self.dirty.push(object);
     }
 
@@ -683,7 +684,7 @@ mod tests {
         let Some(g) = crate::game::test_game(crate::game::tests::save()) else { return };
         let reference = |o: &NetObj| {
             let mut out: Vec<u8> = o.behaviours.iter().flat_map(|b| b.vars.iter().flat_map(|v| v.full())).collect();
-            let mut tail = o.tail.clone();
+            let mut tail = o.tail.to_vec();
             if let Some(at) = o.tail_position {
                 if let Some(slot) = tail.get_mut(at..at + 12) {
                     slot.copy_from_slice(&o.position.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>());

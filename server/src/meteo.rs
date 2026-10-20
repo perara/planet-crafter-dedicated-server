@@ -574,7 +574,7 @@ pub(crate) mod tests {
     pub(crate) fn var(game: &Game, class: &str, name: &str) -> Vec<u8> {
         let (object, _) = game.net.find_class(class).unwrap();
         match game.net.get(object, class, name) {
-            Some(crate::net::VarValue::Plain(b)) => b.clone(),
+            Some(crate::net::VarValue::Plain(b)) => b.to_vec(),
             _ => panic!("{class}.{name}"),
         }
     }

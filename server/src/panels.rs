@@ -187,7 +187,7 @@ pub fn change_contiguous_panels(game: &mut Game, o: &mut NetObj) {
     for index in own {
         let Some(v) = o.behaviours.iter_mut().find(|b| b.index == index).and_then(|b| b.vars.iter_mut().find(|v| v.name == "_currentSubPanelType")) else { continue };
         if !matches!(&v.value, VarValue::Plain(b) if *b == enc::enumeration(WALL_CORRIDOR)) {
-            v.value = VarValue::Plain(enc::enumeration(WALL_CORRIDOR));
+            v.value = VarValue::Plain(enc::enumeration(WALL_CORRIDOR).into());
             game.panel_constructed(WALL_CORRIDOR);
             changed = true;
         }

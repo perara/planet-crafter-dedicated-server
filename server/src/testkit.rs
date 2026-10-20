@@ -111,7 +111,7 @@ pub fn one(g: &Game, name: &str) -> Vec<Value> {
 /// A plain network variable's bytes.
 pub fn var(g: &Game, object: u64, class: &str, name: &str) -> Vec<u8> {
     match g.net.get(object, class, name) {
-        Some(VarValue::Plain(b)) => b.clone(),
+        Some(VarValue::Plain(b)) => b.to_vec(),
         v => panic!("{class}.{name} of {object}: {v:?}"),
     }
 }
