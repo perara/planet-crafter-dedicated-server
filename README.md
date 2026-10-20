@@ -186,7 +186,7 @@ Manage it with `docker exec`:
 ```bash
 docker exec pcds pcds worlds                 # the worlds in data/worlds, * = the one running
 docker exec pcds pcds world use mybase && docker restart pcds
-docker exec pcds pcds world new second --planet Aqualis
+docker exec pcds pcds world new second --planet Selenea
 docker exec pcds pcds world remove old       # kept in worlds/backups/
 docker exec pcds pcds code                   # the invite code
 docker exec pcds pcds players | rules | gui
@@ -198,8 +198,8 @@ it healthy once the world runs), so it needs `PCDS_ADMIN` on, as it is by defaul
 `--stop-timeout 90` gives the server time to save the world at `docker stop` (Docker's default
 of 10 s would kill it during the save); Compose has `stop_grace_period: 90s`. `PUID`/`PGID` (default 1000) set who owns `data/` on the host. On the first start without
 a world, the newest save in `data/worlds/` runs, or a new world is made (the arguments of the
-container, for example `docker run ... IMAGE --planet Aqualis` or Compose's `command: ["--planet",
-"Aqualis"]`, choose its options). [compose.yaml](compose.yaml) does the same with
+container, for example `docker run ... IMAGE --planet Selenea` or Compose's `command: ["--planet",
+"Selenea"]`, choose its options). [compose.yaml](compose.yaml) does the same with
 `docker compose up -d`.
 
 ### Updating in Docker
@@ -287,7 +287,13 @@ file and the name.
 ./pcds ban NAME                # also bans the SteamID (invite code) or the IP (direct IP)
 ./pcds unban NAME_OR_IP
 ./pcds gui                     # the admin web page's address, with its token
+./pcds token                   # the admin token alone, for curl and scripts
+./pcds api GET /api/status     # any admin API route, through the token in server.env
+./pcds status --json           # the whole status, for scripts
 ```
+
+`./pcds help` lists every command. When a command cannot do what you asked, it says what to do;
+[docs/troubleshooting.md](docs/troubleshooting.md) has the usual problems from the symptom to the fix.
 
 The admin web page has nine sections (keys 1 to 9 switch between them). **Overview**: players,
 CPU, memory, loop load, loop rate and network traffic with live graphs of the last minutes, the
@@ -298,8 +304,9 @@ water, health and toxicity, position) with show on map, teleport (to coordinates
 player), kick and ban. **Map**: the planet from above with the buildings, the players moving with
 their trails; drag, wheel or pinch to move and zoom, follow a player, and click a spot to teleport
 someone there (the height comes from the nearest building). **Chat**: the chat as it happens, and
-messages to everyone. **World**: save now, save and stop, the world settings, the worlds beside
-this one and this world's backups. **Updates**: the running and latest release, check, update
+messages to everyone. **World**: pause, save now, back up now, stop and start the world (the page and API stay up),
+shut the server down, the off-site copies, the worlds beside this one (make, run, download,
+remove) and this world's backups (download, restore as a world), and the world settings. **Updates**: the running and latest release, check, update
 now, install a given release or roll back (each a hand-over without disconnecting anyone), the
 two banks and the update history. **Config**: every setting (rules, access lists; the
 `server.env` settings read-only), drawn from the server's configuration schema, with search.
@@ -522,7 +529,8 @@ cannot download (`--steam-user` installs) fails `pcds update`, so the hourly uni
   `./pcds world import SAVE.json [NAME]` adds a save, as does copying it into `run/worlds/`
   (a save from the game's old layouts, from 2022 and before, has to be imported: see below);
   `./pcds world new NAME [--planet ID] [--start LOCATION] [--seed N] [--set KEY=VALUE]...` makes a
-  new one with the game's Standard settings (`--set` changes any game setting, for example
+  new one with the game's Standard settings, on Prime or Selenea (the free starting planets; a
+  refused planet or start location names the choices) (`--set` changes any game setting, for example
   `--set modifierGaugeDrain=0.5 --set dyingConsequencesLabel=NoConsequences`);
   `./pcds world remove NAME` moves one into `run/worlds/backups/`.
 - `./pcds new [OPTIONS] --force` replaces the running world with a new one; the old one is kept.

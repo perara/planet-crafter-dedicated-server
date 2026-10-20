@@ -13,7 +13,7 @@ services:
   pcds:
     image: ghcr.io/perara/planet-crafter-dedicated-server:latest
     restart: unless-stopped
-    # command: ["--planet", "Aqualis"]   # the options of the first world, when there is none yet
+    # command: ["--planet", "Selenea"]   # the options of the first world, when there is none yet
     ports:
       - "7777:7777/udp"        # direct IP: players join HOST:7777
       - "127.0.0.1:7782:7782"  # the admin page, on this machine only

@@ -52,6 +52,8 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
   pcds install-service | uninstall-service    start at login, check for game updates hourly
   pcds code | players | save | kick PLAYER | ban PLAYER | unban NAME_OR_IP
   pcds gui | token | config | api METHOD PATH [JSON]
+                         the admin page's address with its token | the token | edit server.env
+                         (EDITOR; 'pcds restart' applies it) | any admin API route (docs/admin-api.md)
   pcds rules [set SECTION.RULE=VALUE ... | reset]
                          show or change the server rules (rules.json; README \"Server rules\")
   pcds plugin list | check PATH | install PATH | enable ID | disable ID | reload | new ID
@@ -64,6 +66,7 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
   pcds run                    run the server in the foreground (what the service runs)
   pcds container [NEW OPTIONS]  the Docker image's start (tables, world, then run); the
                          options make the first world when there is none
+  pcds help                   this text (problems and fixes: docs/troubleshooting.md)
 
 The server and its tools:
   pcds serve DATA_DIR SAVE.json          the server itself, settings from the environment

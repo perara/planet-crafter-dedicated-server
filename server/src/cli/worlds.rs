@@ -41,7 +41,8 @@ impl Ctx {
             let said = String::from_utf8_lossy(&out.stderr);
             return Err(said.lines().find(|l| !l.starts_with("usage:")).unwrap_or("pcds new-save failed").to_string());
         }
-        print!("{}", String::from_utf8_lossy(&out.stdout));
+        // What it made is told by the file's final place, not the one beside it.
+        print!("{}", String::from_utf8_lossy(&out.stdout).replace(&*made.to_string_lossy(), &path.to_string_lossy()));
         fs::rename(&made, path).map_err(|e| format!("{}: {e}", path.display()))?;
         let _ = fs::remove_dir(&beside);
         Ok(())

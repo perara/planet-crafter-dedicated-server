@@ -5,7 +5,7 @@
 # runAsUser), nothing is given away: /data must be writable by that user already. pcds
 # container stays the parent of the server to its end: tini ends with it, and the container's
 # end kills every process left (pcds waits for the banks of a front that crashed to save
-# first). Arguments (docker run IMAGE --planet Aqualis) are the options of the new world made
+# first). Arguments (docker run IMAGE --planet Selenea) are the options of the new world made
 # when there is none.
 set -e
 PUID="${PUID:-1000}"
