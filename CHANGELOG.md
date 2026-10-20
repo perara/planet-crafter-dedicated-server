@@ -26,6 +26,32 @@ and restored from the command line, and limits on the admin port. Five new docum
 [disaster-recovery.md](docs/disaster-recovery.md), [reverse-proxy.md](docs/reverse-proxy.md), and the
 dashboard [grafana/pcds.json](docs/grafana/pcds.json).
 
+### Breaking changes
+
+* **Snapshot format 8.** The rules are part of the state a hot update hands over, and three rules
+  were added (`log.format`, `log.level`, `save.verifyBackups`), so 0.8.0 cannot hand a running world to
+  this release (`make gate` found it: the new game process could not read the old snapshot). `pcds
+  upgrade` refuses the hot update and names `pcds upgrade VERSION --restart`; every player joins again
+  once. The game tables (format 4) and the front protocol (3) are unchanged: nothing is read again.
+* **Log lines start with a time, a level and a component** (see Changed), which breaks a program that
+  matched the start of a line. `log.format=json` is the format for programs.
+* **`pcds run` and the server no longer rewrite the systemd unit.** `pcds restart`, `start`, `install-service`
+  and `upgrade --restart` do.
+
+### Upgrade
+
+1. Back up: `pcds backup verify` finds a backup that loads, `tar czf pcds-settings.tar.gz -C run server.env
+   rules.json access.json plugins` keeps the settings ([disaster-recovery.md](docs/disaster-recovery.md)).
+2. `pcds upgrade vX.Y.Z --restart`. It installs the release, writes the new unit (the sandbox of
+   [hardening.md](docs/hardening.md)) and restarts the server; players join again. Then `pcds doctor`.
+3. In Docker: `docker compose pull && docker compose up -d`, with the new `compose.yaml` if you want
+   its hardening (a read-only root needs the `tmpfs` for `/tmp`; docs/hardening.md); a hot update inside the
+   container is refused for the same reason as above (`docker exec pcds pcds upgrade vX.Y.Z --restart`).
+4. A hook program that writes outside `run/`, or is written in Node or Java and was started with
+   `MemoryDenyWriteExecute` set by you, is affected by the sandbox: docs/hardening.md, "What a hook
+   program or a plugin sees".
+5. Back to 0.8.0: `pcds upgrade v0.8.0 --restart`; the unit of 0.8.0 is written again by it.
+
 ### Added
 
 * **`pcds doctor`** checks everything an operator needs in one command and prints PASS, WARN or
@@ -82,12 +108,6 @@ dashboard [grafana/pcds.json](docs/grafana/pcds.json).
 
 ### Changed
 
-* **A hot update from 0.8.0 works, and the front stays old until a restart.** The snapshot format and
-  the front protocol are unchanged, so `pcds upgrade` hands the world over without a disconnect. The
-  front keeps running from the release that started it: until `pcds restart` there is no
-  `/api/health`, `/api/metrics` answers JSON, the log has no time prefix, and the unit is the
-  old one (docs/monitoring.md). Run `pcds restart` once (it writes the new unit, which has the
-  sandbox, and restarts the server).
 * **Every line of the log starts with its time, level and component** (`2026-10-20T18:07:37.354Z
   INFO  front: client 1: connected from ...`), also in `pcds logs`, where journald's own time is
   not shown. Warnings and errors still go to standard error and the rest to standard output.
