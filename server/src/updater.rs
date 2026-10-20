@@ -349,7 +349,7 @@ fn unpack(release: &Release, new: &Path) -> Result<BankInfo, String> {
         Ok(s) => return Err(format!("{tag}: tar could not unpack it ({s})")),
         Err(e) => return Err(format!("tar: {e} (install tar with your package manager)")),
     }
-    plain_files(new, new).map_err(|e| format!("{tag}: the tarball holds {e}, which is not a file or a folder; nothing installed"))?;
+    plain_files(new, new).map_err(|e| format!("{tag}: the tarball holds {e}, which is not a file or a folder of its own (a link, a hard link or a device in it could point the server anywhere); nothing installed"))?;
     let program = new.join("pcds");
     if !program.is_file() {
         return Err(format!("{tag}: no pcds in the tarball"));
@@ -366,15 +366,17 @@ fn unpack(release: &Release, new: &Path) -> Result<BankInfo, String> {
 }
 
 /// Err names the first thing under `dir` that is neither a plain file nor a folder (a link, a
-/// device, a fifo): a link in a bank could point the server anywhere.
+/// device, a fifo) or is a file with more than one name (a hard link in the tarball, which tar
+/// extracts as a second name of the same file): a link in a bank could point the server anywhere.
 fn plain_files(root: &Path, dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
     for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
         let entry = entry.map_err(|e| e.to_string())?;
         let kind = entry.file_type().map_err(|e| e.to_string())?;
         let path = entry.path();
         if kind.is_dir() {
             plain_files(root, &path)?;
-        } else if !kind.is_file() {
+        } else if !kind.is_file() || entry.metadata().map_err(|e| e.to_string())?.nlink() > 1 {
             return Err(path.strip_prefix(root).unwrap_or(&path).display().to_string());
         }
     }
@@ -800,6 +802,36 @@ pub mod tests {
         let e = install(&lookup(&base, None).unwrap(), &banks, "b", None).unwrap_err();
         assert!(e.contains("web, which is not a file or a folder"), "{e}");
         assert!(!banks.join("b").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A hard link in a release tarball looks like a file once extracted: it is refused by its link
+    /// count (a crafted tar, made by GNU tar from two names of one file), also in a folder.
+    #[test]
+    fn a_hard_link_in_a_tarball_is_refused() {
+        let dir = test_dir("hardlink");
+        let name = "pcds-v9.9.9-linux-x86_64";
+        std::fs::create_dir_all(dir.join(name).join("web")).unwrap();
+        std::fs::write(dir.join(name).join("pcds"), script(crate::ipc::PROTOCOL)).unwrap();
+        std::fs::write(dir.join(name).join("web/a.html"), "<html></html>").unwrap();
+        std::fs::hard_link(dir.join(name).join("web/a.html"), dir.join(name).join("web/b.html")).unwrap();
+        let out = dir.join("t.tar.gz");
+        assert!(Command::new("tar").arg("-czf").arg(&out).arg("-C").arg(&dir).arg(name).status().unwrap().success());
+        let listing = Command::new("tar").arg("-tvzf").arg(&out).output().unwrap().stdout;
+        assert!(String::from_utf8_lossy(&listing).lines().any(|l| l.starts_with('h')), "the crafted tar holds a hard link entry");
+        let tar = std::fs::read(&out).unwrap();
+        let sum = hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
+        let base = format!("{}/releases", serve(release("BASE", "v9.9.9", tar, sum)));
+        let banks = dir.join("bin");
+        let e = install(&lookup(&base, None).unwrap(), &banks, "b", None).unwrap_err();
+        assert!(e.contains("web/") && e.contains(".html, which is not a file or a folder") && e.contains("hard link"), "{e}");
+        assert!(!banks.join("b").exists());
+        // A plain tree with no second names passes.
+        let plain = dir.join("plain");
+        std::fs::create_dir_all(plain.join("web")).unwrap();
+        std::fs::write(plain.join("web/a.html"), "x").unwrap();
+        std::fs::write(plain.join("pcds"), "x").unwrap();
+        assert_eq!(plain_files(&plain, &plain), Ok(()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
