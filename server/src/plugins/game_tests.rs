@@ -38,9 +38,10 @@ fn chat_out(g: &Game) -> Vec<(crate::net::Target, String)> {
 
 #[test]
 fn with_no_plugin_nobody_listens() {
-    let Some((g, _)) = world() else { return };
+    let Some((mut g, _)) = world() else { return };
     assert_eq!(g.ext.plugins.interest, 0);
     assert!(g.ext.plugins.host.is_none());
+    assert!(stream_bell(&mut g).is_none(), "and no bell rings");
 }
 
 #[test]
@@ -122,6 +123,13 @@ fn a_data_plugin_changes_the_rules_with_the_players_online_and_the_stream_hears_
     assert!(types.iter().filter(|t| **t == "rule_change").count() == 2 && types.contains(&"chat") && types.iter().filter(|t| **t == "player_join").count() == 5, "{types:?}");
     let chat = answer["events"].as_array().unwrap().iter().find(|e| e["type"] == "chat").unwrap();
     assert_eq!((chat["name"].as_str(), chat["text"].as_str(), chat["client"].as_u64()), (Some("Ann"), Some("hello all"), Some(1)));
+    // The front's long polls wait on a doorbell: rung when the stream has something newer, once.
+    let bell: Value = serde_json::from_str(&stream_bell(&mut g).expect("new events: the bell rings")).unwrap();
+    assert_eq!((bell["epoch"].as_u64(), bell["last"].as_u64()), (Some(g.ext.plugins.saved.stream.epoch), Some(answer["last"].as_u64().unwrap())));
+    assert!(stream_bell(&mut g).is_none(), "nothing new, no bell");
+    send_scene(&mut g, 1, "ChatHandler.SendChatMessageServerRpc", &[json!("again")]);
+    let rung: Value = serde_json::from_str(&stream_bell(&mut g).unwrap()).unwrap();
+    assert_eq!(rung["last"].as_u64(), Some(bell["last"].as_u64().unwrap() + 1));
     let rule = answer["events"].as_array().unwrap().iter().find(|e| e["type"] == "rule_change").unwrap();
     assert_eq!(rule["changes"]["speed.growth"], 2.0);
     // The ring's ids and epoch are in the snapshot.

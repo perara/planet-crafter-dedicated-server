@@ -102,6 +102,9 @@ pub struct Slot {
     /// What the timer scan of the folder has seen.
     #[serde(skip)]
     pub scan: Scan,
+    /// The newest stream event the front was told of (`stream_bell`).
+    #[serde(skip)]
+    pub rung: u64,
     pub saved: state::Saved,
 }
 
@@ -1059,6 +1062,19 @@ pub fn attach(game: &mut crate::game::Game, mut host: Host) {
     slot.scan = Scan { next: Some(Instant::now() + POLL_EVERY), seen: host.sig.clone(), settling: None };
     slot.host = (!host.is_empty()).then(|| Box::new(host));
     slot.refresh();
+}
+
+/// The doorbell for the front's long polls of the event stream (`ipc::STREAM`): the body to send when
+/// the stream has a newer event than the last bell told of, else none. The bank asks once a loop; it
+/// costs two loads and a comparison, and a stream nobody listens to has no new events.
+pub fn stream_bell(game: &mut crate::game::Game) -> Option<String> {
+    let slot = &mut game.ext.plugins;
+    let last = slot.saved.stream.last();
+    if last <= slot.rung {
+        return None;
+    }
+    slot.rung = last;
+    Some(serde_json::json!({"epoch": slot.saved.stream.epoch, "last": last}).to_string())
 }
 
 /// Delivers an event to the plugins; Veto when one refused an RPC that may be refused.

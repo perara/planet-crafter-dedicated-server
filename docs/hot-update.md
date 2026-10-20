@@ -66,8 +66,9 @@ go as CHATCFG; replies come back as SAY. Replies that arrive while the world sta
 (`world.pauseWhenEmpty`) are dropped with a log line.
 
 **Frames** (PROTOCOL 3): HELLO, START, RESTORE, READY, CONNECTED (JSON: ip, steamId, trusted),
-DATA, GONE, KICK, HANDOFF, SNAPSHOT, EXIT, RESUME, ADMIN, ANSWER, SAVE, STOP, CHAT, SAY, CHATCFG
-(`ipc.rs` lists what each carries). RESTORE and SNAPSHOT carry a memfd: the old bank serializes
+DATA, GONE, KICK, HANDOFF, SNAPSHOT, EXIT, RESUME, ADMIN, ANSWER, SAVE, STOP, CHAT, SAY, CHATCFG,
+OPS, STREAM (`ipc.rs` lists what each carries; a front skips a frame kind it does not know, so a
+new kind that is only a notice does not need a PROTOCOL bump). RESTORE and SNAPSHOT carry a memfd: the old bank serializes
 straight into it (`handoff::snapshot_to`), seals it, and sends the descriptor; the front passes
 the same descriptor on, and keeps one as the last snapshot. The snapshot never crosses the
 socket. HANDOFF carries the flip's number and SNAPSHOT echoes it: the front drops a snapshot of
@@ -201,6 +202,10 @@ a 401). This list is what the next release's notes are made from:
 - *Scoped tokens* (`admin.rs`, `tokens.rs`): the admin thread accepts `Authorization: Bearer
   pcdst_...` for the requests of the token's scopes. Requires `pcds upgrade --restart` for tokens
   to work; the endpoints that make them (`/api/plugins/tokens`) are the bank's and work at once.
+- *Long poll of the plugin event stream* (`admin.rs`, `front.rs`, `ipc::STREAM`): `POST
+  /api/plugins/events` with `"wait"` is held in the front until the bank rings. Requires `pcds
+  upgrade --restart`; before it a front answers at once as if `wait` were not there, and a new bank's
+  bell frames are skipped.
 
 **The CLI.** `pcds upgrade [VERSION] [--restart] | --rollback | --check`. Running: through the
 admin API (`POST /api/update`, then `GET /api/update` until its outcome). `--restart` installs

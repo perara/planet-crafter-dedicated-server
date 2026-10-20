@@ -394,7 +394,7 @@ All answer JSON; the bearer token is the admin token (docs/hot-update.md, README
 | `GET /api/plugins/tokens` | | `{"tokens": [{"id","name","scopes","ratePerMinute","createdAt"}], "scopes": [{"name","allows"}], "defaultRatePerMinute", "maxRatePerMinute"}`: never a token or its hash |
 | `POST /api/plugins/tokens` | `{"name", "scopes": [...], "ratePerMinute"}` | `{"ok": true, "token": "pcdst_...", "info": {...}}`: **the only time the token is shown**; 400 for a name used, an unknown scope, a rate out of range |
 | `POST /api/plugins/tokens/revoke` | `{"id"}` (the id or the name) | `{"ok": true, "revoked": {...}}`; the token is refused from its next request |
-| `POST /api/plugins/events` | `{"consumer": "relay", "after": 0, "types": ["chat","player_join"], "limit": 200}` or `{"consumer": "relay", "unregister": true}` | `{"epoch", "events": [...], "last", "dropped"}`, or `{"ok", "registered": false, "was"}` |
+| `POST /api/plugins/events` | `{"consumer": "relay", "after": 0, "types": ["chat","player_join"], "limit": 200, "wait": 25}` or `{"consumer": "relay", "unregister": true}` | `{"epoch", "events": [...], "last", "dropped"}`, or `{"ok", "registered": false, "was"}`. With `wait` (seconds, 25 at most) the front holds the request until there is an event or the wait is over (see "The event stream") |
 
 Status values: `running`, `pending` (discovered, never approved), `disabled`, `changed` (files differ
 from the approved ones, and nothing is running), `unloading` (its last call and save are running;
@@ -453,6 +453,19 @@ event is `{"id", "time" (Unix ms), "type", ...}`:
 
 Ids go on across hot updates; `epoch` (when the ring began, Unix ms) changes when the server
 restarts and the ids begin again: start from `after: 0` when it does.
+
+**Waiting for events (long poll).** Add `"wait": SECONDS` (a number up to 25) to the request and it
+is answered when the ring holds an event after `after` of your kinds, or, empty, when the wait is
+over: loop on it with the `last` of each answer as the next `after`, and events reach you in the
+time the bank takes to say so (a few milliseconds), without asking every second. The waiting is
+done by the front (a thread and a connection for each, at most 8 at once: more are answered `503`
+at once, poll without `wait` or try again), not by the game loop. The bank rings a bell (`ipc::STREAM`)
+when the ring has a newer id; the front then asks the bank again. When no bell comes (a bank older than
+this feature) the front asks every second, so the latency is at most one. A consumer is registered by each
+ask, so a long poll keeps it listed. Without `wait`, as before: answered at once, empty or not. This is in the
+front, which a hot update does not replace: it works after `pcds upgrade --restart`; an older front
+ignores `wait` and answers at once, which a loop written as above handles (add a pause when the answer is
+empty and came at once).
 
 ## Versioning and compatibility
 

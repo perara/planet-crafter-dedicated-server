@@ -94,6 +94,11 @@ impl Ring {
         self.consumers.iter().map(|(name, c)| json!({"name": name, "kinds": Kind::ALL.iter().filter(|k| c.kinds & k.bit() != 0).map(|k| k.name()).collect::<Vec<_>>(), "lastPollSecondsAgo": c.last.elapsed().as_secs(), "polls": c.polls, "after": c.after})).collect()
     }
 
+    /// The id of the newest event (0: none yet).
+    pub fn last(&self) -> u64 {
+        self.next - 1
+    }
+
     pub fn push(&mut self, event: &Event<'_>) {
         let Some(mut v) = event_json(event) else { return };
         v["id"] = self.next.into();

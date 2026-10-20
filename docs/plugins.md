@@ -187,10 +187,11 @@ trusted with less than the admin token. So it is the second mechanism, for integ
 the server writes events into a ring (`stream.rs`) and any program reads them (`POST
 /api/plugins/events`), then acts through the endpoints that already exist (`/api/chat`,
 `/api/kick`, `/api/teleport`, `/api/rules`). The ring is part of the snapshot, so ids go on across
-a hot update, and the `epoch` tells a reader that the server was restarted. It is polled today:
-a long-poll in the front (like `/api/chat/events`) needs a new frame between front and bank, which
-an old front cannot be taught by a hot update, so it waits for a release that also restarts the
-front (see "Open questions"). Out-of-process plugins have no manifest, no capabilities and no
+a hot update, and the `epoch` tells a reader that the server was restarted. It can be waited on:
+`POST /api/plugins/events` with `"wait"` is held in the front (like `/api/chat/events`) and
+answered when the bank rings the bell (`ipc::STREAM`, a frame an older front skips and an older
+bank never sends), with a look every second as the fallback; the ring and the registration stay in
+the bank, the front only waits (section "Long-polling the stream"). Out-of-process plugins have no manifest, no capabilities and no
 budget: they hold the admin token and can do what it can. That is stated in the dashboard and in
 `examples/plugins/webhook-relay`.
 
@@ -487,6 +488,27 @@ request costs the plugin's call, a queue push, and on a worker a lookup, a conne
 handshake (a fresh agent each time: no pooling, by design). `make plugin-bench` and the bench are
 unchanged by it (see "Measurements of the whole").
 
+## Long-polling the stream
+
+An integration that polls the stream every second costs a request a second and is up to a second
+late. With `"wait"` the request is held and answered when there is something. Where the waiting
+is: not in the bank (the game loop answers admin requests between ticks and must never sit in
+one), so in the front, as for `/api/chat/events`, in the admin thread that already holds the
+connection. What the front does not have is the ring (it is in the bank, in the snapshot, with
+the consumers' registration), so it does not wait for events but for a **bell**: the bank sends one
+small frame (`ipc::STREAM`) when the ring has a newer id than it last told, once a loop at most,
+nothing when nobody listens (nothing is recorded then, so no id is new); the front counts rings
+and an admin thread that is waiting asks the bank the same question again. Three properties came
+out of that: the bank's side is unchanged (one question, one answer, the same code as the plain poll
+and its tests); a ring between the question and the wait is not lost (the count is read before the
+question); and a front and a bank of different releases still work: an older front skips the
+frame (`on_live` ignores kinds it does not know) and answers a request with `wait` at once; an
+older bank never rings and the front asks again every second. `ipc::PROTOCOL` did not change
+(nothing a bank must send or understand was added), the snapshot did not change. Limits: 25 s a
+wait, 8 waiting at once, a thread and a connection each (the admin listener's 64 are shared).
+The change is in `front.rs` and `admin.rs`, which a hot update does not replace: it takes effect after
+`pcds upgrade --restart` (docs/hot-update.md lists it).
+
 ## Budgets and faults
 
 | What | Limit | When it is over |
@@ -774,9 +796,8 @@ These are for the owner.
 2. **A workspace.** `plugin-api` is a path dependency, not a workspace member, because a workspace
    root moves `target/` and `Cargo.lock` and touches the Makefile, the Dockerfile and both
    workflows at once (docs/architecture.md, "Target: crates"). Do it with the refactors, or now?
-3. **Long-polling the stream in the front.** Needs a frame between front and bank (`EVENTS`), so
-   it takes effect only after a restart of the front, and the front's protocol number may stay
-   the same (old banks never send it). Worth doing before the first release with plugins?
+3. **Long-polling the stream in the front**: built (section "Long-polling the stream"), as a bell
+   frame (`ipc::STREAM`) rather than the events themselves; it takes effect with a restart of the front.
 4. **Signed plugins**: built (section "Distribution, signing, permissions"). A list of them
    somebody curates, and `pcds plugin install URL`, are not.
 5. **Scoped tokens** for out-of-process plugins: built (section "Scoped tokens").

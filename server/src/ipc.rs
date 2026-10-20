@@ -59,6 +59,10 @@ pub const CHATCFG: u8 = 19;
 // bank -> front: body JSON {"autosaveMinutes", "autoUpdate", "updateCheckHours"}, the rules the
 // front acts on (save, update); at the start and whenever they change.
 pub const OPS: u8 = 20;
+// bank -> front: body JSON {"epoch", "last"}, the plugin event stream's newest id (plugins/stream.rs):
+// a doorbell for the long polls of POST /api/plugins/events that wait in the front. A front that does
+// not know it skips it, a bank that does not send it leaves the long poll looking every second.
+pub const STREAM: u8 = 21;
 
 /// The largest frame either side takes (a world's join batch is a few MiB; a snapshot never
 /// crosses the socket). A frame shorter than its header or longer than this breaks the link.
