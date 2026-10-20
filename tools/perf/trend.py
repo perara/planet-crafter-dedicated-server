@@ -16,8 +16,8 @@ What the columns are:
               The verdict: flat when |drift| < --flat-pct or tau < 0.3; creeping when drift is up to --leak-pct
               or tau < 0.6; leaking above both. A decrease is "falling" (not a problem).
   per bank    the bank is a new process after each flip or restart, so its memory is also judged inside each
-              run of one pid (the first 5 minutes of a pid dropped), as the median slope over the pids that ran
-              at least 20 minutes.
+              run of one pid (the first 3 minutes of a pid dropped), as the median slope over the pids that ran
+              at least 12 minutes (the 20-minute flips of longsoak.py give segments of about 20).
   counters    (CPU seconds, log bytes and lines, S3 and hook hits): the rate per hour, and the rate of the
               last third against the first third.
   windows     (busy, tick, longest loop, status latency): median and p95 of the whole run, and the trend of the
@@ -28,6 +28,9 @@ import argparse
 import csv
 import statistics
 import sys
+
+
+SMALL = {"f_thr", "b_thr", "f_fds", "b_fds", "tcp_admin", "plugins_running", "udp_rx"}
 
 
 def theil_sen(xs, ys, cap=1600):
@@ -95,8 +98,11 @@ def main():
     ap.add_argument("--levels", default="f_rss,b_rss,unit_anon,f_thr,b_thr,f_fds,b_fds,wo,net,inv,save_bytes,backups,backups_bytes,home_bytes,tcp_admin,udp_rx,plugins_running", help="level columns")
     ap.add_argument("--counters", default="f_cpu,log_bytes,log_lines,s3_hits,hook_hits,plug_hits,bytes_in,bytes_out", help="cumulative columns")
     ap.add_argument("--windows", default="f_cpu_pct,b_cpu_pct,busy,tick_p50_us,tick_p99_us,tick_max_us,winmax_longest_us,st_ms_p50,st_ms_max,fps", help="per-window columns")
+    ap.add_argument("--phase", default="", help="only the samples of this phase column value (longsoak.py: 8, 16, 32 or churn players): the load is the same in every sample then")
     a = ap.parse_args()
     rows = list(csv.DictReader(open(a.csv)))
+    if a.phase:
+        rows = [r for r in rows if r.get("phase") == a.phase]
     if len(rows) < 10:
         sys.exit("too few samples")
     t = col(rows, "t")
@@ -116,10 +122,15 @@ def main():
         sl, tau = theil_sen(list(xs), list(vs))
         med = statistics.median(vs)
         drift = 100 * sl * (xs[-1] - xs[0]) / med if med else 0.0
-        print(f"| {k} | {fmt(med)} | {fmt(min(vs))} | {fmt(max(vs))} | {sl:+.4g} | {drift:+.1f} % | {tau:+.2f} | {verdict(drift, tau, a.flat_pct, a.leak_pct)} |")
+        v = verdict(drift, tau, a.flat_pct, a.leak_pct)
+        if k in SMALL:  # a thread or a descriptor that is there at a sample is no growth: the level of the first third against the last
+            n3 = len(vs) // 3
+            d = statistics.median(vs[-n3:]) - statistics.median(vs[:n3])
+            v = "flat" if d <= 1 else "creeping" if d <= 3 else "LEAKING"
+        print(f"| {k} | {fmt(med)} | {fmt(min(vs))} | {fmt(max(vs))} | {sl:+.4g} | {drift:+.1f} % | {tau:+.2f} | {v} |")
 
     if "b_pid" in rows[0]:
-        print("\n## The bank, inside each process (a flip or a restart starts a new one; first 5 min of each dropped)\n")
+        print("\n## The bank, inside each process (a flip or a restart starts a new one; first 3 min of each dropped)\n")
         segs = []
         cur, start = None, 0
         pid = col(rows, "b_pid")
@@ -129,23 +140,23 @@ def main():
                 if cur is not None:
                     segs.append((cur, start, i))
                 cur, start = p, i
-        print("| metric | segments >= 20 min | median slope /h | worst slope /h | median drift in segment | verdicts |")
+        print("| metric | segments >= 12 min | median slope /h | worst slope /h | median drift in segment | verdicts |")
         print("|---|---|---|---|---|---|")
         for k in ("b_rss", "b_thr", "b_fds"):
             ys = col(rows, k)
             res = []
             for p, s0, s1 in segs:
-                if p <= 0 or t[s1 - 1] - t[s0] < 20 * 60:
+                if p <= 0 or t[s1 - 1] - t[s0] < 12 * 60:
                     continue
-                pts = [(t[i] / 3600, ys[i]) for i in range(s0, s1) if t[i] - t[s0] >= 300 and ys[i] == ys[i] and ys[i] >= 0]
-                if len(pts) < 20:
+                pts = [(t[i] / 3600, ys[i]) for i in range(s0, s1) if t[i] - t[s0] >= 180 and ys[i] == ys[i] and ys[i] >= 0]
+                if len(pts) < 15:
                     continue
                 xs, vs = zip(*pts)
                 sl, tau = theil_sen(list(xs), list(vs), cap=400)
                 med = statistics.median(vs)
                 res.append((sl, 100 * sl * (xs[-1] - xs[0]) / med if med else 0.0, tau, p))
             if res:
-                vd = [verdict(d, tau, a.flat_pct, a.leak_pct) for _, d, tau, _ in res]
+                vd = [verdict(d, tau, a.flat_pct, a.leak_pct) if k not in SMALL else "flat" if abs(sl) < 2 else "creeping" for sl, d, tau, _ in res]
                 print(f"| {k} | {len(res)} | {statistics.median(r[0] for r in res):+.4g} | {max(r[0] for r in res):+.4g} | {statistics.median(r[1] for r in res):+.1f} % | " + ", ".join(f"{v} {vd.count(v)}" for v in sorted(set(vd))) + " |")
 
     print("\n## Counters (rate per hour; last third against the first third)\n")

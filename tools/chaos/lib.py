@@ -366,11 +366,12 @@ class UnitSrv(Srv):
     tables carry (as docker/test.sh does). Bank b is a copy of bank a with another release tag, so
     a flip is a flip between two releases. Same interface as Srv; supervision is systemd's."""
 
-    def __init__(self, name, args, unit, rules=None, env=None, dev=None, port=None, world=None, cpus="8-15"):
+    def __init__(self, name, args, unit, rules=None, env=None, dev=None, port=None, world=None, cpus="8-15", props=()):
         if not unit.startswith("pcds-qa-"):
             sys.exit(f"unit {unit}: a scratch unit must be named pcds-qa-*")
         self.unit = unit
         self.cpus = cpus
+        self.props = list(props)  # more systemd properties of the unit: "CPUQuota=100%", "MemoryHigh=100M", "LimitNOFILE=256", "IOWriteBandwidthMax=/dev/nvme0n1 512K"
         super().__init__(name, args, port=port, world=world, rules=rules, env=env, dev=dev, banks=False)
         h = self.home
         os.makedirs(f"{h}/worlds")
@@ -435,6 +436,8 @@ class UnitSrv(Srv):
                f"--setenv=PCDS_HOME={self.home}", f"--setenv=PCDS_UNIT={self.unit}", f"--setenv=PCDS_GAME_DIR={self.game}"]
         if "PCDS_DEV" in self.env:
             cmd.append(f"--setenv=PCDS_DEV={self.env['PCDS_DEV']}")
+        for p in self.props:
+            cmd += ["-p", p]
         r = subprocess.run(cmd + [self.pcds, "run"], capture_output=True, text=True)
         if r.returncode:
             raise RuntimeError("systemd-run: " + r.stderr)

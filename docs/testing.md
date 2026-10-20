@@ -263,8 +263,10 @@ resolution ([clock.md](clock.md)).
 `pcds load` and `pcds probe` (the scripted clients) and `GET /api/status` (`busyPercent`,
 `longestLoopMicros`) are the live equivalents; see [Load, chaos, soak and churn](#load-chaos-soak-and-churn).
 
-Ignored soak tests in the same spirit: `soak_growth` (`PCDS_SOAK_SECONDS`, `PCDS_SOAK_STEP`,
-`PCDS_SOAK_REPORT`: what grows over a long game), `drone_farm_runs_for_hours` (`PCDS_FARM_STATIONS`,
+Ignored soak tests in the same spirit: `soak_growth` (`PCDS_SOAK_SECONDS`, `PCDS_SOAK_STEP` (at most a third
+of a second: the loop's longest frame, docs/clock.md), `PCDS_SOAK_REPORT`, `PCDS_SOAK_PLAYERS`, `PCDS_BENCH_START_DAYS`, `PCDS_SOAK_ONLY`, `PCDS_SOAK_PARTS`: what
+grows over a long game; each report prints the age in days, the heap, the save and the snapshot size and the wire tick. On the 2,565-object bench
+world with 2 players a game year takes about an hour; on the late-game world a game day takes about an hour), `drone_farm_runs_for_hours` (`PCDS_FARM_STATIONS`,
 `_DRONES`, `_PAIRS`, `_SECONDS`: stations, drones and a supply and demand that never end; prints per game
 minute the worst tick, the sizes of what could grow and the memory) and `perf_logistics_and_destroy`
 (`PCDS_REVIEW_STATIONS`, `PCDS_REVIEW_SECONDS`: the cost of the logistics search in a world with tens of
@@ -296,7 +298,7 @@ clients the program has:
   limit on a message is lifted in test builds only).
 
 The scripts that start a scratch server, run these and check the server afterwards are in
-`tools/chaos/` (chaos, soak, churn, stress, stall, limits, disk full) and `tools/perf/` (load runs
+`tools/chaos/` (chaos, soak, long soak, pressure, Docker memory, churn, stress, stall, limits, disk full) and `tools/perf/` (load runs
 with CPU and memory sampling, profiles, A/B runs): see [tools/README.md](../tools/README.md) for what
 each does and what a pass looks like. None of them is in CI.
 
