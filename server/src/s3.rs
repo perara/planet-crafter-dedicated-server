@@ -222,7 +222,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let seen = crate::chathooks::tests::read_request(&mut stream);
+            let seen = crate::testkit::read_request(&mut stream);
             std::io::Write::write_all(&mut stream, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
             seen
         });

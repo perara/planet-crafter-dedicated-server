@@ -181,6 +181,11 @@ pub struct Ops {
     pub bank_watchdog_seconds: Option<u64>,
 }
 
+/// Replies waiting for the next tick (the bank's queue and the front's); more are refused.
+pub const CHAT_REPLIES: usize = 64;
+/// The longest reply, in characters.
+pub const CHAT_MAX_REPLY: usize = 500;
+
 /// A chat message as an event for the hooks and the API (CHAT, GET /api/chat/events).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

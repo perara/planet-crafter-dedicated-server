@@ -49,10 +49,6 @@ only plugins <- events bank ext cli
 # Each is an edge that is there today and should not be. The number is the step of the refactor list
 # in docs/architecture.md that removes it.
 
-# The admin HTTP threads serve /api/chat from the chat feed that lives in chathooks.rs, a file that
-# also holds the bank's chat state (6: split chathooks into the bank's state and the front's feed).
-debt admin -> chathooks
-debt front -> chathooks
 # The table folder's contract (build id, find_tables) lives in cli, and the table reader uses an
 # encoder of net (7: a `tables` module owns the contract; native stops importing cli and net).
 debt bank -> cli

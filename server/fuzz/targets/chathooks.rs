@@ -1,4 +1,4 @@
-//! Chat commands, the admin API's chat endpoints and the Event JSON.
+//! Chat commands and the Event JSON (the feed and its endpoints go with the front's parsers).
 use super::*;
 
 pub fn run(data: &[u8]) {
@@ -12,14 +12,5 @@ pub fn run(data: &[u8]) {
         let again = serde_json::to_string(&e).unwrap();
         assert_eq!(serde_json::from_str::<Event>(&again).unwrap(), e);
     }
-    let _ = sign(prefix, rest);
-    // The API: no long waits (a fuzz input must not sleep).
-    let feed = Hooks::default().feed;
-    let mut parts = text.splitn(4, '\n');
-    let (method, path, query) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or("").replace("wait", "w"));
-    let body: Value = serde_json::from_str(parts.next().unwrap_or("")).unwrap_or(Value::Null);
-    let _ = api(&feed, method, path, &query, &body);
-    let _ = api(&feed, "GET", "/api/chat/events", &query, &body);
-    let _ = api(&feed, "POST", "/api/chat", "", &body);
-    let _ = feed.say(rest);
+    crate::front::fuzz::chat(data);
 }

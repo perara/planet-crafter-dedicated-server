@@ -1,10 +1,8 @@
-//! Admin API and web GUI over HTTP on 127.0.0.1: GET /api/status, POST /api/save, /api/stop,
-//! /api/kick, /api/ban, /api/unban, GET and POST /api/rules and /api/config (every setting,
-//! the access lists among them), POST /api/chat and /api/teleport, GET /api/chat/events,
-//! /api/worlds, /api/map and /api/logs, GET and POST /api/update (see admin_request in bank.rs
-//! and front.rs). Every /api call needs "Authorization: Bearer <token>". A thread in the front
-//! serves HTTP; the front's loop answers requests or passes them to the bank, but for the logs
-//! and the chat (chathooks.rs): a long poll must not hold the loop.
+//! The admin API and the web page over HTTP on 127.0.0.1. The routes, and who answers each, are the
+//! table in front/admin_routes.rs (docs/admin-api.md is written from it). A thread in the front
+//! serves HTTP: it answers the page, the logs and the chat itself (a long poll must not hold the
+//! game loop), and passes the rest to the front's loop, which answers it or passes it to the
+//! bank. Every /api call needs "Authorization: Bearer <token>".
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -15,12 +13,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::chathooks::Feed;
+use crate::front::{Feed, Http, Owner};
 
 /// Connections served at once (more are closed unanswered), the bytes of one request (line,
 /// headers and body), and how long it may take to arrive: the line and headers within HEAD (an
 /// idle connection gives its slot back soon), the whole request within DEADLINE. Chat long
-/// polls have a cap of their own (chathooks::MAX_POLLS), so they never take every slot.
+/// polls have a cap of their own (front::chat_hooks MAX_POLLS), so they never take every slot.
 const MAX_CONNECTIONS: usize = 64;
 const MAX_REQUEST: u64 = 64 << 10;
 const HEAD: Duration = Duration::from_secs(3);
@@ -219,7 +217,10 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
     // Past MAX_REQUEST the reader ends: headers and body together over it fail here.
     let mut body = vec![0u8; length];
     reader.read_exact(&mut body)?;
-    if method == "GET" && (path == "/" || path == "/index.html") {
+    // The routes this thread answers itself are in front/admin_routes.rs.
+    let route = crate::front::find_http(&method, &path);
+    // The page needs no token; every other route does.
+    if route.is_some_and(|r| !r.needs_token()) {
         return match web.and_then(|p| std::fs::read_to_string(p).ok()) {
             Some(html) => respond(stream, 200, "text/html; charset=utf-8", &html),
             None => respond(stream, 404, "text/plain", "no web GUI installed"),
@@ -228,7 +229,7 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
     if !same(&auth, &format!("Bearer {token}")) {
         return respond(stream, 401, "application/json", "{\"error\":\"missing or wrong token\"}");
     }
-    if method == "GET" && path == "/api/logs" {
+    if route.map(|r| r.owner) == Some(Owner::Http(Http::Logs)) {
         return respond(stream, 200, "application/json", &logs().to_string());
     }
     let body: Value = if body.iter().all(u8::is_ascii_whitespace) { Value::Object(Default::default()) } else {
@@ -237,8 +238,8 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
             Err(e) => return respond(stream, 400, "application/json", &serde_json::json!({ "error": e.to_string() }).to_string()),
         }
     };
-    if path.starts_with("/api/chat") {
-        let (status, json) = crate::chathooks::api(chat, &method, &path, &query, &body);
+    if route.map(|r| r.owner) == Some(Owner::Http(Http::Chat)) {
+        let (status, json) = crate::front::chat_api(chat, &method, &path, &query, &body);
         return respond(stream, status, "application/json", &json);
     }
     let (reply, answer) = channel();
@@ -383,7 +384,7 @@ mod tests {
     fn token_size_and_connection_limits() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let rx = listen(listener, "secret".into(), Default::default(), crate::chathooks::Hooks::default().feed).unwrap();
+        let rx = listen(listener, "secret".into(), Default::default(), crate::front::Hooks::default().feed).unwrap();
         let wrong = b"GET /api/status HTTP/1.1\r\nAuthorization: Bearer secreT\r\n\r\n";
         assert!(ask(addr, wrong).starts_with("HTTP/1.1 401"));
 

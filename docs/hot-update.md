@@ -29,8 +29,8 @@ installed with `pcds upgrade --restart`, which disconnects every player).
  run/bin/active    "a" or "b": the bank the front starts (written beside, renamed over)
 ```
 
-**Modules.** `front.rs` (the front), `bank.rs` (the game process), `ipc.rs` (frames, the
-non-blocking queue, SCM_RIGHTS, the memfd), `updater.rs` (releases into a bank),
+**Modules.** `front/` (the front: docs/architecture.md has its map), `bank.rs` (the game process), `ipc.rs` (frames, the
+non-blocking queue, SCM_RIGHTS, the memfd), `msg.rs` (the typed bodies of the frames and of bank.json), `updater.rs` (releases into a bank),
 `cli/upgrade.rs` (`pcds upgrade`, the banks in `pcds status`). `split.rs` is gone. The state
 module of (e) is not split out: the state types stay where they are, and `handoff.rs` holds the
 snapshot format and `verify`; `bincodec.rs` is the codec. `main.rs` dispatches.
@@ -38,11 +38,11 @@ snapshot format and `verify`; `bincodec.rs` is the codec. `main.rs` dispatches.
 **The front** owns the UDP socket and the utp.rs sessions, the Steam game server login, its
 listen socket, every `NetConnection` with its `Split<n>` reassembly, the invite code, the client
 ids, the 300 ms delayed close of kicked clients, the admin HTTP listener (it serves the live
-bank's `web/index.html`), the chat hooks (`chathooks::Hooks`: the event ring, the webhook and
+bank's `web/index.html`), the chat hooks (`front::Hooks`, `front/chat_hooks.rs`: the event ring, the webhook and
 exec worker, `/api/chat`), and the autosave timer (it sends SAVE; the bank saves only if the
 world advanced). Admin requests other than `/api/stop`, `/api/update` and `/api/world/*` (stop,
 start, switch: the front owns the world's lifetime) go to the bank as ADMIN frames with the
-autosave setting; while the world is stopped the front answers `GET /api/status` and `GET
+autosave setting (`docs/admin-api.md` lists every route and who answers it); while the world is stopped the front answers `GET /api/status` and `GET
 /api/worlds` itself and refuses the rest. The answer comes back as ANSWER, and the front adds its part to
 `/api/status` (invite code, network, uptime, traffic, CPU and memory of front and banks,
 `banks`, `update`). Writes to a bank never block: frames wait in a queue per bank, and a client
@@ -694,7 +694,7 @@ Status: analysis only, nothing of it is built. Today the front is updated by a r
 again as the same process), and every player reconnects. The idea is nginx's binary upgrade: the
 running front starts the new program and gives it what a client notices, so direct-IP players see
 a pause of a few hundred milliseconds. The owner decides whether it is worth it; what follows
-is what it would take, read from `front.rs` and `utp.rs`.
+is what it would take, read from `front/` and `utp.rs`.
 
 **What the front holds, and what happens to each at the handover**
 
@@ -744,7 +744,7 @@ shorter the list above, which is the reason to keep new features out of it.
 
 ## (e) What moves where in the refactor
 
-Front (`front.rs`, new, from `main.rs`):
+Front (`front/`, new, from `main.rs`):
 - `utp.rs` as it is. Its only crate dependency is `idmap::FxHashMap`; the spike's front uses it
   unchanged (one accessor for its socket was added, to wait on it with other descriptors).
 - From `main.rs`: `start_steam`, `APP_ID`, `Link`, `reassemble`, `send` (Steam `Split<n>`),
@@ -752,7 +752,7 @@ Front (`front.rs`, new, from `main.rs`):
   client ids, `links`, `ip_clients`), `pending_drop`, the signal handler, the shutdown.
 - `admin.rs` (the HTTP thread), forwarding requests to the game; the front fills
   `invite_code`, `network`, `port` and the per-player link type of `/api/status`.
-- The supervisor (also in `front.rs`): banks, HELLO checks, HANDOFF / SNAPSHOT / RESTORE / READY /
+- The supervisor (also in the front: `front/flip.rs`, `supervise.rs`, `bank_link.rs`): banks, HELLO checks, HANDOFF / SNAPSHOT / RESTORE / READY /
   EXIT / RESUME, holding frames, the health check, the active pointer, restarting a crashed
   bank from the save.
 

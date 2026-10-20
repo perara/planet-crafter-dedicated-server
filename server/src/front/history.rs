@@ -28,7 +28,7 @@ pub(super) struct History {
 impl History {
     /// An outcome, now.
     pub fn new(seq: u64, ok: bool, message: impl Into<String>) -> History {
-        History { flip: None, check: None, seq, ok, message: message.into(), at: Some(super::now_secs()), rolled: None }
+        History { flip: None, check: None, seq, ok, message: message.into(), at: Some(crate::util::now_secs()), rolled: None }
     }
 
     /// The outcome of a flip, with its numbers.
