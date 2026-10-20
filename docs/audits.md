@@ -100,7 +100,7 @@ of a late-game world (U1) and several smaller ones. Finding numbers are those of
 | U7 | The automatic-update settings were read only when the front started | Low | fixed in 0.7.0: `update.auto` and `update.checkHours` are rules, read at each check | `front/updates.rs` |
 | U8 | A partial tarball was left beside the banks when the disk filled | Low | fixed in 0.7.0 | `updater::tests::a_broken_tarball_is_refused_and_leaves_the_banks_as_they_were` and the unwritable-folder test `a_banks_folder_that_cannot_be_written_fails_the_install_and_changes_nothing` |
 | U9 | A `pcds` that cannot run was reported as "a release from before hot updates" | Low | fixed in 0.7.0 | `updater::tests` (the install tests; the report's own test used a program that cannot run) |
-| U10 | A crash between the two renames in `updater::put` leaves the standby bank missing and a `.<bank>.old` folder behind; the active bank is never touched | Low | open | `updater.rs` (`put_with`, `sweep`) |
+| U10 | A crash between the two renames in `updater::put` leaves the standby bank missing and a `.<bank>.old` folder behind; the active bank is never touched | Low | fixed after 0.7.0: `updater::recover` (the front's start, and every `put` before it moves anything) puts the old bank back when only `.<bank>.old` is left, and removes it when a whole new bank stands beside it | `updater::tests::a_crash_inside_an_install_is_made_whole_at_the_next_start` (crash injected after each rename) |
 | U11 | `pcds upgrade --restart` set `active` to the new bank before reading its tables; if that failed, the next reboot would have left the server down | Medium | fixed in 0.7.0: `active` goes back to the bank that runs | `tables_or_undo` test in `cli/upgrade.rs` |
 | U12 | Flips stood 35 to 1330 ms against 6 to 17 ms measured elsewhere, and two e2e tests failed once, while the host load was 33 to 114 | Info | not reproducible: seen only on a loaded host; rerun alone they pass | docs/hot-update.md, "Measured" |
 | U13 | Alternating two releases shows systemd's "unit file changed on disk" because each release's `pcds run` rewrites the unit | Info | by design: cosmetic | `refresh_unit` in `cli/systemd.rs` |
@@ -230,11 +230,6 @@ Architecture:
   update and before touching `native/`.
 * **A26, A27** The web page restates the unit order; `hex` has three copies. Next: serve the unit
   order from `/api/status`; use one `hex`.
-
-Update:
-
-* **U10** A crash between the two renames of `updater::put` leaves a `.<bank>.old` folder and no
-  standby bank. Next: recover `.old` in `sweep` under the lock.
 
 Static:
 

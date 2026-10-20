@@ -283,7 +283,7 @@ fn sweep(banks: &Path) {
 /// program of the old one keeps its files (they are renamed away, not overwritten). Err leaves
 /// the bank as it was.
 pub fn put(banks: &Path, bank: &str, new: &Path) -> Result<(), String> {
-    put_with(banks, bank, new, |p| std::fs::File::open(p)?.sync_all())
+    put_with(banks, bank, new, |p| std::fs::File::open(p)?.sync_all(), |_| false)
 }
 
 /// Every file and folder under `dir`, `dir` last, through `sync` (fsync).
@@ -299,25 +299,65 @@ fn sync_tree(dir: &Path, sync: &impl Fn(&Path) -> std::io::Result<()>) -> std::i
     sync(dir)
 }
 
-/// put() with the flush as a parameter. The unpacked files reach the disk before the folder is
+/// What an install that died between its two renames left (`put`): `.<bank>.old` holds the bank
+/// as it was. With no bank in its place the old one is put back; with a whole new bank in
+/// place (it died after the second rename) the old one is only to be removed. Each thing done
+/// is returned, to be told. Under the banks' lock (`recover` takes it; `put` holds it).
+fn recover_locked(banks: &Path) -> Result<Vec<String>, String> {
+    let mut done = Vec::new();
+    for bank in BANKS {
+        let (path, old) = (banks.join(bank), banks.join(format!(".{bank}.old")));
+        if std::fs::symlink_metadata(&old).is_err() {
+            continue;
+        }
+        if std::fs::symlink_metadata(&path).is_err() {
+            std::fs::rename(&old, &path).map_err(|e| format!("{}: could not be put back as bank {bank}: {e}", old.display()))?;
+            done.push(format!("bank {bank} was missing after an install was interrupted: the bank it held is back"));
+        } else {
+            std::fs::remove_dir_all(&old).map_err(|e| format!("{}: {e}", old.display()))?;
+        }
+    }
+    Ok(done)
+}
+
+/// Makes the banks folder whole after a crash of an install (`recover_locked`), under the lock.
+/// The front does it before it picks the bank to start.
+pub fn recover(banks: &Path) -> Result<Vec<String>, String> {
+    let _lock = lock(banks)?;
+    recover_locked(banks)
+}
+
+/// put() with the flush as a parameter, and `crash`, which a test uses to end the process
+/// where it stands (true at "renamed away" and "renamed in": the function returns with the
+/// disk as a crash there leaves it). The unpacked files reach the disk before the folder is
 /// moved to the bank's name, and the move itself after: a power cut leaves the old bank or a
 /// whole new one, not a bank whose program is a name with no bytes (the data of a file the
 /// system had not written yet).
-fn put_with(banks: &Path, bank: &str, new: &Path, sync: impl Fn(&Path) -> std::io::Result<()>) -> Result<(), String> {
+fn put_with(banks: &Path, bank: &str, new: &Path, sync: impl Fn(&Path) -> std::io::Result<()>, crash: impl Fn(&str) -> bool) -> Result<(), String> {
     let _lock = lock(banks)?;
     sync_tree(new, &sync).map_err(|e| format!("{}: could not be flushed to disk before it is installed: {e}", new.display()))?;
+    // A crash of an earlier install: what it left is made whole first (never removed blindly: the
+    // bank it moved away may be the only copy).
+    for done in recover_locked(banks)? {
+        println!("banks: {done}");
+    }
     let path = banks.join(bank);
     let old = banks.join(format!(".{bank}.old"));
-    let _ = std::fs::remove_dir_all(&old);
     let had = std::fs::symlink_metadata(&path).is_ok();
     if had {
         std::fs::rename(&path, &old).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    if crash("renamed away") {
+        return Err("crashed".into());
     }
     if let Err(e) = std::fs::rename(new, &path) {
         if had && let Err(back) = std::fs::rename(&old, &path) {
             return Err(format!("{}: {e}; and the bank could not be put back from {}: {back}", path.display(), old.display()));
         }
         return Err(format!("{}: {e}", path.display()));
+    }
+    if crash("renamed in") {
+        return Err("crashed".into());
     }
     let _ = std::fs::remove_dir_all(&old);
     // The renames themselves.
@@ -664,6 +704,54 @@ pub mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A crash between the two renames of `put` leaves the bank missing and `.<bank>.old` holding
+    /// it; a crash after them leaves a whole new bank and the old one beside it. `recover` (the
+    /// front's start) and the next `put` make either whole: the old bank is put back, or the
+    /// leftover removed; with the crash injected at each point.
+    #[test]
+    fn a_crash_inside_an_install_is_made_whole_at_the_next_start() {
+        let dir = test_dir("put-crash");
+        let banks = dir.join("bin");
+        let bank = || std::fs::read_to_string(banks.join("b/pcds")).unwrap_or_else(|e| e.to_string());
+        let stage = |n: u32| {
+            let new = banks.join(format!(".b.new.{n}"));
+            std::fs::create_dir_all(&new).unwrap();
+            std::fs::write(new.join("pcds"), "new").unwrap();
+            new
+        };
+        for point in ["renamed away", "renamed in"] {
+            let _ = std::fs::remove_dir_all(&banks);
+            std::fs::create_dir_all(banks.join("b")).unwrap();
+            std::fs::write(banks.join("b/pcds"), "old").unwrap();
+            assert_eq!(put_with(&banks, "b", &stage(1), |_| Ok(()), |at| at == point).unwrap_err(), "crashed");
+            if point == "renamed away" {
+                assert_eq!(names(&banks), [".b.new.1", ".b.old"], "the bank is missing: its folder is the .old one");
+                assert!(!banks.join("b").exists());
+            } else {
+                assert_eq!((bank(), banks.join(".b.old/pcds").is_file()), ("new".into(), true), "a whole new bank, the old one beside it");
+            }
+            let told = recover(&banks).unwrap();
+            if point == "renamed away" {
+                assert_eq!((bank(), told.len()), ("old".into(), 1), "the bank it held is back: {told:?}");
+            } else {
+                assert_eq!((bank(), told.len()), ("new".into(), 0), "the leftover goes, the new bank stays");
+            }
+            assert!(!banks.join(".b.old").exists());
+            // Nothing to recover: nothing done.
+            assert_eq!(recover(&banks).unwrap(), Vec::<String>::new());
+        }
+        // The install tried again after a crash (no recover in between) must not remove the only
+        // copy of the old bank: put finds `.old`, puts it back, and then replaces it.
+        let _ = std::fs::remove_dir_all(&banks);
+        std::fs::create_dir_all(banks.join("b")).unwrap();
+        std::fs::write(banks.join("b/pcds"), "old").unwrap();
+        put_with(&banks, "b", &stage(2), |_| Ok(()), |at| at == "renamed away").unwrap_err();
+        put_with(&banks, "b", &stage(3), |_| Ok(()), |_| false).unwrap();
+        assert_eq!(bank(), "new");
+        assert!(!banks.join(".b.old").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     const LIVE: &str = r#"{"format": 1}"#;
 
     /// A bank's info from the JSON a test spells out.
@@ -690,7 +778,7 @@ pub mod tests {
             log.borrow_mut().push((p.strip_prefix(&banks).unwrap_or(p).to_path_buf(), at));
             Ok(())
         };
-        put_with(&banks, "b", &new, record).unwrap();
+        put_with(&banks, "b", &new, record, |_| false).unwrap();
         let log = log.into_inner();
         let names: Vec<String> = log.iter().map(|(p, _)| p.display().to_string()).collect();
         // Both files, the web folder, the new folder (last of them), then the banks folder.
@@ -701,7 +789,7 @@ pub mod tests {
         // A flush that fails: nothing moved.
         std::fs::create_dir_all(dir.join("bin/.b.new.2")).unwrap();
         std::fs::write(dir.join("bin/.b.new.2/pcds"), "newer").unwrap();
-        let e = put_with(&banks, "b", &dir.join("bin/.b.new.2"), |_| Err(std::io::Error::other("disk gone"))).unwrap_err();
+        let e = put_with(&banks, "b", &dir.join("bin/.b.new.2"), |_| Err(std::io::Error::other("disk gone")), |_| false).unwrap_err();
         assert!(e.contains("could not be flushed to disk before it is installed: disk gone"), "{e}");
         assert_eq!(std::fs::read_to_string(banks.join("b/pcds")).unwrap(), "new");
         // The real flush works on files and folders.

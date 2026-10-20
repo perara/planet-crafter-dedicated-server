@@ -160,6 +160,13 @@ impl Front {
     /// when the active one cannot start (a broken update), as a bootloader falls back.
     pub(super) fn boot(&mut self) {
         self.note_rollback_of_the_last_life();
+        // An install that died between its two renames left a bank missing: put it back first.
+        if let Some(dir) = &self.banks {
+            match updater::recover(dir) {
+                Ok(done) => done.iter().for_each(|d| println!("banks: {d}")),
+                Err(e) => eprintln!("banks: {e}"),
+            }
+        }
         let first = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
         let mut kept = self.kept_snapshot().unwrap_or_else(|e| {
             eprintln!("{e}");
