@@ -52,6 +52,8 @@ mod view;
 mod wasm;
 
 #[cfg(test)]
+mod abi13_tests;
+#[cfg(test)]
 mod cost;
 #[cfg(test)]
 mod game_tests;

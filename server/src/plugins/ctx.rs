@@ -395,7 +395,7 @@ impl Ctx {
         if !self.allowed(caps::WORLD_TOKENS) {
             return E_DENIED;
         }
-        if amount == 0 || amount.abs() > limits::MAX_TOKENS_PER_ACTION {
+        if amount == 0 || amount.unsigned_abs() > limits::MAX_TOKENS_PER_ACTION as u32 {
             return E_BAD;
         }
         if self.since(self.tokens_second.0).as_secs() >= 1 {

@@ -10,8 +10,8 @@ Versions in this release:
 
 | What | Version |
 |---|---|
-| plugin ABI | 1.2 (`ABI 1.2`; `pcds_plugin_api::ABI`, `0x0001_0002`) |
-| `pcds-plugin-api` crate | 0.1.0 |
+| plugin ABI | 1.3 (`ABI 1.3`; `pcds_plugin_api::ABI`, `0x0001_0003`) |
+| `pcds-plugin-api` crate | 0.2.0 |
 | manifest (`plugin.toml`) | the keys below; unknown keys are refused |
 | snapshot | `handoff::FORMAT` 7, with the `ext.plugins` part (docs/plugins.md, "The compatibility rule") |
 
@@ -46,8 +46,14 @@ The `export!` macro of `pcds-plugin-api` makes all of these from a type that imp
 A module for another language implements them by hand; the table is the whole contract.
 
 The host accepts a module whose `pcds_abi` has the same major and a minor no newer than the
-server's (`ABI 1.2` today). It refuses a module that imports anything but the eight functions
-below, with the name of the import in the message.
+server's (`ABI 1.3` today). A module built for 1.0, 1.1 or 1.2 runs unchanged: a new server only adds to
+what it sends and answers. It refuses a module that imports anything but the twelve functions below,
+with the name of the import in the message, and a module built for a newer minor with both versions
+in the message ("built for plugin ABI 1.4; this server speaks 1.3").
+
+The module is translated when it is read, all of it, not function by function when each is first
+called: the first call of an instance costs the fuel the next ones do. Before ABI 1.3 translation
+was charged to the call, and a budget that held the steady state could fault the first call.
 
 ## The module's imports (module `pcds`)
 
@@ -59,21 +65,25 @@ negative code (below).
 | Import | Signature | Capability | What |
 |---|---|---|---|
 | `pcds.log` | `(level: i32, ptr: i32, len: i32)` | none | a line in the server's log, prefixed with `plugin ID:`. Levels 0 error, 1 warn, 2 info, 3 debug. 20 lines per second, 240 characters, control characters become spaces |
-| `pcds.query` | `(kind: i32, arg: i32, arg_len: i32, out: i32, cap: i32) -> i32` | `world.read` | writes the answer into `out` (at most `cap` bytes) and returns its full length; a length over `cap` means it did not fit, call again with a bigger buffer. `arg` is unused in ABI 1.0 (pass 0, 0) |
+| `pcds.query` | `(kind: i32, arg: i32, arg_len: i32, out: i32, cap: i32) -> i32` | `world.read` (not for kind 7) | writes the answer into `out` (at most `cap` bytes) and returns its full length; a length over `cap` means it did not fit, call again with a bigger buffer (the host keeps the answer for the length of the call, so asking again costs the copy). `arg` is `arg_len` bytes (at most `MAX_QUERY_ARG`) that some kinds take (ABI 1.3); kinds 1 to 3 take none (pass 0, 0) |
 | `pcds.say` | `(ptr: i32, len: i32) -> i32` | `chat.say` | a chat message from the server to everyone (500 characters at most) |
 | `pcds.tell` | `(client: i64, ptr: i32, len: i32) -> i32` | `chat.say` | the same, to one player |
 | `pcds.kick` | `(client: i64, ptr: i32, len: i32) -> i32` | `player.kick` | kicks a client with the reason as the player's message (128 characters) |
 | `pcds.teleport` | `(client: i64, x: f32, y: f32, z: f32) -> i32` | `player.teleport` | moves a player; finite numbers within 100,000 of the origin |
 | `pcds.rules_patch` | `(ptr: i32, len: i32) -> i32` | `rules.write` | a JSON merge patch of the rules, as `pcds rules set` sends it, limited to the gameplay sections; two a second |
+| `pcds.give` | `(client: i64, ptr: i32, len: i32, count: i32) -> i32` | `player.give` | ABI 1.3. Puts `count` (1 to `MAX_GIVE_COUNT`) of the item whose group id is the text (letters, digits, `_`, `-`, at most 64 bytes) into the backpack of a player. Queued; at apply time the player must be online, the item a real item of the game that can be given (not a key or a quest item), and the backpack must have room: the ones that fit are put in. `GIVES_PER_SECOND` a second |
+| `pcds.tokens` | `(amount: i32) -> i32` | `world.tokens` | ABI 1.3. Adds Terra tokens to the world's count, or takes them away (negative; the count stops at 0). `1` to `MAX_TOKENS_PER_ACTION` either way. Queued. `TOKEN_CHANGES_PER_SECOND` a second |
+| `pcds.timer_set` | `(id: u32, delay_ms: u32, repeat_ms: u32) -> i32` | `event.timer` | ABI 1.3. Calls the plugin with the event `timer` after `delay_ms` of game time, then every `repeat_ms` if that is not 0 (at least `MIN_TIMER_REPEAT_MS`; delay and repeat at most `MAX_TIMER_DELAY_MS`). Setting an id again replaces the timer. `MAX_TIMERS` per plugin. Takes effect at once. A timer set in `pcds_load` starts counting at the first game tick after it |
+| `pcds.timer_cancel` | `(id: u32) -> i32` | `event.timer` | ABI 1.3. Cancels a timer; one that is not set is no error |
 | `pcds.http_request` | `(ptr: i32, len: i32) -> i64` | `net.http` | ABI 1.2. Starts an HTTP request (an encoded `HttpRequest`, at most `MAX_HTTP_REQUEST` bytes) and returns its ticket, a positive number; the answer comes later as the event `http_done`. Returns a code (below) when the request is turned down at once. See "`net.http`" |
 
 Codes: `0` done, `-1` denied (the capability is not granted), `-2` bad arguments, `-3` the action
 queue is full (16 per call, 200 per second; for `http_request`: too many requests alive, or in this
 second), `-4` unsupported (the host does not have it, or there is no world to read now: inside
 `pcds_save` and `pcds_load`), `-5` not allowed (ABI 1.2; `http_request`: the host is not on the
-manifest's `[net] allow` list).
+manifest's `[net] allow` list), `-6` not found (ABI 1.3; the player or object asked about is not there).
 
-Actions (`say`, `tell`, `kick`, `teleport`, `rules_patch`, `http_request`) are **queued**: the host applies them
+Actions (`say`, `tell`, `kick`, `teleport`, `rules_patch`, `give`, `tokens`, `http_request`) are **queued**: the host applies them
 after the call, through the admin API's code, and checks again then (the player may have left). A
 call that faults has its queued actions dropped.
 
@@ -87,19 +97,30 @@ know.
 
 | Kind | Name in the manifest | Needs | Fields, in order |
 |---|---|---|---|
-| 1 | `tick` | `event.tick` | `game_ms: i64`, `tick: i32`, `players: u32`, `since_ms: u32` (game time since this plugin's last tick) |
-| 2 | `player_join` | `event.player` | `client: u64`, `name: str`, `steam_id: str` (empty unless verified) |
-| 3 | `player_leave` | `event.player` | `client: u64`, `name: str` |
-| 4 | `chat` | `event.chat` | `client: u64`, `name: str`, `text: str` |
-| 5 | `command` | `event.chat` | `client: u64`, `name: str`, `command: str`, `argc: u32`, `argc` times `arg: str`, `text: str` |
+| 1 | `tick` | `event.tick` | `game_ms: i64`, `tick: i32`, `players: u32`, `since_ms: u32` (game time since this plugin's last tick), `unix_ms: i64` (ABI 1.3: the wall clock) |
+| 2 | `player_join` | `event.player` | `client: u64`, `name: str`, `steam_id: str` (empty unless verified), `player_id: u64` (ABI 1.3) |
+| 3 | `player_leave` | `event.player` | `client: u64`, `name: str`, `player_id: u64` (ABI 1.3) |
+| 4 | `chat` | `event.chat` | `client: u64`, `name: str`, `text: str`, `player_id: u64` (ABI 1.3) |
+| 5 | `command` | `event.chat` | `client: u64`, `name: str`, `command: str` (lower case), `argc: u32`, `argc` times `arg: str`, `text: str`, `player_id: u64` (ABI 1.3) |
 | 6 | `rpc_before` | `event.rpc` (`rpc.veto` to refuse) | `client: u64`, `rpc: str`, `object: u64`, `args_json: str` |
 | 7 | `rpc_after` | `event.rpc` | `client: u64`, `rpc: str`, `object: u64`, `args_json: str` |
-| 8 | `object_placed` | `event.object` | `id: i32`, `group: str`, `x: f32`, `y: f32`, `z: f32` |
-| 9 | `object_destroyed` | `event.object` | `id: i32`, `group: str`, `x: f32`, `y: f32`, `z: f32` |
+| 8 | `object_placed` | `event.object` | `id: i32`, `group: str`, `x: f32`, `y: f32`, `z: f32`, `client: u64` (ABI 1.3: who built or dropped it; 0: nobody) |
+| 9 | `object_destroyed` | `event.object` | `id: i32`, `group: str`, `x: f32`, `y: f32`, `z: f32`, `client: u64` (ABI 1.3: who took it apart; 0: it went some other way) |
 | 10 | `world_saved` | `event.world` | `game_ms: i64`, `ok: bool` |
 | 11 | `rule_change` | `event.world` | `changes_json: str` (an object of dotted rule names to values, the ones that differ from the defaults, gameplay sections only) |
 | 12 | `http_done` | `net.http` | ABI 1.2. `ticket: u64`, `status: u32` (the HTTP status; 0 when there was no answer), `error: str` (empty when there was an answer; else a short fixed phrase), `body: bytes` (a `u32` length and the bytes), `headers`: `count: u32`, then `count` times `name: str`, `value: str` (names in lowercase) |
+| 13 | `timer` | `event.timer` | ABI 1.3. `id: u32`, `game_ms: i64`, `late_ms: u32` (how long after its time it is delivered) |
+| 14 | `flip` | `event.world` | ABI 1.3. `game_ms: i64`, `server_version: str` |
 
+- `player_id` is the player's id in the world's save: the same player has the same id at every visit,
+  whatever connection number (`client`) the session has. It is the verified SteamID64 for a player who joined through
+  Steam, else a number made from the name. Keep what you remember about a player under it. A chat message from a
+  client that is not in the game yet has an empty `name` and `player_id` 0.
+- `timer` is not in `events.subscribe`: it is delivered to the plugin that set the timer, whatever it subscribed to, and
+  to nobody else. `flip` is: subscribe to it. It is delivered once, to the plugins that were running when a hot update
+  handed the world over, after their `pcds_load` and before the world goes on; not at a restart and not at a reload.
+- `unix_ms` and `player_id` and the others added in 1.3 come at the end of the event: a module built for an older minor
+  ignores them.
 - `http_done` is not in `events.subscribe` either: it is delivered to the plugin that made the request, whatever it subscribed to, and to nobody else.
 - `command` is not in `events.subscribe`: the manifest's `[[command]]` entries declare it, and
   only the plugin that owns a command is called for it. A chat message is a command when it
@@ -110,18 +131,34 @@ know.
   `ChatHandler.SendChatMessageServerRpc`; `args_json` is the decoded arguments as a JSON array. An
   RPC refused by a veto does not run, and gets no `rpc_after`.
 - `tick` is called when `tick_every_ms` of game time have passed since the plugin's last one, at
-  most once per game tick, and not while the world stands still.
+  most once per game tick, and not while the world stands still. The same goes for timers: they count game
+  time, so a world that stands still (paused, or empty with `world.pauseWhenEmpty`) delivers none; use `unix_ms`
+  of the next tick for anything that is about the wall clock.
+- A `command` reaches the plugin only after the host has checked it against the manifest: a command with
+  `permission = "operator"` from a player who is not one is answered by the host (`!name is for the server's
+  operators.`), and one with fewer arguments than `min_args` or more than `max_args` is answered with `Use: !name USAGE`.
+  The plugin is not called then. `command` is given in lower case, whatever the player typed.
 - `object_placed` is not sent for the objects of a loaded world or for a restored one.
 - Events caused by a plugin's own actions (a `rule_change` from its `rules_patch`) are not
   delivered to plugins during that call, so plugins cannot loop on themselves.
 
-## Queries (capability `world.read`)
+## Queries
 
-| Kind | Const | Answer |
-|---|---|---|
-| 1 | `Q_WORLD` | `game_ms: i64`, `planet: str`, `players: u32`, `world_objects: u32`, `network_objects: u32`, `terraformation: f64`, `standing_still: bool` |
-| 2 | `Q_PLAYERS` | `count: u32`, then for each: `client: u64`, `name: str`, `steam_id: str`, `x: f32`, `y: f32`, `z: f32`, `oxygen: f32`, `water: f32`, `health: f32`, `toxic: f32` |
-| 3 | `Q_RULES` | the rules that differ from the defaults, as JSON text (no length; the gameplay sections only) |
+All of them need `world.read` except kind 7. Answers are read-only copies taken at the moment of the call;
+asked twice in one call (kinds 1 to 3, no argument) they are the same copy. A query is available in
+`pcds_load` too: the host answers it from the world as it is when the plugin starts (not inside `pcds_save`, where
+there is no world, and a query there returns `-4`).
+
+| Kind | Const | Argument | Answer |
+|---|---|---|---|
+| 1 | `Q_WORLD` | none | `game_ms: i64`, `planet: str`, `players: u32`, `world_objects: u32`, `network_objects: u32`, `terraformation: f64`, `standing_still: bool`, `unix_ms: i64` (1.3), `command_prefix: str` (1.3) |
+| 2 | `Q_PLAYERS` | none | `count: u32`, then for each: `client: u64`, `name: str`, `steam_id: str`, `x: f32`, `y: f32`, `z: f32`, `oxygen: f32`, `water: f32`, `health: f32`, `toxic: f32`, `player_id: u64` (1.3), `operator: bool` (1.3) |
+| 3 | `Q_RULES` | none | the rules that differ from the defaults, as JSON text (no length; the gameplay sections only) |
+| 4 | `Q_INVENTORY` | the client, `u64` | ABI 1.3. `slots_used: u32`, `slots_total: u32`, `count: u32`, then `group: str`, `count: u32` for each kind of item, sorted by group id. `-6` if the player is not online |
+| 5 | `Q_NEARBY` | `x, y, z, radius: f32`, `max: u32` | ABI 1.3. `count: u32` and for each, the closest first: `id: i32`, `net: u64`, `group: str`, `x, y, z: f32`, `distance: f32`. At most `MAX_NEARBY` objects within `MAX_NEARBY_RADIUS`; only what stands in the world (not what is in a backpack). `-2` for a number that is not finite. The host looks at every object in the world: that costs `FUEL_PER_SCANNED_OBJECT` each |
+| 6 | `Q_OBJECT` | a byte, 0 for a world object id (`i32` as `u64`) or 1 for a network object id (`u64`) | ABI 1.3. `found: bool` and, if found, `id: i32`, `net: u64`, `group: str`, `x, y, z: f32`. An RPC's `object` is a network object id |
+| 7 | `Q_CONFIG` | none | ABI 1.3. No capability. `count: u32` and `key: str`, `value: str` for each setting the plugin declares that is not a secret, as the admin set it or as its default says (checked and normalised: `true`/`false`, whole numbers) |
+| 8 | `Q_PLAYER` | the client, `u64` | ABI 1.3. One `PlayerInfo`, as in kind 2. `-6` if the player is not online. Much cheaper than kind 2 when you know whom you want |
 
 ## Capabilities
 
@@ -141,6 +178,9 @@ know.
 | `rules.write` | change the server rules (gameplay sections only: `meteo`, `gauges`, `speed`, `death`, `loot`, `limits`, `world`; not `world.dlcPlanets`, which is the operator's statement of what they own) |
 | `net.http` | send HTTP requests to the hosts its manifest lists |
 | `net.http.local` | let those requests reach this machine and the local network |
+| `event.timer` | set timers and be called when they are due |
+| `player.give` | put items into players' backpacks |
+| `world.tokens` | add Terra tokens to the world, or take them away |
 
 A subscription needs the capability of its event kind; the manifest is refused if it subscribes
 without asking. The admin may grant less than was asked; events whose capability is not granted
@@ -169,27 +209,59 @@ memory_pages = 64
 tick_every_ms = 1000
 
 [events]                       # wasm only
-subscribe = ["tick", "player_join"]       # kinds from the table, except command
+subscribe = ["tick", "player_join"]       # kinds from the table, except command, http_done and timer
 rpc = ["ChatHandler.SendChatMessageServerRpc"]   # with rpc_before / rpc_after
 
 [[command]]                    # wasm only; a data plugin's commands are in its rules file
 name = "stats"
 help = "the world's numbers"
+usage = "[player]"             # optional: the arguments, one line; the host adds "!stats" when it tells a player how to type it
+min_args = 0                   # optional: fewer or more and the host answers the player and does not call the plugin
+max_args = 1
+permission = "everyone"        # or "operator": only the players in access.operators (verified SteamIDs)
 
 [net]                          # only with the capability net.http (see "net.http")
 allow = ["https://discord.com", "https://*.example.org:8443"]   # scheme://host[:port]; the only places it may go
 timeout_ms = 10000             # optional: the wall clock of a request (30000 at most)
 max_response_bytes = 65536     # optional: the most of an answer it takes (1048576 at most)
 
-[[config]]                     # values the admin sets (pcds plugin config set ID KEY), put into requests as ${config.KEY}
+[[config]]                     # a setting the admin gives (pcds plugin config set ID KEY, or the dashboard)
 key = "webhook"
 description = "the path of the Discord webhook"
-secret = true                  # the default: never shown, never logged, never in the plugin's memory
+secret = true                  # the default for a string: never shown, never logged, never in the plugin's memory;
+                               # only put into a request as ${config.KEY}. A secret has no default.
+
+[[config]]                     # a setting the plugin reads: host.config("afk_minutes")
+key = "afk_minutes"
+description = "minutes without moving before a player is warned"
+type = "int"                   # "string" (the default), "int", "float" or "bool"; a number or a yes/no is never a secret
+default = 15                   # what the plugin sees when the admin set nothing
+min = 1                        # int and float: bounds, both included
+max = 240
+
+[[config]]
+key = "mode"
+type = "string"
+secret = false                 # a string setting the plugin may read says so
+default = "warn"
+choices = ["warn", "kick"]     # the only values; max_len = 200 is the default length limit of a string (2048 for a secret)
 ```
 
-Unknown keys are an error. The id must be the folder's name. `abi` must equal the server's major;
+Unknown keys are an error, with the key that was probably meant (`unknown key capabilites (did you mean
+capabilities?)`); so are a capability, an event or a setting's type that does not exist. The id must be the folder's name. `abi` must equal the server's major;
 `min_server` newer than the server makes the plugin `incompatible`. `events.rpc` and a subscription
 to `rpc_before` or `rpc_after` go together.
+
+**Settings.** The admin's value is checked against the declaration when it is set (the command line, the admin API and
+the dashboard all do) and again when the plugin starts: a stored value the declaration no longer accepts (the plugin
+was updated to a narrower range) makes the plugin `invalid` with the message, and is not quietly replaced by the default.
+The plugin reads its settings with `Host::settings()` / `config(key)` (kind 7 of the queries) in `pcds_load` and in events; a
+change of a value restarts the plugin the way a reload does (its state is handed over, its timers are set again by its `load`).
+A setting that is a secret is never in that list.
+
+**Operators.** `access.operators` (`pcds rules set access.operators=SteamID,SteamID`, or the dashboard's rules) lists
+SteamID64s. Only a player who joined through Steam, where the id is verified, can be an operator; `PlayerInfo.operator` and
+`permission = "operator"` follow it. A name cannot be one: a name is anyone's.
 
 ### `approved.json`
 
@@ -361,6 +433,19 @@ them (`approved.json`).
 | `MAX_PAYLOAD` | 1048576 | an event payload or a query answer |
 | `MAX_FAULTS` | 5 | faults within the window that switch a plugin off |
 | `MAX_PLUGINS` | 64 | plugins loaded |
+| `MAX_GIVE_COUNT` | 50 | items in one `give` |
+| `GIVES_PER_SECOND` | 10 | `give` calls one plugin may queue in a second |
+| `MAX_TOKENS_PER_ACTION` | 10000 | Terra tokens one `tokens` call adds or takes |
+| `TOKEN_CHANGES_PER_SECOND` | 2 | `tokens` calls one plugin may queue in a second |
+| `MAX_TIMERS` | 16 | timers one plugin has |
+| `MIN_TIMER_REPEAT_MS` | 100 | the shortest repeat |
+| `MAX_TIMER_DELAY_MS` | 604800000 | the longest delay or repeat (seven days) |
+| `TIMER_EVENTS_PER_TICK` | 4 | timer events one plugin gets in one game tick |
+| `FUEL_PER_SCANNED_OBJECT` | 8 | fuel for each world object `Q_NEARBY` looks at |
+| `MAX_QUERY_ARG` | 64 | bytes of a query's argument |
+| `MAX_ITEM_NAME_BYTES` | 64 | bytes of an item's group id in `give` |
+| `LOG_KEPT` | 200 | log lines kept for each plugin (`pcds plugin logs`) |
+| `FAULTS_KEPT` | 20 | faults kept for each plugin |
 | `HTTP_IN_FLIGHT` | 2 | `net.http` requests of one plugin alive (queued or running) |
 | `HTTP_PER_SECOND` | 10 | requests one plugin starts in a second |
 | `HTTP_WORKERS` | 4 | threads that send the requests of all plugins |
@@ -385,7 +470,8 @@ All answer JSON; the bearer token is the admin token (docs/hot-update.md, README
 
 | Request | Body | Answer |
 |---|---|---|
-| `GET /api/plugins` | | `{"plugins": [...], "folder", "approvalsError", "capabilities": [{"name","allows"}], "abi": {"major","minor"}, "stream": {"epoch"}}`. Each plugin: `id name version description authors license kind status detail requested granted notGranted commands events warnings limits stats digest net config signature`; `stats`: `calls faults restarts slow shed denied refused actions vetoes fuel averageMicros maxMicros lastError lastFaultAt http`; `stats.http`: `requests answered failed bytesOut bytesIn inFlight`; `net` (null without `[net]`): `allow wildcards local localGranted timeoutMs maxResponseBytes`; `signature`: `state` (`none`, `invalid`, `untrusted`, `revoked`, `trusted`), `keyId`, `keyName`, `vouches` (what the key covers of what the plugin asks) and `detail` (why an invalid one is); the listing also has `trustedKeys`, `revokedKeys` and `keysError`; `config`: the declared keys, `key description secret set`, and the `value` of a key that is not a secret |
+| `GET /api/plugins` | | `{"plugins": [...], "folder", "approvalsError", "capabilities": [{"name","allows"}], "abi": {"major","minor"}, "stream": {"epoch"}}`. Each plugin: `id name version description authors license kind status detail requested granted notGranted commands events warnings limits stats digest net config signature`; `stats`: `calls faults restarts slow shed denied refused actions vetoes fuel averageMicros maxMicros lastError lastFaultAt byEvent faultLog http`, where `byEvent` is a list of `{event, calls, fuel, averageFuel, maxFuel, averageMicros, maxMicros}` for each kind of event the plugin was called for, and `faultLog` the last `FAULTS_KEPT` faults `{at, during, text}`, oldest first; `deniedCapabilities`: the capabilities the plugin used without being granted them (the log says each once); `changes`: null, or what the files on disk ask for beyond what the admin approved, `{version, digest, requested, allow, added, removed, addedHosts, removedHosts}` (capabilities and `[net] allow` hosts), which the dashboard and `pcds plugin enable` show before the admin decides; `commands` each `{name, help, usage, minArgs, maxArgs, permission}`; `stats.http`: `requests answered failed bytesOut bytesIn inFlight`; `net` (null without `[net]`): `allow wildcards local localGranted timeoutMs maxResponseBytes`; `signature`: `state` (`none`, `invalid`, `untrusted`, `revoked`, `trusted`), `keyId`, `keyName`, `vouches` (what the key covers of what the plugin asks) and `detail` (why an invalid one is); the listing also has `trustedKeys`, `revokedKeys` and `keysError`; `config`: the declared keys, `key description secret set type default min max maxLen choices`, and the `value` of a key that is not a secret; the listing also has `commandPrefix` |
+| `POST /api/plugins/logs` | `{"id", "limit"}` (limit: 1 to `LOG_KEPT`, default 100) | `{"id", "lines": [{"seq","at" (Unix seconds),"level" ("error","warn","info","debug"),"text"}]}`, oldest first: the plugin's own lines and the host's about it (faults, unloading, slow calls), the last `LOG_KEPT`. 404 for a plugin that is not installed. `seq` counts the plugin's lines since it was loaded, so a reader that follows asks again and keeps the lines above the last `seq` it saw |
 | `POST /api/plugins/reload` | | `{"ok": true, "message"}`: the folder is read again; a plugin whose files and approval did not change keeps running |
 | `POST /api/plugins/enable` | `{"id", "grant": [...]}` (grant optional: everything asked) | `{"ok": true, "plugin": {...}}`; 400 for an unknown plugin, a grant above what is asked, or a plugin that does not hold up |
 | `POST /api/plugins/disable` | `{"id"}` | `{"ok": true, "plugin": {...}}` |
@@ -407,6 +493,51 @@ running modules hold; it is zero once they are all unloaded. `scanEverySeconds` 
 bank looks at the folder by itself (2); a change is acted on when two looks in a row see it.
 
 `GET /api/status` has a `plugins` object: `loaded`, `running`, `faults`.
+
+## Delivery and ordering
+
+What a plugin may rely on:
+
+- **One thing at a time.** The host calls plugins on the game thread, between the game's own steps; a call is never
+  interrupted by the game, by another plugin or by an admin request. Whatever a plugin reads in a call (`world`,
+  `players`, ...) is the world as it stood when the call began, and stays so until it returns.
+- **Order of plugins.** Plugins are called in the order of their ids (the names of their folders, sorted). That order is the
+  same at every start and does not depend on when a plugin was installed or approved. A `rpc_before` that one plugin vetoes is
+  not shown to the plugins after it. Ticks are the exception: when the plugins' 2 ms for a tick run out, the next tick
+  starts with the plugin where the last one stopped, so they take turns.
+- **Order of events.** Events reach a plugin in the order they happened in the game. A chat message that is a command
+  is delivered as `chat` first (to the plugins that subscribed), then as `command` (to its owner). The actions a call
+  queued are applied right after that call, before the next plugin is called, in the order they were queued, so the
+  next plugin sees their effect. Timers are delivered after the tick's own events, at most `TIMER_EVENTS_PER_TICK` per plugin.
+- **A hot update.** At the hand-over each plugin is asked for its state (`pcds_save`), the new server starts the plugins from it
+  (`pcds_load`), and `flip` is delivered to those that subscribed. No other event happens in between. Timers do not
+  survive: set them in `pcds_load`. A request in flight (`http_request`) is lost without an event.
+- **Not guaranteed.** That every event is delivered: a plugin that faults misses the event that faulted it and is started
+  again; a plugin that is switched off for faults misses everything until it is started. That two events arrive at the same
+  wall-clock time. That `tick` arrives at the interval asked for (it never arrives while the world stands still, and
+  not more often than once per game tick of 5 ms).
+
+## What each host function costs
+
+Every call costs `HOST_CALL_FUEL` (200) fuel besides the instructions that make it; a byte the host copies for the
+module (a text, an answer) costs `FUEL_PER_BYTE` (1) and a byte it parses (a rules patch, an HTTP request)
+`FUEL_PER_PARSED_BYTE` (16). A million fuel is about a third of a millisecond.
+
+| Function | Fuel | Other limits |
+|---|---|---|
+| `log` | 200 + 1 per byte (at most 4 times `LOG_LINE_CHARS` bytes looked at) | `LOG_LINES_PER_SECOND` a second, `LOG_LINE_CHARS` characters; the rest is counted, not kept |
+| `query` kinds 1, 2, 3, 7, 8 | 200 + 1 per byte of the answer copied | the answer is built once per call (kinds 1 to 3, 7) |
+| `query` 4, 6 | the same | `-6` when not found |
+| `query` 5 (`nearby`) | the same + `FUEL_PER_SCANNED_OBJECT` per object in the world | at most `MAX_NEARBY` objects, radius `MAX_NEARBY_RADIUS`; a world of 100,000 objects costs 800,000 of the 1,000,000 default fuel |
+| `say`, `tell`, `kick` | 200 + 1 per byte (at most `MAX_TEXT_BYTES`) | `ACTIONS_PER_CALL`, `ACTIONS_PER_SECOND`; `SAY_CHARS` per chat line; a kick's reason is cut to 128 characters |
+| `teleport` | 200 | finite, within 100,000 of the origin |
+| `rules_patch` | 200 + 17 per byte | `MAX_PATCH_BYTES`; `RULE_CHANGES_PER_SECOND`; gameplay sections only |
+| `give` | 200 + 1 per byte of the name | `MAX_GIVE_COUNT`, `GIVES_PER_SECOND`, and the actions limits |
+| `tokens` | 200 | `MAX_TOKENS_PER_ACTION`, `TOKEN_CHANGES_PER_SECOND`, and the actions limits |
+| `timer_set`, `timer_cancel` | 200 | `MAX_TIMERS`, `MIN_TIMER_REPEAT_MS`, `MAX_TIMER_DELAY_MS` |
+| `http_request` | 200 + 16 per byte of the request | `HTTP_IN_FLIGHT`, `HTTP_PER_SECOND`, and the rest under `net.http` |
+
+A pointer or a length outside the module's memory traps the call, whatever the function.
 
 ### Scoped tokens
 
