@@ -277,6 +277,9 @@ fn read_value(r: &mut Reader, a: &Arg, enc: &str, ty: &str) -> Option<Value> {
             let scene = r.string()?;
             let (loot, difficulty) = (r.i32()?, r.i32()?);
             let n = r.i32()?;
+            if n > MAX_ARRAY_ITEMS {
+                return None;
+            }
             let recipe = (0..n.max(0)).map(|_| r.i32()).collect::<Option<Vec<i32>>>()?;
             json!([seed, time_left, scene, loot, difficulty, recipe])
         }
@@ -426,6 +429,14 @@ mod tests {
         assert!(s.decode(hash, &too_many).is_none());
         let (hash, huge) = s.encode("A.BRpc", &[json!(list(60_000))]);
         assert!(s.decode(hash, &huge).is_none());
+        // The world instance's recipe is a list too.
+        let Some(s) = spec() else { return };
+        let name = "WorldInstanceHandler.SetAndOpenWorldInstanceSceneServerRpc";
+        let recipe = |n: i32| json!([[77, 600, "Instance-1", 2, 1, list(n)]]);
+        for (n, decodes) in [(MAX_ARRAY_ITEMS, true), (MAX_ARRAY_ITEMS + 1, false), (100_000, false)] {
+            let (hash, bytes) = s.encode(name, recipe(n).as_array().unwrap());
+            assert_eq!(s.decode(hash, &bytes).is_some(), decodes, "{n}");
+        }
     }
 
     #[test]
