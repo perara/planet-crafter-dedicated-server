@@ -103,6 +103,7 @@ energy: the grower's random state).
   containers 213 hold the same groups in the game against this server and in the game against
   the game (the item counts agree in 297 and 329 containers in two runs against this server, in
   305 against the game itself).
+  (`wrecks.py` makes the two scripts and compares the saves and the event lists; run them with `sweep.sh both`.)
   Found and fixed by this comparison: the planters of a wreck (`TreePlanter2`, `FlowerPot2`)
   tell everyone their growth is 0 when they appear (`GrowthProxy.SetCurrentGrowthClientRpc`);
   this server did not.
