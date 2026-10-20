@@ -525,6 +525,7 @@ The change is in `front/` and `admin.rs`, which a hot update does not replace: i
 | all plugins' saves in a hot update | 25 ms | a plugin not reached keeps the state of its last save |
 | actions | 16 per call, 200 per second per plugin | refused, counted |
 | log lines | 20 per second per plugin, 240 characters | dropped, counted and said once a second |
+| a data plugin's rules file | 64 commands, 16 each of on_join and on_leave, 64 every, 32 when_players, 64 vars; a text 2000 bytes, a variable 1000 | not loaded (`invalid`, with the count) |
 | state | 1 MiB | a fault |
 | module | 8 MiB | not loaded |
 | faults | 5 in 60 seconds | the plugin is switched off (`failed`) until `pcds plugin reload` or the dashboard starts it |

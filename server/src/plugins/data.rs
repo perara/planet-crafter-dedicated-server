@@ -93,6 +93,14 @@ pub struct When {
 }
 
 const VARS: [&str; 9] = ["name", "client", "players", "planet", "time", "args", "arg1", "arg2", "arg3"];
+/// How many of each a rules file may hold, and how long a text or a variable may be (see `check`).
+const MAX_COMMANDS: usize = 64;
+const MAX_ENTRIES: usize = 16;
+const MAX_EVERY: usize = 64;
+const MAX_WHEN: usize = 32;
+const MAX_VARS: usize = 64;
+const MAX_TEXT_BYTES: usize = 2000;
+const MAX_VAR_BYTES: usize = 1000;
 /// The ones that need `world.read`.
 const WORLD_VARS: [&str; 3] = ["players", "planet", "time"];
 
@@ -118,6 +126,20 @@ impl Rules {
     }
 
     fn check(&self) -> Result<(), String> {
+        // A rules file has no fuel: what it costs is the size of what it names, at every event and every
+        // tick, so the sizes are bounded (a file may be 8 MiB; the same bytes as 250,000 `every` entries
+        // would have had each tick walk them all).
+        for (what, n, most) in [("[[command]]", self.commands.len(), MAX_COMMANDS), ("[[on_join]]", self.on_join.len(), MAX_ENTRIES), ("[[on_leave]]", self.on_leave.len(), MAX_ENTRIES), ("[[every]]", self.every.len(), MAX_EVERY), ("[[when_players]]", self.when_players.len(), MAX_WHEN), ("[vars]", self.vars.len(), MAX_VARS)] {
+            if n > most {
+                return Err(format!("{n} {what} entries: at most {most}"));
+            }
+        }
+        if let Some((k, _)) = self.vars.iter().find(|(k, v)| k.len() > MAX_VAR_BYTES || v.len() > MAX_VAR_BYTES) {
+            return Err(format!("[vars] {k:?}: a name and a value of {MAX_VAR_BYTES} bytes at most"));
+        }
+        if let Some((where_, _)) = self.texts().into_iter().find(|(_, t)| t.len() > MAX_TEXT_BYTES) {
+            return Err(format!("{where_}: a text of {MAX_TEXT_BYTES} bytes at most (a chat line is {} characters)", super::limits::SAY_CHARS));
+        }
         let mut names = BTreeSet::new();
         for c in &self.commands {
             if c.name.is_empty() || c.name.len() > 32 || !c.name.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '-') {
@@ -478,5 +500,21 @@ mod tests {
         assert!(bad("[[every]]\nseconds = 0.1\nsay = \"x\"").contains("seconds"));
         assert!(bad("[[when_players]]\nat_least = 1\nset_rules = { chat = { exec = [\"/bin/sh\"] } }").contains("plugins may change only"));
         assert!(bad("surprise = 1").contains("unknown field"));
+    }
+
+    /// A rules file runs without fuel: the entries a tick walks and the text an event renders must be
+    /// bounded, or one 8 MiB file makes every tick (and every !command) cost milliseconds.
+    #[test]
+    fn a_rules_file_is_bounded_in_what_each_tick_and_event_walks() {
+        let many = |entry: &str, n: usize| entry.repeat(n);
+        let bad = |t: String| Rules::parse(&t).unwrap_err();
+        assert!(bad(many("[[every]]\nseconds = 1\nsay = \"x\"\n", 250_000)).contains("at most 64"));
+        assert!(bad(many("[[when_players]]\nat_least = 1\nset_rules = { speed = { growth = 2.0 } }\n", 33)).contains("at most 32"));
+        assert!(bad((0..65).map(|i| format!("[[command]]\nname = \"c{i}\"\nreply = \"x\"\n")).collect()).contains("at most 64"));
+        assert!(bad(format!("[[on_join]]\nsay = \"{}\"\n", "a".repeat(2001))).contains("2000 bytes"));
+        assert!(bad(format!("[vars]\nk = \"{}\"\n", "a".repeat(1001))).contains("1000 bytes"));
+        // And what is allowed is allowed.
+        assert!(Rules::parse(&many("[[every]]\nseconds = 1\nsay = \"x\"\n", 64)).is_ok());
+        assert!(Rules::parse(&format!("[[on_join]]\nsay = \"{}\"\n", "a".repeat(2000))).is_ok());
     }
 }
