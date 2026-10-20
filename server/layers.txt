@@ -9,7 +9,7 @@
 
 # Formats and primitives: bytes, ids, geometry, the game's tables as data, the transport framing.
 # No game, no process, no sockets: they use each other and nothing above.
-layer base: wire idmap geometry world save data protocol rpcspec transform gamedata model ipc utp util bincodec
+layer base: wire idmap geometry world save data protocol rpcspec transform gamedata model ipc utp util bincodec dotnet_sort
 # The game's network state: objects, variables, RPC messages. Uses base only.
 layer world: net
 # The game logic, ported class by class, free of I/O: the game, its handlers and subsystems, the
