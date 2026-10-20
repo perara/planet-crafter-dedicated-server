@@ -348,6 +348,7 @@ impl Loaded {
         match &p.signed {
             sign::Signed::Broken(why) => p.warnings.push(format!("{why}: the plugin is judged as if it were not signed")),
             sign::Signed::Revoked { id } => p.warnings.push(format!("signed by the key {id}, which was revoked: it is not trusted")),
+            sign::Signed::Trusted(k) if sign::published(&k.id) => p.warnings.push(format!("signed by the key {}: {}", k.id, sign::PUBLISHED_WARNING)),
             _ => {}
         }
         let (standing, granted) = approvals::standing(approval, &p.digest, &p.requested, &p.signed);

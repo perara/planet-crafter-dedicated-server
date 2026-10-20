@@ -144,9 +144,9 @@ Tools were run on the whole source; each real hit was fixed with a test. The rel
 | S18 | Release profile: no overflow checks, `panic = "unwind"` | by design: the parity ports rely on the game's unchecked arithmetic; the overflow-checked fuzz build found one wrap (S7) | `Cargo.toml` has no `[profile]` |
 | S19 | `SaveFile::from_text` dropped any entry it could not parse and read a missing section as empty, so a damaged save loaded as a smaller world | fixed in 0.7.0 for damaged entries and unreadable saves, which are refused. A missing section reading as empty was not rechecked | `a_save_with_a_damaged_entry_is_refused`, `truncated_and_garbage_files_are_refused` |
 | S20 | A new bank was renamed into place without flushing its files, so a power cut could leave empty files | fixed in 0.7.0 | `updater::tests::a_bank_is_flushed_to_disk_before_it_is_moved_into_place` |
-| S21 | `cargo audit`: one warning, `paste` 1.0.15 unmaintained (a compile-time macro pulled by `steamworks`); no vulnerability; licences all compatible | open: nothing to do here until `steamworks` moves. Not rerun for the crates added since (the plugin host, `toml`, `unicode-normalization`) | `server/Cargo.lock` |
+| S21 | `cargo audit`: one warning, `paste` 1.0.15 unmaintained (a compile-time macro pulled by `steamworks`); no vulnerability; licences all compatible | open: nothing to do here until `steamworks` moves. Rerun in the security review for the crates added since (the plugin host, `toml`, `unicode-normalization`): the same one warning, no advisory, all licences compatible (see the review's supply-chain verdict) | `server/Cargo.lock` |
 | S22 | The updater's checksum comes from the same server as the tarball, so it guards against damage, not a compromised release or mirror | by design: a limit of the design (the unpacked program runs as the server user), written down in docs/hot-update.md ("the sha256 guards against a damaged download, not a forged release: releases are not signed") | `updater.rs` (`unpack`) |
-| S23 | A hard link inside a release tarball passes `plain_files` (it looks like a file) | open | `updater.rs` (`plain_files`) |
+| S23 | A hard link inside a release tarball passes `plain_files` (it looks like a file) | fixed after 0.7.0 (security review, H4): a file with a link count above one is refused | `updater::tests::releases_come_over_https_with_plain_tags_and_files` |
 | S24 | `world::hex` slices a string by bytes and panics on non-ASCII input (offline probe and load tools only) | fixed (consolidation after 0.7.0: no panic; bad hex still reads as 0, as the tools expect) | `world::tests::hex_reads_pairs_and_does_not_panic_on_text_that_is_not_ascii` |
 | S25 | Small suspects never reproduced: `serde_json` float parsing may move a huge value by one bit per save, `set_var` in a chat-hook test races other tests, `request.accept()` results ignored in the front | unverified | none |
 
@@ -199,6 +199,159 @@ Experiments that found nothing (kept for the record, no finding):
 Not covered: the Steam transport and invite codes, a real Unity client for D5, the hourly update
 check against a real service, and S3 against a real bucket (a fake endpoint answered).
 
+## Security review v0.7+
+
+An independent review of the code that is new since v0.6.2 (`git diff --stat bb6ae80..main`: 353
+files, 61,000 lines), made in October 2026 on `main` at a2a5560 by an adversary's reading: read the
+code, attack it, prove each problem with a failing test or a scripted run against a scratch server,
+fix it in its own commit with the regression test. The threat actors were: (a) an anonymous game
+client, (b) a holder of a scoped token, (c) a malicious plugin author (a module approved by an
+admin with some capabilities), (d) a malicious release feed or tarball, (e) a malicious world file,
+(f) a local user of the same host, (g) a network attacker against the admin port. Ids: P plugins,
+H admin API, updater, install and CI, G game protocol, W worlds and files.
+
+Statuses as above. "Commit" is the fix in this branch (`git log a2a5560..`); every fix has its test
+in the same commit.
+
+### Findings
+
+| Id | Finding | Sev. | Status | Evidence |
+|---|---|---|---|---|
+| P1 | The host functions a module imports did work by the byte for free: `log` (no capability needed) converted a 1 MiB range of the module's memory to a string at every call, `say`, `rules_patch` (JSON parse) and `http_request` (a copy, before its capability was looked at) the same, `query` rebuilt the player list and the rules at every ask; a call costs the module about 8 fuel. One chat event of a plugin that asked for `event.chat` alone held the game thread **44 s** (the watchdog then kills the bank, and the next chat message does it again) | High | fixed (b308058): each host call costs 200 fuel and the bytes it copies (1) or parses (16); a text is read to 4096 bytes, a rules patch is refused over 64 KiB, a query answer is built once per call | `plugins::tests::a_host_call_with_a_megabyte_buffer_is_paid_for_in_fuel`, `asking_the_world_again_and_again_is_paid_for_in_fuel` |
+| P2 | wasmi charges `memory.fill`/`copy` one fuel per 64 bytes: one fill of the 64 MiB a module may hold cost the default budget and **14 ms** (66 ms at the 20,000,000 maximum, a 32 MiB copy 200 ms) where a million fuel is meant to be 0.3 ms: three game ticks per event for a plugin with `event.tick` and nothing else | Medium | fixed (fbd22d9): four bytes a fuel | `plugins::tests::a_bulk_memory_operation_is_paid_for_by_the_byte`; endless recursion pinned (a trap in under a millisecond) |
+| P3 | A data plugin (no fuel) walks every `every` and `when_players` entry at each tick and renders its texts at each event; the bound was the 8 MiB file: 250,000 entries made every tick **26 ms** (a tick is 5 ms) | Medium | fixed (6f2dcf9): 64 commands, 64 every, 32 when_players, 16 each of on_join and on_leave, 64 vars, texts of 2000 bytes | `plugins::data::tests::a_rules_file_is_bounded_in_what_each_tick_and_event_walks` |
+| P4 | Every folder of `plugins/` is read before approval, on the game thread: a **named pipe** in the place of `plugin.sig`, the manifest, the module or `data/<world>.state` (a tar can hold one) blocked the open for ever (hang, watchdog kill, the same hang after the restart); the module's size check read a device's size (0) and then read `/dev/zero` to the end | Medium | fixed (d90eca4): `read_regular` opens without waiting, refuses what is not a regular file, caps the read | `plugins::tests::a_plugin_folder_with_a_pipe_or_a_device_in_place_of_a_file_does_not_hold_the_host` (red before: "prepare() is blocked on a pipe named plugin.sig") |
+| P5 | `approve()` pinned the digest of the files it read at the moment of the answer, not of the files the admin was shown: `pcds plugin enable` waits at "[y/N]" as long as the admin likes (the dashboard dialog too), and a folder a sync, `git pull` or its author changes meanwhile was approved unseen | Medium | fixed (faed557): `approve_digest`; the CLI and the dashboard hold the digest they displayed (`POST /api/plugins/enable` takes `digest`) | `plugins::tests::files_swapped_between_the_screen_and_the_approval_are_not_approved` |
+| P6 | The author's name, description, authors, license, help texts, the folder's name, a TOML error (it quotes the line) and the name of an import went raw to the admin's terminal: `ESC[8m` conceals the capability list and the question, OSC 52 sets the clipboard, a line break forges a line of the approval; the same in `pcds plugin list` and the journal | Medium | fixed (901145b): manifest texts are one line of plain text (limits in docs/plugins.md); what the host says of a plugin is cleaned (`plugins::clean`). The dashboard sets text only: unaffected | `plugins::tests::a_manifest_text_with_a_control_character_is_refused`, `what_the_host_says_of_a_plugin_has_no_control_character_whatever_the_folder_and_the_files_say` |
+| P7 | `net.http.local` opened link-local, which holds the cloud metadata service (169.254.169.254 on AWS, Azure, GCP, OpenStack, a Kubernetes node): the machine's role credentials, back to the plugin through `HttpDone` | Medium | fixed (7186666): those addresses (also 100.100.100.200 and fd00:ec2::254, also IPv4-mapped) are never reachable | `plugins::net::tests::addresses_a_plugin_may_not_reach_are_every_local_private_and_reserved_range` |
+| P8 | The system's name lookup cannot be interrupted, so a request that gives up leaves its thread until the resolver does (tens of seconds against a name server that never answers); a manifest may ask for `timeout_ms = 1`, a plugin starts ten requests a second: 300 requests made 300 threads | Low | fixed (269a5de): 16 lookups waiting at once for all plugins | `plugins::net::tests::lookups_that_cannot_be_given_up_are_few` (measured: 2 to 302 threads with the cap off) |
+| P9 | A scoped `events.read` token chooses the `consumer` name of every poll: each new name was a table entry, a journal line and a row of `GET /api/plugins` | Low | fixed (0867462): 16 consumers, then 429 | `plugins::stream::tests::the_consumers_are_few` |
+| H1 | The admin HTTP head was read leniently: `X: a` followed by ` Authorization: Bearer T` (a folded line) was an Authorization header, `Authorization : Bearer T` too, the last of two Content-Lengths won, a 70 KB header was cut and the request went on. A proxy in front reads each of these another way. One request a connection, so nothing was smuggled | Low | fixed (20325ba): 400 for each, 431 for a head over 64 KiB | `admin::tests::a_head_that_can_be_read_two_ways_is_refused_not_guessed` |
+| H2 | The page and the API had no policy besides framing: JSON with the status and the plugin listing was cacheable by a proxy in front, and a script that got into the page (none can: no `innerHTML`, `eval` or other sink anywhere in it) could have sent the token anywhere | Low (depth) | fixed (b878920): CSP (`connect-src 'self'`, nothing else loaded, no `<base>`), `nosniff`, `no-referrer`, `no-store` | `admin::tests::the_page_has_a_policy_of_its_own_and_the_api_does_not_need_it`; the nine views opened in a browser against a scratch server, no violation |
+| H3 | A hard link in a release tarball passed the post-unpack check (S23) | Low | fixed (0136ab7) | `updater::tests::releases_come_over_https_with_plain_tags_and_files` |
+| H4 | CI: actions pinned by moving tags, the release job holds `contents: write` while the dependencies' build scripts run and `actions/checkout` left that token in `.git/config`; `ci.yml` had no `permissions` | Low | fixed (b993624): every action pinned by commit (dependabot proposes updates), `persist-credentials: false`, read-only default. Not run on a runner: the first release is the test | `.github/workflows/`, `.github/dependabot.yml` |
+| G1 | `LoadInstanceFromScene` (allowed before PlayerReady): any number of distinct ids, each a network object for every player, a saved world object and a save line (the save is quadratic): 3,000 RPCs, 1,275 objects, 2.1 s | High | fixed (24a937f): ids below 200M, 256 scene wrecks | `instances::tests::a_client_cannot_make_scene_wrecks_without_end` |
+| G2 | `SpawnAnimals` carried a trait list of up to 1 MiB: one RPC made 400,021 world objects; spawners grew without bound (also `SpawnerRegistered`, pre-ready) | High | fixed (9636678): 9 trait kinds, scene ids only, 1024 spawners, 256 pending requests | `animals::spawn::tests::a_list_of_traits_cannot_make_millions_of_world_objects`, `a_client_cannot_make_wild_spawners_without_end` |
+| G3 | The toxic-area `Register*` RPCs (allowed pre-ready) pushed an entry per call: each is scanned at every tick for every player and is in the snapshot | High | fixed (f996344): 256 a client in each list | `toxic::tests::a_client_cannot_register_for_toxic_areas_without_end` |
+| G4 | A client's own object id followed by garbage: a delta cut before its last flag, or a transform state that does not decode, was relayed byte for byte to everybody | High | fixed (3c0fa97): only whole deltas and decodable states are relayed | `game::tests::a_cut_variable_delta_is_not_passed_on`, `a_transform_state_that_is_garbage_is_not_passed_on` |
+| G5 | RPC arrays of up to 60,000 ints at cost 1: `GetOrCreateNewInventory` 32 ms an RPC, 32 an RPC budget a tick | Medium | fixed (79fc16b, 0c31b3d): arrays capped at 4096, an RPC costs one more per KiB | `rpcspec::tests::an_array_longer_than_the_games_lists_is_not_decoded` |
+| G6 | UDP reflection and amplification: a peer that never receives can drive the reliable window blind (the server's sequence starts at 0) and the forged handshake gets the world: 876 bytes sent, **2.1 MB** answered (x2445) | Medium | **partly fixed** (08886bb): the world goes to sessions from other machines at a burst of max(16, maxPlayers), then one a second. Open: Unity Transport has no return-routability proof | `handlers::tests::joins_have_a_burst_and_a_rate`, `game::tests::worlds_go_to_sessions_from_other_machines_at_a_bounded_rate` |
+| G7 | Name bans and the whitelist were dodged with a space, no-break space, ideographic space, U+3164, Braille blank; a relay player (127.0.0.1) is banned by name alone | Medium | fixed (2c1093b) | `access::tests::names_compare_by_unicode_case_folding_and_normalisation` |
+| G8 | `StartInterpolation`: any positive id and a speed of 0 never ends; 4,000 RPCs, 1,601 world objects | Medium | fixed (573d45a): scene ids, speed >= 1e-4, 1024 moves | `animals::interpolation::tests::a_client_cannot_start_moves_without_end` |
+| G9 | RPCs over a client's budget ran inside `tick` outside the panic guard: a latent handler panic would end the bank for everyone (none found in about 4,000 rounds of every RPC) | Medium (depth) | fixed (8b08232): the panic is caught per RPC, the client kicked | `handlers::tests::a_waiting_rpc_that_panics_kicks_its_client_and_not_the_world` |
+| G10 | The NetworkAnimator body was relayed undecoded up to 1 MiB; a player name cut mid-character put invalid UTF-8 in the list every client reads; `SetAndOpenWorldInstanceScene` took a scene name and recipe of any size and sent them whole to everybody at each open | Low | fixed (4ed4284, c2d9b5e, 2b5105e) | `game::tests::animator_server_rpcs_reach_the_other_clients_as_client_rpcs`, `players::tests::a_long_name_is_cut_between_characters_in_the_players_list`, `instances::tests::an_instance_opened_by_rpc_is_the_size_of_a_scenes` |
+| W1 | A snapshot directory that claims more entries than bytes asked `Vec::with_capacity` for 1.3 TB and the process aborted (a damaged kept snapshot or a hostile bank) | Low | fixed (b5795d0) | `handoff::tests::a_directory_that_claims_more_entries_than_bytes_is_an_error_not_an_abort` |
+| W2 | `write_atomic` took the mode from `metadata`, which follows a symlink, and the rename replaced the link: a local user's link to a 0644 file made the snapshot (Steam ids, names, chat) world-readable | Low | fixed (cf03c39) | `save::tests::a_link_in_the_way_does_not_lend_its_targets_mode` |
+| W3 | `pcds world import` and the kept copies in `backups/` were written 0644 (server-written saves are 0600) | Low | fixed (37ce635) | `cli::worlds::tests::import_converts_an_old_save_and_copies_a_current_one` |
+
+### Checked and found sound
+
+* **`net.http`** (`plugins/net.rs`): the allow-list matches scheme, host and port after a strict parse
+  (userinfo, `\`, `#`, percent escapes, a trailing dot, uppercase, IDN and punycode, decimal, octal
+  and hex IP literals, `127.1`, port tricks and the zone of an IPv6 literal are refused); a wildcard
+  covers names below it and never a public suffix; every redirect (relative, scheme-relative, other
+  port or scheme) is checked again and `Authorization` and `Cookie` do not cross origins; the
+  addresses connected to are those checked (a name with one bad address among its answers is refused
+  whole, and the connector looks again); every IPv4 and IPv6 range of the task's list (mapped, 6to4,
+  NAT64, link-local, ULA, `::`, 0/8, 100.64/10, 192.0.0/24, multicast, broadcast) is classified;
+  `Host`, `Content-Length` and the like are the host's; CRLF cannot enter through `${config.KEY}` (the
+  URL and the header values are checked after the substitution, and a value cannot be in the host);
+  one wall clock covers DNS to the last byte; the answer is read one byte past its limit; TLS is
+  rustls with the Mozilla roots and cannot be turned off; `proxy(None)`: no proxy variable is read
+  for a plugin; the log has `METHOD scheme://host:port` and no path, query, header or body.
+* **Plugin sandbox**: one memory (4 MiB by default, 64 at most), one table of 10,000, one instance,
+  no WASI; every pointer is checked against the module's memory (a range outside it traps); the
+  state blob is checked before it is allocated; fuel stops loops; recursion ends in a trap; actions
+  are 16 a call and 200 a second; `rules.write` reaches seven sections and never `chat`, `backup` or
+  `access`; a veto is for the plugin that holds `rpc.veto` and an RPC its manifest names; the
+  digest is computed from the bytes the module is compiled from (no gap between scan and load); the
+  entry and folder names cannot leave the plugin's folder (`..`, a leading `/` and empty parts are
+  refused); `pcds plugin install` copies a manifest, an entry and a signature, never a tree.
+* **Signing**: Ed25519 over `pcds-plugin-v1:` and the digest of manifest, zero byte and entry (a
+  manifest cannot hold a zero byte: pinned); the signature file is checked against the files as they
+  are at every load and reload; a signature that does not hold is judged as no signature; revoked
+  keys do not trust; an unreadable `trusted-keys.json` trusts no key; nothing outside the manifest and
+  the entry is ever loaded as code or rules.
+* **Scoped tokens and the admin API**: 192 bits from `SystemRandom`, only the sha256 stored (0600),
+  compared in constant time, revoked at the next request, rate limited; the scope check and the
+  routes read the same (method, path), and a matrix of every route, method and spelling of its path
+  with a token of each scope (1,374 requests live against a scratch server, and a unit test) lets
+  through exactly the five requests the scopes name; no CORS header is sent and every state-changing
+  route needs the Bearer header, so a web page cannot make a request; a DNS-rebinding page gets
+  the page's HTML and nothing else (no secret is in it, the token is in the browser's storage of
+  another origin); the long polls are 8 and 25 s; a request is read in 3 s (head) and 10 s (all), 64
+  connections, one request each; no secret is in `/api/status`, `/api/update`, `/api/config` ("(set)")
+  or the logs; the page builds all of its DOM with text (0 `innerHTML`-class sinks).
+* **Updater and install**: GNU tar 1.35 refuses a member that writes through a symlink, absolute and
+  `..` names (tried with a hostile archive); only plain files and folders are kept (now also single
+  names); the tag is `v?[0-9A-Za-z._-]+`; https only (plain http for `http://127.0.0.1` alone); the
+  downloaded program runs with `PATH`, `HOME` and `LANG` only; the bank swap is under a lock and
+  flushed; `server.env` and `tokens.json` are 0600; the unit holds no secret (an `EnvironmentFile`);
+  the container's entrypoint drops to `PUID:PGID` with `setpriv`, `chown -h`; compose publishes the
+  admin port on 127.0.0.1, the Kubernetes example runs non-root with no capability and a read-only
+  root, and its admin Service is a ClusterIP.
+* **Worlds, saves, S3** (reviewed by a second reader): world names are `[A-Za-z0-9._-]`; temp files
+  are `create_new`; hostile saves (NaN, infinity, 2^31 and 2^63 boundaries, huge exponents) loaded
+  and re-saved without a panic; the old-format import is linear and its output is parsed again; the
+  bank link is an inherited socket pair, the memfd is sealed and checked before `mmap`; the S3
+  canonical request is the sent path, the `Host` header is signed as sent, no redirect is followed,
+  and the keys never reach a log; tessera has one solver thread, a queue of 32 and 1000 seeds a wreck.
+* **Game protocol**: UTP handshake and token binding to the address, per-address and handshake-rate
+  limits, fragment, batch and queue caps, the Steam gate, the pre-ready RPC list, owner-only RPCs and
+  the whitelist of variables an owner may write, finite floats, chat limits, the chat hook's payload
+  (JSON, an HMAC over the body, an exec program without a shell and with a minimal environment).
+* **Supply chain**: see the verdict below.
+
+### Supply chain
+
+`cargo audit` (advisory database of 20 October 2026, 93 crates): no vulnerability; one warning,
+`paste` 1.0.15 unmaintained (RUSTSEC-2024-0436, a compile-time macro under `steamworks`, as S21).
+New runtime crates since v0.6.2: `wasmi` 2.0 with `wasmi_core`, `wasmi_ir`, `wasmi_collections` and
+`wasmparser` 0.228 (MIT/Apache-2.0, Apache-2.0 WITH LLVM-exception), `string-interner`, `hashbrown`,
+`foldhash` (Zlib), `spin`, `libm` (MIT), `toml` 1.1 with `toml_parser`, `toml_datetime`,
+`serde_spanned`, `winnow` (MIT), `unicode-normalization` with `tinyvec` ((MIT OR Apache-2.0) AND
+Unicode-3.0, Zlib OR Apache-2.0 OR MIT); dev only: `wat`, `wast`, `wasm-encoder`, `bumpalo`. All are
+compatible with GPL-3.0-or-later. Build scripts: `wasmi`, `wasmi_ir`, `wasmparser` 0.228 and `libm`
+(read: code generation and compiler feature probes; no network, no process but `rustc --version`).
+`cargo deny` is not installed; the licences were read from `cargo metadata`. Actions are now pinned
+by commit (H4). The Docker bases (`rust:1-trixie`, `debian:trixie-slim`) are tags, not digests:
+open (I1). Both the updater and S3 take the operator's `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`
+(ureq's default: a corporate proxy is a use of the feature; TLS is end to end); the plugins and
+the chat webhooks set `proxy(None)` and never do.
+
+### Open
+
+* **I1** Docker base images are pinned by tag only. Next: pin by digest in the Dockerfile and let
+  dependabot (`package-ecosystem: docker`) propose updates.
+* **I2** The systemd user unit has no sandboxing options (`NoNewPrivileges`, `RestrictSUIDSGID`,
+  `PrivateTmp`); `setpriv` in the entrypoint has no `--no-new-privs`. Next: add them and run
+  `docker/test.sh` and a unit start on a test machine (steamcmd's 32-bit program and `chat.exec`
+  programs are the risk of breaking).
+* **I3** The trust root of an update is the release feed (S22): the sha256 comes from the same place
+  as the tarball, and `pcds` of the new bank is run (`bank-info`) before it is installed. A feed that
+  is compromised runs code as the server's user. Next: sign releases (the plugin keys' Ed25519 would
+  do) and check the signature before `ask`.
+* **I4** (G6) A UDP source address can be forged: sessions cannot be proven return-routable inside
+  Unity Transport. The reflection is bounded to about one world a second per server; a spoofer can
+  also fill the 128 half-open slots for 10 s at a time. Next: a cookie in the handshake would need a
+  client that speaks it, so none here.
+* **I5** A ready player can create records without a quota (`CreateAndInstantiate`,
+  `CreateAndDropOnFloor`, `AddWorldObjectToInventory`, inventory contents: up to about 6,400 RPCs a
+  second). Next: a rule `limits.maxWorldObjects`.
+* **I6** The game's host-trust RPCs are open to any ready player, as in the original game:
+  `GainTokens`, `UnlockGroupGlobally`, `SwitchToPlanet`, `LaunchSpecificMeteoEvent`,
+  `Deconstruct` of anyone's building, `ResetOwnership`. The name ban and the whitelist are the gates;
+  a name-only whitelist on direct IP does not authenticate (README).
+* **I7** A tessera solve that fails (1000 seeds) leaves its wreck ungenerated and a client can ask
+  again; no seed that fails is known. Next: a persisted `failed` flag (the snapshot format changes).
+* **I8** A plugin with `rules.write` can set `limits.bankWatchdogSeconds` (an operational setting,
+  not gameplay) and `limits.maxPlayers`. Next: take the watchdog out of `PLUGIN_RULES` by key.
+* **I9** The admin port, when it is exposed past loopback, can be held by 64 slow connections (the
+  head limit is 3 s); it is plain HTTP and says so in the log. By design: bind loopback, use an
+  SSH tunnel or an HTTPS proxy. A Host-header check was not added: a DNS-rebinding page reads only
+  the HTML.
+* **I10** Unchanged from the audits: S11 (the memfd seal result of the front's own bank), U10.
+
 ## Open
 
 Everything below is still open at 0.7.0. Each line gives the reason and the smallest next step.
@@ -242,8 +395,6 @@ Static:
   and fail the frame.
 * **S21** `paste` is unmaintained (build time, via `steamworks`). Next: rerun `cargo audit` and
   `cargo deny` for the crates added since 0.6.1.
-* **S23** A hard link in a release tarball passes the file check. Next: refuse entries with a link
-  count above one, or refuse hard links in the tar listing.
 
 Dynamic:
 

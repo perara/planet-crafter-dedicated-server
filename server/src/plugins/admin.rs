@@ -197,7 +197,7 @@ pub fn request(game: &mut Game, method: &str, path: &str, body: &Value) -> (u16,
             });
             match result {
                 Ok(key) => match super::reload(game) {
-                    Ok(_) => (200, json!({"ok": true, "key": key}).to_string()),
+                    Ok(_) => (200, json!({"ok": true, "key": key, "warning": super::sign::published(&key.id).then_some(super::sign::PUBLISHED_WARNING)}).to_string()),
                     Err(e) => error(500, e),
                 },
                 Err(e) => error(400, e),

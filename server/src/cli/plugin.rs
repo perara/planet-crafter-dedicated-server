@@ -281,6 +281,9 @@ impl Ctx {
         let mut keys = sign::Keys::load(&dir)?;
         let trusted = keys.trust(&public, &name, grant, force)?;
         keys.save(&dir)?;
+        if sign::published(&trusted.id) {
+            println!("pcds: WARNING: {}", sign::PUBLISHED_WARNING);
+        }
         println!("pcds: trusting {} ({}); it vouches for: {}", trusted.name, trusted.id, if trusted.grant.is_empty() { "no capability (its plugins still wait for you to approve what they ask for, and then follow its updates)".to_string() } else { trusted.grant.join(", ") });
         self.plugin_reload_running();
         Ok(())
