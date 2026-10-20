@@ -233,7 +233,14 @@ fn a_restart_clears_the_units_start_count_first() {
     std::fs::write(dir.join("run/worlds/world.json"), "{\"saveDisplayName\":\"w\"}").unwrap();
     std::fs::create_dir_all(dir.join("home/.config/systemd/user")).unwrap();
     std::fs::write(dir.join("home/.config/systemd/user/pcds-cli-itest.service"), "").unwrap();
-    let out = pcds(&dir, &fake, &["restart"]);
+    // restart puts this release into the banks first, and for that the program has its library and
+    // page beside it (a test binary has not: a copy that has).
+    let prog = dir.join("prog");
+    std::fs::create_dir_all(prog.join("web")).unwrap();
+    std::fs::copy(PCDS, prog.join("pcds")).unwrap();
+    std::fs::write(prog.join("libsteam_api.so"), "x").unwrap();
+    std::fs::write(prog.join("web/index.html"), "<html></html>").unwrap();
+    let out = pcds_at(&prog.join("pcds"), &dir, &fake, &["restart"]);
     let calls = std::fs::read_to_string(&log).unwrap();
     let (reset, restart) = (calls.find("reset-failed pcds-cli-itest.service"), calls.find("restart pcds-cli-itest.service"));
     assert!(reset.is_some() && restart.is_some() && reset < restart, "{calls}\n{}", text(&out));
