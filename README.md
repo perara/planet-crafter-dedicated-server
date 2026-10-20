@@ -656,6 +656,11 @@ make test       # also: make lint, make plugin-bench, make gate, make docker, ma
 Before tagging a release: the release checklist in [docs/hot-update.md](docs/hot-update.md) ("Release checklist")
 (`make test`, `make docker-test` and `make gate` need the game tables, so CI does not run them).
 
+[docs/testing.md](docs/testing.md) describes every kind of test and check (unit and end-to-end tests,
+fuzzing, the parity sweep, the benchmarks and their fingerprints, the load and chaos tools, Docker, the flip
+gate) and how to run each; [tools/README.md](tools/README.md) indexes the scripts, and
+[docs/audits.md](docs/audits.md) holds the findings of the v0.6.1 audits.
+
 Tests that need game tables use `run/data/2.103` (or `PCDS_TEST_DATA`) and fail without
 them; `PCDS_TEST_DATA=none` skips them, as CI does (the tables are not in the repository).
 `src/coverage.txt` names the tests of every server RPC and every module; a test fails when an

@@ -145,7 +145,7 @@ Tools were run on the whole source; each real hit was fixed with a test. The rel
 | S19 | `SaveFile::from_text` dropped any entry it could not parse and read a missing section as empty, so a damaged save loaded as a smaller world | fixed in 0.7.0 for damaged entries and unreadable saves, which are refused. A missing section reading as empty was not rechecked | `a_save_with_a_damaged_entry_is_refused`, `truncated_and_garbage_files_are_refused` |
 | S20 | A new bank was renamed into place without flushing its files, so a power cut could leave empty files | fixed in 0.7.0 | `updater::tests::a_bank_is_flushed_to_disk_before_it_is_moved_into_place` |
 | S21 | `cargo audit`: one warning, `paste` 1.0.15 unmaintained (a compile-time macro pulled by `steamworks`); no vulnerability; licences all compatible | open: nothing to do here until `steamworks` moves. Not rerun for the crates added since (the plugin host, `toml`, `unicode-normalization`) | `server/Cargo.lock` |
-| S22 | The updater's checksum comes from the same server as the tarball, so it guards against damage, not a compromised release or mirror | open: this is a limit of the design (the unpacked program runs as the server user), but it is written down nowhere | `updater.rs` (`unpack`) |
+| S22 | The updater's checksum comes from the same server as the tarball, so it guards against damage, not a compromised release or mirror | by design: a limit of the design (the unpacked program runs as the server user), written down in docs/hot-update.md ("the sha256 guards against a damaged download, not a forged release: releases are not signed") | `updater.rs` (`unpack`) |
 | S23 | A hard link inside a release tarball passes `plain_files` (it looks like a file) | open | `updater.rs` (`plain_files`) |
 | S24 | `world::hex` slices a string by bytes and panics on non-ASCII input (offline probe and load tools only) | fixed (consolidation after 0.7.0: no panic; bad hex still reads as 0, as the tools expect) | `world::tests::hex_reads_pairs_and_does_not_panic_on_text_that_is_not_ascii` |
 | S25 | Small suspects never reproduced: `serde_json` float parsing may move a huge value by one bit per save, `set_var` in a chat-hook test races other tests, `request.accept()` results ignored in the front | unverified | none |
@@ -242,8 +242,6 @@ Static:
   and fail the frame.
 * **S21** `paste` is unmaintained (build time, via `steamworks`). Next: rerun `cargo audit` and
   `cargo deny` for the crates added since 0.6.1.
-* **S22** The updater's checksum guards against damage, not against a compromised release or
-  mirror. Next: write that limit into docs/hot-update.md.
 * **S23** A hard link in a release tarball passes the file check. Next: refuse entries with a link
   count above one, or refuse hard links in the tar listing.
 
@@ -255,6 +253,11 @@ Dynamic:
 * **D9** Saved players are never pruned. Next: owner decides a retention rule.
 * **D15** Backups stamped in the future block new ones after a clock step back. Next: write a test
   with a clock that steps back.
+
+Lead from the tools' smoke runs, not a finding: in two of three disk-full runs against 0.6.2,
+`GET /api/status` was refused for 8 s after a `kill -9` of the bank on a full disk although the
+front's log showed the bank restarting. Not reproduced on 0.7.0; run `tools/chaos/diskfull.sh` on a
+0.7.0 build to see.
 
 Unverified (could not be checked, listed so they are not lost): **S14** (chat hooks stay off after a
 delivery panic), **S15** (two sets growing per hostile connection id), **S25** (small suspects), and

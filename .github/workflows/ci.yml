@@ -51,3 +51,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: shellcheck -S error install.sh docker/entrypoint.sh docker/test.sh tools/flip-gate.sh
+      # The scripts in tools/ are run by hand, never here; they only have to parse.
+      - run: for f in tools/*/*.sh; do bash -n "$f"; done
+      - run: python3 -m compileall -q tools && find tools -name __pycache__ -prune -exec rm -rf {} +
