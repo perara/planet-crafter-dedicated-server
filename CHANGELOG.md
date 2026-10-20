@@ -19,6 +19,77 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+Plugins grew up by being used. Fourteen example plugins were written and tested against the real game, and what
+hurt while writing them is fixed: plugin ABI 1.3 (a stable player id, the wall clock, who built or destroyed
+something, timers, a backpack and nearby-objects query, giving items and Terra tokens, typed settings, operator
+commands), a runner that tests a plugin in the real host without a game, a log and a cost table for each plugin, a way
+to share a plugin as one file, and a dashboard page that shows what a plugin did and what a new version asks for.
+
+### Breaking changes
+
+* **Plugin ABI 1.3, crate `pcds-plugin-api` 0.2.0.** A module built for 1.0, 1.1 or 1.2 runs unchanged. Rust source that
+  names every field of `Event::Tick`, `PlayerJoin`, `PlayerLeave`, `Chat`, `Command`, `ObjectPlaced`, `ObjectDestroyed`
+  or builds a `WorldInfo`/`PlayerInfo` must add the new fields (or use `..`); the bytes an old module receives are
+  unchanged apart from fields at the end that it ignores.
+* **`Event::Command::command` is lower case**, whatever the player typed.
+* **A string setting in `[[config]]` is a secret unless it says `secret = false`** (it was always the default); a number or a
+  yes/no is never a secret. A setting of type `int`, `float`, `bool` or with `choices` is checked when it is set, and a stored value that
+  no longer fits makes the plugin `invalid` instead of running with a value nobody meant.
+* **`[[every]]` in a rules file** takes a text or a list; **`[[when_players]]`** has `at_most`. Files that worked still work.
+
+### Added
+
+* **Plugins can** (ABI 1.3): read the world in `load`; know a player by a stable `player_id`; read the wall clock (`unix_ms`);
+  see who built or took apart an object (`client` on `object_placed` and `object_destroyed`); look up one player, a
+  player's backpack, the objects near a point, one object (a network object id from an RPC resolves to its position),
+  and their own settings; give items (`player.give`) and Terra tokens (`world.tokens`); set timers (`event.timer`);
+  hear that the world was handed over by a hot update (`flip`); declare commands with a usage line, an argument count and
+  a permission (`permission = "operator"`, the players in the new rule `access.operators`).
+* **`pcds plugin test`**: a scenario file (TOML) drives a plugin in the real host against a made-up world, with no game tables;
+  exit code 1 when an expectation fails. `scenario.rs` describes the format.
+* **`pcds plugin check`** shows the fuel of each event as a share of the budget, in a world of 16 players, and warns about a
+  secret setting the plugin cannot read.
+* **`pcds plugin watch`** (install each new build, approve it again if it asks for nothing new, state kept), **`logs`**, **`stats`**,
+  **`pack`**, **`search`**, **`install`** from a `.pcdsplugin` file, an https address (with `--sha256`) or an index entry; `plugin new`
+  has a C template, a Makefile and a justfile, and a scenario.
+* **`pcds-plugin-api`**: a `testing` feature (`MockHost`, `Harness`: ordinary `cargo test` for a plugin), a small `json` module, docs for every
+  item, package metadata and a README. It is not published.
+* **The dashboard's Plugins page** shows each plugin's log, faults, cost by event and settings (typed controls), a per-row
+  reload, and what a new version asks for beyond what you approved.
+* **`POST /api/plugins/logs`**; `GET /api/plugins` has `byEvent`, `faultLog`, `deniedCapabilities`, `changes`, typed settings and
+  `commandPrefix`; the event stream's chat and player events have `playerId`.
+* **Examples** (`examples/plugins/`): `afk-guard`, `playtime-board`, `quest-rewards`, `claims`, `restart-notice`, `chat-bridge`,
+  `prometheus-exporter`, `hello-c`, `server-motd`, `scaling-rules`, each with a README, scenarios and a test in the real game
+  (`server/src/plugins/cookbook_tests.rs`).
+* **Documentation**: docs/plugins-guide.md is a tutorial and a cookbook; docs/plugins-api.md has the host functions with their costs and
+  the delivery and ordering rules; docs/plugins.md has sharing, the licence, the versions, the measurements.
+
+### Changed
+
+* **A module is translated when it is read**, not when each function is first called. Translation was charged to the call as fuel,
+  so the first call of an instance cost up to ten times the next ones and a budget that held the steady state could fault it, again and
+  again after each restart. Now the first call costs what the others do, and a reload does its translation before it starts the plugin.
+* **A fault says what happened and what to do**: the event, the budget used and the knob that raises it (`chat: out of fuel: the call used all
+  500000 fuel...`), a Rust panic is named as such, a capability a plugin used without having it is named once in its log, and a manifest key,
+  capability or event that is misspelled names the one meant.
+* The first `tick` of an instance says `since_ms` 0 (it was the whole game time).
+
+### Fixed
+
+* `world.tokens` accepted an amount of `i32::MIN`: `abs()` wraps in a release build, so the bound let it through. It is checked with `unsigned_abs`.
+* `pcds plugin check` no longer reports an error for a plugin that reads its settings without `world.read`.
+* A panic in the server's own code inside a plugin host function would have ended the whole process (the interpreter's frame cannot unwind).
+  Every host function now runs under `catch_unwind` and a panic is that plugin's fault: counted, the plugin restarted, the game goes on. No such
+  panic is known; 300 generated hostile modules in the tests found none.
+* A rules file's command with `cooldown_seconds` silently had no cooldown without `world.read` (the clock is the world's); the check now says the
+  rules need `world.read`, and a command without a cooldown no longer asks the world for the time.
+
+### Upgrade
+
+Nothing to do for a server that runs no plugin, or plugins built for ABI 1.0 to 1.2: they load as they were. `POST /api/plugins/logs` is
+a route of the front (which a hot update does not replace): `pcds plugin logs` and the dashboard's log work after `pcds upgrade --restart`. Rebuild a Rust plugin that
+matches on `Event` fields by name. The snapshot format is unchanged (still 7), so this release hot-updates from 0.8.0.
+
 ## [0.8.0] - 2026-10-20
 
 The DLC planets (Humble, Toxicity) run on their own ground, and you say which of them you own; the

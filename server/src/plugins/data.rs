@@ -254,7 +254,9 @@ impl Rules {
             c.insert(caps::RULES_WRITE);
         }
         let world = self.texts().iter().any(|(_, t)| placeholders(t).unwrap_or_default().iter().any(|v| WORLD_VARS.contains(&v.as_str())));
-        if world {
+        // A cooldown is counted in the world's time.
+        let cooldown = self.commands.iter().any(|c| c.cooldown_seconds.is_some_and(|s| s > 0.0));
+        if world || cooldown {
             c.insert(caps::WORLD_READ);
         }
         c
@@ -376,13 +378,14 @@ impl Runtime for Data {
             Event::Command { client, name, command, args, .. } => {
                 let Some(i) = self.rules.commands.iter().position(|c| c.name.eq_ignore_ascii_case(command)) else { return Ok(done) };
                 let c = self.rules.commands[i].clone();
-                let now = self.ctx.info().map(|w| w.game_ms).unwrap_or(0);
-                if let Some(wait) = c.cooldown_seconds.filter(|s| *s > 0.0)
-                    && self.last.get(&(i, *client)).is_some_and(|t| (now - t) as f64 / 1000.0 < wait)
-                {
-                    return Ok(done);
+                // A cooldown reads the clock of the world (world.read); a command without one does not touch it.
+                if let Some(wait) = c.cooldown_seconds.filter(|s| *s > 0.0) {
+                    let now = self.ctx.info().map(|w| w.game_ms).unwrap_or(0);
+                    if self.last.get(&(i, *client)).is_some_and(|t| (now - t) as f64 / 1000.0 < wait) {
+                        return Ok(done);
+                    }
+                    self.last.insert((i, *client), now);
                 }
-                self.last.insert((i, *client), now);
                 let texts: Vec<&str> = c.reply.iter().chain(&c.say).map(String::as_str).collect();
                 let vars = self.vars(&texts, *client, name, args);
                 if let Some(t) = &c.reply {

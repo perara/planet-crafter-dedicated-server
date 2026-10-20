@@ -125,6 +125,11 @@ fn asked_name(args: &[&str]) -> String {
     args.iter().take(8).map(|a| cut(a, NAME_CHARS * 2)).collect::<Vec<_>>().join(" ").split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The chat command prefix of this server (the world says; `!` if it does not).
+fn prefix(host: &dyn Host) -> String {
+    host.world().map(|w| w.command_prefix).ok().filter(|p| !p.is_empty()).unwrap_or_else(|| "!".to_string())
+}
+
 fn dist_sq(a: [f32; 3], b: [f32; 3]) -> f32 {
     let (x, y, z) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
     x * x + y * y + z * z
@@ -173,9 +178,11 @@ impl<'a> Finder<'a> {
 
 impl Plugin for Guard {
     fn load(host: &dyn Host, state: Option<State<'_>>) -> Self {
-        // The world cannot be read inside `load` (only settings can): the clocks start at 0, and
-        // the first tick, or the first destroy that needs them, sets them.
         let mut me = Guard { settings: Settings::read(host), ..Guard::default() };
+        if let Ok(w) = host.world() {
+            me.now_ms = w.game_ms;
+            me.unix_ms = w.unix_ms;
+        }
         let Some(state) = state else { return me };
         match state.version {
             1 => me.strikes = read_strikes(state.bytes),
@@ -196,7 +203,7 @@ impl Plugin for Guard {
             }
             Event::PlayerLeave { player_id, .. } => self.forget_session(*player_id),
             Event::ObjectDestroyed { client, .. } => self.on_destroyed(host, *client),
-            Event::Command { client, command, args, .. } => match command.to_ascii_lowercase().as_str() {
+            Event::Command { client, command, args, .. } => match *command {
                 "guard" => self.cmd_guard(host, *client),
                 "pardon" => self.cmd_pardon(host, *client, args),
                 _ => {}
@@ -297,16 +304,10 @@ impl Guard {
         if client == 0 {
             return;
         }
-        let Ok(players) = host.players() else { return };
-        let Some(p) = players.iter().find(|p| p.client == client) else { return };
+        // One player is one cheap query; all of them are asked for only when there is a strike to tell.
+        let Ok(p) = host.player(client) else { return };
         if p.operator {
             return;
-        }
-        if self.unix_ms == 0
-            && let Ok(w) = host.world()
-        {
-            self.now_ms = w.game_ms;
-            self.unix_ms = w.unix_ms;
         }
         let (limit, window) = (self.settings.destroy_limit as usize, self.settings.window_ms);
         let now = self.now_ms;
@@ -336,7 +337,7 @@ impl Guard {
         let seconds = window / 1000;
         let what = if self.settings.kick_on_grief { "kicked" } else { "warned" };
         let line = format!("Guard: {} destroyed {count} objects in {seconds} s (strike {strikes}). Action: {what}.", cut(&p.name, NAME_CHARS));
-        for op in players.iter().filter(|o| o.operator) {
+        for op in host.players().unwrap_or_default().iter().filter(|o| o.operator) {
             let _ = host.tell(op.client, &line);
         }
         if self.settings.kick_on_grief {
@@ -403,7 +404,7 @@ impl Guard {
     fn cmd_pardon(&mut self, host: &dyn Host, client: u64, args: &[&str]) {
         let wanted = asked_name(args);
         if wanted.is_empty() {
-            let _ = host.tell(client, "Use: !pardon <player name>");
+            let _ = host.tell(client, &format!("Use: {}pardon <player name>", prefix(host)));
             return;
         }
         // Players online (their name now) first, then players with strikes (the name they had).
@@ -450,10 +451,9 @@ mod tests {
         t.join(OP, "Root");
         t.join(ANN, "Ann");
         t.join(BO, "Bo");
-        // join() adds players at the origin and not operator: make client 1 an operator.
-        let mut root = t.mock().players().unwrap().into_iter().find(|p| p.client == OP).unwrap();
-        root.operator = true;
-        t.mock().add_player(root);
+        t.mock().set_operator(OP, true);
+        t.declare_command("guard", 0, 0, true);
+        t.declare_command("pardon", 1, u32::MAX, true);
         t
     }
 
@@ -462,9 +462,7 @@ mod tests {
     }
 
     fn move_to(t: &Harness<Guard>, client: u64, position: [f32; 3]) {
-        let mut p = t.mock().players().unwrap().into_iter().find(|p| p.client == client).unwrap();
-        p.position = position;
-        t.mock().add_player(p);
+        t.mock().set_position(client, position);
     }
 
     fn told_to(t: &Harness<Guard>, client: u64) -> Vec<String> {
@@ -608,16 +606,34 @@ mod tests {
     }
 
     #[test]
-    fn destroys_right_after_a_start_ask_the_world_for_the_clock() {
-        // `load` cannot read the world on the real host, so the clocks are 0 until a tick or a destroy needs them.
+    fn load_reads_the_clocks_from_the_world_so_a_strike_right_after_a_start_is_dated() {
         let mut t = room(mock());
         t.reload();
-        assert_eq!(t.plugin().unix_ms, 0);
+        assert!(t.plugin().unix_ms > 0);
         for id in 0..4 {
             t.destroy(id, BO);
         }
         assert_eq!(t.plugin().strikes.len(), 1);
         assert!(t.plugin().strikes[0].last_unix_ms > 0);
+    }
+
+    #[test]
+    fn the_host_checks_who_may_use_the_commands_and_the_prefix_comes_from_the_world() {
+        let mut t = room(mock());
+        t.command(ANN, "guard", &[]);
+        t.command(ANN, "PARDON", &["Bo"]);
+        assert_eq!(told_to(&t, ANN), ["!guard is for the server's operators.", "!pardon is for the server's operators."]);
+        t.clear();
+        t.mock().set_world(|w| w.command_prefix = "?".into());
+        t.command(OP, "guard", &["extra"]);
+        assert_eq!(told_to(&t, OP), ["Use: ?guard"]);
+        // The plugin's own usage text (a host that did not check the count) uses the world's prefix.
+        t.clear();
+        let mut plain = Harness::<Guard>::start(mock());
+        plain.mock().set_world(|w| w.command_prefix = "?".into());
+        plain.join(OP, "Root");
+        plain.command(OP, "pardon", &[]);
+        assert_eq!(told_to(&plain, OP), ["Use: ?pardon <player name>"]);
     }
 
     #[test]
@@ -718,10 +734,6 @@ mod tests {
             t.advance_ms(5000);
             let kicked = t.mock().kicked();
             assert!(kicked.len() - seen <= 16, "one call queues at most 16 actions");
-            // The server removes a kicked player; the mock does not.
-            kicked[seen..].iter().for_each(|k| {
-                t.leave(k.0);
-            });
             seen = kicked.len();
         }
         assert_eq!(seen, 30, "all 30 are gone in the end, over more than one tick");

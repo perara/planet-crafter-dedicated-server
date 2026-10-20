@@ -13,7 +13,7 @@ abi = 1
 capabilities = ["event.chat", "event.rpc", "rpc.veto", "world.read", "chat.say"]
 
 [budget]
-fuel_per_event = 300000
+fuel_per_event = 200000
 fuel_per_save = 10000000
 
 [events]

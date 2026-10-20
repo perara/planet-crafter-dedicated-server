@@ -84,6 +84,11 @@ fn ahead(a: &Row, b: &Row) -> bool {
     a.seconds > b.seconds || (a.seconds == b.seconds && a.id < b.id)
 }
 
+/// The chat command prefix of this server (the world says; `!` if it does not).
+fn prefix(host: &dyn Host) -> String {
+    host.world().map(|w| w.command_prefix).ok().filter(|p| !p.is_empty()).unwrap_or_else(|| "!".to_string())
+}
+
 fn board_size(host: &dyn Host) -> usize {
     host.config("board_size").and_then(|v| v.trim().parse::<usize>().ok()).map_or(DEFAULT_BOARD, |n| n.clamp(10, MAX_BOARD))
 }
@@ -136,8 +141,10 @@ impl<'a> Finder<'a> {
 
 impl Plugin for Board {
     fn load(host: &dyn Host, state: Option<State<'_>>) -> Self {
-        // The world cannot be read inside `load` (only settings can): the clock is 0 until the first tick.
         let mut me = Board { board_size: board_size(host), ..Board::default() };
+        if let Ok(w) = host.world() {
+            me.unix_ms = w.unix_ms;
+        }
         let Some(state) = state else { return me };
         match state.version {
             1 => me.players = read_v1(state.bytes),
@@ -161,7 +168,7 @@ impl Plugin for Board {
                     self.players[i].last_seen_ms = now;
                 }
             }
-            Event::Command { client, command, args, player_id, .. } => match command.to_ascii_lowercase().as_str() {
+            Event::Command { client, command, args, player_id, .. } => match *command {
                 "top" => self.cmd_top(host, *client, args),
                 "playtime" => self.cmd_playtime(host, *client, *player_id, args),
                 _ => {}
@@ -275,7 +282,7 @@ impl Board {
             Some(a) => match a.parse::<usize>() {
                 Ok(n) => n.clamp(1, TOP_MAX),
                 Err(_) => {
-                    let _ = host.tell(client, "Use: !top [number from 1 to 10]");
+                    let _ = host.tell(client, &format!("Use: {}top [number from 1 to 10]", prefix(host)));
                     return;
                 }
             },
@@ -311,10 +318,6 @@ impl Board {
             return;
         }
         let wanted = asked_name(args);
-        // The clock of the last tick is 0 before the first one: ask the world.
-        if self.unix_ms == 0 {
-            self.unix_ms = host.world().map_or(0, |w| w.unix_ms);
-        }
         // Players online now (they may not be on the board for another tick), then the board.
         let online = host.players().unwrap_or_default();
         let mut finder = Finder::new(&wanted);
@@ -434,12 +437,24 @@ mod tests {
     }
 
     #[test]
-    fn a_paused_world_counts_nothing() {
-        let still = WorldInfo { standing_still: true, ..WorldInfo::default() };
-        let mut t = Harness::<Board>::start(MockHost::new().with_world(still)).tick_every_ms(5000).tick_step_ms(1000);
+    fn a_paused_world_counts_nothing_until_it_runs_again() {
+        let mut t = start();
         t.join(1, "Ann");
+        t.mock().set_world(|w| w.standing_still = true);
         minutes(&mut t, 10);
         assert!(t.plugin().players.is_empty());
+        t.mock().set_world(|w| w.standing_still = false);
+        minutes(&mut t, 2);
+        assert_eq!(row(&t, 1001).seconds, 120);
+    }
+
+    #[test]
+    fn the_usage_text_uses_the_prefix_the_world_has() {
+        let mut t = start();
+        t.join(1, "Ann");
+        t.mock().set_world(|w| w.command_prefix = "?".into());
+        t.command(1, "top", &["many"]);
+        assert_eq!(told(&t), ["Use: ?top [number from 1 to 10]"]);
     }
 
     #[test]

@@ -7,19 +7,28 @@
 //! rounds, to leave out what a busy machine adds.
 
 use std::hint::black_box;
-use std::time::Instant;
+
 
 use pcds_plugin_api::Event;
 
 use super::tests::{Mock, boot, fresh_dir, install, module};
 use super::*;
 
+/// CPU time of this thread in nanoseconds: what the work cost, not how long a loaded machine took to get to
+/// it (the development host runs at a load of 90).
+fn cpu_ns() -> u64 {
+    let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: clock_gettime fills the struct it is given.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+    t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64
+}
+
 fn best(rounds: u32, n: u64, mut f: impl FnMut()) -> f64 {
     (0..rounds)
         .map(|_| {
-            let t = Instant::now();
+            let t = cpu_ns();
             f();
-            t.elapsed().as_nanos() as f64 / n as f64
+            (cpu_ns() - t) as f64 / n as f64
         })
         .fold(f64::MAX, f64::min)
 }
@@ -109,19 +118,19 @@ fn start_cost() {
     let engine = wasm::engine();
     for (label, path) in [("hello-stats (44 KB, Rust)", std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins/hello-stats/plugin.wasm"))] {
         let bytes = std::fs::read(&path).unwrap();
-        let t = Instant::now();
+        let t = cpu_ns();
         let mut module = None;
         for _ in 0..50 {
             module = Some(wasm::compile(&engine, &bytes).unwrap().0);
         }
-        let compile = t.elapsed() / 50;
+        let compile = std::time::Duration::from_nanos((cpu_ns() - t) / 50);
         let module = module.unwrap();
         let limits = limits::Limits::resolve(&Default::default(), &Default::default());
-        let t = Instant::now();
+        let t = cpu_ns();
         for _ in 0..200 {
             black_box(wasm::Wasm::new(&engine, &module, Ctx::new("t", Grant::default()), limits, Default::default()).unwrap());
         }
-        let instantiate = t.elapsed() / 200;
+        let instantiate = std::time::Duration::from_nanos((cpu_ns() - t) / 200);
         println!("\nplugin start: {label}: compile and validate {compile:?}, new instance {instantiate:?}");
     }
 }
@@ -158,11 +167,13 @@ fn zero_plugins_cost_nothing() {
 #[ignore]
 fn tick_cost_on_a_real_world() {
     let (Some(path), Some(dir_tables)) = (std::env::var("PCDS_BENCH_SAVE").ok(), crate::test_data()) else { return println!("PCDS_BENCH_SAVE or the game tables are missing: skipped") };
+    // The bench's own number of players (PCDS_BENCH_PLAYERS, default 4).
+    let players: u64 = std::env::var("PCDS_BENCH_PLAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
     let make = |plugins: &[(&str, String, &[&str])]| {
         let (net_data, data, spec) = crate::tables(dir_tables);
         let scenes = crate::scene_tables(dir_tables, &net_data, &data);
         let mut g = crate::game::Game::with_clock(net_data, data, spec, crate::save::SaveFile::load(&path).unwrap(), scenes, Some(0.0));
-        for c in 1..=4 {
+        for c in 1..=players {
             crate::game::tests::join(&mut g, c, &format!("P{c}"));
         }
         let dir = fresh_dir("cost-tick");
@@ -186,7 +197,7 @@ fn tick_cost_on_a_real_world() {
             }
         })
     };
-    println!("\ntick cost on {path} with 4 players; {ticks} ticks per round, best of 5 (a tick is 5 ms)");
+    println!("\ntick cost on the world of PCDS_BENCH_SAVE with {players} players; {ticks} ticks per round, best of 5 (a tick is 5 ms)");
     let tick_caps: &[&str] = &["event.tick"];
     let query_caps: &[&str] = &["event.tick", "world.read"];
     let cases: Vec<(&str, Vec<(&str, String, &[&str])>)> = vec![
@@ -195,6 +206,8 @@ fn tick_cost_on_a_real_world() {
         ("10 plugins that do nothing, called at every tick", (0..10).map(|_| ("a", noop(), tick_caps)).collect()),
         ("1 plugin that reads the world at every tick", vec![("a", queries(), query_caps)]),
         ("10 plugins that read the world at every tick", (0..10).map(|_| ("a", queries(), query_caps)).collect()),
+        ("50 plugins that do nothing, called at every tick", (0..50).map(|_| ("a", noop(), tick_caps)).collect()),
+        ("50 plugins that read the world at every tick", (0..50).map(|_| ("a", queries(), query_caps)).collect()),
     ];
     let mut base = None;
     for (label, plugins) in cases {
@@ -221,4 +234,69 @@ fn idle_scan_cost() {
         }
     });
     println!("\nidle scan of a folder with 10 plugins: {:.1} us (every {} s)", ns / 1000.0, POLL_EVERY.as_secs());
+}
+
+/// The real example plugins in a real world: the tick with all of them installed (what a busy server with
+/// the cookbook on would carry), and the cost of the commands and vetoes they answer.
+#[test]
+#[ignore]
+fn the_example_plugins_on_a_real_world() {
+    let (Some(path), Some(dir_tables)) = (std::env::var("PCDS_BENCH_SAVE").ok(), crate::test_data()) else { return println!("PCDS_BENCH_SAVE or the game tables are missing: skipped") };
+    let players: u64 = std::env::var("PCDS_BENCH_PLAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(16);
+    let wasm_examples = ["afk-guard", "chat-bridge", "claims", "hello-c", "hello-stats", "playtime-board", "quest-rewards", "restart-notice"];
+    let make = |names: &[&str]| {
+        let (net_data, data, spec) = crate::tables(dir_tables);
+        let scenes = crate::scene_tables(dir_tables, &net_data, &data);
+        let mut g = crate::game::Game::with_clock(net_data, data, spec, crate::save::SaveFile::load(&path).unwrap(), scenes, Some(0.0));
+        for c in 1..=players {
+            crate::game::tests::join(&mut g, c, &format!("P{c}"));
+        }
+        let dir = fresh_dir("cost-examples");
+        for n in names {
+            super::game_tests::install_example(&dir, n, None);
+        }
+        // A request is never sent from a benchmark.
+        let mut host = prepare(&dir, "world");
+        host.offline = Some(Vec::new());
+        attach(&mut g, host, false);
+        g
+    };
+    let ticks = 4_000u64;
+    // The game time of a tick is 5 ms; the plugins' own intervals (1 to 5 s) mean most ticks call none of them.
+    let run = |g: &mut crate::game::Game| {
+        let mut t = g.sim_time.unwrap_or(0.0);
+        best(3, ticks, || {
+            for _ in 0..ticks {
+                t += 0.005;
+                g.sim_time = Some(t);
+                g.tick();
+                g.net.out.clear();
+            }
+        })
+    };
+    println!("\nthe example plugins on {path} with {players} players (best of 3 rounds of {ticks} ticks)");
+    let mut base = None;
+    for (label, names) in [("no plugin", vec![]), ("afk-guard alone", vec!["afk-guard"]), ("quest-rewards alone", vec!["quest-rewards"]), ("playtime-board alone", vec!["playtime-board"]), ("all eight wasm examples", wasm_examples.to_vec())] {
+        let mut g = make(&names);
+        let ns = run(&mut g);
+        let base_ns = *base.get_or_insert(ns);
+        println!("  {label:<30} {:>9.1} us/tick  ({:+.2} us, {:.3}% of the 5 ms tick)", ns / 1000.0, (ns - base_ns) / 1000.0, (ns - base_ns) / 5e6 * 100.0);
+    }
+    // A command, a veto, a placement with all of them there.
+    let mut g = make(&wasm_examples);
+    let n = 2_000u64;
+    let chat = best(3, n, || {
+        for _ in 0..n {
+            g.sim_time = Some(g.sim_time.unwrap_or(0.0) + 0.3);
+            crate::events::chat(&mut g, 1, "!top");
+            g.net.out.clear();
+        }
+    });
+    println!("  a chat message with a command (!top) with all eight: {:.1} us", chat / 1000.0);
+    let rpc = best(3, n, || {
+        for _ in 0..n {
+            black_box(crate::events::rpc_before(&mut g, 1, 2, "GroupNetworkBase.DeconstructServerRpc", &[serde_json::json!(2.0)]));
+        }
+    });
+    println!("  a deconstruct request that claims looks at (no claims yet): {:.1} us", rpc / 1000.0);
 }

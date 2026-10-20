@@ -54,11 +54,17 @@ mod wasm;
 #[cfg(test)]
 mod abi13_tests;
 #[cfg(test)]
+mod cookbook_tests;
+#[cfg(test)]
 mod cost;
+#[cfg(test)]
+mod fuzz_tests;
 #[cfg(test)]
 mod game_tests;
 #[cfg(test)]
 mod net_tests;
+#[cfg(test)]
+mod production_tests;
 #[cfg(test)]
 mod sign_tests;
 #[cfg(test)]
@@ -251,6 +257,8 @@ pub struct Loaded {
     checkpoint: Option<Blob>,
     next_tick: i64,
     last_tick: i64,
+    /// Whether this instance has had a tick: its first one says no time has passed (`since_ms` 0), not the whole game time.
+    ticked: bool,
     faults: VecDeque<Instant>,
     last_slow_log: Option<Instant>,
     pub stats: Stats,
@@ -310,6 +318,7 @@ impl Loaded {
             checkpoint: None,
             next_tick: 0,
             last_tick: 0,
+            ticked: false,
             faults: VecDeque::new(),
             last_slow_log: None,
             stats: Stats::default(),
@@ -1075,7 +1084,7 @@ impl Host {
             // A tick comes with the game time since the plugin's last one.
             let owned;
             let event = if let Event::Tick { game_ms, tick, players, unix_ms, .. } = event {
-                owned = Event::Tick { game_ms: *game_ms, tick: *tick, players: *players, unix_ms: *unix_ms, since_ms: (*game_ms - p.last_tick).clamp(0, u32::MAX as i64) as u32 };
+                owned = Event::Tick { game_ms: *game_ms, tick: *tick, players: *players, unix_ms: *unix_ms, since_ms: if p.ticked { (*game_ms - p.last_tick).clamp(0, u32::MAX as i64) as u32 } else { 0 } };
                 if payload.is_some() {
                     let mut w = Writer::new();
                     owned.encode(&mut w);
@@ -1171,7 +1180,16 @@ impl Host {
         let Some(rt) = p.rt.as_mut() else { return verdict };
         rt.ctx().begin(&*sink, game_ms);
         let t = Instant::now();
-        let result = rt.event(event, bytes);
+        // A panic in the host's own code while it serves this plugin (a bug in a host function or in the world's view) is this plugin's
+        // fault, counted as one: the plugin is restarted, the game goes on. (The actions are applied below, outside this: a panic in the
+        // game's own code is the bank's to contain.)
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rt.event(event, bytes))) {
+            Ok(r) => r,
+            Err(p) => {
+                let what = p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+                Err(Fault::Trap(format!("the server panicked while it served this plugin ({}): the plugin is restarted", clean(&what))))
+            }
+        };
         let spent = t.elapsed();
         let (queued, denied, refused) = {
             let c = rt.ctx();
@@ -1194,6 +1212,7 @@ impl Host {
         }
         if is_tick {
             p.last_tick = game_ms;
+            p.ticked = true;
             p.next_tick = game_ms + p.limits.tick_every_ms as i64;
         }
         match result {

@@ -12,7 +12,7 @@ abi = 1
 capabilities = ["event.timer", "event.world", "event.chat", "world.read", "chat.say"]
 
 [budget]
-fuel_per_event = 200000
+fuel_per_event = 150000
 
 [events]
 subscribe = ["world_saved", "flip"]

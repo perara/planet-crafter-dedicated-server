@@ -38,7 +38,7 @@
 //! | `chat = { client, text }` | a chat message; one that begins with `!` and names the plugin's command is that command (the host checks the manifest's `permission`, `min_args`, `max_args` as the server does) |
 //! | `advance = "10m"` | game time passes: ticks (every 50 ms of game time here) and timers; the rate limits see the time pass too |
 //! | `place = { id, group, position, client? }` / `destroy = { id, client? }` | an object is placed or destroyed (by `client`; 0: nobody) |
-//! | `rpc = { client, name, object?, args? }` | a client RPC is about to run: `expect = [{ veto = true }]` says whether the plugin refused it |
+//! | `rpc = { client, name, object?, args?, after? }` | a client RPC is about to run (`after = true`: it ran): `expect = [{ veto = true }]` says whether the plugin refused it |
 //! | `world_saved = true` | a save ended (`false`: it failed) |
 //! | `http_done = { ticket, status?, body?, error?, headers? }` | the answer to the plugin's Nth request of this scenario (1 is the first) |
 //! | `save = true` | the plugin is asked for its state (`pcds_save`), as at a world save; its size and version are shown |
@@ -208,6 +208,9 @@ pub struct RpcSpec {
     /// The arguments, JSON text.
     #[serde(default = "no_args")]
     pub args: String,
+    /// Deliver `rpc_after` (the RPC ran) instead of `rpc_before`.
+    #[serde(default)]
+    pub after: bool,
 }
 
 fn no_args() -> String {
@@ -731,12 +734,14 @@ pub fn run(rig: &mut Rig, scenario: &Scenario) -> Outcome {
             let event = Event::ObjectDestroyed { id: o.id, group: &group, position, client: o.client };
             deliver(rig, &mut sim, &event);
         } else if let Some(r) = &step.rpc {
-            let event = Event::RpcBefore { client: r.client, rpc: &r.name, object: r.object, args_json: &r.args };
+            let event = if r.after { Event::RpcAfter { client: r.client, rpc: &r.name, object: r.object, args_json: &r.args } } else { Event::RpcBefore { client: r.client, rpc: &r.name, object: r.object, args_json: &r.args } };
             verdict = deliver(rig, &mut sim, &event);
             if !rig.plugin().rpc.contains(r.name.as_str()) {
                 out.lines.push(format!("  note: the plugin did not subscribe to {} (events.rpc), so it never heard of it", r.name));
             }
-            out.lines.push(format!("  the request was {}", if verdict == Verdict::Veto { "refused (veto)" } else { "let through" }));
+            if !r.after {
+                out.lines.push(format!("  the request was {}", if verdict == Verdict::Veto { "refused (veto)" } else { "let through" }));
+            }
         } else if let Some(ok) = step.world_saved {
             let event = Event::WorldSaved { game_ms: sim.game_ms, ok };
             deliver(rig, &mut sim, &event);

@@ -31,12 +31,14 @@ once (at most once in 3 seconds, however often you press the button):
 >
 > This ground is claimed by Ann. You cannot take this apart here.
 
-**What you see after a refusal.** The server drops the request as if it had never arrived and does not
-change the world. Your game has already done its own half of the action, so what you see for a moment
-may not be true: for example a building you were placing may still show on your screen, or a thing you
-took apart may look gone, until the game next syncs that part of the world with the server. Nothing
-changed on the server and no other player sees anything. See "To verify against the real game" below:
-the exact picture has to be looked at in the game.
+**What you see after a refusal.** A refused request is dropped as if it had never arrived, and the world does
+not change. For a refused *build* the server also sends no answer at all: the game's own reply to the client
+(`CreateAndInstantiateWorldObjectClientRpc`) is never sent. So your game may show the building ghost, or
+seem to hang on the placement, for a moment. You do not have to do anything: the chat line tells you why, and
+the game settles by itself. Nothing is built, and no other player sees anything. A refused take-apart leaves the
+object where it is; your screen may show it gone until the game next syncs it. (Confirmed in the real game:
+the build arguments, the deconstruct arguments and the missing answer; how long the ghost stays is for a person to
+look at.)
 
 ### Exact texts (for tests)
 
@@ -108,15 +110,15 @@ is the way to free ground whose owner is gone. There is no list of all claims an
 
 ## Cost
 
-Measured with `pcds plugin check` and `pcds plugin test`:
+Measured with `pcds plugin check` and `pcds plugin test` (the first call costs the same as the next ones):
 
 - With no claims at all, a matching RPC costs about 6,600 to 7,200 fuel (the event arrives and the plugin
   looks at an empty list).
 - With claims, a build request outside every claim: about 13,000 fuel (the position is read by a short
-  way, see "How it is made"). A request inside a claim needs the list of players: 37,000 to 70,000 fuel.
-- A command: 29,000 to 80,000 fuel. The first call after the plugin starts is up to about 170,000
-  more: the host translates each function of the module on its first use.
-- Budget in the manifest: `fuel_per_event = 300000`, `fuel_per_save = 10000000` (400 claims with 8 trusted
+  way, see "How it is made"). A request inside a claim asks the host for the one player (`Host::player`,
+  not the whole roster) and costs 25,000 to 40,000 fuel.
+- A command: 18,000 to 36,000 fuel; `!trust` about 99,000 (it reads the roster to find the name).
+- Budget in the manifest: `fuel_per_event = 200000`, `fuel_per_save = 10000000` (400 claims with 8 trusted
   players each are about 150 KB of state; saving them was not measured at that size).
 - 1,000,000 fuel is about 0.3 ms, so even a busy builder costs a few microseconds a request.
 
@@ -136,10 +138,10 @@ Measured with `pcds plugin check` and `pcds plugin test`:
   list of "who was told lately" at 32 players.
 - **The veto path.** `rpc_before` for the two names. First test: no claims, return. Then the position: for
   a deconstruct the object's, from `host.object`; for a build the one in `args_json`. If no claim holds the
-  position, return. Only then is the roster of players read (to know who asks and whether they are an
+  position, return. Only then is the player read, with `Host::player(client)` (to know who asks and whether they are an
   operator). A request that cannot be understood (an arguments text that is not the one we know, an object
   that is unknown to the host) is let through, and the log says so once: a bug here must never stop the game.
-  If the roster cannot be read (`world.read` denied) the request is let through too.
+  If the player cannot be read (`world.read` denied, or they just left) the request is let through too.
 - **Reading the position cheaply.** `json::parse` builds a tree for the whole text and costs about 40,000
   fuel. Since this runs for every build request, `quick_position` cuts the second item out of the text and
   reads three numbers (about 6,000 fuel); anything that is not exactly that falls back to `json::parse`.
@@ -190,15 +192,16 @@ pass, an unreadable request is let through and logged once, a hot update keeps t
 - Reading the position of a build request depends on the shape of its arguments; a game update that
   changes them makes the plugin let every build through and log one warning, until it is changed.
 
-## To verify against the real game
+## Checked in the real game, and still to look at
 
-1. The two RPC names, spelled as above, arrive as `rpc_before` events with `client` set.
-2. For `GroupNetworkBase.DeconstructServerRpc` the event's `object` is the network id that
-   `host.object(ObjectRef::Net(object))` can find, and the object's position is where it stands in the
-   world (the same coordinates `world.players()` gives).
-3. For `WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc` the arguments text has the position
-   as its second item, `[x,y,z]`, in world coordinates, and the first item is not a position.
-4. What the unmodified client shows after a veto of each of the two (see the section above), and whether
-   the stuff spent on a building (the items) comes back or was never taken.
-5. That an operator (`access.operators`) shows as `operator` in `world.players()` and so passes.
-6. That the state is still there after a server restart and after `pcds upgrade` (hot update).
+Confirmed by the integration tests against the real game: the two RPC names arrive as `rpc_before` with
+`client` set; the build arguments are `[hash,[x,y,z],[qx,qy,qz,qw],true,false,true,false]` (position second);
+the deconstruct arguments are `[2.0]` and its `object` is the network id that `host.object(ObjectRef::Net(id))`
+resolves; a vetoed build gets no answer.
+
+Still for a person to look at:
+
+1. How long the ghost of a refused build stays on the player's screen, and whether the items spent on the
+   building come back or were never taken.
+2. That an operator (`access.operators`) shows as `operator` in `world.players()` and so passes.
+3. That the state is still there after a server restart and after `pcds upgrade` (hot update).

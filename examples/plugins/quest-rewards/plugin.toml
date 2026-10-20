@@ -2,20 +2,23 @@
 id = "quest-rewards"
 name = "Quest rewards"
 version = "0.1.0"
-description = "Gives items and Terra tokens for milestones: buildings placed, hours played, and the world's terraformation. Each once, remembered per player"
+description = "Gives items and Terra tokens for milestones: buildings built, hours played, and the world's terraformation. Each once, remembered per player"
 authors = ["Planet Crafter dedicated server contributors"]
 license = "MIT"
 kind = "wasm"
 entry = "plugin.wasm"
 abi = 1
-capabilities = ["event.object", "event.tick", "event.chat", "event.player", "world.read", "chat.say", "player.give", "world.tokens"]
+capabilities = ["event.rpc", "event.tick", "event.chat", "world.read", "chat.say", "player.give", "world.tokens"]
 
 [budget]
 fuel_per_event = 800000
 tick_every_ms = 5000
 
 [events]
-subscribe = ["object_placed", "player_join", "player_leave", "tick"]
+subscribe = ["rpc_after", "tick"]
+# The build request, heard after it ran: its client is the player who built. (A dropped item or a
+# crafted one is another request and does not count.)
+rpc = ["WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc"]
 
 [[command]]
 name = "rewards"

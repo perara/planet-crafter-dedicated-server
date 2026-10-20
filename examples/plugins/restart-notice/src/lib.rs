@@ -23,8 +23,6 @@ const DEFAULT_WARNINGS: &str = "15,5,1";
 /// The timer that sets all the others again from the wall clock, and how often it goes off.
 const RESYNC_ID: u32 = 20;
 const RESYNC_MS: u32 = 300_000;
-/// A timer that goes off a moment after `load`: the first call in which the clock can be read.
-const BOOT_ID: u32 = 21;
 /// A warning later than this after its time is not said.
 const STALE_MS: i64 = 90_000;
 /// The least game time between two "World saved." (or two failed-save lines) in the chat.
@@ -125,8 +123,6 @@ struct Notice {
     last_failed_say: Option<i64>,
     /// Whether the log already said that timers or the clock are out of reach.
     complained: bool,
-    /// Whether the timers are set (they are, once an event has let the plugin read the clock).
-    armed: bool,
 }
 
 impl Notice {
@@ -166,13 +162,12 @@ impl Notice {
         }
     }
 
-    /// Sets a timer for each slot, and the one that sets them again; once, in the first call that can read the clock.
+    /// Sets a timer for each slot, and the one that sets them again (in `load`).
     fn arm_all(&mut self, host: &dyn Host) {
-        if self.armed || self.restart_min.is_none() {
+        if self.restart_min.is_none() {
             return;
         }
         let Some(now) = self.clock(host) else { return };
-        self.armed = true;
         for i in 0..self.slots.len() {
             self.arm(host, i, now, now);
         }
@@ -228,25 +223,12 @@ impl Notice {
     }
 }
 
-/// The text of a setting: the admin's, or the default, or `None` when the host has neither (a test double).
-fn setting(host: &dyn Host, key: &str) -> Option<String> {
-    host.config(key)
-}
-
-fn flag(host: &dyn Host, key: &str, default: bool) -> bool {
-    match setting(host, key).as_deref().map(str::trim) {
-        Some(v) if v.eq_ignore_ascii_case("true") => true,
-        Some(v) if v.eq_ignore_ascii_case("false") => false,
-        _ => default,
-    }
-}
-
 impl Plugin for Notice {
     fn load(host: &dyn Host, _state: Option<State<'_>>) -> Self {
-        let mut me = Notice { restart_min: None, bad_setting: false, slots: Vec::new(), announce_saves: false, announce_updates: true, last_saved_say: None, last_failed_say: None, complained: false, armed: false };
-        me.announce_saves = flag(host, "announce_saves", false);
-        me.announce_updates = flag(host, "announce_updates", true);
-        let restart_at = setting(host, "restart_at").unwrap_or_default();
+        let mut me = Notice { restart_min: None, bad_setting: false, slots: Vec::new(), announce_saves: false, announce_updates: true, last_saved_say: None, last_failed_say: None, complained: false };
+        me.announce_saves = host.config_bool("announce_saves").unwrap_or(false);
+        me.announce_updates = host.config_bool("announce_updates").unwrap_or(true);
+        let restart_at = host.config("restart_at").unwrap_or_default();
         match parse_restart_at(&restart_at) {
             Ok(minute) => me.restart_min = minute,
             Err(Malformed) => {
@@ -254,27 +236,19 @@ impl Plugin for Notice {
                 host.log(Level::Warn, "restart_at is not a time as HH:MM (UTC), as 04:00: no restart is announced");
             }
         }
-        let warn_text = setting(host, "warn_minutes").unwrap_or_else(|| DEFAULT_WARNINGS.to_string());
+        let warn_text = host.config("warn_minutes").unwrap_or_else(|| DEFAULT_WARNINGS.to_string());
         let warnings = parse_warnings(&warn_text).unwrap_or_else(|Malformed| {
             me.bad_setting = true;
             host.log(Level::Warn, "warn_minutes is not up to 8 numbers of 1 to 1439 separated by commas, as 30,10,5,1: using 15,5,1");
             parse_warnings(DEFAULT_WARNINGS).unwrap_or_default()
         });
         me.slots = warnings.into_iter().chain(Some(0)).map(|minutes_before| Slot { minutes_before, target: 0 }).collect();
-        // The world cannot be read inside `load`: ask to be called at once, and plan the day then.
-        if me.restart_min.is_some()
-            && let Err(e) = host.set_timer(BOOT_ID, 1, 0)
-        {
-            host.log(Level::Warn, &format!("cannot set a timer: {e:?}"));
-            me.complained = true;
-        }
+        me.arm_all(host);
         me
     }
 
     fn event(&mut self, host: &dyn Host, event: &Event<'_>) -> Verdict {
-        self.arm_all(host);
         match event {
-            Event::Timer { id: BOOT_ID, .. } => {}
             Event::Timer { id: RESYNC_ID, .. } => self.resync(host),
             Event::Timer { id, .. } if *id >= 1 => self.fire(host, *id as usize - 1),
             Event::Command { client, command: "restart", .. } => {
@@ -330,23 +304,11 @@ mod tests {
         mock
     }
 
-    /// What the host does a moment after `load`: it calls the plugin with the boot timer.
-    fn boot(t: &mut Harness<Notice>) {
-        let game_ms = t.mock().game_ms();
-        t.event(&Event::Timer { id: BOOT_ID, game_ms, late_ms: 0 });
-        t.mock().cancel_timer(BOOT_ID).ok();
-    }
-
-    /// A reload: the old instance's timers are gone, the new one asks for the boot timer.
-    fn reload(t: &mut Harness<Notice>) {
-        t.reload();
-        boot(t);
-    }
-
     fn start_on(mock: MockHost) -> Harness<Notice> {
-        // No ticks (the plugin does not ask for them) and a step of a second: a timer is late by less than that.
-        let mut t = Harness::<Notice>::start(mock).tick_every_ms(0).tick_step_ms(1000);
-        boot(&mut t);
+        // The manifest's events, no ticks (the plugin does not ask for them) and a step of a second:
+        // a timer is late by less than that.
+        let mut t = Harness::<Notice>::start(mock).subscribe(&[Kind::WorldSaved, Kind::Flip]).tick_every_ms(0).tick_step_ms(1000);
+        t.declare_command("restart", 0, 0, false);
         t
     }
 
@@ -391,7 +353,7 @@ mod tests {
         let mut t = start(at(3, 40), &[("restart_at", "04:00")]);
         t.advance_ms(5 * MIN + 30_000); // 03:45:30, after the 15-minute warning
         assert_eq!(t.mock().said(), ["Server restart in 15 minutes"]);
-        reload(&mut t);
+        t.reload();
         // The timers are set again from the clock: the 5-minute warning is due in 9 and a half minutes.
         let due: Vec<(u32, i64)> = t.mock().timers().iter().filter(|x| x.id != RESYNC_ID).map(|x| (x.id, x.due_ms - t.mock().game_ms())).collect();
         assert_eq!(due[0], (1, DAY_MS - 30_000));
@@ -406,7 +368,7 @@ mod tests {
         // The wall clock goes on while game time stands still: by the time game time has gone five
         // minutes it is 04:03 on the wall, and every warning of today is over.
         t.set_unix_ms(at(3, 58));
-        t.advance_ms(5 * MIN);
+        t.advance_ms(5 * MIN + 1000); // timers set in `load` start counting at the first call, one step in
         assert!(t.mock().said().is_empty(), "{:?}", t.mock().said());
         // All four are set for tomorrow, from the wall clock.
         let next_day = t.mock().timers().iter().filter(|x| x.id <= 4).all(|x| x.due_ms - t.mock().game_ms() > 23 * 60 * MINUTE_MS);
@@ -421,7 +383,7 @@ mod tests {
         // The wall is 04:00:30 when the resync looks (game time stood still for 15 minutes): the
         // restart line is 30 seconds late and still true, the warnings are not.
         t.set_unix_ms(at(3, 55) + 30_000);
-        t.advance_ms(5 * MIN);
+        t.advance_ms(5 * MIN + 1000); // timers set in `load` start counting at the first call, one step in
         assert_eq!(t.mock().said(), ["The server restarts now"]);
     }
 
@@ -443,7 +405,8 @@ mod tests {
         t.command(1, "restart", &[]);
         t.command(1, "restart", &["garbage", "more"]);
         assert_eq!(t.mock().told()[0].1, "Next restart in 2 hours 5 minutes (at 04:00 UTC).");
-        assert_eq!(t.mock().told()[1].1, t.mock().told()[0].1);
+        // The host answers more arguments than the manifest allows with the usage, and does not call the plugin.
+        assert_eq!(t.mock().told()[1].1, "Use: !restart");
         t.set_unix_ms(at(3, 0));
         t.command(1, "restart", &[]);
         assert_eq!(t.mock().told()[2].1, "Next restart in 1 hour (at 04:00 UTC).");
@@ -549,7 +512,7 @@ mod tests {
     fn a_hot_update_sets_the_timers_again_in_the_new_instance() {
         let mut t = start(at(3, 40), &[("restart_at", "04:00")]);
         t.advance_ms(MIN);
-        reload(&mut t);
+        t.reload();
         t.flip("0.9.1");
         t.advance_ms(19 * MIN);
         assert_eq!(t.mock().said().last().map(String::as_str), Some("The server restarts now"));
@@ -610,31 +573,34 @@ mod tests {
     fn the_notice_saves_no_state_and_a_reload_keeps_working() {
         let mut t = start(at(3, 0), &[("restart_at", "04:00")]);
         assert!(t.save().is_none());
-        reload(&mut t);
-        reload(&mut t);
+        t.reload();
+        t.reload();
         t.advance_ms(61 * MIN);
         assert_eq!(t.mock().said().len(), 4);
         // State from some other version of the plugin is not read.
-        let mut t = Harness::<Notice>::start_with_state(mock(at(3, 0), &[("restart_at", "04:00")]), 9, &[1, 2, 3]);
-        boot(&mut t);
+        let t = Harness::<Notice>::start_with_state(mock(at(3, 0), &[("restart_at", "04:00")]), 9, &[1, 2, 3]);
         assert_eq!(t.mock().timers().len(), 5);
     }
 
     #[test]
-    fn load_reads_no_world_and_asks_for_the_boot_timer_and_any_first_event_plans_the_day() {
-        // The real host lets a plugin read the world only while it handles an event: `load` must not.
-        let t = Harness::<Notice>::start(mock(at(3, 0), &[("restart_at", "04:00")]).deny(&["world.read"]));
-        assert!(t.mock().denied().is_empty(), "load asked the world something");
-        assert_eq!(t.mock().timers().iter().map(|x| x.id).collect::<Vec<_>>(), [BOOT_ID]);
-        // Without the boot timer, the first command plans the day.
-        let mut t = Harness::<Notice>::start(mock(at(3, 0), &[("restart_at", "04:00")])).tick_every_ms(0).tick_step_ms(1000);
-        t.join(1, "Ann");
-        t.command(1, "restart", &[]);
-        assert_eq!(t.mock().timers().len(), 6);
-        t.advance_ms(61 * MIN);
-        assert_eq!(t.mock().said().len(), 4);
-        // No restart time: no boot timer at all.
-        let t = Harness::<Notice>::start(mock(at(3, 0), &[]));
+    fn load_sets_the_timers_itself_and_only_when_there_is_a_restart_time() {
+        let t = start(at(3, 0), &[("restart_at", "04:00")]);
+        assert_eq!(t.mock().timers().iter().map(|x| x.id).collect::<Vec<_>>(), [1, 2, 3, 4, RESYNC_ID]);
+        // Each timer is set from the wall clock: the 15-minute warning in 45 minutes.
+        assert_eq!(t.mock().timers()[0].delay_ms, 45 * 60_000);
+        let t = start(at(3, 0), &[]);
         assert!(t.mock().timers().is_empty());
+    }
+
+    #[test]
+    fn a_timer_fired_by_hand_checks_the_wall_clock_before_it_speaks() {
+        let mut t = start(at(3, 0), &[("restart_at", "04:00")]);
+        // Too early by 45 minutes: nothing is said and the timer is set again for the real time.
+        t.fire_timer(1);
+        assert!(t.mock().said().is_empty());
+        assert_eq!(t.mock().timers().iter().find(|x| x.id == 1).map(|x| x.delay_ms), Some(45 * 60_000));
+        t.set_unix_ms(at(3, 45));
+        t.fire_timer(1);
+        assert_eq!(t.mock().said(), ["Server restart in 15 minutes"]);
     }
 }

@@ -1,4 +1,4 @@
-name = "quests: buildings, a hot update, the world milestone, an hour of play"
+name = "quests: the world milestone, a hot update, an hour of play, !rewards"
 
 [config]
 world_milestones = "500,5000"
@@ -12,56 +12,12 @@ operator = true
 client = 2
 name = "Ann"
 
+# Buildings are counted from the build request heard AFTER it ran (rpc_after); the scenario runner
+# can only send rpc_before, so the building milestones are tested in the unit tests (cargo test).
+# This step shows that a request about to run, not yet run, pays nothing.
 [[step]]
-note = "the first building pays items and tokens, and tells the player"
-place = { id = 1, group = "Wall", client = 2 }
-expect = [
-  { give = 2, equals = "10 Iron" },
-  { tokens = true, equals = "100" },
-  { tell = 2, contains = "your first building" },
-]
-
-[[step]]
-place = { id = 2, group = "Wall", client = 2 }
-
-[[step]]
-place = { id = 3, group = "Wall", client = 2 }
-
-[[step]]
-place = { id = 4, group = "Wall", client = 2 }
-
-[[step]]
-place = { id = 5, group = "Wall", client = 2 }
-
-[[step]]
-place = { id = 6, group = "Wall", client = 2 }
-
-[[step]]
-place = { id = 7, group = "Wall", client = 2 }
-
-[[step]]
-place = { id = 8, group = "Wall", client = 2 }
-
-[[step]]
-place = { id = 9, group = "Wall", client = 2 }
-expect = [{ give = 2, count = 0 }, { tokens = true, count = 0 }]
-
-[[step]]
-note = "a building nobody placed (client 0, a machine) does not count"
-place = { id = 50, group = "Drill1", client = 0 }
-expect = [{ give = 2, count = 0 }]
-
-[[step]]
-note = "the tenth building"
-place = { id = 10, group = "Wall", client = 2 }
-expect = [{ give = 2, equals = "10 Iron" }, { tell = 2, contains = "10 buildings placed" }]
-
-[[step]]
-note = "a hot update: what was given is remembered"
-flip = true
-
-[[step]]
-place = { id = 11, group = "Wall", client = 2 }
+note = "a build request that has not run yet counts for nothing"
+rpc = { client = 2, name = "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc", args = "[1,[0,0,0]]" }
 expect = [{ give = 2, count = 0 }, { tokens = true, count = 0 }]
 
 [[step]]
@@ -72,11 +28,9 @@ expect = [
   { tokens = true, equals = "500", count = 1 },
 ]
 
-# The host allows 2 token changes a second, counted on the wall clock; a scenario runs in a flash, so
-# this restart starts a fresh count. (In a real game an hour is an hour.)
 [[step]]
-note = "a restart: nothing given is forgotten"
-reload = true
+note = "a hot update: what was paid is remembered (the host's count of token changes starts again too)"
+flip = true
 
 [[step]]
 note = "an hour of play: both players earn it"
@@ -84,15 +38,15 @@ advance = "1h"
 expect = [
   { give = 1, equals = "10 Iron", count = 1 },
   { give = 2, equals = "10 Iron", count = 1 },
-  { tell = 2, contains = "1 hour of play", count = 1 },
+  { tokens = true, equals = "100", count = 2 },
+  { tell = 2, equals = "Quest reward for 1 hour of play: +10 Iron, +100 Terra tokens.", count = 1 },
   { say = true, count = 0 },
 ]
 
 [[step]]
 chat = { client = 2, text = "!rewards" }
 expect = [
-  { tell = 2, contains = "You have placed 11 buildings" },
-  { tell = 2, contains = "Milestones done: 3 of 6." },
-  { tell = 2, contains = "Next: 50 buildings placed (39 more), 10 hours of play" },
+  { tell = 2, equals = "You have placed 0 buildings and played 1h 00m. Milestones done: 1 of 6." },
+  { tell = 2, equals = "Next: your first building (1 more), 10 hours of play (8h 59m more). Each gives +10 Iron, +100 Terra tokens." },
   { tell = 2, equals = "World: terraformation 1000; the next milestone is 5000." },
 ]

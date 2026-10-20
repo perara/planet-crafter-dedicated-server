@@ -392,7 +392,7 @@ class Exporter:
             reached = bool(self.stream_state and self.stream_state[0])
         if self.stream_state is not None:
             sources["stream"] = self.stream_state[1]
-        return render(self.counts.snapshot(), status, plugins, reached, sources, dict(self.errors))
+        return render(self.counts.snapshot(), status, plugins, reached, sources, {k: v for k, v in self.errors.items() if self.admin or k == "stream"})
 
 
 def replay(bundle):
@@ -635,6 +635,24 @@ class Tests(unittest.TestCase):
         self.assertNotIn("pcds_players_online", text)
         self.assertEqual(self.value(text, "pcds_up"), "1")
         self.assertEqual({a[1] for a in Fake.state["asked"]}, {"/api/plugins/events"})
+        # A server that would answer 403 on both admin endpoints is never asked, so nothing is counted against it.
+        Fake.state["admin_status"] = 403
+        again = exp.metrics()
+        lint(again)
+        self.assertEqual({a[1] for a in Fake.state["asked"]}, {"/api/plugins/events"})
+        self.assertIn('pcds_exporter_errors_total{source="stream"} 0\n', again)
+        self.assertNotIn('source="status"', again)
+
+    def test_a_big_bundle_renders_in_under_50_ms(self):
+        bundle = {"events": [dict(EVENTS[i % 8], id=i + 1) for i in range(10000)], "status": STATUS, "plugins": PLUGINS}
+        best = 1e9
+        for _ in range(3):
+            started = time.perf_counter()
+            text = replay(bundle)
+            best = min(best, time.perf_counter() - started)
+        lint(text)
+        self.assertEqual(self.value(text, "pcds_chat_messages_total"), "1250")
+        self.assertLess(best, 0.05, "%.1f ms" % (best * 1000))
 
     def test_a_scoped_token_on_the_admin_endpoints_is_an_error_count_not_a_crash(self):
         Fake.state["admin_status"] = 403

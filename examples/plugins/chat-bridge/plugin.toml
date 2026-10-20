@@ -9,10 +9,7 @@ kind = "wasm"
 entry = "plugin.wasm"
 abi = 1
 # net.http is the way out of the sandbox: only to the hosts under [net], approved by you.
-# world.read is NOT needed at run time: settings (Host::settings) need no capability. It is here
-# only because `pcds plugin check` counts every `query` import as world.read and calls the plugin
-# an error without it (a bug of the checker; remove this line when it is fixed).
-capabilities = ["event.chat", "event.player", "event.tick", "net.http", "world.read"]
+capabilities = ["event.chat", "event.player", "event.tick", "net.http"]
 
 [budget]
 tick_every_ms = 1000
@@ -60,6 +57,8 @@ description = "send joins and leaves"
 type = "bool"
 default = true
 
+# The prefix is the chat.commandPrefix rule; a plugin can read the rule only with world.read, so the
+# admin repeats it here instead of giving the plugin a capability it needs for nothing else.
 [[config]]
 key = "command_prefix"
 description = "messages that start with this are commands and are not sent (the chat.commandPrefix rule)"

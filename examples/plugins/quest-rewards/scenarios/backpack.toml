@@ -1,17 +1,19 @@
-name = "a full backpack: the tokens come, the items wait until there is room"
+name = "a backpack without room: the tokens come, the items wait, the player is told once"
 
+# The sim's backpack has 30 slots and each item takes one (the same rule as the host's `inventory`).
 [[player]]
 client = 2
 name = "Ann"
 inventory = { Cobalt = 30 }
 
 [[step]]
-note = "30 items fill the sim's 30 slots"
-place = { id = 1, group = "Wall", client = 2 }
+note = "an hour of play (3605 s: the first tick comes at 50 ms, the others every 5 s) with a full backpack"
+advance = "3605s"
 expect = [
   { give = 2, count = 0 },
-  { tokens = true, equals = "100" },
-  { tell = 2, count = 0 },
+  { tokens = true, equals = "100", count = 1 },
+  { tell = 2, equals = "A quest reward is waiting: your backpack needs 10 free slots for +10 Iron. It is given when there is room.", count = 1 },
+  { tell = 2, contains = "Quest reward for", count = 0 },
 ]
 
 [[step]]
@@ -19,8 +21,12 @@ chat = { client = 2, text = "!rewards" }
 expect = [{ tell = 2, contains = "1 reward is waiting" }]
 
 [[step]]
+note = "5 free slots are not enough for 10 items: nothing is given (the host would give 5 and lose 5), and she is not told again"
+set = { inventory = [2, { Cobalt = 25 }] }
+
+[[step]]
 advance = "20s"
-expect = [{ give = 2, count = 0 }]
+expect = [{ give = 2, count = 0 }, { tell = 2, count = 0 }]
 
 [[step]]
 note = "she empties her backpack"
@@ -31,7 +37,7 @@ advance = "6s"
 expect = [
   { give = 2, equals = "10 Iron", count = 1 },
   { tokens = true, count = 0 },
-  { tell = 2, equals = "Quest reward for your first building: +10 Iron, +100 Terra tokens." },
+  { tell = 2, equals = "Quest reward for 1 hour of play: +10 Iron, +100 Terra tokens." },
 ]
 
 [[step]]

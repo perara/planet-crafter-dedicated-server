@@ -43,10 +43,8 @@ The webhook is the part of the URL after `https://discord.com/api/webhooks/` (or
 | `send_joins` | bool | true | joins and leaves |
 | `command_prefix` | string, up to 4 | `!` | messages that start with it are commands and are not sent |
 
-`plugin.toml` also asks for `world.read`, which the plugin does not use: reading its own settings needs no
-capability, but `pcds plugin check` counts every `query` import as `world.read` and calls the plugin an error
-without it. Leave it out at the approval if you like (`pcds plugin enable chat-bridge --grant event.chat,event.player,event.tick,net.http`); nothing breaks.
-Remove the line from `plugin.toml` when the checker is fixed.
+`command_prefix` repeats the server's `chat.commandPrefix` rule: reading the rule needs `world.read`, which the plugin
+would need for nothing else.
 
 What it does:
 
@@ -66,6 +64,7 @@ What it does:
 - **Bounded.** 200 lines at most; the oldest go first, and the next message starts with
   `(N earlier lines were lost)`. The buffer and the failure count are saved state: a restart or a hot update
   loses nothing it had not sent.
+- **The first tick of a new instance** (a restart, a hot update) carries the whole game time as `since_ms`, because the host counts from 0, so lines that were waiting go at the next tick whatever the wait was.
 - **No chat text in the log.** Log lines have counts and HTTP statuses only.
 - **An empty world has no ticks** (`world.pauseWhenEmpty`). The leave of the last player is therefore sent in
   the leave's own call, and so is anything that came while that request was out. A failure at that moment

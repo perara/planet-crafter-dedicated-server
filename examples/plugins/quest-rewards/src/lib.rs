@@ -1,7 +1,7 @@
 //! quest-rewards: small rewards for milestones, each given once and remembered for the player.
 //!
 //!   Personal milestones (the same reward for each, set by the admin: items and Terra tokens)
-//!     the first building, 10, 50 and 200 buildings placed; 1 hour and 10 hours of play
+//!     the first building, 10, 50 and 200 buildings built; 1 hour and 10 hours of play
 //!   World milestones (the world's terraformation passes a number: the colony gets tokens, once)
 //!   !rewards          your progress and the next milestones
 //!   !givetokens <n>   (operators) adds n Terra tokens to the world, 1 to 10000
@@ -20,8 +20,12 @@ const STATE_VERSION: u32 = 1;
 /// Players kept in state, and the most dropped at a tick when over (finding one reads them all).
 const MAX_PLAYERS: usize = 1000;
 const TRIM_PER_TICK: usize = 3;
-/// Players online that are looked at.
-const MAX_ONLINE: usize = 256;
+/// Players told that their backpack has no room, remembered so that they are told once.
+const MAX_TOLD: usize = 64;
+/// The request a player's client sends to build; heard after it ran (`rpc_after`). Its `args_json`
+/// is `[group hash, position, ...]`; only the client matters here. Other requests that create a
+/// world object (dropping an item on the floor, ...) are other RPCs and do not count.
+const RPC_BUILD: &str = "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc";
 /// World milestones that can be set, and how many are remembered as paid.
 const MAX_WORLD: usize = 8;
 const MAX_PAID: usize = 32;
@@ -142,6 +146,8 @@ enum Try {
     Done,
     /// Not now: try at the next tick.
     Later,
+    /// Not now, because the backpack has too few free slots: try at the next tick, and tell the player once.
+    NoRoom,
     /// The host is busy: stop asking in this call.
     Busy,
     /// The player is gone: stop for this player.
@@ -155,9 +161,8 @@ struct Quests {
     players: Vec<Player>,
     /// World milestones already paid (the numbers, so a changed list does not pay twice).
     world_paid: Vec<u64>,
-    /// Who is online: (client, player_id), kept from join and leave events and rebuilt at every tick,
-    /// so a placement does not need a `players()` query (which costs fuel for every player online).
-    online: Vec<(u64, u64)>,
+    /// Players who were told that their backpack needs room (not saved: told again after a restart).
+    told_full: Vec<u64>,
     carry_ms: u32,
     world_ms: u32,
     /// Game time of the last tick.
@@ -186,15 +191,8 @@ impl Plugin for Quests {
     fn event(&mut self, host: &dyn Host, event: &Event<'_>) -> Verdict {
         match event {
             Event::Tick { game_ms, since_ms, .. } => self.on_tick(host, *game_ms, *since_ms),
-            Event::PlayerJoin { client, player_id, .. } => {
-                self.online.retain(|(c, id)| c != client && id != player_id);
-                if self.online.len() < MAX_ONLINE {
-                    self.online.push((*client, *player_id));
-                }
-            }
-            Event::PlayerLeave { client, .. } => self.online.retain(|(c, _)| c != client),
-            Event::ObjectPlaced { client, .. } if *client != 0 => self.on_placed(host, *client),
-            Event::Command { client, command, args, player_id, .. } => match command.to_ascii_lowercase().as_str() {
+            Event::RpcAfter { client, rpc, .. } if *client != 0 && *rpc == RPC_BUILD => self.on_built(host, *client),
+            Event::Command { client, command, args, player_id, .. } => match *command {
                 "rewards" => self.cmd_rewards(host, *client, *player_id),
                 "givetokens" => self.cmd_givetokens(host, *client, args),
                 _ => {}
@@ -250,19 +248,12 @@ impl Quests {
 
     // ---- Events.
 
-    /// A building was placed by a connection: it counts for the player who is online with it.
-    fn on_placed(&mut self, host: &dyn Host, client: u64) {
-        let id = match self.online.iter().find(|(c, _)| *c == client) {
-            Some((_, id)) => *id,
-            // Not known from a join (the plugin started after the player joined, and no tick yet): ask.
-            None => match host.players().ok().and_then(|ps| ps.iter().find(|p| p.client == client).map(|p| p.player_id)) {
-                Some(id) => id,
-                None => return,
-            },
-        };
-        let i = self.ensure(id);
+    /// A build request of a connection ran: it counts for the player who is online with it.
+    fn on_built(&mut self, host: &dyn Host, client: u64) {
+        let Ok(who) = host.player(client) else { return };
+        let i = self.ensure(who.player_id);
         self.players[i].placed = self.players[i].placed.saturating_add(1);
-        self.pay(host, client, id);
+        self.pay(host, client, who.player_id);
     }
 
     fn on_tick(&mut self, host: &dyn Host, game_ms: i64, since_ms: u32) {
@@ -278,9 +269,8 @@ impl Quests {
         let (seconds, carry) = (total / 1000, total % 1000);
         self.carry_ms = carry;
         if let Ok(online) = host.players() {
-            self.online = online.iter().take(MAX_ONLINE).map(|p| (p.client, p.player_id)).collect();
             let mut ids: Vec<u64> = Vec::with_capacity(online.len());
-            for p in online.iter().take(MAX_ONLINE) {
+            for p in online.iter().take(MAX_PLAYERS) {
                 ids.push(p.player_id);
                 let i = self.ensure(p.player_id);
                 self.players[i].seconds = self.players[i].seconds.saturating_add(seconds);
@@ -336,15 +326,28 @@ impl Quests {
             let mut stop = false;
             if p.items_done & bit == 0 {
                 match self.give_items(host, client) {
-                    Try::Done => p.items_done |= bit,
+                    Try::Done => {
+                        p.items_done |= bit;
+                        self.told_full.retain(|x| *x != id);
+                    }
                     Try::Later => {}
+                    Try::NoRoom => {
+                        // Once for each wait, not at every tick.
+                        if !self.told_full.contains(&id) {
+                            if self.told_full.len() >= MAX_TOLD {
+                                self.told_full.remove(0);
+                            }
+                            self.told_full.push(id);
+                            let _ = host.tell(client, &format!("A quest reward is waiting: your backpack needs {} free slots for +{} {}. It is given when there is room.", self.cfg.item_count, self.cfg.item_count, self.cfg.item_group));
+                        }
+                    }
                     Try::Busy | Try::Gone => stop = true,
                 }
             }
             if !stop && p.tokens_done & bit == 0 {
                 match self.add_tokens(host, self.cfg.token_amount) {
                     Try::Done => p.tokens_done |= bit,
-                    Try::Later => {}
+                    Try::Later | Try::NoRoom => {}
                     Try::Busy | Try::Gone => stop = true,
                 }
             }
@@ -377,9 +380,10 @@ impl Quests {
         if self.now_ms < self.give_blocked_until {
             return Try::Later;
         }
-        // A full backpack would refuse the items when they are applied, after we have counted them as given.
+        // The host puts in as many as fit and drops the rest, after we have counted them as given: give
+        // only when all of them fit. A slot holds one item (`InventoryInfo`), so `count` items need `count` free slots.
         match host.inventory(client) {
-            Ok(inv) if inv.slots_total > 0 && inv.slots_used >= inv.slots_total => return Try::Later,
+            Ok(inv) if inv.slots_total > 0 && inv.slots_total.saturating_sub(inv.slots_used) < self.cfg.item_count => return Try::NoRoom,
             Err(Error::NotFound) => return Try::Gone,
             _ => {}
         }
@@ -479,7 +483,8 @@ impl Quests {
     fn cmd_givetokens(&mut self, host: &dyn Host, client: u64, args: &[&str]) {
         let amount = args.first().and_then(|a| a.parse::<i32>().ok()).filter(|n| (1..=MAX_TOKENS).contains(n));
         let Some(amount) = amount else {
-            let _ = host.tell(client, "Use: !givetokens <number from 1 to 10000>");
+            let prefix = host.world().map(|w| w.command_prefix).ok().filter(|p| !p.is_empty()).unwrap_or_else(|| "!".to_string());
+            let _ = host.tell(client, &format!("Use: {prefix}givetokens <number from 1 to 10000>"));
             return;
         };
         let text = match host.tokens(amount) {
@@ -505,98 +510,101 @@ mod tests {
     const OP: u64 = 1;
     const ANN: u64 = 2;
 
-    fn roomy() -> InventoryInfo {
-        InventoryInfo { slots_used: 3, slots_total: 30, items: vec![] }
-    }
-
-    /// A harness with a backpack for everyone who joins: the mock answers `NotFound` for a player with none.
-    struct Room {
-        t: Harness<Quests>,
-    }
-
-    fn room(mock: MockHost) -> Room {
-        let mut t = Harness::<Quests>::start(mock).tick_every_ms(5000).tick_step_ms(1000);
+    /// The operator (client 1) and Ann (client 2) in a harness that hears what the manifest subscribes to.
+    /// The mock gives every player an empty 30-slot backpack.
+    fn room(mock: MockHost) -> Harness<Quests> {
+        let mut t = Harness::<Quests>::start(mock).tick_every_ms(5000).tick_step_ms(1000).subscribe(&[Kind::RpcAfter, Kind::Tick]);
         t.join(OP, "Root");
         t.join(ANN, "Ann");
-        let mut root = t.mock().players().unwrap().into_iter().find(|p| p.client == OP).unwrap();
-        root.operator = true;
-        t.mock().add_player(root);
-        t.mock().set_inventory(OP, roomy());
-        t.mock().set_inventory(ANN, roomy());
-        Room { t }
+        t.mock().set_operator(OP, true);
+        t.declare_command("rewards", 0, 0, false);
+        t.declare_command("givetokens", 1, 1, true);
+        t
     }
 
     fn told(t: &Harness<Quests>, client: u64) -> Vec<String> {
         t.mock().told().into_iter().filter(|(c, _)| *c == client).map(|(_, s)| s).collect()
     }
 
-    fn place(t: &mut Harness<Quests>, from: i32, n: i32, client: u64) {
-        for id in from..from + n {
-            t.place(id, "Wall", [0.0; 3], client);
+    /// `n` build requests of a client, heard after they ran.
+    fn build(t: &mut Harness<Quests>, n: u32, client: u64) {
+        for _ in 0..n {
+            t.rpc_after(client, RPC_BUILD, 0, "[123456,[1.0,2.0,3.0],[0,0,0,1]]");
         }
+    }
+
+    fn backpack(t: &Harness<Quests>, client: u64, used: u32) {
+        t.mock().set_inventory(client, InventoryInfo { slots_used: used, slots_total: 30, items: vec![] });
     }
 
     #[test]
     fn the_first_building_pays_items_and_tokens_once() {
-        let Room { mut t } = room(MockHost::new());
-        place(&mut t, 1, 1, ANN);
+        let mut t = room(MockHost::new());
+        build(&mut t, 1, ANN);
         assert_eq!(t.mock().given(), [(ANN, "Iron".to_string(), 10)]);
         assert_eq!(t.mock().tokens_total(), 100);
         assert_eq!(told(&t, ANN), ["Quest reward for your first building: +10 Iron, +100 Terra tokens."]);
-        // The second building is not a milestone; neither is placing it again after a reload.
-        place(&mut t, 2, 1, ANN);
+        // The second building is not a milestone; neither is building again after a reload.
+        build(&mut t, 1, ANN);
         t.reload();
-        place(&mut t, 3, 1, ANN);
+        build(&mut t, 1, ANN);
         assert_eq!(t.mock().given().len(), 1);
         assert_eq!(t.mock().tokens_total(), 100);
     }
 
     #[test]
-    fn a_connection_number_that_is_used_again_belongs_to_the_new_player() {
-        let Room { mut t } = room(MockHost::new());
-        t.leave(ANN);
-        t.join_as(ANN, "Bo", 5555, "");
-        t.mock().set_inventory(ANN, roomy());
-        place(&mut t, 1, 1, ANN);
-        assert_eq!(t.plugin().players.iter().map(|p| p.id).collect::<Vec<_>>(), [5555]);
-        // After a reload nobody is known from a join: the host is asked once.
-        t.reload();
-        assert!(t.plugin().online.is_empty());
-        place(&mut t, 2, 1, ANN);
-        assert_eq!(t.plugin().players[0].placed, 2);
+    fn only_the_build_request_counts_not_a_placed_object_or_another_request() {
+        let mut t = room(MockHost::new());
+        // A dropped item is an object placed by a client, but it is not a build.
+        t.place(1, "Iron", [0.0; 3], ANN);
+        t.rpc_after(ANN, "InventoriesHandler.DropOnFloorServerRpc", 0, "[1,[0,0,0]]");
+        t.rpc_before(ANN, RPC_BUILD, 0, "[1,[0,0,0]]");
+        assert!(t.mock().given().is_empty() && t.plugin().players.is_empty());
+        build(&mut t, 1, ANN);
+        assert_eq!(t.mock().given().len(), 1);
+        // Delivered by the manifest's list only: a harness that hears everything must not count a veto-able RPC twice.
+        assert_eq!(t.plugin().players[0].placed, 1);
     }
 
     #[test]
     fn ten_fifty_and_two_hundred_buildings_each_pay_once() {
-        let Room { mut t } = room(MockHost::new());
-        place(&mut t, 1, 9, ANN);
+        let mut t = room(MockHost::new());
+        build(&mut t, 9, ANN);
         assert_eq!(t.mock().given().len(), 1, "only the first so far");
-        place(&mut t, 10, 1, ANN);
+        build(&mut t, 1, ANN);
         assert_eq!(t.mock().given().len(), 2);
-        place(&mut t, 11, 190, ANN);
+        build(&mut t, 190, ANN);
         assert_eq!(t.mock().given().len(), 4, "first, 10, 50, 200");
-        place(&mut t, 201, 50, ANN);
+        build(&mut t, 50, ANN);
         assert_eq!(t.mock().given().len(), 4, "nothing more for buildings");
         assert_eq!(t.mock().tokens_total(), 400);
-        let rewards: Vec<String> = told(&t, ANN);
+        let rewards = told(&t, ANN);
         assert!(rewards[3].starts_with("Quest reward for 200 buildings placed"), "{rewards:?}");
     }
 
     #[test]
-    fn only_buildings_of_players_who_are_online_count() {
-        let Room { mut t } = room(MockHost::new());
-        place(&mut t, 1, 5, 0);
-        place(&mut t, 10, 5, 77);
+    fn only_builds_of_players_who_are_online_count() {
+        let mut t = room(MockHost::new());
+        build(&mut t, 5, 0);
+        build(&mut t, 5, 77);
         assert!(t.mock().given().is_empty() && t.plugin().players.is_empty());
-        // A player who left: the placement arrives with a connection that is gone.
         t.leave(ANN);
-        place(&mut t, 20, 5, ANN);
+        build(&mut t, 5, ANN);
         assert!(t.mock().given().is_empty());
     }
 
     #[test]
+    fn a_connection_number_that_is_used_again_belongs_to_the_new_player() {
+        let mut t = room(MockHost::new());
+        t.leave(ANN);
+        t.join_as(ANN, "Bo", 5555, "");
+        build(&mut t, 1, ANN);
+        assert_eq!(t.plugin().players.iter().map(|p| p.id).collect::<Vec<_>>(), [5555]);
+    }
+
+    #[test]
     fn play_time_pays_after_one_hour_and_after_ten() {
-        let Room { mut t } = room(MockHost::new());
+        let mut t = room(MockHost::new());
         t.advance_ms(3_590_000);
         assert!(t.mock().given().is_empty());
         t.advance_ms(20_000);
@@ -611,32 +619,33 @@ mod tests {
 
     #[test]
     fn progress_and_the_rewards_given_survive_a_reload() {
-        let Room { mut t } = room(MockHost::new());
-        place(&mut t, 1, 9, ANN);
+        let mut t = room(MockHost::new());
+        build(&mut t, 9, ANN);
         t.advance_ms(1_800_000);
         t.reload();
         t.clear();
-        place(&mut t, 100, 1, ANN);
+        build(&mut t, 1, ANN);
         assert_eq!(told(&t, ANN).len(), 1, "the tenth building, not the first again");
         t.advance_ms(1_800_000);
         assert_eq!(told(&t, ANN).len(), 2, "the hour");
-        let saved = t.save().unwrap();
-        assert_eq!(saved.version, 1);
+        assert_eq!(t.save().unwrap().version, 1);
     }
 
     #[test]
-    fn a_full_backpack_waits_and_the_reward_comes_when_there_is_room() {
-        let Room { mut t } = room(MockHost::new());
-        t.mock().set_inventory(ANN, InventoryInfo { slots_used: 30, slots_total: 30, items: vec![] });
-        place(&mut t, 1, 1, ANN);
+    fn a_full_backpack_waits_and_the_player_is_told_once() {
+        let mut t = room(MockHost::new());
+        backpack(&t, ANN, 30);
+        build(&mut t, 1, ANN);
         assert!(t.mock().given().is_empty());
-        // Tokens are not tied to the backpack: they were given, the items were not, and the player is not told yet.
+        // Tokens are not tied to the backpack; the player is told about the wait, once, and not about a reward.
         assert_eq!(t.mock().tokens_total(), 100);
+        assert_eq!(told(&t, ANN), ["A quest reward is waiting: your backpack needs 10 free slots for +10 Iron. It is given when there is room."]);
+        t.advance_ms(30_000);
+        build(&mut t, 1, ANN);
+        assert_eq!(told(&t, ANN).len(), 1, "not told again at every try");
         t.command(ANN, "rewards", &[]);
-        assert!(told(&t, ANN)[0].contains("1 reward is waiting"), "{:?}", told(&t, ANN));
-        t.advance_ms(10_000);
-        assert!(t.mock().given().is_empty());
-        t.mock().set_inventory(ANN, roomy());
+        assert!(told(&t, ANN)[1].contains("1 reward is waiting"), "{:?}", told(&t, ANN));
+        backpack(&t, ANN, 5);
         t.advance_ms(5000);
         assert_eq!(t.mock().given(), [(ANN, "Iron".to_string(), 10)]);
         assert_eq!(t.mock().tokens_total(), 100, "the tokens are not given twice");
@@ -644,18 +653,39 @@ mod tests {
     }
 
     #[test]
+    fn too_few_free_slots_do_not_give_a_part_of_the_reward() {
+        let mut t = room(MockHost::new());
+        // 5 free slots for 10 items: the host would put in 5 and drop 5. Nothing is given.
+        backpack(&t, ANN, 25);
+        build(&mut t, 1, ANN);
+        t.advance_ms(10_000);
+        assert!(t.mock().given().is_empty());
+        backpack(&t, ANN, 20);
+        t.advance_ms(5000);
+        assert_eq!(t.mock().given(), [(ANN, "Iron".to_string(), 10)], "exactly 10 free slots is enough");
+        // The next wait tells again.
+        backpack(&t, ANN, 29);
+        t.clear();
+        build(&mut t, 9, ANN);
+        assert_eq!(told(&t, ANN).len(), 1);
+        assert!(told(&t, ANN)[0].starts_with("A quest reward is waiting"));
+    }
+
+    #[test]
     fn a_busy_host_is_asked_again_at_the_next_tick_and_nothing_is_paid_twice() {
-        // 8 players earn the hour at the same tick: 3 actions each is 24, the call takes 16.
+        // 8 players earn the hour at the same tick. The host takes 2 token changes in a game second (and
+        // 16 actions in a call), so the items go to all at once and the tokens, two at a tick, over four ticks.
         let mut t = Harness::<Quests>::start(MockHost::new().with_limits()).tick_every_ms(5000).tick_step_ms(1000);
         for c in 10..18u64 {
             t.join(c, &format!("P{c}"));
-            t.mock().set_inventory(c, roomy());
         }
         t.advance_ms(3_595_000);
         assert!(t.mock().given().is_empty());
         t.advance_ms(5000);
-        let first = t.mock().given().len();
-        assert!(first < 8, "the limit stopped some: {first}");
+        assert_eq!(t.mock().given().len(), 8, "the items are not limited so much");
+        assert_eq!(t.mock().tokens_total(), 200, "two token changes in the second");
+        let told_at_once = t.mock().told().len();
+        assert_eq!(told_at_once, 2, "only the two that got both parts are told");
         for _ in 0..5 {
             t.advance_ms(5000);
         }
@@ -672,20 +702,15 @@ mod tests {
 
     #[test]
     fn world_milestones_pay_the_colony_once_and_are_remembered() {
-        let low = WorldInfo { terraformation: 500.0, ..WorldInfo::default() };
-        let mut t = Harness::<Quests>::start(MockHost::new().with_world(low).with_setting("world_milestones", "1000, 2000,junk,0")).tick_every_ms(5000).tick_step_ms(1000);
-        t.join(ANN, "Ann");
+        let mut t = room(MockHost::new().with_setting("world_milestones", "1000, 2000,junk,0"));
+        t.mock().set_world(|w| w.terraformation = 500.0);
         t.advance_ms(120_000);
         assert_eq!(t.mock().tokens_total(), 0);
-        let saved = t.save().unwrap();
-        // The world has grown (a new mock stands in for it, with the saved state): 1000 is passed, 2000 is not.
-        let high = WorldInfo { terraformation: 1500.0, ..WorldInfo::default() };
-        let mock = MockHost::new().with_world(high).with_setting("world_milestones", "1000,2000");
-        let mut t = Harness::<Quests>::start_with_state(mock, saved.version, &saved.bytes).tick_every_ms(5000).tick_step_ms(1000);
-        t.join(ANN, "Ann");
-        t.advance_ms(29_000);
-        assert_eq!(t.mock().tokens_total(), 0, "looked at every 30 s of game time");
-        t.advance_ms(2000);
+        // The world grows: 1000 is passed, 2000 is not. It is looked at every 30 s of game time.
+        t.mock().set_world(|w| w.terraformation = 1500.0);
+        t.advance_ms(25_000);
+        assert_eq!(t.mock().tokens_total(), 0);
+        t.advance_ms(10_000);
         assert_eq!(t.mock().tokens_total(), 500);
         assert_eq!(t.mock().said(), ["World milestone: terraformation passed 1000! The colony receives 500 Terra tokens."]);
         t.advance_ms(300_000);
@@ -697,9 +722,8 @@ mod tests {
 
     #[test]
     fn a_new_milestone_in_the_setting_pays_but_one_already_paid_does_not_come_back() {
-        let world = WorldInfo { terraformation: 5000.0, ..WorldInfo::default() };
-        let mut t = Harness::<Quests>::start(MockHost::new().with_world(world).with_setting("world_milestones", "1000")).tick_every_ms(5000).tick_step_ms(1000);
-        t.join(ANN, "Ann");
+        let mut t = room(MockHost::new().with_setting("world_milestones", "1000"));
+        t.mock().set_world(|w| w.terraformation = 5000.0);
         t.advance_ms(35_000);
         assert_eq!(t.mock().tokens_total(), 500);
         t.mock().set_setting("world_milestones", "1000,3000,9000");
@@ -709,31 +733,37 @@ mod tests {
 
     #[test]
     fn givetokens_adds_tokens_for_operators_and_refuses_nonsense() {
-        let Room { mut t } = room(MockHost::new());
+        let mut t = room(MockHost::new());
+        t.command(ANN, "givetokens", &["5"]);
+        assert_eq!(told(&t, ANN), ["!givetokens is for the server's operators."]);
+        assert_eq!(t.mock().tokens_total(), 0);
         t.command(OP, "givetokens", &["250"]);
         assert_eq!(t.mock().tokens_total(), 250);
         assert_eq!(told(&t, OP), ["Added 250 Terra tokens."]);
         t.clear();
+        // The host refuses a wrong count of arguments; the plugin refuses a wrong value itself.
+        t.command(OP, "givetokens", &[]);
+        assert_eq!(told(&t, OP), ["Use: !givetokens"]);
+        t.clear();
+        t.mock().set_world(|w| w.command_prefix = "?".into());
         for bad in ["0", "-5", "10001", "abc", "", "99999999999999999999", "1.5"] {
             t.command(OP, "givetokens", &[bad]);
         }
-        t.command(OP, "givetokens", &[]);
         assert_eq!(t.mock().tokens_total(), 0);
-        assert!(told(&t, OP).iter().all(|s| s == "Use: !givetokens <number from 1 to 10000>"));
-        assert_eq!(told(&t, OP).len(), 8);
+        assert_eq!(told(&t, OP).len(), 7);
+        assert!(told(&t, OP).iter().all(|s| s == "Use: ?givetokens <number from 1 to 10000>"), "{:?}", told(&t, OP));
         t.command(OP, "givetokens", &["10000"]);
         assert_eq!(t.mock().tokens_total(), 10_000);
-        let denied = room(MockHost::new().deny(&["world.tokens"]));
-        let mut t = denied.t;
+        let mut t = room(MockHost::new().deny(&["world.tokens"]));
         t.command(OP, "givetokens", &["5"]);
         assert_eq!(told(&t, OP), ["This plugin may not change the tokens (world.tokens is not granted)."]);
     }
 
     #[test]
     fn rewards_shows_progress_and_the_next_milestones() {
-        let world = WorldInfo { terraformation: 4200.0, ..WorldInfo::default() };
-        let Room { mut t } = room(MockHost::new().with_world(world));
-        place(&mut t, 1, 7, ANN);
+        let mut t = room(MockHost::new());
+        t.mock().set_world(|w| w.terraformation = 4200.0);
+        build(&mut t, 7, ANN);
         t.advance_ms(65 * 60_000);
         t.clear();
         t.command(ANN, "rewards", &[]);
@@ -745,7 +775,7 @@ mod tests {
                 "World: terraformation 4200; the next milestone is 10000.",
             ]
         );
-        place(&mut t, 100, 200, ANN);
+        build(&mut t, 200, ANN);
         t.advance_ms(9 * 3_600_000);
         t.clear();
         t.command(ANN, "rewards", &[]);
@@ -755,54 +785,51 @@ mod tests {
     #[test]
     fn settings_change_the_reward() {
         let mock = MockHost::new().with_setting("item_group", "Cobalt").with_setting("item_count", "50").with_setting("token_amount", "0");
-        let Room { mut t } = room(mock);
-        place(&mut t, 1, 1, ANN);
+        let mut t = room(mock);
+        t.mock().set_inventory(ANN, InventoryInfo { slots_used: 0, slots_total: 60, items: vec![] });
+        build(&mut t, 1, ANN);
         assert_eq!(t.mock().given(), [(ANN, "Cobalt".to_string(), 50)]);
         assert_eq!(t.mock().tokens_total(), 0);
         assert_eq!(told(&t, ANN), ["Quest reward for your first building: +50 Cobalt."]);
         // Bad values fall back to the defaults or the nearest good value.
         let mock = MockHost::new().with_setting("item_count", "9999").with_setting("item_group", "  ").with_setting("token_amount", "-3");
-        let Room { mut t } = room(mock);
-        place(&mut t, 1, 1, ANN);
+        let mut t = room(mock);
+        t.mock().set_inventory(ANN, InventoryInfo { slots_used: 0, slots_total: 60, items: vec![] });
+        build(&mut t, 1, ANN);
         assert_eq!(t.mock().given(), [(ANN, "Iron".to_string(), 50)]);
         assert_eq!(t.mock().tokens_total(), 100);
     }
 
     #[test]
     fn without_the_capabilities_it_logs_once_and_tries_again_later() {
-        let Room { mut t } = room(MockHost::new().deny(&["player.give", "world.tokens"]));
-        place(&mut t, 1, 3, ANN);
+        let mut t = room(MockHost::new().deny(&["player.give", "world.tokens"]));
+        build(&mut t, 3, ANN);
         t.advance_ms(30_000);
         assert!(t.mock().given().is_empty());
         let warns = t.mock().logs().iter().filter(|(l, s)| *l == Level::Warn && s.contains("must be granted")).count();
         assert_eq!(warns, 2, "one line for items and one for tokens, not one for every try");
         assert!(told(&t, ANN).is_empty(), "no reward text for a reward not given");
-        // Denied chat and world reading do not panic either.
+        // Without world.read and chat.say nothing can be attributed or said; nothing panics.
         let mut t = Harness::<Quests>::start(MockHost::new().deny(&["chat.say", "world.read"])).tick_every_ms(5000).tick_step_ms(1000);
         t.join(ANN, "Ann");
-        place(&mut t, 1, 3, ANN);
+        build(&mut t, 3, ANN);
         t.advance_ms(60_000);
         t.command(ANN, "rewards", &[]);
         t.command(OP, "givetokens", &["5"]);
-        // Placements are attributed from the join event, so they still count; the backpack cannot be
-        // looked at, so the items are given anyway; nothing can be said.
-        assert_eq!(t.mock().given().len(), 1);
-        assert!(t.mock().told().is_empty());
+        assert!(t.mock().given().is_empty() && t.mock().told().is_empty());
     }
 
     #[test]
     fn hostile_input_and_floods_stay_bounded() {
-        let Room { mut t } = room(MockHost::new().with_setting("item_group", &"x".repeat(5000)));
-        // A flood of placements by one player, and by clients that are not there.
-        place(&mut t, 1, 3000, ANN);
-        place(&mut t, 5000, 3000, 999);
+        let mut t = room(MockHost::new().with_setting("item_group", &"x".repeat(5000)));
+        build(&mut t, 3000, ANN);
+        build(&mut t, 3000, 999);
         assert_eq!(t.mock().given().len(), 4);
         assert!(t.mock().given().iter().all(|g| g.1.chars().count() <= 60));
         // More players than the table holds, each for a moment.
         for i in 0..1200u64 {
             t.join_as(100 + i, "Visitor", 50_000 + i, "");
-            t.mock().set_inventory(100 + i, roomy());
-            t.place(10_000 + i as i32, "Wall", [0.0; 3], 100 + i);
+            build(&mut t, 1, 100 + i);
             t.leave(100 + i);
             t.advance_ms(1000);
         }
@@ -810,7 +837,7 @@ mod tests {
             t.advance_ms(5000);
         }
         assert!(t.plugin().players.len() <= MAX_PLAYERS, "{}", t.plugin().players.len());
-        t.command(ANN, "rewards", &["extra", "words"]);
+        t.command(ANN, "rewards", &[]);
         t.command(ANN, "REWARDS", &[&"z".repeat(100_000)]);
         for bytes in [&[][..], &[255, 255, 255, 255], &[1, 0, 0, 0, 9, 9], &[0, 0, 0, 0, 255, 255, 255, 255], &[2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]] {
             let t = Harness::<Quests>::start_with_state(MockHost::new(), STATE_VERSION, bytes);
@@ -827,9 +854,12 @@ mod tests {
 
     #[test]
     fn a_paused_world_gives_no_play_time() {
-        let still = WorldInfo { standing_still: true, ..WorldInfo::default() };
-        let Room { mut t } = room(MockHost::new().with_world(still));
+        let mut t = room(MockHost::new());
+        t.mock().set_world(|w| w.standing_still = true);
         t.advance_ms(2 * 3_600_000);
         assert!(t.mock().given().is_empty());
+        t.mock().set_world(|w| w.standing_still = false);
+        t.advance_ms(3_600_000);
+        assert_eq!(t.mock().given().len(), 2);
     }
 }

@@ -171,7 +171,12 @@ for anything but the log lines the server already prints, an environment variabl
 - The bank prepares the plugins (reads, validates, compiles) while it loads its tables and
   before it says HELLO, so a hot update spends its time in the world's stop only on starting
   them, not on compiling them.
-- Inside `plugins/`: `net.rs` (a plugin's outbound HTTP: the allow list, the address checks, the
+- Inside `plugins/` (ABI 1.3): `history.rs` (a plugin's last log lines, faults and cost by kind of event),
+  `scenario.rs` (the stand-in world and the scenario runner behind `pcds plugin test`: the same `Host`, a made-up
+  `World`/`Sink`), `pack.rs` (the `.pcdsplugin` package and the index file), `check.rs` (`pcds plugin check`), `abi13_tests.rs`,
+  `fuzz_tests.rs`, `production_tests.rs` and `cookbook_tests.rs` (the host against hostile modules, generated ones, a
+  hundred reloads, and the example plugins in the real game); `cli/plugin_dev.rs` holds the commands around a
+  plugin's files and life (`test`, `logs`, `stats`, `watch`, `pack`, `search`, `install SOURCE`). `net.rs` (a plugin's outbound HTTP: the allow list, the address checks, the
   worker threads; answers come back as `http_done` events through `plugins::poll`), `config.rs` (the
   values the admin sets for a plugin), `sign.rs` (signatures and the keys the admin trusts) and
   `approvals::standing` (what an approval, a signature and the keys make of a plugin). `tokens.rs`

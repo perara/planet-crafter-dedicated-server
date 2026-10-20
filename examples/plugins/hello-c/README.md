@@ -36,8 +36,7 @@ Capabilities it asks for:
 No settings. Budget: `fuel_per_event = 100000`.
 
 Cost, from `pcds plugin check` and `pcds plugin test`: a tick or a join about 1,000 fuel; a command about
-1,300 to 2,100 fuel. The first call after a start, a reload or a hot update costs about 22,000 fuel more:
-the host translates each function the first time it runs (this is true of every plugin).
+1,300 to 2,100 fuel.
 
 ## Exact behaviour, for tests
 

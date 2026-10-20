@@ -54,15 +54,15 @@ loads them, and checks the board and the next save.
 - Dropping the least player needs a look at all of them, so it is done at most 3 times per tick.
 - `fuel_per_event = 1500000`. With a full board of 2000 players whose names all start the same, a name
   search costs about 1.1 million fuel; the same on a board of 200 costs a tenth of it.
-  `pcds plugin check` prints 135733 for a tick (the first call after a start costs 100000 more than the
-  later ones), 5541 for a join, 4979 for a leave, 16220 and 81391 for the two commands. In a scenario
-  with a full 2000 board a tick with a newcomer costs 290000 at most and `!top 10` 225000.
+  `pcds plugin check` prints 102446 for a tick, 5715 for a join, 5153 for a leave, 61075 for `!top` and
+  9358 for `!playtime`. In a scenario with a full 2000 board a tick with a newcomer costs 294000 at most
+  and `!playtime` with a name 1.1 million at most.
 - `save` of a full board writes about 70 KB.
 
 ## Build and test
 
 ```bash
-cargo test                                                    # 13 tests with pcds_plugin_api::testing
+cargo test                                                    # 14 tests with pcds_plugin_api::testing
 cargo clippy --all-targets -- -D warnings
 cargo build --target wasm32-unknown-unknown --release
 cp target/wasm32-unknown-unknown/release/playtime_board.wasm plugin.wasm   # or ../../../scripts/build-plugin-examples
@@ -83,12 +83,11 @@ pcds plugin install . && pcds plugin enable playtime-board
 
 - The scenario format cannot start a plugin from old saved bytes, so the upgrade is tested in `cargo test`
   and not in `pcds plugin test`.
-- The clock is the tick's. Right after a start, before the first tick, "last seen" of a player who left
-  reads from the world (`!playtime` asks for it), but a leave before the first tick is stamped unknown.
+- "Last seen" is the time of the last tick before the player left, so up to 5 seconds early.
 - A player who joins and leaves between two ticks is not counted.
 - Names with a doubled space cannot be found by name (the chat collapses the spaces in what is typed).
 - Capitals are ignored for the letters A to Z only; other letters must match exactly.
-- The chat command prefix is not known to a plugin: the text `Use: !top ...` assumes `!`.
+- The usage line `Use: !top [number from 1 to 10]` uses the chat command prefix of the world (`WorldInfo::command_prefix`).
 
 ## Licence
 

@@ -54,18 +54,14 @@ impl Default for Settings {
 
 impl Settings {
     fn read(host: &dyn Host) -> Settings {
-        let mut s = Settings::default();
-        for (key, value) in host.settings().unwrap_or_default() {
-            match key.as_str() {
-                "style" => s.slack = value == "slack",
-                "flush_seconds" => s.flush_ms = value.parse::<u32>().unwrap_or(3).clamp(1, 60) * 1000,
-                "send_chat" => s.chat = value != "false",
-                "send_joins" => s.joins = value != "false",
-                "command_prefix" => s.prefix = value,
-                _ => {}
-            }
+        let d = Settings::default();
+        Settings {
+            slack: host.config("style").is_some_and(|v| v == "slack"),
+            flush_ms: host.config_i64("flush_seconds").map_or(d.flush_ms, |n| n.clamp(1, 60) as u32 * 1000),
+            chat: host.config_bool("send_chat").unwrap_or(d.chat),
+            joins: host.config_bool("send_joins").unwrap_or(d.joins),
+            prefix: host.config("command_prefix").unwrap_or(d.prefix),
         }
-        s
     }
 }
 
@@ -328,7 +324,7 @@ mod tests {
     }
 
     fn done(h: &mut Harness<Bridge>, ticket: u64, status: u32, error: &str, headers: Vec<(&str, &str)>) {
-        h.event(&Event::HttpDone { ticket, status, error, body: &[], headers });
+        h.http_done_with(ticket, status, error, &headers, &[]);
     }
 
     #[test]

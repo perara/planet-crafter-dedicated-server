@@ -97,7 +97,7 @@ know.
 
 | Kind | Name in the manifest | Needs | Fields, in order |
 |---|---|---|---|
-| 1 | `tick` | `event.tick` | `game_ms: i64`, `tick: i32`, `players: u32`, `since_ms: u32` (game time since this plugin's last tick), `unix_ms: i64` (ABI 1.3: the wall clock) |
+| 1 | `tick` | `event.tick` | `game_ms: i64`, `tick: i32`, `players: u32`, `since_ms: u32` (game time since this plugin's last tick; 0 at the first tick of an instance), `unix_ms: i64` (ABI 1.3: the wall clock) |
 | 2 | `player_join` | `event.player` | `client: u64`, `name: str`, `steam_id: str` (empty unless verified), `player_id: u64` (ABI 1.3) |
 | 3 | `player_leave` | `event.player` | `client: u64`, `name: str`, `player_id: u64` (ABI 1.3) |
 | 4 | `chat` | `event.chat` | `client: u64`, `name: str`, `text: str`, `player_id: u64` (ABI 1.3) |

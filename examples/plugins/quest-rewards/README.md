@@ -10,7 +10,7 @@ You get a reward the first time you reach each of these (the same reward each ti
 
 | Milestone | Counted as |
 |---|---|
-| your first building | a building you placed while online |
+| your first building | a building you built while online |
 | 10, 50 and 200 buildings placed | the same count |
 | 1 hour of play | game time online (nothing counts while the world stands still) |
 | 10 hours of play | the same count |
@@ -21,8 +21,14 @@ Terra tokens added to the world (default 100). When both have been given you are
 `Quest reward for your first building: ...`, then `50 buildings placed`, `200 buildings placed`,
 `1 hour of play`, `10 hours of play`.) With an item or token amount of 0 that part is left out of the text.
 
-If your backpack has no free slot the items wait (the tokens are not held back) and you are told
-nothing until they are given, at the first tick (5 seconds) after there is room.
+A building counts when the game has run your build request. Dropping an item on the floor, crafting or
+moving things does not count.
+
+The items are given only if they all fit: a slot holds one item, so 10 items need 10 free slots. With
+less room they wait (the tokens are not held back) and you are told once for each wait:
+`A quest reward is waiting: your backpack needs 10 free slots for +10 Iron. It is given when there is room.`
+The items come at the first tick (5 seconds) after there is room, and then you get the usual
+`Quest reward for ...` text.
 
 `!rewards` tells you three lines:
 
@@ -68,11 +74,13 @@ The scale of the terraformation number was not checked against the real game: ch
 
 ## Capabilities it asks for
 
-- `event.object`: `object_placed` says which connection placed a building (`client` 0, a machine or the server, is ignored).
-- `event.player`: joins and leaves keep the list of who is online, so a placement is attributed without
-  asking the world (asking costs fuel for every player online).
+- `event.rpc`: the manifest asks for `rpc_after` of `WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc`,
+  the request a client sends to build. The event's `client` is the builder; the arguments are not read.
+  It is heard after the request ran. (An earlier version counted `object_placed` and so also counted
+  a dropped item; `event.object` and `event.player` are not asked for any more.)
 - `event.tick`: play time, retrying rewards, the world check. `event.chat`: the two commands.
-- `world.read`: who is online, `standing_still`, the terraformation, the backpack (`inventory`).
+- `world.read`: who is online (`players`, and `player` for the one who built), `standing_still`, the
+  terraformation, the backpack (`inventory`).
 - `chat.say`: the texts. `player.give`: the items. `world.tokens`: the tokens.
 
 ## How the books are kept honest
@@ -82,8 +90,9 @@ The scale of the terraformation number was not checked against the real game: ch
   given, tokens given), one bit for each milestone. What is owed is worked out again from these at every
   tick, so there is no queue to lose: a call that returns `Full` (16 actions in a call, 10 gives or 2
   token changes in a second) just stops that tick's payments and is tried again at the next.
-- A `give` is asked of the backpack first (`inventory`): with no free slot the items wait instead of being
-  counted as given and then refused. A player that is gone (`NotFound`) is left alone.
+- A `give` is asked of the backpack first (`inventory`): the host puts in as many items as fit and drops
+  the rest, so the plugin gives only when `slots_total - slots_used >= item_count`; otherwise the items wait
+  (and the player is told once). Nothing is given in part. A player that is gone (`NotFound`) is left alone.
 - A capability that is not granted (`Denied`) is logged once a minute at most and not tried again for 60 seconds.
   A call the host will never take (`Bad`: a bad item name) is logged and counted as given, so it does not repeat.
 - **Known limit.** The host applies a `give` after the plugin has returned. If it refuses then (the
@@ -98,15 +107,16 @@ seconds played and the two masks, 24 bytes each. A newer state version is ignore
 
 ## Fuel
 
-`fuel_per_event = 800000`. `pcds plugin check` prints 158116 for a tick (the first call after a start),
-144949 and 12559 for the two commands and 20669 for a placed object. Measured in scenarios with 24
-players: a tick 315000 on average and 410000 at most (reading the players costs about 6000 for each),
-a placement 13000, `!rewards` 200000. With about 60 players online a tick would reach the budget.
+`fuel_per_event = 800000`. `pcds plugin check` prints 231177 for a tick, 97319 for `!rewards`, 21148 for
+`!givetokens` and 17773 for the build request. Measured in a scenario with 24
+players: a tick 311000 on average and 410000 at most (reading the players costs about 6000 for each),
+`!rewards` 92000. A build costs little: it asks the host for the one player (`Host::player`), not for all.
+With about 60 players online a tick would reach the budget.
 
 ## Build and test
 
 ```bash
-cargo test                                                    # 17 tests with pcds_plugin_api::testing
+cargo test                                                    # 19 tests with pcds_plugin_api::testing
 cargo clippy --all-targets -- -D warnings
 cargo build --target wasm32-unknown-unknown --release
 cp target/wasm32-unknown-unknown/release/quest_rewards.wasm plugin.wasm   # or ../../../scripts/build-plugin-examples
@@ -115,25 +125,33 @@ pcds plugin test .                                            # scenarios/milest
 pcds plugin install . && pcds plugin enable quest-rewards
 ```
 
-A note on scenarios: `pcds plugin test` runs game time as fast as it can, but the host's rate limits count
-real time. `milestones.toml` has a `reload` step before the hour of play for that reason: a fresh instance
-starts the count of token changes again.
+Notes on scenarios:
+
+- The scenario runner can send an RPC only as `rpc_before`, and this plugin hears `rpc_after`. So the
+  building milestones (first, 10, 50, 200) are tested only by the unit tests (`Harness::rpc_after`); the
+  scenarios cover the rest: the world milestone, a hot update, play time, `!rewards`, `!givetokens`, and
+  a backpack without room. `milestones.toml` has a step that shows that a build request that has not run
+  yet (`rpc_before`) pays nothing.
+- The host's limit of 2 token changes a second counts real time, and a scenario runs game time much
+  faster. `milestones.toml` has a `flip` step before the hour of play partly for that reason: a fresh
+  instance starts the count again.
+- An hour is `3605s` in `backpack.toml`: the first tick of a scenario comes at 50 ms and the others every 5 s.
 
 ## What it teaches
 
 - What `Error::Full` means and how to survive it without a queue: make payments a function of counters and masks.
 - `give` and `tokens` are queued and may fail later; say what you promise.
-- Check the backpack with `inventory` before a `give`.
+- Check the backpack with `inventory` before a `give`, and give all or nothing.
 - Settings of three kinds (a string, bounded ints, a list in a string) read with `Host::settings`.
 - Commands with `permission = "operator"` and `min_args`/`max_args`.
 
 ## Limits and known gaps
 
 - One reward for every personal milestone; there is no table of different rewards for different milestones.
-- Buildings count when placed. A player who places and deconstructs the same building 200 times gets the 200 reward.
+- A build request that ran counts, whatever it built. A player who builds and deconstructs the same thing 200 times gets the 200 reward.
 - A reward is counted for the player online when the milestone is reached. If their `give` is refused at apply time it is lost.
 - The `world_milestones` default is a guess at the scale of the terraformation number.
-- The chat command prefix is not known to a plugin: the text `Use: !givetokens ...` assumes `!`.
+- The usage line `Use: !givetokens ...` uses the chat command prefix of the world (`WorldInfo::command_prefix`).
 
 ## Licence
 

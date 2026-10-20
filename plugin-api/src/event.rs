@@ -99,7 +99,7 @@ impl Kind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event<'a> {
     /// Every `tick_every_ms` of game time the plugin asked for (never while the world stands
-    /// still). `since_ms`: game time since this plugin's last tick. `unix_ms` (ABI 1.3): the
+    /// still). `since_ms`: game time since this plugin's last tick (0 for the first tick of an instance: after a start, a reload or a hot update). `unix_ms` (ABI 1.3): the
     /// wall clock, Unix milliseconds: the only clock a plugin has besides the game's.
     Tick {
         /// Game time in milliseconds.

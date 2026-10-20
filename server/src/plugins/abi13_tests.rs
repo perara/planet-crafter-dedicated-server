@@ -13,10 +13,10 @@ use super::*;
 
 /// A world with some players, a backpack, some objects, and a clock, that records what was applied.
 #[derive(Default)]
-struct Stage {
-    applied: Vec<(String, Action)>,
-    objects: u32,
-    operators: Vec<u64>,
+pub(super) struct Stage {
+    pub(super) applied: Vec<(String, Action)>,
+    pub(super) objects: u32,
+    pub(super) operators: Vec<u64>,
 }
 
 impl World for Stage {
@@ -455,4 +455,50 @@ fn the_ring_of_a_plugins_log_is_bounded_and_the_listing_has_the_cost_by_event() 
     assert_eq!(by["event"], "rpc_before");
     assert_eq!(by["calls"], 500);
     assert!(by["averageFuel"].as_u64().unwrap() > 0 && by["maxFuel"].as_u64().unwrap() >= by["averageFuel"].as_u64().unwrap());
+}
+
+/// A world whose view panics when a plugin asks for the players.
+struct Broken(Stage);
+
+impl World for Broken {
+    fn info(&self) -> WorldInfo {
+        self.0.info()
+    }
+    fn players(&self) -> Vec<PlayerInfo> {
+        panic!("a bug in the world's view")
+    }
+    fn rules(&self) -> String {
+        "{}".into()
+    }
+}
+
+impl Sink for Broken {
+    fn apply(&mut self, plugin: &str, queued: Vec<Action>) -> Applied {
+        self.0.apply(plugin, queued)
+    }
+    fn command_prefix(&self) -> String {
+        "!".into()
+    }
+}
+
+#[test]
+fn a_panic_in_the_hosts_own_code_while_it_serves_a_plugin_is_that_plugins_fault_and_the_game_goes_on() {
+    let dir = fresh_dir("host-panic");
+    let ask_players = "(drop (call $query (i32.const 2) (i32.const 0) (i32.const 0) (i32.const 1024) (i32.const 512))) (i32.const 0)";
+    install(&dir, "asker", &module13(ask_players, "", ""), &ALL, RPC, None);
+    install(&dir, "zgood", &module13("(i32.const 0)", "", ""), &ALL, RPC, None);
+    let mut host = super::tests::boot(&dir);
+    let mut broken = Broken(Stage::default());
+    let verdict = host.run(&mut broken, &rpc(), 61_000);
+    assert_eq!(verdict, Verdict::Continue);
+    let p = &host.plugins[0];
+    assert_eq!((p.stats.faults, p.stats.restarts), (1, 1), "{:?}", p.stats.last_error);
+    assert!(p.stats.last_error.as_deref().unwrap().contains("a bug in the world's view") && p.stats.last_error.as_deref().unwrap().contains("restarted"));
+    assert!(p.running(), "restarted, not stopped");
+    // The other plugin was called in the same round, and the host asks nothing more of a broken plugin than five faults.
+    assert_eq!(host.plugins[1].stats.calls, 1);
+    for _ in 0..4 {
+        host.run(&mut broken, &rpc(), 61_000);
+    }
+    assert!(!host.plugins[0].running() && matches!(&host.plugins[0].status, Status::Failed(why) if why.contains("switched off after 5 faults")));
 }

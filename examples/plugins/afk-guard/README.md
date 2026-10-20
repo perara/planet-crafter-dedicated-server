@@ -61,11 +61,11 @@ strikes; when full, the player with the oldest strike is dropped. This is a cons
 - `chat.say`: warnings and replies.
 - `player.kick`: the kicks.
 
-Budget: `fuel_per_event = 800000`. A tick costs about 90000 fuel plus 6000 for each player online
-(`pcds plugin test` with 24 players: 228000 on average, 366000 at most, while it kicks 24 players).
-`pcds plugin check` prints 145758 for its first tick (the first call after a start costs
-100000 to 150000 more than the later ones), 9087 for a join, 5632 for a leave, 91514 and 73687
-for the two commands and 23032 for a destroyed object.
+Budget: `fuel_per_event = 800000`. A tick costs about 80000 fuel plus 5000 for each player online
+(`pcds plugin test` with 24 players: 206000 on average, 334000 at most, while it kicks 24 players).
+`pcds plugin check` prints 145311 for a tick, 6588 for a join, 6010 for a leave, 103330 for `!guard`,
+103453 for `!pardon` and 12109 for a destroyed object. A destroyed object asks the host for the one
+player (`Host::player`), not for all of them; only a strike asks for all, to find the operators.
 
 ## How it works, and how it keeps its promises honest
 
@@ -89,7 +89,7 @@ for the two commands and 23032 for a destroyed object.
 ## Build and test
 
 ```bash
-cargo test                                                    # 18 tests with pcds_plugin_api::testing
+cargo test                                                    # 19 tests with pcds_plugin_api::testing
 cargo clippy --all-targets -- -D warnings
 cargo build --target wasm32-unknown-unknown --release
 cp target/wasm32-unknown-unknown/release/afk_guard.wasm plugin.wasm   # or ../../../scripts/build-plugin-examples
@@ -113,7 +113,7 @@ pcds plugin install . && pcds plugin enable afk-guard
 - A player in a vehicle that is moving by itself is not idle.
 - Tidying one's own base can take apart more than 25 objects in a minute. With `grief_action = "warn"` that costs a message and a strike that expires; raise `destroy_limit` if it is noisy.
 - It cannot tell a legitimate deconstruction from a grief; it only counts.
-- The chat command prefix is not known to a plugin, so the texts say `!pardon`; a server with another prefix shows the wrong one in the text it makes itself (the host's own `Use:` line is right).
+- The usage line the plugin writes itself (`Use: !pardon <player name>`, only seen if the host did not check the arguments) uses the chat command prefix of the world (`WorldInfo::command_prefix`). The long texts in the table above do not name any command.
 
 ## Licence
 

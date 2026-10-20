@@ -66,8 +66,8 @@ CRON_TZ=UTC
 | `world.read` | the wall clock (`WorldInfo::unix_ms`): a module has none of its own |
 | `chat.say` | to say the warnings and to answer `!restart` |
 
-Budget: `fuel_per_event = 200000`. A warning costs about 12,000 fuel; the first call after a start
-or a hot update costs up to about 80,000 more (the host translates the code on first use).
+Budget: `fuel_per_event = 150000`. Measured: a warning or a resync costs about 16,000 fuel (at most about 68,000
+when it sets several timers again), `!restart` 8,000 to 35,000, a save or an update 4,000 to 12,000.
 
 ### Settings
 
@@ -90,8 +90,10 @@ restart" use `pcds plugin config unset restart-notice restart_at`.
   `The server was updated to version X without a restart.`, `Next restart in H hours M minutes (at HH:MM UTC).`
   All with `say` (to everyone) except the answer to `!restart`, which is a `tell`.
 - Timer ids: 1 to 9 for the warnings (in the order of the list, largest first) and the restart itself (the
-  last of them), 20 for the five-minute resync, 21 for the boot timer.
-- A warning that arrives more than 90 seconds after its time is not said (it is logged at debug level).
+  last of them), 20 for the five-minute resync. They are set in `load`.
+- A warning that arrives more than 90 seconds after its time is not said (it is logged at debug level). A warning
+  that arrives more than 90 seconds *early* (the wall clock was set back) is not said either: the timer is set again
+  for the real time.
 - The plugin keeps no state.
 
 ## How it works, and what it teaches
@@ -102,22 +104,21 @@ restart" use `pcds plugin config unset restart-notice restart_at`.
    So there is nothing to save: the plugin works the schedule out from the settings and the wall clock
    every time it starts. A reload in the middle of the 15-minute window neither moves a warning nor says
    one twice.
-3. **The world cannot be read inside `load`.** The host lets a plugin ask the world only while it handles
-   an event. So `load` reads the settings (they need no capability) and sets a one-shot timer of 1 ms, the
-   "boot" timer. In the call it brings, the plugin reads the clock and sets the real timers. Any other
-   event that comes first does the same. (`testing::MockHost` does answer a query inside `load`; the real host
-   does not, so the tests here call the boot timer by hand and one test checks that `load` asks nothing.)
-4. **Timers count game time, the wall clock does not.** A world that stands still when it is empty
-   (`world.pauseWhenEmpty`) does not count game time, so a timer set for 03:45 goes off late. Every
-   five minutes a repeating timer sets the others again from the wall clock, and a warning that has
-   become more than 90 seconds old is dropped instead of telling a time that is not true any more.
-   Tomorrow's warning is set at once.
+3. **`load` can read the world and set timers.** The plugin reads the settings and the clock in `load` and sets
+   all its timers there. A timer set in `load` starts counting at the first call after it (within a game tick
+   or two).
+4. **Timers count game time, the wall clock is real time.** A world that stands still (empty and paused, see
+   `world.pauseWhenEmpty`) delivers no timers, so the warnings of that time arrive late when it moves again.
+   A late warning is dropped, not said: a warning more than 90 seconds off its time (late, or early after the clock
+   was set back) would tell a time that is not true. The next scheduled one is still given. Every five minutes a
+   repeating timer sets the others again from the wall clock, so that a long stand-still does not shift
+   tomorrow's warnings.
 5. **The wall clock can be set back** (a time sync). A timer that goes off more than 90 seconds before its
    time is set again for the real time and says nothing.
 6. **Settings** are typed in the manifest (`[[config]]` with a type, a default and a length), checked by
    the host before they are stored, and read with `Host::config`. A non-secret string must say
    `secret = false`, since a string is a secret by default. The mock does not know the manifest's
-   defaults, so the code knows them too.
+   defaults, so the code knows them too (`Host::config_bool` returns `None` for a key with neither).
 7. **A flood is bounded.** Saves and failed saves are said at most once in 30 seconds of game time each,
    so a broken disk does not fill the chat; the version in the update line is cut and cleaned.
 
@@ -125,7 +126,7 @@ restart" use `pcds plugin config unset restart-notice restart_at`.
 
 ```bash
 cd examples/plugins/restart-notice
-cargo test                                           # 18 tests with the mock server, no game
+cargo test                                           # 19 tests with the mock server, no game
 cargo clippy --all-targets -- -D warnings
 cargo build --target wasm32-unknown-unknown --release
 cp target/wasm32-unknown-unknown/release/restart_notice.wasm plugin.wasm   # or scripts/build-plugin-examples

@@ -1,6 +1,6 @@
 # make build | check | scenario | package | install       (needs clang with the wasm32 target and wasm-ld)
 build:
-	clang --target=wasm32 -nostdlib -O2 -Wall -Wl,--no-entry -o plugin.wasm plugin.c
+	clang --target=wasm32 -nostdlib -O2 -Wall -Wextra -Wl,--no-entry -o plugin.wasm plugin.c
 
 check: build
 	pcds plugin check .

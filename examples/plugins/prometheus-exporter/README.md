@@ -64,6 +64,8 @@ actions, vetoes, fuel, averageMicros, maxMicros, lastFaultAt, http{requests, ans
 inFlight}}}`, `runtime{instances,memoryPages}`, `stream.consumers`. The two requests are made when Prometheus
 scrapes, at most once a second however many scrape, 3 seconds each at most (keep `scrape_timeout` at 10 s).
 
+Speed: rendering a bundle of 10,000 events with status and plugins takes about 8 ms (best of three, in the self-test, which fails over 50 ms); the live `/metrics` only formats counters it already holds, plus the two admin requests, which are cached for a second.
+
 ## What it exports
 
 Counters end in `_total`. Label values are few: `plugin` (at most 64), `status` (8), `unit` (about 10), `kind`

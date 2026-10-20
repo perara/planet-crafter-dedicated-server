@@ -160,122 +160,154 @@ fn text(c: &mut Caller<'_, Inner>, ptr: u32, len: u32, max: usize) -> Result<Str
     Ok(String::from_utf8_lossy(slice(mem, ptr, len)?).into_owned())
 }
 
+/// Runs the body of a host function so that a panic in the host's own code becomes a trap of the call. A panic must not cross out of
+/// a host function: the interpreter calls it through a frame that cannot unwind, and the process would end. As a trap it is the
+/// plugin's fault (counted, the plugin restarted) and the game goes on.
+fn guarded<T>(body: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).unwrap_or_else(|panic| {
+        let what = panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+        Err(trap(&format!("the server panicked while it served this plugin ({what}): the plugin is restarted")))
+    })
+}
+
 fn linker(engine: &Engine) -> Result<Linker<Inner>, String> {
     let mut l = <Linker<Inner>>::new(engine);
     let e = |e: wasmi::errors::LinkerError| e.to_string();
     l.func_wrap("pcds", "log", |mut c: Caller<'_, Inner>, level: i32, ptr: u32, len: u32| -> Result<(), Error> {
-        let level = match level {
-            0 => Level::Error,
-            1 => Level::Warn,
-            3 => Level::Debug,
-            _ => Level::Info,
-        };
-        // A log line is cut to LOG_LINE_CHARS characters: more bytes than that are never looked at.
-        let line = text(&mut c, ptr, len, limits::LOG_LINE_CHARS * 4)?;
-        c.data_mut().ctx.log(level, &line);
-        Ok(())
+        guarded(|| {
+            let level = match level {
+                0 => Level::Error,
+                1 => Level::Warn,
+                3 => Level::Debug,
+                _ => Level::Info,
+            };
+            // A log line is cut to LOG_LINE_CHARS characters: more bytes than that are never looked at.
+            let line = text(&mut c, ptr, len, limits::LOG_LINE_CHARS * 4)?;
+            c.data_mut().ctx.log(level, &line);
+            Ok(())
+        })
     })
     .map_err(e)?;
     l.func_wrap("pcds", "query", |mut c: Caller<'_, Inner>, kind: u32, arg: u32, arg_len: u32, out: u32, cap: u32| -> Result<i32, Error> {
-        charge(&mut c, limits::HOST_CALL_FUEL)?;
-        // The argument (ABI 1.3): a few bytes at most, copied before anything else is looked at.
-        let argument = if arg_len == 0 {
-            Vec::new()
-        } else if arg_len as usize > limits::MAX_QUERY_ARG {
-            c.data_mut().ctx.refused += 1;
-            return Ok(pcds_plugin_api::host::E_BAD);
-        } else {
-            let (mem, _) = split(&mut c)?;
-            slice(mem, arg, arg_len)?.to_vec()
-        };
-        let (mem, inner) = split(&mut c)?;
-        // The answer is built once for a call (the world stands still during it): asking again costs the copy.
-        let (answer_len, n) = match inner.ctx.query(kind, &argument) {
-            Ok(a) => {
-                let n = a.len().min(cap as usize);
-                let end = (out as usize).checked_add(n).filter(|e| *e <= mem.len()).ok_or_else(|| trap("the module gave the host a buffer outside its memory"))?;
-                mem[out as usize..end].copy_from_slice(&a[..n]);
-                (a.len() as i32, n)
-            }
-            Err(code) => return Ok(code),
-        };
-        let extra = std::mem::take(&mut inner.ctx.extra_fuel);
-        // The copy, and the work the query itself did (the scan of Q_NEARBY): the plugin's to pay.
-        charge(&mut c, n as u64 * limits::FUEL_PER_BYTE + extra)?;
-        Ok(answer_len)
+        guarded(|| {
+            charge(&mut c, limits::HOST_CALL_FUEL)?;
+            // The argument (ABI 1.3): a few bytes at most, copied before anything else is looked at.
+            let argument = if arg_len == 0 {
+                Vec::new()
+            } else if arg_len as usize > limits::MAX_QUERY_ARG {
+                c.data_mut().ctx.refused += 1;
+                return Ok(pcds_plugin_api::host::E_BAD);
+            } else {
+                let (mem, _) = split(&mut c)?;
+                slice(mem, arg, arg_len)?.to_vec()
+            };
+            let (mem, inner) = split(&mut c)?;
+            // The answer is built once for a call (the world stands still during it): asking again costs the copy.
+            let (answer_len, n) = match inner.ctx.query(kind, &argument) {
+                Ok(a) => {
+                    let n = a.len().min(cap as usize);
+                    let end = (out as usize).checked_add(n).filter(|e| *e <= mem.len()).ok_or_else(|| trap("the module gave the host a buffer outside its memory"))?;
+                    mem[out as usize..end].copy_from_slice(&a[..n]);
+                    (a.len() as i32, n)
+                }
+                Err(code) => return Ok(code),
+            };
+            let extra = std::mem::take(&mut inner.ctx.extra_fuel);
+            // The copy, and the work the query itself did (the scan of Q_NEARBY): the plugin's to pay.
+            charge(&mut c, n as u64 * limits::FUEL_PER_BYTE + extra)?;
+            Ok(answer_len)
+        })
     })
     .map_err(e)?;
     l.func_wrap("pcds", "say", |mut c: Caller<'_, Inner>, ptr: u32, len: u32| -> Result<i32, Error> {
-        let t = text(&mut c, ptr, len, limits::MAX_TEXT_BYTES)?;
-        Ok(c.data_mut().ctx.say(&t))
+        guarded(|| {
+            let t = text(&mut c, ptr, len, limits::MAX_TEXT_BYTES)?;
+            Ok(c.data_mut().ctx.say(&t))
+        })
     })
     .map_err(e)?;
     l.func_wrap("pcds", "tell", |mut c: Caller<'_, Inner>, client: u64, ptr: u32, len: u32| -> Result<i32, Error> {
-        let t = text(&mut c, ptr, len, limits::MAX_TEXT_BYTES)?;
-        Ok(c.data_mut().ctx.tell(client, &t))
+        guarded(|| {
+            let t = text(&mut c, ptr, len, limits::MAX_TEXT_BYTES)?;
+            Ok(c.data_mut().ctx.tell(client, &t))
+        })
     })
     .map_err(e)?;
     l.func_wrap("pcds", "kick", |mut c: Caller<'_, Inner>, client: u64, ptr: u32, len: u32| -> Result<i32, Error> {
-        let t = text(&mut c, ptr, len, limits::MAX_TEXT_BYTES)?;
-        Ok(c.data_mut().ctx.kick(client, &t))
+        guarded(|| {
+            let t = text(&mut c, ptr, len, limits::MAX_TEXT_BYTES)?;
+            Ok(c.data_mut().ctx.kick(client, &t))
+        })
     })
     .map_err(e)?;
-    l.func_wrap("pcds", "teleport", |mut c: Caller<'_, Inner>, client: u64, x: f32, y: f32, z: f32| -> i32 { c.data_mut().ctx.teleport(client, [x, y, z]) }).map_err(e)?;
+    l.func_wrap("pcds", "teleport", |mut c: Caller<'_, Inner>, client: u64, x: f32, y: f32, z: f32| -> Result<i32, Error> { guarded(|| Ok(c.data_mut().ctx.teleport(client, [x, y, z]))) }).map_err(e)?;
     l.func_wrap("pcds", "rules_patch", |mut c: Caller<'_, Inner>, ptr: u32, len: u32| -> Result<i32, Error> {
-        if len as usize > limits::MAX_PATCH_BYTES {
-            c.data_mut().ctx.refused += 1;
-            return Ok(pcds_plugin_api::host::E_BAD);
-        }
-        // Parsed as JSON before anything else is looked at: a fuel for each byte copied and more for the parse.
-        charge(&mut c, len as u64 * limits::FUEL_PER_PARSED_BYTE)?;
-        let t = text(&mut c, ptr, len, limits::MAX_PATCH_BYTES)?;
-        Ok(c.data_mut().ctx.rules_patch(&t))
+        guarded(|| {
+            if len as usize > limits::MAX_PATCH_BYTES {
+                c.data_mut().ctx.refused += 1;
+                return Ok(pcds_plugin_api::host::E_BAD);
+            }
+            // Parsed as JSON before anything else is looked at: a fuel for each byte copied and more for the parse.
+            charge(&mut c, len as u64 * limits::FUEL_PER_PARSED_BYTE)?;
+            let t = text(&mut c, ptr, len, limits::MAX_PATCH_BYTES)?;
+            Ok(c.data_mut().ctx.rules_patch(&t))
+        })
     })
     .map_err(e)?;
     // ABI 1.3.
     l.func_wrap("pcds", "give", |mut c: Caller<'_, Inner>, client: u64, ptr: u32, len: u32, count: u32| -> Result<i32, Error> {
-        let t = text(&mut c, ptr, len, limits::MAX_ITEM_NAME_BYTES)?;
-        // A name cut at the limit would name another item: too long is refused.
-        if len as usize > limits::MAX_ITEM_NAME_BYTES {
-            c.data_mut().ctx.refused += 1;
-            return Ok(pcds_plugin_api::host::E_BAD);
-        }
-        Ok(c.data_mut().ctx.give(client, &t, count))
+        guarded(|| {
+            let t = text(&mut c, ptr, len, limits::MAX_ITEM_NAME_BYTES)?;
+            // A name cut at the limit would name another item: too long is refused.
+            if len as usize > limits::MAX_ITEM_NAME_BYTES {
+                c.data_mut().ctx.refused += 1;
+                return Ok(pcds_plugin_api::host::E_BAD);
+            }
+            Ok(c.data_mut().ctx.give(client, &t, count))
+        })
     })
     .map_err(e)?;
     l.func_wrap("pcds", "tokens", |mut c: Caller<'_, Inner>, amount: i32| -> Result<i32, Error> {
-        charge(&mut c, limits::HOST_CALL_FUEL)?;
-        Ok(c.data_mut().ctx.tokens(amount))
+        guarded(|| {
+            charge(&mut c, limits::HOST_CALL_FUEL)?;
+            Ok(c.data_mut().ctx.tokens(amount))
+        })
     })
     .map_err(e)?;
     l.func_wrap("pcds", "timer_set", |mut c: Caller<'_, Inner>, id: u32, delay: u32, repeat: u32| -> Result<i32, Error> {
-        charge(&mut c, limits::HOST_CALL_FUEL)?;
-        Ok(c.data_mut().ctx.timer_set(id, delay, repeat))
+        guarded(|| {
+            charge(&mut c, limits::HOST_CALL_FUEL)?;
+            Ok(c.data_mut().ctx.timer_set(id, delay, repeat))
+        })
     })
     .map_err(e)?;
     l.func_wrap("pcds", "timer_cancel", |mut c: Caller<'_, Inner>, id: u32| -> Result<i32, Error> {
-        charge(&mut c, limits::HOST_CALL_FUEL)?;
-        Ok(c.data_mut().ctx.timer_cancel(id))
+        guarded(|| {
+            charge(&mut c, limits::HOST_CALL_FUEL)?;
+            Ok(c.data_mut().ctx.timer_cancel(id))
+        })
     })
     .map_err(e)?;
     // ABI 1.2. The request is a buffer of its own size limit (a body may be a megabyte): a length over
     // it is refused with a code, a range outside the memory traps as everywhere.
     l.func_wrap("pcds", "http_request", |mut c: Caller<'_, Inner>, ptr: u32, len: u32| -> Result<i64, Error> {
-        charge(&mut c, limits::HOST_CALL_FUEL)?;
-        let (mem, inner) = split(&mut c)?;
-        let end = (ptr as usize).checked_add(len as usize).filter(|e| *e <= mem.len()).ok_or_else(|| trap("the module gave the host a pointer outside its memory"))?;
-        if len as usize > limits::MAX_HTTP_REQUEST {
-            inner.ctx.refused += 1;
-            return Ok(pcds_plugin_api::host::E_BAD as i64);
-        }
-        // Nothing is copied for a plugin that may not make requests.
-        if let Some(code) = inner.ctx.http_refused() {
-            return Ok(code);
-        }
-        let bytes = mem[ptr as usize..end].to_vec();
-        // The copy, and the request taken apart, checked and copied again (a byte of URL, header or body costs the host more than a byte of text).
-        charge(&mut c, len as u64 * limits::FUEL_PER_PARSED_BYTE)?;
-        Ok(c.data_mut().ctx.http_request(&bytes))
+        guarded(|| {
+            charge(&mut c, limits::HOST_CALL_FUEL)?;
+            let (mem, inner) = split(&mut c)?;
+            let end = (ptr as usize).checked_add(len as usize).filter(|e| *e <= mem.len()).ok_or_else(|| trap("the module gave the host a pointer outside its memory"))?;
+            if len as usize > limits::MAX_HTTP_REQUEST {
+                inner.ctx.refused += 1;
+                return Ok(pcds_plugin_api::host::E_BAD as i64);
+            }
+            // Nothing is copied for a plugin that may not make requests.
+            if let Some(code) = inner.ctx.http_refused() {
+                return Ok(code);
+            }
+            let bytes = mem[ptr as usize..end].to_vec();
+            // The copy, and the request taken apart, checked and copied again (a byte of URL, header or body costs the host more than a byte of text).
+            charge(&mut c, len as u64 * limits::FUEL_PER_PARSED_BYTE)?;
+            Ok(c.data_mut().ctx.http_request(&bytes))
+        })
     })
     .map_err(e)?;
     Ok(l)

@@ -74,7 +74,7 @@ struct Settings {
 
 impl Settings {
     fn read(host: &dyn Host) -> Settings {
-        let int = |key: &str, default: i64, least: i64, most: i64| host.config(key).and_then(|v| v.trim().parse::<i64>().ok()).unwrap_or(default).clamp(least, most);
+        let int = |key: &str, default: i64, least: i64, most: i64| host.config_i64(key).unwrap_or(default).clamp(least, most);
         let min_radius = int("min_radius", 5, 1, 100) as u32;
         let max_radius = (int("max_radius", 50, 5, 200) as u32).max(min_radius);
         let default_radius = (int("default_radius", 20, 1, 200) as u32).clamp(min_radius, max_radius);
@@ -133,13 +133,11 @@ impl Claims {
         let _ = host.tell(client, text);
     }
 
-    /// The player asking, or `None` (and, if the server will not say who is online, an answer).
-    fn asker(&self, host: &dyn Host, client: u64) -> Option<(PlayerInfo, Vec<PlayerInfo>)> {
-        match host.players() {
-            Ok(all) => {
-                let me = all.iter().find(|p| p.client == client)?.clone();
-                Some((me, all))
-            }
+    /// The player asking, or `None`: they have left, or the server will not say (and then they are told).
+    fn asker(&self, host: &dyn Host, client: u64) -> Option<PlayerInfo> {
+        match host.player(client) {
+            Ok(me) => Some(me),
+            Err(Error::NotFound) => None,
             Err(_) => {
                 self.tell(host, client, "I cannot see who is online right now, ask an admin.");
                 None
@@ -162,7 +160,7 @@ impl Claims {
     // ---- The commands.
 
     fn claim(&mut self, host: &dyn Host, client: u64, args: &[&str]) {
-        let Some((me, _)) = self.asker(host, client) else { return };
+        let Some(me) = self.asker(host, client) else { return };
         self.refresh_name(&me);
         let s = self.settings;
         let radius = match args.first() {
@@ -196,7 +194,7 @@ impl Claims {
     }
 
     fn unclaim(&mut self, host: &dyn Host, client: u64) {
-        let Some((me, _)) = self.asker(host, client) else { return };
+        let Some(me) = self.asker(host, client) else { return };
         self.refresh_name(&me);
         // The claim whose centre is nearest among those that hold the player: they may overlap one's own.
         let inside = |c: &&Claim| c.contains(me.position);
@@ -213,7 +211,8 @@ impl Claims {
     }
 
     fn trust(&mut self, host: &dyn Host, client: u64, args: &[&str]) {
-        let Some((me, all)) = self.asker(host, client) else { return };
+        let Some(me) = self.asker(host, client) else { return };
+        let Ok(all) = host.players() else { return self.tell(host, client, "I cannot see who is online right now, ask an admin.") };
         self.refresh_name(&me);
         let Some(wanted) = typed_name(args) else { return self.tell(host, client, "Use: !trust <player name>") };
         if self.mine(me.player_id).next().is_none() {
@@ -252,7 +251,7 @@ impl Claims {
     }
 
     fn untrust(&mut self, host: &dyn Host, client: u64, args: &[&str]) {
-        let Some((me, _)) = self.asker(host, client) else { return };
+        let Some(me) = self.asker(host, client) else { return };
         self.refresh_name(&me);
         let Some(wanted) = typed_name(args) else { return self.tell(host, client, "Use: !untrust <player name>") };
         let lower = wanted.to_lowercase();
@@ -275,7 +274,7 @@ impl Claims {
     }
 
     fn list(&mut self, host: &dyn Host, client: u64) {
-        let Some((me, _)) = self.asker(host, client) else { return };
+        let Some(me) = self.asker(host, client) else { return };
         self.refresh_name(&me);
         let mine: Vec<&Claim> = self.mine(me.player_id).collect();
         if mine.is_empty() {
@@ -327,10 +326,9 @@ impl Claims {
             _ => return Verdict::Continue,
         };
         let Some(claim) = self.claims.iter().find(|c| c.contains(position)) else { return Verdict::Continue };
-        // Who is it? Only now, in a claim, is the roster worth asking for.
-        let Ok(all) = host.players() else { return Verdict::Continue };
-        let Some(who) = all.iter().find(|p| p.client == client) else { return Verdict::Continue };
-        if claim.lets_in(who) {
+        // Who is it? Only now, in a claim, is the player worth asking for (one player, not the roster).
+        let Ok(who) = host.player(client) else { return Verdict::Continue };
+        if claim.lets_in(&who) {
             return Verdict::Continue;
         }
         let text = format!("This ground is claimed by {}. You cannot {doing} here.", claim.owner_name);
@@ -507,20 +505,28 @@ mod tests {
         for (c, n) in [(ANN, "Ann"), (BO, "Bo"), (CY, "Cy")] {
             mock.add_player(player(c, n, [0.0; 3], false));
         }
-        Harness::start(mock)
+        declared(Harness::start(mock))
     }
 
-    /// Moves a player (the mock keeps the rest).
-    fn go(t: &Harness<Claims>, client: u64, name: &str, position: [f32; 3]) {
-        t.mock().add_player(player(client, name, position, false));
+    /// The manifest's events and commands.
+    fn declared(mut t: Harness<Claims>) -> Harness<Claims> {
+        for (name, least, most) in [("claim", 0, 1), ("unclaim", 0, 0), ("trust", 1, 8), ("untrust", 1, 8), ("claims", 0, 0)] {
+            t.declare_command(name, least, most, false);
+        }
+        t.subscribe(&[Kind::RpcBefore])
+    }
+
+    /// Moves a player.
+    fn go(t: &Harness<Claims>, client: u64, position: [f32; 3]) {
+        t.mock().set_position(client, position);
     }
 
     fn last_told(t: &Harness<Claims>) -> String {
         t.mock().told().last().map(|(_, m)| m.clone()).unwrap_or_default()
     }
 
-    fn net_object(t: &Harness<Claims>, id: i32, net: u64, position: [f32; 3]) {
-        t.mock().add_object(ObjectInfo { id, net, group: "Container1".into(), position });
+    fn net_object(t: &mut Harness<Claims>, id: i32, net: u64, position: [f32; 3]) {
+        t.place_net(id, "Container1", position, net, 0);
     }
 
     const BUILD: &str = "[-12345,[1.5,2.0,-3.25],[0.0,0.5,0.0,1.0],true,false,true,false]";
@@ -534,11 +540,11 @@ mod tests {
     #[test]
     fn a_claim_is_made_around_the_player_and_listed() {
         let mut t = world();
-        go(&t, ANN, "Ann", [100.0, 5.0, -40.0]);
+        go(&t, ANN, [100.0, 5.0, -40.0]);
         t.command(ANN, "claim", &["30"]);
         assert_eq!(last_told(&t), "Claimed radius 30 around (100, 5, -40). Only you and the players you !trust can build or take apart here.");
         // No radius: the default of 20.
-        go(&t, ANN, "Ann", [500.0, 0.0, 0.0]);
+        go(&t, ANN, [500.0, 0.0, 0.0]);
         t.command(ANN, "claim", &[]);
         assert!(last_told(&t).starts_with("Claimed radius 20 around (500, 0, 0)."), "{}", last_told(&t));
         t.command(ANN, "claims", &[]);
@@ -562,9 +568,10 @@ mod tests {
                 assert_eq!(last_told(&t), "The radius must be from 5 to 50 metres.");
             }
         }
-        // More words than the manifest allows are not the plugin's problem: the first is the radius.
+        // More words than the manifest allows: the host answers, the plugin is not called.
         t.command(ANN, "claim", &["10", "20", "30"]);
-        assert!(last_told(&t).starts_with("Claimed radius 10"));
+        assert_eq!(last_told(&t), "Use: !claim");
+        assert!(t.plugin().claims.is_empty());
     }
 
     #[test]
@@ -590,22 +597,22 @@ mod tests {
     fn at_most_max_claims_and_not_over_somebody_elses() {
         let mut t = world();
         for (i, x) in [0.0, 1000.0, 2000.0].into_iter().enumerate() {
-            go(&t, ANN, "Ann", [x, 0.0, 0.0]);
+            go(&t, ANN, [x, 0.0, 0.0]);
             t.command(ANN, "claim", &["10"]);
             assert!(last_told(&t).starts_with("Claimed"), "claim {i}");
         }
-        go(&t, ANN, "Ann", [3000.0, 0.0, 0.0]);
+        go(&t, ANN, [3000.0, 0.0, 0.0]);
         t.command(ANN, "claim", &["10"]);
         assert_eq!(last_told(&t), "You have 3 claims, the most is 3. Stand in one and use !unclaim to give it up.");
         // Bo next to Ann's claim at x=0: radius 10 + 10 means the centres must be 20 metres apart or more.
-        go(&t, BO, "Bo", [19.9, 0.0, 0.0]);
+        go(&t, BO, [19.9, 0.0, 0.0]);
         t.command(BO, "claim", &["10"]);
         assert_eq!(last_told(&t), "That overlaps the claim of Ann. Move away from it or ask for a smaller radius.");
-        go(&t, BO, "Bo", [20.0, 0.0, 0.0]);
+        go(&t, BO, [20.0, 0.0, 0.0]);
         t.command(BO, "claim", &["10"]);
         assert!(last_told(&t).starts_with("Claimed radius 10"), "touching is not overlapping: {}", last_told(&t));
         // One's own claims may overlap.
-        go(&t, BO, "Bo", [25.0, 0.0, 0.0]);
+        go(&t, BO, [25.0, 0.0, 0.0]);
         t.command(BO, "claim", &["10"]);
         assert!(last_told(&t).starts_with("Claimed"), "{}", last_told(&t));
     }
@@ -627,7 +634,7 @@ mod tests {
         assert!(t.mock().told().is_empty() && t.plugin().claims.is_empty());
         // A position that is not a number.
         let mut t = world();
-        go(&t, ANN, "Ann", [f32::NAN, 0.0, 0.0]);
+        go(&t, ANN, [f32::NAN, 0.0, 0.0]);
         t.command(ANN, "claim", &["10"]);
         assert!(last_told(&t).starts_with("I cannot tell where you are"));
         assert!(t.plugin().claims.is_empty());
@@ -636,23 +643,24 @@ mod tests {
     #[test]
     fn unclaim_gives_up_the_claim_you_stand_in_if_it_is_yours() {
         let mut t = world();
-        go(&t, ANN, "Ann", [0.0, 0.0, 0.0]);
+        go(&t, ANN, [0.0, 0.0, 0.0]);
         t.command(ANN, "claim", &["10"]);
-        go(&t, ANN, "Ann", [3.0, 0.0, 0.0]);
+        go(&t, ANN, [3.0, 0.0, 0.0]);
         t.command(ANN, "claim", &["10"]);
         // Standing in both: the one whose centre is nearest goes.
         t.command(ANN, "unclaim", &[]);
         assert_eq!(last_told(&t), "Removed your claim at (3, 0, 0), radius 10.");
         assert_eq!(t.plugin().claims.len(), 1);
-        go(&t, ANN, "Ann", [500.0, 0.0, 0.0]);
+        go(&t, ANN, [500.0, 0.0, 0.0]);
         t.command(ANN, "unclaim", &[]);
         assert_eq!(last_told(&t), "You are not standing in a claim.");
         // Somebody else's: refused, unless you are an operator.
-        go(&t, BO, "Bo", [1.0, 0.0, 0.0]);
+        go(&t, BO, [1.0, 0.0, 0.0]);
         t.command(BO, "unclaim", &[]);
         assert_eq!(last_told(&t), "This ground is claimed by Ann, not by you.");
         assert_eq!(t.plugin().claims.len(), 1);
-        t.mock().add_player(player(CY, "Cy", [1.0, 0.0, 0.0], true));
+        go(&t, CY, [1.0, 0.0, 0.0]);
+        t.mock().set_operator(CY, true);
         t.command(CY, "unclaim", &[]);
         assert_eq!(last_told(&t), "Removed the claim of Ann at (0, 0, 0), radius 10.");
         assert!(t.plugin().claims.is_empty());
@@ -666,7 +674,7 @@ mod tests {
         t.command(ANN, "trust", &["Bo"]);
         assert_eq!(last_told(&t), "You have no claims yet: stand where you want one and use !claim.");
         t.command(ANN, "claim", &["10"]);
-        go(&t, ANN, "Ann", [1000.0, 0.0, 0.0]);
+        go(&t, ANN, [1000.0, 0.0, 0.0]);
         t.command(ANN, "claim", &["10"]);
         t.command(ANN, "trust", &["bo"]);
         assert_eq!(last_told(&t), "Bo can now build and take apart in your claims.");
@@ -674,7 +682,7 @@ mod tests {
         t.command(ANN, "trust", &["BO"]);
         assert_eq!(last_told(&t), "Bo is already trusted.");
         // A claim made later starts with the same people.
-        go(&t, ANN, "Ann", [2000.0, 0.0, 0.0]);
+        go(&t, ANN, [2000.0, 0.0, 0.0]);
         t.command(ANN, "claim", &["10"]);
         assert!(t.plugin().claims.iter().all(|c| c.trusted.len() == 1));
         t.command(ANN, "claims", &[]);
@@ -732,7 +740,7 @@ mod tests {
     #[test]
     fn a_stranger_cannot_take_apart_or_build_inside_a_claim_and_is_told_why() {
         let mut t = claimed_world();
-        net_object(&t, 1, 777, [5.0, 0.0, 0.0]);
+        net_object(&mut t, 1, 777, [5.0, 0.0, 0.0]);
         assert_eq!(t.rpc_before(CY, RPC_DECONSTRUCT, 777, "[]"), Verdict::Veto);
         assert_eq!(t.mock().told(), [(CY, "This ground is claimed by Ann. You cannot take this apart here.".to_string())]);
         t.mock().clear();
@@ -743,11 +751,11 @@ mod tests {
         // The owner, the trusted and an operator pass; so does everything outside.
         assert_eq!(t.rpc_before(ANN, RPC_DECONSTRUCT, 777, "[]"), Verdict::Continue);
         assert_eq!(t.rpc_before(BO, RPC_CREATE, 0, BUILD), Verdict::Continue);
-        t.mock().add_player(player(CY, "Cy", [0.0; 3], true));
+        t.mock().set_operator(CY, true);
         assert_eq!(t.rpc_before(CY, RPC_CREATE, 0, BUILD), Verdict::Continue);
-        t.mock().add_player(player(CY, "Cy", [0.0; 3], false));
+        t.mock().set_operator(CY, false);
         assert_eq!(t.rpc_before(CY, RPC_CREATE, 0, &build_at(500.0)), Verdict::Continue);
-        net_object(&t, 2, 778, [500.0, 0.0, 0.0]);
+        net_object(&mut t, 2, 778, [500.0, 0.0, 0.0]);
         assert_eq!(t.rpc_before(CY, RPC_DECONSTRUCT, 778, "[]"), Verdict::Continue);
         // The sphere has radius 20 around (0, 0, 0); the request is at height 2 and depth -3.25, so x = 19.5 is inside and 19.7 is out.
         assert_eq!(t.rpc_before(CY, RPC_CREATE, 0, &build_at(19.5)), Verdict::Veto);
@@ -777,7 +785,7 @@ mod tests {
     #[test]
     fn with_no_claims_the_veto_does_nothing_and_asks_nothing() {
         let mut t = world();
-        net_object(&t, 1, 777, [0.0; 3]);
+        net_object(&mut t, 1, 777, [0.0; 3]);
         assert_eq!(t.rpc_before(CY, RPC_DECONSTRUCT, 777, "[]"), Verdict::Continue);
         assert_eq!(t.rpc_before(CY, RPC_CREATE, 0, BUILD), Verdict::Continue);
         assert!(t.mock().told().is_empty() && t.mock().logs().is_empty());

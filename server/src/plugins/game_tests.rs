@@ -11,12 +11,12 @@ use super::*;
 use crate::game::Game;
 use crate::testkit::{join, send_scene, sent, world};
 
-fn example(name: &str) -> PathBuf {
+pub(super) fn example(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins").join(name)
 }
 
 /// Copies an example plugin into `dir` as `pcds plugin install` does, and approves it as given.
-fn install_example(dir: &Path, name: &str, grant: Option<Vec<String>>) {
+pub(super) fn install_example(dir: &Path, name: &str, grant: Option<Vec<String>>) {
     let from = example(name);
     let m = read_folder(&from).manifest.unwrap_or_else(|| panic!("{name}: no manifest"));
     let to = dir.join(m.id());
@@ -27,12 +27,12 @@ fn install_example(dir: &Path, name: &str, grant: Option<Vec<String>>) {
     approve(dir, m.id(), grant).unwrap();
 }
 
-fn start(g: &mut Game, dir: &Path) {
+pub(super) fn start(g: &mut Game, dir: &Path) {
     attach(g, prepare(dir, "world"), false);
 }
 
 /// What the server sent as chat messages since `g.net.out` was cleared: (to, text).
-fn chat_out(g: &Game) -> Vec<(crate::net::Target, String)> {
+pub(super) fn chat_out(g: &Game) -> Vec<(crate::net::Target, String)> {
     sent(g, "ChatHandler.ReceiveChatMessageClientRpc").into_iter().map(|s| (s.to, s.args[1].as_str().unwrap_or("").to_string())).collect()
 }
 
@@ -219,7 +219,7 @@ fn the_admin_api_lists_enables_and_disables_plugins() {
     assert_eq!(status["loaded"], 1);
 }
 
-fn ask(g: &mut Game, client: u64, text: &str) -> Vec<String> {
+pub(super) fn ask(g: &mut Game, client: u64, text: &str) -> Vec<String> {
     g.net.out.clear();
     // The game's own chat rate limit (a burst of 10, then one a second) is not what is tested here.
     // Nor is the RPC budget of a tick: two seconds of game time and a tick between asks.

@@ -1,7 +1,7 @@
 # The same as the Makefile, for `just`.
 build:
     cargo build --target wasm32-unknown-unknown --release
-    cp target/wasm32-unknown-unknown/release/{crate}.wasm plugin.wasm
+    cp {{env_var_or_default("CARGO_TARGET_DIR", "target")}}/wasm32-unknown-unknown/release/{crate}.wasm plugin.wasm
 
 test:
     cargo test

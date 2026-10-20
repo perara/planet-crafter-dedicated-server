@@ -502,18 +502,21 @@ has it. `examples/plugins/discord-notify` posts joins, leaves and `!report` to a
 way.
 
 ```bash
-pcds plugin new greeter               # a Rust plugin from a template (--kind data: a TOML file)
-pcds plugin check .                   # checks it and runs it on sample events
+pcds plugin new greeter               # a Rust plugin from a template (--lang c, or --kind data: a TOML file)
+pcds plugin test .                    # runs it in the real host against a made-up world, from scenarios/*.toml
+pcds plugin check .                   # what it asks for, and what each kind of event costs in fuel
 pcds plugin install .                 # copies it to run/plugins/ (it does nothing yet)
-pcds plugin enable greeter            # shows what it asks for; you approve it
+pcds plugin enable greeter            # shows what it asks for (and what is new in an update); you approve it
+pcds plugin watch . --approve         # while writing it: every new build is installed, the state kept
 pcds plugin list                      # state, capabilities, calls, faults
-pcds plugin disable greeter
-pcds plugin config set greeter webhook   # a value a plugin declares (a secret is read from the terminal)
-pcds plugin keygen acme                  # a publisher's key: acme.key (secret) and acme.pub
-pcds plugin sign --key acme.key greeter  # sign a plugin; admins who trust the key need not approve each file
-pcds plugin trust acme.pub --name Acme --grant chat.say   # what the key vouches for needs no approval
-pcds plugin untrust KEY                  # a key taken away stops the plugins that ran only because of it
-pcds plugin token create bridge --scope events.read       # a token for a program, shown once
+pcds plugin logs greeter -f           # the plugin's log
+pcds plugin stats greeter             # what each event costs
+pcds plugin config set greeter greeting Hi   # a setting a plugin declares (checked; a secret is read from the terminal)
+pcds plugin pack .                    # greeter-0.1.0.pcdsplugin and its sha256
+pcds plugin install greeter-0.1.0.pcdsplugin --sha256 HEX   # also: an https address, or an id with --index
+pcds plugin keygen acme               # a publisher's key: acme.key (secret) and acme.pub
+pcds plugin sign --key acme.key greeter   # admins who trust the key need not approve each file
+pcds plugin token create bridge --scope events.read   # a token for a program, shown once
 ```
 
 Plugins are loaded, switched off, replaced and removed with the server running: a folder put in
@@ -521,19 +524,20 @@ Plugins are loaded, switched off, replaced and removed with the server running: 
 hot update.
 
 A plugin asks for **capabilities** (read chat, read the world, say in the chat, kick, move
-players, change gameplay rules, refuse an RPC, send HTTP requests to listed hosts) and does nothing
-until you grant them; it is approved for the files as they are, so a changed plugin waits for you
-again, unless you trust its publisher's signature (optional; then what the key vouches for needs no
-approval and the publisher's updates follow). The dashboard's Plugins page does all of this: approve
-with a tick for each capability, set values, trust or remove a key, make and revoke tokens. It can never write the
-world: it reads a copy and queues actions the server applies through the same code the admin API
-uses. A plugin that crashes or runs too long is stopped in that call and restarted from its last
-saved state, and switched off after five faults in a minute. With no plugin installed the server does
-what it did before, and an event nobody listens to costs a fraction of a nanosecond.
+players, give items and Terra tokens, set timers, change gameplay rules, refuse an RPC, send HTTP requests to
+listed hosts) and does nothing until you grant them; it is approved for the files as they are, so a changed
+plugin waits for you again (and the dashboard and `pcds plugin enable` show what the new version asks for beyond
+what you approved), unless you trust its publisher's signature (optional; then what the key vouches for needs no
+approval and the publisher's updates follow). Commands can be limited to your **operators**
+(`pcds rules set access.operators=SteamID64,...`). The dashboard's Plugins page does all of this and shows each
+plugin's log, faults and cost. A plugin can never write the world: it reads a copy and queues actions the server
+applies through the same code the admin API uses. A plugin that crashes or runs too long is stopped in that call
+and restarted from its last saved state, and switched off after five faults in a minute. With no plugin installed
+the server does what it did before, and an event nobody listens to costs a fraction of a nanosecond.
 
-docs/plugins-guide.md makes a first plugin in ten steps; docs/plugins-api.md is the reference;
-docs/plugins.md says why it is built this way (with measurements, and what it will not do);
-docs/architecture.md is the module map. Four examples are in `examples/plugins/`. A change to the
+docs/plugins-guide.md makes a first plugin in ten minutes and goes through the cookbook; docs/plugins-api.md is
+the reference; docs/plugins.md says why it is built this way (with measurements, sharing, versions and the licence);
+docs/architecture.md is the module map. Fourteen examples are in `examples/plugins/`. A change to the
 front (scoped tokens, the long poll of the event stream) needs `pcds upgrade --restart` once: a hot
 update does not replace the front (docs/hot-update.md).
 

@@ -70,21 +70,23 @@ PCDS_IMPORT("tokens") i32 pcds_tokens(i32 amount);
 PCDS_IMPORT("timer_set") i32 pcds_timer_set(u32 id, u32 delay_ms, u32 repeat_ms);
 /* timer_cancel: cancels a timer (one that is not set is no error). Capability event.timer. */
 PCDS_IMPORT("timer_cancel") i32 pcds_timer_cancel(u32 id);
-/* query: asks the world (capability world.read for 1..6; 7 needs none). `kind` is a PCDS_Q_*
+/* query: asks the world (capability world.read for 1..6 and 8; 7 needs none). `kind` is a PCDS_Q_*
  * constant, `arg` its argument (at most 64 bytes). The answer is written to `out`, at most `cap`
  * bytes; the return value is the answer's full length (more than `cap` means it was cut: ask again
  * with a bigger buffer), or a negative code. The answers are in the encoding events use. */
 PCDS_IMPORT("query") i32 pcds_query(u32 kind, const void *arg, u32 arg_len, void *out, u32 cap);
 enum {
     PCDS_Q_WORLD = 1,     /* game_ms i64, planet str, players u32, world_objects u32, network_objects u32,
-                           * terraformation f64, standing_still u8, unix_ms i64 */
+                           * terraformation f64, standing_still u8, unix_ms i64,
+                           * command_prefix str (the chat commands start with it: "!") */
     PCDS_Q_PLAYERS = 2,   /* count u32, then per player: client u64, name str, steam_id str, position 3 x f32,
                            * gauges 4 x f32, player_id u64, operator u8 */
     PCDS_Q_RULES = 3,     /* the rules that differ from the defaults, as JSON text */
     PCDS_Q_INVENTORY = 4, /* arg: client u64 */
     PCDS_Q_NEARBY = 5,    /* arg: center 3 x f32, radius f32, max u32 */
     PCDS_Q_OBJECT = 6,    /* arg: u8 0 + world id as u64, or u8 1 + network id as u64 */
-    PCDS_Q_CONFIG = 7     /* the plugin's own [[config]] settings: count u32, then key str, value str */
+    PCDS_Q_CONFIG = 7,    /* the plugin's own [[config]] settings: count u32, then key str, value str */
+    PCDS_Q_PLAYER = 8     /* arg: client u64. One player, as one entry of PCDS_Q_PLAYERS (much cheaper). -6 if not online */
 };
 /* Not wrapped here: http_request (net.http); see docs/plugins-api.md for its encoding. */
 
@@ -197,7 +199,7 @@ enum {
  *   PCDS_JOIN            client, name, steam_id (empty unless verified), player_id
  *   PCDS_LEAVE           client, name, player_id
  *   PCDS_CHAT            client, name, text, player_id
- *   PCDS_COMMAND         client, name, command (without the prefix), text (as typed), player_id,
+ *   PCDS_COMMAND         client, name, command (without the prefix, lower case), text (as typed), player_id,
  *                        argc and pcds_arg(ev, i) for the arguments
  *   PCDS_RPC_BEFORE/AFTER  client, rpc (the name), object (a network object id), args_json
  *   PCDS_OBJECT_PLACED/DESTROYED  id, group, position, client (0: nobody did it)
