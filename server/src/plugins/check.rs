@@ -80,7 +80,8 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
     let mut report = Report::default();
     let engine = super::wasm::engine();
     // As an approved plugin with everything granted, so what the host would do with it is done.
-    let mut found = Loaded::inspect(&engine, folder, None, None);
+    let keys = installed.and_then(|d| super::sign::Keys::load(d).ok()).unwrap_or_default();
+    let mut found = Loaded::inspect(&engine, folder, None, None, &keys);
     let Some(m) = found.manifest.clone() else {
         report.errors.push(found.status.detail().unwrap_or("not a plugin").to_string());
         return report;
@@ -93,6 +94,23 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
     report.facts.push(format!("{} {} ({}, plugin ABI {})", p.name, p.version, p.kind.name(), p.abi));
     for (name, allows) in caps::ALL.iter().filter(|(n, _)| p.capabilities.iter().any(|c| c == n)) {
         report.facts.push(format!("asks for {name}: {allows}"));
+    }
+    if let Some(net) = &m.net {
+        report.facts.push(format!("may send HTTP requests to: {}", net.allow.join(", ")));
+        if net.allow.iter().any(|a| a.contains("://*.")) {
+            report.warnings.push("net.allow has a wildcard: the plugin may reach every name below it, whoever runs them".into());
+        }
+        if net.allow.iter().any(|a| a.starts_with("http://")) {
+            report.warnings.push("net.allow has a plain http:// pattern: those requests (and what they carry) can be read on the way".into());
+        }
+    }
+    for k in &m.config {
+        report.facts.push(format!("config {}: {}{}", k.key, if k.description.is_empty() { "(no description)" } else { &k.description }, if k.secret { " (a secret)" } else { "" }));
+    }
+    match &found.signed {
+        super::sign::Signed::No => report.facts.push("unsigned".into()),
+        super::sign::Signed::Broken(why) => report.warnings.push(format!("{why}: it will be judged as if unsigned")),
+        other => report.facts.push(other.describe(&p.capabilities)),
     }
     if p.capabilities.is_empty() {
         report.facts.push("asks for no capability: it can read nothing and change nothing".into());
@@ -156,7 +174,7 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
     if let Some(dir) = installed {
         let this = std::fs::canonicalize(folder).ok();
         for other in std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|f| f.is_dir() && std::fs::canonicalize(f).ok() != this) {
-            let o = Loaded::inspect(&engine, &other, None, None);
+            let o = Loaded::inspect(&engine, &other, None, None, &keys);
             for c in o.commands.iter().filter(|c| found.commands.contains(c)) {
                 report.warnings.push(format!("the command !{c} is also declared by the installed plugin {}: the one first by id gets it", o.id));
             }

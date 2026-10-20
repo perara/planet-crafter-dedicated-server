@@ -609,21 +609,46 @@ line of the server's log.
 
 ## Distribution, signing, permissions
 
-Today: a plugin is a folder, installed by `pcds plugin install PATH` from wherever the admin got
-it. Trust is the admin's, built on three things: the capabilities shown in plain words at approval,
-the digest pinned at approval (a changed file waits again), and the sandbox. Nothing is downloaded
-by the server itself.
+A plugin is a folder, installed by `pcds plugin install PATH` from wherever the admin got it. Nothing
+is downloaded by the server itself. Trust is the admin's, built on the capabilities shown in plain
+words at approval, the sandbox, and one of two ways of recognising the files:
 
-Planned, and designed so that none of it changes a plugin: a `plugin.sig` next to the manifest
-holding an Ed25519 signature of the digest, checked against keys the admin put in
-`plugins/trusted-keys` (the approval screen would say "signed by KEY" or "unsigned"); `pcds plugin
-install URL` for a release asset with a published sha256 (as `pcds upgrade` does); and a list of
-plugins somebody curates. A registry is a social problem before it is a technical one and is not
-started.
+- **The digest** (the default, unchanged): the approval pins the sha256 of the manifest and the
+  entry; a changed file waits for the admin again.
+- **A signature** (optional): the admin trusts a *publisher* instead of each file.
 
-Plugins that are programs have no permissions at all beyond the admin token. Scoped tokens (a
-token that may read the stream and `say`, nothing else) are the missing piece; they are a
-change to the admin API and are listed in "Open questions".
+*Signing.* The publisher makes a key (`pcds plugin keygen acme`: `acme.key`, kept secret, and
+`acme.pub`) and signs the plugin (`pcds plugin sign --key acme.key DIR`: a `plugin.sig` with an
+Ed25519 signature over the plugin's digest, so over the manifest as well as the module). The admin
+trusts the key (`pcds plugin trust acme.pub --name Acme --grant event.chat,chat.say`): the
+**trust grant** is the most the key vouches for. What the plugin asks for within the grant needs
+no approval, and every version the key signs runs as soon as it is read; what it asks for beyond
+waits for the admin like any plugin, and once approved follows the publisher's updates while it
+asks for nothing more. Verification is of the files as they are, at every load and reload, with ring
+(already in the program for HMAC and TLS: no new dependency). Choices and reasons:
+
+- *A signature only adds trust.* One that is missing or broken does not make a plugin worse than
+  unsigned: the digest the admin pinned still decides. So a half-copied file, or a plugin that was
+  signed and then edited, is a warning and a plugin that waits, never a plugin that runs unchecked,
+  and never a plugin an admin approved by digest that stops for a signature.
+- *The grant is part of the key, not of the plugin.* A publisher cannot widen what it is trusted for
+  by changing its manifest: the grant is in the admin's file, and a manifest that asks for more makes
+  the plugin wait. The default grant is nothing: trusting a key says who, not what.
+- *The signer is recorded at approval*, so a plugin that needed the admin's approval for some
+  capability does not need it again for the next version of the same publisher, but does for another
+  signer and for a request for more than was approved.
+- *Revocation is immediate and remembered.* `untrust` removes the key and lists it as revoked, and
+  the plugins that ran only by that key stop at the next look at the folder (two looks, a few
+  seconds), saving their state. A key listed as revoked is not trusted again by accident
+  (`--force`). There is no online check: a revocation is the admin's file, and a publisher's lost key
+  is announced the way any lost key is.
+- *No chain of keys, no expiry, no registry.* A key is trusted or it is not; rotating is trusting
+  the new key and untrusting the old. A list of plugins somebody curates is a social problem before
+  a technical one and is not started; `pcds plugin install URL` for a release asset with a
+  published sha256 (as `pcds upgrade` does) is not either.
+
+Plugins that are programs have no permissions at all beyond the admin token. Scoped tokens exist
+for them (section "Scoped tokens"); the unscoped admin token remains what everything else uses.
 
 ## Licensing
 
@@ -716,7 +741,8 @@ These are for the owner.
 3. **Long-polling the stream in the front.** Needs a frame between front and bank (`EVENTS`), so
    it takes effect only after a restart of the front, and the front's protocol number may stay
    the same (old banks never send it). Worth doing before the first release with plugins?
-4. **Signed plugins and a list of them.** Not started; wanted by whom?
+4. **Signed plugins**: built (section "Distribution, signing, permissions"). A list of them
+   somebody curates, and `pcds plugin install URL`, are not.
 5. **Scoped tokens** for out-of-process plugins.
 6. **The component model.** Trigger: wasmi implements it, or a plugin appears that needs
    wasmtime's speed. Then a WIT file and `Runtime` for components.

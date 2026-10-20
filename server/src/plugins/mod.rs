@@ -42,6 +42,7 @@ pub mod limits;
 pub mod manifest;
 pub mod net;
 mod runtime;
+pub mod sign;
 pub mod state;
 pub mod stream;
 mod view;
@@ -53,6 +54,8 @@ mod cost;
 mod game_tests;
 #[cfg(test)]
 mod net_tests;
+#[cfg(test)]
+mod sign_tests;
 #[cfg(test)]
 mod tests;
 
@@ -229,6 +232,8 @@ pub struct Loaded {
     pub net: Option<NetCtx>,
     /// The values the admin set for the keys the manifest declares (secret ones too: never printed).
     config: config::Values,
+    /// Who signed these files: `plugin.sig` checked against the files and the trusted keys.
+    pub signed: sign::Signed,
 }
 
 impl Loaded {
@@ -259,6 +264,7 @@ impl Loaded {
             retire_due: false,
             net: None,
             config: config::Values::new(),
+            signed: sign::Signed::No,
         }
     }
 
@@ -270,7 +276,7 @@ impl Loaded {
     /// the entry, the approval, and for an approved plugin the module compiled or the rules read.
     /// (An installed plugin's folder is named for its id: `prepare` checks that, a source folder
     /// being checked or installed is named as its author likes.)
-    fn inspect(engine: &wasmi::Engine, dir: &Path, approval: Option<&Approval>, values: Option<&config::Values>) -> Loaded {
+    fn inspect(engine: &wasmi::Engine, dir: &Path, approval: Option<&Approval>, values: Option<&config::Values>, keys: &sign::Keys) -> Loaded {
         let folder = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let mut p = Loaded::bare(&folder, dir, Status::Pending);
         let manifest_bytes = match std::fs::read(dir.join(manifest::FILE)) {
@@ -316,14 +322,21 @@ impl Loaded {
             }
         };
         p.digest = approvals::digest(&manifest_bytes, &entry);
-        p.status = match approval {
-            None => Status::Pending,
-            Some(a) if !a.enabled => Status::Disabled,
-            Some(a) if a.digest != p.digest => Status::Changed,
-            Some(_) => Status::Running,
+        p.signed = sign::check(dir, &p.digest, keys);
+        match &p.signed {
+            sign::Signed::Broken(why) => p.warnings.push(format!("{why}: the plugin is judged as if it were not signed")),
+            sign::Signed::Revoked { id } => p.warnings.push(format!("signed by the key {id}, which was revoked: it is not trusted")),
+            _ => {}
+        }
+        let (standing, granted) = approvals::standing(approval, &p.digest, &p.requested, &p.signed);
+        p.status = match standing {
+            approvals::Standing::Pending => Status::Pending,
+            approvals::Standing::Disabled => Status::Disabled,
+            approvals::Standing::Changed => Status::Changed,
+            approvals::Standing::Running => Status::Running,
         };
         let approved = p.status == Status::Running;
-        p.grant = Grant::from_names(approval.filter(|_| approved).into_iter().flat_map(|a| a.grant.iter().map(String::as_str)).filter(|g| p.requested.iter().any(|r| r == g)));
+        p.grant = Grant::from_names(granted.iter().map(String::as_str));
         // net.http: the allow list is the manifest's (pinned by the digest), and the local network
         // is open only with both capabilities granted. Values are the admin's, for the declared keys.
         p.config = values.map(|v| m.config.iter().filter_map(|k| Some((k.key.clone(), v.get(&k.key)?.clone()))).collect()).unwrap_or_default();
@@ -522,6 +535,8 @@ pub struct Host {
     rotate: usize,
     /// approved.json did not read: nothing runs.
     pub approvals_error: Option<String>,
+    /// trusted-keys.json did not read: no key is trusted.
+    pub keys_error: Option<String>,
     /// What the instances hold, counted (docs/plugins.md, "Loading and unloading while the world runs").
     pub gauge: Arc<wasm::Gauge>,
     /// The folder as it was when the plugins were read (`signature`).
@@ -540,10 +555,11 @@ fn stat(p: &Path) -> (u128, u64) {
 
 /// The signature of `dir`, given each known plugin's entry file.
 fn signature_of(dir: &Path, entry_of: &HashMap<String, String>) -> Sig {
-    let mut sig = vec![(dir.to_path_buf(), stat(dir)), (dir.join(approvals::FILE), stat(&dir.join(approvals::FILE))), (dir.join(config::FILE), stat(&dir.join(config::FILE)))];
+    let mut sig = vec![(dir.to_path_buf(), stat(dir)), (dir.join(approvals::FILE), stat(&dir.join(approvals::FILE))), (dir.join(config::FILE), stat(&dir.join(config::FILE))), (dir.join(sign::KEYS_FILE), stat(&dir.join(sign::KEYS_FILE)))];
     for folder in folders_of(dir) {
         let name = folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         sig.push((folder.join(manifest::FILE), stat(&folder.join(manifest::FILE))));
+        sig.push((folder.join(sign::FILE), stat(&folder.join(sign::FILE))));
         if let Some(entry) = entry_of.get(&name) {
             sig.push((folder.join(entry), stat(&folder.join(entry))));
         }
@@ -560,7 +576,7 @@ fn folders_of(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Reads every folder of `dir` as a plugin: manifests, approvals, modules compiled, nothing started.
-fn scan(engine: &wasmi::Engine, dir: &Path) -> (Vec<Loaded>, Option<String>) {
+fn scan(engine: &wasmi::Engine, dir: &Path) -> (Vec<Loaded>, Option<String>, Option<String>) {
     let approvals = match Approvals::load(dir) {
         Ok(a) => (a, None),
         Err(e) => {
@@ -577,6 +593,14 @@ fn scan(engine: &wasmi::Engine, dir: &Path) -> (Vec<Loaded>, Option<String>) {
             config::Configs::default()
         }
     };
+    // The keys the admin trusts; a file that does not read means none is trusted.
+    let (keys, keys_error) = match sign::Keys::load(dir) {
+        Ok(k) => (k, None),
+        Err(e) => {
+            eprintln!("plugins: {e}: no signing key is trusted until that is fixed");
+            (sign::Keys::default(), Some(e))
+        }
+    };
     let mut folders = folders_of(dir);
     if folders.len() > limits::MAX_PLUGINS {
         eprintln!("plugins: {} folders in {}; only the first {} (by name) are read", folders.len(), dir.display(), limits::MAX_PLUGINS);
@@ -586,7 +610,7 @@ fn scan(engine: &wasmi::Engine, dir: &Path) -> (Vec<Loaded>, Option<String>) {
     for folder in folders {
         let id = folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let approval = approvals.0.get(&id).filter(|_| error.is_none());
-        let mut p = Loaded::inspect(engine, &folder, approval, values.0.get(&id));
+        let mut p = Loaded::inspect(engine, &folder, approval, values.0.get(&id), &keys);
         // Installed plugins live in a folder named for their id: it is how a command or a state file
         // finds its owner, and what `pcds plugin enable ID` names.
         if p.manifest.as_ref().is_some_and(|m| m.id() != id) {
@@ -595,7 +619,7 @@ fn scan(engine: &wasmi::Engine, dir: &Path) -> (Vec<Loaded>, Option<String>) {
         }
         found.push(p);
     }
-    (found, error)
+    (found, error, keys_error)
 }
 
 /// Reads the plugin folder and prepares every plugin: manifests, approvals, modules compiled.
@@ -603,9 +627,10 @@ fn scan(engine: &wasmi::Engine, dir: &Path) -> (Vec<Loaded>, Option<String>) {
 /// old one still plays: a hot update stops the world for the `attach` that follows, not for this.
 pub fn prepare(dir: &Path, world: &str) -> Host {
     let mut host = Host::empty(dir, world);
-    let (found, error) = scan(&host.engine, dir);
+    let (found, error, keys_error) = scan(&host.engine, dir);
     host.plugins = found;
     host.approvals_error = error;
+    host.keys_error = keys_error;
     host.index_commands();
     host.sig = host.signature();
     host
@@ -614,7 +639,7 @@ pub fn prepare(dir: &Path, world: &str) -> Host {
 impl Host {
     /// A host with no plugin.
     pub fn empty(dir: &Path, world: &str) -> Host {
-        Host { dir: dir.to_path_buf(), world: world.to_string(), engine: wasm::engine(), plugins: Vec::new(), commands: HashMap::new(), interest: 0, rotate: 0, approvals_error: None, gauge: Arc::default(), sig: Vec::new(), net: net::Net::default() }
+        Host { dir: dir.to_path_buf(), world: world.to_string(), engine: wasm::engine(), plugins: Vec::new(), commands: HashMap::new(), interest: 0, rotate: 0, approvals_error: None, keys_error: None, gauge: Arc::default(), sig: Vec::new(), net: net::Net::default() }
     }
 
     /// The folder's files that matter, as they are now.
@@ -665,8 +690,9 @@ impl Host {
     /// folder merely changed elsewhere. Returns the summary line.
     pub fn rescan(&mut self, saved: &mut state::Saved, explicit: bool) -> String {
         let before = self.states();
-        let (fresh, error) = scan(&self.engine, &self.dir);
+        let (fresh, error, keys_error) = scan(&self.engine, &self.dir);
         self.approvals_error = error;
+        self.keys_error = keys_error;
         let mut old = std::mem::take(&mut self.plugins);
         let world = self.world.clone();
         let mut next: Vec<Loaded> = Vec::new();
@@ -713,11 +739,14 @@ impl Host {
                 }
                 continue;
             }
-            if prev.running() && matches!(p.status, Status::Changed | Status::Invalid(_) | Status::Incompatible(_)) {
-                // Files that cannot be loaded (or are not approved yet): the approved version, in
-                // memory, goes on until the admin disables it or approves the new one.
+            let torn = p.status == Status::Pending && matches!(p.signed, sign::Signed::Broken(_));
+            if prev.running() && (torn || matches!(p.status, Status::Changed | Status::Invalid(_) | Status::Incompatible(_))) {
+                // Files that cannot be loaded (or are not approved yet, or whose signature no longer
+                // holds): the approved version, in memory, goes on until the admin disables it or
+                // approves the new one.
                 let why = match &p.status {
                     Status::Changed => "its files changed and wait for approval".to_string(),
+                    Status::Pending => "its files changed and their signature does not hold".to_string(),
                     other => format!("its new files do not hold up: {}", other.detail().unwrap_or("")),
                 };
                 prev.notice = Some(format!("{why}; the old version keeps running"));
@@ -1152,7 +1181,12 @@ pub(crate) fn poll_now(game: &mut crate::game::Game) {
 
 /// What a folder holds, read as far as the manifest and the entry go (no approval, nothing compiled).
 pub fn read_folder(folder: &Path) -> Loaded {
-    Loaded::inspect(&wasm::engine(), folder, None, None)
+    Loaded::inspect(&wasm::engine(), folder, None, None, &sign::Keys::default())
+}
+
+/// The same, with the keys the admin trusts (for the signature to be judged).
+pub fn read_folder_with(folder: &Path, keys: &sign::Keys) -> Loaded {
+    Loaded::inspect(&wasm::engine(), folder, None, None, keys)
 }
 
 /// Approves a plugin: records `grant` (default: everything it asks for; never more) and the digest
@@ -1161,7 +1195,8 @@ pub fn approve(dir: &Path, id: &str, grant: Option<Vec<String>>) -> Result<Appro
     if !manifest::valid_id(id) {
         return Err(format!("{id:?} is not a plugin id"));
     }
-    let found = read_folder(&dir.join(id));
+    let keys = sign::Keys::load(dir).unwrap_or_default();
+    let found = read_folder_with(&dir.join(id), &keys);
     if let Status::Invalid(why) | Status::Incompatible(why) = &found.status {
         return Err(format!("{id}: {why}"));
     }
@@ -1174,7 +1209,8 @@ pub fn approve(dir: &Path, id: &str, grant: Option<Vec<String>>) -> Result<Appro
     }
     let mut all = Approvals::load(dir)?;
     let limits = all.0.get(id).map(|a| a.limits.clone()).unwrap_or_default();
-    let approval = Approval { enabled: true, grant, digest: found.digest, limits, approved_at: approvals::now() };
+    let signer = found.signed.trusted().map(|k| k.id.clone());
+    let approval = Approval { enabled: true, grant, digest: found.digest, limits, approved_at: approvals::now(), signer };
     all.0.insert(id.to_string(), approval.clone());
     all.save(dir)?;
     Ok(approval)
@@ -1183,7 +1219,11 @@ pub fn approve(dir: &Path, id: &str, grant: Option<Vec<String>>) -> Result<Appro
 /// Switches an approved plugin off (it stays approved with the same grant for `approve` to switch on).
 pub fn disable(dir: &Path, id: &str) -> Result<(), String> {
     let mut all = Approvals::load(dir)?;
-    let a = all.0.get_mut(id).ok_or_else(|| format!("{id} was never enabled"))?;
+    // A plugin that runs because a trusted key vouches for it has no approval: its switching off is one.
+    if !all.0.contains_key(id) && (!manifest::valid_id(id) || !dir.join(id).is_dir()) {
+        return Err(format!("{id} is not an installed plugin"));
+    }
+    let a = all.0.entry(id.to_string()).or_insert_with(|| Approval { enabled: false, grant: Vec::new(), digest: String::new(), limits: Default::default(), approved_at: approvals::now(), signer: None });
     a.enabled = false;
     all.save(dir)
 }

@@ -1,4 +1,5 @@
-//! `pcds plugin list | check | install | enable | disable | reload | new | config` (docs/plugins-guide.md).
+//! `pcds plugin list | check | install | enable | disable | reload | new | config | keygen | sign |
+//! trust | untrust | keys` (docs/plugins-guide.md).
 //! Plugins live in run/plugins/<id>/; what the admin approved is run/plugins/approved.json. The
 //! commands change those files, and ask the running server (if there is one) to read them again.
 
@@ -9,7 +10,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::{Ctx, Result};
-use crate::plugins::{self, approvals, config, manifest};
+use crate::plugins::{self, approvals, config, manifest, sign};
 
 const USAGE: &str = "\
 pcds plugin list                      the plugins, their state, what they asked for and what they cost
@@ -21,6 +22,12 @@ pcds plugin disable ID                switch an approved plugin off
 pcds plugin reload                    make the running server read run/plugins/ again
 pcds plugin new ID [--kind wasm|data] [--api-path DIR]
                                       a folder for a new plugin, from a template
+pcds plugin keygen NAME               make a signing key pair: NAME.key (keep it secret) and NAME.pub (give it to admins)
+pcds plugin sign --key NAME.key DIR   sign the plugin in DIR: writes DIR/plugin.sig (the files must not change after)
+pcds plugin trust KEY [--name NAME] [--grant CAP,CAP] [--force]
+                                      trust a publisher: KEY is a .pub file or its 64 hex digits; --grant is the most it vouches for
+pcds plugin untrust KEY               stop trusting a key (its id or the start of it); its plugins stop at the next look at run/plugins/
+pcds plugin keys                      the trusted keys and what each vouches for, and the revoked ones
 pcds plugin config list [ID]          the values a plugin's manifest declares and whether they are set
 pcds plugin config set ID KEY [VALUE] set a value; a secret one is read from the terminal (or stdin), not from the command line
 pcds plugin config unset ID KEY       remove a value";
@@ -52,6 +59,11 @@ impl Ctx {
             },
             ["new", id, rest @ ..] => self.plugin_new(id, rest),
             ["config", rest @ ..] => self.plugin_config(rest),
+            ["keygen", name] => plugin_keygen(name),
+            ["sign", "--key", key, dir] => plugin_sign(key, dir),
+            ["trust", key, rest @ ..] => self.plugin_trust(key, rest),
+            ["untrust", key] => self.plugin_untrust(key),
+            ["keys"] => self.plugin_keys(),
             _ => Err(USAGE.to_string()),
         }
     }
@@ -108,6 +120,12 @@ impl Ctx {
             if let Some(d) = p["detail"].as_str() {
                 println!("    {d}");
             }
+            match p["signature"]["state"].as_str() {
+                Some("trusted") => println!("    signed by {} ({})", p["signature"]["keyName"].as_str().unwrap_or(""), p["signature"]["keyId"].as_str().unwrap_or("")),
+                Some("untrusted") => println!("    signed by the key {}, which this server does not trust", p["signature"]["keyId"].as_str().unwrap_or("")),
+                Some("revoked") => println!("    signed by the key {}, which was revoked", p["signature"]["keyId"].as_str().unwrap_or("")),
+                _ => {}
+            }
             if let Some(n) = p["notice"].as_str() {
                 println!("    notice: {n}");
             }
@@ -162,6 +180,14 @@ impl Ctx {
             super::mkdir(target.parent().unwrap_or(&to))?;
             super::replace_file(&target, &bytes, 0o644)?;
         }
+        // A signature goes with the files it was made for; one that no longer holds is not copied.
+        let sig = from.join(sign::FILE);
+        if sig.is_file() {
+            let bytes = fs::read(&sig).map_err(|e| format!("{}: {e}", sig.display()))?;
+            super::replace_file(&to.join(sign::FILE), &bytes, 0o644)?;
+        } else {
+            let _ = fs::remove_file(to.join(sign::FILE));
+        }
         println!("pcds: installed {} {} in {}", m.plugin.name, m.plugin.version, to.display());
         for c in &m.plugin.capabilities {
             println!("  asks for {c}");
@@ -182,11 +208,13 @@ impl Ctx {
             }
         }
         let dir = self.plugins_dir();
-        let found = plugins::read_folder(&dir.join(id));
+        let keys = sign::Keys::load(&dir)?;
+        let found = plugins::read_folder_with(&dir.join(id), &keys);
         let Some(m) = &found.manifest else { return Err(format!("{id}: {}", found.status.detail().unwrap_or("not installed"))) };
         let given: Vec<String> = grant.clone().unwrap_or_else(|| found.requested.clone());
         println!("{} {} by {} ({}, {} licence)", m.plugin.name, m.plugin.version, if m.plugin.authors.is_empty() { "an unnamed author".into() } else { m.plugin.authors.join(", ") }, m.plugin.kind.name(), if m.plugin.license.is_empty() { "no".to_string() } else { m.plugin.license.clone() });
         println!("  {}", m.plugin.description);
+        println!("  {}", found.signed.describe(&found.requested));
         for (name, allows) in pcds_plugin_api::caps::ALL.iter().filter(|(n, _)| found.requested.iter().any(|r| r == n)) {
             println!("  {} {name}: may {allows}", if given.iter().any(|g| g == name) { "grant:" } else { "deny: " });
         }
@@ -221,6 +249,53 @@ impl Ctx {
         println!("pcds: {id} is approved");
         self.plugin_reload_running();
         let _ = approvals::FILE;
+        Ok(())
+    }
+
+    fn plugin_trust(&self, key: &str, rest: &[&str]) -> Result {
+        let (mut name, mut grant, mut force) = (String::new(), Vec::new(), false);
+        let mut it = rest.iter();
+        while let Some(o) = it.next() {
+            match *o {
+                "--force" => force = true,
+                "--name" => name = it.next().ok_or("--name NAME")?.to_string(),
+                "--grant" => grant = it.next().ok_or("--grant CAP,CAP")?.split(',').filter(|c| !c.is_empty()).map(str::to_string).collect(),
+                other => return Err(format!("unknown option {other}\n{USAGE}")),
+            }
+        }
+        let text = fs::read_to_string(key).unwrap_or_else(|_| key.to_string());
+        let public = sign::parse_public(&text)?;
+        let dir = self.plugins_dir();
+        let mut keys = sign::Keys::load(&dir)?;
+        let trusted = keys.trust(&public, &name, grant, force)?;
+        keys.save(&dir)?;
+        println!("pcds: trusting {} ({}); it vouches for: {}", trusted.name, trusted.id, if trusted.grant.is_empty() { "no capability (its plugins still wait for you to approve what they ask for, and then follow its updates)".to_string() } else { trusted.grant.join(", ") });
+        self.plugin_reload_running();
+        Ok(())
+    }
+
+    fn plugin_untrust(&self, key: &str) -> Result {
+        let dir = self.plugins_dir();
+        let mut keys = sign::Keys::load(&dir)?;
+        let id = keys.find(key)?.id.clone();
+        let revoked = keys.revoke(&id).ok_or("not trusted")?;
+        keys.save(&dir)?;
+        println!("pcds: {} ({}) is no longer trusted; plugins that run only because it signed them stop", revoked.name, revoked.id);
+        self.plugin_reload_running();
+        Ok(())
+    }
+
+    fn plugin_keys(&self) -> Result {
+        let keys = sign::Keys::load(&self.plugins_dir())?;
+        if keys.keys.is_empty() && keys.revoked.is_empty() {
+            println!("no signing key is trusted (pcds plugin trust KEY); every plugin is approved by its own digest");
+        }
+        for k in &keys.keys {
+            println!("{}  {:<20} vouches for: {}", k.id, k.name, if k.grant.is_empty() { "nothing (a signed plugin still needs its capabilities approved)".to_string() } else { k.grant.join(" ") });
+        }
+        for r in &keys.revoked {
+            println!("{}  {:<20} REVOKED", r.id, r.name);
+        }
         Ok(())
     }
 
@@ -349,4 +424,36 @@ fn read_line_hidden(prompt: &str, hidden: bool) -> std::result::Result<String, S
     read.map_err(|e| e.to_string())?;
     let line = line.trim_end_matches(['\r', '\n']).to_string();
     if line.is_empty() { Err("no value given".into()) } else { Ok(line) }
+}
+
+fn plugin_keygen(name: &str) -> Result {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) {
+        return Err(format!("{name:?} is not a name for key files (letters, digits, - _ .)"));
+    }
+    let (private, public) = (PathBuf::from(".").join(format!("{name}.key")), PathBuf::from(".").join(format!("{name}.pub")));
+    if private.exists() || public.exists() {
+        return Err(format!("{} or {} exists already", private.display(), public.display()));
+    }
+    let (private_text, public_text) = sign::generate()?;
+    super::replace_file(&private, private_text.as_bytes(), 0o600)?;
+    super::replace_file(&public, public_text.as_bytes(), 0o644)?;
+    println!("pcds: made {} (keep it secret: whoever has it can sign as you) and {} (give it to the admins who should trust you: pcds plugin trust {})", private.display(), public.display(), public.display());
+    Ok(())
+}
+
+fn plugin_sign(key: &str, dir: &str) -> Result {
+    let folder = Path::new(dir);
+    let found = plugins::read_folder(folder);
+    if let plugins::Status::Invalid(why) | plugins::Status::Incompatible(why) = &found.status {
+        return Err(format!("{dir}: {why}: not signed"));
+    }
+    let private = fs::read_to_string(key).map_err(|e| format!("{key}: {e}"))?;
+    let text = sign::sign(&private, &found.digest)?;
+    super::replace_file(&PathBuf::from(dir).join(sign::FILE), text.as_bytes(), 0o644)?;
+    // Read back as a server would.
+    match sign::check(folder, &found.digest, &sign::Keys::default()) {
+        sign::Signed::Unknown { id } => println!("pcds: signed {dir} with the key {id}: {} (change a file of it and the signature no longer holds)", folder.join(sign::FILE).display()),
+        other => return Err(format!("the signature just made does not check: {other:?}")),
+    }
+    Ok(())
 }

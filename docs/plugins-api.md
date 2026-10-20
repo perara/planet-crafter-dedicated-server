@@ -200,8 +200,50 @@ Written by `pcds plugin enable` and the admin API; the server only reads it.
                  "limits": {"fuelPerEvent": 250000}, "approvedAt": 1760781234}}
 ```
 
-`limits` (optional) lowers the plugin's budget (`fuelPerEvent`, `fuelPerSave`, `memoryPages`) or
+`signer` (optional) is the id of the trusted key that had signed the plugin when it was approved (see
+"Signing"). `limits` (optional) lowers the plugin's budget (`fuelPerEvent`, `fuelPerSave`, `memoryPages`) or
 lengthens its tick (`tickEveryMs`); it can not raise anything.
+
+## Signing
+
+Digest pinning is the default: an approval holds for the files whose digest it recorded. A
+publisher can sign a plugin so that an admin who trusts the publisher's key does not approve each
+file. A signature only ever adds trust; a plugin whose signature is missing or does not hold is
+judged by its pinned digest as before.
+
+- **`plugin.sig`**, in the plugin's folder (`pcds plugin sign --key NAME.key DIR` writes it):
+  ```json
+  {"publicKey": "9f2c... (64 hex)", "signature": "ab01... (128 hex)", "digest": "5e7d... (the plugin's digest)"}
+  ```
+  The signature is Ed25519 over the text `pcds-plugin-v1:` and the digest, the sha256 of the manifest,
+  a zero byte and the entry file (the `digest` of `approved.json` and of the listing). It is checked
+  against the files as they are when they are read, at every start and every reload, so a changed
+  manifest (another capability, another allow list) or module is a signature that does not hold.
+  At most 4096 bytes are read.
+- **`trusted-keys.json`**, beside `approved.json` (`pcds plugin trust`, `untrust`, `keys`, the
+  admin API; the server only reads it):
+  ```json
+  {"keys": [{"id": "ab12...", "publicKey": "9f2c...", "name": "Acme", "grant": ["event.chat", "chat.say"], "addedAt": 1760781234}],
+   "revoked": [{"id": "cd34...", "name": "Old key", "at": 1760781300}]}
+  ```
+  `id` is the first 16 bytes of sha256 of the public key, in hex. `grant` is the key's **trust
+  grant**: the most it vouches for. A file that does not read trusts nobody (`keysError`).
+- **The rule** (`approvals::standing`). The admin's own `disable` beats everything. A plugin whose
+  signature holds and whose key is trusted needs no approval for the capabilities in the key's grant:
+  if it asks for nothing else, it runs with no entry in `approved.json` at all, and every new
+  version the key signs runs as soon as it is read. What it asks for beyond the grant waits for the
+  admin as for any plugin (`pending`); `enable` then records the signer, and from then on a version
+  the same key signs runs without a new approval while it asks for nothing beyond the approved
+  grant and the key's. A different key, no signature, a signature that does not hold, a key
+  untrusted or revoked: the digest is all there is, and the running version of a plugin whose new
+  files do not hold goes on with a notice, or stops (a key taken away) at the next look at the folder.
+  A key's trust grant is a floor: the admin can switch the plugin off, but not grant it less than the
+  key vouches for.
+- **Revocation.** `pcds plugin untrust KEY` (or the admin API) removes the key and records it as
+  revoked; the plugins that ran only because of it stop within seconds (two looks at the folder), with
+  their state saved. Trusting a revoked key again takes `--force`.
+- **Keys.** `pcds plugin keygen NAME` writes `NAME.key` (0600; the publisher keeps it) and `NAME.pub`.
+  `trust` takes the `.pub` file or its 64 hex digits and shows the key's id.
 
 ## Rules files (`kind = "data"`)
 
@@ -343,10 +385,12 @@ All answer JSON; the bearer token is the admin token (docs/hot-update.md, README
 
 | Request | Body | Answer |
 |---|---|---|
-| `GET /api/plugins` | | `{"plugins": [...], "folder", "approvalsError", "capabilities": [{"name","allows"}], "abi": {"major","minor"}, "stream": {"epoch"}}`. Each plugin: `id name version description authors license kind status detail requested granted notGranted commands events warnings limits stats digest net config`; `stats`: `calls faults restarts slow shed denied refused actions vetoes fuel averageMicros maxMicros lastError lastFaultAt http`; `stats.http`: `requests answered failed bytesOut bytesIn inFlight`; `net` (null without `[net]`): `allow wildcards local localGranted timeoutMs maxResponseBytes`; `config`: the declared keys, `key description secret set`, and the `value` of a key that is not a secret |
+| `GET /api/plugins` | | `{"plugins": [...], "folder", "approvalsError", "capabilities": [{"name","allows"}], "abi": {"major","minor"}, "stream": {"epoch"}}`. Each plugin: `id name version description authors license kind status detail requested granted notGranted commands events warnings limits stats digest net config signature`; `stats`: `calls faults restarts slow shed denied refused actions vetoes fuel averageMicros maxMicros lastError lastFaultAt http`; `stats.http`: `requests answered failed bytesOut bytesIn inFlight`; `net` (null without `[net]`): `allow wildcards local localGranted timeoutMs maxResponseBytes`; `signature`: `state` (`none`, `invalid`, `untrusted`, `revoked`, `trusted`), `keyId`, `keyName`, `vouches` (what the key covers of what the plugin asks) and `detail` (why an invalid one is); the listing also has `trustedKeys`, `revokedKeys` and `keysError`; `config`: the declared keys, `key description secret set`, and the `value` of a key that is not a secret |
 | `POST /api/plugins/reload` | | `{"ok": true, "message"}`: the folder is read again; a plugin whose files and approval did not change keeps running |
 | `POST /api/plugins/enable` | `{"id", "grant": [...]}` (grant optional: everything asked) | `{"ok": true, "plugin": {...}}`; 400 for an unknown plugin, a grant above what is asked, or a plugin that does not hold up |
 | `POST /api/plugins/disable` | `{"id"}` | `{"ok": true, "plugin": {...}}` |
+| `POST /api/plugins/trust` | `{"publicKey": "(64 hex or a .pub file's text)", "name", "grant": [...], "force"}` | `{"ok": true, "key": {...}}`; 400 for a key that is none, a grant that is no capability, or a revoked key without `force`. The plugins are read again |
+| `POST /api/plugins/untrust` | `{"id"}` (the id, or its first 8 characters or more) | `{"ok": true, "revoked": {...}}`; 400 for a key that is not trusted |
 | `POST /api/plugins/events` | `{"consumer": "relay", "after": 0, "types": ["chat","player_join"], "limit": 200}` or `{"consumer": "relay", "unregister": true}` | `{"epoch", "events": [...], "last", "dropped"}`, or `{"ok", "registered": false, "was"}` |
 
 Status values: `running`, `pending` (discovered, never approved), `disabled`, `changed` (files differ

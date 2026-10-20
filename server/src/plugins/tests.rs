@@ -69,8 +69,8 @@ pub(super) fn module(body: &str, extra: &str) -> String {
     )
 }
 
-/// Installs a plugin in `dir` and approves it with `grant` (None: all it asks for).
-pub(super) fn install(dir: &Path, id: &str, wat: &str, caps: &[&str], extra_manifest: &str, grant: Option<&[&str]>) {
+/// Writes a plugin's folder into `dir` (manifest and module); nobody approved it.
+pub(super) fn write_plugin(dir: &Path, id: &str, wat: &str, caps: &[&str], extra_manifest: &str) {
     let folder = dir.join(id);
     std::fs::create_dir_all(&folder).unwrap();
     let caps_list = caps.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
@@ -80,6 +80,11 @@ pub(super) fn install(dir: &Path, id: &str, wat: &str, caps: &[&str], extra_mani
     )
     .unwrap();
     std::fs::write(folder.join("plugin.wasm"), wat::parse_str(wat).unwrap_or_else(|e| panic!("{id}: {e}"))).unwrap();
+}
+
+/// Installs a plugin in `dir` and approves it with `grant` (None: all it asks for).
+pub(super) fn install(dir: &Path, id: &str, wat: &str, caps: &[&str], extra_manifest: &str, grant: Option<&[&str]>) {
+    write_plugin(dir, id, wat, caps, extra_manifest);
     approve(dir, id, grant.map(|g| g.iter().map(|s| s.to_string()).collect())).unwrap();
 }
 
@@ -532,7 +537,7 @@ fn the_api_document_matches_the_code() {
     assert!(doc.contains("`SLOW_CALL` (5 ms)") && limits::SLOW_CALL.as_millis() == 5);
     assert!(doc.contains("`FAULT_WINDOW` is 60 seconds") && limits::FAULT_WINDOW.as_secs() == 60);
     let admin = include_str!("admin.rs");
-    for route in ["GET /api/plugins", "POST /api/plugins/reload", "POST /api/plugins/enable", "POST /api/plugins/disable", "POST /api/plugins/events"] {
+    for route in ["GET /api/plugins", "POST /api/plugins/reload", "POST /api/plugins/enable", "POST /api/plugins/disable", "POST /api/plugins/events", "POST /api/plugins/trust", "POST /api/plugins/untrust"] {
         assert!(doc.contains(&format!("`{route}`")), "{route} in the document");
         let (method, path) = route.split_once(' ').unwrap();
         assert!(admin.contains(&format!("(\"{method}\", \"{path}\")")), "{route} in admin.rs");

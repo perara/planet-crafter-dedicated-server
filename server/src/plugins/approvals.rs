@@ -36,6 +36,11 @@ pub struct Approval {
     /// Unix seconds.
     #[serde(default)]
     pub approved_at: u64,
+    /// The trusted key (its id) that signed the plugin when it was approved: while the plugin's
+    /// signature holds and that key is still trusted, a new version it signed needs no new approval
+    /// as long as it asks for nothing beyond what was granted and what the key vouches for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,4 +79,41 @@ pub fn digest(manifest: &[u8], entry: &[u8]) -> String {
 
 pub fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Where a plugin stands: what its approval, its files and the signature on them make of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// Never approved (and not vouched for in full by a trusted key).
+    Pending,
+    /// The admin switched it off.
+    Disabled,
+    /// Approved once, but these files are not the ones, and no trusted signer stands for them.
+    Changed,
+    Running,
+}
+
+/// The standing of a plugin and the capabilities it is granted. Digest pinning is the rule: an
+/// approval holds for the files whose digest it recorded. A good signature by a trusted key adds
+/// to that, never takes away: the capabilities the key vouches for (its trust grant) need no
+/// approval at all, and an approval made while the plugin was signed by that key (`signer`) holds
+/// for a later version the key signed, as long as the version asks for nothing beyond what was
+/// granted and what the key vouches for. The admin's own `disable` beats everything.
+pub fn standing(approval: Option<&Approval>, digest: &str, requested: &[String], signed: &super::sign::Signed) -> (Standing, Vec<String>) {
+    let key = signed.trusted();
+    if approval.is_some_and(|a| !a.enabled) {
+        return (Standing::Disabled, Vec::new());
+    }
+    let vouched: Vec<String> = key.map(|k| requested.iter().filter(|c| k.grant.contains(c)).cloned().collect()).unwrap_or_default();
+    let held = approval.filter(|a| a.digest == digest || key.is_some_and(|k| a.signer.as_deref() == Some(k.id.as_str()) && requested.iter().all(|c| a.grant.contains(c) || k.grant.contains(c))));
+    if held.is_none() && !(key.is_some() && vouched.len() == requested.len()) {
+        return (if approval.is_some() { Standing::Changed } else { Standing::Pending }, Vec::new());
+    }
+    let mut grant = vouched;
+    for g in held.into_iter().flat_map(|a| a.grant.iter()).filter(|g| requested.contains(g)) {
+        if !grant.contains(g) {
+            grant.push(g.clone());
+        }
+    }
+    (Standing::Running, grant)
 }

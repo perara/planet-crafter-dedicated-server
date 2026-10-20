@@ -321,3 +321,47 @@ fn stream_consumers_register_through_the_api_and_leave_cleanly() {
     poll(&mut g, json!({"consumer": "metrics", "unregister": true}));
     assert_eq!(g.ext.plugins.interest, 0);
 }
+
+#[test]
+fn the_admin_api_trusts_a_key_and_takes_it_away_and_the_listing_says_who_signed() {
+    let Some((mut g, _)) = world() else { return };
+    let dir = fresh_dir("keys");
+    // A signed copy of an example, not approved by anyone.
+    let from = example("welcome-rules");
+    let to = dir.join("welcome-rules");
+    std::fs::create_dir_all(&to).unwrap();
+    for file in [manifest::FILE, "rules.toml"] {
+        std::fs::copy(from.join(file), to.join(file)).unwrap();
+    }
+    let (private, public) = sign::generate().unwrap();
+    std::fs::write(to.join(sign::FILE), sign::sign(&private, &read_folder(&to).digest).unwrap()).unwrap();
+    start(&mut g, &dir);
+    let plugin = |g: &mut Game| -> Value {
+        let (_, body) = admin::request(g, "GET", "/api/plugins", &json!({}));
+        serde_json::from_str::<Value>(&body).unwrap()
+    };
+    let listing = plugin(&mut g);
+    assert_eq!((listing["plugins"][0]["status"].as_str(), listing["plugins"][0]["signature"]["state"].as_str()), (Some("pending"), Some("untrusted")));
+    let asked = listing["plugins"][0]["requested"].clone();
+    // Trust it for what the plugin asks: it starts, with no approval.
+    assert_eq!(admin::request(&mut g, "POST", "/api/plugins/trust", &json!({"publicKey": "nonsense"})).0, 400);
+    assert_eq!(admin::request(&mut g, "POST", "/api/plugins/trust", &json!({"publicKey": public, "grant": ["fly"]})).0, 400);
+    let (status, body) = admin::request(&mut g, "POST", "/api/plugins/trust", &json!({"publicKey": public, "name": "Acme", "grant": asked}));
+    assert_eq!(status, 200, "{body}");
+    let id = serde_json::from_str::<Value>(&body).unwrap()["key"]["id"].as_str().unwrap().to_string();
+    let listing = plugin(&mut g);
+    assert_eq!((listing["plugins"][0]["status"].as_str(), listing["plugins"][0]["signature"]["state"].as_str(), listing["plugins"][0]["signature"]["keyName"].as_str()), (Some("running"), Some("trusted"), Some("Acme")));
+    assert_eq!(listing["trustedKeys"][0]["id"].as_str(), Some(id.as_str()));
+    assert!(g.ext.plugins.interest & Kind::Chat.bit() != 0);
+    assert!(!dir.join("approved.json").exists());
+    // Taken away: the plugin stops, the key is listed as revoked.
+    assert_eq!(admin::request(&mut g, "POST", "/api/plugins/untrust", &json!({"id": "00000000"})).0, 400);
+    assert_eq!(admin::request(&mut g, "POST", "/api/plugins/untrust", &json!({})).0, 400);
+    let (status, _) = admin::request(&mut g, "POST", "/api/plugins/untrust", &json!({"id": &id[..10]}));
+    assert_eq!(status, 200);
+    let listing = plugin(&mut g);
+    assert_eq!((listing["plugins"][0]["status"].as_str(), listing["plugins"][0]["signature"]["state"].as_str()), (Some("pending"), Some("revoked")));
+    assert_eq!(listing["revokedKeys"][0]["id"].as_str(), Some(id.as_str()));
+    assert!(listing["trustedKeys"].as_array().unwrap().is_empty());
+    assert_eq!(g.ext.plugins.interest & Kind::Chat.bit(), 0);
+}
