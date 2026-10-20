@@ -161,6 +161,7 @@ pub fn run(args: &[String]) {
         error!("usage: pcds serve DATA_DIR SAVE.json (settings are environment variables: docs/env.md; 'pcds run' is what the service runs)");
         std::process::exit(2);
     };
+    crate::util::fix_malloc_threshold();
     crate::logging::start("front", &crate::config::installation_file(&crate::env, save, "rules.json"));
     // Settings that are not what they should be stop the start, before anything is opened.
     if let Err(e) = crate::config::check_env(crate::env) {

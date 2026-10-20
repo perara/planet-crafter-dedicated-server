@@ -30,6 +30,7 @@ pub fn run(args: &[String]) {
         error!("usage: pcds bank DATA_DIR SAVE.json (the front starts it)");
         std::process::exit(2);
     };
+    crate::util::fix_malloc_threshold();
     crate::logging::start("bank", &crate::config::installation_file(&crate::env, save_path, "rules.json"));
     let mut link = open_link();
     // The tables load before the hello: the front stops the old bank only once they are in.
