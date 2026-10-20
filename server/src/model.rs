@@ -555,6 +555,8 @@ mod tests {
     }
 
     #[test]
+    // The game's own numbers (0.7071068 is a quaternion's component, not 1/sqrt(2) by choice).
+    #[allow(clippy::approx_constant)]
     fn push_g7_writes_what_g7_always_wrote() {
         let mut rng = Xorshift(0x9e37_79b9_7f4a_7c15);
         let mut values = vec![0.0, -0.0, 1.0, -1.0, 9.9999995, 0.99999999, 9999999.5, 1234567.0, 12345678.0, 0.00001, 0.000009999999, 1e-5, 1e7, 1e-6, f32::MAX, f32::MIN_POSITIVE, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 558.2, 0.7071068, 100.0, 1e6, 1e-45];
@@ -579,6 +581,8 @@ mod tests {
     /// JSON route gives, whatever the fields hold: odd floats, texts that need escaping, every
     /// default and near miss.
     #[test]
+    // The game's own numbers (0.7071068 is a quaternion's component, not 1/sqrt(2) by choice).
+    #[allow(clippy::approx_constant)]
     fn save_entries_written_directly_are_the_json_routes_bytes() {
         let Some((_, data, _, _)) = crate::game::test_tables() else { return };
         let mut rng = Xorshift(0x2545_f491_4f6c_dd1d);
