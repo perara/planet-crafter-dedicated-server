@@ -47,6 +47,10 @@ const MAX_QUEUE: usize = 32;
 /// late-game Prime save: 8); a client may ask for any number of them, before PlayerReady too, and
 /// each is a network object for everyone, a world object and a line of the save.
 const MAX_SCENE_WRECKS: usize = 256;
+/// The most of a scene name and of a recipe a client's SetAndOpenWorldInstanceScene may carry
+/// (the scenes' names are 23 characters at most, recipes 7 entries).
+const MAX_SCENE_NAME: usize = 64;
+const MAX_RECIPE: usize = 64;
 /// The player's CharacterController height, for what drops from a player dying in an instance.
 const PLAYER_HEIGHT: f32 = 2.0;
 
@@ -595,6 +599,12 @@ fn open_from_rpc(game: &mut Game, a: &Args) {
         let recipe = d.get(5).and_then(|r| r.as_array()).map(|r| r.iter().filter_map(|x| x.as_i64()).map(|x| x as i32).collect()).unwrap_or_default();
         WorldInstance { seed: int(0), time_left: int(1), scene: d.get(2).and_then(|x| x.as_str()).unwrap_or("").to_string(), loot_rarity: int(3), difficulty: int(4), recipe, loaded_from_db: false }
     });
+    // The data goes whole to every client and stays: a scene is named in 23 characters at most
+    // and a recipe lists a handful of props.
+    if data.as_ref().is_some_and(|d| d.scene.len() > MAX_SCENE_NAME || d.recipe.len() > MAX_RECIPE) {
+        eprintln!("world instance: a scene name or recipe over {MAX_SCENE_NAME} bytes or {MAX_RECIPE} entries; ignored");
+        return;
+    }
     set_and_open(game, data);
 }
 
@@ -1010,6 +1020,27 @@ mod tests {
         assert_eq!(g.save.world["openedInstanceSeed"], json!(a.seed));
         let g = reload(&mut g);
         assert_eq!(g.ext.planets.instances.opened.as_ref().map(|o| o.seed), Some(a.seed));
+    }
+
+    /// The opened instance's data is a network variable every client is sent whole, each time one
+    /// is opened: a scene name of hundreds of kilobytes (a scene's is 23 characters at most) or a
+    /// recipe of as many numbers is a multiplier of the sender's bytes by the players, and by
+    /// as many opens as its RPC budget allows (open, unload, open...). Only the sizes a scene has.
+    #[test]
+    fn an_instance_opened_by_rpc_is_the_size_of_a_scenes() {
+        use crate::testkit::*;
+        let Some(mut g) = crate::planets::tests::game() else { return };
+        join(&mut g, 1, "Ann");
+        let a = prime_instance(400_000_032).unwrap();
+        for data in [json!([a.seed, a.time_left, "x".repeat(300_000), a.loot_rarity, a.difficulty, a.recipe]), json!([a.seed, a.time_left, a.scene, a.loot_rarity, a.difficulty, vec![7; 100_000]])] {
+            send_scene(&mut g, 1, "WorldInstanceHandler.SetAndOpenWorldInstanceSceneServerRpc", &[data]);
+            // (An RPC of this size is charged by its size and may wait for a later tick to run.)
+            (0..100).for_each(|_| g.tick());
+            assert!(g.ext.planets.instances.opened.is_none(), "an instance of a megabyte was opened");
+        }
+        let data = json!([a.seed, a.time_left, a.scene, a.loot_rarity, a.difficulty, a.recipe]);
+        send_scene(&mut g, 1, "WorldInstanceHandler.SetAndOpenWorldInstanceSceneServerRpc", &[data]);
+        assert!(g.ext.planets.instances.opened.is_some(), "a real one still opens");
     }
 
     #[test]
