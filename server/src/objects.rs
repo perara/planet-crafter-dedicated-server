@@ -31,7 +31,9 @@ impl Game {
         if fresh && self.data.groups[group].id == crate::genetics::TRAIT_GROUP {
             crate::genetics::randomize_trait(self, &mut wo);
         }
-        self.wos.insert(id, wo);
+        if let Some(old) = self.wos.insert(id, wo) {
+            crate::meteo::explode::net_changed(self, old.group, old.net.is_some(), false);
+        }
         self.add_to_specific_lists(id);
         self.change_state_index(id);
         id
@@ -230,7 +232,7 @@ impl Game {
         if set_after_spawn {
             self.net.objects.get_mut(&net_id).unwrap().flags |= DONT_DESTROY_WITH_OWNER;
         }
-        self.wos.get_mut(&id).unwrap().net = Some(net_id);
+        self.set_wo_net(id, Some(net_id));
         if constructible && !from_db && energy != 0.0 {
             crate::energy::update_all_energy_requesters(self);
         }
@@ -249,6 +251,7 @@ impl Game {
         }
         self.change_state_index(id);
         let Some(wo) = self.wos.remove(&id) else { return };
+        crate::meteo::explode::net_changed(self, wo.group, wo.net.is_some(), false);
         self.constructed.remove(&id);
         self.pickables.remove(&id);
         let hash = self.data.groups[wo.group].hash;
@@ -302,9 +305,16 @@ impl Game {
             Some(net) => self.net.despawn(net),
             None => self.destroy_go_rpc(Target::All, id, disolve),
         }
-        if let Some(wo) = self.wos.get_mut(&id) {
-            wo.net = None;
-        }
+        self.set_wo_net(id, None);
+    }
+
+    /// Sets or clears the network object a world object stands for. The only place that does: the
+    /// explosives' scan counts the ones that have one (meteo/explode.rs `live`).
+    pub fn set_wo_net(&mut self, id: i32, net: Option<u64>) {
+        let Some(w) = self.wos.get_mut(&id) else { return };
+        let (group, had) = (w.group, w.net.is_some());
+        w.net = net;
+        crate::meteo::explode::net_changed(self, group, had, net.is_some());
     }
 
     /// DropOnFloorImplentation.

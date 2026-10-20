@@ -28,6 +28,13 @@ pub struct Explode {
     hit: HashSet<i32>,
     pending: Vec<(GameTime, Step)>,
     next_scan: GameTime,
+    /// How many world objects are of an explosive group and have a network object: the only ones
+    /// `scan` looks at, so it does not run (and costs nothing) while there are none. Derived, not
+    /// saved: `recount` makes it at load and after a hot update, and `net_changed` keeps it at every
+    /// place a world object gains or loses its network object, is replaced or removed. In tests
+    /// every scan time checks it against the world (`check`).
+    #[serde(skip)]
+    live: usize,
 }
 
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -78,6 +85,23 @@ pub fn init(game: &mut Game) {
         }
     }
     game.ext.meteo.explode = e;
+    recount(game);
+}
+
+/// `live` from the world objects (a load, or the game rebuilt from a snapshot).
+pub fn recount(game: &mut Game) {
+    let e = &game.ext.meteo.explode;
+    let live = game.wos.values().filter(|w| w.net.is_some() && e.explosives.contains_key(&w.group)).count();
+    game.ext.meteo.explode.live = live;
+}
+
+/// A world object of `group` had a network object (`had`) and has one (`has`) now, or is gone
+/// (`has` false): the count of explosives the scan must look at follows.
+pub fn net_changed(game: &mut Game, group: usize, had: bool, has: bool) {
+    let e = &mut game.ext.meteo.explode;
+    if had != has && e.explosives.contains_key(&group) {
+        e.live = if has { e.live + 1 } else { e.live.saturating_sub(1) };
+    }
 }
 
 /// Restarts an explosive's countdown (StopAllCoroutines, StartCoroutine(ProcessExplosion)).
@@ -104,11 +128,18 @@ fn scan(game: &mut Game) {
 
 pub fn tick(game: &mut Game) {
     let now = game.time;
-    // ponytail: scans every world object 10 times a second; keep a set of dropped explosives
-    // if worlds grow large enough for this to show.
     if now >= game.ext.meteo.explode.next_scan {
         game.ext.meteo.explode.next_scan = now + 0.1;
-        scan(game);
+        #[cfg(test)]
+        check(game);
+        // ponytail: with an explosive about, every world object is still looked at 10 times a
+        // second; keep their ids in slot order if a world with many bombs lying about needs it.
+        if game.ext.meteo.explode.live > 0 {
+            scan(game);
+        } else {
+            // What a scan with no candidate leaves: nothing seen.
+            game.ext.meteo.explode.seen.clear();
+        }
     }
     let e = &mut game.ext.meteo.explode;
     if e.pending.iter().all(|(t, _)| *t > now) {
@@ -136,9 +167,7 @@ fn go_off(game: &mut Game, wo: i32, net: u64) {
     game.ext.meteo.explode.exploded.insert(wo);
     game.ext.meteo.explode.hit.insert(wo);
     // Its network object stays for the blast's lifetime (Step::Despawn below).
-    if let Some(w) = game.wos.get_mut(&wo) {
-        w.net = None;
-    }
+    game.set_wo_net(wo, None);
     game.destroy_world_object(wo, false);
     let reached: Vec<(i32, usize, u64)> = game
         .wos
@@ -175,6 +204,21 @@ fn exploded(game: &mut Game, target: i32, d: Explodable) {
         }
     }
     game.ext.meteo.explode.pending.push((game.time + d.lifetime, Step::Remove(target)));
+}
+
+/// Whether the tests compare `live` with the world at every scan time (the benchmarks turn it off:
+/// it looks at every world object, which is what `live` saves).
+#[cfg(test)]
+pub static CHECK_LIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// `live` is what a scan of the world would find.
+#[cfg(test)]
+fn check(game: &Game) {
+    if CHECK_LIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        let e = &game.ext.meteo.explode;
+        let found = game.wos.values().filter(|w| w.net.is_some() && e.explosives.contains_key(&w.group)).count();
+        assert_eq!(e.live, found, "explode::live drifted from the world: a place that sets a world object's net, group or presence does not tell explode");
+    }
 }
 
 #[cfg(test)]
@@ -214,5 +258,113 @@ mod tests {
         assert!(!g.wos.contains_key(&near) && g.wos.contains_key(&far));
         at(&mut g, 26.4);
         assert!(!g.net.objects.contains_key(&bomb_net), "despawned two lifetimes later");
+    }
+
+    /// The count that lets the scan be skipped follows every way an explosive gains or loses its
+    /// network object: random worlds of bombs, rocks and iron that are made, dropped, picked up,
+    /// destroyed, armed, left to go off, and rebuilt from a snapshot (a hot update), with the count
+    /// compared to the world after every step (and at every scan time by `check`). And the bombs go
+    /// off in slot order, as they did when every scan looked at the whole world.
+    #[test]
+    fn the_count_of_live_explosives_follows_the_world() {
+        let Some(mut g) = game() else { return };
+        let groups = [g.data.group("Explosive").unwrap(), g.data.group("RockExplodable").unwrap(), g.data.group("Iron").unwrap()];
+        let planet = g.planet_hash();
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut roll = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let found = |g: &crate::game::Game| g.wos.values().filter(|w| w.net.is_some() && g.ext.meteo.explode.explosives.contains_key(&w.group)).count();
+        let (mut ids, mut now, mut restored) = (Vec::new(), 1.0f64, 0);
+        for step in 0..1500 {
+            match roll(9) {
+                0 | 1 => {
+                    let id = g.create_world_object(groups[roll(3) as usize], 0, true);
+                    let w = g.wos.get_mut(&id).unwrap();
+                    (w.position, w.planet) = ([10.0 + roll(40) as f32, 0.0, 10.0 + roll(40) as f32], planet);
+                    ids.push(id);
+                    if roll(10) < 7 {
+                        g.instantiate(id, false, 0);
+                    }
+                }
+                2 if !ids.is_empty() => {
+                    g.instantiate(ids[roll(ids.len() as u64) as usize], false, 0);
+                }
+                3 if !ids.is_empty() => g.destroy_go_on_all_clients(ids[roll(ids.len() as u64) as usize], 0.0),
+                4 if !ids.is_empty() => g.destroy_world_object(ids[roll(ids.len() as u64) as usize], false),
+                5 if !ids.is_empty() => {
+                    if let Some(w) = g.wos.get_mut(&ids[roll(ids.len() as u64) as usize]) {
+                        w.setting = 3;
+                    }
+                }
+                // A world object created again under an id that is taken: the old one is replaced.
+                6 if !ids.is_empty() => {
+                    let id = ids[roll(ids.len() as u64) as usize];
+                    g.create_world_object(groups[roll(3) as usize], id, true);
+                }
+                7 => {
+                    now += roll(40) as f64 / 10.0;
+                    g.time = crate::clock::GameTime::at(now);
+                    super::tick(&mut g);
+                }
+                8 if step % 50 == 0 => {
+                    let text = crate::handoff::snapshot(&mut g).unwrap();
+                    let dir = crate::test_data().unwrap();
+                    let (n, d, s) = crate::tables(dir);
+                    let scenes = crate::scene_tables(dir, &n, &d);
+                    g = crate::handoff::restore(n, d, s, &text, scenes).unwrap();
+                    restored += 1;
+                }
+                _ => {}
+            }
+            assert_eq!(g.ext.meteo.explode.live, found(&g), "after step {step}");
+        }
+        assert!(restored >= 3 && g.ext.meteo.explode.live <= g.wos.len());
+    }
+
+    /// Armed together, bombs go off in the order of their slots in the world, whether or not the
+    /// scan was skipped on the way (it is while no explosive stands, and runs when one does).
+    #[test]
+    fn bombs_armed_in_one_scan_go_off_in_slot_order() {
+        let Some(mut g) = game() else { return };
+        let explosive = g.data.group("Explosive").unwrap();
+        let planet = g.planet_hash();
+        let at = |g: &mut crate::game::Game, t: f64| {
+            g.time = crate::clock::GameTime::at(t);
+            super::tick(g);
+        };
+        // A long quiet time with none about: the scan is skipped.
+        for t in 1..50 {
+            at(&mut g, f64::from(t) * 0.1);
+        }
+        assert_eq!(g.ext.meteo.explode.live, 0);
+        // Three bombs dropped; the third takes the slot a filler freed before the others, so that
+        // slot order is not the order of their ids.
+        let iron = g.data.group("Iron").unwrap();
+        let filler = g.create_world_object(iron, 0, true);
+        let mut bombs = Vec::new();
+        for i in 0..3 {
+            if i == 2 {
+                g.destroy_world_object(filler, false);
+            }
+            let id = g.create_world_object(explosive, 0, true);
+            let w = g.wos.get_mut(&id).unwrap();
+            (w.position, w.planet) = ([10.0 + 40.0 * i as f32, 0.0, 10.0], planet);
+            g.instantiate(id, false, 0);
+            bombs.push(id);
+        }
+        assert_eq!(g.ext.meteo.explode.live, 3);
+        at(&mut g, 6.0);
+        for id in &bombs {
+            g.wos.get_mut(id).unwrap().setting = 3;
+        }
+        at(&mut g, 6.2);
+        let order: Vec<(f64, i32)> = g.ext.meteo.explode.pending.iter().filter_map(|(t, s)| matches!(s, super::Step::GoOff(..)).then(|| (t.secs(), match s { super::Step::GoOff(w, _) => *w, _ => 0 }))).collect();
+        let slots: Vec<i32> = g.wos.keys().copied().filter(|id| bombs.contains(id)).collect();
+        assert_eq!(order.iter().map(|(_, w)| *w).collect::<Vec<_>>(), slots, "armed in slot order");
+        assert_eq!(slots.first(), bombs.last(), "the last bomb has the first slot");
     }
 }

@@ -20,7 +20,7 @@ use crate::net::enc;
 use crate::units::Kind;
 use crate::wire::Writer;
 
-mod explode;
+pub mod explode;
 mod story;
 
 const HANDLER: &str = "MeteoHandler";
