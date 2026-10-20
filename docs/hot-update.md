@@ -1,6 +1,6 @@
 # Hot update: a new server release without disconnecting players
 
-Status: built (branch `hot-update`). The server always runs as a front and a bank; there is no
+Status: built and released (since 0.6.0). The server always runs as a front and a bank; there is no
 single-process mode. Sections (a) to (e) are the design and the spike's measurements; "As built"
 says what the code does now, what it measured, and what is not verified. Numbers come from this
 host (shared, 32 cores) on a copy of the live world (2551 world objects, 402 network objects,
@@ -191,6 +191,9 @@ CI has: it is part of the release checklist below, not a CI job.
 3. `make test` with game tables, and `make docker-test`.
 4. `make gate`. Read its output: "SKIPPED - format changed" is expected after a bump in step 2
    and nothing else; anything else must pass.
+5. If a plugin or `plugin-api` changed: `scripts/build-plugin-examples --check` (on the toolchain the
+   committed `plugin.wasm` files were built with; the check does not depend on the checkout's path),
+   and `scripts/sign-plugin-examples` after a rebuild.
 
 **Changes in the front** are the ones a flip does not bring: the front survives the flip, so what
 changed in `front/`, `admin.rs`, `ipc.rs`'s frames or the admin threads takes effect after

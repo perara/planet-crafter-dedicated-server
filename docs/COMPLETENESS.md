@@ -1,5 +1,11 @@
 # Is the dedicated server done?
 
+**Status at v0.7.0:** this is the report as written against v0.6.2 on the completeness branch; its
+numbers are that snapshot's. Every fix it calls "in this branch" or "on `integrate`" is in the
+release now (the default-field cut `d0d9607`, the autosave thread `ca4e517`, the clock `GameTime`,
+the UTP window `e65c211`, the corrupt-entry error, old-save import, wrecks and the .NET sort);
+whether a gap it lists as open has been closed since was not rechecked. To measure again, see [testing.md](testing.md#completeness-map).
+
 Measured on 2026-10-20 against v0.6.2 (plus the two commits of this branch), with a real late-game
 save as the driver and the real game (under Wine) as the reference. Everything below is found by
 searching the code and tests, or measured; nothing is a guess. What could not be checked is listed
@@ -194,7 +200,7 @@ Severity is how likely a normal player or server owner meets it times how bad it
 
 | # | gap | evidence | smallest fix |
 |---|---|---|---|
-| 1 | **Saving a big world took over a minute of the game thread. Fixed.** | `pcds serve` on the late-game save: the bank sat at 100 % CPU in `memmove` for 60 s after `stop`, was killed by the front, and wrote nothing. A 60 000-object test of the old code ran for more than two minutes. Cause: `SaveFile::to_text` cut each default field out of the 2 MB text in place, 250 000 times. | One pass per default (commit 9520160, test `save::tests::default_fields_of_a_large_world_are_cut_in_linear_time`). The same cause is fixed on `integrate` (d0d9607, c28a115): drop mine when merging. |
+| 1 | **Saving a big world took over a minute of the game thread. Fixed.** | `pcds serve` on the late-game save: the bank sat at 100 % CPU in `memmove` for 60 s after `stop`, was killed by the front, and wrote nothing. A 60 000-object test of the old code ran for more than two minutes. Cause: `SaveFile::to_text` cut each default field out of the 2 MB text in place, 250 000 times. | One pass per default (commit 9520160, test `save::tests::a_big_save_is_written_in_time`). The same cause is fixed on `integrate` (d0d9607, c28a115): drop mine when merging. |
 | 2 | **A world saved on a DLC planet runs without that planet's ground.** The save's own planet (Humble) has no ore veins, water boxes or scene objects here; Toxicity's toxic areas are not simulated (the two `ToxicAreaHandler` client calls are never sent). | Humble run, five minutes: its 29 ore extractors went from 291 to 295 items (the same extractors on a free planet make one ore each 70 s); `veins.rs` and `water.rs` say "None on a DLC planet"; `toxic.rs` answers zeros. The reference cannot show the right answer (it owns no DLC and runs Humble's machines while the host is elsewhere). | Read the DLC scenes from an owner's install in `pcds extract` (like the free planets', for veins and water); the toxic areas are a feature (about one module). Until then refuse or warn when the saved planet is a DLC planet. |
 | 3 | **Old-format saves were destroyed on the first save. Fixed.** The 2022 single-planet save loaded as an empty world, silently; its 5 136 objects were kept as 5 136 "players" and the next save wrote that. | The old-format save, loaded and stopped: `world: 0 world objects`, section 2 of the output held 5 136 records. The real game imports all of it (5 129 distinct objects: seven ids are listed twice in the file; and 181 more made by the machines), 358 inventories, planet Prime. | Done in this branch: the loader refuses what it cannot read (`save::layout`), `pcds world import` ports the game's conversion (`oldsave.rs`), parity-checked against the game (EXPECTED.md "Old saves"). |
 | 4 | **The autosave holds the game for a third of a second or more.** | Soak: the slowest loop of the second was 250 to 620 ms at each autosave with eight bots, 3 to 27 ms in between; the 99th percentile of round trips is the autosave. | Write the autosave on a thread: done on `integrate` (ca4e517). |
