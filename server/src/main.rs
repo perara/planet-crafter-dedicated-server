@@ -122,6 +122,7 @@ mod rules;
 mod s3;
 mod protocol;
 mod rockets;
+mod routes;
 mod rpcspec;
 mod save;
 mod scene;
