@@ -165,8 +165,7 @@ WantedBy=timers.target
         check(&mut self.systemctl(&["daemon-reload"]))
     }
 
-    /// Units written by an older pcds (the bash one ran a program that is gone) are written
-    /// again when they differ from this one's.
+    /// The units are written again when they differ from what this release writes.
     pub fn refresh_unit(&self) -> Result {
         let files = self.unit_files()?;
         if files.iter().any(|(name, text)| fs::read_to_string(self.unit_dir.join(name)).ok().as_deref() != Some(text.as_str())) {
@@ -343,8 +342,8 @@ mod tests {
         assert!(quoted("/srv/a\nb").is_err() && plain("-/x").is_err());
     }
 
-    /// Another installation's unit of the same name is refused; an older pcds's unit of this
-    /// installation is written again.
+    /// Another installation's unit of the same name is refused; a unit of this installation
+    /// that differs is written again.
     #[test]
     fn units_of_another_installation_are_left_alone() {
         let dir = super::super::test_dir("unit-owner");

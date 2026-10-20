@@ -128,7 +128,7 @@ release and its published sha256 into the bank that is not running, checks it, a
 world over: the old release stops for about 15 ms, the new one takes the world and players see a
 short pause. If the new release fails, the old one goes on. The release before stays installed,
 so `--rollback` needs no download. A rollback is live only when that release reads the snapshot
-format the running one writes (0.6.0 does not read 0.6.1's): when it does not, `--rollback` says
+format the running one writes (a release that changed it does not): when it does not, `--rollback` says
 so and changes nothing, and `pcds upgrade --rollback --restart` goes back with a restart (the
 server saves the world as it stops; every player has to join again). While the world is stopped
 (dashboard: Stop world) there is nothing to hand over: start it first, or use `--restart`. A release that changes how the server's two processes talk
@@ -157,23 +157,6 @@ one, unless a bank holds that build already (so a rollback stays rolled back); a
 not installed, and says so (`pcds upgrade vX.Y.Z --restart` goes back on purpose). A release
 whose server cannot start the world falls back to the other bank, which ran before (unless you
 rolled back from it); `pcds status` then says which bank started and why.
-
-From 0.5 or older (the bash `pcds`):
-- A release folder (the installer's): its `pcds` is the new program now, so the old units still
-  start the server. `pcds run` writes this version's units in their place (the stop handling
-  changed: `KillMode=mixed`, `TimeoutStopSec=90`); systemd uses them from the next start, so
-  run `pcds restart` once.
-- A checkout: the units ran the bash `pcds`, which is gone, so the server does not start until
-  `pcds install-service` (or `pcds up`) has written the units again.
-- A game build is recognised by a hash of its code now: the server stops with "the game changed"
-  until `pcds update` has extracted the game tables once more.
-- A world still in `run/world.json` (before 0.5) is not moved any more: move it to
-  `run/worlds/world.json` yourself.
-- What the Wine-era table extraction left (`run/extractor/`, a Wine prefix with copies of the
-  game's files; `/data/extractor` in Docker; `run/bin/pcds-server`; a 0.5 release folder's
-  `bin/pcds-server` and `bin/PcdsExtractor.dll`; unfinished `run/data/.<version>.new/`) is
-  removed by the first `pcds update`, `pcds up`, `pcds setup` or container start, which says
-  so.
 
 ## Docker
 
