@@ -64,7 +64,9 @@ fn in_range(game: &Game, wo: i32, range: f32) -> Vec<i32> {
 
 fn by_distance(game: &Game, wo: i32, mut list: Vec<i32>) -> Vec<i32> {
     let p = game.wos[&wo].position;
-    list.sort_by(|a, b| dist(game.wos[a].position, p).total_cmp(&dist(game.wos[b].position, p)));
+    // MachineOptimizer: result.Sort(Vector3.Distance(x) vs Distance(y)), List<T>.Sort, an introsort
+    // (machines at equal distances are not kept in the order the physics found them in).
+    let _ = crate::dotnet_sort::sort_by(&mut list, |a, b| dist(game.wos[a].position, p).total_cmp(&dist(game.wos[b].position, p)));
     list
 }
 

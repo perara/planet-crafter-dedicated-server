@@ -144,7 +144,8 @@ pub fn instance_via_seed(game: &Game, seed: i32, time_left: i32, loaded_from_db:
         }
     }
     let mut ids: Vec<String> = ingredients.iter().filter_map(|i| Some(game.data.asset(i)?["id"].as_str()?.to_string())).collect();
-    ids.sort_by(|x, y| crate::inventories::culture_cmp(y, x));
+    // list.Sort(y.id.CompareTo(x.id)): an introsort; equal ids are the same ingredient twice.
+    let _ = crate::dotnet_sort::sort_by(&mut ids, |x, y| crate::inventories::culture_cmp(y, x));
     let scene = scenes.get(r.next_int(0, scenes.len() as i32) as usize)?.clone();
     let recipe = ids.iter().map(|i| crate::data::stable_hash(i)).collect();
     Some(WorldInstance { seed, time_left, scene, loot_rarity, difficulty, recipe, loaded_from_db })
