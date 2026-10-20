@@ -201,7 +201,7 @@ fn a_module_with_imports_the_server_does_not_have_is_refused_by_name() {
 fn a_module_built_for_another_abi_does_not_run() {
     let dir = fresh_dir("abi");
     install(&dir, "future", &module("(i32.const 0)", "").replace("(i32.const 65536)", "(i32.const 131072)"), &CHAT_SAY, SUBSCRIBE_CHAT, None);
-    install(&dir, "newer-minor", &module("(i32.const 0)", "").replace("(i32.const 65536)", "(i32.const 65538)"), &CHAT_SAY, SUBSCRIBE_CHAT, None);
+    install(&dir, "newer-minor", &module("(i32.const 0)", "").replace("(i32.const 65536)", "(i32.const 65539)"), &CHAT_SAY, SUBSCRIBE_CHAT, None);
     let host = boot(&dir);
     for id in ["future", "newer-minor"] {
         assert!(matches!(&plugin(&host, id).status, Status::Failed(why) if why.contains("plugin ABI")), "{id}: {:?}", plugin(&host, id).status);
@@ -472,11 +472,11 @@ fn the_api_document_matches_the_code() {
     for (name, allows) in pcds_plugin_api::caps::ALL {
         assert!(has_row(&format!("| `{name}` | {allows}")), "the capability table lacks `{name}` | {allows}");
     }
-    for import in ["log", "query", "say", "tell", "kick", "teleport", "rules_patch"] {
+    for import in ["log", "query", "say", "tell", "kick", "teleport", "rules_patch", "http_request"] {
         assert!(has_row(&format!("| `pcds.{import}` |")), "pcds.{import}");
         assert!(super::wasm::IMPORTS.contains(&import));
     }
-    assert_eq!(super::wasm::IMPORTS.len(), 7);
+    assert_eq!(super::wasm::IMPORTS.len(), 8);
     for export in ["memory", "pcds_abi", "pcds_alloc", "pcds_free", "pcds_event", "pcds_load", "pcds_save", "pcds_state_version", "pcds_unload"] {
         assert!(has_row(&format!("| `{export}` |")), "export {export}");
     }
@@ -503,6 +503,20 @@ fn the_api_document_matches_the_code() {
         ("MAX_PAYLOAD", limits::MAX_PAYLOAD as u64),
         ("MAX_FAULTS", limits::MAX_FAULTS as u64),
         ("MAX_PLUGINS", limits::MAX_PLUGINS as u64),
+        ("HTTP_IN_FLIGHT", limits::HTTP_IN_FLIGHT as u64),
+        ("HTTP_PER_SECOND", limits::HTTP_PER_SECOND as u64),
+        ("HTTP_WORKERS", limits::HTTP_WORKERS as u64),
+        ("HTTP_QUEUE", limits::HTTP_QUEUE as u64),
+        ("HTTP_REDIRECTS", limits::HTTP_REDIRECTS as u64),
+        ("HTTP_DELIVER", limits::HTTP_DELIVER as u64),
+        ("HTTP_TIMEOUT_MS", limits::HTTP_TIMEOUT_MS as u64),
+        ("MAX_HTTP_TIMEOUT_MS", limits::MAX_HTTP_TIMEOUT_MS as u64),
+        ("HTTP_RESPONSE_BYTES", limits::HTTP_RESPONSE_BYTES as u64),
+        ("MAX_HTTP_RESPONSE", limits::MAX_HTTP_RESPONSE as u64),
+        ("MAX_HTTP_URL", limits::MAX_HTTP_URL as u64),
+        ("MAX_HTTP_HEADER_BYTES", limits::MAX_HTTP_HEADER_BYTES as u64),
+        ("MAX_HTTP_BODY", limits::MAX_HTTP_BODY as u64),
+        ("MAX_HTTP_REQUEST", limits::MAX_HTTP_REQUEST as u64),
     ];
     for (name, value) in limit_rows {
         assert!(has_row(&format!("| `{name}` | {value} |")), "the limits table: `{name}` should be {value}");
@@ -526,7 +540,7 @@ fn the_api_document_matches_the_code() {
     for status in ["running", "pending", "disabled", "changed", "invalid", "incompatible", "failed"] {
         assert!(doc.contains(&format!("`{status}`")), "status {status}");
     }
-    for key in ["id", "name", "version", "description", "authors", "license", "kind", "entry", "abi", "min_server", "capabilities", "fuel_per_event", "fuel_per_save", "memory_pages", "tick_every_ms", "subscribe", "rpc"] {
+    for key in ["id", "name", "version", "description", "authors", "license", "kind", "entry", "abi", "min_server", "capabilities", "fuel_per_event", "fuel_per_save", "memory_pages", "tick_every_ms", "subscribe", "rpc", "allow", "timeout_ms", "max_response_bytes", "key", "secret"] {
         assert!(doc.contains(&format!("\n{key} = ")) || doc.contains(&format!("\n{key} =")), "manifest key {key}");
     }
     for var in ["name", "client", "players", "planet", "time", "args", "arg1", "arg2", "arg3"] {

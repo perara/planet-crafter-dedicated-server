@@ -53,6 +53,28 @@ pub const MAX_STATE_BYTES: usize = 1 << 20;
 /// What a query answer or an event payload may hold.
 pub const MAX_PAYLOAD: usize = 1 << 20;
 
+/// `net.http` (docs/plugins.md): requests a plugin may have alive (queued or running) and may start
+/// in a second; the threads that serve every plugin and the queue before them; redirects followed.
+pub const HTTP_IN_FLIGHT: u32 = 2;
+pub const HTTP_PER_SECOND: u32 = 10;
+pub const HTTP_WORKERS: usize = 4;
+pub const HTTP_QUEUE: usize = 32;
+pub const HTTP_REDIRECTS: usize = 3;
+/// Answers handed to plugins between two game ticks.
+pub const HTTP_DELIVER: usize = 8;
+/// The wall clock of one request (DNS to the last byte), by default and at most.
+pub const HTTP_TIMEOUT_MS: u32 = 10_000;
+pub const MAX_HTTP_TIMEOUT_MS: u32 = 30_000;
+/// The answer's body a plugin takes, by default and at most (an answer over it is an error).
+pub const HTTP_RESPONSE_BYTES: u32 = 65_536;
+pub const MAX_HTTP_RESPONSE: u32 = MAX_PAYLOAD as u32;
+/// One request: its URL, the most a header's value (and the sum of the answer's headers) may hold,
+/// its body, and the encoded request altogether (the body and room for the rest).
+pub const MAX_HTTP_URL: usize = 2048;
+pub const MAX_HTTP_HEADER_BYTES: usize = 8192;
+pub const MAX_HTTP_BODY: usize = 1 << 20;
+pub const MAX_HTTP_REQUEST: usize = MAX_HTTP_BODY + (128 << 10);
+
 /// This many faults within FAULT_WINDOW switch the plugin off until it is reloaded or enabled again.
 pub const MAX_FAULTS: usize = 5;
 pub const FAULT_WINDOW: Duration = Duration::from_secs(60);

@@ -1,4 +1,4 @@
-//! `pcds plugin list | check | install | enable | disable | reload | new` (docs/plugins-guide.md).
+//! `pcds plugin list | check | install | enable | disable | reload | new | config` (docs/plugins-guide.md).
 //! Plugins live in run/plugins/<id>/; what the admin approved is run/plugins/approved.json. The
 //! commands change those files, and ask the running server (if there is one) to read them again.
 
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::{Ctx, Result};
-use crate::plugins::{self, approvals, manifest};
+use crate::plugins::{self, approvals, config, manifest};
 
 const USAGE: &str = "\
 pcds plugin list                      the plugins, their state, what they asked for and what they cost
@@ -20,7 +20,10 @@ pcds plugin enable ID [--grant CAP,CAP] [--yes]
 pcds plugin disable ID                switch an approved plugin off
 pcds plugin reload                    make the running server read run/plugins/ again
 pcds plugin new ID [--kind wasm|data] [--api-path DIR]
-                                      a folder for a new plugin, from a template";
+                                      a folder for a new plugin, from a template
+pcds plugin config list [ID]          the values a plugin's manifest declares and whether they are set
+pcds plugin config set ID KEY [VALUE] set a value; a secret one is read from the terminal (or stdin), not from the command line
+pcds plugin config unset ID KEY       remove a value";
 
 impl Ctx {
     fn plugins_dir(&self) -> PathBuf {
@@ -48,6 +51,7 @@ impl Ctx {
                 Err(e) => Err(format!("the server did not take it: {e}")),
             },
             ["new", id, rest @ ..] => self.plugin_new(id, rest),
+            ["config", rest @ ..] => self.plugin_config(rest),
             _ => Err(USAGE.to_string()),
         }
     }
@@ -186,6 +190,20 @@ impl Ctx {
         for (name, allows) in pcds_plugin_api::caps::ALL.iter().filter(|(n, _)| found.requested.iter().any(|r| r == n)) {
             println!("  {} {name}: may {allows}", if given.iter().any(|g| g == name) { "grant:" } else { "deny: " });
         }
+        if let Some(net) = &m.net {
+            println!("  may send HTTP requests to:");
+            for a in &net.allow {
+                println!("    {a}{}", if a.contains("://*.") { "   (a wildcard: every name below it)" } else { "" });
+            }
+            if found.requested.iter().any(|r| r == pcds_plugin_api::caps::NET_HTTP_LOCAL) {
+                println!("  and, with net.http.local, to this machine and your local network (loopback, private addresses)");
+            } else {
+                println!("  never to this machine or your local network: an address of those is refused whatever the name");
+            }
+        }
+        for k in m.config.iter().filter(|k| plugins::config::Configs::load(&dir).ok().is_none_or(|c| c.0.get(id).is_none_or(|v| !v.contains_key(&k.key)))) {
+            println!("  needs a value you set: pcds plugin config set {id} {}   ({}{})", k.key, k.description, if k.secret { "; a secret" } else { "" });
+        }
         println!("  digest {}", found.digest);
         if !yes {
             if unsafe { libc::isatty(0) } != 1 {
@@ -204,6 +222,57 @@ impl Ctx {
         self.plugin_reload_running();
         let _ = approvals::FILE;
         Ok(())
+    }
+
+    /// `pcds plugin config ...`: the values the admin gives a plugin (a webhook URL, a token).
+    fn plugin_config(&self, args: &[&str]) -> Result {
+        let dir = self.plugins_dir();
+        let declared = |id: &str| -> std::result::Result<Vec<manifest::ConfigKey>, String> {
+            let found = plugins::read_folder(&dir.join(id));
+            found.manifest.map(|m| m.config).ok_or_else(|| format!("{id}: {}", found.status.detail().unwrap_or("not installed")))
+        };
+        match args {
+            ["list"] | ["list", _] => {
+                let all = config::Configs::load(&dir)?;
+                let ids: Vec<String> = match args {
+                    ["list", id] => vec![id.to_string()],
+                    _ => plugins::prepare(&dir, "world").plugins.iter().map(|p| p.id.clone()).collect(),
+                };
+                for id in ids {
+                    for k in declared(&id)? {
+                        let value = all.0.get(&id).and_then(|v| v.get(&k.key));
+                        let shown = match (value, k.secret) {
+                            (None, _) => "not set".to_string(),
+                            (Some(_), true) => "set (a secret: not shown)".to_string(),
+                            (Some(v), false) => v.clone(),
+                        };
+                        println!("{id} {}: {shown}   {}", k.key, k.description);
+                    }
+                }
+                Ok(())
+            }
+            ["set", id, key, rest @ ..] => {
+                let keys = declared(id)?;
+                let k = keys.iter().find(|k| k.key == *key).ok_or_else(|| format!("{id} declares no config key {key} (it declares: {})", keys.iter().map(|k| k.key.as_str()).collect::<Vec<_>>().join(", ")))?;
+                let value = match (rest, k.secret) {
+                    ([v], false) => v.to_string(),
+                    ([], _) => read_line_hidden(&format!("{id} {key}: "), k.secret)?,
+                    (_, true) => return Err(format!("{key} is a secret: leave the value off; it is read from the terminal (or standard input), so it stays out of the shell history and the process list")),
+                    _ => return Err(USAGE.to_string()),
+                };
+                config::set(&dir, id, key, Some(value.trim_end_matches(['\r', '\n'])))?;
+                println!("pcds: {id} {key} is set");
+                self.plugin_reload_running();
+                Ok(())
+            }
+            ["unset", id, key] => {
+                config::set(&dir, id, key, None)?;
+                println!("pcds: {id} {key} is removed");
+                self.plugin_reload_running();
+                Ok(())
+            }
+            _ => Err(USAGE.to_string()),
+        }
     }
 
     fn plugin_new(&self, id: &str, rest: &[&str]) -> Result {
@@ -249,4 +318,35 @@ impl Ctx {
         println!("pcds: made {id}/ ({kind} plugin); next steps are in {id}/README.md");
         Ok(())
     }
+}
+
+/// One line from the terminal, not echoed when `hidden` (a secret), or from standard input.
+fn read_line_hidden(prompt: &str, hidden: bool) -> std::result::Result<String, String> {
+    let tty = unsafe { libc::isatty(0) } == 1;
+    let mut saved: Option<libc::termios> = None;
+    if tty {
+        print!("{prompt}");
+        let _ = std::io::stdout().flush();
+        if hidden {
+            // SAFETY: plain termios calls on standard input, undone below.
+            unsafe {
+                let mut t: libc::termios = std::mem::zeroed();
+                if libc::tcgetattr(0, &mut t) == 0 {
+                    saved = Some(t);
+                    t.c_lflag &= !libc::ECHO;
+                    libc::tcsetattr(0, libc::TCSANOW, &t);
+                }
+            }
+        }
+    }
+    let mut line = String::new();
+    let read = std::io::stdin().lock().read_line(&mut line);
+    if let Some(t) = saved {
+        // SAFETY: restores what tcgetattr gave.
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, &t) };
+        println!();
+    }
+    read.map_err(|e| e.to_string())?;
+    let line = line.trim_end_matches(['\r', '\n']).to_string();
+    if line.is_empty() { Err("no value given".into()) } else { Ok(line) }
 }

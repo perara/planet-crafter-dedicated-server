@@ -16,6 +16,8 @@
 //! - `wasm.rs`, `data.rs`: the two kinds of plugin, behind `runtime.rs`.
 //! - `state.rs`: plugin state in the snapshot of a flip and on disk.
 //! - `stream.rs`: the event stream for out-of-process integrations.
+//! - `net.rs`, `config.rs`: `net.http`, a plugin's outbound HTTP on worker threads, and the values
+//!   the admin sets for a plugin that it puts into requests.
 //! - `admin.rs`: the admin API's part. `crate::events` is where the game hands events over.
 //!
 //! The game is reached only through the `Sink` trait below, which is also what makes the host
@@ -33,10 +35,12 @@ pub mod actions;
 pub mod admin;
 pub mod approvals;
 pub mod check;
+pub mod config;
 pub mod ctx;
 mod data;
 pub mod limits;
 pub mod manifest;
+pub mod net;
 mod runtime;
 pub mod state;
 pub mod stream;
@@ -48,10 +52,12 @@ mod cost;
 #[cfg(test)]
 mod game_tests;
 #[cfg(test)]
+mod net_tests;
+#[cfg(test)]
 mod tests;
 
 use approvals::{Approval, Approvals};
-use ctx::{Action, Ctx, Grant, World};
+use ctx::{Action, Ctx, Grant, NetCtx, World};
 use limits::Limits;
 use manifest::{Manifest, PluginKind};
 use runtime::{Fault, Runtime};
@@ -176,6 +182,13 @@ pub struct Stats {
     pub shed: u64,
     pub last_error: Option<String>,
     pub last_fault_unix: Option<u64>,
+    /// `net.http`: requests started, answered by a server (any status), without an answer
+    /// (refused by the guard, DNS, connection, TLS, timeout, size), and the bytes of bodies sent and taken.
+    pub http_requests: u64,
+    pub http_answered: u64,
+    pub http_failed: u64,
+    pub http_bytes_out: u64,
+    pub http_bytes_in: u64,
 }
 
 /// What a plugin still has to be started with, when it is approved.
@@ -212,6 +225,10 @@ pub struct Loaded {
     pub notice: Option<String>,
     /// Switched off for faults but its instance is still held for the final call (`Host::settle`).
     retire_due: bool,
+    /// `net.http`, when it is granted: where it may go, its values, its requests alive.
+    pub net: Option<NetCtx>,
+    /// The values the admin set for the keys the manifest declares (secret ones too: never printed).
+    config: config::Values,
 }
 
 impl Loaded {
@@ -240,6 +257,8 @@ impl Loaded {
             entry_rel: None,
             notice: None,
             retire_due: false,
+            net: None,
+            config: config::Values::new(),
         }
     }
 
@@ -251,7 +270,7 @@ impl Loaded {
     /// the entry, the approval, and for an approved plugin the module compiled or the rules read.
     /// (An installed plugin's folder is named for its id: `prepare` checks that, a source folder
     /// being checked or installed is named as its author likes.)
-    fn inspect(engine: &wasmi::Engine, dir: &Path, approval: Option<&Approval>) -> Loaded {
+    fn inspect(engine: &wasmi::Engine, dir: &Path, approval: Option<&Approval>, values: Option<&config::Values>) -> Loaded {
         let folder = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let mut p = Loaded::bare(&folder, dir, Status::Pending);
         let manifest_bytes = match std::fs::read(dir.join(manifest::FILE)) {
@@ -305,6 +324,17 @@ impl Loaded {
         };
         let approved = p.status == Status::Running;
         p.grant = Grant::from_names(approval.filter(|_| approved).into_iter().flat_map(|a| a.grant.iter().map(String::as_str)).filter(|g| p.requested.iter().any(|r| r == g)));
+        // net.http: the allow list is the manifest's (pinned by the digest), and the local network
+        // is open only with both capabilities granted. Values are the admin's, for the declared keys.
+        p.config = values.map(|v| m.config.iter().filter_map(|k| Some((k.key.clone(), v.get(&k.key)?.clone()))).collect()).unwrap_or_default();
+        if approved && p.grant.has(caps::NET_HTTP)
+            && let Some(net) = &m.net
+        {
+            let local = p.grant.has(caps::NET_HTTP_LOCAL);
+            let patterns = net.allow.iter().filter_map(|a| net::Pattern::parse(a, true).ok()).filter(|pattern| local || !pattern.is_ip()).collect();
+            let policy = net::Policy { patterns, local, timeout: Duration::from_millis(net.timeout_ms.unwrap_or(limits::HTTP_TIMEOUT_MS) as u64), max_response: net.max_response_bytes.unwrap_or(limits::HTTP_RESPONSE_BYTES) as usize };
+            p.net = Some(NetCtx { policy: Arc::new(policy), config: Arc::new(p.config.clone()), in_flight: Arc::default() });
+        }
         // What an approved plugin is: its module compiled, or its rules read. Unapproved ones are
         // listed but not looked into any further than the manifest.
         let kinds: BTreeSet<Kind> = match m.plugin.kind {
@@ -371,7 +401,8 @@ impl Loaded {
     fn start(&mut self, engine: &wasmi::Engine, gauge: &Arc<wasm::Gauge>, saved: &state::Saved, world: &str) {
         let Some(pending) = self.pending.take() else { return };
         let state = self.starting_state(saved, world);
-        let ctx = Ctx::new(&self.id, self.grant);
+        let mut ctx = Ctx::new(&self.id, self.grant);
+        ctx.net = self.net.clone();
         let made: Result<Box<dyn Runtime>, String> = match pending {
             Pending::Wasm(module) => wasm::Wasm::new(engine, &module, ctx, self.limits, gauge.clone()).map(|w| Box::new(w) as Box<dyn Runtime>),
             Pending::Data(rules) => Ok(Box::new(data::Data::new(rules, ctx))),
@@ -388,7 +419,7 @@ impl Loaded {
 
     /// Whether the same files, approved the same way, were meant: a reload leaves it as it is.
     fn same_files(&self, other: &Loaded) -> bool {
-        self.digest == other.digest && self.grant == other.grant && self.limits == other.limits
+        self.digest == other.digest && self.grant == other.grant && self.limits == other.limits && self.config == other.config
     }
 
     /// The last call, the last save, then the instance goes (its memory, its capabilities, what
@@ -495,6 +526,8 @@ pub struct Host {
     pub gauge: Arc<wasm::Gauge>,
     /// The folder as it was when the plugins were read (`signature`).
     pub sig: Sig,
+    /// `net.http`: the workers and the answers waiting to be delivered.
+    pub net: net::Net,
 }
 
 /// Size and modification time of the files that decide what plugins there are: a change in any is
@@ -507,7 +540,7 @@ fn stat(p: &Path) -> (u128, u64) {
 
 /// The signature of `dir`, given each known plugin's entry file.
 fn signature_of(dir: &Path, entry_of: &HashMap<String, String>) -> Sig {
-    let mut sig = vec![(dir.to_path_buf(), stat(dir)), (dir.join(approvals::FILE), stat(&dir.join(approvals::FILE)))];
+    let mut sig = vec![(dir.to_path_buf(), stat(dir)), (dir.join(approvals::FILE), stat(&dir.join(approvals::FILE))), (dir.join(config::FILE), stat(&dir.join(config::FILE)))];
     for folder in folders_of(dir) {
         let name = folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         sig.push((folder.join(manifest::FILE), stat(&folder.join(manifest::FILE))));
@@ -536,6 +569,14 @@ fn scan(engine: &wasmi::Engine, dir: &Path) -> (Vec<Loaded>, Option<String>) {
         }
     };
     let (approvals, error) = approvals;
+    // The admin's values for the plugins' [[config]] keys; a file that does not read means none.
+    let values = match config::Configs::load(dir) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("plugins: {e}: plugins run without their config values until that is fixed");
+            config::Configs::default()
+        }
+    };
     let mut folders = folders_of(dir);
     if folders.len() > limits::MAX_PLUGINS {
         eprintln!("plugins: {} folders in {}; only the first {} (by name) are read", folders.len(), dir.display(), limits::MAX_PLUGINS);
@@ -545,7 +586,7 @@ fn scan(engine: &wasmi::Engine, dir: &Path) -> (Vec<Loaded>, Option<String>) {
     for folder in folders {
         let id = folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let approval = approvals.0.get(&id).filter(|_| error.is_none());
-        let mut p = Loaded::inspect(engine, &folder, approval);
+        let mut p = Loaded::inspect(engine, &folder, approval, values.0.get(&id));
         // Installed plugins live in a folder named for their id: it is how a command or a state file
         // finds its owner, and what `pcds plugin enable ID` names.
         if p.manifest.as_ref().is_some_and(|m| m.id() != id) {
@@ -573,7 +614,7 @@ pub fn prepare(dir: &Path, world: &str) -> Host {
 impl Host {
     /// A host with no plugin.
     pub fn empty(dir: &Path, world: &str) -> Host {
-        Host { dir: dir.to_path_buf(), world: world.to_string(), engine: wasm::engine(), plugins: Vec::new(), commands: HashMap::new(), interest: 0, rotate: 0, approvals_error: None, gauge: Arc::default(), sig: Vec::new() }
+        Host { dir: dir.to_path_buf(), world: world.to_string(), engine: wasm::engine(), plugins: Vec::new(), commands: HashMap::new(), interest: 0, rotate: 0, approvals_error: None, gauge: Arc::default(), sig: Vec::new(), net: net::Net::default() }
     }
 
     /// The folder's files that matter, as they are now.
@@ -813,59 +854,115 @@ impl Host {
                 event
             };
             let bytes = payload.as_deref().unwrap_or(&[]);
-            let Some(rt) = p.rt.as_mut() else { continue };
-            rt.ctx().begin(&*sink);
-            let t = Instant::now();
-            let result = rt.event(event, bytes);
-            let spent = t.elapsed();
-            let (queued, denied, refused) = {
-                let c = rt.ctx();
-                (c.end(), std::mem::take(&mut c.denied), std::mem::take(&mut c.refused))
-            };
-            p.stats.calls += 1;
-            p.stats.nanos += spent.as_nanos() as u64;
-            p.stats.max_nanos = p.stats.max_nanos.max(spent.as_nanos() as u64);
-            p.stats.denied += denied as u64;
-            p.stats.refused += refused as u64;
-            if spent > limits::SLOW_CALL {
-                p.stats.slow += 1;
-                if p.last_slow_log.is_none_or(|t| t.elapsed() > Duration::from_secs(10)) {
-                    p.last_slow_log = Some(Instant::now());
-                    eprintln!("plugin {}: {} took {} ms (slow calls are counted; the fuel limit stops runaways)", p.id, event.kind().name(), spent.as_millis());
-                }
-            }
-            if is_tick {
-                p.last_tick = game_ms;
-                p.next_tick = game_ms + p.limits.tick_every_ms as i64;
-            }
-            match result {
-                Ok((v, cost)) => {
-                    p.stats.fuel += cost.fuel;
-                    if v == Verdict::Veto {
-                        if event.kind() == Kind::RpcBefore && p.grant.has(caps::RPC_VETO) {
-                            p.stats.vetoes += 1;
-                            verdict = Verdict::Veto;
-                        } else {
-                            p.stats.denied += 1;
-                        }
-                    }
-                }
-                Err(f) => {
-                    // What the plugin asked for before it failed is not done.
-                    p.faulted(&f, event.kind().name());
-                    self.recompute();
-                    continue;
-                }
-            }
-            let applied = sink.apply(&p.id, queued);
-            let p = &mut self.plugins[i];
-            p.stats.actions += applied.done as u64;
-            p.stats.refused += applied.refused as u64;
-            if verdict == Verdict::Veto {
+            if self.call(i, sink, event, bytes, game_ms) == Verdict::Veto {
+                verdict = Verdict::Veto;
                 break;
             }
         }
         verdict
+    }
+
+    /// One call of plugin `i` with an event (`bytes`: the event as a module reads it), and what
+    /// follows: its counters, its faults, its queued actions applied. Veto when it refused an RPC it may.
+    fn call(&mut self, i: usize, sink: &mut dyn Sink, event: &Event<'_>, bytes: &[u8], game_ms: i64) -> Verdict {
+        let is_tick = event.kind() == Kind::Tick;
+        let mut verdict = Verdict::Continue;
+        let p = &mut self.plugins[i];
+        let Some(rt) = p.rt.as_mut() else { return verdict };
+        rt.ctx().begin(&*sink);
+        let t = Instant::now();
+        let result = rt.event(event, bytes);
+        let spent = t.elapsed();
+        let (queued, denied, refused) = {
+            let c = rt.ctx();
+            (c.end(), std::mem::take(&mut c.denied), std::mem::take(&mut c.refused))
+        };
+        p.stats.calls += 1;
+        p.stats.nanos += spent.as_nanos() as u64;
+        p.stats.max_nanos = p.stats.max_nanos.max(spent.as_nanos() as u64);
+        p.stats.denied += denied as u64;
+        p.stats.refused += refused as u64;
+        if spent > limits::SLOW_CALL {
+            p.stats.slow += 1;
+            if p.last_slow_log.is_none_or(|t| t.elapsed() > Duration::from_secs(10)) {
+                p.last_slow_log = Some(Instant::now());
+                eprintln!("plugin {}: {} took {} ms (slow calls are counted; the fuel limit stops runaways)", p.id, event.kind().name(), spent.as_millis());
+            }
+        }
+        if is_tick {
+            p.last_tick = game_ms;
+            p.next_tick = game_ms + p.limits.tick_every_ms as i64;
+        }
+        match result {
+            Ok((v, cost)) => {
+                p.stats.fuel += cost.fuel;
+                if v == Verdict::Veto {
+                    if event.kind() == Kind::RpcBefore && p.grant.has(caps::RPC_VETO) {
+                        p.stats.vetoes += 1;
+                        verdict = Verdict::Veto;
+                    } else {
+                        p.stats.denied += 1;
+                    }
+                }
+            }
+            Err(f) => {
+                // What the plugin asked for before it failed is not done.
+                p.faulted(&f, event.kind().name());
+                self.recompute();
+                return Verdict::Continue;
+            }
+        }
+        // HTTP requests go to the workers; the rest is applied to the game.
+        let (http, queued): (Vec<Action>, Vec<Action>) = queued.into_iter().partition(|a| matches!(a, Action::Http(_)));
+        if !http.is_empty() {
+            let p = &mut self.plugins[i];
+            if let Some(net) = p.net.clone() {
+                for action in http {
+                    let Action::Http(fetch) = action else { continue };
+                    p.stats.http_requests += 1;
+                    p.stats.http_bytes_out += fetch.body.len() as u64;
+                    self.net.submit(&p.id, fetch, net.policy.clone(), net.in_flight.clone());
+                }
+            }
+        }
+        let applied = sink.apply(&self.plugins[i].id, queued);
+        let p = &mut self.plugins[i];
+        p.stats.actions += applied.done as u64;
+        p.stats.refused += applied.refused as u64;
+        verdict
+    }
+
+    /// Whether requests of plugins are out and their answers not taken yet.
+    pub fn net_waiting(&self) -> bool {
+        self.net.outstanding > 0
+    }
+
+    /// Hands finished HTTP requests to the plugins that made them, as `HttpDone` events, at most
+    /// `HTTP_DELIVER` of them (the game thread does this between two ticks). An answer whose plugin is
+    /// gone, switched off or no longer holds `net.http` is dropped. One line of the log for each request:
+    /// the method, `scheme://host[:port]`, the result: never the path, the query or a header.
+    pub fn deliver_http(&mut self, sink: &mut dyn Sink, game_ms: i64) {
+        for done in self.net.take(limits::HTTP_DELIVER) {
+            println!("{}", net::log_line(&done));
+            let Some(i) = self.plugins.iter().position(|p| p.id == done.plugin && p.running() && p.grant.has(caps::NET_HTTP)) else { continue };
+            let p = &mut self.plugins[i];
+            let (mut status, mut error, mut body) = (done.status, done.error.as_str(), done.body.as_slice());
+            // An answer the module's memory cannot hold would fault it for nothing it did.
+            if body.len() > p.limits.memory_pages as usize * 65536 / 2 {
+                (status, error, body) = (0, "the answer does not fit in the plugin's memory (raise budget.memory_pages or lower net.max_response_bytes)", &[]);
+            }
+            if status > 0 {
+                p.stats.http_answered += 1;
+            } else {
+                p.stats.http_failed += 1;
+            }
+            p.stats.http_bytes_in += body.len() as u64;
+            let headers: Vec<(&str, &str)> = done.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            let event = Event::HttpDone { ticket: done.ticket, status, error, body, headers };
+            let mut w = Writer::new();
+            event.encode(&mut w);
+            self.call(i, sink, &event, &w.0, game_ms);
+        }
     }
 
     /// Asks every running plugin for its state, within `budget` altogether; one the budget cannot
@@ -1006,6 +1103,10 @@ fn rescan_game(game: &mut crate::game::Game, explicit: bool) -> Result<String, S
 /// folder, an approval, a file replaced, a folder removed). It also lets stream consumers that
 /// stopped asking go. With nothing changed it is a few `stat`s.
 pub fn poll(game: &mut crate::game::Game) {
+    // Answers of plugins' HTTP requests are handed over every time (a test of a counter when none is out).
+    if game.ext.plugins.host.as_ref().is_some_and(|h| h.net_waiting()) {
+        deliver_http(game);
+    }
     let slot = &mut game.ext.plugins;
     let now = Instant::now();
     if slot.place.is_none() || slot.scan.next.is_some_and(|t| now < t) {
@@ -1013,6 +1114,18 @@ pub fn poll(game: &mut crate::game::Game) {
     }
     slot.scan.next = Some(now + POLL_EVERY);
     poll_now(game);
+}
+
+/// The finished HTTP requests of plugins, to the plugins (`Host::deliver_http`), between two events.
+pub(crate) fn deliver_http(game: &mut crate::game::Game) {
+    let Some(mut host) = game.ext.plugins.host.take() else { return };
+    let game_ms = (game.time as f64 * 1000.0) as i64;
+    host.deliver_http(game, game_ms);
+    if host.plugins.iter().any(|p| p.retire_due) {
+        host.settle(&mut game.ext.plugins.saved);
+    }
+    game.ext.plugins.host = Some(host);
+    game.ext.plugins.refresh();
 }
 
 /// `poll` without the timer.
@@ -1039,7 +1152,7 @@ pub(crate) fn poll_now(game: &mut crate::game::Game) {
 
 /// What a folder holds, read as far as the manifest and the entry go (no approval, nothing compiled).
 pub fn read_folder(folder: &Path) -> Loaded {
-    Loaded::inspect(&wasm::engine(), folder, None)
+    Loaded::inspect(&wasm::engine(), folder, None, None)
 }
 
 /// Approves a plugin: records `grant` (default: everything it asks for; never more) and the digest

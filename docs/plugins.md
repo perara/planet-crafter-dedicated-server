@@ -8,7 +8,7 @@ is docs/architecture.md.
 ## The decision in ten lines
 
 1. **Logic that runs inside the world is a WebAssembly module**, a plain core module (no WASI, no
-   component model) with seven imports and seven exports, run by **wasmi**, an interpreter in
+   component model) with eight imports and nine exports, run by **wasmi**, an interpreter in
    pure Rust. Rust, C, C++, Zig, AssemblyScript and TinyGo can all make one.
 2. **Small jobs are data**: a `rules.toml` of chat commands, welcome messages, announcements and
    rule switches that the host runs itself. No code, nothing to sandbox, nothing that can loop.
@@ -173,7 +173,7 @@ each ten seconds), and the **component model**.
 set aside: components need wasmtime (the 11 MB); an author needs `cargo-component` or
 `wasm-tools component new` and the `wasm32-wasip2` target, which brings a set of WASI imports the
 sandbox then has to stub one by one; the canonical ABI's lifting and lowering would be code in the
-host for an interface of seven functions; and WASI itself is moving (0.2 to 0.3). A core module
+host for an interface of eight functions; and WASI itself is moving (0.2 to 0.3). A core module
 with a hand-written codec builds with `cargo build --target wasm32-unknown-unknown`, which any Rust
 author has. The event kinds and their fields map one to one onto a WIT `variant`, so the day wasmi
 has components, or wasmtime is wanted anyway, a WIT file is a mechanical translation and old core
@@ -404,6 +404,89 @@ an error code to the plugin, counts in `denied`, and does nothing). `pcds plugin
 the host functions a module imports with the capabilities its manifest asks for, so most
 mismatches are found before installing.
 
+## `net.http`: a plugin's way out
+
+A module has no network. Integrations that must reach the Internet were programs of their own
+(a process, the admin token); a Discord notice, a web hook, a metrics push is a small call to a few
+hosts, and a program for it is a service to run, watch and give the admin token. `net.http` lets a
+module make those calls itself, **from inside the bank and without being able to aim them**. The
+reference is docs/plugins-api.md ("`net.http`"); this is the design.
+
+**Asynchronous, and never on the game thread.** `pcds.http_request` checks the request (capability,
+form, allow list, rate), queues it like an action and returns a **ticket**. Four worker threads,
+started with the first request and shared by every plugin, send it. The answer is an event,
+`http_done`, delivered by the bank between two ticks (`plugins::poll`, the same safe point as the
+folder scan; at most eight a frame) to the plugin that asked, and the call that handles it is an
+ordinary call: fuel, faults, actions applied after it. A synchronous call would hold the tick for
+a network round trip; a callback would run plugin code on a thread. A plugin that wants to wait
+for an answer remembers its ticket in its state.
+
+**The allow list is the authority.** The manifest's `[net] allow` is what the admin approves
+(shown in the approval, pinned by the digest), so a plugin cannot widen it later. A pattern is a
+scheme, a lowercase host and a port; one `*.` in front of a name covers the names below it, and the
+manifest is refused if the name is a public suffix (`*.com`, `*.co.uk`, `*.github.io`). The host
+carries a short list of those instead of the Public Suffix List (thousands of lines, a new
+dependency, a release to keep it fresh): the rule that a wildcard has two labels at least, plus
+the two-label national suffixes and the hosting platforms a plugin would plausibly name. It is a
+net, not a proof; the approval screen flags a wildcard and the admin decides.
+
+**The address is checked where it is used.** Allowing a *name* proves nothing about the *machine*
+(a name can point at 127.0.0.1, at the cloud's metadata address, at the router). The guard is in the
+connection itself: ureq is given a resolver of the host's that does the lookup (on a thread it stops
+waiting for at the deadline), refuses every address in a class a plugin may not reach, and hands
+ureq exactly what it checked, and a connector in front of the TCP connector looks at the addresses
+ureq is about to dial once more. A name with one disallowed address among its answers is refused
+whole. The lookup is repeated for every connection and every redirect, no connection is kept, so
+there is no moment at which a second answer of the DNS could be used without being looked at (the
+rebinding attack): the test that does it gives the same name a loopback answer the first time and
+an unspecified one the second, and the redirect to the same name is stopped. IPv4 spellings that a
+resolver reads as addresses (`127.1`, `0x7f.1`, `2130706433`) are not host names here (a host's last
+label begins with a letter), and one that reaches the resolver anyway is judged by the address it
+becomes. `net.http.local` (asked for in the manifest, granted by the admin as its own line in the
+approval) opens loopback, the private ranges, link-local and shared address space, for a plugin
+whose job is the local network (a bridge on the same machine); unspecified, multicast and the
+reserved ranges stay closed.
+
+**Limits that need no goodwill.** One wall clock from the lookup to the last byte (so a server
+that trickles one byte a second is let go: `timeout_ms`, 10 s by default, 30 s at most); the answer
+is read one byte past `max_response_bytes` and an answer over it is an error, not a short body that
+looks like a whole one; a request's size, URL and headers are bounded; two requests alive per
+plugin and ten started a second; four workers behind a queue of 32, and a request that finds the
+queue full is answered at once with "the server is busy" (nothing waits without bound). Four workers
+and two alive per plugin mean that it takes two plugins that never answer to hold half the
+workers, and four to hold all of them: a hostile plugin the admin approved can still slow the
+others' requests down to the timeout; it cannot touch the game.
+
+**What a plugin learns.** Fixed phrases, never a URL and never an address: a plugin must not be able
+to map the server's network by the errors it gets back. The host's log has one line per request
+(plugin, method, `scheme://host[:port]`, result, milliseconds, bytes): no path, no query, no
+header.
+
+**Values the admin sets.** A webhook URL or a token should not be in the plugin (the manifest is
+public, the module is pinned and shared) and the plugin should not have it in its memory either, where
+a bug or a hostile module could copy it into a request to a listed host. The manifest declares
+`[[config]]` keys; the admin sets them (`pcds plugin config set`, in `config.json`, mode 0600); a
+request names them as `${config.KEY}` in the path, the query or a header value and the host puts
+the value in *after* the plugin's call. A key is a secret unless the manifest says otherwise, and a
+secret is in no listing, log line or event; the host part of a URL cannot hold one, so the log line
+(which shows the host) cannot either. A plugin whose values change is restarted with its state
+handed over, like one whose files changed.
+
+**What is not here.** No streaming of a body (a request is at most 1 MiB and an answer at most 1
+MiB, so the S3 backup, whose world files are larger, stays in the bank for now: the section "Where
+the built-ins stand"); no WebSocket or server-sent events; HTTP/1.1 only; no proxy and no custom
+root certificates (a private CA is a change to the host, not to a manifest); no client
+certificates; the system's DNS lookup cannot be interrupted, so a lookup that hangs occupies a thread
+(of its own, not a worker) until the system gives up. A request in flight when the bank is
+replaced by a hot update is lost: the plugin's own timeout (in `tick`) is the answer; the state of
+tickets is not in the snapshot and `handoff::FORMAT` did not change.
+
+**What it costs.** With no plugin that uses it: nothing (`poll` tests whether any request is
+out, one load of a counter that is zero, once a frame; the first request starts the threads). A
+request costs the plugin's call, a queue push, and on a worker a lookup, a connection and a TLS
+handshake (a fresh agent each time: no pooling, by design). `make plugin-bench` and the bench are
+unchanged by it (see "Measurements of the whole").
+
 ## Budgets and faults
 
 | What | Limit | When it is over |
@@ -419,6 +502,7 @@ mismatches are found before installing.
 | state | 1 MiB | a fault |
 | module | 8 MiB | not loaded |
 | faults | 5 in 60 seconds | the plugin is switched off (`failed`) until `pcds plugin reload` or the dashboard starts it |
+| HTTP requests | 2 alive and 10 a second per plugin, 4 workers and a queue of 32 for all, 10 s (30 s at most) each, answers of 64 KiB (1 MiB at most) | refused (`-3`), or answered with an error |
 
 A **fault** is a trap (including `unreachable`, which is what a Rust panic becomes with
 `panic = "abort"`), running out of fuel, a pointer outside the module's memory, an answer that is
@@ -547,8 +631,8 @@ The server is GPL-3.0-or-later. What that means for a plugin, honestly:
 
 - **A WebAssembly module or a program that talks to the server through the documented
   interface** is, in the project's view, a separate work, and may be under any licence, closed
-  or open. The module is run in an isolated memory and exchanges bytes through seven functions
-  and seven exports; the program is another process. The Free Software Foundation's own FAQ
+  or open. The module is run in an isolated memory and exchanges bytes through eight functions
+  and nine exports; the program is another process. The Free Software Foundation's own FAQ
   treats a pipe, a socket or command-line arguments as normally between separate programs, and
   says that exchanging complex internal data structures weighs towards one program. Here nothing
   internal is exchanged: the interface is small, public and versioned. **This is not legal
@@ -579,7 +663,7 @@ The server is GPL-3.0-or-later. What that means for a plugin, honestly:
 |---|---|---|---|
 | Chat hooks (webhooks, exec, `GET /api/chat/events`) | `chathooks.rs`: the bank queues a chat event, the front's worker delivers | the front-side half is an integration that reads the stream; the bank-side half is `events::chat`'s first subscriber | the bank side is already the first subscriber of `events`. Replacing the front's worker by the stream needs the front-side long-poll, and the file split (docs/architecture.md, step 6): not done |
 | Rules (`speed.*`, `gauges.*`...) | `rules.rs`, read by the game's code | stays core: it changes how the game computes, and parity depends on it | plugins change rules with `rules.write`; `rules::set` emits `rule_change` |
-| Backups to S3 | `s3.rs` called from `bank.rs`: network I/O and a thread in the game process, with process-wide statics that a flip resets | the first user of a future `net.http` capability, on `world_saved`, its status kept as plugin state | the event exists; the capability and the thread model do not. Until then it stays where it is |
+| Backups to S3 | `s3.rs` called from `bank.rs`: network I/O and a thread in the game process, with process-wide statics that a flip resets | the first user of `net.http`, on `world_saved`, its status kept as plugin state | the event and the capability exist; what is missing is a body bigger than 1 MiB (a world file is tens of MB) and a signing of requests with the keys of `backup.*`. Until a streaming request body exists it stays where it is |
 | `world.pauseWhenEmpty`, the pause | the clock | stays core | |
 
 Chat has one path (`events::chat`, with the chat hooks as its first subscriber); no parallel one was
@@ -636,9 +720,9 @@ These are for the owner.
 5. **Scoped tokens** for out-of-process plugins.
 6. **The component model.** Trigger: wasmi implements it, or a plugin appears that needs
    wasmtime's speed. Then a WIT file and `Runtime` for components.
-7. **The `net.http` capability** (a host function that posts to hosts the manifest lists and the
-   admin approved, run on a thread of the host) would let S3 and Discord run inside the bank. The
-   risks (requests to the local network) need a design of their own.
+7. **The `net.http` capability**: built (section "`net.http`: a plugin's way out"). Left: a request
+   body and an answer that stream (the S3 backup), and the Public Suffix List instead of the short
+   list, if the wildcard turns out to be wanted in practice.
 8. **A panel for plugins in the web page** (a sandboxed iframe served from the plugin's files).
 9. **The snapshot becoming binary** (the flip-speed work): `Saved`'s hex strings should become
    bytes then.

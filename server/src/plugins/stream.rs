@@ -130,7 +130,7 @@ pub fn event_json(event: &Event<'_>) -> Option<Value> {
         Event::ObjectPlaced { id, group, position } | Event::ObjectDestroyed { id, group, position } => json!({"object": id, "group": group, "position": position}),
         Event::WorldSaved { game_ms, ok } => json!({"gameSeconds": *game_ms as f64 / 1000.0, "ok": ok}),
         Event::RuleChange { changes_json } => json!({"changes": serde_json::from_str::<Value>(changes_json).unwrap_or(Value::Null)}),
-        Event::Tick { .. } | Event::Command { .. } | Event::RpcBefore { .. } | Event::RpcAfter { .. } => return None,
+        Event::Tick { .. } | Event::Command { .. } | Event::RpcBefore { .. } | Event::RpcAfter { .. } | Event::HttpDone { .. } => return None,
     })
 }
 

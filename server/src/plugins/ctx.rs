@@ -7,14 +7,18 @@
 //! after the call through the same validated paths the admin API uses (`actions.rs`). A plugin
 //! cannot change the world in any other way.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
-use pcds_plugin_api::host::{E_BAD, E_DENIED, E_FULL, E_UNSUPPORTED, OK};
+use pcds_plugin_api::host::{E_BAD, E_DENIED, E_FULL, E_NOT_ALLOWED, E_UNSUPPORTED, OK};
 use pcds_plugin_api::query::{self, PlayerInfo, WorldInfo};
 use pcds_plugin_api::{Level, Writer, caps};
 use serde_json::Value;
 
 use super::limits;
+use super::net::{self, Fetch, Policy, Reject};
 
 /// A set of capabilities, one bit for each of `caps::ALL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -47,6 +51,17 @@ pub enum Action {
     Kick(u64, String),
     Teleport(u64, [f32; 3]),
     RulesPatch(Value),
+    /// An HTTP request (`net.http`): not applied to the game; the host hands it to its workers.
+    Http(Fetch),
+}
+
+/// What a plugin with `net.http` carries: where it may go, the values the admin set for it, and how
+/// many of its requests are alive (queued or running).
+#[derive(Clone)]
+pub struct NetCtx {
+    pub policy: Arc<Policy>,
+    pub config: Arc<BTreeMap<String, String>>,
+    pub in_flight: Arc<AtomicU32>,
 }
 
 /// A pointer to the world for one call. The host makes it from the game it holds exclusively and
@@ -74,12 +89,22 @@ pub struct Ctx {
     rules_second: (Instant, u32),
     log_second: (Instant, u32),
     pub log_dropped: u64,
+    /// `net.http`: set when the capability is granted.
+    pub net: Option<NetCtx>,
+    http_second: (Instant, u32),
 }
 
 impl Ctx {
     pub fn new(id: &str, grant: Grant) -> Ctx {
         let now = Instant::now();
-        Ctx { id: id.to_string(), grant, world: None, actions: Vec::new(), denied: 0, refused: 0, second: (now, 0), rules_second: (now, 0), log_second: (now, 0), log_dropped: 0 }
+        Ctx { id: id.to_string(), grant, world: None, actions: Vec::new(), denied: 0, refused: 0, second: (now, 0), rules_second: (now, 0), log_second: (now, 0), log_dropped: 0, net: None, http_second: (now, 0) }
+    }
+
+    /// A fresh context for the same plugin (a restart after a fault): same id, grant and network access.
+    pub fn renewed(&self) -> Ctx {
+        let mut c = Ctx::new(&self.id, self.grant);
+        c.net = self.net.clone();
+        c
     }
 
     /// Starts a call: the plugin may read `world` until `end`.
@@ -206,6 +231,47 @@ impl Ctx {
             return E_BAD;
         }
         self.queue(Action::Teleport(client, position))
+    }
+
+    /// `http_request`: a ticket (positive), or the error code. The request is checked here, as far as
+    /// it can be without the network (the list, the form, the rate); what is left (DNS, the address,
+    /// the connection, the answer) comes in `HttpDone`. Nothing is sent from here: the request
+    /// is queued like an action, and a call that faults has it dropped.
+    pub fn http_request(&mut self, bytes: &[u8]) -> i64 {
+        if !self.allowed(caps::NET_HTTP) {
+            return E_DENIED as i64;
+        }
+        let Some(net) = self.net.clone() else { return E_UNSUPPORTED as i64 };
+        let Ok(request) = pcds_plugin_api::HttpRequest::decode(bytes) else { return E_BAD as i64 };
+        let mut fetch = match net.policy.build(&request, &net.config) {
+            Ok(f) => f,
+            Err(Reject::Bad(why)) => {
+                self.log(Level::Warn, &format!("http request refused: {why}"));
+                self.refused += 1;
+                return E_BAD as i64;
+            }
+            Err(Reject::NotAllowed(why)) => {
+                self.log(Level::Warn, &format!("http request refused: {why}"));
+                self.refused += 1;
+                return E_NOT_ALLOWED as i64;
+            }
+        };
+        if self.http_second.0.elapsed().as_secs() >= 1 {
+            self.http_second = (Instant::now(), 0);
+        }
+        let waiting = self.actions.iter().filter(|a| matches!(a, Action::Http(_))).count() as u32;
+        if self.http_second.1 >= limits::HTTP_PER_SECOND || net.in_flight.load(Ordering::SeqCst) + waiting >= limits::HTTP_IN_FLIGHT {
+            self.refused += 1;
+            return E_FULL as i64;
+        }
+        fetch.ticket = net::next_ticket();
+        let ticket = fetch.ticket;
+        let code = self.queue(Action::Http(fetch));
+        if code != OK {
+            return code as i64;
+        }
+        self.http_second.1 += 1;
+        ticket as i64
     }
 
     pub fn rules_patch(&mut self, json: &str) -> i32 {

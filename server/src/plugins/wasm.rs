@@ -3,7 +3,7 @@
 //! The module's side of the contract is `pcds-plugin-api`; the host's side is here:
 //!
 //! - **Imports** (module `pcds`): `log`, `query`, `say`, `tell`, `kick`, `teleport`,
-//!   `rules_patch`, each checked against the capabilities granted (ctx.rs).
+//!   `rules_patch`, `http_request`, each checked against the capabilities granted (ctx.rs).
 //! - **Exports**: `memory`, `pcds_abi`, `pcds_alloc`, `pcds_event`; optional `pcds_free`,
 //!   `pcds_load`, `pcds_save`, `pcds_state_version`.
 //! - **Limits**: fuel per call (the call stops with a trap when it is spent), memory pages, one
@@ -21,7 +21,7 @@ use super::runtime::{Cost, Fault, Runtime};
 use super::state::Blob;
 
 /// The imports a module may have (names under `pcds`).
-pub(super) const IMPORTS: [&str; 7] = ["log", "query", "say", "tell", "kick", "teleport", "rules_patch"];
+pub(super) const IMPORTS: [&str; 8] = ["log", "query", "say", "tell", "kick", "teleport", "rules_patch", "http_request"];
 
 /// The engine every plugin shares: fuel on, nothing a module could use to find out about the
 /// machine or to do work the host does not count.
@@ -184,6 +184,19 @@ fn linker(engine: &Engine) -> Result<Linker<Inner>, String> {
         Ok(inner.ctx.rules_patch(&t))
     })
     .map_err(e)?;
+    // ABI 1.2. The request is a buffer of its own size limit (a body may be a megabyte): a length over
+    // it is refused with a code, a range outside the memory traps as everywhere.
+    l.func_wrap("pcds", "http_request", |mut c: Caller<'_, Inner>, ptr: u32, len: u32| -> Result<i64, Error> {
+        let (mem, inner) = split(&mut c)?;
+        let end = (ptr as usize).checked_add(len as usize).filter(|e| *e <= mem.len()).ok_or_else(|| trap("the module gave the host a pointer outside its memory"))?;
+        if len as usize > limits::MAX_HTTP_REQUEST {
+            inner.ctx.refused += 1;
+            return Ok(pcds_plugin_api::host::E_BAD as i64);
+        }
+        let bytes = mem[ptr as usize..end].to_vec();
+        Ok(inner.ctx.http_request(&bytes))
+    })
+    .map_err(e)?;
     Ok(l)
 }
 
@@ -337,7 +350,7 @@ impl Runtime for Wasm {
     }
 
     fn restart(&mut self, state: Option<&Blob>) -> Result<(), Fault> {
-        let ctx = Ctx::new(&self.store.data().ctx.id.clone(), self.store.data().ctx.grant);
+        let ctx = self.store.data().ctx.renewed();
         let (store, funcs) = instantiate(&self.engine, &self.module, ctx, self.limits).map_err(Fault::Trap)?;
         self.store = store;
         self.funcs = funcs;

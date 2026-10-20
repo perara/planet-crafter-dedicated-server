@@ -52,6 +52,7 @@ fn import_cap(import: &str) -> Option<&'static str> {
         "kick" => caps::PLAYER_KICK,
         "teleport" => caps::PLAYER_TELEPORT,
         "rules_patch" => caps::RULES_WRITE,
+        "http_request" => caps::NET_HTTP,
         _ => return None,
     })
 }
@@ -69,6 +70,7 @@ fn sample(kind: Kind, command: Option<&str>, rpc: Option<&str>) -> Event<'static
         Kind::ObjectDestroyed => Event::ObjectDestroyed { id: 100, group: "Drill1", position: [1.0, 2.0, 3.0] },
         Kind::WorldSaved => Event::WorldSaved { game_ms: 3_725_000, ok: true },
         Kind::RuleChange => Event::RuleChange { changes_json: "{\"speed.growth\":2.0}" },
+        Kind::HttpDone => Event::HttpDone { ticket: 1, status: 200, error: "", body: b"{}", headers: vec![("content-type", "application/json")] },
     }
 }
 
@@ -78,7 +80,7 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
     let mut report = Report::default();
     let engine = super::wasm::engine();
     // As an approved plugin with everything granted, so what the host would do with it is done.
-    let mut found = Loaded::inspect(&engine, folder, None);
+    let mut found = Loaded::inspect(&engine, folder, None, None);
     let Some(m) = found.manifest.clone() else {
         report.errors.push(found.status.detail().unwrap_or("not a plugin").to_string());
         return report;
@@ -154,7 +156,7 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
     if let Some(dir) = installed {
         let this = std::fs::canonicalize(folder).ok();
         for other in std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|f| f.is_dir() && std::fs::canonicalize(f).ok() != this) {
-            let o = Loaded::inspect(&engine, &other, None);
+            let o = Loaded::inspect(&engine, &other, None, None);
             for c in o.commands.iter().filter(|c| found.commands.contains(c)) {
                 report.warnings.push(format!("the command !{c} is also declared by the installed plugin {}: the one first by id gets it", o.id));
             }
@@ -208,5 +210,5 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
 }
 
 fn import_cap_needed(cap: &str) -> bool {
-    [caps::WORLD_READ, caps::CHAT_SAY, caps::PLAYER_KICK, caps::PLAYER_TELEPORT, caps::RULES_WRITE].contains(&cap)
+    [caps::WORLD_READ, caps::CHAT_SAY, caps::PLAYER_KICK, caps::PLAYER_TELEPORT, caps::RULES_WRITE, caps::NET_HTTP].contains(&cap)
 }

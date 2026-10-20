@@ -44,8 +44,21 @@ pub fn plugin_json(p: &Loaded) -> Value {
             "denied": p.stats.denied, "refused": p.stats.refused, "actions": p.stats.actions, "vetoes": p.stats.vetoes,
             "fuel": p.stats.fuel, "averageMicros": p.stats.nanos as f64 / calls as f64 / 1000.0, "maxMicros": p.stats.max_nanos as f64 / 1000.0,
             "lastError": p.stats.last_error, "lastFaultAt": p.stats.last_fault_unix,
+            "http": {"requests": p.stats.http_requests, "answered": p.stats.http_answered, "failed": p.stats.http_failed, "bytesOut": p.stats.http_bytes_out, "bytesIn": p.stats.http_bytes_in, "inFlight": p.net.as_ref().map_or(0, |n| n.in_flight.load(std::sync::atomic::Ordering::SeqCst))},
         },
         "digest": p.digest,
+        "net": m.and_then(|m| m.net.as_ref()).map(|n| {
+            json!({
+                "allow": n.allow,
+                "wildcards": n.allow.iter().filter(|a| a.contains("://*.")).count(),
+                "local": p.requested.iter().any(|c| c == caps::NET_HTTP_LOCAL),
+                "localGranted": p.grant.has(caps::NET_HTTP_LOCAL),
+                "timeoutMs": n.timeout_ms.unwrap_or(super::limits::HTTP_TIMEOUT_MS),
+                "maxResponseBytes": n.max_response_bytes.unwrap_or(super::limits::HTTP_RESPONSE_BYTES),
+            })
+        }),
+        // The keys the manifest declares and whether the admin set them; a secret's value is never here.
+        "config": m.map(|m| m.config.iter().map(|k| json!({"key": k.key, "description": k.description, "secret": k.secret, "set": p.config.contains_key(&k.key), "value": (!k.secret).then(|| p.config.get(&k.key)).flatten()})).collect::<Vec<_>>()),
     })
 }
 

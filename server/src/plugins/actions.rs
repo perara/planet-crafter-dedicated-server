@@ -67,6 +67,8 @@ pub fn apply(game: &mut Game, plugin: &str, actions: Vec<Action>) -> Applied {
                     false
                 }
             },
+            // The host takes the HTTP requests out before it applies the rest (Host::run).
+            Action::Http(_) => false,
         };
         if ok {
             out.done += 1;

@@ -292,6 +292,47 @@ fn plugin(dir: &Path, cwd: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
+fn a_plugins_config_values_are_set_without_the_command_line_and_a_secret_is_never_shown() {
+    use std::io::Write;
+    let dir = test_dir("plugin-config");
+    let work = dir.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    assert!(plugin(&dir, &work, &["new", "demo", "--kind", "data"]).status.success());
+    let manifest = work.join("demo/plugin.toml");
+    let text_of = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(&manifest, format!("{text_of}\n[[config]]\nkey = \"hook\"\ndescription = \"a webhook\"\n\n[[config]]\nkey = \"region\"\nsecret = false\n")).unwrap();
+    assert!(plugin(&dir, &work, &["install", "demo"]).status.success());
+    // Approving says which values the plugin needs.
+    let out = plugin(&dir, &work, &["enable", "demo", "--yes"]);
+    assert!(text(&out).contains("needs a value you set: pcds plugin config set demo hook") && text(&out).contains("a secret"), "{}", text(&out));
+    // A secret is not taken from the command line; a key the manifest does not declare is refused.
+    let out = plugin(&dir, &work, &["config", "set", "demo", "hook", "https://example.org/hook/abc"]);
+    assert!(!out.status.success() && text(&out).contains("is a secret"), "{}", text(&out));
+    assert!(!dir.join("run/plugins/config.json").exists());
+    let out = plugin(&dir, &work, &["config", "set", "demo", "nothing", "x"]);
+    assert!(!out.status.success() && text(&out).contains("declares no config key nothing"), "{}", text(&out));
+    // From standard input (no terminal here).
+    let mut cmd = Command::new(PCDS);
+    cmd.args(["plugin", "config", "set", "demo", "hook"]).current_dir(&work).env("PCDS_HOME", dir.join("run")).env("HOME", dir.join("home")).env_remove("PCDS_CONTAINER").env_remove("PCDS_UNIT").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    child.stdin.take().unwrap().write_all(b"https://example.org/hook/abc\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!text(&out).contains("hook/abc"), "the value is not echoed: {}", text(&out));
+    assert!(plugin(&dir, &work, &["config", "set", "demo", "region", "eu-1"]).status.success());
+    let out = plugin(&dir, &work, &["config", "list", "demo"]);
+    let listed = text(&out);
+    assert!(listed.contains("demo hook: set (a secret: not shown)") && listed.contains("demo region: eu-1") && !listed.contains("hook/abc"), "{listed}");
+    let file = dir.join("run/plugins/config.json");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    assert!(std::fs::read_to_string(&file).unwrap().contains("hook/abc"));
+    assert!(plugin(&dir, &work, &["config", "unset", "demo", "hook"]).status.success());
+    assert!(text(&plugin(&dir, &work, &["config", "list"])).contains("demo hook: not set"));
+}
+
+#[test]
 fn a_plugin_is_made_checked_installed_approved_and_listed_without_a_server() {
     let dir = test_dir("plugin");
     let work = dir.join("work");
