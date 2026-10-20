@@ -412,6 +412,13 @@ fn drone_farm_runs_for_hours() {
     assert!(crate::energy::has_enough(&game, game.planet_hash()));
     let rss = || std::fs::read_to_string("/proc/self/status").unwrap().lines().find(|l| l.starts_with("VmRSS")).map(|l| l.split_whitespace().nth(1).unwrap().to_string()).unwrap_or_default();
     let benchmark_start = std::time::Instant::now();
+    let cold = std::time::Instant::now();
+    refresh_navigation(&mut game);
+    let cold = cold.elapsed();
+    build(&mut game,"Container1",[5000.0,2.0,5000.0]);
+    let changed = std::time::Instant::now();
+    refresh_navigation(&mut game);
+    println!("navigation index: cold {:.3} ms; after one new building {:.3} ms",cold.as_secs_f64()*1000.0,changed.elapsed().as_secs_f64()*1000.0);
     let (mut t, mut worst, mut all_worst, mut delivered) = (2.0, 0.0f64, 0.0f64, 0usize);
     game.sim_time = Some(t);
     game.tick();
@@ -808,9 +815,11 @@ fn clearance_routes_deliver_cargo_and_rebuild_after_construction_and_snapshot() 
     assert!(items(&game, demand_inv).contains(&cargo));
     assert!(items(&game, station_inv).contains(&drone));
     let epoch = game.ext.logistics.navigation_epoch;
+    let terrain = &game.ext.logistics.terrain_navigation[&planet] as *const _;
     let building = build(&mut game, "Container1", [50.0, 2.0, 40.0]);
     refresh_navigation(&mut game);
     assert_eq!(game.ext.logistics.navigation_epoch, epoch + 1);
+    assert_eq!(&game.ext.logistics.terrain_navigation[&planet] as *const _,terrain,"construction reuses the static terrain index");
     refresh_navigation(&mut game);
     assert_eq!(game.ext.logistics.navigation_epoch, epoch + 1, "unchanged world reuses the index");
     game.destroy_world_objects(&[building], false);

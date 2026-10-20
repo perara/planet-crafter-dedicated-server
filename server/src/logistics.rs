@@ -154,6 +154,8 @@ pub struct Logistics {
     #[serde(skip)]
     navigation: HashMap<i32, crate::geometry::navigation::Grid>,
     #[serde(skip)]
+    terrain_navigation: HashMap<i32, crate::geometry::navigation::Grid>,
+    #[serde(skip)]
     navigation_dirty: bool,
     #[serde(skip)]
     navigation_epoch: u64,
@@ -474,7 +476,10 @@ fn frame(game: &mut Game, tick: u64) {
 fn refresh_navigation(game: &mut Game) {
     let Some(data) = game.data.drone_navigation.as_ref() else { return };
     if !game.ext.logistics.navigation_dirty && !game.ext.logistics.navigation.is_empty() { return; }
-    let mut planets = data.planets.clone();
+    if game.ext.logistics.terrain_navigation.is_empty() {
+        game.ext.logistics.terrain_navigation = data.planets.iter().map(|(p,bounds)| (*p,crate::geometry::navigation::Grid::new(bounds.clone()))).collect();
+    }
+    let mut planets: HashMap<_, Vec<_>> = data.planets.keys().map(|p| (*p,Vec::new())).collect();
     for id in &game.constructed {
         let Some(w) = game.wos.get(id).filter(|w| w.net.is_some()) else { continue };
         if let Some(bounds) = data.buildings.get(&game.data.groups[w.group].id) {
@@ -529,12 +534,12 @@ fn update(game: &mut Game) {
             l.at_target.push_back(i);
             continue;
         }
-        if let Some(grid) = l.navigation.get(&a.planet) {
+        if let Some(grid) = l.terrain_navigation.get(&a.planet) {
             if dr.route_goal != Some(a.target) || dr.route_epoch != l.navigation_epoch {
                 if routes_left == 0 { continue; }
                 routes_left -= 1;
                 l.navigation_cursor = (i + 1) % count;
-                dr.route = grid.route(dr.position, a.target).into();
+                dr.route = grid.route_with(l.navigation.get(&a.planet), dr.position, a.target).into();
                 dr.route_goal = Some(a.target);
                 dr.route_epoch = l.navigation_epoch;
             }

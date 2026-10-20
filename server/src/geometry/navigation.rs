@@ -124,6 +124,17 @@ impl Grid {
         }
         found
     }
+    pub fn route_with(&self, other: Option<&Self>, from: V3, to: V3) -> Vec<V3> {
+        let route = self.route(from, to);
+        let Some(other) = other else { return route };
+        let dynamic = other.route(from, to);
+        if route.len() == 1 && dynamic.len() == 1 {
+            return route;
+        }
+        let height = route.iter().chain(&dynamic).fold(from[1].max(to[1]), |h, p| h.max(p[1]));
+        vec![[from[0], height, from[2]], [to[0], height, to[2]], to]
+    }
+
     // shortcut: collider bounds overestimate some mountains; use mesh-level routing if detours dominate.
     pub fn route(&self, from: V3, to: V3) -> Vec<V3> {
         let candidates = self.candidates(from, to);
