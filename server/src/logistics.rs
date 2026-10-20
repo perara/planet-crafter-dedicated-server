@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Value};
 
+use crate::doc::Doc;
 use crate::clock::GameTime;
 use crate::data::stable_hash;
 use crate::game::{Args, Game};
@@ -353,7 +354,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     let Some(w) = game.wos.get(&wo) else { return };
     let id = game.data.groups[w.group].id.clone();
     if let Some(c) = game.data.prefab_components(&id, "Drone").first().map(|c| (*c).clone()) {
-        let vis = game.data.prefab_components(&id, "DroneNetworkVibility").first().map(|c| (*c).clone()).unwrap_or(Value::Null);
+        let vis = game.data.prefab_components(&id, "DroneNetworkVibility").first().map(|c| (*c).clone()).unwrap_or(Doc::Null);
         awake_drone(game, wo, &c, &vis);
     }
     if let Some(c) = game.data.prefab_components(&id, "MachineDroneStation").first() {
@@ -1066,7 +1067,7 @@ fn respawn_drone(game: &mut Game, d: i32) -> bool {
     let Some(mut o) = dr.parked.take() else { return false };
     o.position = dr.position;
     o.rotation = dr.rotation;
-    o.tail = motion::Transform::sync_tail(dr.behaviour, dr.position, dr.rotation, tick);
+    o.tail = motion::Transform::sync_tail(dr.behaviour, dr.position, dr.rotation, tick).into();
     // Spawn() without destroyWithScene, unlike InstantiateWorldObject's first spawn.
     o.flags &= !DESTROY_WITH_SCENE;
     dr.transform = motion::Transform::default();
@@ -1079,11 +1080,11 @@ fn respawn_drone(game: &mut Game, d: i32) -> bool {
 // ---- Drone ------------------------------------------------------------------------------------
 
 /// Drone.Awake: the drone's container just spawned. CheckBusy runs next frame.
-fn awake_drone(game: &mut Game, wo: i32, c: &Value, vis: &Value) {
-    let f = |v: &Value, k: &str, default: f32| v[k].as_f64().map(|x| x as f32).unwrap_or(default);
+fn awake_drone(game: &mut Game, wo: i32, c: &Doc, vis: &Doc) {
+    let f = |v: &Doc, k: &str, default: f32| v[k].as_f64().map(|x| x as f32).unwrap_or(default);
     let Some(net) = game.wos.get(&wo).and_then(|w| w.net) else { return };
     let Some(o) = game.net.objects.get(&net) else { return };
-    let behaviour = o.behaviours.iter().find(|b| b.class == "ClientNetworkTransform").map(|b| b.index).unwrap_or(0);
+    let behaviour = o.behaviours().find(|b| b.class == "ClientNetworkTransform").map(|b| b.index).unwrap_or(0);
     let rotation = if o.rotation.iter().all(|v| *v == 0.0) { motion::IDENTITY } else { o.rotation };
     let (position, owner) = (o.position, o.owner);
     // GroupNetworkContainer keeps server ownership of a child with a Rigidbody, as drones are.
@@ -1117,7 +1118,7 @@ fn awake_drone(game: &mut Game, wo: i32, c: &Value, vis: &Value) {
     let handle = game.net.scene_handle;
     let o = game.net.objects.get_mut(&net).unwrap();
     o.rotation = rotation;
-    o.tail = motion::Transform::sync_tail(behaviour, position, rotation, tick);
+    o.tail = motion::Transform::sync_tail(behaviour, position, rotation, tick).into();
     o.tail_position = None;
     let body = [vec![1], o.scene_object(handle)].concat();
     let spawned = |b: &[u8]| {
@@ -1363,7 +1364,7 @@ fn send_transforms(game: &mut Game, tick: i32) {
         let Some(o) = game.net.objects.get_mut(&net) else { continue };
         o.position = dr.position;
         o.rotation = dr.rotation;
-        o.tail = motion::Transform::sync_tail(dr.behaviour, dr.position, dr.rotation, tick);
+        o.tail = motion::Transform::sync_tail(dr.behaviour, dr.position, dr.rotation, tick).into();
         if !active || o.owner != 0 {
             continue;
         }

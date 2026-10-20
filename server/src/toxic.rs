@@ -274,7 +274,7 @@ mod tests {
         let objects: Vec<Value> = ids.iter().map(|i| json!({"worldObjectId": i, "group": "GroupDataItem:ToxicGoo"})).collect();
         let dump = json!({"position": at, "active": true, "activators": [], "fields": {"_toxicTimeInSeconds": time, "_toxicObjects": objects}});
         let planet = g.planet_id().to_string();
-        g.scenes.planets.get_mut(&planet).expect("the planet's scene").toxic_areas.push(dump);
+        g.scenes.planets.get_mut(&planet).expect("the planet's scene").toxic_areas.push(dump.into());
         g.ext.toxic.planet = None;
         area_id(at.map(|v| v as f32))
     }

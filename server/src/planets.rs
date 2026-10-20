@@ -19,6 +19,7 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
+use crate::doc::Doc;
 use crate::data::stable_hash;
 use crate::geometry::MathRandom;
 use crate::game::{Args, Game};
@@ -119,10 +120,10 @@ fn yaw_degrees(q: [f32; 4]) -> f32 {
 /// MachineDeparturePlatform.GetLandingTransform: the platform's _landingPosition child, which sits
 /// where the dump's pose (relative to the prefab root) puts it; the platform itself without one.
 fn landing_transform(game: &Game, platform: &WorldObject) -> ([f32; 3], [f32; 4]) {
-    let components = game.data.group_prefabs[&game.data.groups[platform.group].id]["components"].as_array().cloned().unwrap_or_default();
+    let components = game.data.group_prefabs[&game.data.groups[platform.group].id]["components"].as_array().unwrap_or_default();
     let pose = components.iter().find(|c| c["type"] == "MachineDeparturePlatform").map(|c| c["poses"]["_landingPosition"].clone()).filter(|p| !p.is_null());
     let Some(pose) = pose else { return (platform.position, platform.rotation) };
-    let f = |v: &serde_json::Value, i: usize| v[i].as_f64().unwrap_or(if i == 3 { 1.0 } else { 0.0 }) as f32;
+    let f = |v: &Doc, i: usize| v[i].as_f64().unwrap_or(if i == 3 { 1.0 } else { 0.0 }) as f32;
     let offset = crate::geometry::rotate(platform.rotation, [0, 1, 2].map(|i| f(&pose["position"], i)));
     ([0, 1, 2].map(|i| platform.position[i] + offset[i]), crate::geometry::mul(platform.rotation, [0, 1, 2, 3].map(|i| f(&pose["rotation"], i))))
 }
@@ -148,7 +149,7 @@ pub fn switch_to_planet(game: &mut Game, planet_hash: i32, rocket_wo: i32, spawn
             return;
         };
         let spawn = &list[game.rng.range(0, list.len() as i32) as usize];
-        let f = |v: &serde_json::Value, i: usize| v.get(i).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+        let f = |v: &Doc, i: usize| v[i].as_f64().unwrap_or(0.0) as f32;
         position = [0, 1, 2].map(|i| f(&spawn["position"], i));
         rotation = [0, 1, 2, 3].map(|i| f(&spawn["rotation"], i));
     } else {

@@ -57,7 +57,7 @@ impl Game {
             if reset_position {
                 w.reset_position();
             }
-            w.lock_time = GameTime::ZERO;
+            w.clear_lock_time();
         }
         true
     }

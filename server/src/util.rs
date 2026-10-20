@@ -28,6 +28,38 @@ pub fn clean(s: &str) -> String {
     s.chars().map(|c| if c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}') { '?' } else { c }).collect()
 }
 
+/// Fixes the size from which glibc's malloc serves a request by a mapping of its own at 128 KiB (the
+/// default, but the default moves: each such block given back raises it, to 32 MiB at most).
+/// After one 12 MB save text or one 2.4 MB frame of a world joined has been freed, the next ones
+/// are made from the heap, and the free space they leave sits in it, in the process, between
+/// what is still used: 5 MiB of a bank holding 200,000 objects, 12 MiB of a front that has sent
+/// eight joins of it (docs/performance.md). Fixed, a large block goes back to the system when it is
+/// freed. Called first in the bank and in the front, before they have a thread.
+pub fn fix_malloc_threshold() {
+    // SAFETY: mallopt only sets one of malloc's tunables; nothing is allocated yet that it could
+    // matter to, and no other thread runs.
+    unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, 128 * 1024) };
+}
+
+/// JSON text without the whitespace between its tokens: the tables are written indented, and a
+/// table kept as text takes half the room without it (a prefab, a planet's scene dump).
+pub fn compact_json(json: &str) -> Box<str> {
+    let mut out = Vec::with_capacity(json.len() / 2);
+    let (mut in_string, mut escaped) = (false, false);
+    for &b in json.as_bytes() {
+        match b {
+            _ if escaped => escaped = false,
+            b'\\' if in_string => escaped = true,
+            b'"' => in_string = !in_string,
+            b' ' | b'\t' | b'\n' | b'\r' if !in_string => continue,
+            _ => {}
+        }
+        out.push(b);
+    }
+    out.shrink_to_fit();
+    String::from_utf8(out).expect("only ASCII whitespace was dropped from valid UTF-8").into_boxed_str()
+}
+
 /// Bytes as lower-case hex.
 pub fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()

@@ -2,12 +2,11 @@
 //! the group whose recipe it costs, and Panel.GetContingousPanels opens compartments built side
 //! by side into each other (and closes them again when one is taken apart).
 
-use serde_json::Value;
-
+use crate::doc::Doc;
 use crate::game::Game;
 use crate::geometry::{conj, mul, q, rotate, sub, v3};
 use crate::handlers::change_panel;
-use crate::net::{enc, NetBehaviour, NetObj, VarValue};
+use crate::net::{enc, BehaviourRef, NetObj, VarValue};
 
 /// DataConfig.BuildPanelSubType.
 pub const SUB_TYPES: [&str; 17] = ["WallNull", "WallPlain", "WallCorridor", "WallGlass", "WallDoor", "FloorLight", "FloorGlass", "FloorPlain", "FloorLab", "WallLab", "FloorNoLight", "WallInside", "None", "WallWaterLife", "FloorAnglePlain", "FloorAngleGlass", "FloorAngleLight"];
@@ -21,7 +20,7 @@ pub fn panel_group(game: &Game, sub_type: i32) -> Option<usize> {
     let name = SUB_TYPES.get(sub_type as usize)?;
     let r = &game.data.singletons["PanelsResources"];
     let i = r["panelsSubtypes"].as_array()?.iter().position(|s| s.as_str() == Some(name))?;
-    game.data.group_of_ref(r["panelsGroupItems"].get(i)?.as_str()?)
+    game.data.group_of_ref(r["panelsGroupItems"][i].as_str()?)
 }
 
 /// One Panel of a building, in the world.
@@ -30,15 +29,15 @@ struct WorldPanel<'a> {
     object: u64,
     index: u16,
     /// The dumped panel: panel type, transform in the building, box colliders.
-    data: &'a Value,
+    data: &'a Doc,
     position: [f32; 3],
     rotation: [f32; 4],
     sub_type: i32,
 }
 
 /// Panel.GetSubPanelType of a Panel behaviour.
-pub fn sub_type(b: &NetBehaviour) -> i32 {
-    match b.vars.iter().find(|v| v.name == "_currentSubPanelType").map(|v| &v.value) {
+pub fn sub_type(b: BehaviourRef) -> i32 {
+    match b.var("_currentSubPanelType") {
         Some(VarValue::Plain(v)) if v.len() == 4 => i32::from_le_bytes(v[..4].try_into().unwrap()),
         _ => 0,
     }
@@ -48,8 +47,7 @@ pub fn sub_type(b: &NetBehaviour) -> i32 {
 fn panels_of<'a>(game: &'a Game, o: &NetObj) -> Vec<WorldPanel<'a>> {
     let Some(w) = o.wo.and_then(|w| game.wos.get(&w)) else { return Vec::new() };
     let Some(data) = game.data.panels["groups"][&game.data.groups[w.group].id].as_array() else { return Vec::new() };
-    o.behaviours
-        .iter()
+    o.behaviours()
         .filter(|b| b.class == "Panel")
         .zip(data)
         .map(|(b, d)| WorldPanel {
@@ -71,7 +69,7 @@ fn placed_panels(game: &Game, planet: i32) -> Vec<WorldPanel<'_>> {
 /// BoundsHelper.GetBoundsOfChildren (`of_panel` false) or Panel.GetBoundsOfPanel of a panel:
 /// the bounds of its look, as [min, max] in the world.
 fn bounds(game: &Game, p: &WorldPanel, of_panel: bool) -> Option<[[f32; 3]; 2]> {
-    let look = &game.data.panels["looks"][SUB_TYPES.get(p.sub_type as usize)?];
+    let look = &game.data.panels["looks"][*SUB_TYPES.get(p.sub_type as usize)?];
     let look = if p.position[1] < UNDERGROUND && look["underground"].is_object() { &look["underground"] } else { look };
     let b = look.get(if of_panel { "panelBounds" } else { "bounds" })?;
     let (min, max) = (v3(&b[0]), v3(&b[1]));
@@ -185,15 +183,13 @@ pub fn change_contiguous_panels(game: &mut Game, o: &mut NetObj) {
     // ChangePanelServerRpc on the new building, refreshing its panels' ids.
     let mut changed = false;
     for index in own {
-        let Some(v) = o.behaviours.iter_mut().find(|b| b.index == index).and_then(|b| b.vars.iter_mut().find(|v| v.name == "_currentSubPanelType")) else { continue };
-        if !matches!(&v.value, VarValue::Plain(b) if *b == enc::enumeration(WALL_CORRIDOR)) {
-            v.value = VarValue::Plain(enc::enumeration(WALL_CORRIDOR));
+        if o.init_in_behaviour(index, "_currentSubPanelType", enc::enumeration(WALL_CORRIDOR)) == Some(true) {
             game.panel_constructed(WALL_CORRIDOR);
             changed = true;
         }
     }
     if let Some(w) = o.wo.and_then(|w| game.wos.get_mut(&w)).filter(|_| changed) {
-        w.panels = Some(o.behaviours.iter().filter(|b| b.class == "Panel").map(sub_type).collect());
+        w.panels = Some(o.behaviours().filter(|b| b.class == "Panel").map(sub_type).collect());
     }
 }
 

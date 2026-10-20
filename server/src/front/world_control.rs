@@ -15,7 +15,7 @@ use crate::updater;
 /// A world file this server reads (an old layout, a file cut short and the like are refused,
 /// each saying what to do), checked before a world that runs is stopped for it.
 fn readable(save: &str, name: &str) -> Result<(), String> {
-    crate::save::SaveFile::load(save).map(drop).map_err(|e| format!("world {name}: {e}"))
+    crate::save::SaveFile::check_file(save).map(drop).map_err(|e| format!("world {name}: {e}"))
 }
 
 impl Front {

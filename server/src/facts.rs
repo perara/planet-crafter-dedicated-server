@@ -83,9 +83,9 @@ mod tests {
         let Some((_, data, spec, _)) = crate::game::test_tables() else { return };
         let mut data = data;
         let mut assets = (*data.assets).clone();
-        let mut list = (**assets.get("AnimalList:AnimalList").unwrap()).clone();
+        let mut list = assets.get("AnimalList:AnimalList").unwrap().to_value();
         list["animals"].as_array_mut().unwrap().push(serde_json::json!({"id": 99, "prefab": "GameObject:Dragon"}));
-        assets.insert("AnimalList:AnimalList".into(), std::sync::Arc::new(list));
+        assets.insert("AnimalList:AnimalList".into(), std::sync::Arc::new(list.into()));
         data.assets = std::sync::Arc::new(assets);
         let e = check(&data, &spec).unwrap_err();
         assert!(e.contains("prefab hash of animal Dragon") && !e.contains("Sharky"), "{e}");

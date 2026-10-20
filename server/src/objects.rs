@@ -197,16 +197,11 @@ impl Game {
             // SetPanelsForNewlyInstantiatedWorldObject: Panel.ChangePanel per saved type, which
             // counts each one that changes the panel in _constructedPanelTypes (loads included).
             let mut changed = Vec::new();
-            let mut i = 0;
-            for b in o.behaviours.iter_mut().filter(|b| b.class == "Panel") {
-                if let (Some(p), Some(v)) = (panels.get(i), b.vars.iter_mut().find(|v| v.name == "_currentSubPanelType")) {
-                    let new = enc::enumeration(*p);
-                    if !matches!(&v.value, VarValue::Plain(b) if *b == new) {
-                        changed.push(*p);
-                    }
-                    v.value = VarValue::Plain(new);
+            let indices: Vec<u16> = o.behaviours().filter(|b| b.class == "Panel").map(|b| b.index).collect();
+            for (index, p) in indices.into_iter().zip(&panels) {
+                if o.init_in_behaviour(index, "_currentSubPanelType", enc::enumeration(*p)) == Some(true) {
+                    changed.push(*p);
                 }
-                i += 1;
             }
             for p in changed {
                 self.panel_constructed(p);
@@ -314,7 +309,7 @@ impl Game {
     pub fn set_wo_net(&mut self, id: i32, net: Option<u64>) {
         let Some(w) = self.wos.get_mut(&id) else { return };
         let (group, had) = (w.group, w.net.is_some());
-        w.net = net;
+        w.set_net(net);
         if net.is_some() {
             self.net_wos.insert(id);
         } else {

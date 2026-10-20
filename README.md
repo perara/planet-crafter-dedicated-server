@@ -260,7 +260,7 @@ docker compose pull && docker compose up -d   # a new image: the container is re
   `data/bin` holds. So **a pinned image tag does not pin the server** once a hot update has run:
   the newer release from `data/bin` keeps running. The container's log and `docker exec pcds pcds
   status` say which release runs and why; `pcds upgrade vX.Y.Z --restart` goes back to a given one.
-- A hot update needs spare memory (about three times the running game, which is 70 MB for a small
+- A hot update needs spare memory (about three times the running game, which is 21 MB for a small
   world): with `--memory` set too low it is refused with the size to give, never killed.
 
 [docs/docker.md](docs/docker.md) has the rule in full, what `docker stop`, `kill` and crashes do, running

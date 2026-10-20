@@ -56,8 +56,9 @@ const MAX_QUEUED: usize = 64 << 20;
 /// And in all, over every connection: 128 clients at MAX_QUEUED each would be eight gigabytes.
 /// Past it the connection with the most waiting (the slowest to read) is dropped.
 const MAX_QUEUED_TOTAL: usize = 256 << 20;
-/// The room an emptied send queue keeps.
-const QUEUE_KEPT: usize = 256 << 10;
+/// The room an emptied send queue keeps: a few batches of a busy frame. (It was 256 KiB for every
+/// player that ever joined a world of a few KB; a batch of 32 players is 25 KB.)
+const QUEUE_KEPT: usize = 32 << 10;
 const MAX_DATAGRAMS: usize = 4096;
 pub const MAX_CONNECTIONS: usize = 128;
 const MAX_PER_IP: usize = 8;

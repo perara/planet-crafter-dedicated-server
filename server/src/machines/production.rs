@@ -3,10 +3,12 @@
 //! fuses, MachineDestructInventoryIfFull, MachineGetInRange and ConstructibleProxy's
 //! RecycleContentServerRpc.
 
-use serde_json::{json, Value};
+use serde_json::json;
 
 use super::{add_new, components, dist, f32_of, force_reset, has_energy, is_active, is_full, items, remove_item, Game};
+use crate::doc::Doc;
 use crate::clock::GameTime;
+use crate::compact::Sym;
 use crate::net::Target;
 
 /// What tick runs now: mining rays, generate, craft, disintegrate.
@@ -36,17 +38,17 @@ pub fn tick(game: &mut Game, wo: i32, now: GameTime) {
         mining_rays(game, wo, now);
     }
     if generate {
-        let g = game.ext.machines.get_mut(&wo).unwrap().generator.as_mut().unwrap();
+        let g = game.ext.machines.get_mut(&wo).unwrap().parts_mut().generator.as_mut().unwrap();
         g.next = now + g.period() / speed;
         try_to_generate(game, wo);
     }
     if craft {
-        let a = game.ext.machines.get_mut(&wo).unwrap().autocrafter.as_mut().unwrap();
+        let a = game.ext.machines.get_mut(&wo).unwrap().parts_mut().autocrafter.as_mut().unwrap();
         a.next = now + a.period / speed;
         try_to_craft(game, wo);
     }
     if disintegrate {
-        let d = game.ext.machines.get_mut(&wo).unwrap().disintegrator.as_mut().unwrap();
+        let d = game.ext.machines.get_mut(&wo).unwrap().parts_mut().disintegrator.as_mut().unwrap();
         d.next = now + d.period / speed;
         if has_energy(game, wo) {
             try_to_disintegrate(game, wo);
@@ -90,7 +92,7 @@ pub struct Generator {
     /// groupDatas, with the groups the mining rays found.
     groups: Vec<usize>,
     terra_groups: Vec<usize>,
-    terra_stage: String,
+    terra_stage: Sym,
     via_linked: bool,
     when_vein_empty: bool,
     /// The TryToCastRay coroutine (None: no mining rays, or cast once for good).
@@ -102,7 +104,7 @@ pub struct Generator {
 impl Generator {
     /// SetGeneratorInventory: TryToGenerate every spawnEveryXSec, and TryToCastRay. `cast`: the
     /// rays were cast already (veins::cast, for a machine on the current planet).
-    pub fn new(game: &Game, f: &Value, wo: i32, now: GameTime, cast: bool) -> Generator {
+    pub fn new(game: &Game, f: &Doc, wo: i32, now: GameTime, cast: bool) -> Generator {
         let refs = |k: &str| f[k].as_array().into_iter().flatten().filter_map(|r| game.data.group_of_ref(r.as_str()?)).collect::<Vec<usize>>();
         let spawn_every = f["spawnEveryXSec"].as_f64().unwrap_or(0.0) as f32;
         let mut g = Generator {
@@ -111,7 +113,7 @@ impl Generator {
             speed: 1.0,
             groups: refs("groupDatas"),
             terra_groups: refs("groupDatasTerraStage"),
-            terra_stage: f["terraStageNameInPlanetData"].as_str().unwrap_or("").to_string(),
+            terra_stage: Sym::new(f["terraStageNameInPlanetData"].as_str().unwrap_or("")),
             via_linked: f["setGroupsDataViaLinkedGroup"].as_bool().unwrap_or(false),
             when_vein_empty: f["generateWhenVeinIsEmpty"].as_bool().unwrap_or(false),
             rays: None,
@@ -168,7 +170,7 @@ pub struct Rays {
 fn mining_rays(game: &mut Game, wo: i32, now: GameTime) {
     let stage = crate::meteo::current_global_stage(game);
     let (active, loaded) = (is_active(game, wo), game.ext.machines.loaded);
-    let g = game.ext.machines.get_mut(&wo).unwrap().generator.as_mut().unwrap();
+    let g = game.ext.machines.get_mut(&wo).unwrap().parts_mut().generator.as_mut().unwrap();
     let r = g.rays.as_mut().unwrap();
     r.next = now + RAY_CHECK_EVERY;
     let cast = if r.pending {
@@ -192,14 +194,14 @@ fn mining_rays(game: &mut Game, wo: i32, now: GameTime) {
         }
         let g = game.ext.machines.list.get(&wo).unwrap().generator.as_ref().unwrap();
         let veins = g.vein_groups(game, wo);
-        game.ext.machines.get_mut(&wo).unwrap().generator.as_mut().unwrap().groups.extend(veins);
+        game.ext.machines.get_mut(&wo).unwrap().parts_mut().generator.as_mut().unwrap().groups.extend(veins);
     }
 }
 
 /// AddToGenerationSpeedMultiplier: the loop restarts with the new period.
 fn add_generation_speed(game: &mut Game, wo: i32, add: f32) {
     let (now, speed) = (game.time, game.rules.speed.machines);
-    if let Some(g) = game.ext.machines.get_mut(&wo).and_then(|m| m.generator.as_mut()) {
+    if let Some(g) = game.ext.machines.get_mut(&wo).and_then(|m| m.existing_parts_mut().and_then(|p| p.generator.as_mut())) {
         g.speed += add;
         g.next = now + g.period() / speed;
     }
@@ -217,7 +219,7 @@ fn try_to_generate(game: &mut Game, wo: i32) {
         return;
     }
     let Some(count) = game.wos.get(&vein).map(|v| v.count) else {
-        game.ext.machines.get_mut(&wo).unwrap().generator.as_mut().unwrap().dead = true;
+        game.ext.machines.get_mut(&wo).unwrap().parts_mut().generator.as_mut().unwrap().dead = true;
         return;
     };
     let when_empty = game.ext.machines.list[&wo].generator.as_ref().unwrap().when_vein_empty;
@@ -241,7 +243,7 @@ fn set_scene_growth_and_count(game: &mut Game, vein: i32, count: [i32; 2]) {
 /// GenerateAnObject: one of the machine's groups into its inventory.
 fn generate_an_object(game: &mut Game, wo: i32, inventory: i32) {
     let g = game.ext.machines.list[&wo].generator.as_ref().unwrap();
-    let (via_linked, mut list, terra, stage) = (g.via_linked, g.groups.clone(), g.terra_groups.clone(), g.terra_stage.clone());
+    let (via_linked, mut list, terra, stage) = (g.via_linked, g.groups.clone(), g.terra_groups.clone(), g.terra_stage);
     let linked = game.wos.get(&wo).and_then(|w| w.linked_groups.clone());
     let group = if via_linked {
         match linked {
@@ -282,12 +284,12 @@ pub struct AutoCrafter {
 
 impl AutoCrafter {
     /// The table's values, set again after a restore (machines::refresh_from_tables).
-    pub fn refresh(&mut self, f: &Value) {
+    pub fn refresh(&mut self, f: &Doc) {
         (self.period, self.range) = (f32_of(f, "craftEveryXSec"), f32_of(f, "range"));
     }
 
     /// Awake: TryToCraft waits (instance count % 50) / 10 s before its loop.
-    pub fn new(f: &Value, now: GameTime, instanced: i32) -> AutoCrafter {
+    pub fn new(f: &Doc, now: GameTime, instanced: i32) -> AutoCrafter {
         AutoCrafter { next: now + (instanced % 50) as f32 / 10.0, period: f32_of(f, "craftEveryXSec"), range: f32_of(f, "range") }
     }
 }
@@ -386,14 +388,14 @@ pub struct Disintegrator {
 }
 
 impl Disintegrator {
-    pub fn refresh(&mut self, f: &Value) {
+    pub fn refresh(&mut self, f: &Doc) {
         let fresh = Disintegrator::new(f, GameTime::ZERO);
         (self.period, self.give) = (fresh.period, fresh.give);
     }
 
     /// SetDisintegratorInventory: the loop starts once the second inventory is known (the frame
     /// after the spawn), then breaks an object every breakEveryXSec.
-    pub fn new(f: &Value, now: GameTime) -> Disintegrator {
+    pub fn new(f: &Doc, now: GameTime) -> Disintegrator {
         let period = f["breakEveryXSec"].as_f64().unwrap_or(0.0) as f32;
         Disintegrator { next: now + period, period, give: f["giveXIngredientsBack"].as_i64().unwrap_or(0) as i32 }
     }
@@ -441,12 +443,12 @@ pub struct Optimizer {
 }
 
 impl Optimizer {
-    pub fn refresh(&mut self, f: &Value) {
+    pub fn refresh(&mut self, f: &Doc) {
         let fresh = Optimizer::new(f);
         (self.range, self.max) = (fresh.range, fresh.max);
     }
 
-    pub fn new(f: &Value) -> Optimizer {
+    pub fn new(f: &Doc) -> Optimizer {
         Optimizer { range: f32_of(f, "range"), max: f["maxWorldObjectPerFuse"].as_i64().unwrap_or(0).max(0) as usize, modified: Vec::new() }
     }
 }
@@ -525,7 +527,7 @@ pub fn change_multiplier(game: &mut Game, wo: i32) {
             }
         }
     }
-    if let Some(o) = game.ext.machines.get_mut(&wo).and_then(|m| m.optimizer.as_mut()) {
+    if let Some(o) = game.ext.machines.get_mut(&wo).and_then(|m| m.existing_parts_mut().and_then(|p| p.optimizer.as_mut())) {
         o.modified = modified;
     }
     // RequireEnergyHandler.UpdateAllEnergyRequesterDelayed.
@@ -534,7 +536,7 @@ pub fn change_multiplier(game: &mut Game, wo: i32) {
 
 /// RemovePreviouslySetWorldObjects: every multiplier the fuses gave is taken back.
 fn remove_previously_set(game: &mut Game, wo: i32) {
-    let Some(o) = game.ext.machines.get_mut(&wo).and_then(|m| m.optimizer.as_mut()) else { return };
+    let Some(o) = game.ext.machines.get_mut(&wo).and_then(|m| m.existing_parts_mut().and_then(|p| p.optimizer.as_mut())) else { return };
     let modified = std::mem::take(&mut o.modified);
     let planet = game.wos.get(&wo).map(|w| w.planet_hash()).unwrap_or(0);
     for (id, fuse) in modified {
@@ -649,7 +651,7 @@ mod tests {
 
     #[test]
     fn generation_speed_rounds_halves_to_even() {
-        let g = |spawn: f32, speed: f32| Generator { next: GameTime::ZERO, spawn_every: spawn, speed, groups: vec![], terra_groups: vec![], terra_stage: String::new(), via_linked: false, when_vein_empty: false, rays: None, dead: false }.period();
+        let g = |spawn: f32, speed: f32| Generator { next: GameTime::ZERO, spawn_every: spawn, speed, groups: vec![], terra_groups: vec![], terra_stage: Sym::default(), via_linked: false, when_vein_empty: false, rays: None, dead: false }.period();
         assert_eq!(g(70.0, 1.0), 70.0);
         assert_eq!(g(65.0, 1.25), 52.0);
         assert_eq!(g(5.0, 2.0), 2.0);

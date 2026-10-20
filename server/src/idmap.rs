@@ -41,8 +41,9 @@ pub type FxHashSet<K> = std::collections::HashSet<K, BuildHasherDefault<Fx>>;
 #[derive(Clone)]
 pub struct Slots<K, V> {
     slots: Vec<Option<(K, V)>>,
-    free: Vec<usize>,
-    index: FxHashMap<K, usize>,
+    /// Places in `slots`, as 32 bits: the index of a world of 200,000 objects is half the size.
+    free: Vec<u32>,
+    index: FxHashMap<K, u32>,
 }
 
 impl<K, V> Default for Slots<K, V> {
@@ -59,10 +60,10 @@ impl<K: Copy + Eq + Hash, V> Slots<K, V> {
         self.index.is_empty()
     }
     pub fn get(&self, k: &K) -> Option<&V> {
-        self.index.get(k).and_then(|i| self.slots[*i].as_ref()).map(|(_, v)| v)
+        self.index.get(k).and_then(|i| self.slots[*i as usize].as_ref()).map(|(_, v)| v)
     }
     pub fn get_mut(&mut self, k: &K) -> Option<&mut V> {
-        let i = *self.index.get(k)?;
+        let i = *self.index.get(k)? as usize;
         self.slots[i].as_mut().map(|(_, v)| v)
     }
     pub fn contains_key(&self, k: &K) -> bool {
@@ -70,28 +71,28 @@ impl<K: Copy + Eq + Hash, V> Slots<K, V> {
     }
     /// The place of a key in the order `iter` goes in.
     pub fn slot_of(&self, k: &K) -> Option<usize> {
-        self.index.get(k).copied()
+        self.index.get(k).map(|i| *i as usize)
     }
     /// A new key takes the most recently freed slot, or goes last; a known one keeps its slot.
     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
         if let Some(i) = self.index.get(&k) {
-            return self.slots[*i].replace((k, v)).map(|(_, v)| v);
+            return self.slots[*i as usize].replace((k, v)).map(|(_, v)| v);
         }
         let i = match self.free.pop() {
             Some(i) => i,
             None => {
                 self.slots.push(None);
-                self.slots.len() - 1
+                u32::try_from(self.slots.len() - 1).expect("fewer than 2^32 slots: the keys are 32 bits")
             }
         };
-        self.slots[i] = Some((k, v));
+        self.slots[i as usize] = Some((k, v));
         self.index.insert(k, i);
         None
     }
     pub fn remove(&mut self, k: &K) -> Option<V> {
         let i = self.index.remove(k)?;
         self.free.push(i);
-        self.slots[i].take().map(|(_, v)| v)
+        self.slots[i as usize].take().map(|(_, v)| v)
     }
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.slots.iter().flatten().map(|(k, v)| (k, v))
@@ -157,10 +158,10 @@ impl<K: Copy + Eq + Hash, V> std::ops::Index<&K> for Slots<K, V> {
 /// corrupt snapshot could say and a later insert would trip over: a free slot out of range,
 /// occupied, or listed twice (its entry overwritten, or an index out of bounds); a hole nobody
 /// lists (never reused); a key in two slots.
-fn index_of<K: Copy + Eq + Hash, V>(slots: &[Option<(K, V)>], free: &[usize]) -> Result<FxHashMap<K, usize>, String> {
+fn index_of<K: Copy + Eq + Hash, V>(slots: &[Option<(K, V)>], free: &[u32]) -> Result<FxHashMap<K, u32>, String> {
     let mut listed = vec![false; slots.len()];
     for i in free {
-        match (listed.get_mut(*i), slots.get(*i)) {
+        match (listed.get_mut(*i as usize), slots.get(*i as usize)) {
             (Some(seen), Some(None)) if !*seen => *seen = true,
             _ => return Err(format!("free slot {i} is out of range, occupied or listed twice")),
         }
@@ -169,7 +170,7 @@ fn index_of<K: Copy + Eq + Hash, V>(slots: &[Option<(K, V)>], free: &[usize]) ->
         return Err("a free slot is not in the free list".into());
     }
     let mut index = FxHashMap::with_capacity_and_hasher(slots.len(), Default::default());
-    index.extend(slots.iter().enumerate().filter_map(|(i, s)| s.as_ref().map(|(k, _)| (*k, i))));
+    index.extend(slots.iter().enumerate().filter_map(|(i, s)| s.as_ref().map(|(k, _)| (*k, i as u32))));
     if index.len() != slots.len() - free.len() {
         return Err("a key is in two slots".into());
     }
@@ -180,7 +181,7 @@ fn index_of<K: Copy + Eq + Hash, V>(slots: &[Option<(K, V)>], free: &[usize]) ->
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SlotsRepr<T> {
     slots: Vec<Option<T>>,
-    free: Vec<usize>,
+    free: Vec<u32>,
 }
 
 impl<K: serde::Serialize, V: serde::Serialize> serde::Serialize for Slots<K, V> {

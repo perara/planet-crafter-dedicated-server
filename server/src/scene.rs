@@ -83,19 +83,19 @@ pub fn init(game: &mut Game) {
         let Some((object, _)) = game.net.find_class(class) else { return };
         let o = game.net.objects.get_mut(&object).unwrap();
         match value {
-            VarValue::Plain(bytes) => o.init(class, var, bytes),
+            VarValue::Plain(bytes) => o.init(class, var, bytes.to_vec()),
             VarValue::List(items) => o.init_list(class, var, items),
         }
     };
-    set(game, "PlanetNetworkLoader", "_startingPlanetIndex", VarValue::Plain(enc::short(starting)));
-    set(game, "PlanetNetworkLoader", "_planetIndex", VarValue::Plain(enc::short(current)));
+    set(game, "PlanetNetworkLoader", "_startingPlanetIndex", VarValue::Plain(enc::short(starting).into()));
+    set(game, "PlanetNetworkLoader", "_planetIndex", VarValue::Plain(enc::short(current).into()));
     set(game, "PlanetNetworkLoader", "_availablePlanets", VarValue::List(available));
     set(game, "StoryEventsHandler", "_triggeredStoryEvents", VarValue::List(story));
     set(game, "MessagesHandler", "_receivedMessages", VarValue::List(messages));
     set(game, "UnlockedGroupsHandler", "_unlockedGroups", VarValue::List(unlocked));
-    set(game, "TokensHandler", "_tokensNumber", VarValue::Plain(tokens));
-    set(game, "GameSettingsHandler", "_source", VarValue::Plain(source));
-    set(game, "GameSettingsHandler", "_numPlayers", VarValue::Plain(enc::int(0)));
+    set(game, "TokensHandler", "_tokensNumber", VarValue::Plain(tokens.into()));
+    set(game, "GameSettingsHandler", "_source", VarValue::Plain(source.into()));
+    set(game, "GameSettingsHandler", "_numPlayers", VarValue::Plain(enc::int(0).into()));
     set(game, "PlayersDataManager", "_playersData", VarValue::List(Vec::new()));
     for list in ["_allWorldObjectsGroups", "_constructedWorldObjectsGroups", "_constructedPanelTypes"] {
         set(game, "WorldObjectsHandler", list, VarValue::List(Vec::new()));
@@ -103,9 +103,9 @@ pub fn init(game: &mut Game) {
     // Types with their own serializer start as the handlers create them: no planets' units yet,
     // no instance opened, no choices.
     let sys = crate::units::system_terraformation(game);
-    set(game, "WorldUnitsHandler", "_unitSysTerraformation", VarValue::Plain(sys));
-    set(game, "WorldInstanceHandler", "_openedWorldInstanceData", VarValue::Plain(crate::instances::encode_instance(None)));
-    set(game, "WorldInstanceHandler", "_currentChoices", VarValue::Plain(crate::instances::encode_choices(&[])));
+    set(game, "WorldUnitsHandler", "_unitSysTerraformation", VarValue::Plain(sys.into()));
+    set(game, "WorldInstanceHandler", "_openedWorldInstanceData", VarValue::Plain(crate::instances::encode_instance(None).into()));
+    set(game, "WorldInstanceHandler", "_currentChoices", VarValue::Plain(crate::instances::encode_choices(&[]).into()));
     crate::units::init(game);
     crate::meteo::init(game);
     crate::logistics::init(game);

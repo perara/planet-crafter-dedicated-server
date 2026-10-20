@@ -218,6 +218,26 @@ matches on `Event` fields by name. The plugin changes add nothing to the snapsho
   500000 fuel...`), a Rust panic is named as such, a capability a plugin used without having it is named once in its log, and a manifest key,
   capability or event that is misspelled names the one meant.
 * The first `tick` of an instance says `since_ms` 0 (it was the whole game time).
+* **The server uses a third of the memory.** The bank's resident memory, on the same worlds, with the
+  same messages, the same saves and the same snapshots, byte for byte (the bench's fingerprints, every
+  case; the hot update's snapshot is the same bytes): the bench world 43.8 -> 21.4 MiB, the late-game save
+  (33,000 world objects) 77 -> 33, 100,000 objects 122 -> 43, 200,000 objects 199 -> 66 MiB (a world object
+  beyond the bench world: 0.81 -> 0.23 KiB). The start peaks at 298 -> 87 MiB on 200,000 objects, and a hot update holds 437 -> 179 MiB
+  at its largest (264 -> 114 at 100,000). The tick costs the same (the late save: 32.7 against 32.8 M
+  instructions a second with 4 players; 100,000 objects 28.7 against 35.5) and a hot update's stand costs
+  no more (9,500 instructions a world object, 9,700 before). Where it went: nine in ten world objects of a big
+  world are items in an inventory and are 24 bytes (304 before), a machine without components is 48
+  bytes (584), a network object shares the names, types and order of its variables with every other of its
+  kind (1.7 KB -> 0.55), and the game's tables, parsed, are a quarter of what they were (26 -> 8 MiB; the
+  start also keeps a planet's scene dump as text until a planet needs it). The start reads the world from
+  the save's text one entry at a time (a tree of values of the whole save was 100 MB at 200,000 objects),
+  checking a backup or a world does the same, and malloc's mmap threshold is fixed at 128 KiB, so that
+  the frames of a world joined (2.4 MB) go back to the system (the front with 16 players on the 200,000-object
+  world: 21.5 -> 10.5 MiB, its anonymous memory 13.2 -> 1.4). A player costs the bank 6 KB (25 before) and
+  the front 35 to 50 KB. docs/performance.md has the byte accounting, the sizing
+  guide (a container for a hot update: three times the bank and the front still holds) and what was tried
+  and left out; `bench::budget` has a test of the memory of a world object, a network object, a machine
+  and an inventory.
 
 ### Security
 

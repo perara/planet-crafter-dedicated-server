@@ -72,7 +72,7 @@ pub fn choices(net_data: &NetData, data: &GameData) -> Value {
         .iter()
         .filter(|p| p.starting_planet && p.steam_app_id == 0)
         .map(|p| {
-            let spawns = data.asset(&format!("PlanetData:PlanetData-{}", p.id)).and_then(|d| d["spawnPositions"].as_array()).cloned().unwrap_or_default();
+            let spawns = data.asset(&format!("PlanetData:PlanetData-{}", p.id)).and_then(|d| d["spawnPositions"].as_array()).unwrap_or_default();
             json!({"id": p.id, "starts": spawns.iter().filter(|s| s["positions"].as_array().is_some_and(|a| !a.is_empty())).filter_map(|s| s["id"].as_str()).collect::<Vec<_>>()})
         })
         .collect();
@@ -92,7 +92,7 @@ pub fn new_save(net_data: &NetData, data: &GameData, name: &str, o: &Options, rn
             format!("--planet {planet}: a new world starts on {}{}", planets.join(", "), if dlc { " (a DLC planet is only continued by a world that is on it already: README, \"Differences\")" } else { "" })
         });
     }
-    let spawns = data.asset(&format!("PlanetData:PlanetData-{planet}")).and_then(|p| p["spawnPositions"].as_array()).cloned().unwrap_or_default();
+    let spawns = data.asset(&format!("PlanetData:PlanetData-{planet}")).and_then(|p| p["spawnPositions"].as_array()).unwrap_or_default();
     let positions = spawns.iter().find(|s| s["id"] == o.start.as_str()).and_then(|s| s["positions"].as_array()).filter(|p| !p.is_empty()).ok_or_else(|| {
         let ids: Vec<&str> = spawns.iter().filter_map(|s| s["id"].as_str()).collect();
         format!("--start {}: {planet} has {}", o.start, ids.join(", "))
@@ -101,12 +101,12 @@ pub fn new_save(net_data: &NetData, data: &GameData, name: &str, o: &Options, rn
     let pod_group = crate::scene::pod_group(data, planet).ok_or("no EscapePod group in the game tables")?;
     // WorldObjectsIdHandler.GetNewWorldObjectIdForDb.
     let mut pod = WorldObject::new(20 * 10_000_000 + rng.range(1_000_000, 9_999_999), pod_group, data);
-    let f = |v: &Value, i: usize| v[i].as_f64().unwrap_or(0.0) as f32;
+    let f = |v: &crate::doc::Doc, i: usize| v[i].as_f64().unwrap_or(0.0) as f32;
     pod.position = [0, 1, 2].map(|i| f(&spawn["position"], i));
     pod.rotation = [0, 1, 2, 3].map(|i| f(&spawn["rotation"], i));
     pod.planet = stable_hash(planet);
 
-    let mut settings = data.asset("JsonableGameState:GameSettingsPresetStandard").cloned().ok_or("no GameSettingsPresetStandard in the game tables")?;
+    let mut settings = data.asset("JsonableGameState:GameSettingsPresetStandard").map(crate::doc::Doc::to_value).ok_or("no GameSettingsPresetStandard in the game tables")?;
     // The preset's runtime fields as a new save has them. ConvertEnumToStrings writes the enums
     // as labels and CleanSaveStringOfVariables drops them; CreateNewFile names the save and
     // randomizes the seed; modded, version and hasPlayedIntro are set when the game saves.
