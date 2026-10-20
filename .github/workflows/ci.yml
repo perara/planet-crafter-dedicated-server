@@ -5,13 +5,21 @@ on:
     branches: [main]
   pull_request:
 
+# Nothing here writes: the token of a run (a pull request's, a dependency's build script's) can read and no more.
+permissions:
+  contents: read
+
 jobs:
   server:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: server
       - run: cargo build --release --locked
@@ -33,9 +41,12 @@ jobs:
   plugins:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
           targets: wasm32-unknown-unknown
       - run: cargo test --locked
         working-directory: plugin-api
@@ -49,7 +60,9 @@ jobs:
   script:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - run: shellcheck -S error install.sh docker/entrypoint.sh docker/test.sh tools/flip-gate.sh
       # The scripts in tools/ are run by hand, never here; they only have to parse.
       - run: for f in tools/*/*.sh; do bash -n "$f"; done

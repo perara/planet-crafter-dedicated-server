@@ -1,0 +1,8 @@
+# The workflows pin their actions by commit (a tag can be moved to other code, and the release job
+# holds a token that writes releases): this proposes the newer commit, with its tag, as a pull request.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
