@@ -5,7 +5,8 @@
 //! - the admin's, a chat hook's or a plugin's work (`contained`): logged, the bank goes on;
 //! - either way the world is `taint`ed: the next save first keeps the file on disk as
 //!   <save>.before-panic (`take_taint`, asked by persist.rs), once.
-//! - the tick itself is not contained: a panic there ends the bank after a last save (run.rs).
+//! - the tick itself is not contained (`ticked`): a panic there ends the bank after a last save
+//!   (serve.rs).
 
 use crate::game::Game;
 
@@ -31,6 +32,12 @@ thread_local! {
 
 pub(super) fn taint() {
     TAINTED.set(true);
+}
+
+/// One tick of the game. A panic in it is not contained: the whole world may be half-updated, so the
+/// bank keeps what there is (a last save) and ends, and the front starts it again from the save.
+pub(super) fn ticked(game: &mut Game) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| game.tick())).is_ok()
 }
 
 /// Whether work panicked since the last save, and forgets it: the save about to be written keeps

@@ -11,8 +11,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::game::Game;
-use crate::{plugins, save};
-use super::panic::contained;
+use crate::save;
 
 /// The last save's outcome, for GET /api/status: {"ok", "at" (Unix seconds), "error"}.
 #[derive(Clone, Serialize)]
@@ -111,10 +110,7 @@ fn saved(game: &mut Game, path: &str, written: &Written) {
     if let Err(e) = crate::s3::after_backup(&game.rules.backup, path, false) {
         eprintln!("backup: {e}");
     }
-    contained("the plugins' state", || {
-        crate::events::world_saved(game, saved.is_ok());
-        plugins::saved(game);
-    });
+    super::plugins_glue::world_saved(game, saved.is_ok());
 }
 
 /// The save being written, once it has ended (`wait`: waiting for it). A failed one is tried
