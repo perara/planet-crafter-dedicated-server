@@ -129,7 +129,7 @@ impl Ctx {
 
     /// Where releases are looked up: PCDS_RELEASES from the environment, else from server.env
     /// (what the running server uses), else GitHub's.
-    fn releases_url(&self) -> String {
+    pub(super) fn releases_url(&self) -> String {
         crate::env("PCDS_RELEASES").or_else(|| self.env_get("PCDS_RELEASES")).unwrap_or_else(updater::releases_url)
     }
 

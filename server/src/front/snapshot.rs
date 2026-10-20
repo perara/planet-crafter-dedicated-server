@@ -35,7 +35,7 @@ impl Front {
         let Ok(at) = std::fs::metadata(&path).and_then(|m| m.modified()) else { return Ok(None) };
         if at <= crate::util::modified(Path::new(&self.save)) {
             std::fs::remove_file(&path).map_err(|e| format!("{path}: {e}"))?;
-            println!("removed {path}: the save is newer");
+            info!("removed {path}: the save is newer");
             return Ok(None);
         }
         let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
@@ -57,8 +57,8 @@ impl Front {
             .and_then(|bytes| crate::util::replace_file(std::path::Path::new(&path), &bytes, 0o600))
             .and_then(|_| std::fs::File::options().write(true).open(&path).and_then(|f| f.set_modified(*at)).map_err(|e| e.to_string()));
         match kept {
-            Ok(()) => eprintln!("the world is in no bank: the last flip's snapshot (newer than the save) is kept in {path}; the next start runs it"),
-            Err(e) => eprintln!("the world is in no bank, and the last flip's snapshot could not be kept in {path} ({e}): the next start runs the save, which is older"),
+            Ok(()) => warn!("the world is in no bank: the last flip's snapshot (newer than the save) is kept in {path}; the next start runs it"),
+            Err(e) => error!("the world is in no bank, and the last flip's snapshot could not be kept in {path} ({e}): the next start runs the save, which is older"),
         }
     }
 }

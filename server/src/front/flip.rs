@@ -181,7 +181,7 @@ impl Front {
         }
         self.flip_fits()?;
         let b = self.spawn(bank, fail)?;
-        println!("flip to bank {bank} ({reason}): pid {} loading", b.child.id());
+        info!("flip to bank {bank} ({reason}): pid {} loading", b.child.id());
         self.next = Some(b);
         self.enter(Phase::Starting);
         self.flip = Some(Flip::new(seq, reason));
@@ -233,7 +233,7 @@ impl Front {
             return self.fail_flip(&format!("it has game {}'s tables, the world runs on {}'s", msg::json(&hello.game_version), msg::json(&live_game)));
         }
         if let (Some(n), Some(l)) = (self.next.as_ref(), self.live.as_ref()) {
-            println!(
+            info!(
                 "flip: bank {} has loaded its tables after {:.0} ms and holds {:.0} MiB; the live bank holds {:.0} MiB",
                 n.name,
                 n.started.elapsed().as_secs_f64() * 1000.0,
@@ -254,7 +254,7 @@ impl Front {
             }
         }
         self.enter(Phase::Snapshotting);
-        println!("flip: bank {} is checked; the running bank is told to hand the world over", self.next.as_ref().map_or("?", |b| b.name.as_str()));
+        info!("flip: bank {} is checked; the running bank is told to hand the world over", self.next.as_ref().map_or("?", |b| b.name.as_str()));
     }
 
     /// The live bank's SNAPSHOT: the world, for the next bank to restore.
@@ -262,7 +262,7 @@ impl Front {
         // A SNAPSHOT answers the HANDOFF of one flip: one of an earlier flip (it came after
         // that flip failed and the bank was told to go on) is not this flip's world.
         if !self.flip.as_ref().is_some_and(|flip| flip.seq == f.n) || self.phase != Phase::Snapshotting {
-            eprintln!("bank: a snapshot for flip {} dropped (the flip under way: {:?}, {:?})", f.n, self.flip.as_ref().map(|flip| flip.seq), self.phase);
+            warn!("bank: a snapshot for flip {} dropped (the flip under way: {:?}, {:?})", f.n, self.flip.as_ref().map(|flip| flip.seq), self.phase);
             return;
         }
         match f.fd {
@@ -306,7 +306,7 @@ impl Front {
         self.admin.set_page(self.web_page(&to));
         if recovered {
             self.persist_flip(&to, None, None);
-            println!("bank {to} (pid {}) runs the world again", self.live.as_ref().map_or(0, |b| b.child.id()));
+            info!("bank {to} (pid {}) runs the world again", self.live.as_ref().map_or(0, |b| b.child.id()));
             return;
         }
         let Some(mut flip) = self.flip.take() else { return self.persist_flip(&to, None, None) };
@@ -316,13 +316,14 @@ impl Front {
         }
         let stood = flip.stopped.map(|t| released.duration_since(t)).unwrap_or_default();
         self.flips += 1;
+        self.totals.last_stand_ms = Some(ms(stood));
         // The crashes counted so far were another release's: the new one starts with none.
         self.crashes.clear();
         self.flipped = Some(to.clone());
         let version = self.live.as_ref().and_then(|b| b.version().map(str::to_string));
         let (message, note) = outcome(&flip, &ready, Handover { from, to: to.clone(), held, stood, version, ready_at, released_at });
-        println!("{message}");
-        println!("flip timeline (ms): {}", msg::json(&note.timeline));
+        info!("{message}");
+        info!("flip timeline (ms): {}", msg::json(&note.timeline));
         self.persist_flip(&to, rolled_back, Some((flip.seq, message, note)));
     }
 
@@ -341,12 +342,12 @@ impl Front {
         self.persisting.retain(|t| !t.is_finished());
         let write = move || {
             if let Err(e) = updater::set_active(&dir, &bank) {
-                eprintln!("banks: {e}");
+                warn!("banks: {e}");
             }
             if let Some(from) = rolled_back_from
                 && let Err(e) = updater::set_rolled_back(&dir, &from)
             {
-                eprintln!("banks: the rollback from bank {from} could not be noted ({e}): the automatic update may install its release again");
+                error!("banks: the rollback from bank {from} could not be noted ({e}): the automatic update may install its release again");
             }
             if let Some((seq, message, note)) = record {
                 let _ = tx.send(super::updates::Done::Flipped { seq, message, note });
@@ -354,7 +355,7 @@ impl Front {
         };
         match std::thread::Builder::new().name("banks-folder".into()).spawn(write) {
             Ok(t) => self.persisting.push(t),
-            Err(e) => eprintln!("banks: no thread to write the banks folder ({e})"),
+            Err(e) => warn!("banks: no thread to write the banks folder ({e})"),
         }
     }
 
@@ -368,6 +369,7 @@ impl Front {
         let phase = self.phase;
         self.enter(Phase::Idle);
         let flip = self.flip.take();
+        self.totals.flips_failed += u64::from(flip.is_some());
         let stood = flip.as_ref().and_then(|f| f.stopped).map(|t| t.elapsed());
         let message = match (&mut self.live, phase) {
             (Some(b), Phase::Snapshotting | Phase::Restoring) => {
@@ -378,14 +380,14 @@ impl Front {
             (Some(_), _) => format!("flip refused ({why}); the running bank never stopped"),
             (None, _) => format!("flip failed ({why})"),
         };
-        eprintln!("{message}");
+        warn!("{message}");
         if let Some(f) = flip {
             self.record(History::new(f.seq, false, message.clone()));
         }
         if self.live.is_none() {
             match self.banks.as_deref().map(updater::active).transpose() {
                 Ok(name) => self.recover(&name.unwrap_or_else(|| "a".into())),
-                Err(e) => eprintln!("banks: {e}: the world stays stopped"),
+                Err(e) => warn!("banks: {e}: the world stays stopped"),
             }
         }
     }

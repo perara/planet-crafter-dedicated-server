@@ -10,6 +10,22 @@ use serde_json::{json, Value};
 pub(super) static BYTES_IN: AtomicU64 = AtomicU64::new(0);
 pub(super) static BYTES_OUT: AtomicU64 = AtomicU64::new(0);
 
+/// What the front counts over its life for GET /api/metrics (a counter is what Prometheus rates).
+#[derive(Default)]
+pub(super) struct Totals {
+    /// Game processes that ended outside a hand-over (CrashWindow keeps only the last ten minutes).
+    pub crashes: u64,
+    /// Games the watchdog killed for saying nothing.
+    pub watchdog_kills: u64,
+    /// Hand-overs that failed and left the old bank running.
+    pub flips_failed: u64,
+    /// How long the world stood in the last hand-over, in milliseconds.
+    pub last_stand_ms: Option<f64>,
+    /// Players dropped for too much waiting for a bank, and the bytes that waited.
+    pub dropped_clients: u64,
+    pub dropped_bytes: u64,
+}
+
 pub(super) fn traffic() -> Value {
     json!({ "bytesIn": BYTES_IN.load(Ordering::Relaxed), "bytesOut": BYTES_OUT.load(Ordering::Relaxed) })
 }
@@ -26,7 +42,7 @@ pub(super) fn process() -> Value {
 }
 
 /// The CPU time and memory of another process of this user (a bank), from /proc.
-pub(super) fn process_of(pid: u32) -> (f64, u64) {
+pub fn process_of(pid: u32) -> (f64, u64) {
     // SAFETY: sysconf only reads.
     let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
@@ -41,7 +57,7 @@ pub(super) fn process_of(pid: u32) -> (f64, u64) {
 /// Kubernetes memory limit) and what counts against it now (anonymous memory and shared
 /// memory, the snapshot's memfd among it; page cache is reclaimable and left out). None
 /// without a limit or without cgroup v2 (a host: nothing is checked).
-pub(super) fn cgroup_memory() -> Option<(u64, u64)> {
+pub fn cgroup_memory() -> Option<(u64, u64)> {
     let limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max").ok()?.trim().parse().ok()?;
     let stat = std::fs::read_to_string("/sys/fs/cgroup/memory.stat").ok()?;
     let field = |name: &str| stat.lines().find_map(|l| l.strip_prefix(name)?.trim().parse::<u64>().ok());
@@ -53,7 +69,7 @@ pub(super) fn cgroup_memory() -> Option<(u64, u64)> {
 /// objects (bank 321 MB, snapshot 166 MB, the new bank peaking at 488 MB as it restores),
 /// about twice the live bank's memory beyond what is in use. A flip that does not fit gets a
 /// bank killed by the kernel (a crash restart, players dropped), so it is refused first.
-pub(super) fn flip_memory(live_bank: u64, cgroup: Option<(u64, u64)>) -> Result<(), String> {
+pub fn flip_memory(live_bank: u64, cgroup: Option<(u64, u64)>) -> Result<(), String> {
     let Some((limit, used)) = cgroup else { return Ok(()) };
     let need = live_bank * 2;
     let free = limit.saturating_sub(used);

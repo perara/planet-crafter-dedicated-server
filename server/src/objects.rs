@@ -153,7 +153,7 @@ impl Game {
         }
         let key = if !own_prefab && g.inventory_size <= 0 && from_db { format!("{}#static", g.id) } else { g.id.clone() };
         let Some(def) = self.data.layouts.get(&key) else {
-            eprintln!("no network layout for {key}");
+            warn!("no network layout for {key}");
             return None;
         };
         let mut o = NetObj::from_layout(&def.layout(self.tick_number()));

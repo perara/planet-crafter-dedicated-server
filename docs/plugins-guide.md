@@ -394,7 +394,7 @@ once, so pause a second when an answer comes back empty at once). Without `wait`
 `{"consumer": "my-bridge", "unregister": true}` when you stop (`relay.py` does, on exit and on SIGTERM);
 silent for a minute, you are dropped anyway. `pcds plugin list` and the dashboard show who is registered. If `epoch` in an answer is not the one you saw, the server
 restarted: start again from `after: 0`. Give such a program a **scoped token** (`pcds plugin token create NAME
---scope events.read,chat.send`; `chat.read`, `player.kick` and `player.teleport` are the others): it opens only the
+--scope events.read,chat.send`; `chat.read`, `player.kick`, `player.teleport` and `metrics.read`, for a monitor, are the others): it opens only the
 requests of its scopes, has a rate of its own and is revoked with `pcds plugin token revoke NAME` or in the dashboard.
 With the admin token it would have every power the admin API has. Either way, run it as a service of its own, as a
 user of its own, and keep the token out of its logs.

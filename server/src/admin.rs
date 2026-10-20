@@ -21,14 +21,22 @@ use crate::tokens::{Checker, Denied};
 /// idle connection gives its slot back soon), the whole request within DEADLINE. Chat long
 /// polls have a cap of their own (front::chat_hooks MAX_POLLS), so they never take every slot.
 const MAX_CONNECTIONS: usize = 64;
+/// Of those 64, connections from other machines get at most this many in all, and this many from one
+/// address: a client that opens connections and says nothing holds them for HEAD each, and one
+/// address (or a few) can no longer hold every slot, so the command line and a proxy on this machine
+/// (the loopback) always find one. Over a limit the answer is 503 with Retry-After, at once.
+const MAX_REMOTE: usize = 48;
+const MAX_PER_ADDRESS: usize = 16;
 const MAX_REQUEST: u64 = 64 << 10;
-const HEAD: Duration = Duration::from_secs(3);
+const HEAD: Duration = Duration::from_secs(2);
 const DEADLINE: Duration = Duration::from_secs(10);
 /// How long the game loop may take to answer: 10 s, but the world controls stop and start the
 /// bank inside that loop (a save and a stop of up to 60 s, a load of up to 120 s: front/mod.rs
 /// STOP_GRACE and LOAD_DEADLINE), so a switch is answered up to 200 s after, not as failed at 10.
 const ANSWER: Duration = Duration::from_secs(10);
 const WORLD_ANSWER: Duration = Duration::from_secs(200);
+/// The health route: a loop that takes longer than this to say so is not healthy.
+const HEALTH_ANSWER: Duration = Duration::from_secs(3);
 
 /// The page's Content-Security-Policy (see `respond_with`).
 const PAGE_POLICY: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; base-uri 'none'; frame-ancestors 'none'";
@@ -121,7 +129,7 @@ pub fn listen(listener: TcpListener, token: String, web_index: Web, chat: Arc<Fe
 
 pub fn listen_with(listener: TcpListener, token: String, web_index: Web, chat: Arc<Feed>, tokens: Arc<Checker>) -> std::io::Result<Receiver<Request>> {
     let (tx, rx) = channel();
-    let open = Arc::new(AtomicUsize::new(0));
+    let slots = Arc::new(Slots::default());
     std::thread::Builder::new().name("pcds-admin".into()).spawn(move || {
         let mut accepting = Accepting::default();
         loop {
@@ -132,12 +140,19 @@ pub fn listen_with(listener: TcpListener, token: String, web_index: Web, chat: A
                     continue;
                 }
             };
-            // Only this thread adds, so the count cannot pass the cap.
-            if open.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
-                continue;
-            }
-            open.fetch_add(1, Ordering::SeqCst);
-            let (slot, tx, token, web, chat, tokens) = (Slot(open.clone()), tx.clone(), token.clone(), web_index.clone(), chat.clone(), tokens.clone());
+            let from = stream.peer_addr().map(|a| a.ip().to_canonical()).unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+            // Only this thread adds, so the counts cannot pass the caps.
+            let slot = match slots.admit(from) {
+                Ok(slot) => slot,
+                Err(Refused::Full) => continue,
+                Err(Refused::Busy) => {
+                    // Told at once, on this thread: the answer is a few bytes into an empty send buffer.
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+                    let _ = respond_with(stream, 503, "application/json", "{\"error\":\"too many connections from this address; try again in a few seconds\"}", "Retry-After: 5\r\n");
+                    continue;
+                }
+            };
+            let (tx, token, web, chat, tokens) = (tx.clone(), token.clone(), web_index.clone(), chat.clone(), tokens.clone());
             let spawned = std::thread::Builder::new().name("pcds-admin-conn".into()).spawn(move || {
                 let _slot = slot;
                 let page = web.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -146,7 +161,7 @@ pub fn listen_with(listener: TcpListener, token: String, web_index: Web, chat: A
             // No thread for it (the process is at its limit): the connection is closed (the
             // closure, with its slot and stream, is dropped with the error), and the acceptor goes on.
             if let Err(e) = spawned {
-                eprintln!("admin: no thread for a connection ({e}); it was closed, the listener goes on");
+                warn!("admin: no thread for a connection ({e}); it was closed, the listener goes on");
                 std::thread::sleep(accepting.pause_after_failure());
             }
         }
@@ -179,7 +194,7 @@ impl Accepting {
                 self.failures = self.failures.saturating_add(1);
                 // The first, and then one in a while: a minute of a stuck listener is a few lines.
                 if self.failures == 1 || self.failures.is_multiple_of(60) {
-                    eprintln!("admin: accept failed ({e}), {} in a row; trying again in {:?} (connections wait or are refused until it clears)", self.failures, Self::backoff(self.failures));
+                    error!("admin: accept failed ({e}), {} in a row; trying again in {:?} (connections wait or are refused until it clears)", self.failures, Self::backoff(self.failures));
                 }
                 Step::Pause(Self::backoff(self.failures))
             }
@@ -197,12 +212,67 @@ impl Accepting {
     }
 }
 
+/// The connections being served, in all and by where they come from.
+#[derive(Default)]
+struct Slots {
+    open: AtomicUsize,
+    /// From other machines.
+    remote: AtomicUsize,
+    per_address: Mutex<std::collections::HashMap<std::net::IpAddr, usize>>,
+}
+
+/// Why a connection is not served.
+#[derive(Debug, PartialEq)]
+enum Refused {
+    /// Every slot is taken: closed unanswered.
+    Full,
+    /// This address (or the other machines together) has its share: answered 503.
+    Busy,
+}
+
 /// One connection being served; freed when its thread ends, panic or not.
-struct Slot(Arc<AtomicUsize>);
+struct Slot {
+    slots: Arc<Slots>,
+    from: std::net::IpAddr,
+}
+
+impl Slots {
+    /// A slot for a connection from `from`: the loopback (this machine: the command line, a proxy)
+    /// has all of them; the rest share MAX_REMOTE, and one address has MAX_PER_ADDRESS.
+    fn admit(self: &Arc<Self>, from: std::net::IpAddr) -> Result<Slot, Refused> {
+        if self.open.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
+            return Err(Refused::Full);
+        }
+        if !from.is_loopback() {
+            let mut per = self.per_address.lock().unwrap_or_else(|e| e.into_inner());
+            let mine = per.entry(from).or_insert(0);
+            if *mine >= MAX_PER_ADDRESS || self.remote.load(Ordering::SeqCst) >= MAX_REMOTE {
+                if *mine == 0 {
+                    per.remove(&from);
+                }
+                return Err(Refused::Busy);
+            }
+            *mine += 1;
+            self.remote.fetch_add(1, Ordering::SeqCst);
+        }
+        self.open.fetch_add(1, Ordering::SeqCst);
+        Ok(Slot { slots: self.clone(), from })
+    }
+}
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        self.slots.open.fetch_sub(1, Ordering::SeqCst);
+        if !self.from.is_loopback() {
+            self.slots.remote.fetch_sub(1, Ordering::SeqCst);
+            let mut per = self.slots.per_address.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(n) = per.get_mut(&self.from) {
+                *n -= 1;
+                if *n == 0 {
+                    per.remove(&self.from);
+                }
+            }
+        }
     }
 }
 
@@ -222,7 +292,18 @@ impl Read for Deadline {
 
 /// How long a request's answer is waited for.
 fn answer_wait(path: &str) -> Duration {
-    if path.starts_with("/api/world/") { WORLD_ANSWER } else { ANSWER }
+    if path.starts_with("/api/world/") {
+        WORLD_ANSWER
+    } else if path == "/api/health" {
+        HEALTH_ANSWER
+    } else {
+        ANSWER
+    }
+}
+
+/// What an answer is: the metrics are text, everything else JSON.
+fn content_type(path: &str, status: u16) -> &'static str {
+    if path == "/api/metrics" && status == 200 { "text/plain; version=0.0.4; charset=utf-8" } else { "application/json" }
 }
 
 /// Equal strings, in time that does not depend on where they differ.
@@ -317,14 +398,14 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
     reader.read_exact(&mut body)?;
     // The routes this thread answers itself are in front/admin_routes.rs.
     let route = crate::front::find_http(&method, &path);
-    // The page needs no token; every other route does.
-    if route.is_some_and(|r| !r.needs_token()) {
+    // The page needs no token (it asks for it), nor does the health route; every other route does.
+    if route.is_some_and(|r| r.handler.owner == Owner::Http(Http::Page)) {
         return match web.and_then(|p| std::fs::read_to_string(p).ok()) {
             Some(html) => respond(stream, 200, "text/html; charset=utf-8", &html),
             None => respond(stream, 404, "text/plain", "no web GUI installed"),
         };
     }
-    if !same(&auth, &format!("Bearer {token}")) {
+    if !crate::front::is_open(&method, &path) && !same(&auth, &format!("Bearer {token}")) {
         // Not the admin token: a scoped token may make the requests of its scopes (tokens.rs).
         match tokens.authorize(&auth, &method, &path) {
             Ok(_) => {}
@@ -351,12 +432,13 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
         return long_poll(stream, tx, path, body, wait);
     }
     let (reply, answer) = channel();
-    let wait = answer_wait(&path);
+    let (wait, asked) = (answer_wait(&path), path.clone());
     if tx.send(Request { method, path, body, reply }).is_err() {
         return respond(stream, 500, "application/json", "{\"error\":\"server stopping\"}");
     }
     match answer.recv_timeout(wait) {
-        Ok((status, json)) => respond(stream, status, "application/json", &json),
+        Ok((status, json)) => respond(stream, status, content_type(&asked, status), &json),
+        Err(_) if asked == "/api/health" => respond(stream, 503, "application/json", "{\"ok\":false}"),
         Err(_) => respond(stream, 500, "application/json", "{\"error\":\"the game loop did not answer\"}"),
     }
 }
@@ -646,6 +728,127 @@ mod tests {
             ask(addr, wrong).starts_with("HTTP/1.1 401")
         });
         assert!(served, "slots are freed when connections end");
+    }
+
+    /// Other machines have a share of the slots and one address a part of it; this machine (the
+    /// loopback) has the rest, so the command line always finds one. Slots come back when a
+    /// connection ends.
+    #[test]
+    fn other_machines_have_their_share_and_the_loopback_the_rest() {
+        let slots = Arc::new(Slots::default());
+        let ip = |s: &str| -> std::net::IpAddr { s.parse().unwrap() };
+        let mut held: Vec<Slot> = (0..MAX_PER_ADDRESS).map(|_| slots.admit(ip("192.0.2.1")).unwrap()).collect();
+        assert_eq!(slots.admit(ip("192.0.2.1")).err(), Some(Refused::Busy), "one address has MAX_PER_ADDRESS");
+        // Other addresses fit until the machines together have MAX_REMOTE.
+        for other in ["198.51.100.1", "198.51.100.2"] {
+            held.extend((0..MAX_PER_ADDRESS).map(|_| slots.admit(ip(other)).unwrap()));
+        }
+        assert_eq!(held.len(), MAX_REMOTE);
+        assert_eq!(slots.admit(ip("203.0.113.9")).err(), Some(Refused::Busy), "the other machines together are at their share");
+        assert!(slots.per_address.lock().unwrap().get(&ip("203.0.113.9")).is_none(), "a refusal leaves no count behind");
+        // This machine has the rest, up to every slot.
+        let local: Vec<Slot> = (0..MAX_CONNECTIONS - MAX_REMOTE).map(|_| slots.admit(ip("127.0.0.1")).unwrap()).collect();
+        assert_eq!(slots.admit(ip("::1")).err(), Some(Refused::Full), "every slot is taken: closed unanswered");
+        assert_eq!(slots.admit(ip("203.0.113.9")).err(), Some(Refused::Full));
+        // Slots come back as connections end, address by address.
+        drop(local);
+        held.truncate(MAX_PER_ADDRESS);
+        assert_eq!(slots.open.load(Ordering::SeqCst), MAX_PER_ADDRESS);
+        assert_eq!(slots.remote.load(Ordering::SeqCst), MAX_PER_ADDRESS);
+        assert_eq!(slots.per_address.lock().unwrap().len(), 1);
+        assert!(slots.admit(ip("198.51.100.1")).is_ok() && slots.admit(ip("::1")).is_ok());
+        drop(held);
+        assert_eq!((slots.open.load(Ordering::SeqCst), slots.remote.load(Ordering::SeqCst), slots.per_address.lock().unwrap().len()), (0, 0, 0));
+    }
+
+    /// The address of this machine on the network (what a connection to it comes from, so it is not the
+    /// loopback), when there is one.
+    fn lan_ip() -> Option<std::net::IpAddr> {
+        let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        probe.connect("192.0.2.1:9").ok()?;
+        probe.local_addr().ok().map(|a| a.ip()).filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+    }
+
+    /// A machine that opens connections and says nothing holds its share and no more: the next
+    /// connection from it is told 503 at once, while this machine's command line is served; and a
+    /// head that does not come within two seconds ends the connection.
+    #[test]
+    fn a_silent_machine_holds_its_share_and_this_machine_is_still_served() {
+        let Some(lan) = lan_ip() else { return };
+        let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let rx = listen(listener, "secret".into(), Default::default(), crate::front::Hooks::default().feed).unwrap();
+        let remote = std::net::SocketAddr::new(lan, port);
+        let idle: Vec<TcpStream> = (0..MAX_PER_ADDRESS).map(|_| TcpStream::connect(remote).unwrap()).collect();
+        std::thread::sleep(Duration::from_millis(200));
+        let started = Instant::now();
+        let refused = ask(remote, b"GET /api/health HTTP/1.1\r\n\r\n");
+        assert!(refused.starts_with("HTTP/1.1 503") && refused.contains("Retry-After: 5") && refused.contains("too many connections"), "{refused}");
+        assert!(started.elapsed() < Duration::from_secs(1), "told at once, not after the head's wait: {:?}", started.elapsed());
+        // This machine is served meanwhile.
+        let wrong = b"GET /api/status HTTP/1.1\r\nAuthorization: Bearer nope\r\n\r\n";
+        assert!(ask(std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), port), wrong).starts_with("HTTP/1.1 401"));
+        // The silent ones are let go when their head does not come (HEAD): the machine is served again.
+        let began = Instant::now();
+        let mut first = idle.into_iter().next().unwrap();
+        let mut buf = [0u8; 16];
+        assert_eq!(std::io::Read::read(&mut first, &mut buf).unwrap_or(0), 0, "closed without an answer");
+        assert!(began.elapsed() >= Duration::from_millis(1500) && began.elapsed() < Duration::from_secs(4), "{:?}", began.elapsed());
+        assert!((0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            ask(remote, wrong).starts_with("HTTP/1.1 401")
+        }));
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// The health route needs no token and is answered by the game loop in 3 s or it is 503; the
+    /// metrics are text, need a token, and a token of the scope metrics.read is enough for them.
+    #[test]
+    fn health_needs_no_token_and_metrics_are_text_for_a_token_of_their_scope() {
+        let dir = std::env::temp_dir().join(format!("pcds-admin-metrics-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_, scoped) = crate::tokens::create(&dir, "prometheus", &["metrics.read".to_string()], None).unwrap();
+        let (_, chat) = crate::tokens::create(&dir, "relay", &["chat.send".to_string()], None).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let rx = listen_with(listener, "secret".into(), Default::default(), crate::front::Hooks::default().feed, Arc::new(Checker::new(dir.clone()))).unwrap();
+        // Healthy: no token, JSON.
+        let client = std::thread::spawn(move || ask(addr, b"GET /api/health HTTP/1.1\r\n\r\n"));
+        let request = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!((request.method.as_str(), request.path.as_str()), ("GET", "/api/health"));
+        request.reply.send((200, "{\"ok\":true}".into())).unwrap();
+        let answer = client.join().unwrap();
+        assert!(answer.starts_with("HTTP/1.1 200") && answer.contains("Content-Type: application/json") && answer.ends_with("{\"ok\":true}"), "{answer}");
+        // Not healthy: 503 from the loop; and a loop that does not answer in time is 503 too.
+        let client = std::thread::spawn(move || ask(addr, b"GET /api/health HTTP/1.1\r\n\r\n"));
+        rx.recv_timeout(Duration::from_secs(5)).unwrap().reply.send((503, "{\"ok\":false}".into())).unwrap();
+        assert!(client.join().unwrap().starts_with("HTTP/1.1 503"));
+        let started = Instant::now();
+        let client = std::thread::spawn(move || ask(addr, b"GET /api/health HTTP/1.1\r\n\r\n"));
+        let _silent = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let answer = client.join().unwrap();
+        assert!(answer.starts_with("HTTP/1.1 503") && answer.ends_with("{\"ok\":false}") && started.elapsed() < Duration::from_secs(8), "{answer}");
+        // Health is the one path other than the page that needs no token; the same path with another method does.
+        assert!(ask(addr, b"POST /api/health HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 401"));
+        // Metrics: no token is 401, a scope that is not theirs 403, the admin token or metrics.read pass and the answer is text.
+        assert!(ask(addr, b"GET /api/metrics HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 401"));
+        assert!(ask(addr, format!("GET /api/metrics HTTP/1.1\r\nAuthorization: Bearer {chat}\r\n\r\n").as_bytes()).starts_with("HTTP/1.1 403"));
+        for token in ["secret", scoped.as_str()] {
+            let request = format!("GET /api/metrics HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n");
+            let client = std::thread::spawn(move || ask(addr, request.as_bytes()));
+            rx.recv_timeout(Duration::from_secs(5)).unwrap().reply.send((200, "# HELP pcds_x x\n# TYPE pcds_x gauge\npcds_x 1\n".into())).unwrap();
+            let answer = client.join().unwrap();
+            assert!(answer.starts_with("HTTP/1.1 200") && answer.contains("Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n") && answer.ends_with("pcds_x 1\n"), "{answer}");
+        }
+        // An error from the game stays JSON.
+        let request = b"GET /api/metrics HTTP/1.1\r\nAuthorization: Bearer secret\r\n\r\n";
+        let client = std::thread::spawn(move || ask(addr, request));
+        rx.recv_timeout(Duration::from_secs(5)).unwrap().reply.send((500, "{\"error\":\"x\"}".into())).unwrap();
+        assert!(client.join().unwrap().contains("Content-Type: application/json"));
+        // A scoped token reaches nothing else.
+        assert!(ask(addr, format!("GET /api/status HTTP/1.1\r\nAuthorization: Bearer {scoped}\r\n\r\n").as_bytes()).starts_with("HTTP/1.1 403"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A head that a proxy in front of the admin port could read another way is refused, so that no

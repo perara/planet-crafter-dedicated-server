@@ -46,6 +46,8 @@ type Handler = fn(&mut Game, &Request) -> Reply;
 const ROUTES: &[Route<Handler>] = &[
     // The bank's part of the status; the front adds its own (invite code, network, banks, traffic).
     route("GET", "/api/status", world::status),
+    // The same numbers for a monitor; the front turns them into the Prometheus text format.
+    route("GET", "/api/metrics", world::metrics),
     // The front's watchdog asks this of a bank that has been silent: any answer is a loop that runs.
     route("GET", "/api/ping", world::ping),
     // The save, and what became of its backup: a backup that failed is the answer's, too.

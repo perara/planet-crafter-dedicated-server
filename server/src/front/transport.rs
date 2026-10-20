@@ -104,7 +104,7 @@ impl Transport {
     pub fn accept_ip(&mut self, token: utp::Token, addr: SocketAddr) -> (u64, String) {
         let client = self.next_client;
         self.next_client += 1;
-        println!("client {client}: connected from {addr}");
+        info!("client" = client, "addr" = addr.to_string(); "client {client}: connected from {addr}");
         self.ip_clients.insert(token, client);
         self.conns.insert(client, Conn::Ip(token));
         let body = Connected { steam_id: None, ip: Some(addr.ip().to_string()), trusted: trusted(addr.ip(), crate::config::dev("trust-loopback").is_some()) };
@@ -126,7 +126,7 @@ impl Transport {
         if self.conns.remove(&client).is_none() {
             return false;
         }
-        println!("client {client}: disconnected");
+        info!("client" = client; "client {client}: disconnected");
         self.ip_clients.retain(|_, c| *c != client);
         self.kicked.remove(&client);
         self.pending_drop.retain(|(c, _)| *c != client);
@@ -158,7 +158,7 @@ impl Transport {
             Some(Conn::Steam { connection, .. }) => {
                 // A batch it got only part of would be garbage to it: the client goes, loudly.
                 if let Err(e) = steam::send(connection, batch) {
-                    eprintln!("client {client}: {e}; dropped");
+                    warn!("client {client}: {e}; dropped");
                     self.kicked.insert(client);
                     self.close(client);
                     return Sent::Closed;

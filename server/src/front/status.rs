@@ -56,6 +56,30 @@ impl Front {
         v
     }
 
+    /// GET /api/metrics: the text for a monitor. `from_bank` is the bank's answer (its status, its
+    /// plugins, what only it knows); None while the world is stopped.
+    pub(super) fn metrics_text(&self, from_bank: Option<Value>) -> String {
+        let mut m = from_bank.unwrap_or_else(|| json!({"status": self.stopped_status(), "plugins": [], "bank": null}));
+        if m["status"]["state"] == "running" {
+            let mut status = m["status"].take();
+            self.overlay(&mut status);
+            m["status"] = status;
+        }
+        let rss = |b: &Option<Bank>| b.as_ref().map(|b| super::metrics::process_of(b.child.id()).1);
+        let count = |ip: bool| self.net.conns.values().filter(|c| matches!(c, super::transport::Conn::Ip(_)) == ip).count();
+        let t = &self.totals;
+        m["front"] = json!({
+            "connections": {"ip": count(true), "steam": count(false)},
+            "memory": {"front": super::metrics::process()["memoryBytes"], "bank": rss(&self.live), "next_bank": rss(&self.next)},
+            "flipsFailed": t.flips_failed,
+            "lastStandMillis": t.last_stand_ms,
+            "crashes": t.crashes,
+            "watchdogKills": t.watchdog_kills,
+            "queue": {"waitingBytes": self.waiting_total(), "droppedClients": t.dropped_clients, "droppedBytes": t.dropped_bytes},
+        });
+        super::prometheus::render(&m)
+    }
+
     /// GET /api/status while the world is stopped: the front's part, and which world it was.
     pub(super) fn stopped_status(&self) -> Value {
         let mut s = json!({"state": "stopped", "save": self.world_name(), "players": [], "serverVersion": env!("CARGO_PKG_VERSION"), "gameVersion": self.game_version});

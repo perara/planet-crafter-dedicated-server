@@ -158,7 +158,7 @@ impl Ctx {
     pub fn log(&mut self, level: Level, message: &str) {
         if self.log_second.0.elapsed().as_secs() >= 1 {
             if self.log_dropped > 0 {
-                eprintln!("plugin {}: {} log lines dropped (over {} a second)", self.id, self.log_dropped, limits::LOG_LINES_PER_SECOND);
+                warn!("plugin {}: {} log lines dropped (over {} a second)", self.id, self.log_dropped, limits::LOG_LINES_PER_SECOND);
                 self.log_dropped = 0;
             }
             self.log_second = (Instant::now(), 0);
@@ -170,10 +170,10 @@ impl Ctx {
         self.log_second.1 += 1;
         let line: String = message.chars().take(limits::LOG_LINE_CHARS).map(|c| if c.is_control() { ' ' } else { c }).collect();
         match level {
-            Level::Error | Level::Warn => eprintln!("plugin {}: {line}", self.id),
-            Level::Info => println!("plugin {}: {line}", self.id),
+            Level::Error | Level::Warn => warn!("plugin {}: {line}", self.id),
+            Level::Info => info!("plugin {}: {line}", self.id),
             // Debug lines are for the plugin's author, who reads them with the log at hand.
-            Level::Debug => println!("plugin {} (debug): {line}", self.id),
+            Level::Debug => info!("plugin {} (debug): {line}", self.id),
         }
     }
 
@@ -304,7 +304,7 @@ impl Ctx {
             return E_BAD;
         }
         if let Err(why) = super::actions::rules_patch_allowed(&patch) {
-            eprintln!("plugin {}: rules patch refused: {why}", self.id);
+            warn!("plugin {}: rules patch refused: {why}", self.id);
             self.refused += 1;
             return E_DENIED;
         }

@@ -1,5 +1,5 @@
 //! The rules the front acts on, as the live bank says them (OPS, at its start and whenever the
-//! rules change): the autosave timer, the update schedule and the watchdog's limit. The front
+//! rules change): the autosave timer, the update schedule, the watchdog's limit and the log's format and level. The front
 //! holds these because it outlives a bank; a rule it has not heard of yet has the default.
 
 use std::time::{Duration, Instant};
@@ -59,6 +59,10 @@ impl Front {
         }
         if let Some(seconds) = o.bank_watchdog_seconds {
             self.watch.limit = Duration::from_secs(seconds);
+        }
+        // The front's own lines follow the rules log.format and log.level too.
+        if let (Some(format), Some(level)) = (o.log_format.as_deref().and_then(crate::logging::Format::parse), o.log_level.as_deref().and_then(crate::logging::Level::parse)) {
+            crate::logging::set(format, level);
         }
     }
 }

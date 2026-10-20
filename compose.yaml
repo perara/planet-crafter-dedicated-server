@@ -25,6 +25,15 @@ services:
       PUID: "1000"   # the owner of ./data on the host (id -u)
       PGID: "1000"
     stop_grace_period: 90s
-    # The server writes only /data (and /game is read-only), so the rest can be locked down:
-    # read_only: true
-    # security_opt: ["no-new-privileges:true"]
+    # Docker's default log driver never rotates; this keeps at most 50 MB (docs/monitoring.md).
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+    # The server writes only /data (and /game is read-only), so the rest is locked down
+    # (docs/hardening.md; docker/test.sh runs the image with these):
+    read_only: true
+    tmpfs: ["/tmp"]                       # Steam's crash dump folder; empty at every start
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]   # the entrypoint gives /data to PUID:PGID, then runs without them
+    pids_limit: 1024
