@@ -959,7 +959,14 @@ mod tests {
         let newest = crate::s3::newest_backup(save.to_str().unwrap()).unwrap();
         assert_eq!(std::fs::read_to_string(&newest).unwrap(), "v1");
         assert!(![&f1, &f2].contains(&&newest.file_name().unwrap().to_string_lossy().to_string()));
-        // Room for two: the futures go before the day-old past one, and the new copy stays.
+        // Room for two: the futures go before the day-old past one, and the new copy stays. (The copy
+        // of v1 goes first: its stamp is the second the test is in, and a second copy a second later
+        // would be one more past backup.)
+        for n in names() {
+            if ![&f1, &f2, &p1].contains(&&n) {
+                std::fs::remove_file(backups.join(n)).unwrap();
+            }
+        }
         std::fs::write(&save, "v2").unwrap();
         assert!(backup(save.to_str().unwrap(), Duration::ZERO, 2).unwrap());
         let left = names();
