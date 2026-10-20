@@ -522,7 +522,12 @@ cannot download (`--steam-user` installs) fails `pcds update`, so the hourly uni
 - `run/worlds/backups/` keeps timestamped copies of each world (one per `save.backupMinutes`,
   the newest `save.backupsKept`), named by UTC time. Each start also backs up the world as it was
   before the server touched it, at most once per 10 minutes. To restore one, stop the server and
-  copy it over the world's file.
+  copy it over the world's file. `/api/status` (`backup`) and the dashboard say when the last one
+  was made and why one failed.
+- When the server catches a panic in a player's action (`./pcds logs` shows it; the player is
+  kicked), the world may hold half of what that action did. It is not saved at once: the next
+  save first keeps the world's file as it was as `NAME.json.before-panic` beside it, so that you can
+  go back to it (stop the server and copy it over the world's file).
 - A server that keeps crashing stops after 5 starts in 10 minutes, so the older backups stay.
   `./pcds logs` shows why; `systemctl --user reset-failed pcds` and `./pcds start` try again.
 - Access lists (`access.json`) and rules (`rules.json`) belong to the installation and apply to
