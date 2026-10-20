@@ -216,7 +216,14 @@ fn a_start_falls_back_to_the_other_bank() {
     assert_eq!(out.status.code(), Some(0), "{said}");
     let unit = std::fs::read_to_string(units.join("pcds-cli-itest.service")).unwrap();
     assert!(unit.contains("TimeoutStopSec=60") && !unit.contains("KillMode") && !said.contains("written again"), "{unit}\n{said}");
-    let restarted = pcds(&dir, &fake, &["restart"]);
+    // restart puts this release into the banks first, and for that the program has its library and
+    // page beside it (a test binary has not: a copy that has).
+    let prog = dir.join("prog");
+    std::fs::create_dir_all(prog.join("web")).unwrap();
+    std::fs::copy(PCDS, prog.join("pcds")).unwrap();
+    std::fs::write(prog.join("libsteam_api.so"), "x").unwrap();
+    std::fs::write(prog.join("web/index.html"), "<html></html>").unwrap();
+    let restarted = pcds_at(&prog.join("pcds"), &dir, &fake, &["restart"]);
     let unit = std::fs::read_to_string(units.join("pcds-cli-itest.service")).unwrap();
     assert!(unit.contains("KillMode=mixed") && unit.contains("TimeoutStopSec=90") && unit.contains("\nNoNewPrivileges=yes\n") && unit.contains("\nProtectSystem=strict\n") && text(&restarted).contains("written again"), "{unit}\n{}", text(&restarted));
     assert!(said.contains("bank a could not start the world: its front (pcds 9.0.0) ended without running it (exit 75") && said.contains("Starting bank b"), "{said}");
