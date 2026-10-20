@@ -21,8 +21,14 @@ use crate::tokens::{Checker, Denied};
 /// idle connection gives its slot back soon), the whole request within DEADLINE. Chat long
 /// polls have a cap of their own (front::chat_hooks MAX_POLLS), so they never take every slot.
 const MAX_CONNECTIONS: usize = 64;
+/// Of those 64, connections from other machines get at most this many in all, and this many from one
+/// address: a client that opens connections and says nothing holds them for HEAD each, and one
+/// address (or a few) can no longer hold every slot, so the command line and a proxy on this machine
+/// (the loopback) always find one. Over a limit the answer is 503 with Retry-After, at once.
+const MAX_REMOTE: usize = 48;
+const MAX_PER_ADDRESS: usize = 16;
 const MAX_REQUEST: u64 = 64 << 10;
-const HEAD: Duration = Duration::from_secs(3);
+const HEAD: Duration = Duration::from_secs(2);
 const DEADLINE: Duration = Duration::from_secs(10);
 /// How long the game loop may take to answer: 10 s, but the world controls stop and start the
 /// bank inside that loop (a save and a stop of up to 60 s, a load of up to 120 s: front/mod.rs
@@ -123,7 +129,7 @@ pub fn listen(listener: TcpListener, token: String, web_index: Web, chat: Arc<Fe
 
 pub fn listen_with(listener: TcpListener, token: String, web_index: Web, chat: Arc<Feed>, tokens: Arc<Checker>) -> std::io::Result<Receiver<Request>> {
     let (tx, rx) = channel();
-    let open = Arc::new(AtomicUsize::new(0));
+    let slots = Arc::new(Slots::default());
     std::thread::Builder::new().name("pcds-admin".into()).spawn(move || {
         let mut accepting = Accepting::default();
         loop {
@@ -134,12 +140,19 @@ pub fn listen_with(listener: TcpListener, token: String, web_index: Web, chat: A
                     continue;
                 }
             };
-            // Only this thread adds, so the count cannot pass the cap.
-            if open.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
-                continue;
-            }
-            open.fetch_add(1, Ordering::SeqCst);
-            let (slot, tx, token, web, chat, tokens) = (Slot(open.clone()), tx.clone(), token.clone(), web_index.clone(), chat.clone(), tokens.clone());
+            let from = stream.peer_addr().map(|a| a.ip().to_canonical()).unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+            // Only this thread adds, so the counts cannot pass the caps.
+            let slot = match slots.admit(from) {
+                Ok(slot) => slot,
+                Err(Refused::Full) => continue,
+                Err(Refused::Busy) => {
+                    // Told at once, on this thread: the answer is a few bytes into an empty send buffer.
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+                    let _ = respond_with(stream, 503, "application/json", "{\"error\":\"too many connections from this address; try again in a few seconds\"}", "Retry-After: 5\r\n");
+                    continue;
+                }
+            };
+            let (tx, token, web, chat, tokens) = (tx.clone(), token.clone(), web_index.clone(), chat.clone(), tokens.clone());
             let spawned = std::thread::Builder::new().name("pcds-admin-conn".into()).spawn(move || {
                 let _slot = slot;
                 let page = web.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -199,12 +212,67 @@ impl Accepting {
     }
 }
 
+/// The connections being served, in all and by where they come from.
+#[derive(Default)]
+struct Slots {
+    open: AtomicUsize,
+    /// From other machines.
+    remote: AtomicUsize,
+    per_address: Mutex<std::collections::HashMap<std::net::IpAddr, usize>>,
+}
+
+/// Why a connection is not served.
+#[derive(Debug, PartialEq)]
+enum Refused {
+    /// Every slot is taken: closed unanswered.
+    Full,
+    /// This address (or the other machines together) has its share: answered 503.
+    Busy,
+}
+
 /// One connection being served; freed when its thread ends, panic or not.
-struct Slot(Arc<AtomicUsize>);
+struct Slot {
+    slots: Arc<Slots>,
+    from: std::net::IpAddr,
+}
+
+impl Slots {
+    /// A slot for a connection from `from`: the loopback (this machine: the command line, a proxy)
+    /// has all of them; the rest share MAX_REMOTE, and one address has MAX_PER_ADDRESS.
+    fn admit(self: &Arc<Self>, from: std::net::IpAddr) -> Result<Slot, Refused> {
+        if self.open.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
+            return Err(Refused::Full);
+        }
+        if !from.is_loopback() {
+            let mut per = self.per_address.lock().unwrap_or_else(|e| e.into_inner());
+            let mine = per.entry(from).or_insert(0);
+            if *mine >= MAX_PER_ADDRESS || self.remote.load(Ordering::SeqCst) >= MAX_REMOTE {
+                if *mine == 0 {
+                    per.remove(&from);
+                }
+                return Err(Refused::Busy);
+            }
+            *mine += 1;
+            self.remote.fetch_add(1, Ordering::SeqCst);
+        }
+        self.open.fetch_add(1, Ordering::SeqCst);
+        Ok(Slot { slots: self.clone(), from })
+    }
+}
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        self.slots.open.fetch_sub(1, Ordering::SeqCst);
+        if !self.from.is_loopback() {
+            self.slots.remote.fetch_sub(1, Ordering::SeqCst);
+            let mut per = self.slots.per_address.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(n) = per.get_mut(&self.from) {
+                *n -= 1;
+                if *n == 0 {
+                    per.remove(&self.from);
+                }
+            }
+        }
     }
 }
 
@@ -660,6 +728,77 @@ mod tests {
             ask(addr, wrong).starts_with("HTTP/1.1 401")
         });
         assert!(served, "slots are freed when connections end");
+    }
+
+    /// Other machines have a share of the slots and one address a part of it; this machine (the
+    /// loopback) has the rest, so the command line always finds one. Slots come back when a
+    /// connection ends.
+    #[test]
+    fn other_machines_have_their_share_and_the_loopback_the_rest() {
+        let slots = Arc::new(Slots::default());
+        let ip = |s: &str| -> std::net::IpAddr { s.parse().unwrap() };
+        let mut held: Vec<Slot> = (0..MAX_PER_ADDRESS).map(|_| slots.admit(ip("192.0.2.1")).unwrap()).collect();
+        assert_eq!(slots.admit(ip("192.0.2.1")).err(), Some(Refused::Busy), "one address has MAX_PER_ADDRESS");
+        // Other addresses fit until the machines together have MAX_REMOTE.
+        for other in ["198.51.100.1", "198.51.100.2"] {
+            held.extend((0..MAX_PER_ADDRESS).map(|_| slots.admit(ip(other)).unwrap()));
+        }
+        assert_eq!(held.len(), MAX_REMOTE);
+        assert_eq!(slots.admit(ip("203.0.113.9")).err(), Some(Refused::Busy), "the other machines together are at their share");
+        assert!(slots.per_address.lock().unwrap().get(&ip("203.0.113.9")).is_none(), "a refusal leaves no count behind");
+        // This machine has the rest, up to every slot.
+        let local: Vec<Slot> = (0..MAX_CONNECTIONS - MAX_REMOTE).map(|_| slots.admit(ip("127.0.0.1")).unwrap()).collect();
+        assert_eq!(slots.admit(ip("::1")).err(), Some(Refused::Full), "every slot is taken: closed unanswered");
+        assert_eq!(slots.admit(ip("203.0.113.9")).err(), Some(Refused::Full));
+        // Slots come back as connections end, address by address.
+        drop(local);
+        held.truncate(MAX_PER_ADDRESS);
+        assert_eq!(slots.open.load(Ordering::SeqCst), MAX_PER_ADDRESS);
+        assert_eq!(slots.remote.load(Ordering::SeqCst), MAX_PER_ADDRESS);
+        assert_eq!(slots.per_address.lock().unwrap().len(), 1);
+        assert!(slots.admit(ip("198.51.100.1")).is_ok() && slots.admit(ip("::1")).is_ok());
+        drop(held);
+        assert_eq!((slots.open.load(Ordering::SeqCst), slots.remote.load(Ordering::SeqCst), slots.per_address.lock().unwrap().len()), (0, 0, 0));
+    }
+
+    /// The address of this machine on the network (what a connection to it comes from, so it is not the
+    /// loopback), when there is one.
+    fn lan_ip() -> Option<std::net::IpAddr> {
+        let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        probe.connect("192.0.2.1:9").ok()?;
+        probe.local_addr().ok().map(|a| a.ip()).filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+    }
+
+    /// A machine that opens connections and says nothing holds its share and no more: the next
+    /// connection from it is told 503 at once, while this machine's command line is served; and a
+    /// head that does not come within two seconds ends the connection.
+    #[test]
+    fn a_silent_machine_holds_its_share_and_this_machine_is_still_served() {
+        let Some(lan) = lan_ip() else { return };
+        let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let rx = listen(listener, "secret".into(), Default::default(), crate::front::Hooks::default().feed).unwrap();
+        let remote = std::net::SocketAddr::new(lan, port);
+        let idle: Vec<TcpStream> = (0..MAX_PER_ADDRESS).map(|_| TcpStream::connect(remote).unwrap()).collect();
+        std::thread::sleep(Duration::from_millis(200));
+        let started = Instant::now();
+        let refused = ask(remote, b"GET /api/health HTTP/1.1\r\n\r\n");
+        assert!(refused.starts_with("HTTP/1.1 503") && refused.contains("Retry-After: 5") && refused.contains("too many connections"), "{refused}");
+        assert!(started.elapsed() < Duration::from_secs(1), "told at once, not after the head's wait: {:?}", started.elapsed());
+        // This machine is served meanwhile.
+        let wrong = b"GET /api/status HTTP/1.1\r\nAuthorization: Bearer nope\r\n\r\n";
+        assert!(ask(std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), port), wrong).starts_with("HTTP/1.1 401"));
+        // The silent ones are let go when their head does not come (HEAD): the machine is served again.
+        let began = Instant::now();
+        let mut first = idle.into_iter().next().unwrap();
+        let mut buf = [0u8; 16];
+        assert_eq!(std::io::Read::read(&mut first, &mut buf).unwrap_or(0), 0, "closed without an answer");
+        assert!(began.elapsed() >= Duration::from_millis(1500) && began.elapsed() < Duration::from_secs(4), "{:?}", began.elapsed());
+        assert!((0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            ask(remote, wrong).starts_with("HTTP/1.1 401")
+        }));
+        assert!(rx.try_recv().is_err());
     }
 
     /// The health route needs no token and is answered by the game loop in 3 s or it is 503; the

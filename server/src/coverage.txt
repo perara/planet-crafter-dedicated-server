@@ -137,7 +137,7 @@ rpc WorldObjectsHandler.SetSceneWorldObjectGrowthServerRpc  objects::tests::scen
 
 # ---- Modules (systems in comments) ----
 module access  access::tests::a_ban_that_cannot_be_kept_is_refused access::tests::rules_match_the_plugin access::tests::the_lists_survive_a_restart_and_steam_bans_take_the_steam_id  # access
-module admin  admin::tests::token_size_and_connection_limits admin::tests::health_needs_no_token_and_metrics_are_text_for_a_token_of_their_scope  # admin API
+module admin  admin::tests::token_size_and_connection_limits admin::tests::health_needs_no_token_and_metrics_are_text_for_a_token_of_their_scope admin::tests::other_machines_have_their_share_and_the_loopback_the_rest admin::tests::a_silent_machine_holds_its_share_and_this_machine_is_still_served  # admin API
 module animals  animals::tests::dropped_items_go_back_to_the_server animals::tests::loading_players_do_not_count  # animals
 module animals::interpolation  animals::interpolation::tests::interrupted_moves_go_on_when_a_client_checks_them animals::interpolation::tests::scene_interpolators_move_for_everyone_and_late_joiners_catch_up  # scene interpolators
 module animals::spawn  animals::spawn::tests::animal_layout_matches_the_captured_spawn_tail animals::spawn::tests::halves_match_the_bioluminescence_bytes animals::spawn::tests::math_random_matches_the_animals_random_state animals::spawn::tests::petted_animals_give_a_trait_and_tell_their_growth animals::spawn::tests::shelter_animals_get_hungry_eat_from_feeders_and_grow animals::spawn::tests::wild_spawners_register_spawn_and_go_with_their_last_client animals::spawn::tests::wild_spawns_are_seeded_like_the_game  # animal spawners

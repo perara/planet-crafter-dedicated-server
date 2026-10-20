@@ -215,7 +215,7 @@ impl Admin {
                 // 127.0.0.1.
                 let loopback = addr.rsplit_once(':').and_then(|(h, _)| h.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok()).is_some_and(|ip| ip.is_loopback());
                 if !loopback && crate::env("PCDS_CONTAINER").is_none() {
-                    warn!("admin: WARNING: {addr} is reachable from other machines over plain HTTP; bind 127.0.0.1 and use an SSH tunnel or an HTTPS proxy");
+                    warn!("admin: WARNING: {addr} is reachable from other machines over plain HTTP. The admin token and every action travel in the clear, and whoever holds the token can have this machine run programs (the rule chat.exec). Bind 127.0.0.1 and reach it by an SSH tunnel or a TLS reverse proxy: docs/reverse-proxy.md; 'pcds doctor' keeps saying so");
                 }
                 self.rx = Some(rx);
                 Ok(())

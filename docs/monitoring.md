@@ -6,6 +6,12 @@ reads its text format), a Grafana dashboard, alert rules to start from, and the 
 it goes and how long it is kept). `pcds doctor` is the other half: it checks the setup, and this
 page watches the running server.
 
+**After a hot update from 0.8.0.** The front, the part that holds the sockets and answers these
+routes and writes the log, keeps running from the release that started it until the server restarts
+(`pcds upgrade` hands the world to the new game process and leaves the front). So until `pcds
+restart`, a server hot-updated from 0.8.0 has no `/api/health`, its `/api/metrics` answers JSON
+instead of the text format, and its log has no time prefix. `pcds status` shows the front's version.
+
 | You want | Use |
 |---|---|
 | "Is it up?" for Docker, Kubernetes or an uptime monitor | `GET /api/health` (no token) |

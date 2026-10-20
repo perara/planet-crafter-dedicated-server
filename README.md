@@ -291,7 +291,7 @@ ones for tests and tools.
 | `PCDS_STEAM` | `on` | invite codes through Steam; `off` disables them |
 | `PCDS_STEAM_TOKEN` | empty | a [game server login token](https://steamcommunity.com/dev/managegameservers) (app 1284190) keeps the invite code the same across restarts |
 | `PCDS_SESSION` | `4242` | the last four digits of the invite code |
-| `PCDS_ADMIN` | `127.0.0.1:7782` | admin API and web page; `off` disables them. Plain HTTP: keep it on 127.0.0.1 and reach it from elsewhere through an SSH tunnel (`ssh -L 7782:127.0.0.1:7782 HOST`) or an HTTPS proxy; another address logs a warning |
+| `PCDS_ADMIN` | `127.0.0.1:7782` | admin API and web page; `off` disables them. Plain HTTP: keep it on 127.0.0.1 and reach it from elsewhere through an SSH tunnel (`ssh -L 7782:127.0.0.1:7782 HOST`) or a TLS proxy ([docs/reverse-proxy.md](docs/reverse-proxy.md), with Caddy and nginx configurations); another address logs a warning at every start, `pcds doctor` warns, and other machines get at most 48 of its 64 connections, 16 per address |
 | `PCDS_ADMIN_TOKEN` | generated | the admin API's bearer token |
 | `PCDS_WORLD` | `world` | the world the server runs: `run/worlds/<name>.json` (`pcds world use NAME`) |
 | `PCDS_RELEASES` | GitHub's API for this project | where `pcds upgrade` and the rule `update.auto` look up releases (a mirror) |
@@ -395,7 +395,9 @@ unban everyone): fix it or move it away.
 - A second connection under a name or SteamID that is already playing is refused.
 
 The admin API listens on 127.0.0.1. To reach the web page from another machine, use an SSH
-tunnel (`ssh -L 7782:127.0.0.1:7782 server`) rather than exposing it.
+tunnel (`ssh -L 7782:127.0.0.1:7782 server`) or a TLS reverse proxy
+([docs/reverse-proxy.md](docs/reverse-proxy.md)) rather than exposing it: its token can set the
+rule `chat.exec`, which runs a program on the machine.
 Every route of the API, who answers it and what it takes: docs/admin-api.md.
 
 **Monitoring.** `GET /api/health` needs no token and says only whether the server serves a world

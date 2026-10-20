@@ -19,6 +19,13 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+An operator's release: one command that checks the setup (`pcds doctor`), numbers and a health route
+for monitoring, a log that can be filtered and shipped, a sandboxed service, backups that are checked
+and restored from the command line, and limits on the admin port. Five new documents:
+[monitoring.md](docs/monitoring.md), [hardening.md](docs/hardening.md),
+[disaster-recovery.md](docs/disaster-recovery.md), [reverse-proxy.md](docs/reverse-proxy.md), and the
+dashboard [grafana/pcds.json](docs/grafana/pcds.json).
+
 ### Added
 
 * **`pcds doctor`** checks everything an operator needs in one command and prints PASS, WARN or
@@ -26,12 +33,13 @@ Every release has two parts a reader can rely on:
   tables format, game version, the DLC ground when the world is on a DLC planet and the rule
   `world.dlcPlanets`), the world file, `server.env`, `rules.json` and `access.json`, both ports
   (free, or this server's) and whether the admin port is open to other machines, the modes of the
-  files that hold secrets, free disk against the world and its backups, the clock (backups
-  stamped in the future), the systemd unit and lingering, Steam (login token, `steamclient.so`,
-  network), both banks, the release feed, plugins that wait or fail, the memory limit against the
-  size a hot update needs, and the open-files limit. With the server running it also asks the
-  admin API (invite code, last save, backups, S3, crashes). It changes nothing; the exit code is 1
-  when a check FAILs; `--json` is for scripts.
+  files that hold secrets, free disk against the world and its backups, whether the backups are on
+  and leave the machine, the clock (backups stamped in the future), the systemd unit, its sandbox
+  and lingering, Steam (login token, `steamclient.so`, network), both banks, the release feed,
+  plugins that wait or fail, the memory limit against the size a hot update needs, and the
+  open-files limit. With the server running it also asks the admin API (invite code, last save,
+  backups, S3, crashes). It changes nothing; the exit code is 1 when a check FAILs; `--json` is
+  for scripts.
 * **Metrics and health for monitoring.** `GET /api/metrics` answers in the Prometheus text format
   (checked with `promtool check metrics`, and scraped by a real Prometheus): players online and
   the limit, tick p50, p99 and max, how busy the loop is, memory of the front and the game,
@@ -40,76 +48,94 @@ Every release has two parts a reader can rely on:
   queue of player traffic and what was dropped, plugins by state and what each one costs, and
   version and format labels. `GET /api/health` needs no token and answers `{"ok":true}` while a
   world is served and `503` while it is stopped, loading or starting again after a crash; a hot
-  update does not turn it red. A new token scope, `metrics.read`, opens the metrics route and
-  nothing else (`pcds plugin token create prometheus --scope metrics.read`), so the scraper does
-  not hold the admin token. [docs/monitoring.md](docs/monitoring.md) has the list of metrics, a
-  scrape configuration, 18 alert rules (checked with `promtool check rules`) and the Grafana
-  dashboard [docs/grafana/pcds.json](docs/grafana/pcds.json) (all its queries run on a real
-  Prometheus). `pcds health` is the command form of the health route.
-
+  update does not turn it red. `pcds health` is the command form. [docs/monitoring.md](docs/monitoring.md)
+  has the list of metrics (a test keeps it equal to what the server writes), a scrape
+  configuration, 18 alert rules (checked with `promtool check rules`) and the Grafana dashboard
+  [docs/grafana/pcds.json](docs/grafana/pcds.json) (all its queries run on a real Prometheus).
 * **A structured, filterable log.** The rule `log.format` (`text` or `json`) and `log.level`
   (`error`, `warn`, `info`, `debug`) apply to the front and the game process at once and change
   while the server runs. A JSON line has `timestamp`, `level`, `component`, `message` and
   `fields` (the process, its pid, and the data of the event: client, name, path, ...); a text
   line starts with its UTC time, level and component. Under systemd each line carries its priority,
-  so `journalctl -p warning` works. No token, webhook URL, chat secret or S3 key is ever written
-  (they are replaced where they appear, and a test writes such values in both formats).
-  `pcds logs` takes `-n LINES`, `--since TIME`, `--grep PATTERN` and `--follow`.
-  [docs/monitoring.md](docs/monitoring.md) says how long journald, Docker and Kubernetes keep it
-  and how to set that; [compose.yaml](compose.yaml) now rotates the container's log.
+  so `journalctl -p warning` works. `pcds logs` takes `-n LINES`, `--since TIME`, `--grep PATTERN`
+  and `--follow`. [docs/monitoring.md](docs/monitoring.md) says how long journald, Docker and
+  Kubernetes keep the log and how to set that; [compose.yaml](compose.yaml) now rotates the
+  container's log.
+* **Backups can be checked and restored from the command line**
+  ([docs/disaster-recovery.md](docs/disaster-recovery.md)). `pcds backup list`; `pcds backup
+  verify` loads the newest backups (3 by default, `--count N`, `--all`) with the loader the server
+  uses, reports what each holds and whether the server would start it, checks the S3 copy of the
+  newest, and exits 1 when one does not load; `pcds backup restore NAME` loads the backup first,
+  asks, keeps the world it replaces and refuses while the server runs (`--as WORLD` makes a new
+  world instead); `pcds backup fetch [NAME]` copies one from the bucket (HEAD, GET and listing are
+  new in the S3 client, signed like the upload; the signer is checked against AWS's own examples,
+  and ran against a real S3 server). The new rule `save.verifyBackups` (off by default) reads each
+  new backup back on a thread of its own and says so in the log and in the metrics
+  `pcds_backup_verify_last_ok` and `pcds_backup_verify_last_timestamp_seconds`. The guide covers
+  what to keep, restoring on the same machine, on a new one, from the bucket and from a Docker
+  volume, and was rehearsed on a scratch installation: a late-game world restored from the bucket
+  into an empty installation on other ports, which a scripted player and two load players then
+  joined.
+* **A scoped token for the scraper.** The scope `metrics.read` opens `GET /api/metrics` and nothing
+  else (`pcds plugin token create prometheus --scope metrics.read`), so a monitor does not hold the
+  admin token.
+
+### Changed
+
+* **A hot update from 0.8.0 works, and the front stays old until a restart.** The snapshot format and
+  the front protocol are unchanged, so `pcds upgrade` hands the world over without a disconnect. The
+  front keeps running from the release that started it: until `pcds restart` there is no
+  `/api/health`, `/api/metrics` answers JSON, the log has no time prefix, and the unit is the
+  old one (docs/monitoring.md). Run `pcds restart` once (it writes the new unit, which has the
+  sandbox, and restarts the server).
+* **Every line of the log starts with its time, level and component** (`2026-10-20T18:07:37.354Z
+  INFO  front: client 1: connected from ...`), also in `pcds logs`, where journald's own time is
+  not shown. Warnings and errors still go to standard error and the rest to standard output.
+  A program that parsed the old lines has to skip the prefix, or read `log.format=json`. Valve's
+  Steam library still writes a few plain lines of its own while the server logs in.
+* **The game's protocol noise is `debug`**: an RPC to an object without the class, a variable an
+  object does not carry. It is no longer in the log unless `log.level=debug`.
+* **The unit is written by the command line only.** The server can no longer rewrite its own unit
+  at start (its home is read-only to it, which is the point); `pcds start`, `pcds restart`,
+  `pcds install-service` and `pcds upgrade --restart` write it when a release changes it. After
+  the update that brings the sandbox, run `pcds restart` once (`pcds upgrade --restart` does it).
+* **The Docker health check and the Kubernetes probes use the health route.** The image's
+  `HEALTHCHECK` runs `pcds health` (it needed the admin token and a status request before), and
+  [docs/kubernetes.yaml](docs/kubernetes.yaml) probes `GET /api/health` over HTTP. The liveness
+  probe now waits five minutes for a world, since a crash is healed in seconds.
+* **The admin port waits 2 seconds, not 3,** for a request head.
+
+### Security
 
 * **The systemd unit is sandboxed** ([docs/hardening.md](docs/hardening.md)): no new privileges,
   no capabilities, everything but `run/` read-only (your home readable, not writable), a private
   `/tmp`, no devices, no writing of `/proc/sys`, `/sys` or the cgroups, only the socket families a
   server uses, a system call filter, files private to your user, and limits on open files and
   tasks. `systemd-analyze --user security` scores the unit 2.1 (OK) where the 0.8 unit scored 9.4
-  (UNSAFE). Each option was tried with the real server: Steam login and invite code, players,
-  saves and backups, a hot update, S3 copies, a signed webhook, hook programs (shell with curl,
-  Python, Node, Java), a plugin with `net.http`, and `steamcmd`. Left out because they break
-  something the server starts: `MemoryDenyWriteExecute` (Node and Java hooks, `steamcmd`) and
-  `SystemCallArchitectures=native` (`steamcmd` is 32-bit); the document says how to add them. A
-  machine that does not let a user service have a mount namespace gets the options that need
-  none, and `pcds install-service` and `pcds doctor` say so. The update check's unit gets the
-  options that need no mount. `pcds doctor` has a `sandbox` line.
+  (UNSAFE) (audit item I2). Each option was tried with the real server: Steam login and invite
+  code, players, saves and backups, a hot update, S3 copies, a signed webhook, hook programs
+  (shell with curl, Python, Node, Java), a plugin with `net.http`, and `steamcmd`. Left out because
+  they break something the server starts: `MemoryDenyWriteExecute` (Node and Java hooks,
+  `steamcmd`) and `SystemCallArchitectures=native` (`steamcmd` is 32-bit); the document says how to
+  add them. A machine that does not let a user service have a mount namespace gets the options that
+  need none, and `pcds install-service` and `pcds doctor` say so. The update check's unit gets the
+  options that need no mount.
 * **Docker**: the entrypoint runs the server with `setpriv --no-new-privs`; `compose.yaml` turns on
-  `read_only`, `no-new-privileges`, dropped capabilities (with the five the entrypoint needs
-  to give `/data` away) and a process limit; `docker/test.sh` runs its hot update with the same
-  flags. The base images are pinned by digest (Dependabot's `docker` entry proposes new ones).
-  The Kubernetes example mounts no service account token.
-
-* **Backups can be checked and restored from the command line**
-  ([docs/disaster-recovery.md](docs/disaster-recovery.md)). `pcds backup list`; `pcds backup
-  verify` loads the newest backups (3 by default, `--count N`, `--all`) with the loader the server
-  uses, reports what each holds and whether the server would start it, checks the S3 copy of the
-  newest, and exits 1 when one does not load; `pcds backup restore NAME` asks, keeps the world it
-  replaces, refuses while the server runs and loads the backup before it changes anything
-  (`--as WORLD` makes a new world instead); `pcds backup fetch [NAME]` copies one from the bucket
-  (HEAD, GET and listing are new in the S3 client, signed like the upload; the signer is checked
-  against AWS's own examples, and ran against a real S3 server). The new rule
-  `save.verifyBackups` (off by default) reads each new backup back on a thread of its own and
-  says so in the log, in `pcds_backup_verify_last_ok` and
-  `pcds_backup_verify_last_timestamp_seconds`, with an alert rule in docs/monitoring.md. The
-  guide covers what to keep, restoring on the same machine, on a new one, from the bucket and from a
-  Docker volume, and was rehearsed on a scratch installation: a late-game world restored from the
-  bucket into an empty installation on other ports, which a scripted player and two load players
-  then joined.
-
-### Changed
-
-* **The unit is written by the command line only.** The server can no longer rewrite its own unit
-  at start (its home is read-only to it, which is the point); `pcds start`, `pcds restart`,
-  `pcds install-service` and `pcds upgrade --restart` write it when a release changes it. After
-  the update that brings the sandbox, run `pcds restart` once (`pcds upgrade --restart` does it).
-* **Every line of the log starts with its time, level and component** (`2026-10-20T18:07:37.354Z
-  INFO  front: client 1: connected from ...`), also in `pcds logs`, where journald's own time is
-  not shown. Warnings and errors still go to standard error and the rest to standard output.
-  A program that parsed the old lines has to skip the prefix, or read `log.format=json`.
-* **The game's protocol noise is `debug`**: an RPC to an object without the class, a variable an
-  object does not carry. It is no longer in the log unless `log.level=debug`.
-* **The Docker health check and the Kubernetes probes use the health route.** The image's
-  `HEALTHCHECK` runs `pcds health` (it needed the admin token and a status request before), and
-  [docs/kubernetes.yaml](docs/kubernetes.yaml) probes `GET /api/health` over HTTP. The liveness
-  probe now waits five minutes for a world, since a crash is healed in seconds.
+  `read_only`, `no-new-privileges`, dropped capabilities (with the five the entrypoint needs to
+  give `/data` away) and a process limit; `docker/test.sh` runs its hot update with the same flags.
+  The base images are pinned by digest (audit item I1; Dependabot's `docker` entry proposes new
+  ones). The Kubernetes example mounts no service account token.
+* **The admin port, when it is open past the loopback** (audit item I9): other machines get 48 of
+  the 64 connection slots and one address 16, so the command line and a proxy on the machine always
+  find one; a connection over its share is answered `503` with `Retry-After` at once; a request head
+  that does not come within 2 seconds ends the connection. The start-up warning says that the token
+  can run programs on the machine (the rule `chat.exec`), and `pcds doctor` warns.
+  [docs/reverse-proxy.md](docs/reverse-proxy.md) has a Caddy and an nginx configuration, tried
+  against a real server.
+* **No secret in the log.** The admin token, the Steam token, the chat secret, webhook URLs and S3
+  keys are replaced by `***` wherever they appear in a line, and so is anything that looks like a
+  bearer token or a scoped token. The code did not print them; this is the net under it, with
+  tests in both formats and a check on a real server's log.
 
 ## [0.8.0] - 2026-10-20
 
