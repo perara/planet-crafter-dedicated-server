@@ -52,4 +52,4 @@ thread, never held by the game loop), the front's loop (the process: updates, st
 | `GET /api/plugins/tokens` | bank | nothing | The scoped tokens (never the token itself), the scopes there are and the rate limits. |
 | `POST /api/plugins/tokens` | bank | `{"name", "scopes": [...], "ratePerMinute"?}` | Makes a scoped token for an out-of-process plugin; the answer's `token` is shown this once. |
 | `POST /api/plugins/tokens/revoke` | bank | `{"id"}` (the id or the name) | Revokes a scoped token at once. |
-| `POST /api/plugins/events` | bank | `{"after"?, "types"?, "limit"?, "consumer"?, "unregister"?, "wait"?: SECONDS}` | The plugin event stream; with `wait` (at most 25 s; at most 8 polls wait at once) the front holds the request until an event comes or the wait is over. |
+| `POST /api/plugins/events` | bank | `{"after"?, "types"?, "limit"?, "consumer"?, "unregister"?, "wait"?: SECONDS}` | The plugin event stream; with `wait` (at most 25 s; at most 8 polls wait at once) the front holds the request until an event comes or the wait is over. At most 16 consumer names are registered at once (429 for a new one beyond). |

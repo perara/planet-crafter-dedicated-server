@@ -22,6 +22,8 @@ const KEEP_ASKING: Duration = Duration::from_secs(60);
 /// Kinds an integration may ask for: not the per-tick and per-RPC ones, and not commands (those are
 /// a plugin's own: a command's chat message is a `chat` event here).
 pub const STREAMABLE: u32 = Kind::PlayerJoin.bit() | Kind::PlayerLeave.bit() | Kind::Chat.bit() | Kind::ObjectPlaced.bit() | Kind::ObjectDestroyed.bit() | Kind::WorldSaved.bit() | Kind::RuleChange.bit();
+/// Consumers registered at once (a real setup has a handful of bridges).
+pub const MAX_CONSUMERS: usize = 16;
 /// What a poll that names no kinds gets.
 pub const DEFAULT_KINDS: u32 = Kind::PlayerJoin.bit() | Kind::PlayerLeave.bit() | Kind::Chat.bit() | Kind::WorldSaved.bit() | Kind::RuleChange.bit();
 
@@ -69,8 +71,14 @@ impl Ring {
         self.consumers.values().fold(0, |m, c| m | c.kinds)
     }
 
-    /// A poll by `name` for `kinds`, having read up to `after`: it is registered (or its wishes updated).
-    pub fn ask(&mut self, name: &str, kinds: u32, after: u64) {
+    /// A poll by `name` for `kinds`, having read up to `after`: it is registered (or its wishes
+    /// updated). False when `name` is new and `MAX_CONSUMERS` others are registered: a token
+    /// that names itself anew at every poll made a log line and an entry each.
+    pub fn ask(&mut self, name: &str, kinds: u32, after: u64) -> bool {
+        self.wanted();
+        if !self.consumers.contains_key(name) && self.consumers.len() >= MAX_CONSUMERS {
+            return false;
+        }
         let kinds = kinds & STREAMABLE;
         let c = self.consumers.entry(name.to_string()).or_insert_with(|| {
             println!("stream consumer {name}: registered");
@@ -78,6 +86,7 @@ impl Ring {
         });
         (c.kinds, c.last, c.after) = (kinds, Instant::now(), after);
         c.polls += 1;
+        true
     }
 
     /// `name` leaves: what only it wanted is no longer recorded. False if it was not there.
@@ -187,5 +196,20 @@ mod tests {
         ring.push(&Event::Chat { client: 1, name: "x", text: "y" });
         // The ring still numbers what was pushed (it is cheap), but nothing asks for it.
         assert_eq!(ring.read(0, DEFAULT_KINDS, 10)["last"], 1);
+    }
+
+    /// A token that names itself anew at every poll would make an entry and a log line each time.
+    #[test]
+    fn the_consumers_are_few() {
+        let mut ring = Ring::default();
+        for i in 0..MAX_CONSUMERS {
+            assert!(ring.ask(&format!("c{i}"), Kind::Chat.bit(), 0));
+        }
+        assert!(!ring.ask("one-more", Kind::Chat.bit(), 0), "a new name over the limit is refused");
+        assert!(ring.ask("c3", Kind::Chat.bit(), 7), "one that is registered goes on");
+        assert_eq!(ring.consumers_json().len(), MAX_CONSUMERS);
+        // A silent one gives its place up.
+        ring.consumers.get_mut("c0").unwrap().last = Instant::now() - KEEP_ASKING - Duration::from_secs(1);
+        assert!(ring.ask("one-more", Kind::Chat.bit(), 0));
     }
 }

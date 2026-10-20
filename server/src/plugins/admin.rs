@@ -259,7 +259,9 @@ fn events(game: &mut Game, body: &Value) -> (u16, String) {
     }
     let after = body["after"].as_u64().unwrap_or(0);
     let limit = body["limit"].as_u64().unwrap_or(200).clamp(1, 500) as usize;
-    ring.ask(name, kinds, after);
+    if !ring.ask(name, kinds, after) {
+        return error(429, format!("{} consumers are registered already: poll under one of their names, or unregister one", stream::MAX_CONSUMERS));
+    }
     let answer = ring.read(after, kinds, limit);
     game.ext.plugins.refresh();
     (200, answer.to_string())
