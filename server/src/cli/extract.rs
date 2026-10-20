@@ -19,6 +19,30 @@ impl Drop for Unfinished {
     }
 }
 
+/// `new` becomes `tables`, in one step: where `tables` exists the two are exchanged (renameat2
+/// RENAME_EXCHANGE), so a bank that loads its tables at that moment finds the old ones or the
+/// new ones, never a folder that is missing or half there; the old ones are then in `new`. Where
+/// there are none, a plain rename.
+fn swap_in(new: &Path, tables: &Path) -> Result {
+    let error = |e: std::io::Error| format!("{}: {e}", tables.display());
+    if fs::symlink_metadata(tables).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+        return fs::rename(new, tables).map_err(error);
+    }
+    exchange(new, tables).map_err(|e| match e.raw_os_error() {
+        Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP) => format!("{}: this file system cannot exchange two folders in one step ({e}): move run/ to one that can (ext4, xfs, btrfs, tmpfs), or remove {} and read the tables again", tables.display(), tables.display()),
+        _ => error(e),
+    })
+}
+
+fn exchange(a: &Path, b: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    let (a, b) = (c(a)?, c(b)?);
+    // SAFETY: renameat2 with two NUL-terminated paths that live through the call.
+    let done = unsafe { libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, a.as_ptr(), libc::AT_FDCWD, b.as_ptr(), libc::RENAME_EXCHANGE) };
+    if done == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
 impl Ctx {
     /// The game's tables into run/data/<game version>/, read by program().
     pub fn extract(&self, game: Option<&Path>) -> Result {
@@ -43,8 +67,8 @@ impl Ctx {
         let version: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", netdata.display()))?;
         let version = version["gameVersion"].as_str().filter(|v| super::env::world_arg(v).is_ok_and(|name| name == *v)).ok_or_else(|| format!("{}: no gameVersion to name the folder by", netdata.display()))?.to_string();
         let tables = self.run.join(format!("data/{version}"));
-        let _ = fs::remove_dir_all(&tables);
-        fs::rename(&out.0, &tables).map_err(|e| format!("{}: {e}", tables.display()))?;
+        // The old tables of this version (a re-read) end up in `out`, which is removed.
+        swap_in(&out.0, &tables)?;
         say(format!("game tables for {version} in {}", tables.display()));
         // What the server will look for: this build in its tables format.
         self.tables(&build).map(|_| ())
@@ -90,5 +114,66 @@ impl Ctx {
         }
         self.extract(Some(&game))?;
         self.restart_after_update()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Re-reading the tables of a version replaces its folder while a bank may be loading it:
+    /// a reader that opens the folder at any moment finds the old tables or the new ones whole,
+    /// never no folder, never an empty one, and what it reads through that open folder is one
+    /// version's. (A reader that opens its files by path one after the other can still see the
+    /// swap between two of them; a swap is rare and a load takes seconds.)
+    #[test]
+    fn tables_are_replaced_in_one_step() {
+        let dir = super::super::test_dir("swap-tables");
+        let tables = dir.join("2.103");
+        let made = |name: &str, content: &str| {
+            let d = dir.join(name);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("netdata.json"), content).unwrap();
+            fs::write(d.join("gamedata.json"), content).unwrap();
+            d
+        };
+        // None there yet: a plain move.
+        swap_in(&made(".new-1", "v0"), &tables).unwrap();
+        assert_eq!(fs::read_to_string(tables.join("netdata.json")).unwrap(), "v0");
+        let done = std::sync::Arc::new(AtomicBool::new(false));
+        let reader = {
+            let (done, tables) = (done.clone(), tables.clone());
+            std::thread::spawn(move || {
+                let mut seen = std::collections::BTreeSet::new();
+                while !done.load(Ordering::SeqCst) {
+                    // The folder is opened once: what it holds is one version's.
+                    let d = fs::File::open(&tables).unwrap_or_else(|e| panic!("no tables folder at some moment: {e}"));
+                    let path = format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&d));
+                    let a = fs::read_to_string(format!("{path}/netdata.json")).unwrap_or_else(|e| panic!("a table is missing: {e}"));
+                    let b = fs::read_to_string(format!("{path}/gamedata.json")).unwrap_or_else(|e| panic!("a table is missing: {e}"));
+                    assert_eq!(a, b, "tables of two versions in one folder");
+                    seen.insert(a);
+                }
+                seen
+            })
+        };
+        // The old tables end up in the folder the caller removes; here they stay until the reader
+        // is done (it holds one of them open: a reader that opened the old folder just before a
+        // swap would else find it gone).
+        let mut olds = Vec::new();
+        for round in 1..=300 {
+            let content = format!("v{round}");
+            let new = made(&format!(".new-{}", round + 1), &content);
+            swap_in(&new, &tables).unwrap();
+            assert_eq!(fs::read_to_string(new.join("netdata.json")).unwrap(), format!("v{}", round - 1));
+            olds.push(new);
+        }
+        done.store(true, Ordering::SeqCst);
+        let seen = reader.join().unwrap();
+        olds.iter().for_each(|d| fs::remove_dir_all(d).unwrap());
+        assert!(seen.len() > 1, "the reader saw the tables change: {seen:?}");
+        assert_eq!(fs::read_to_string(tables.join("netdata.json")).unwrap(), "v300");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
