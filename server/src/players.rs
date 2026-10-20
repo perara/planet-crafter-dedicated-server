@@ -24,8 +24,13 @@ pub fn name_id(name: &str) -> u64 {
 /// (u16 length + 30 bytes), short lightTier, bool lightActivated, short backpackTier,
 /// short jetpackTier, short skinIndex.
 pub fn player_data(client: u64, name: &str, light: (bool, i16), backpack: i16, jetpack: i16, skin: i16) -> Vec<u8> {
-    let mut name_bytes = name.as_bytes().to_vec();
-    name_bytes.truncate(29);
+    // The 29 bytes the FixedString32Bytes holds, cut between characters: half of one is not UTF-8,
+    // and every client reads this list.
+    let mut end = name.len().min(29);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    let name_bytes = name.as_bytes()[..end].to_vec();
     let mut out = Vec::with_capacity(56);
     out.extend(client.to_le_bytes());
     out.extend((name_bytes.len() as u16).to_le_bytes());
@@ -391,6 +396,19 @@ mod tests {
     use crate::game::tests::join;
     use crate::net::Target;
     use crate::testkit::*;
+
+    /// A name longer than the 29 bytes of the list's FixedString32Bytes is cut between characters: the
+    /// name is the client's (64 characters of any script), the list is read by every client.
+    #[test]
+    fn a_long_name_is_cut_between_characters_in_the_players_list() {
+        for name in ["é".repeat(40), "日本語".repeat(10), "x".repeat(40), "😀".repeat(30), "ab".to_string(), String::new()] {
+            let item = super::player_data(1, &name, (false, 0), 0, 0, 0);
+            let len = u16::from_le_bytes([item[8], item[9]]) as usize;
+            assert!(len <= 29 && item.len() == 56, "{name}");
+            let shown = std::str::from_utf8(&item[10..10 + len]).unwrap_or_else(|_| panic!("{name}: not UTF-8"));
+            assert!(name.starts_with(shown) && (name.len() <= 29 || shown.len() > 29 - 4), "{name} {shown}");
+        }
+    }
 
     /// A player's PlayersData entry: (light tier, light on, backpack, jetpack, skin).
     fn entry(g: &crate::game::Game, client: u64) -> (i16, bool, i16, i16, i16) {
