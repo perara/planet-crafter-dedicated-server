@@ -21,6 +21,13 @@ pub fn utc(unix: u64) -> (i64, i64, i64, i64, i64, i64) {
     (yoe + era * 400 + (m <= 2) as i64, m, d, secs / 3600, secs / 60 % 60, secs % 60)
 }
 
+/// Text another party chose (a plugin's author, a bucket), made safe to put on a terminal and in a log: a control character (an escape
+/// sequence that hides, redraws or sets the clipboard; a line break that forges a line), a mark that
+/// turns the text around (U+202E) and the zero-width ones become `?`. Plain text is returned as it is.
+pub fn clean(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}') { '?' } else { c }).collect()
+}
+
 /// Bytes as lower-case hex.
 pub fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()

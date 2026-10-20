@@ -212,7 +212,7 @@ fn failure(mut answer: ureq::http::Response<ureq::Body>) -> String {
 /// bucket's: what it says goes to a terminal and the log as text, so control characters and
 /// direction marks are written as `?` and a field is cut at 200 characters.
 fn error_text(status: u16, text: &str) -> String {
-    let field = |tag: &str| text.split(&format!("<{tag}>")).nth(1).and_then(|r| r.split(&format!("</{tag}>")).next()).map(|v| crate::plugins::clean(&unescape(v)).chars().take(200).collect::<String>());
+    let field = |tag: &str| text.split(&format!("<{tag}>")).nth(1).and_then(|r| r.split(&format!("</{tag}>")).next()).map(|v| crate::util::clean(&unescape(v)).chars().take(200).collect::<String>());
     format!("HTTP {status}{}", field("Code").map(|c| format!(": {c}{}", field("Message").map(|m| format!(" ({m})")).unwrap_or_default())).unwrap_or_default())
 }
 
