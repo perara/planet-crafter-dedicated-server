@@ -19,6 +19,12 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+### Fixed
+
+* **The fuzz crate (`server/fuzz`) compiles again.** It had stopped building when the game tables
+  became raw JSON (a missing `raw_value` feature) and when two test-only functions were used by
+  the targets, so none of the 15 fuzz targets could run. CI now type-checks it (`make fuzz-check`).
+
 ## [0.8.0] - 2026-10-20
 
 The DLC planets (Humble, Toxicity) run on their own ground, and you say which of them you own; the

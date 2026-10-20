@@ -33,7 +33,7 @@ libc = "0.2"
 pcds-plugin-api = { path = "../../plugin-api", features = ["std"] }
 ring = "0.17"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.154", features = ["preserve_order"] }
+serde_json = { version = "1.0.154", features = ["preserve_order", "raw_value"] }
 steamworks = "0.13.1"
 unicode-normalization = { version = "0.1.25", default-features = false, features = ["std"] }
 toml = { version = "1", default-features = false, features = ["parse", "serde"] }

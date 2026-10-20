@@ -59,6 +59,26 @@ jobs:
       - run: cargo test --release --locked --test layers
         working-directory: server
 
+  # The fuzz crate is the server's main.rs built with --cfg fuzzing (server/fuzz/Cargo.toml). Nothing
+  # else compiles it, so a change to the server broke it silently once (a dependency feature, two
+  # test-only functions): it is type-checked here, as `make fuzz-check` does.
+  fuzz:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-10-20
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: server/fuzz
+      - run: cargo check --locked --bin pcds_fuzz
+        working-directory: server/fuzz
+        env:
+          RUSTFLAGS: --cfg fuzzing
+
   script:
     runs-on: ubuntu-22.04
     steps:

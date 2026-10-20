@@ -139,6 +139,9 @@ python3 fuzz/seeds.py                         # (re)writes the small seed corpus
 PCDS_FUZZ_TARGET=wire cargo fuzz run pcds_fuzz fuzz/corpus/wire
 ```
 
+`make fuzz-check` (CI runs it) type-checks the fuzz crate without a nightly toolchain: it is the server's code built another way, and it
+had stopped compiling unnoticed.
+
 Targets: `wire utp rpcspec transform ipc config chathooks updater access rules save handoff game front`.
 The targets `rpcspec`, `handoff` and `game` read the game tables from `PCDS_FUZZ_DATA` (default:
 `run/data/2.103` of the checkout). `handoffsweep` and `savesweep` are not fuzzers: each puts awkward
