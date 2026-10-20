@@ -136,7 +136,7 @@ pub fn new_save(net_data: &NetData, data: &GameData, name: &str, o: &Options, rn
         };
         settings[key.as_str()] = parsed.ok_or_else(|| format!("--set {key}={value}: not a valid value (now {})", settings[key.as_str()]))?;
     }
-    Ok(SaveFile {
+    let save = SaveFile {
         world: json!({"terraTokens": 0, "allTimeTerraTokens": 0, "unlockedGroups": "", "openedInstanceSeed": 0, "openedInstanceTimeLeft": 0, "logisticsPaused": false}),
         planets: vec![json!({"planetId": planet, "unitOxygenLevel": 0.0, "unitHeatLevel": 0.0, "unitPressureLevel": 0.0, "unitPlantsLevel": 0.0, "unitInsectsLevel": 0.0, "unitAnimalsLevel": 0.0, "unitPurificationLevel": 0.0})],
         objects: vec![pod.to_json(data)],
@@ -144,7 +144,10 @@ pub fn new_save(net_data: &NetData, data: &GameData, name: &str, o: &Options, rn
         stats: json!({"craftedObjects": 0, "totalSaveFileLoad": 0, "totalSaveFileTime": 0}),
         settings,
         ..SaveFile::empty()
-    })
+    };
+    // What is written is what the loader reads back (never a world it would refuse).
+    SaveFile::parse(&save.to_text()).and_then(|_| crate::save::check_settings(&save.settings)).map_err(|e| format!("the new world would not load: {e}"))?;
+    Ok(save)
 }
 
 #[cfg(test)]

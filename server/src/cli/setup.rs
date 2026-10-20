@@ -325,14 +325,12 @@ impl Ctx {
 
     /// `setup --world`: a save becomes the current world (the one it replaces is kept in
     /// backups/), copied beside it and then moved over it.
-    fn replace_world(&self, save: &Path) -> Result {
+    pub(super) fn replace_world(&self, save: &Path) -> Result {
         let (current, name) = (self.world_file(), self.world_name());
         if !save.is_file() {
             return Err(format!("no save at {}", save.display()));
         }
-        if !super::is_save(save) {
-            return Err(format!("{} is not a Planet Crafter save", save.display()));
-        }
+        super::check_world(save)?;
         if super::same_file(save, &current) {
             return Err(format!("{} is the world {name} already: leave out --world", save.display()));
         }
@@ -639,21 +637,21 @@ mod tests {
         let ctx = super::super::test_ctx(&dir);
         let current = ctx.world_file();
         fs::create_dir_all(current.parent().unwrap()).unwrap();
-        fs::write(&current, "{\"saveDisplayName\":\"live\"}").unwrap();
+        fs::write(&current, crate::save::SaveFile::tiny_text("live")).unwrap();
         let link = dir.join("link.json");
         std::os::unix::fs::symlink(&current, &link).unwrap();
         for same in [&current, &link] {
             assert!(ctx.replace_world(same).unwrap_err().contains("already"), "{}", same.display());
         }
-        assert_eq!(fs::read_to_string(&current).unwrap(), "{\"saveDisplayName\":\"live\"}");
+        assert_eq!(fs::read_to_string(&current).unwrap(), crate::save::SaveFile::tiny_text("live"));
         assert!(!dir.join("run/worlds/backups").exists());
 
         let other = dir.join("other.json");
-        fs::write(&other, "{\"saveDisplayName\":\"other\"}").unwrap();
+        fs::write(&other, crate::save::SaveFile::tiny_text("other")).unwrap();
         ctx.replace_world(&other).unwrap();
-        assert_eq!(fs::read_to_string(&current).unwrap(), "{\"saveDisplayName\":\"other\"}");
+        assert_eq!(fs::read_to_string(&current).unwrap(), crate::save::SaveFile::tiny_text("other"));
         let backups: Vec<_> = fs::read_dir(dir.join("run/worlds/backups")).unwrap().flatten().map(|e| fs::read_to_string(e.path()).unwrap()).collect();
-        assert_eq!(backups, ["{\"saveDisplayName\":\"live\"}"]);
+        assert_eq!(backups, [crate::save::SaveFile::tiny_text("live")]);
         assert!(!dir.join("run/worlds/world.new").exists());
         fs::remove_dir_all(&dir).unwrap();
     }

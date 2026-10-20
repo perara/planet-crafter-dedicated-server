@@ -271,21 +271,6 @@ fn connection_data(body: &[u8]) -> Option<String> {
     Some(String::from_utf8_lossy(r.rest().get(..n)?).to_string())
 }
 
-/// Saves from before the dying consequences setting had only a game mode, which the game turns
-/// into dying consequences and a gauge drain at load (JsonableGameState.ConvertOldFormatToNew).
-/// The server does not convert them: the game does, when it opens and saves the world once.
-pub fn check_save_format(settings: &Value) -> Result<(), String> {
-    // A file with no game settings is no save, or one cut short (a copy still under way): read
-    // as an empty world, the next save would write over what it held.
-    if !settings.is_object() {
-        return Err("no game settings in it: it is not a Planet Crafter save, or it was cut short (is the copy complete?)".into());
-    }
-    match settings["mode"].as_str() {
-        Some(mode) if settings["dyingConsequencesLabel"].is_null() => Err(format!("a save from an old game version (game mode \"{mode}\", no dying consequences): open it in the game and save it once, then try again")),
-        _ => Ok(()),
-    }
-}
-
 /// World objects the tables cannot place are dropped when the world loads, and gone from the
 /// next save: a save from a newer game than these tables (or with mods), or an entry edited by
 /// hand. The start stops instead, saying which.
@@ -1385,14 +1370,6 @@ pub mod tests {
         }
         let ids: Vec<&str> = g.save.messages.iter().filter_map(|m| m["stringId"].as_str()).collect();
         assert!(ids.contains(&"Message_YouAreAConvict") && !ids.contains(&"Message_NoLongerInTheGame"), "{ids:?}");
-    }
-
-    #[test]
-    fn saves_with_only_the_old_game_mode_are_refused() {
-        assert!(check_save_format(&json!({"mode": "Hardcore"})).unwrap_err().contains("Hardcore"));
-        assert!(check_save_format(&json!({"mode": "Chill", "dyingConsequencesLabel": "DropAllItems"})).is_ok());
-        assert!(check_save_format(&json!({"planetId": "Prime"})).is_ok());
-        assert!(check_save_format(&Value::Null).unwrap_err().contains("cut short"));
     }
 
     /// World objects of a group the tables do not know would be dropped at load and gone from the

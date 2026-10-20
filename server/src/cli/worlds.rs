@@ -83,6 +83,7 @@ impl Ctx {
                 if !file(&name).is_file() {
                     return Err(format!("no world {name} in {} ('pcds worlds' lists them)", self.worlds.display()));
                 }
+                super::check_world(&file(&name))?;
                 if crate::env("PCDS_WORLD").is_some_and(|w| w != name) {
                     return Err("PCDS_WORLD is set in this environment (the container's): change it there".into());
                 }
@@ -112,9 +113,7 @@ impl Ctx {
                 if !save.is_file() {
                     return Err(format!("pcds world import SAVE.json [NAME]: no save at '{}'", save.display()));
                 }
-                if !super::is_save(save) {
-                    return Err(format!("{} is not a Planet Crafter save", save.display()));
-                }
+                super::check_world(save)?;
                 let name = world_arg(a.get(2).copied().unwrap_or(&save.to_string_lossy()))?;
                 if file(&name).exists() {
                     return Err(format!("world {name} exists: pass another NAME"));
@@ -143,5 +142,45 @@ impl Ctx {
             }
             _ => Err("pcds world use NAME | new NAME [OPTIONS] | import SAVE.json [NAME] | remove NAME".into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::save::SaveFile;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A world this server cannot read (the game's old layout, a file cut short, no save at all)
+    /// is neither switched to, imported nor made the world by `setup --world`; the error names
+    /// the file and, for an old save, `pcds world import`.
+    #[test]
+    fn a_world_the_server_cannot_read_is_refused_by_use_import_and_setup() {
+        let dir = super::super::test_dir("refuse-worlds");
+        let ctx = super::super::test_ctx(&dir);
+        fs::create_dir_all(&ctx.worlds).unwrap();
+        let good = SaveFile::tiny_text("good");
+        let cut = &good[..good.len() - 30];
+        for (name, text) in [("cut", cut.to_string()), ("garbage", "not a save".to_string()), ("empty", String::new())] {
+            fs::write(ctx.worlds.join(format!("{name}.json")), &text).unwrap();
+            let e = ctx.world(&args(&["use", name])).unwrap_err();
+            assert!(e.contains(&format!("{name}.json")) && !e.contains('\n'), "{e}");
+            let e = ctx.world(&args(&["import", &ctx.worlds.join(format!("{name}.json")).to_string_lossy(), "copy"])).unwrap_err();
+            assert!(e.contains(&format!("{name}.json")), "{e}");
+            assert!(!ctx.worlds.join("copy.json").exists());
+            let e = ctx.replace_world(&ctx.worlds.join(format!("{name}.json"))).unwrap_err();
+            assert!(e.contains(&format!("{name}.json")), "{e}");
+        }
+        fs::write(ctx.worlds.join("old.json"), SaveFile::old_format_text()).unwrap();
+        let old = ctx.worlds.join("old.json");
+        let e = ctx.world(&args(&["use", "old"])).unwrap_err();
+        assert!(e.contains("old.json") && e.contains("old save format") && e.contains("pcds world import"), "{e}");
+        let e = ctx.replace_world(&old).unwrap_err();
+        assert!(e.contains("pcds world import"), "{e}");
+        assert!(!ctx.world_file().exists() && !ctx.worlds.join("backups").exists(), "nothing was installed");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

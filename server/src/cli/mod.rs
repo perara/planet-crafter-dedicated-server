@@ -441,6 +441,12 @@ fn is_save(path: &Path) -> bool {
     fs::read(path).is_ok_and(|b| b.windows(15).any(|w| w == b"saveDisplayName"))
 }
 
+/// Whether a file is a world this server reads: the refusals of `SaveFile::load` (an old
+/// layout, a file cut short, no game settings), each naming the file.
+fn check_world(path: &Path) -> Result {
+    crate::save::SaveFile::load(&path.to_string_lossy()).map(drop).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// An installation in `dir` for tests: the program in build/, the home in home/, run/, and a
 /// unit name no server uses.
 #[cfg(test)]

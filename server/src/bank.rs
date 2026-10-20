@@ -163,7 +163,7 @@ fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, data: crate:
         }
         std::process::exit(1)
     });
-    if let Err(e) = crate::game::check_save_format(&save.settings).and_then(|()| crate::game::check_save_content(&save, &data)) {
+    if let Err(e) = crate::game::check_save_content(&save, &data) {
         eprintln!("{save_path}: {e}");
         std::process::exit(1);
     }

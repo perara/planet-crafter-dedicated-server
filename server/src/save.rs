@@ -35,7 +35,7 @@ pub struct SaveFile {
 
 /// Splits on `delimiter` outside JSON strings: a name or a sign text may contain '@' or '|'
 /// (JSONExport masks names before splitting for the same reason).
-fn split_outside_strings(text: &str, delimiter: char) -> Vec<&str> {
+pub(crate) fn split_outside_strings(text: &str, delimiter: char) -> Vec<&str> {
     let (mut parts, mut start, mut in_string, mut escaped) = (Vec::new(), 0, false, false);
     for (i, c) in text.char_indices() {
         match c {
@@ -62,6 +62,112 @@ fn entries(section: &str) -> Result<Vec<Value>, String> {
         .filter(|s| !s.is_empty())
         .map(|s| serde_json::from_str(s).map_err(|e| format!("{e} in {}", s.chars().take(80).collect::<String>())))
         .collect()
+}
+
+/// What the errors about an old save tell the user to run.
+pub const IMPORT_HINT: &str = "`pcds world import SAVE.json`";
+
+/// What a section's entry is, by the fields that tell the kinds apart ("other": none of them).
+fn kind(v: &Value) -> &'static str {
+    let has = |k: &str| v.get(k).is_some();
+    if !v.is_object() {
+        "something that is no record"
+    } else if has("layerId") {
+        "colour layers"
+    } else if has("playerPosition") {
+        "a player"
+    } else if has("gId") {
+        "world objects"
+    } else if has("woIds") {
+        "inventories"
+    } else if has("unitOxygenLevel") {
+        if has("planetId") { "planets" } else { "unit levels" }
+    } else if has("isRead") {
+        "messages"
+    } else if has("stringId") {
+        "story events"
+    } else if has("craftedObjects") {
+        "stats"
+    } else if has("terraTokens") {
+        "the world state"
+    } else if has("dyingConsequencesLabel") || has("worldSeed") || has("saveDisplayName") || has("mode") {
+        "game settings"
+    } else if has("owner") && has("seed") {
+        "procedural instances"
+    } else {
+        "other"
+    }
+}
+
+/// The ten sections of the layout JSONExport writes, with the kinds an entry of each may be.
+const LAYOUT: [(&str, &[&str]); 10] = [
+    ("world state", &["the world state"]),
+    ("planets", &["planets"]),
+    ("players", &["a player"]),
+    ("world objects", &["world objects"]),
+    ("inventories", &["inventories"]),
+    ("stats", &["stats"]),
+    ("messages", &["messages", "story events"]),
+    ("story events", &["story events"]),
+    ("game settings", &["game settings"]),
+    ("procedural instances", &["procedural instances"]),
+];
+
+/// Refuses a file that is not a save in the current layout, in one line: what the file is and
+/// what to do. Loaded as one, an old save (the game's layout before several planets: unit
+/// levels first, one player, no planets) would be an empty world, its objects "players", and
+/// the next save would write that over it. `sections` are the file's parts split at '@'; the
+/// last one is what follows the final end mark.
+fn layout(sections: &[&str], save: &SaveFile) -> Result<(), String> {
+    let n = sections.len() - 1;
+    let firsts = [
+        Some(&save.world).filter(|v| !v.is_null()),
+        save.planets.first(),
+        save.players.first(),
+        save.objects.first(),
+        save.inventories.first(),
+        Some(&save.stats).filter(|v| !v.is_null()),
+        save.messages.first(),
+        save.story_events.first(),
+        Some(&save.settings).filter(|v| !v.is_null()),
+        save.procedural.first(),
+    ];
+    for (i, (name, accepted)) in LAYOUT.iter().enumerate() {
+        let found = firsts[i];
+        let Some(found) = found else { continue };
+        let k = kind(found);
+        if k == "other" || accepted.contains(&k) {
+            continue;
+        }
+        let old = matches!(k, "unit levels" | "colour layers") || (i == 1 && k == "a player");
+        let where_ = format!("{n} sections, {k} in section {} where {name} are expected", i + 1);
+        return Err(if old {
+            format!("{where_}: the game's old save format (before several planets); {IMPORT_HINT} converts it")
+        } else {
+            format!("{where_}: not a layout this server reads (a save has 9 or 10 sections; the file may be cut short or no Planet Crafter save)")
+        });
+    }
+    if !sections[n].trim().is_empty() {
+        return Err(format!("the file ends inside section {} without its end mark: cut short (is the copy complete?)", n + 1));
+    }
+    if !(9..=10).contains(&n) {
+        return Err(format!("{n} sections: a save has 9 or 10 (the file may be cut short or no Planet Crafter save)"));
+    }
+    Ok(())
+}
+
+/// A file with no game settings is no save, or one cut short (a copy still under way): read as an
+/// empty world, the next save would write over what it held. Settings of the game's older
+/// versions (a game mode, no dying consequences) are the game's to convert, which `pcds world
+/// import` does as the game does.
+pub fn check_settings(settings: &Value) -> Result<(), String> {
+    if !settings.is_object() {
+        return Err("no game settings in it: it is not a Planet Crafter save, or it was cut short (is the copy complete?)".into());
+    }
+    match settings["mode"].as_str() {
+        Some(mode) if settings["dyingConsequencesLabel"].is_null() => Err(format!("a save from an old game version (game mode \"{mode}\", no dying consequences): {IMPORT_HINT} converts it")),
+        _ => Ok(()),
+    }
 }
 
 /// What JSONExport.SaveStringsInFile removes after serializing.
@@ -167,8 +273,43 @@ impl SaveFile {
         }
     }
 
+    /// The save a file holds, if it is in the layout this server writes (`layout`): an old or
+    /// unknown layout, a file cut short, or one with no usable game settings is an error naming
+    /// what the file is and what to do.
     pub fn load(path: &str) -> std::io::Result<SaveFile> {
-        SaveFile::parse(&std::fs::read_to_string(path)?).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        let bad = |e: String| std::io::Error::new(std::io::ErrorKind::InvalidData, e);
+        let save = SaveFile::parse(&std::fs::read_to_string(path)?).map_err(bad)?;
+        check_settings(&save.settings).map_err(bad)?;
+        Ok(save)
+    }
+
+    #[cfg(test)]
+    /// A save as the game wrote it in 2022, before several planets: unit levels, one player (no
+    /// id, no name), world objects, inventories, stats, messages, story events, a game mode, colour
+    /// layers (nine sections, nothing in them is the current layout).
+    pub fn old_format_text() -> String {
+        let sections = [
+            r#"{"unitOxygenLevel":15.5,"unitHeatLevel":1.0,"unitPressureLevel":2.0,"unitBiomassLevel":3.0}"#,
+            r#"{"playerPosition":"1,2,3","playerRotation":"0,0,0,1","unlockedGroups":"Pod4x,BootsSpeed1","playerGaugeOxygen":370.0,"playerGaugeThirst":99.0,"playerGaugeHealth":98.0}"#,
+            "{\"id\":208716012,\"gId\":\"EscapePod\",\"liId\":0,\"pos\":\"4,5,6\",\"rot\":\"0,0,0,1\",\"wear\":0,\"grwth\":0}|\n{\"id\":107604566,\"gId\":\"ice\",\"liId\":0,\"pos\":\"0,0,0\",\"wear\":0}",
+            "{\"id\":1,\"woIds\":\"208716012\",\"size\":35}|\n{\"id\":2,\"woIds\":\"\",\"size\":12}",
+            r#"{"craftedObjects":765,"totalSaveFileLoad":0,"totalSaveFileTime":0}"#,
+            r#"{"stringId":"Message_YouAreAConvict","isRead":true}"#,
+            r#"{"stringId":"StoryEvent-FirstRain"}"#,
+            r#"{"mode":"Standard","hasPlayedIntro":false}"#,
+            r#"{"layerId":"PCLayer1","colorBase":"0.2-0.7-0.2-1","colorCustom":"1-1-1-1","colorBaseLerp":100,"colorCustomLerp":0}"#,
+        ];
+        sections.iter().map(|s| format!("\n{s}\n@")).collect()
+    }
+
+    /// The smallest world this server loads, named `name` (CLI tests need a world that loads).
+    #[cfg(test)]
+    pub fn tiny_text(name: &str) -> String {
+        let mut save = SaveFile::empty();
+        save.world = serde_json::json!({"terraTokens": 0});
+        save.stats = serde_json::json!({"craftedObjects": 0});
+        save.settings = serde_json::json!({"saveDisplayName": name, "planetId": "Prime", "mode": "Standard", "dyingConsequencesLabel": "DropSomeItems"});
+        save.to_text()
     }
 
     /// A save that was written by this server or the game; panics on one that is not (tests,
@@ -178,13 +319,14 @@ impl SaveFile {
         SaveFile::parse(text).unwrap_or_else(|e| panic!("not a save: {e}"))
     }
 
+    /// The sections of a save in the current layout; anything else is refused (`layout`).
     pub fn parse(text: &str) -> Result<SaveFile, String> {
         let text = text.trim_start_matches('\u{feff}');
         let sections = split_outside_strings(text, '@');
         let section = |i: usize| sections.get(i).copied().unwrap_or("");
         let list = |i: usize| entries(section(i)).map_err(|e| format!("section {i}: {e}"));
         let first = |i: usize| list(i).map(|v| v.into_iter().next().unwrap_or(Value::Null));
-        Ok(SaveFile {
+        let save = SaveFile {
             world: first(0)?,
             planets: list(1)?,
             players: list(2)?,
@@ -195,7 +337,9 @@ impl SaveFile {
             story_events: list(7)?,
             settings: first(8)?,
             procedural: list(9)?,
-        })
+        };
+        layout(&sections, &save)?;
+        Ok(save)
     }
 
     pub fn to_text(&self) -> String {
@@ -445,7 +589,7 @@ mod tests {
         let (a, b) = (writer("a"), writer("b"));
         a.join().unwrap().unwrap();
         b.join().unwrap().unwrap();
-        let world = SaveFile::load(&path).unwrap().world;
+        let world = SaveFile::from_text(&std::fs::read_to_string(&path).unwrap()).world;
         assert!(world["who"] == "a".repeat(20_000) || world["who"] == "b".repeat(20_000));
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -512,7 +656,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("w.json");
         std::fs::write(&path, &text).unwrap();
-        let back = SaveFile::load(path.to_str().unwrap()).unwrap();
+        let back = SaveFile::from_text(&std::fs::read_to_string(&path).unwrap());
         assert_eq!(back.players.len(), 2);
         assert_eq!(back.players[0]["name"], "Bob@Home|x");
         assert_eq!(back.objects.len(), 3);
@@ -529,7 +673,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s.json");
         std::fs::write(&path, original).unwrap();
-        let save = SaveFile::load(path.to_str().unwrap()).unwrap();
+        let save = SaveFile::from_text(&std::fs::read_to_string(&path).unwrap());
         assert_eq!(save.objects.len(), 2);
         assert_eq!(save.to_text(), original);
         std::fs::remove_dir_all(dir).unwrap();
@@ -609,6 +753,76 @@ mod tests {
         std::fs::write(&path, good).unwrap();
         assert_eq!(SaveFile::load(path.to_str().unwrap()).err().map(|e| e.kind()), Some(std::io::ErrorKind::InvalidData));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn an_old_format_save_is_refused_naming_the_import() {
+        let err = SaveFile::parse(&SaveFile::old_format_text()).err().expect("refused");
+        assert!(err.contains("9 sections") && err.contains("unit levels in section 1") && err.contains("old save format") && err.contains("pcds world import"), "{err}");
+        // Units first or a player in the planets' place: the same old layout.
+        let text = SaveFile::old_format_text().replacen("unitOxygenLevel", "x", 1);
+        let err = SaveFile::parse(&text).err().expect("refused");
+        assert!(err.contains("a player in section 2") && err.contains("pcds world import"), "{err}");
+        let dir = std::env::temp_dir().join(format!("pcds-old-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.json");
+        std::fs::write(&path, SaveFile::old_format_text()).unwrap();
+        let err = SaveFile::load(path.to_str().unwrap()).err().expect("refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!err.to_string().contains('\n') && err.to_string().contains("pcds world import"), "{err}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A save in the current layout with one of every kind of entry.
+    fn current_text() -> String {
+        let mut save = SaveFile::empty();
+        save.world = json!({"terraTokens": 3, "allTimeTerraTokens": 3, "unlockedGroups": "", "openedInstanceSeed": 0, "openedInstanceTimeLeft": 0, "logisticsPaused": false});
+        save.planets = vec![json!({"planetId": "Prime", "unitOxygenLevel": 1.5, "unitHeatLevel": 0.0, "unitPressureLevel": 0.0, "unitPlantsLevel": 0.0, "unitInsectsLevel": 0.0, "unitAnimalsLevel": 0.0, "unitPurificationLevel": -1.0})];
+        save.players = vec![json!({"id": 0, "name": "Convict-1", "inventoryId": 1, "equipmentId": 2, "playerPosition": "1,2,3", "playerRotation": "0,0,0,1", "host": true, "planetId": "Prime"})];
+        save.objects = vec![json!({"id": 5, "gId": "Iron"}), json!({"id": 6, "gId": "ice"})];
+        save.inventories = vec![json!({"id": 1, "woIds": "5", "size": 12})];
+        save.stats = json!({"craftedObjects": 1, "totalSaveFileLoad": 0, "totalSaveFileTime": 0});
+        save.messages = vec![json!({"stringId": "Message_Help1", "isRead": true})];
+        save.story_events = vec![json!({"stringId": "StoryEvent-FirstRain"})];
+        save.settings = json!({"saveDisplayName": "w", "planetId": "Prime", "mode": "Standard", "dyingConsequencesLabel": "DropSomeItems", "worldSeed": 7});
+        save.procedural = vec![json!({"owner": 0, "planet": 1, "index": 0, "seed": 5})];
+        save.to_text()
+    }
+
+    /// Whatever is not a save in this layout is refused with a reason, and never read as a smaller
+    /// world: a file cut anywhere, text that is no save, a section too many or too few.
+    #[test]
+    fn truncated_and_garbage_files_are_refused() {
+        let good = current_text();
+        assert!(SaveFile::parse(&good).is_ok());
+        let ends: Vec<usize> = good.match_indices("\r@").map(|(i, _)| i + 2).collect();
+        assert_eq!(ends.len(), 10);
+        for cut in (0..good.len()).filter(|c| good.is_char_boundary(*c)) {
+            let prefix = &good[..cut];
+            let whole_sections = ends.iter().filter(|e| **e <= cut).count();
+            // Cut at a section's end mark: nine sections are a save with no instances, fewer are not.
+            let ok = cut == good.len() || (whole_sections == 9 && good[ends[8]..cut].trim().is_empty());
+            let result = SaveFile::parse(prefix);
+            assert_eq!(result.is_ok(), ok, "cut at {cut} ({whole_sections} sections): {:?}", result.err());
+            if let Err(e) = result {
+                assert!(!e.is_empty() && !e.contains('\n'), "{e}");
+            }
+        }
+        for garbage in ["", "\u{feff}", "hello", "{}", "[1,2]", "@@@@@@@@@@", "\0\0\0@", &"x@".repeat(10), &good.replace("\r@", "\r@\r@"), &format!("{good}\r{{\"a\":1}}\r@")] {
+            assert!(SaveFile::parse(garbage).and_then(|s| check_settings(&s.settings)).is_err(), "{garbage:?}");
+        }
+        // Sections in the wrong places (a world object where the players belong): no silent shift (these say "are expected").
+        let swapped = good.replacen("\"Convict-1\"", "\"x\",\"gId\":\"Iron\"", 1).replacen("\"playerPosition\":\"1,2,3\",", "", 1);
+        assert!(SaveFile::parse(&swapped).err().is_some_and(|e| e.contains("world objects in section 3")), "{swapped}");
+    }
+
+    #[test]
+    fn settings_of_an_old_game_version_are_refused_naming_the_import() {
+        assert!(check_settings(&json!({"mode": "Hardcore"})).unwrap_err().contains("Hardcore"));
+        assert!(check_settings(&json!({"mode": "Hardcore"})).unwrap_err().contains("pcds world import"));
+        assert!(check_settings(&json!({"mode": "Chill", "dyingConsequencesLabel": "DropAllItems"})).is_ok());
+        assert!(check_settings(&json!({"planetId": "Prime"})).is_ok());
+        assert!(check_settings(&Value::Null).unwrap_err().contains("cut short"));
     }
 
     #[test]
