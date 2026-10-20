@@ -524,7 +524,7 @@ impl Net {
         let class = name.split('.').next().unwrap_or("");
         let behaviour = self.behaviour_index(object, class).or_else(|| subclasses(class).iter().find_map(|c| self.behaviour_index(object, c)));
         let Some(behaviour) = behaviour else {
-            eprintln!("rpc {name}: object {object} has no {class}");
+            debug!("rpc {name}: object {object} has no {class}");
             return;
         };
         self.rpc_on(to, object, behaviour, name, args);
@@ -547,7 +547,7 @@ impl Net {
         let class = name.split('.').next().unwrap_or("");
         match self.find_class(class) {
             Some((object, _)) => self.rpc(to, object, name, args),
-            None => eprintln!("rpc {name}: no {class} in the scene"),
+            None => debug!("rpc {name}: no {class} in the scene"),
         }
     }
 
@@ -573,7 +573,7 @@ impl Net {
     /// Sets a plain variable; a change goes out as a delta at the end of the tick.
     pub fn set(&mut self, object: u64, class: &str, name: &str, bytes: Vec<u8>) {
         let Some(v) = self.objects.get_mut(&object).and_then(|o| o.var_mut(class, name)) else {
-            eprintln!("set {class}.{name}: not on object {object}");
+            debug!("set {class}.{name}: not on object {object}");
             return;
         };
         if matches!(&v.value, VarValue::Plain(b) if *b == bytes) {

@@ -13,7 +13,7 @@ Versions in this release:
 | plugin ABI | 1.2 (`ABI 1.2`; `pcds_plugin_api::ABI`, `0x0001_0002`) |
 | `pcds-plugin-api` crate | 0.1.0 |
 | manifest (`plugin.toml`) | the keys below; unknown keys are refused |
-| snapshot | `handoff::FORMAT` 7, with the `ext.plugins` part (docs/plugins.md, "The compatibility rule") |
+| snapshot | `handoff::FORMAT` 8, with the `ext.plugins` part (docs/plugins.md, "The compatibility rule") |
 
 ## A plugin is
 
@@ -421,6 +421,7 @@ sent as `Authorization: Bearer pcdst_...` and opens the requests of its scopes a
 | `chat.send` | write to the chat as the server (`POST /api/chat`) |
 | `player.kick` | kick a player (`POST /api/kick`) |
 | `player.teleport` | move a player (`POST /api/teleport`) |
+| `metrics.read` | read the numbers for a monitor (`GET /api/metrics`, docs/monitoring.md) |
 
 Every other request, the endpoints that manage tokens, keys and approvals among them, takes the
 admin token only; a token asking for one is answered `403` and the scope it lacks. `401`: no such

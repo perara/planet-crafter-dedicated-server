@@ -229,8 +229,8 @@ docker exec pcds pcds players | rules | gui
 ```
 
 The admin page listens on port 7782 inside the container; publish it on 127.0.0.1 only, as
-above. The image's health check asks the admin API for the server's status (`docker ps` shows
-it healthy once the world runs), so it needs `PCDS_ADMIN` on, as it is by default.
+above. The image's health check runs `pcds health`, which asks `GET /api/health` (no token; `docker ps`
+shows it healthy once the world runs), so it needs `PCDS_ADMIN` on, as it is by default.
 `--stop-timeout 90` gives the server time to save the world at `docker stop` (Docker's default
 of 10 s would kill it during the save); Compose has `stop_grace_period: 90s`. `PUID`/`PGID` (default 1000) set who owns `data/` on the host. On the first start without
 a world, the newest save in `data/worlds/` runs, or a new world is made (the arguments of the
@@ -291,7 +291,7 @@ ones for tests and tools.
 | `PCDS_STEAM` | `on` | invite codes through Steam; `off` disables them |
 | `PCDS_STEAM_TOKEN` | empty | a [game server login token](https://steamcommunity.com/dev/managegameservers) (app 1284190) keeps the invite code the same across restarts |
 | `PCDS_SESSION` | `4242` | the last four digits of the invite code |
-| `PCDS_ADMIN` | `127.0.0.1:7782` | admin API and web page; `off` disables them. Plain HTTP: keep it on 127.0.0.1 and reach it from elsewhere through an SSH tunnel (`ssh -L 7782:127.0.0.1:7782 HOST`) or an HTTPS proxy; another address logs a warning |
+| `PCDS_ADMIN` | `127.0.0.1:7782` | admin API and web page; `off` disables them. Plain HTTP: keep it on 127.0.0.1 and reach it from elsewhere through an SSH tunnel (`ssh -L 7782:127.0.0.1:7782 HOST`) or a TLS proxy ([docs/reverse-proxy.md](docs/reverse-proxy.md), with Caddy and nginx configurations); another address logs a warning at every start, `pcds doctor` warns, and other machines get at most 48 of its 64 connections, 16 per address |
 | `PCDS_ADMIN_TOKEN` | generated | the admin API's bearer token |
 | `PCDS_WORLD` | `world` | the world the server runs: `run/worlds/<name>.json` (`pcds world use NAME`) |
 | `PCDS_RELEASES` | GitHub's API for this project | where `pcds upgrade` and the rule `update.auto` look up releases (a mirror) |
@@ -314,6 +314,12 @@ file and the name.
 
 `run/server.env` holds the admin token and is readable by your user only.
 
+The systemd unit `pcds setup` writes runs the server in a sandbox (no new privileges, no
+capabilities, everything but `run/` read-only, a private `/tmp`, a system call filter), and the
+Docker image drops privileges the same way: [docs/hardening.md](docs/hardening.md) says what is
+on, what is left off because it breaks `steamcmd` or hook programs written in Node or Java, and how
+to change it.
+
 ## Administration
 
 ```bash
@@ -326,10 +332,27 @@ file and the name.
 ./pcds token                   # the admin token alone, for curl and scripts
 ./pcds api GET /api/status     # any admin API route, through the token in server.env
 ./pcds status --json           # the whole status, for scripts
+./pcds doctor                  # checks everything the server needs, with the fix for each problem
+./pcds logs                    # the last 100 lines of the log, then new ones (Ctrl+C leaves)
+./pcds logs --since "1 hour ago" --grep error   # what was said, then exit (-n LINES, --follow)
 ```
 
 `./pcds help` lists every command. When a command cannot do what you asked, it says what to do;
 [docs/troubleshooting.md](docs/troubleshooting.md) has the usual problems from the symptom to the fix.
+
+`./pcds doctor` is the first thing to run on a new machine, after an update, and when something
+is wrong. It prints one line per check, `PASS`, `WARN` or `FAIL`, and under each problem the line
+to type that fixes it: the game folder and its tables (and that they are whole, with the DLC
+ground when the world is on a DLC planet), the world file, `server.env`, `rules.json` and
+`access.json`, the two ports (free, or this server's) and whether the admin port can be reached
+from other machines, the file modes of the files that hold secrets, free disk space against the
+world and its backups, whether the backups are on and leave this machine, the clock, the systemd unit and its sandbox and lingering, Steam (a login token, the
+client library, the network), the two banks, whether the release feed answers, the plugins that
+wait for approval or fail, the memory limit against what a hot update needs and the open-files
+limit. With the server running it also asks the admin API: the invite code, the last save, the
+backups, the off-site copies and the crashes. It changes nothing. The exit code is 1 when a check
+FAILs and 0 otherwise (a `WARN` is advice); `--json` prints the same list for scripts and
+monitoring. In Docker: `docker exec pcds pcds doctor`.
 
 The admin web page has nine sections (keys 1 to 9 switch between them). **Overview**: players,
 CPU, memory, loop load, loop rate and network traffic with live graphs of the last minutes, the
@@ -372,8 +395,19 @@ unban everyone): fix it or move it away.
 - A second connection under a name or SteamID that is already playing is refused.
 
 The admin API listens on 127.0.0.1. To reach the web page from another machine, use an SSH
-tunnel (`ssh -L 7782:127.0.0.1:7782 server`) rather than exposing it.
+tunnel (`ssh -L 7782:127.0.0.1:7782 server`) or a TLS reverse proxy
+([docs/reverse-proxy.md](docs/reverse-proxy.md)) rather than exposing it: its token can set the
+rule `chat.exec`, which runs a program on the machine.
 Every route of the API, who answers it and what it takes: docs/admin-api.md.
+
+**Monitoring.** `GET /api/health` needs no token and says only whether the server serves a world
+(`200 {"ok":true}`, else `503`; a hot update does not turn it red), for container probes and
+uptime monitors (`pcds health` is the same for scripts). `GET /api/metrics` gives players,
+tick times, memory, saves, backups, hand-overs, crashes and the plugins in the Prometheus text
+format; a token with the scope `metrics.read` (`pcds plugin token create prometheus --scope
+metrics.read`) can read that and nothing else. [docs/monitoring.md](docs/monitoring.md) lists every
+metric, a scrape configuration, alert rules and the Grafana dashboard
+([docs/grafana/pcds.json](docs/grafana/pcds.json)).
 
 To run a second server on the same machine, give it its own folder and unit names:
 `PCDS_HOME=/srv/world2 PCDS_UNIT=pcds-world2 PCDS_LISTEN=0.0.0.0:7778 PCDS_ADMIN=127.0.0.1:7783
@@ -418,9 +452,12 @@ reason in `./pcds logs`.
 | `save.autosaveMinutes` | `5` | minutes between saves; `0` saves only on stop |
 | `save.backupsKept` | `24` | save backups kept in `run/worlds/backups/`; `0` keeps none |
 | `save.backupMinutes` | `60` | minutes between those backups |
+| `save.verifyBackups` | `false` | read each new backup back after it is written (on a thread of its own) and say in the log and the metrics whether it loads; `./pcds backup verify` does the full check on demand |
 | `update.auto` | `false` | install each new server release and hand the world over to it (see [Upgrading](#upgrading)); off: nothing contacts GitHub on its own |
 | `update.checkHours` | `24` | hours between those checks |
-| `log.trace` | `false` | log every incoming message and RPC (debugging; a lot of output) |
+| `log.trace` | `false` | log every incoming message and RPC (debugging; a lot of output; written whatever `log.level` is) |
+| `log.format` | `text` | how a line of the log is written: `text` (time, level, component, message) or `json` (one object per line: `timestamp`, `level`, `component`, `message`, `fields`). The front and the game process change together, at once |
+| `log.level` | `info` | the lines written, this level and above: `error` (failures), `warn` (what needs a look), `info` (what happens: joins, saves, hand-overs), `debug` (and the protocol noise) |
 | `limits.buildings` | none | building group id to how many the world may have; one more is taken down at once and its materials go back to the builder |
 | `players.forgetAfterDays` | `0` | days away after which a saved player is forgotten (about 1.2 KB each). Only a player who never crafted or earned a token and holds no more than a new player is given (the starter items) is forgotten, with those items; anyone with more, the host and anyone in the game is kept for ever. `0`: every player is kept for ever. The days count from the day the rule is first on (players already saved have no time yet) |
 | `world.dlcPlanets` | none | the DLC planets (Humble, Toxicity) you own, as names: `./pcds rules set world.dlcPlanets=Humble,Toxicity`. The server cannot ask Steam about an account, so this is your statement of ownership, not a check. A world on a DLC planet does not start unless the planet is listed, and players can travel only to the DLC planets listed. `/api/status` shows them as `dlcPlanets` |
@@ -574,9 +611,17 @@ cannot download (`--steam-user` installs) fails `pcds update`, so the hourly uni
 - `./pcds new [OPTIONS] --force` replaces the running world with a new one; the old one is kept.
 - `run/worlds/backups/` keeps timestamped copies of each world (one per `save.backupMinutes`,
   the newest `save.backupsKept`), named by UTC time. Each start also backs up the world as it was
-  before the server touched it, at most once per 10 minutes. To restore one, stop the server and
-  copy it over the world's file. `/api/status` (`backup`) and the dashboard say when the last one
-  was made and why one failed.
+  before the server touched it, at most once per 10 minutes. `/api/status` (`backup`) and the
+  dashboard say when the last one was made and why one failed.
+- `./pcds backup list` shows them. `./pcds backup verify` loads the newest three (`--count N`,
+  `--all`) the way the server loads a world and says what each holds and whether the server would
+  start it (exit 1 when one does not load; with a bucket set it also checks the bucket's copy).
+  `./pcds backup restore NAME` puts one back as the world: it loads it first, asks, keeps the world
+  it replaces as `<world>-replaced-<time>.json`, and refuses while the server runs;
+  `--as WORLD` makes it a new world instead (also while the server runs). The rule
+  `save.verifyBackups` reads each new backup back and says so in the log and the metrics.
+  [docs/disaster-recovery.md](docs/disaster-recovery.md) has what to keep, restoring on a new
+  machine, from the bucket and from a Docker volume.
 - When the server catches a panic in a player's action (`./pcds logs` shows it; the player is
   kicked), the world may hold half of what that action did. It is not saved at once: the next
   save first keeps the world's file as it was as `NAME.json.before-panic` beside it, so that you can
@@ -621,7 +666,9 @@ never logged, and `/api/rules` and `/api/status` show them as `(set)`. `GET /api
 outcome). `POST /api/backup` saves the world and makes a backup now (answers 400 when
 `save.backupsKept` is `0`) and copies it to the bucket; `POST /api/backup/s3` copies the newest
 backup again (answers 400 when S3 is off or incomplete, or there is no backup yet). The web
-page's World tab has both as buttons.
+page's World tab has both as buttons. `./pcds backup verify` asks the bucket whether the newest
+backup is there with the file's size; `./pcds backup fetch [NAME]` copies a backup from the bucket
+into `run/worlds/backups/` (the newest of this world without a name), for a new machine.
 
 ## Differences from hosting in the game
 

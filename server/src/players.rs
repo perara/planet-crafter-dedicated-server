@@ -83,13 +83,13 @@ impl Game {
         let state = match found {
             Some(i) => {
                 let p = self.saved_players.remove(i);
-                println!("client {client}: {name} ({id}) ready, saved player");
+                info!("client" = client, "name" = name, "id" = id; "client {client}: {name} ({id}) ready, saved player");
                 saved_state(&p, id, &name)
             }
             None => {
-                println!("client {client}: {name} ({id}) ready, new player");
+                info!("client" = client, "name" = name, "id" = id; "client {client}: {name} ({id}) ready, new player");
                 let Some((position, rotation)) = self.new_player_spawn() else {
-                    eprintln!("no starting pod: cannot place a new player");
+                    error!("no starting pod: cannot place a new player");
                     return;
                 };
                 let planet = self.planet_id().to_string();
@@ -284,7 +284,7 @@ impl Game {
                 }
                 let verified = c.verified_steam_id;
                 if !self.access.name_allowed(&player_name, verified) {
-                    println!("client {client}: refused ({player_name:?})");
+                    info!("client {client}: refused ({player_name:?})");
                     self.kick(client, crate::access::REFUSED);
                     return true;
                 }
@@ -293,7 +293,7 @@ impl Game {
                 let id = self.player_id(client, claimed, &player_name);
                 let online = self.clients.values().filter(|o| o.id != client).filter_map(|o| o.ready.as_ref()).any(|s| Some(s.id) == id || crate::access::same_name(&s.name, &player_name));
                 if online {
-                    println!("client {client}: refused ({player_name:?} is already online)");
+                    info!("client {client}: refused ({player_name:?} is already online)");
                     self.kick(client, "Already connected");
                     return true;
                 }
@@ -413,7 +413,7 @@ pub fn forget_unseen(game: &mut Game, now: u64) -> usize {
         // Their inventories are nobody's now, so destroy_inventory takes them (and the items).
         game.destroy_inventory(*backpack, false);
         game.destroy_inventory(*equipment, false);
-        println!("players: forgot {name} ({id}), away for {} days with nothing past the starter items", game.rules.players.forget_after_days);
+        info!("players: forgot {name} ({id}), away for {} days with nothing past the starter items", game.rules.players.forget_after_days);
     }
     forget.len()
 }

@@ -141,7 +141,7 @@ impl Link {
     /// other side would break the link on it), with a line in the log.
     pub fn queue(&mut self, kind: u8, n: u64, body: &[u8], fd: Option<OwnedFd>, client: u64) {
         if !fits(body) {
-            eprintln!("ipc: a frame {kind} of {} bytes not sent: a frame holds at most {MAX_FRAME}", 9 + body.len());
+            warn!("ipc: a frame {kind} of {} bytes not sent: a frame holds at most {MAX_FRAME}", 9 + body.len());
             return;
         }
         let bytes = encode(kind, n, body);

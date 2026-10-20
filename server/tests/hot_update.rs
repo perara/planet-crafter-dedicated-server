@@ -747,7 +747,7 @@ fn survivors(pids: &[u64]) -> Vec<u64> {
 
 /// The pid of the bank the last flip in the log started.
 fn loading_pid(log: &str) -> u64 {
-    let line = log.lines().rev().find(|l| l.starts_with("flip to bank")).expect("a flip started");
+    let line = log.lines().rev().find(|l| l.contains(" flip to bank ")).expect("a flip started");
     line.split("pid ").nth(1).and_then(|r| r.split_whitespace().next()).and_then(|p| p.parse().ok()).expect("its pid")
 }
 

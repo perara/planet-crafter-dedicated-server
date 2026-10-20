@@ -126,6 +126,21 @@ impl Ctx {
         request(sock, &token, method, path, body, if path.starts_with("/api/world/") { WORLD_TIMEOUT } else { ADMIN_TIMEOUT }).map_err(|e| explain(e, &addr))
     }
 
+    /// `pcds health`: Ok when the server answers GET /api/health with ok, which needs no token; Err
+    /// (exit 1) with what to do otherwise. The Docker image's health check runs this.
+    pub fn health(&self) -> Result {
+        let addr = self.env_get("PCDS_ADMIN").filter(|a| a != "off").ok_or_else(|| self.no_admin())?;
+        let sock = crate::config::admin_loopback(&addr)?;
+        match request(sock, "", "GET", "/api/health", "", Duration::from_secs(10)) {
+            Ok(_) => {
+                println!("ok");
+                Ok(())
+            }
+            Err(e) if e.contains("HTTP 503") => Err("the server runs but serves no world: it is stopped, still loading (the first start reads the game tables), or starting the game process again after a crash ('pcds status' says which, 'pcds logs' why)".into()),
+            Err(e) => Err(explain(e, &addr)),
+        }
+    }
+
     /// Why there is no admin API to ask: no server set up here yet, or the settings turn it off.
     pub(super) fn no_admin(&self) -> String {
         if self.env_file.is_file() {
@@ -304,6 +319,43 @@ mod tests {
         assert!(parse("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\npong\r\n0\r\n\r\n").unwrap_err().contains("chunked"));
         assert!(parse("SSH-2.0-OpenSSH\r\n").is_err());
         assert!(parse("").is_err());
+    }
+
+    /// `pcds health` asks the health route without a token and turns a 503 into what it means.
+    #[test]
+    fn health_is_asked_without_a_token_and_a_503_is_explained() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut heads = Vec::new();
+            for answer in ["HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"ok\":true}", "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 12\r\n\r\n{\"ok\":false}"] {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(s.try_clone().unwrap());
+                let mut head = String::new();
+                while !head.ends_with("\r\n\r\n") {
+                    reader.read_line(&mut head).unwrap();
+                }
+                heads.push(head);
+                s.write_all(answer.as_bytes()).unwrap();
+            }
+            heads
+        });
+        let dir = super::super::test_dir("health");
+        let ctx = super::super::test_ctx(&dir);
+        assert!(ctx.health().unwrap_err().contains("no server is set up"));
+        std::fs::create_dir_all(&ctx.run).unwrap();
+        std::fs::write(&ctx.env_file, format!("PCDS_ADMIN={addr}\n")).unwrap();
+        ctx.health().unwrap();
+        let e = ctx.health().unwrap_err();
+        assert!(e.contains("serves no world") && e.contains("pcds status"), "{e}");
+        let heads = server.join().unwrap();
+        assert!(heads[0].starts_with("GET /api/health HTTP/1.1\r\n") && heads.iter().all(|h| h.contains("Bearer \r\n")), "{heads:?}");
+        std::fs::write(&ctx.env_file, "PCDS_ADMIN=off\n").unwrap();
+        assert!(ctx.health().unwrap_err().contains("the admin API is off"));
+        // Nothing listens there (port 1).
+        std::fs::write(&ctx.env_file, "PCDS_ADMIN=127.0.0.1:1\n").unwrap();
+        assert!(ctx.health().unwrap_err().contains("does not answer"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

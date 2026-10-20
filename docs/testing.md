@@ -335,6 +335,28 @@ without a game says what to do); part 2 (with `PCDS_TEST_DATA=DIR`) runs a serve
 folder, three scripted players, a hot update from a local release feed, `docker restart` and a rollback
 in place. It works on rootless Docker too. Details and measurements: [docker.md](docker.md).
 
+The container in part 2 runs with the hardening of [hardening.md](hardening.md) (read-only root, `no-new-privileges`, all
+capabilities dropped but the five the entrypoint needs, a process limit), and part 1 checks the image's health check is
+`pcds health`.
+
+## Operations checks by hand
+
+What the operator documents rely on, and the tools that checked them (none of them is in CI, because each needs Docker or a
+live server; the unit tests keep the files and the output in step):
+
+* **Metrics**: `curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7782/api/metrics | docker run --rm -i --entrypoint promtool
+  prom/prometheus check metrics`; the alert rules and the scrape configuration of docs/monitoring.md with `promtool check rules` and
+  `check config`; a Prometheus container scraping a real server, and every `expr` of docs/grafana/pcds.json run against it with the
+  query API. `front::prometheus::tests` parses what `render` writes with a strict reader of the format and keeps the metric table of
+  docs/monitoring.md, the alert rules and the dashboard to metrics that exist.
+* **The sandbox**: `systemd-analyze --user security pcds.service` (the score) and `grep -E 'NoNewPrivs|Seccomp|CapBnd'
+  /proc/PID/status`, then a hot update, a chat hook of each language you use and `steamcmd` under the unit
+  ([hardening.md](hardening.md) lists what was tried).
+* **Proxies**: `docker run caddy caddy validate` and `docker run nginx nginx -t` on the configurations of
+  docs/reverse-proxy.md, then the curl checks listed there against a running server.
+* **Kubernetes**: `docker run ghcr.io/yannh/kubeconform -strict -kubernetes-version 1.31.0 docs/kubernetes.yaml`.
+* **Disaster recovery**: the rehearsal at the end of [disaster-recovery.md](disaster-recovery.md).
+
 ## The flip gate and the release checklist
 
 `make gate` (`tools/flip-gate.sh`) hot-updates the last published release into this build on a world with

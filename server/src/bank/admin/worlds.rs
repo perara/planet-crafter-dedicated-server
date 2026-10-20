@@ -73,6 +73,7 @@ pub(super) fn backup(game: &mut Game, r: &Request) -> Reply {
     if let Err(e) = made {
         return error(500, format!("backup failed: {e}"));
     }
+    crate::bank::persist::verify_if_on(game, save_path);
     let made = crate::s3::newest_backup(save_path).and_then(|p| p.file_stem().map(|f| f.to_string_lossy().to_string()));
     let s3 = crate::s3::after_backup(&game.rules.backup, save_path, false);
     json(200, &Backup { backup: made, s3: s3.as_ref().ok().cloned().flatten(), s3_error: s3.err() })

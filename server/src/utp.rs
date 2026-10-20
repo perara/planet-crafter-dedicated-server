@@ -336,7 +336,7 @@ impl Utp {
             let silent: Vec<Token> = if self.connections.values().any(silent) { self.connections.iter().filter(|(_, c)| silent(c)).map(|(t, _)| *t).collect() } else { Vec::new() };
             for token in silent {
                 if self.connections.get(&token).is_some_and(stalled) {
-                    eprintln!("utp: {}: nothing acknowledged for {} s, dropped", self.connections[&token].addr, STALL.as_secs());
+                    warn!("utp: {}: nothing acknowledged for {} s, dropped", self.connections[&token].addr, STALL.as_secs());
                     self.disconnect(&token);
                 }
                 self.connections.remove(&token);
@@ -412,7 +412,7 @@ impl Utp {
                         let sequence = u16::from_le_bytes([body[4], body[5]]);
                         let acked = u16::from_le_bytes([body[6], body[7]]);
                         if !c.acknowledge(acked, u64::from_le_bytes(body[8..16].try_into().unwrap()), now) {
-                            eprintln!("utp: {from}: acknowledged sequence {acked}, which was never sent; dropped");
+                            warn!("utp: {from}: acknowledged sequence {acked}, which was never sent; dropped");
                             self.disconnect(&token);
                             events.push(Event::Disconnected(token));
                             return;
@@ -421,7 +421,7 @@ impl Utp {
                             c.receive_reliable(sequence, &body[16..]);
                             c.ack_due = true;
                             if !pop_batches(&mut c.stream, &mut batches, max_batch) {
-                                eprintln!("utp: {from}: a batch over {} MiB, dropped", max_batch >> 20);
+                                warn!("utp: {from}: a batch over {} MiB, dropped", max_batch >> 20);
                                 self.disconnect(&token);
                                 events.push(Event::Disconnected(token));
                                 return;
@@ -472,7 +472,7 @@ impl Utp {
     fn send_within(&mut self, token: &Token, batch: &[u8], total_cap: usize) {
         let Some(c) = self.connections.get_mut(token) else { return };
         if c.queued.len() + batch.len() > MAX_QUEUED {
-            eprintln!("utp: {}: over {} MiB waiting to be sent, dropped", c.addr, MAX_QUEUED >> 20);
+            warn!("utp: {}: over {} MiB waiting to be sent, dropped", c.addr, MAX_QUEUED >> 20);
             self.disconnect(token);
             self.dropped.push(*token);
             return;
@@ -485,7 +485,7 @@ impl Utp {
                 break;
             }
             let Some((slowest, bytes)) = self.connections.iter().map(|(t, c)| (*t, c.queued.len())).max_by_key(|(t, n)| (*n, *t)).filter(|(_, n)| *n > 0) else { break };
-            eprintln!("utp: {}: {} MiB waiting to be sent, the most of the {} MiB in all (at most {} MiB): dropped", self.connections[&slowest].addr, bytes >> 20, total >> 20, total_cap >> 20);
+            warn!("utp: {}: {} MiB waiting to be sent, the most of the {} MiB in all (at most {} MiB): dropped", self.connections[&slowest].addr, bytes >> 20, total >> 20, total_cap >> 20);
             self.disconnect(&slowest);
             self.dropped.push(slowest);
             if slowest == *token {

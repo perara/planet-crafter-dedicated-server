@@ -127,7 +127,7 @@ impl Access {
     fn save(&mut self, lists: Lists) -> Result<(), String> {
         if let Some(p) = &self.path {
             crate::save::write_atomic(p, serde_json::to_string_pretty(&lists).unwrap_or_default().as_bytes()).map_err(|e| {
-                eprintln!("access: could not write {p}: {e}");
+                error!("access: could not write {p}: {e}");
                 format!("could not write the access lists ({p}: {e}); nothing changed")
             })?;
         }
@@ -173,7 +173,7 @@ impl Access {
         if let (None, Some(ip)) = (steam_id, ip) {
             // Behind a UDP relay every player is 127.0.0.1: banning that bans them all.
             if ip.parse().is_ok_and(crate::utp::is_loopback) {
-                eprintln!("access: {name} connects from {ip} (a local relay): banned by name only, as that address is every player's");
+                warn!("access: {name} connects from {ip} (a local relay): banned by name only, as that address is every player's");
             } else {
                 ips.push(ip.to_string());
             }

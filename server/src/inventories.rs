@@ -206,7 +206,7 @@ impl Game {
             return false;
         }
         if self.refused_inventories.insert(client) {
-            eprintln!("client {client}: a change to another player's inventory {inventory} refused (logged once per client)");
+            warn!("client {client}: a change to another player's inventory {inventory} refused (logged once per client)");
         }
         true
     }
