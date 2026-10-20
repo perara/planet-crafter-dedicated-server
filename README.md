@@ -441,8 +441,18 @@ the server without changing it. A plugin is a folder in `run/plugins/`; it is on
   announcement every 15 minutes, faster growth while six or more play;
 - **a WebAssembly module** (Rust, C, Zig...): logic that runs in the game, sandboxed, with a work
   limit per event, a memory limit and its state kept across restarts and hot updates;
-- **a program of its own** that reads the server's events and uses the admin API: a Discord
-  bridge, a database, a web page.
+- **a program of its own** that reads the server's events and uses the admin API: a database, a
+  web page, a bridge to something that is not a web hook. It holds a **scoped token** that opens
+  only what it needs (`pcds plugin token create NAME --scope events.read,chat.send`), and can wait for
+  events with a long poll instead of asking every second.
+
+A WebAssembly plugin can also reach the Internet itself, with the capability `net.http`: it names the
+hosts it may send requests to in its manifest (you see them when you approve it, and they are pinned
+with the files), the server sends the requests from its own threads and never lets one reach this
+machine or your network (unless you grant `net.http.local` too), and a webhook URL or a token is a
+value you set (`pcds plugin config set`), put in the request by the server so that the plugin never
+has it. `examples/plugins/discord-notify` posts joins, leaves and `!report` to a Discord webhook that
+way.
 
 ```bash
 pcds plugin new greeter               # a Rust plugin from a template (--kind data: a TOML file)
@@ -451,6 +461,12 @@ pcds plugin install .                 # copies it to run/plugins/ (it does nothi
 pcds plugin enable greeter            # shows what it asks for; you approve it
 pcds plugin list                      # state, capabilities, calls, faults
 pcds plugin disable greeter
+pcds plugin config set greeter webhook   # a value a plugin declares (a secret is read from the terminal)
+pcds plugin keygen acme                  # a publisher's key: acme.key (secret) and acme.pub
+pcds plugin sign --key acme.key greeter  # sign a plugin; admins who trust the key need not approve each file
+pcds plugin trust acme.pub --name Acme --grant chat.say   # what the key vouches for needs no approval
+pcds plugin untrust KEY                  # a key taken away stops the plugins that ran only because of it
+pcds plugin token create bridge --scope events.read       # a token for a program, shown once
 ```
 
 Plugins are loaded, switched off, replaced and removed with the server running: a folder put in
@@ -458,8 +474,11 @@ Plugins are loaded, switched off, replaced and removed with the server running: 
 hot update.
 
 A plugin asks for **capabilities** (read chat, read the world, say in the chat, kick, move
-players, change gameplay rules, refuse an RPC) and does nothing until you grant them; it is
-approved for the files as they are, so a changed plugin waits for you again. It can never write the
+players, change gameplay rules, refuse an RPC, send HTTP requests to listed hosts) and does nothing
+until you grant them; it is approved for the files as they are, so a changed plugin waits for you
+again, unless you trust its publisher's signature (optional; then what the key vouches for needs no
+approval and the publisher's updates follow). The dashboard's Plugins page does all of this: approve
+with a tick for each capability, set values, trust or remove a key, make and revoke tokens. It can never write the
 world: it reads a copy and queues actions the server applies through the same code the admin API
 uses. A plugin that crashes or runs too long is stopped in that call and restarted from its last
 saved state, and switched off after five faults in a minute. With no plugin installed the server does
@@ -467,7 +486,9 @@ what it did before, and an event nobody listens to costs a fraction of a nanosec
 
 docs/plugins-guide.md makes a first plugin in ten steps; docs/plugins-api.md is the reference;
 docs/plugins.md says why it is built this way (with measurements, and what it will not do);
-docs/architecture.md is the module map. Three examples are in `examples/plugins/`.
+docs/architecture.md is the module map. Four examples are in `examples/plugins/`. A change to the
+front (scoped tokens, the long poll of the event stream) needs `pcds upgrade --restart` once: a hot
+update does not replace the front (docs/hot-update.md).
 
 ## Game updates
 

@@ -10,7 +10,8 @@ There are three kinds of plugin. Pick the smallest that does the job:
 |---|---|---|
 | a message, a command that answers with a text, an announcement, a rule change by player count | **a rules file** (a TOML file; "A plugin that is only data" below) | nothing but an editor |
 | logic: counting, remembering, deciding, reading positions | **a WebAssembly module** (this guide, steps 1 to 10) | Rust (or C, Zig...) |
-| a Discord bridge, a database, a web page, anything that must reach the Internet | **a program** that reads the event stream ("A program of its own" below) | any language |
+| a Discord notice, a web hook, a call to a few known hosts | **a WebAssembly module with `net.http`** ("Reaching the Internet" below) | Rust (or C, Zig...) |
+| a database, a web page, anything big or long-lived that must reach the Internet | **a program** that reads the event stream ("A program of its own" below) | any language |
 
 ## The ten steps
 
@@ -315,6 +316,55 @@ missing or unused. Then `install` and `enable` as above. There is a complete one
 (`speed`, `gauges`, `meteo`, `death`, `loot`, `limits`, `world`): never the chat, backup or access
 rules.
 
+## Reaching the Internet: `net.http`
+
+A module has no network. With the capability `net.http` it may send HTTP(S) requests to the places its
+manifest names, and nowhere else; `examples/plugins/discord-notify` is the whole pattern in 150 lines.
+
+```toml
+capabilities = ["event.player", "event.tick", "net.http"]
+
+[net]
+allow = ["https://discord.com"]      # the only hosts; scheme://host[:port], *.example.org for the names below it
+timeout_ms = 10000                   # one wall clock from the lookup to the last byte
+max_response_bytes = 4096            # an answer over it is an error
+
+[[config]]                           # a value the admin sets; never in your module
+key = "webhook"
+description = "the ID/TOKEN end of the webhook's URL"
+secret = true
+```
+
+In the code a request is not a call: `host.http_request(&HttpRequest { method: "POST", url:
+"https://discord.com/api/webhooks/${config.webhook}", headers, body })` returns a *ticket* at once, and
+the answer comes later as `Event::HttpDone { ticket, status, error, body, headers }` in another call (to
+your plugin only, even though you did not subscribe to it). So keep what you are waiting for in your plugin
+(the ticket of the request in flight), keep what failed for later (`status` 0 and `error` a fixed phrase, or
+a status that is not 2xx), and save what must survive a restart: a request in flight when the server
+restarts or is hot-updated is lost without an event.
+
+What the server does for you, and to you: it refuses a host that is not on your list (`Error::NotAllowed`, at
+once), a name that points at the machine or the local network (told in `HttpDone`, not as an address), more than two
+requests alive or ten a second (`Error::Full`), a body of over 1 MiB, an answer over your limit, and a server that
+takes more than your timeout. It follows at most three redirects, to hosts on your list only, and without
+`Authorization` or `Cookie` when they leave the first host. `${config.KEY}` in the path, the query or a header
+value is replaced by the admin's value *after* your call; the host part of a URL cannot be one. Test the plugin
+on a PC with a mock `Host` (the example does); `pcds plugin check` tells where it may reach and what it needs from the
+admin. Reference: docs/plugins-api.md ("`net.http`"); the design and what is not there: docs/plugins.md.
+
+## Signing and trusting
+
+Normally the admin approves the exact files. If you publish plugins, make a key (`pcds plugin keygen
+acme`), sign each release after building (`pcds plugin sign --key acme.key DIR` writes `plugin.sig`; any change
+to the manifest or the module afterwards makes it not hold), ship `plugin.sig` with the plugin and give admins
+`acme.pub`. An admin who trusts the key (`pcds plugin trust acme.pub --grant chat.say`) approves
+nothing for what the key vouches for and your updates run as they arrive; whatever you ask for beyond that, they
+approve once and your later versions follow. Admins who do not trust it see "signed by an unknown key" and
+approve the digest as for any plugin. Keep `acme.key` secret: whoever has it can sign as you; if it leaks,
+tell your admins to `pcds plugin untrust` it, which stops the plugins that ran only because of it.
+`examples/plugins/example-publisher.key` is public on purpose, for trying this: never trust its `.pub`
+on a real server.
+
 ## A program of its own
 
 For anything that reaches outside the server, run a separate program. It asks the server for
@@ -322,13 +372,14 @@ events and uses the admin API to act. `examples/plugins/webhook-relay/relay.py` 
 joins and leaves to a Discord webhook:
 
 ```bash
-PCDS_ADMIN_TOKEN=$(pcds token) WEBHOOK_URL=https://discord.com/api/webhooks/... ./relay.py
+pcds plugin token create relay --scope events.read      # the token is shown once
+PCDS_TOKEN=pcdst_... WEBHOOK_URL=https://discord.com/api/webhooks/... ./relay.py
 ```
 
 The core of any such program is a loop:
 
 ```python
-answer = post(api + "/api/plugins/events", {"consumer": "my-bridge", "after": after, "types": ["chat", "player_join"]},
+answer = post(api + "/api/plugins/events", {"consumer": "my-bridge", "after": after, "types": ["chat", "player_join"], "wait": 25},
               {"Authorization": "Bearer " + token})
 for event in answer["events"]:
     ...                       # {"id", "time", "type": "chat", "client", "name", "text"}
@@ -337,12 +388,16 @@ for event in answer["events"]:
 
 and, to act, the endpoints that exist: `POST /api/chat {"text"}`, `/api/kick`, `/api/teleport`,
 `/api/rules`. The first call registers you (by the `consumer` name) and turns the recording on for the kinds
-you name, for the minute after each call; poll every second or two. Leave with
+you name, for the minute after each call. With `"wait": 25` the server holds the request until there is an event
+(or 25 seconds pass), so events reach you as they happen: loop on it (a server older than the long poll answers at
+once, so pause a second when an answer comes back empty at once). Without `wait`, poll every second or two. Leave with
 `{"consumer": "my-bridge", "unregister": true}` when you stop (`relay.py` does, on exit and on SIGTERM);
 silent for a minute, you are dropped anyway. `pcds plugin list` and the dashboard show who is registered. If `epoch` in an answer is not the one you saw, the server
-restarted: start again from `after: 0`. Such a program has the admin token and so every power the
-admin API has: run it as a service of its own, as a user of its own, and keep the token out of its
-logs.
+restarted: start again from `after: 0`. Give such a program a **scoped token** (`pcds plugin token create NAME
+--scope events.read,chat.send`; `chat.read`, `player.kick` and `player.teleport` are the others): it opens only the
+requests of its scopes, has a rate of its own and is revoked with `pcds plugin token revoke NAME` or in the dashboard.
+With the admin token it would have every power the admin API has. Either way, run it as a service of its own, as a
+user of its own, and keep the token out of its logs.
 
 ## Next
 

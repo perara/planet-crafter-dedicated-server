@@ -13,8 +13,9 @@ is docs/architecture.md.
 2. **Small jobs are data**: a `rules.toml` of chat commands, welcome messages, announcements and
    rule switches that the host runs itself. No code, nothing to sandbox, nothing that can loop.
 3. **Integrations are programs of their own** that read the event stream
-   (`POST /api/plugins/events`) and use the admin API, in any language, on any machine. A crash
-   of one never touches the game.
+   (`POST /api/plugins/events`, with a long poll) and use the admin API with a scoped token, in any
+   language, on any machine. A crash of one never touches the game. A module may also reach a few
+   listed hosts itself with `net.http`, which the server sends from its own threads and aims for it.
 4. **No native libraries** for third parties: no memory isolation, no budget, a segfault takes the
    world with it, and they would make the plugin part of the GPL program. First-party code that
    must be native stays a Cargo feature or a built-in, behind the same `Runtime` trait.
@@ -192,8 +193,10 @@ a hot update, and the `epoch` tells a reader that the server was restarted. It c
 answered when the bank rings the bell (`ipc::STREAM`, a frame an older front skips and an older
 bank never sends), with a look every second as the fallback; the ring and the registration stay in
 the bank, the front only waits (section "Long-polling the stream"). Out-of-process plugins have no manifest, no capabilities and no
-budget: they hold the admin token and can do what it can. That is stated in the dashboard and in
-`examples/plugins/webhook-relay`.
+budget: they can do what their token can, and a **scoped token** (section "Scoped tokens") makes that the
+stream and a few actions instead of everything the admin token can. That is stated in the dashboard and in
+`examples/plugins/webhook-relay`. A small integration that only calls a few hosts (a Discord notice) is better a
+WebAssembly module with `net.http` (`examples/plugins/discord-notify`): no process to run, a budget, and no token at all.
 
 **(d) Scripting.** Rhai is a good embedded language, and its operation limits would serve as a
 budget. It measured 17 µs for the event that wasmi handles in 0.27 µs, and 2.7 ms for the 10,000
@@ -780,6 +783,18 @@ above 100, so every figure has noise of about 20 %:
 - **Starting a plugin**: 1.0 ms to read, validate and compile a 44 KB module (done before the
   world stops, in the new bank), 25 µs to make an instance (inside the stop). Ten plugins add
   about 0.3 ms to the stop.
+
+**After `net.http`, signing, scoped tokens and the stream's long poll** (the branch these four came in,
+cut from the integration branch, on a host with a load of about 20, so figures have noise of 20 % or
+more): the bench's fingerprint is still `15c299165b6b3eb0` and the handoff comparison EQUAL (45,558
+messages); `events::tick` with no plugin 0.46 ns a call against an empty loop's 0.31 ns, `events::rpc_before`
+1.85 ns (before: 0.48 and 1.8); ten plugins that do nothing at every tick +3.1 µs, ten that read the world
++4.4 µs. The snapshot did not change (`handoff::FORMAT` is as it was: tickets, secrets, keys and tokens are
+not in it), and no new crate came in (`Cargo.lock` is untouched): the program grew by 0.58 MB unstripped
+(14.71 to 15.28 MB, +3.9 %), which is the guard, the pool, the signature code and the token store. What a
+program that nobody asks for any of it pays: once a frame, `plugins::poll` tests whether a request is
+out (one load of a counter when a host exists, one test of `None` when none does), and once a loop the
+bank compares two numbers for the stream's bell.
 
 **Reproducing.** `make plugin-bench` prints the host's numbers (`PCDS_BENCH_SAVE=...` adds the tick
 cost on a world). The fingerprint and the handoff comparison are `make bench`. The engine

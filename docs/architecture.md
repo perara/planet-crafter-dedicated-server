@@ -39,7 +39,7 @@ paid (so the list only gets shorter). `scripts/check-layers` runs that test alon
 
 | Layer | Modules | May use | What it is |
 |---|---|---|---|
-| base | `wire` `idmap` `geometry` `world` `save` `oldsave` `data` `protocol` `rpcspec` `transform` `gamedata` `model` `ipc` `utp` | base | Bytes, ids, the game's tables as data, the framing of the transports. No game, no process, no sockets of their own. |
+| base | `wire` `idmap` `geometry` `world` `save` `oldsave` `data` `protocol` `rpcspec` `transform` `gamedata` `model` `ipc` `utp` `tokens` | base | Bytes, ids, the game's tables as data, the framing of the transports. No game, no process, no sockets of their own. |
 | world | `net` | base | The game's network state: objects, variables, RPC messages. |
 | core | `game` `handlers` `hooks` `ext` `scene` `status` `gauges` `units` `energy` `water` `machines` `logistics` `meteo` `rockets` `planets` `animals` `genetics` `players` `inventories` `instances` `objects` `panels` `deconstruct` `equipment` `toxic` `unlocks` `access` `rules` `config` `chathooks` `handoff` | base, world, core, extension | The game logic, ported class by class, with no I/O: files, sockets and threads are not in it. A subsystem is free functions over `&mut Game`, reached through `hooks.rs`. |
 | extension | `events` `plugins` | base, world, core, extension | What the world tells the outside (`events`) and the host of the plugins that listen (`plugins`). |
@@ -125,6 +125,12 @@ for anything but the log lines the server already prints, an environment variabl
 - The bank prepares the plugins (reads, validates, compiles) while it loads its tables and
   before it says HELLO, so a hot update spends its time in the world's stop only on starting
   them, not on compiling them.
+- Inside `plugins/`: `net.rs` (a plugin's outbound HTTP: the allow list, the address checks, the
+  worker threads; answers come back as `http_done` events through `plugins::poll`), `config.rs` (the
+  values the admin sets for a plugin), `sign.rs` (signatures and the keys the admin trusts) and
+  `approvals::standing` (what an approval, a signature and the keys make of a plugin). `tokens.rs`
+  (base layer: scoped tokens for programs) is checked by the front's admin thread and made by the
+  bank and the command line; the stream's doorbell (`ipc::STREAM`) lets the front hold a long poll.
 - `ext.plugins` is the one thing the snapshot carries: the plugins' saved state and the event
   stream's ring. How it stays compatible is in docs/plugins.md ("Plugin state in a flip").
 
@@ -181,7 +187,9 @@ change, or the test says so.
 
 It added two modules (`events`, `plugins`), a field in `Ext`, a handful of one-line calls to
 `events::*` (in `hooks.rs`, `game.rs`, `players.rs`, `handlers.rs`, `rules.rs`) and a few lines in
-`bank.rs`. It did not touch the front, the transports, the snapshot's format number or the
+`bank.rs`. The later work (`net.http`, signing, scoped tokens, the stream's long poll) added the module
+`tokens` and, in the bank, four lines (the doorbell); in the front, the admin thread's token check and long
+poll (`admin.rs`) and one arm of `front.rs`'s frame handling, each in a commit of its own. It did not touch the front, the transports, the snapshot's format number or the
 files the other refactors are changing (`config.rs`, `handoff.rs`), and it adds no edge to the
 debt list. The splits of `front.rs`, `bank.rs` and `chathooks.rs` are described above and not
 started.
