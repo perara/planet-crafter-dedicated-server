@@ -387,3 +387,52 @@ fn automatic_trade_rocket_launches_when_the_last_item_is_added() {
     assert!(g.add_new_item(group, 90, 0).0);
     assert_eq!(g.wos[&platform].growth, 1.0);
 }
+
+// Focused diagnostics for launch-when-full; production logic is unchanged.
+fn rocket_check_fixture(setting: i32, count: usize) -> Option<Game> {
+    let mut objects = vec![placed(210_000_001, "TradePlatform1", "100,10,100", "Prime", json!({"liId": 50, "set": setting}))];
+    let ids: Vec<i32> = (0..count).map(|n| 210_000_002 + n as i32).collect();
+    for id in &ids { objects.push(json!({"id": id, "gId": "astrofood2"})); }
+    game(objects, vec![json!({"id": 50, "woIds": ids.iter().map(i32::to_string).collect::<Vec<_>>().join(","), "size": 25})])
+}
+
+#[test]
+fn rocket_check_enabled_before_filling_launches() {
+    let Some(mut g) = rocket_check_fixture(1, 0) else { return };
+    let group = g.data.group("astrofood2").unwrap();
+    for _ in 0..24 { assert!(g.add_new_item(group, 50, 0).0); }
+    assert_eq!(g.wos[&210_000_001].growth, 0.0, "not full yet");
+    assert!(g.add_new_item(group, 50, 0).0);
+    assert_eq!(g.wos[&210_000_001].growth, 1.0, "full rocket launches");
+}
+
+#[test]
+fn rocket_check_enabling_after_filling_launches() {
+    let Some(mut g) = rocket_check_fixture(0, 25) else { return };
+    let net = g.wos[&210_000_001].net.unwrap();
+    assert!(crate::handlers::rpc(&mut g, 1, net, 0, "SettingProxy.SetSettingServerRpc", &Args(vec![json!(1)])));
+    assert_eq!(g.wos[&210_000_001].setting, 1);
+    assert!(g.inventories[&50].is_full());
+    run_until(&mut g, 20.0, |g| g.wos[&210_000_001].growth > 0.0);
+    assert!(g.wos[&210_000_001].growth > 0.0, "already-full rocket should launch when automation is enabled");
+}
+
+#[test]
+fn rocket_check_loading_full_enabled_rocket_launches() {
+    let Some(mut g) = rocket_check_fixture(1, 25) else { return };
+    run_until(&mut g, 20.0, |g| g.wos[&210_000_001].growth > 0.0);
+    assert!(g.wos[&210_000_001].growth > 0.0, "full enabled rocket should launch after loading");
+}
+
+#[test]
+fn rocket_check_refilling_after_toggle_recovers() {
+    let Some(mut g) = rocket_check_fixture(0, 25) else { return };
+    let net = g.wos[&210_000_001].net.unwrap();
+    crate::handlers::rpc(&mut g, 1, net, 0, "SettingProxy.SetSettingServerRpc", &Args(vec![json!(1)]));
+    let item = g.inventories[&50].items[0];
+    assert!(g.inventory_remove(50, item));
+    g.propagate(50, item, false);
+    assert_eq!(g.wos[&210_000_001].growth, 0.0);
+    assert!(g.add_existing_item(item, 50, true, 0));
+    assert_eq!(g.wos[&210_000_001].growth, 1.0, "removing and replacing one item triggers launch");
+}
