@@ -47,10 +47,10 @@ impl Front {
         if name == self.world_name() && self.phase != Phase::Stopped {
             return error(409, &format!("{name} is the world that runs"));
         }
-        if !std::path::Path::new(&self.save).with_file_name(format!("{name}.json")).is_file() || crate::dashboard::world_name(&name).is_err() {
+        if !crate::worlds::file(&self.save, &name).is_file() || crate::worlds::name(&name).is_err() {
             return error(400, &format!("no world {name}"));
         }
-        if let Err(e) = readable(&std::path::Path::new(&self.save).with_file_name(format!("{name}.json")).to_string_lossy(), &name) {
+        if let Err(e) = readable(&crate::worlds::file(&self.save, &name).to_string_lossy(), &name) {
             // Before the world that runs is stopped for it.
             return error(400, &e);
         }
@@ -86,7 +86,7 @@ impl Front {
 
     /// The name of the world that runs (or ran): its save's file name without the extension.
     pub(super) fn world_name(&self) -> String {
-        std::path::Path::new(&self.save).file_stem().unwrap_or_default().to_string_lossy().to_string()
+        crate::worlds::stem(&self.save)
     }
 
     /// The world (`name`, else the one it ran) started in the active bank: Idle. A world other
@@ -100,8 +100,8 @@ impl Front {
         }
         let mut moved = None;
         if let Some(name) = name.filter(|n| *n != self.world_name()) {
-            let name = crate::dashboard::world_name(name)?;
-            let save = std::path::Path::new(&self.save).with_file_name(format!("{name}.json")).to_string_lossy().to_string();
+            let name = crate::worlds::name(name)?;
+            let save = crate::worlds::file(&self.save, &name).to_string_lossy().to_string();
             if !std::path::Path::new(&save).is_file() {
                 return Err(format!("no world {name}"));
             }

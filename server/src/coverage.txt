@@ -147,7 +147,7 @@ module bincodec  bincodec::tests::what_is_written_reads_back_exactly bincodec::t
 module chathooks  chathooks::tests::command_prefixes_parse chathooks::tests::replies_are_dropped_while_the_world_stands_still front::chat_hooks::tests::a_chat_rpc_becomes_an_event_and_still_reaches_everyone  # chat hooks, the game's side
 module cli  cli::tests::options_of_extract_and_update cli::tests::sizes_read_like_du
 module cli::api  cli::api::tests::http_answers_are_read_by_their_length cli::api::tests::requests_go_to_127_0_0_1_with_the_token cli::api::tests::rule_arguments_become_a_merge_patch cli::api::tests::status_reads_as_a_few_lines
-module cli::env  cli::env::tests::world_names cli::env::tests::a_setting_is_changed_by_replacing_the_file cli::env::tests::settings_are_read_and_edited_line_by_line cli::env::tests::the_build_id_is_a_hash_of_the_game_code cli::env::tests::the_first_settings_file_has_the_defaults_of_the_schema
+module cli::env  cli::env::tests::a_setting_is_changed_by_replacing_the_file cli::env::tests::settings_are_read_and_edited_line_by_line cli::env::tests::the_build_id_is_a_hash_of_the_game_code cli::env::tests::the_first_settings_file_has_the_defaults_of_the_schema
 untested cli::extract  pcds extract: native::tables::read_game into run/data/<version> under a lock; the reading itself is checked by native::tables::tests::read_game_writes_the_test_tables (by hand)
 module cli::setup cli::setup::tests::builds_go_into_the_standby_bank_once cli::setup::tests::the_banks_of_a_front_that_ended_get_to_save_first cli::setup::tests::the_current_world_is_not_copied_over_itself cli::setup::tests::the_standby_bank_rule_on_real_version_sequences
 module cli::plugin  cli::a_plugin_is_made_checked_installed_approved_and_listed_without_a_server cli::the_wasm_template_builds_against_the_api_crate  # pcds plugin
@@ -266,3 +266,4 @@ module utp utp::tests::a_client_that_never_acks_is_dropped utp::tests::connectio
 module water  water::tests::an_inactive_object_stays_hidden_whatever_its_activators water::tests::rotation_round_trip water::tests::story_interpolated_water_starts_offset_and_ends_at_its_scene_position water::tests::machines_built_underwater_have_no_energy_at_once  # water
 module wire  wire::tests::batch_round_trip wire::tests::packing_matches_netcode_samples
 module world  animals::spawn::tests::animal_layout_matches_the_captured_spawn_tail
+module worlds  worlds::tests::names_are_one_rule_with_two_ways_in worlds::tests::a_worlds_files_are_beside_the_save worlds::tests::the_listing_takes_json_files_and_skips_the_settings_files dashboard::tests::worlds_lists_saves_and_this_worlds_backups cli::worlds::tests::import_converts_an_old_save_and_copies_a_current_one

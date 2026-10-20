@@ -136,6 +136,7 @@ mod util;
 mod utp;
 mod water;
 mod wire;
+mod worlds;
 mod world;
 
 use std::collections::HashMap;

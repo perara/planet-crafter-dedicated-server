@@ -4,7 +4,6 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use super::env::world_arg;
 use super::{check, say, Ctx, Result};
 
 /// --force out of a world's options, the rest for `pcds new-save`.
@@ -16,9 +15,9 @@ fn force_and_options(args: &[String]) -> (bool, Vec<String>) {
 impl Ctx {
     /// A world's file goes to worlds/backups/ before something replaces or removes it.
     pub fn keep_copy(&self, name: &str, why: &str) -> Result {
-        let backups = self.worlds.join("backups");
+        let backups = self.worlds.join(crate::worlds::BACKUPS);
         super::mkdir(&backups)?;
-        let to = super::free_path(&backups, &format!("{name}-{why}-{}", crate::save::stamp(std::time::SystemTime::now())));
+        let to = super::free_path(&backups, &crate::worlds::kept_stem(name, why, std::time::SystemTime::now()));
         let from = self.worlds.join(format!("{name}.json"));
         let bytes = fs::read(&from).map_err(|e| format!("{}: {e}", from.display()))?;
         super::replace_file(&to, &bytes, 0o644)?;
@@ -65,17 +64,16 @@ impl Ctx {
 
     pub fn worlds(&self) -> Result {
         let current = self.world_name();
-        let mut files: Vec<_> = fs::read_dir(&self.worlds).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "json")).collect();
+        let mut files = crate::worlds::list(&self.worlds, &|_| true);
         if files.is_empty() {
             say(format!("no worlds in {} yet: 'pcds world new NAME', 'pcds world import SAVE.json', or copy a save there", self.worlds.display()));
             return Ok(());
         }
-        files.sort();
-        for f in files {
-            let name = f.file_stem().unwrap_or_default().to_string_lossy().to_string();
-            let size = fs::metadata(&f).map(|m| m.len()).unwrap_or(0);
-            let mark = if name == current { '*' } else { ' ' };
-            println!("{mark} {name:<28} {:>7}  {}", super::human_size(size), super::local_time(super::modified(&f)));
+        // By file name, as they were always listed (a world "x-2" before "x").
+        files.sort_by_key(|e| format!("{}.json", e.name));
+        for e in files {
+            let mark = if e.name == current { '*' } else { ' ' };
+            println!("{mark} {:<28} {:>7}  {}", e.name, super::human_size(e.bytes), super::local_time(e.modified.unwrap_or(std::time::UNIX_EPOCH)));
         }
         println!("(* the server runs it; add a world by copying a save into {})", self.worlds.display());
         Ok(())
@@ -86,7 +84,7 @@ impl Ctx {
         let file = |name: &str| self.worlds.join(format!("{name}.json"));
         match a.as_slice() {
             ["use", name] => {
-                let name = world_arg(name)?;
+                let name = crate::worlds::arg(name)?;
                 if !file(&name).is_file() {
                     return Err(format!("no world {name} in {} ('pcds worlds' lists them)", self.worlds.display()));
                 }
@@ -100,7 +98,7 @@ impl Ctx {
                 self.restart_if_running()
             }
             ["new", name, ..] => {
-                let name = world_arg(name)?;
+                let name = crate::worlds::arg(name)?;
                 let (force, options) = force_and_options(&args[2..]);
                 if file(&name).is_file() {
                     if !force {
@@ -120,7 +118,7 @@ impl Ctx {
                 if !save.is_file() {
                     return Err(format!("pcds world import SAVE.json [NAME]: no save at '{}'", save.display()));
                 }
-                let name = world_arg(a.get(2).copied().unwrap_or(&save.to_string_lossy()))?;
+                let name = crate::worlds::arg(a.get(2).copied().unwrap_or(&save.to_string_lossy()))?;
                 if file(&name).exists() {
                     return Err(format!("world {name} exists: pass another NAME"));
                 }
@@ -136,7 +134,7 @@ impl Ctx {
                 Ok(())
             }
             ["remove", name] => {
-                let name = world_arg(name)?;
+                let name = crate::worlds::arg(name)?;
                 if !file(&name).is_file() {
                     return Err(format!("no world {name} in {}", self.worlds.display()));
                 }
@@ -144,9 +142,9 @@ impl Ctx {
                     return Err(format!("the server runs {name}: 'pcds world use' another one first"));
                 }
                 // Moved into backups/ rather than deleted.
-                let backups = self.worlds.join("backups");
+                let backups = self.worlds.join(crate::worlds::BACKUPS);
                 super::mkdir(&backups)?;
-                let to = super::free_path(&backups, &format!("{name}-removed-{}", crate::save::stamp(std::time::SystemTime::now())));
+                let to = super::free_path(&backups, &crate::worlds::kept_stem(&name, "removed", std::time::SystemTime::now()));
                 fs::rename(file(&name), &to).map_err(|e| format!("{}: {e}", to.display()))?;
                 say(format!("world {name} removed (it is kept in {})", backups.display()));
                 Ok(())
