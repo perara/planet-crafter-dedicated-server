@@ -80,6 +80,8 @@ mod coverage;
 #[cfg(test)]
 mod scenario;
 #[cfg(test)]
+mod timetravel;
+#[cfg(test)]
 mod testkit;
 mod config;
 mod dashboard;
