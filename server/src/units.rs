@@ -585,6 +585,7 @@ mod tests {
             g.time = GameTime::at(g.time.secs() + jump);
             tick(&mut g);
             let grown = unit(&g, Kind::Heat).total - before;
+            println!("start {start} s: a jump of {jump} s took {:?}", began.elapsed());
             if start >= 1000.0 {
                 assert!(began.elapsed() < std::time::Duration::from_secs(1), "{:?} for a jump of {jump} s", began.elapsed());
                 assert!((grown - jump * f64::from(heater)).abs() <= 0.1 * f64::from(heater) + 1e-6 * jump * f64::from(heater), "{grown} in {jump} s at {heater}");

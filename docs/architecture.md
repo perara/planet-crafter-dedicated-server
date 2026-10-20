@@ -39,7 +39,7 @@ paid (so the list only gets shorter). `scripts/check-layers` runs that test alon
 
 | Layer | Modules | May use | What it is |
 |---|---|---|---|
-| base | `wire` `idmap` `geometry` `world` `save` `oldsave` `data` `protocol` `rpcspec` `transform` `gamedata` `model` `ipc` `utp` | base | Bytes, ids, the game's tables as data, the framing of the transports. No game, no process, no sockets of their own. |
+| base | `wire` `idmap` `geometry` `world` `save` `oldsave` `data` `protocol` `rpcspec` `transform` `gamedata` `model` `ipc` `utp` `clock` | base | Bytes, ids, the game's tables as data, the framing of the transports. No game, no process, no sockets of their own. |
 | world | `net` | base | The game's network state: objects, variables, RPC messages. |
 | core | `game` `handlers` `hooks` `ext` `scene` `status` `gauges` `units` `energy` `water` `machines` `logistics` `meteo` `rockets` `planets` `animals` `genetics` `players` `inventories` `instances` `objects` `panels` `deconstruct` `equipment` `toxic` `unlocks` `access` `rules` `config` `chathooks` `handoff` | base, world, core, extension | The game logic, ported class by class, with no I/O: files, sockets and threads are not in it. A subsystem is free functions over `&mut Game`, reached through `hooks.rs`. |
 | extension | `events` `plugins` | base, world, core, extension | What the world tells the outside (`events`) and the host of the plugins that listen (`plugins`). |
@@ -103,7 +103,7 @@ Ask what the code is, in this order.
 9. **A new module**: add it to a layer in `layers.txt`, and to `coverage.txt` with the tests
    that check it. Both are tests; neither can be forgotten.
 
-What does not go in the core, ever: a wall clock outside `Game::clock` (the tick must be
+What does not go in the core, ever: a float for a time of the game (docs/clock.md: `GameTime`), a wall clock outside `Game::clock` (the tick must be
 repeatable: the benchmark's fingerprint depends on it), a thread, a socket, a file, `println!`
 for anything but the log lines the server already prints, an environment variable.
 
