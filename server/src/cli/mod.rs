@@ -4,7 +4,6 @@
 
 mod api;
 mod env;
-pub use env::{build_id, find_tables, set_env_file};
 mod extract;
 mod plugin;
 mod setup;
@@ -171,7 +170,7 @@ impl Ctx {
     /// update or `pcds upgrade` moves all of them at once. Any other copy of pcds (a release
     /// folder, a checkout's build) runs as itself, and installs itself into a bank when newer.
     fn hand_over(&self, args: &[String]) -> Result {
-        let program = self.program();
+        let program = self.program()?;
         if !same_file(&self.exe, &self.installed()) || same_file(&program, &self.exe) {
             return Ok(());
         }
@@ -289,22 +288,6 @@ fn say(message: impl std::fmt::Display) {
     println!("pcds: {message}");
 }
 
-/// An exclusive lock on `path` (flock), held while the file lives: Err with `busy` and the
-/// holder's pid when another process has it. The file holds the holder's pid.
-pub fn hold(path: &Path, busy: &str) -> Result<fs::File> {
-    use std::io::Write;
-    use std::os::fd::AsRawFd;
-    let mut file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    // SAFETY: flock on a descriptor this function owns; the lock lasts as long as the file.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        let holder = fs::read_to_string(path).unwrap_or_default();
-        return Err(format!("{busy} (process {}, which holds {}); stop it or wait for it", holder.trim(), path.display()));
-    }
-    // The holder, for the message above.
-    let _ = file.set_len(0).and_then(|_| write!(file, "{}", std::process::id()));
-    Ok(file)
-}
-
 /// Whether a program is on the PATH.
 fn have(program: &str) -> bool {
     let executable = |p: PathBuf| fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
@@ -375,28 +358,7 @@ fn download(url: &str, path: &Path) -> Result {
 fn install_file(from: &Path, to: &Path) -> Result {
     let bytes = fs::read(from).map_err(|e| format!("{}: {e}", from.display()))?;
     let mode = fs::metadata(from).map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions())).map_err(|e| format!("{}: {e}", from.display()))?;
-    replace_file(to, &bytes, mode)
-}
-
-/// A file written whole or not at all: beside it, flushed to disk, then moved over it (and the
-/// move flushed), so a crash or a full disk leaves the old file or the new one, never part.
-pub fn replace_file(path: &Path, bytes: &[u8], mode: u32) -> Result {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    let new = path.with_file_name(format!(".{name}.new"));
-    let _ = fs::remove_file(&new);
-    let err = |e: std::io::Error| format!("{}: {e}", path.display());
-    let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(&new).map_err(err)?;
-    let written = f.write_all(bytes).and_then(|_| f.sync_all()).and_then(|_| fs::rename(&new, path));
-    if let Err(e) = written {
-        let _ = fs::remove_file(&new);
-        return Err(err(e));
-    }
-    if let Some(dir) = path.parent() {
-        fs::File::open(dir).and_then(|d| d.sync_all()).map_err(|e| format!("{}: {e}", dir.display()))?;
-    }
-    Ok(())
+    crate::util::replace_file(to, &bytes, mode)
 }
 
 /// A path in `dir` for "<base>.json" that does not exist yet (a counter when one does), so
@@ -511,18 +473,6 @@ fn test_dir(name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_lock_is_held_by_one_holder_at_a_time() {
-        let dir = test_dir("hold");
-        let path = dir.join("world.json.lock");
-        let first = hold(&path, "another server runs this world").unwrap();
-        let e = hold(&path, "another server runs this world").unwrap_err();
-        assert!(e.contains("another server runs this world") && e.contains(&std::process::id().to_string()), "{e}");
-        drop(first);
-        hold(&path, "another server runs this world").unwrap();
-        fs::remove_dir_all(&dir).unwrap();
-    }
 
     #[test]
     fn sizes_read_like_du() {

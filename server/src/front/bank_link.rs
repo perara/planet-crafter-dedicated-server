@@ -160,7 +160,18 @@ impl Front {
     /// when the active one cannot start (a broken update), as a bootloader falls back.
     pub(super) fn boot(&mut self) {
         self.note_rollback_of_the_last_life();
-        let first = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
+        // An install that died between its two renames left a bank missing: put it back first.
+        if let Some(dir) = &self.banks {
+            match updater::recover(dir) {
+                Ok(done) => done.iter().for_each(|d| println!("banks: {d}")),
+                Err(e) => eprintln!("banks: {e}"),
+            }
+        }
+        let first = self.banks.as_deref().map(updater::active).transpose().unwrap_or_else(|e| {
+            eprintln!("banks: {e}");
+            std::process::exit(1)
+        });
+        let first = first.unwrap_or_else(|| "a".into());
         let mut kept = self.kept_snapshot().unwrap_or_else(|e| {
             eprintln!("{e}");
             std::process::exit(1)
@@ -173,7 +184,7 @@ impl Front {
             let snapshot = match kept.as_ref().map(|(fd, _)| fd.try_clone()).transpose() {
                 Ok(fd) => fd,
                 Err(e) => {
-                    eprintln!("{}: {e}", super::snapshot::snapshot_path(&self.save));
+                    eprintln!("{}: {e}", crate::worlds::snapshot_path(&self.save));
                     std::process::exit(1);
                 }
             };
@@ -181,7 +192,7 @@ impl Front {
                 Ok(b) => {
                     println!("bank {bank} (pid {}, pcds {}) running the world after {:?}", b.child.id(), b.version().unwrap_or("?"), b.started.elapsed());
                     if let Some((fd, at)) = kept {
-                        println!("the world is the one kept in {} at the last stop (the last flip's snapshot, newer than the save)", super::snapshot::snapshot_path(&self.save));
+                        println!("the world is the one kept in {} at the last stop (the last flip's snapshot, newer than the save)", crate::worlds::snapshot_path(&self.save));
                         self.last_snapshot = Some((fd, at));
                     }
                     if bank != first {
@@ -211,7 +222,7 @@ impl Front {
         }
         eprintln!("no bank could start the world: {}", tried.join("; "));
         if kept.is_some() {
-            eprintln!("they were given the world kept in {} at the last stop; move it away to start from the save instead", super::snapshot::snapshot_path(&self.save));
+            eprintln!("they were given the world kept in {} at the last stop; move it away to start from the save instead", crate::worlds::snapshot_path(&self.save));
         }
         std::process::exit(BOOT_FAILED);
     }
@@ -228,7 +239,7 @@ impl Front {
             let _ = b.child.wait();
         })?;
         if let Some(why) = snapshot.as_ref().and_then(|fd| ipc::read_memfd(fd).ok()).and_then(|s| super::snapshot::never_runs(&s, &hello)) {
-            let path = super::snapshot::snapshot_path(&self.save);
+            let path = crate::worlds::snapshot_path(&self.save);
             let aside = format!("{path}.unusable-{}", crate::save::stamp(SystemTime::now()));
             match std::fs::rename(&path, &aside) {
                 Ok(()) => eprintln!("{path} can never run ({why}): moved to {aside}; the world starts from the save, which is older"),

@@ -20,7 +20,7 @@ impl Ctx {
         let to = super::free_path(&backups, &crate::worlds::kept_stem(name, why, std::time::SystemTime::now()));
         let from = self.worlds.join(format!("{name}.json"));
         let bytes = fs::read(&from).map_err(|e| format!("{}: {e}", from.display()))?;
-        super::replace_file(&to, &bytes, 0o644)?;
+        crate::util::replace_file(&to, &bytes, 0o644)?;
         let modified = fs::metadata(&from).and_then(|m| m.modified()).map_err(|e| e.to_string())?;
         fs::File::options().write(true).open(&to).and_then(|f| f.set_modified(modified)).map_err(|e| format!("{}: {e}", to.display()))
     }
@@ -35,7 +35,7 @@ impl Ctx {
         // Named as the world: the save's display name in the game's list is its file's name.
         let made = beside.join(path.file_name().ok_or("no world name")?);
         let _ = fs::remove_file(&made);
-        let out = Command::new(self.program()).arg("new-save").arg(&made).arg(&data).args(options).output().map_err(|e| format!("pcds new-save: {e}"))?;
+        let out = Command::new(self.program()?).arg("new-save").arg(&made).arg(&data).args(options).output().map_err(|e| format!("pcds new-save: {e}"))?;
         if !out.status.success() {
             // new-save says what is wrong on its first line; its usage line is for the tools.
             let said = String::from_utf8_lossy(&out.stderr);
@@ -137,7 +137,7 @@ impl Ctx {
                 let seed = crate::game::Rng::seeded().range(0, i32::MAX) as u32;
                 let converted = crate::oldsave::import(&text, seed, &self.game_version()).map_err(|e| format!("{}: {e}", save.display()))?;
                 super::mkdir(&self.worlds)?;
-                super::replace_file(&file(&name), converted.as_bytes(), 0o644)?;
+                crate::util::replace_file(&file(&name), converted.as_bytes(), 0o644)?;
                 let how = if converted == text { "" } else { " (converted from the game's old save format)" };
                 say(format!("world {name} imported{how}; 'pcds world use {name}' plays it"));
                 Ok(())

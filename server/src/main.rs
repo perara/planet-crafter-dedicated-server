@@ -129,6 +129,7 @@ mod rockets;
 mod routes;
 mod rpcspec;
 mod save;
+mod tables;
 mod scene;
 mod status;
 mod tessera;
@@ -153,8 +154,6 @@ use data::NetData;
 use gamedata::GameData;
 use rpcspec::Spec;
 
-/// DisconnectReasonMessage: shown to a kicked or refused player.
-const DISCONNECT_REASON: u32 = 8;
 /// Autosave interval bounds, in minutes (larger ones overflow the clock).
 const MAX_AUTOSAVE: u64 = 1440;
 

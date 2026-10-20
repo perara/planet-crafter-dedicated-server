@@ -288,7 +288,8 @@ players (name, SteamID if verified, position, gauges), the rules that differ fro
 **Actions** (queued, applied after the call, by the host): `say` and `tell` (`chat.say`), `kick`
 (`player.kick`), `teleport` (`player.teleport`), `rules_patch` (`rules.write`; only the `meteo`,
 `gauges`, `speed`, `death`, `loot`, `limits` and `world` rules: never `chat`, whose exec program
-would run code outside the sandbox, nor `backup`, nor `access`). Each is checked again when
+would run code outside the sandbox, nor `backup`, nor `access`, nor `players`, nor `world.dlcPlanets`, which is
+the operator's statement of what they own). Each is checked again when
 applied (the player may have gone), counted, and bounded (16 per call, 200 per second per
 plugin).
 

@@ -23,7 +23,6 @@ use ring::rand::SystemRandom;
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 
-use super::state::{hex, unhex};
 
 pub const FILE: &str = "plugin.sig";
 pub const KEYS_FILE: &str = "trusted-keys.json";
@@ -36,7 +35,7 @@ const MAX_SIG_BYTES: u64 = 4096;
 
 /// A key's short name: the first 16 bytes of sha256 of the public key, hex.
 pub fn key_id(public_key: &[u8]) -> String {
-    hex(&ring::digest::digest(&ring::digest::SHA256, public_key).as_ref()[..16])
+    crate::util::to_hex(&ring::digest::digest(&ring::digest::SHA256, public_key).as_ref()[..16])
 }
 
 fn message(digest: &str) -> Vec<u8> {
@@ -50,7 +49,7 @@ pub fn generate() -> Result<(String, String), String> {
     let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).map_err(|_| "the system has no random numbers to make a key from")?;
     let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).map_err(|e| e.to_string())?;
     let public = pair.public_key().as_ref();
-    Ok((format!("{PRIVATE_HEADER}\n{}\n", hex(pkcs8.as_ref())), format!("{PUBLIC_HEADER}\n{}\n# id {}\n", hex(public), key_id(public))))
+    Ok((format!("{PRIVATE_HEADER}\n{}\n", crate::util::to_hex(pkcs8.as_ref())), format!("{PUBLIC_HEADER}\n{}\n# id {}\n", crate::util::to_hex(public), key_id(public))))
 }
 
 fn load_private(text: &str) -> Result<Ed25519KeyPair, String> {
@@ -58,7 +57,7 @@ fn load_private(text: &str) -> Result<Ed25519KeyPair, String> {
     if lines.next().map(str::trim) != Some(PRIVATE_HEADER) {
         return Err(format!("not a plugin private key (the first line is {PRIVATE_HEADER})"));
     }
-    let body = unhex(lines.next().unwrap_or("").trim()).map_err(|_| "the private key is not hex".to_string())?;
+    let body = crate::util::from_hex(lines.next().unwrap_or("").trim()).map_err(|_| "the private key is not hex".to_string())?;
     Ed25519KeyPair::from_pkcs8(&body).map_err(|_| "the private key is not a valid Ed25519 key".to_string())
 }
 
@@ -66,7 +65,7 @@ fn load_private(text: &str) -> Result<Ed25519KeyPair, String> {
 pub fn sign(private_key_file: &str, digest: &str) -> Result<String, String> {
     let pair = load_private(private_key_file)?;
     let signature = pair.sign(&message(digest));
-    let sig = Sig { public_key: hex(pair.public_key().as_ref()), signature: hex(signature.as_ref()), digest: digest.to_string() };
+    let sig = Sig { public_key: crate::util::to_hex(pair.public_key().as_ref()), signature: crate::util::to_hex(signature.as_ref()), digest: digest.to_string() };
     Ok(format!("{}\n", serde_json::to_string_pretty(&sig).map_err(|e| e.to_string())?))
 }
 
@@ -75,7 +74,7 @@ pub fn parse_public(text: &str) -> Result<Vec<u8>, String> {
     let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#'));
     let first = lines.next().ok_or("no key")?;
     let body = if first == PUBLIC_HEADER { lines.next().ok_or("the public key file has no key")? } else { first };
-    let bytes = unhex(body).map_err(|_| "a public key is 64 hex digits (or the text of a .pub file)".to_string())?;
+    let bytes = crate::util::from_hex(body).map_err(|_| "a public key is 64 hex digits (or the text of a .pub file)".to_string())?;
     if bytes.len() != 32 {
         return Err("a public key is 64 hex digits (32 bytes)".into());
     }
@@ -167,7 +166,7 @@ pub fn check(folder: &Path, digest: &str, keys: &Keys) -> Signed {
     }
     let broken = |why: &str| Signed::Broken(format!("{FILE}: {why}"));
     let Ok(sig) = serde_json::from_str::<Sig>(&text) else { return broken("not a signature file") };
-    let (Ok(public), Ok(signature)) = (unhex(&sig.public_key), unhex(&sig.signature)) else { return broken("the key or the signature is not hex") };
+    let (Ok(public), Ok(signature)) = (crate::util::from_hex(&sig.public_key), crate::util::from_hex(&sig.signature)) else { return broken("the key or the signature is not hex") };
     if public.len() != 32 || signature.len() != 64 {
         return broken("a key is 32 bytes and a signature 64");
     }
@@ -253,7 +252,7 @@ impl Keys {
             return Err(format!("{g:?} is not a capability (docs/plugins-api.md lists them)"));
         }
         let name = if name.trim().is_empty() { id.clone() } else { name.trim().chars().take(64).collect() };
-        let key = TrustedKey { id: id.clone(), public_key: hex(public_key), name, grant, added_at: super::approvals::now() };
+        let key = TrustedKey { id: id.clone(), public_key: crate::util::to_hex(public_key), name, grant, added_at: super::approvals::now() };
         self.keys.retain(|k| k.id != id);
         self.keys.push(key.clone());
         Ok(key)
@@ -336,9 +335,9 @@ mod tests {
         // The right key's name on another key's signature; one flipped bit; the signature of another digest.
         let other: Sig = serde_json::from_str(&sign(&other_private, &digest).unwrap()).unwrap();
         assert!(broken(serde_json::to_string(&Sig { signature: other.signature.clone(), ..sig.clone() }).unwrap()));
-        let mut bytes = unhex(&sig.signature).unwrap();
+        let mut bytes = crate::util::from_hex(&sig.signature).unwrap();
         bytes[10] ^= 1;
-        assert!(broken(serde_json::to_string(&Sig { signature: hex(&bytes), ..sig.clone() }).unwrap()));
+        assert!(broken(serde_json::to_string(&Sig { signature: crate::util::to_hex(&bytes), ..sig.clone() }).unwrap()));
         let elsewhere: Sig = serde_json::from_str(&sign(&private, &"34".repeat(32)).unwrap()).unwrap();
         assert!(broken(serde_json::to_string(&Sig { signature: elsewhere.signature, ..sig.clone() }).unwrap()), "a signature of another plugin's digest");
         // Garbage in every shape.
@@ -360,7 +359,7 @@ mod tests {
         let (private, public) = generate().unwrap();
         assert!(private.starts_with(PRIVATE_HEADER) && public.starts_with(PUBLIC_HEADER));
         let bytes = parse_public(&public).unwrap();
-        assert_eq!(parse_public(&hex(&bytes)).unwrap(), bytes, "the hex alone is a key too");
+        assert_eq!(parse_public(&crate::util::to_hex(&bytes)).unwrap(), bytes, "the hex alone is a key too");
         assert!(public.contains(&format!("# id {}", key_id(&bytes))));
         assert!(parse_public("abcd").is_err() && parse_public(&"zz".repeat(32)).is_err() && parse_public("").is_err());
         assert!(sign("not a key", "00").is_err() && sign(&format!("{PRIVATE_HEADER}\nzz\n"), "00").is_err());

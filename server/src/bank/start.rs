@@ -1,7 +1,7 @@
 //! How the bank gets its world, at START or at RESTORE, and the files beside it: the save (checked
 //! before anything loads), the rules and access files (a file that does not hold up stops the
 //! start; a restored game takes both again from their files), the folders that hold the world's
-//! backups. `enforce` kicks everyone the access lists no longer let in.
+//! backups. `access::enforce` kicks everyone the access lists no longer let in.
 
 use std::time::Duration;
 
@@ -22,7 +22,7 @@ pub(super) fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, d
         }
         std::process::exit(1)
     });
-    if let Err(e) = crate::game::check_save_content(&save, &data) {
+    if let Err(e) = crate::game::check_save_content(&save, &data, &net_data) {
         eprintln!("{save_path}: {e}");
         std::process::exit(1);
     }
@@ -42,7 +42,6 @@ pub(super) fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, d
     // The save as it was before this server touched it (as every backup: none with save.backupsKept 0).
     // At most one per 10 minutes: a crash loop must not push the hourly backups out.
     note_backup(&save::backup(save_path, Duration::from_secs(600), loaded_rules.save.backups_kept as usize).map_err(|e| format!("{save_path}: {e}")));
-    let session_number = config::env_number("PCDS_SESSION") as u32;
     let version = net_data.game_version.clone();
     let mut game = Game::new(net_data, data, spec, save, scenes);
     // A world on a DLC planet needs that planet's ground in the tables: not silently empty.
@@ -50,9 +49,13 @@ pub(super) fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, d
         eprintln!("{save_path}: the world cannot start: {why}");
         std::process::exit(1);
     }
+    // ... and the operator's statement that they own it (the server cannot ask Steam).
+    if let Some(why) = crate::planets::ownership_unstated(&game, &loaded_rules) {
+        eprintln!("{save_path}: the world cannot start: {why}");
+        std::process::exit(1);
+    }
     rules::start(&mut game, loaded_rules, rules_path);
     game.access = loaded_access;
-    game.session_number = session_number;
     println!("world: {} world objects, {} network objects, planet {}, game {version}", game.wos.len(), game.net.objects.len(), game.planet_id());
     game
 }
@@ -92,25 +95,8 @@ pub(super) fn reread(game: &mut Game, access_path: &str, rules_path: &str) -> Re
     if rules != game.rules {
         rules::set(game, rules)?;
     }
-    enforce(game);
+    access::enforce(game);
     Ok(())
-}
-
-/// Kicks everyone the access lists no longer let in.
-pub fn enforce(game: &mut Game) {
-    let refused: Vec<u64> = game
-        .clients
-        .values()
-        .filter(|c| {
-            let ip_refused = c.verified_steam_id.is_none() && c.ip.as_deref().is_some_and(|ip| !game.access.ip_allowed(ip));
-            let name_refused = c.ready.as_ref().is_some_and(|s| !game.access.name_allowed(&s.name, c.verified_steam_id));
-            ip_refused || name_refused
-        })
-        .map(|c| c.id)
-        .collect();
-    for c in refused {
-        game.kick(c, access::REFUSED);
-    }
 }
 
 /// How the check of a restored state came out (PCDS_DEV=flip-verify, tests): `verified` is true,

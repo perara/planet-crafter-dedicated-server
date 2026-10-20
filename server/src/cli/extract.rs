@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use super::env::build_id;
+use crate::tables::build_id;
 use super::{say, Ctx, Result};
 
 /// The tables being made: removed unless they were finished (moved into place).
@@ -50,7 +50,7 @@ impl Ctx {
         let build = build_id(&game)?;
         super::mkdir(&self.run.join("data"))?;
         // One extraction at a time (the hourly update and a manual one).
-        let _lock = super::hold(&self.run.join(".extract.lock"), "another extraction is running")?;
+        let _lock = crate::util::hold(&self.run.join(".extract.lock"), "another extraction is running")?;
         // Earlier extractions that failed (none runs: the lock is ours).
         for e in fs::read_dir(self.run.join("data")).into_iter().flatten().flatten() {
             if e.file_name().to_string_lossy().starts_with(".new-") {
@@ -59,7 +59,7 @@ impl Ctx {
         }
         // Hidden until complete: tables() only picks finished versions.
         let out = Unfinished(self.run.join(format!("data/.new-{}", std::process::id())));
-        let program = self.program();
+        let program = self.program()?;
         say(format!("reading the game tables from {} with {}", game.display(), program.display()));
         super::check(Command::new(&program).arg("read-game").arg(&game).arg(&out.0).stdout(Stdio::null()))?;
         let netdata = out.0.join("netdata.json");

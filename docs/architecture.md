@@ -39,7 +39,7 @@ paid (so the list only gets shorter). `scripts/check-layers` runs that test alon
 
 | Layer | Modules | May use | What it is |
 |---|---|---|---|
-| base | `wire` `idmap` `geometry` `world` `save` `oldsave` `data` `protocol` `rpcspec` `transform` `gamedata` `model` `ipc` `msg` `worlds` `utp` `routes` `bincodec` `util` `dotnet_sort` `tessera` `tokens` `clock` | base | Bytes, ids, the game's tables as data, the framing of the transports, the typed bodies of the frames between the front and the banks (`msg`), the world files' names and places (`worlds`), the lookup of a route table (`routes`: the bank's admin requests and the front's use one type), the game's algorithms that need no game (the .NET sort, the Tessera solver), the store of scoped tokens (`tokens`). No game, no process, no sockets of their own. |
+| base | `tables` `wire` `idmap` `geometry` `world` `save` `oldsave` `data` `protocol` `rpcspec` `transform` `gamedata` `model` `ipc` `msg` `worlds` `utp` `routes` `bincodec` `util` `dotnet_sort` `tessera` `tokens` `clock` | base | Bytes, ids, the game's tables as data, the framing of the transports, the typed bodies of the frames between the front and the banks (`msg`), the world files' names and places (`worlds`), the lookup of a route table (`routes`: the bank's admin requests and the front's use one type), the game's algorithms that need no game (the .NET sort, the Tessera solver), the store of scoped tokens (`tokens`). No game, no process, no sockets of their own. |
 | world | `net` | base | The game's network state: objects, variables, RPC messages. |
 | core | `game` `handlers` `hooks` `ext` `scene` `status` `gauges` `units` `energy` `water` `machines` `logistics` `meteo` `rockets` `planets` `animals` `genetics` `players` `inventories` `instances` `objects` `panels` `deconstruct` `equipment` `toxic` `unlocks` `access` `rules` `config` `chathooks` `handoff` | base, world, core, extension | The game logic, ported class by class, with no I/O: files and sockets are not in it, and the only thread is the wreck solver's (`instances`: a pure function of the tables and a seed, answered between ticks). A subsystem is free functions over `&mut Game`, reached through `hooks.rs`. |
 | extension | `events` `plugins` | base, world, core, extension | What the world tells the outside (`events`) and the host of the plugins that listen (`plugins`). |
@@ -62,10 +62,6 @@ the work" that removes it.
 
 | Edge | Why it is there | Step |
 |---|---|---|
-| `bank → cli`, `native → cli`, `native → net` | the tables folder's contract (build id, finding tables, an encoder) is defined in `cli` and `net`; the bank asks it in `bank/status.rs` (the installed game) | 7 |
-| `front → cli`, `updater → cli` | file primitives (`hold`, `replace_file`, `set_env_file`) live in `cli` | 13 |
-| `front → bank`, `bank → front` | the kick batch is built in `bank/mail.rs` (`reason_batch`); the snapshot's path (`snapshot_path`, used by `bank/persist.rs`) is in `front/snapshot.rs` | 4 |
-| `config → bank` | `bank::enforce` (an access policy, in `bank/start.rs`) is called from the settings code | 4 |
 | `front → config`, `front → rules` | settings read by name; the chat rules' struct | 8 |
 
 ## The front
@@ -187,7 +183,7 @@ for anything but the log lines the server already prints, an environment variabl
 ## The bank, module by module
 
 `bank/` is a directory module; each file has one job, and nothing outside it is reached except through
-`mod.rs` (`run`, `info`, `reason_batch`, `contained`, `enforce`).
+`mod.rs` (`run`, `info`, `contained`).
 
 | File | What it owns |
 |---|---|
@@ -235,13 +231,16 @@ Three rules keep the DLC planets apart from everything else:
 - **A world on a DLC planet does not start without the planet's ground** (`planets::ground_missing`,
   checked in `bank/start.rs`): an empty ground would run silently wrong. The message says to run
   `pcds extract`. A travel to such a planet is refused the same way.
-- **Ownership is never decided here.** The game lets a host take a world to a DLC planet when the
-  host's Steam account owns it (`PlanetList.GetIsPlanetPurchased`, `BIsDlcInstalled`); this server
-  has no account to ask. `scene::available_planets` (the game's `_availablePlanets`) offers the free
-  planets, the planet the world is on and the planets its save lists, the ones a host that owned
-  them took it to. No world is given a DLC planet it did not have, and nothing is faked or
-  patched: not here, and not in the Wine reference, which has no Steam and so owns no DLC
-  (see COMPLETENESS.md "What could not be checked").
+- **Ownership is never decided here; the operator states it.** The game lets a host take a world
+  to a DLC planet when the host's Steam account owns it (`PlanetList.GetIsPlanetPurchased`,
+  `BIsDlcInstalled`); this server is an anonymous Steam game server with no account to ask. The
+  rule `world.dlcPlanets` (empty by default) lists the DLC planets the operator says they own.
+  `scene::available_planets` (the game's `_availablePlanets`) offers the free planets and those
+  listed, and nothing else: a save that lists a planet is no evidence. A world saved on a DLC planet
+  that is not listed does not start (`planets::ownership_unstated`, in `bank/start.rs`; the same
+  check refuses a rules change that would unlist the planet under a running world), and the message
+  names the rule to set. Nothing is faked or patched: not here, and not in the Wine reference, which
+  has no Steam and so owns no DLC (see COMPLETENESS.md "What could not be checked").
 
 `toxic.rs` is the one new game logic: Toxicity's `ToxicAreaHandler` and `ToxicArea` (see its header).
 The areas are read again from the scene dump and the world objects after a hot update; only the
@@ -309,14 +308,14 @@ the audit's list (the ones not done here are another agent's or later).
 |---|---|---|---|
 | 0 | `layers.txt` and its test; the `events` module; the plugin host | done with the plugin system | `scripts/check-layers`; zero behaviour change: the bench fingerprint and the handoff comparison are equal |
 | 1-3 | single source of truth for settings and rules, delete dead code | the refactor1 branch | its own |
-| 4 | small relocations: `DISCONNECT_REASON` and `reason_batch` into `protocol.rs`; `enforce` into `access.rs`; the serde helpers of `handoff` into a neutral module; `now_secs`, `hex` and friends once | next | removes the debts `front → bank`, `bank → front`, `config → bank` |
+| 4 | small relocations: `DISCONNECT_REASON` and `reason_batch` into `protocol.rs`; `snapshot_path` into `worlds.rs`; `enforce` into `access.rs`. Not done: the serde helpers of `handoff` into a neutral module; `hex` and friends once | done for the three relocations | removed the debts `front → bank`, `bank → front`, `config → bank` (`tests/layers.rs` fails on a debt that is gone, so they are out of `layers.txt`); `protocol::tests::the_disconnect_reason_is_one_message_of_type_8_with_the_text_in_utf16` |
 | 5 | typed messages between front and bank (`Hello`, `Ready`, `BankInfo`, ...) | done for the frames, bank.json and the banks' folder's notes (`msg.rs`); the API's requests and answers are not typed | `tests/hot_update.rs`, `msg::tests`, `tests/admin_golden.rs` |
 | 6 | split `front.rs`, `bank.rs`, `chathooks.rs` by concern, moving code only | `front/`, `bank/` and `chathooks/` done (the modules above and in "The bank, module by module") | `cargo test`; removed `admin → chathooks`, `front → chathooks`, `front → dashboard` |
-| 7 | a `tables` module that owns the tables folder's contract | later | `pcds read-game` then `pcds tables-diff`; removes `bank → cli`, `native → cli`, `native → net` |
+| 7 | a `tables` module that owns the tables folder's contract | done: `tables.rs` (`build_id`, `find_tables`); the encoder the reader used (`fixed_string`) is in `wire.rs` | removed `bank → cli`, `native → cli`, `native → net`; `tables::tests`, `tests/layers.rs` |
 | 8 | typed settings accessor | later | removes `front → config`, `front → rules` |
 | 9 | one worlds module | done for the names, the paths and the listing (`worlds.rs`) | `worlds::tests`, `tests/cli.rs`, `tests/admin_golden.rs` |
 | 11 | one admin route table | done: the table, `docs/admin-api.md`, the test against the source, the golden test; not done: typed requests and answers, one timeout table, dropping routes | `front::admin_routes::tests`, `tests/admin_golden.rs` |
-| 13 | one place for the file primitives | later | removes `front → cli`, `updater → cli` |
+| 13 | one place for the file primitives | done for the lock (`util::hold`) and the whole-file writer (`util::replace_file`) and the server.env text (`config::parse_env`, `set_env_text`, `set_env_file`); not done: `save::write_atomic` (its own temp names for concurrent writers) and `updater::lock` stay beside them | removed `front → cli`, `updater → cli`; `util::tests`, `tests/layers.rs` |
 | 14 | a workspace, with the crates above, one at a time, base first | after 4, 7, 13 | each crate: the build, the tests and the flip |
 | 15 | the flip and recovery as a state machine with its own tests | last, and the owner's call | `tests/hot_update.rs` first extended |
 

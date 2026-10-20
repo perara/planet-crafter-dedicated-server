@@ -9,7 +9,7 @@
 
 # Formats and primitives: bytes, ids, geometry, the game's tables as data, the transport framing.
 # No game, no process, no sockets: they use each other and nothing above.
-layer base: wire idmap geometry world save oldsave data protocol rpcspec transform gamedata model ipc msg worlds utp util bincodec dotnet_sort routes tessera tokens clock
+layer base: tables wire idmap geometry world save oldsave data protocol rpcspec transform gamedata model ipc msg worlds utp util bincodec dotnet_sort routes tessera tokens clock
 # The game's network state: objects, variables, RPC messages. Uses base only.
 layer world: net
 # The game logic, ported class by class, free of I/O: the game, its handlers and subsystems, the
@@ -49,21 +49,6 @@ only plugins <- events bank ext cli
 # Each is an edge that is there today and should not be. The number is the step of the refactor list
 # in docs/architecture.md that removes it.
 
-# The table folder's contract (build id, find_tables) lives in cli, and the table reader uses an
-# encoder of net (7: a `tables` module owns the contract; native stops importing cli and net).
-debt bank -> cli
-debt native -> cli
-debt native -> net
-# Files of the filesystem (hold, replace_file, set_env_file) live in cli (13: one place for the
-# file primitives).
-debt front -> cli
-debt updater -> cli
-# The kick batch (DISCONNECT_REASON) is built by bank/mail.rs, and the front asks it (4: into protocol.rs);
-# bank/persist.rs asks front/snapshot.rs for the snapshot's path (4: next to the other paths).
-debt front -> bank
-debt bank -> front
-# The access policy `enforce` sits in bank/start.rs and config.rs calls it (4: into access.rs).
-debt config -> bank
 # The front reads settings and rules by name (8: typed settings).
 debt front -> config
 debt front -> rules

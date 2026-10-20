@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use super::admin;
 use super::forward::{forward_chat, forward_ops};
-use super::mail::{check_loading, post, reason_batch, send};
+use super::mail::{check_loading, post, send};
 use super::panic::{contained, guarded, taint, ticked};
 use super::persist::{autosave, final_save, persist, persist_later, settle};
 use super::plugins_glue;
@@ -156,7 +156,10 @@ impl Bank {
                 self.link.send_fd(ipc::SNAPSHOT, n, &msg::body(&head), Some(fd));
                 // The world stays in memory until the new bank runs.
                 match self.link.recv() {
-                    Some(f) if f.kind == ipc::RESUME => println!("bank: resumed, the new bank failed"),
+                    Some(f) if f.kind == ipc::RESUME => {
+                        game.resume_after_stand();
+                        println!("bank: resumed, the new bank failed")
+                    }
                     Some(f) if f.kind == ipc::EXIT => {
                         settle(game, true);
                         std::process::exit(0)
@@ -220,7 +223,7 @@ impl Bank {
             }
             println!("client {client}: kicked ({reason})");
             send(&mut self.link, &mut t.mail, &[client], &mut HashMap::new());
-            self.link.send(ipc::DATA, client, &reason_batch(&reason));
+            self.link.send(ipc::DATA, client, &crate::protocol::reason_batch(&reason));
             self.link.send(ipc::KICK, client, &[]);
         }
         forward_chat(game, &mut self.link);

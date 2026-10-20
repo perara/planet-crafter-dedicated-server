@@ -1,63 +1,12 @@
 //! The settings (run/server.env), the world names, and which game tables go with the game.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::{say, Ctx, Result, APP_ID};
+use crate::config::{parse_env, set_env_text};
+use crate::tables::{build_id, find_tables};
 use crate::updater;
-
-/// The KEY=VALUE lines of a settings file, in order; comments and blank lines left out, quotes
-/// around a value taken off (as systemd's EnvironmentFile= reads it).
-pub fn parse_env(text: &str) -> Vec<(String, String)> {
-    text.lines()
-        .filter_map(|line| {
-            let (key, value) = line.trim().split_once('=')?;
-            let key = key.trim();
-            if key.is_empty() || key.starts_with('#') || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-                return None;
-            }
-            let value = value.trim();
-            let unquoted = ['"', '\''].iter().find_map(|q| value.strip_prefix(*q)?.strip_suffix(*q)).unwrap_or(value);
-            Some((key.to_string(), unquoted.to_string()))
-        })
-        .collect()
-}
-
-/// The text with KEY set to VALUE: every KEY= line replaced, else one added at the end.
-pub fn set_env_text(text: &str, key: &str, value: &str) -> String {
-    let prefix = format!("{key}=");
-    let mut found = false;
-    let mut out: Vec<String> = text
-        .lines()
-        .map(|line| {
-            if line.starts_with(&prefix) {
-                found = true;
-                format!("{key}={value}")
-            } else {
-                line.to_string()
-            }
-        })
-        .collect();
-    if !found {
-        out.push(format!("{key}={value}"));
-    }
-    out.join("\n") + "\n"
-}
-
-/// One setting of a settings file changed (written beside and moved over, mode 600: it holds
-/// the admin token).
-pub fn set_env_file(path: &Path, key: &str, value: &str) -> Result {
-    let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    super::replace_file(path, set_env_text(&text, key, value).as_bytes(), 0o600)
-}
-
-/// The game build: a hash of the game's code, which changes with every game update. One way
-/// for every installation (Steam, steamcmd or a copied folder).
-pub fn build_id(game: &Path) -> Result<String> {
-    let path = game.join("Planet Crafter_Data/Managed/Assembly-CSharp.dll");
-    let code = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(format!("{:016x}", xxhash_rust::xxh64::xxh64(&code, 0)))
-}
 
 impl Ctx {
     /// A setting from server.env (the last line for it); None when empty or missing.
@@ -85,7 +34,7 @@ impl Ctx {
     /// the admin token) and moved over, so a crash leaves the old one or the new one.
     pub fn set_env(&self, key: &str, value: &str) -> Result {
         let text = fs::read_to_string(&self.env_file).map_err(|e| format!("{}: {e}", self.env_file.display()))?;
-        super::replace_file(&self.env_file, set_env_text(&text, key, value).as_bytes(), 0o600)
+        crate::util::replace_file(&self.env_file, set_env_text(&text, key, value).as_bytes(), 0o600)
     }
 
     /// The direct-IP port (PCDS_LISTEN's).
@@ -130,7 +79,7 @@ PCDS_ADMIN_TOKEN={token}
 PCDS_WORLD=world
 "
         );
-        super::replace_file(&self.env_file, text.as_bytes(), 0o600)?;
+        crate::util::replace_file(&self.env_file, text.as_bytes(), 0o600)?;
         say(format!("settings written to {}", self.env_file.display()));
         Ok(())
     }
@@ -152,16 +101,16 @@ PCDS_WORLD=world
 
     /// The program that runs the server and reads its tables: the active bank's, else (no
     /// bank installed yet) this one.
-    pub fn program(&self) -> PathBuf {
+    pub fn program(&self) -> Result<PathBuf> {
         let banks = self.banks();
-        let program = banks.join(updater::active(&banks)).join("pcds");
-        if program.is_file() { program } else { self.exe.clone() }
+        let program = banks.join(updater::active(&banks)?).join("pcds");
+        Ok(if program.is_file() { program } else { self.exe.clone() })
     }
 
     /// The format of the game tables program() reads and writes (its bank.json says).
     pub fn tables_format(&self) -> Result<u32> {
         let banks = self.banks();
-        let active = updater::active(&banks);
+        let active = updater::active(&banks)?;
         if !banks.join(&active).join("pcds").is_file() {
             return Ok(crate::native::tables::TABLES_FORMAT);
         }
@@ -175,34 +124,6 @@ PCDS_WORLD=world
         let game = self.game_dir(None)?;
         self.tables(&build_id(&game)?)
     }
-}
-
-/// The tables in `data` (run/data) for a game build in a tables format. Folders whose name
-/// starts with "." are extractions not finished yet.
-pub fn find_tables(data: &Path, build: &str, format: u32) -> Result<PathBuf> {
-    let (mut any, mut other_format) = (false, None);
-    for entry in fs::read_dir(data).into_iter().flatten().flatten() {
-        let dir = entry.path();
-        if entry.file_name().to_string_lossy().starts_with('.') || !dir.is_dir() {
-            continue;
-        }
-        any = true;
-        if !fs::read_to_string(dir.join("buildid")).is_ok_and(|id| id.trim() == build) {
-            continue;
-        }
-        let theirs = fs::read_to_string(dir.join("tables-format")).map_or_else(|_| "none".to_string(), |f| f.trim().to_string());
-        if theirs == format.to_string() {
-            return Ok(dir);
-        }
-        other_format = Some((dir, theirs));
-    }
-    if let Some((dir, theirs)) = other_format {
-        return Err(format!("the tables in {} are of tables format {theirs}, the server reads format {format}: run `pcds update`, which reads them again", dir.display()));
-    }
-    if !any {
-        return Err(format!("no game tables in {}: run `pcds update` (see README)", data.display()));
-    }
-    Err(format!("the game changed: run `pcds update` (no tables in {} for game build {build})", data.display()))
 }
 
 #[cfg(test)]
@@ -289,22 +210,11 @@ mod tests {
         fs::create_dir_all(&bank).unwrap();
         fs::write(bank.join("pcds"), "").unwrap();
         updater::write_info(&bank, &crate::msg::BankInfo { tables_format: Some(u64::from(ours) + 1), ..crate::msg::BankInfo::new("9.0.0", 0, 0, 0) }).unwrap();
-        assert_eq!(ctx.program(), bank.join("pcds"));
+        assert_eq!(ctx.program().unwrap(), bank.join("pcds"));
         assert!(ctx.tables("b1").unwrap_err().contains(&format!("the server reads format {}", ours + 1)));
         updater::write_info(&bank, &crate::msg::BankInfo { version: Some("9.0.0".into()), ..Default::default() }).unwrap();
         assert!(ctx.tables("b1").unwrap_err().contains("does not say which game tables it reads"));
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[test]
-    fn the_build_id_is_a_hash_of_the_game_code() {
-        let dir = std::env::temp_dir().join(format!("pcds-build-id-{}", std::process::id()));
-        fs::create_dir_all(dir.join("Planet Crafter_Data/Managed")).unwrap();
-        fs::write(dir.join("Planet Crafter_Data/Managed/Assembly-CSharp.dll"), b"code").unwrap();
-        let id = build_id(&dir).unwrap();
-        assert_eq!(id, format!("{:016x}", xxhash_rust::xxh64::xxh64(b"code", 0)));
-        assert_eq!(id.len(), 16);
-        fs::remove_dir_all(&dir).unwrap();
-        assert!(build_id(&dir).is_err());
-    }
 }

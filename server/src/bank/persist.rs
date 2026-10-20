@@ -184,7 +184,7 @@ pub(super) fn autosave(game: &mut Game, path: &str) {
 /// is 1, and the front says so.
 pub(super) fn final_save(game: &mut Game, path: &str) -> i32 {
     let Err(e) = persist(game, path) else { return 0 };
-    let beside = crate::front::snapshot_path(path);
+    let beside = crate::worlds::snapshot_path(path);
     let name = std::path::Path::new(&beside).file_name().unwrap_or_default().to_string_lossy().to_string();
     let elsewhere = std::env::temp_dir().join(format!("pcds-{}-{name}", std::process::id())).to_string_lossy().to_string();
     let mut bytes = Vec::new();

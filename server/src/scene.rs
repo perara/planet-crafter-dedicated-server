@@ -44,14 +44,13 @@ fn list_i32(items: impl Iterator<Item = i32>) -> Vec<Vec<u8>> {
 }
 
 /// Planet indices players may travel to (PlanetNetworkLoader._availablePlanets): the free ones,
-/// and a DLC planet the world already has, the one it is on or one its save lists. The game
-/// fills the list with the planets its host owns (PlanetList.GetIsPlanetPurchased: Steam asks
-/// about the host's account). This server has no account to ask, and a world's host owned its
-/// DLC planets when it got there, so the world's own file stands for the ownership; a world
-/// that never had a DLC planet is not given one (the server checks nothing and bypasses nothing).
+/// and the DLC planets the operator states they own (the rule world.dlcPlanets). The game fills
+/// the list with the planets its host owns (PlanetList.GetIsPlanetPurchased: Steam asks about the
+/// host's account). This server is an anonymous Steam game server with no account to ask, so the
+/// operator's statement stands for the ownership; nothing is faked or patched.
 pub fn available_planets(game: &Game) -> Vec<usize> {
-    let has = |id: &str| game.save.planets.iter().any(|s| s["planetId"].as_str() == Some(id));
-    game.net_data.planets.iter().enumerate().filter(|(i, p)| p.steam_app_id == 0 || *i == game.planet || has(&p.id)).map(|(i, _)| i).collect()
+    let stated = &game.rules.world.dlc_planets;
+    game.net_data.planets.iter().enumerate().filter(|(_, p)| p.steam_app_id == 0 || stated.contains(&p.id)).map(|(i, _)| i).collect()
 }
 
 pub fn init(game: &mut Game) {
@@ -63,7 +62,7 @@ pub fn init(game: &mut Game) {
     }
     let save = &game.save;
     let index = |id: &str| game.net_data.planet_index(id).map(|i| i as i16);
-    let starting = index(save.settings["planetId"].as_str().unwrap_or("Prime")).unwrap_or(0);
+    let starting = index(game.started_planet()).expect("the started planet is a planet of the tables (world_planet)");
     let current = game.planet as i16;
     let available: Vec<Vec<u8>> = available_planets(game).into_iter().map(|i| enc::short(i as i16)).collect();
     let story = list_i32(save.story_events.iter().filter_map(|e| e["stringId"].as_str()).map(stable_hash));
@@ -178,7 +177,7 @@ pub fn fill_save(game: &Game, save: &mut crate::save::SaveFile) {
 }
 
 pub fn starting_pod_group(game: &Game) -> Option<usize> {
-    pod_group(&game.data, game.save.settings["planetId"].as_str().unwrap_or("Prime"))
+    pod_group(&game.data, game.started_planet())
 }
 
 /// GroupsHandler.GetStartingPodGroup: EscapePod<planet>, else EscapePod.

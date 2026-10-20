@@ -714,8 +714,8 @@ brings the stand close to the snapshot-plus-restore time above.
 
 The game clock: `started` is restored as "elapsed before now", so game time stands still
 during the pause and then goes on. Linux's monotonic clock is the same in every process, so
-the refactor can instead keep the clock running through the pause (the first tick catches up,
-as after a long frame); for the pauses measured, clients' network time sees about one tick
+the refactor can instead keep the clock running through the pause (the first tick would be a long
+frame, which the game bounds to a third of a second, docs/clock.md); for the pauses measured, clients' network time sees about one tick
 (33 ms) of difference at most either way.
 
 ## (d) Versions, health check, flip back, and updating the front

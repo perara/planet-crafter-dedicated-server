@@ -69,7 +69,7 @@ impl Front {
         if self.phase != Phase::Idle || self.live.is_none() {
             return Err(format!("the world cannot stop now ({})", if self.live.is_none() { "it is not running".to_string() } else { self.phase.label().to_string() }));
         }
-        let reason = crate::bank::reason_batch(why);
+        let reason = crate::protocol::reason_batch(why);
         self.dismiss_all(&reason, Instant::now());
         self.net.flush(true);
         self.queue.clear();
@@ -106,7 +106,7 @@ impl Front {
                 return Err(format!("no world {name}"));
             }
             readable(&save, &name)?;
-            let lock = crate::cli::hold(std::path::Path::new(&format!("{save}.lock")), "another server runs that world")?;
+            let lock = crate::util::hold(std::path::Path::new(&format!("{save}.lock")), "another server runs that world")?;
             moved = Some((std::mem::replace(&mut self.save, save), self.world_lock.replace(lock), name));
         }
         let started = self.start_bank();
@@ -117,7 +117,7 @@ impl Front {
             }
             (Ok(world), Some((_, _, name))) => {
                 if let Some(home) = crate::env("PCDS_HOME")
-                    && let Err(e) = crate::cli::set_env_file(&std::path::Path::new(&home).join("server.env"), "PCDS_WORLD", &name)
+                    && let Err(e) = crate::config::set_env_file(&std::path::Path::new(&home).join("server.env"), "PCDS_WORLD", &name)
                 {
                     eprintln!("world {name}: not remembered for the next start ({e})");
                 }
@@ -129,7 +129,7 @@ impl Front {
 
     /// The world of `self.save` booted in the active bank: Idle.
     fn start_bank(&mut self) -> Result<String, String> {
-        let bank = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
+        let bank = self.banks.as_deref().map(updater::active).transpose()?.unwrap_or_else(|| "a".into());
         let mut kept = self.kept_snapshot()?;
         let snapshot = kept.as_ref().map(|(fd, _)| fd.try_clone()).transpose().map_err(|e| e.to_string())?;
         let b = self.boot_bank(&bank, snapshot, &mut kept)?;
@@ -174,7 +174,7 @@ mod tests {
         unsafe { std::env::set_var("PCDS_HOME", &dir) };
         let mut front = Front::new("data", &a.to_string_lossy(), Some(dir.join("banks")), None, 0, Arc::new(AtomicBool::new(false)));
         front.phase = Phase::Stopped;
-        front.world_lock = Some(crate::cli::hold(&dir.join("a.json.lock"), "busy").unwrap());
+        front.world_lock = Some(crate::util::hold(&dir.join("a.json.lock"), "busy").unwrap());
         // A world in an old layout is refused before any bank is started or lock taken.
         let e = front.start_world(Some("c")).unwrap_err();
         assert!(e.contains("world c") && e.contains("pcds world import") && !dir.join("c.json.lock").exists(), "{e}");
@@ -183,8 +183,8 @@ mod tests {
         assert_eq!((front.world_name(), front.phase), ("a".to_string(), Phase::Stopped));
         assert_eq!(std::fs::read_to_string(&env).unwrap(), "PCDS_WORLD=a\n");
         // The lock of a is still this server's; b's is free again.
-        assert!(crate::cli::hold(&dir.join("a.json.lock"), "busy").is_err());
-        assert!(crate::cli::hold(&dir.join("b.json.lock"), "busy").is_ok());
+        assert!(crate::util::hold(&dir.join("a.json.lock"), "busy").is_err());
+        assert!(crate::util::hold(&dir.join("b.json.lock"), "busy").is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

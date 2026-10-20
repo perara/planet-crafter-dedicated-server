@@ -55,12 +55,12 @@ test, which the audit asked for, now exists. Steps 4, 7, 8, 13 and 15 are not do
 | A2 | The list of hidden secrets (`rules::HIDDEN`) was a second copy of the schema's secret marks, so a new secret could leak through `/api/rules` | fixed in 0.7.0: one list, taken from the schema | `rules::tests::every_secret_rule_is_hidden_from_the_endpoints_and_the_log`, `bank::admin::settings` test `the_rules_endpoints_never_show_hook_secrets` |
 | A3 | Values read three ways: `PCDS_TRACE=` turned tracing on, `PCDS_TRUST_LOOPBACK` re-read per connection, the player limit read from the environment per join, process env and server.env in different order per command | fixed in 0.7.0: gameplay values are rules, the test hooks have one accessor `config::dev`. The order between process env and server.env was not rechecked | `Rules::max_players` in `rules.rs`; `PROCESS_ENV` and `DEV_HOOKS` in `config.rs` |
 | A4 | Test hooks (`failForTest`, fail-on-purpose banks, flip verify) are honoured by the production binary | by design: they sit behind `PCDS_DEV`, are listed in docs/env.md, and an unknown hook stops the start. The end-to-end tests need the real binary. A cargo feature was not adopted | docs/env.md, "Developer hooks" |
-| A5 | The CLI accepts the admin host `localhost` and refuses `[::1]`; the server's parser accepts only socket addresses | open | `cli/api.rs` (`Ctx::api`) against `config::check_env` |
-| A6 | One fact in several places: the frame header size, the crash-loop numbers, the chat length 500, the flag bits, the Steam app id, `DISCONNECT_REASON` in main.rs, the `"Prime"` fallback planet, the default session 4242 in `Game::new` | open for the last three (still in `main.rs`, `scene.rs`, `players.rs`, `game.rs`); the frames and bank messages are typed now (A7). The others were not rechecked one by one | grep for `DISCONNECT_REASON`, `unwrap_or("Prime")` |
+| A5 | The CLI accepts the admin host `localhost` and refuses `[::1]`; the server's parser accepts only socket addresses | fixed after 0.7.0: `config::admin_loopback` reads PCDS_ADMIN as `check_env` does (a socket address, on the loopback of its family when it listens on every address); `localhost` is refused by both | `config::tests::the_command_line_reads_the_admin_address_as_the_server_does` |
+| A6 | One fact in several places: the frame header size, the crash-loop numbers, the chat length 500, the flag bits, the Steam app id, `DISCONNECT_REASON` in main.rs (now `protocol.rs`), the `"Prime"` fallback planet, the default session 4242 in `Game::new` | fixed after 0.7.0 for the last three: `DISCONNECT_REASON` is in `protocol.rs`; the `"Prime"` fallback is gone (a save with no known planet is refused at start: `game::world_planet`); the default session is read from the one schema entry (`PCDS_SESSION` in `config::KNOBS`). The others were not rechecked one by one | `game::tests::a_save_without_a_known_planet_is_refused`, `protocol::tests::the_disconnect_reason_is_one_message_of_type_8_with_the_text_in_utf16` |
 | A7 | The messages between front and banks were JSON built and read by string key: HELLO, READY, the snapshot head, bank.json, `RECOVER`; drifted key names and comments; an unreachable snapshot migration step | fixed in 0.7.0: typed messages with golden tests, one snapshot `format`, no migrate step | `msg::tests::every_message_is_the_json_it_always_was`, `msg::tests::the_notes_of_the_banks_folder_are_the_json_they_always_were` |
-| A8 | The tables folder's contract (file names, build id, finding the folder) has no owner; the table reader imports the command line and the network encoders | open: step 7 of the order of work | `debt bank -> cli`, `native -> cli`, `native -> net` in `server/layers.txt` |
-| A9 | File primitives live in `cli` and are used by the front and the updater; two atomic writers (`save::write_atomic`, `cli::replace_file`) and two lock helpers | open: step 13 | `debt front -> cli`, `updater -> cli` in `server/layers.txt` |
-| A10 | Small wrong-way edges: the kick batch built through the bank (`reason_batch`), `enforce` called from the settings code, the front reading the settings by name | open: steps 4 and 8 | `debt front -> bank`, `bank -> front`, `config -> bank`, `front -> config`, `front -> rules` in `server/layers.txt` |
+| A8 | The tables folder's contract (file names, build id, finding the folder) has no owner; the table reader imports the command line and the network encoders | fixed after 0.7.0: `tables.rs` owns `build_id` and `find_tables`, and the fixed-string encoder is in `wire.rs`; the three debts are gone from `server/layers.txt` | `tables::tests::the_build_id_is_a_hash_of_the_game_code`, `cli::env::tests` (the tables lookup), `tests/layers.rs` |
+| A9 | File primitives live in `cli` and are used by the front and the updater; two atomic writers (`save::write_atomic`, `cli::replace_file`) and two lock helpers | partly fixed after 0.7.0: `hold` and `replace_file` are in `util.rs` and the server.env text functions in `config.rs`, so the debts `front -> cli` and `updater -> cli` are gone from `server/layers.txt`. Still two atomic writers (they differ: unique temp names against concurrent writers, and a mode kept; against a fixed name and a mode given) and two lock helpers (`util::hold`, `updater::lock`) | `util::tests::a_file_is_replaced_whole_with_its_mode`, `util::tests::a_lock_is_held_by_one_holder_at_a_time`, `tests/layers.rs` |
+| A10 | Small wrong-way edges: the kick batch built through the bank (`reason_batch`), `enforce` called from the settings code, the front reading the settings by name | fixed after 0.7.0 for the kick batch (now `protocol::reason_batch`), `enforce` (now `access::enforce`) and the snapshot's path (now `worlds::snapshot_path`): the three debts are gone from `server/layers.txt`. Open: the front reading the settings by name (step 8) | `debt front -> config`, `front -> rules` in `server/layers.txt`; `tests/layers.rs` |
 | A11 | `front.rs`, `bank.rs` and `chathooks.rs` are god modules (the front was 1757 lines of six concerns) | fixed in 0.7.0: each is a directory of small modules | docs/architecture.md, "The front" and "The bank, module by module" |
 | A12 | The admin API had three routers, no route table, routes missing from the docs, and two routes (`/api/settings`, `/api/access`) nobody used | fixed in 0.7.0: one route table, a reference, a golden test; the two routes are gone. Typed request bodies and the `err()` helper for hand-built errors are not done | `routes.rs`, `front/admin_routes.rs` tests, docs/admin-api.md, `server/tests/admin_golden.rs` |
 | A13 | The admin answers 500 after 10 s while a world stop can take 60 s; the web page's longer timeouts could never be reached | fixed in 0.7.0: world calls get 200 s on the server | `WORLD_ANSWER` in `admin.rs` |
@@ -70,14 +70,14 @@ test, which the audit asked for, now exists. Steps 4, 7, 8, 13 and 15 are not do
 | A17 | README and docs said things the code did not: the S3 rules, `PCDS_RELEASES`, spike sections of docs/hot-update.md, stale comments (`/api/manifest`, "extractor", HELLO and READY keys) | fixed in 0.7.0 for the README and the settings table; the comments are fixed in this branch. The spike sections of docs/hot-update.md stay on purpose as the design record, and the page says so | README "Off-site copies (S3)", docs/env.md, docs/hot-update.md header |
 | A18 | Dead code and stale `allow`s: five stale allows, `sig_debug`, `refresh_generation_multiplier`, `PCDS_BANK`, the constant `"standalone"` status field | fixed in 0.7.0: all removed. The two `cfg_attr(not(test), allow(dead_code))` that remain mark fields only tests read | grep finds none of the removed names |
 | A19 | Legacy paths kept for 0.5 and 0.6: the clean-up of 0.5 layouts, the 0.6 rules and snapshot compatibility, error shims, `reads` lists | fixed in 0.7.0: removed. Old saves are refused with a message, or imported by `pcds world import` | `oldsave.rs` tests, docs/hot-update.md |
-| A20 | Silent fallbacks against the "no fallbacks" rule: a garbage `active` file reads as bank `a`, a missing planet reads as `Prime`, `world::hex` reads bad hex as 0 | open for these three; a missing or mistyped RPC argument reading as 0 is by design (the hostile-RPC test relies on it) | `updater::active`, `scene.rs`, `world.rs` |
+| A20 | Silent fallbacks against the "no fallbacks" rule: a garbage `active` file reads as bank `a`, a missing planet reads as `Prime`, `world::hex` reads bad hex as 0 | fixed after 0.7.0: `updater::active` is an error that says what to do (no file at all is a fresh installation: bank a); a save with no known planet is refused at start; bad hex is an error (`util::from_hex`) or a panic naming the text (`world::hex`). A missing or mistyped RPC argument reading as 0 stays by design (the hostile-RPC test relies on it) | `updater::tests::an_active_file_that_says_neither_bank_is_an_error_and_not_bank_a`, `game::tests::a_save_without_a_known_planet_is_refused`, `util::tests::the_helpers_do_what_their_names_say` |
 | A21 | The S3 uploader runs in the game process with process-wide statics that are not in the snapshot, so a flip resets "last upload" | open: the owner's call whether S3 belongs in the front | `s3.rs` (`LAST`, `UPLOADED`, `BUSY`, `PENDING`) |
 | A22 | The join rules live in four places (`Game::approve`, `enforce`, the front's trust check, `utp::is_loopback`) and `game` imports `utp` | open: step 12 of the audit's list, never scheduled | `game.rs` calls `crate::utp::is_loopback` |
 | A23 | The flip and recovery logic is welded to processes and clocks and is tested only through real servers; `bank::run` and others call `process::exit` inline | open: step 15, the last and the owner's call | `tests/hot_update.rs` is the only coverage of the whole state machine |
 | A24 | The table reader (`native/`) is tested by hand, so it is the riskiest code to touch | open: one ignored test plus a comparison script | `native::tables::tests::read_game_writes_the_test_tables`, `tools/dev/tables-check.sh` |
 | A25 | Hygiene: duplicate type names (`Ctx`, `Bank`, `Access`), about 220 `pub` items used only in their module, `Result<_, String>` everywhere, raw `println!` logging | by design: the audit judged it not worth a project | none |
 | A26 | The web page restates the server: the unit order and symbols (the chat limit and timeouts were also listed) | open for the unit order; the rest was not rechecked | `UNIT_ORDER` in `server/web/index.html` |
-| A27 | The same small helper written several times: the clock in seconds, hex, file mtime, parent folder, hand-built `{"error":...}` strings | fixed in part in 0.7.0: `util.rs` holds the clock and the parent folder. `hex` still has three copies and the error strings were not counted again | `util.rs`; `fn hex` in `updater.rs`, `plugins/state.rs`, `world.rs` |
+| A27 | The same small helper written several times: the clock in seconds, hex, file mtime, parent folder, hand-built `{"error":...}` strings | fixed in part: `util.rs` holds the clock, the parent folder and, after 0.7.0, hex once (`to_hex`, and the strict `from_hex`; the copies in `updater.rs`, `plugins/state.rs` and the test helper in `wire.rs` are gone). The error strings were not counted again | `util::tests::the_helpers_do_what_their_names_say` |
 
 What the audit said to leave alone is still true: the settings schema and its tests, `coverage.rs`
 and `coverage.txt`, the encapsulation of the subsystems, the low layers, `ipc.rs`, `utp.rs`,
@@ -100,7 +100,7 @@ of a late-game world (U1) and several smaller ones. Finding numbers are those of
 | U7 | The automatic-update settings were read only when the front started | Low | fixed in 0.7.0: `update.auto` and `update.checkHours` are rules, read at each check | `front/updates.rs` |
 | U8 | A partial tarball was left beside the banks when the disk filled | Low | fixed in 0.7.0 | `updater::tests::a_broken_tarball_is_refused_and_leaves_the_banks_as_they_were` and the unwritable-folder test `a_banks_folder_that_cannot_be_written_fails_the_install_and_changes_nothing` |
 | U9 | A `pcds` that cannot run was reported as "a release from before hot updates" | Low | fixed in 0.7.0 | `updater::tests` (the install tests; the report's own test used a program that cannot run) |
-| U10 | A crash between the two renames in `updater::put` leaves the standby bank missing and a `.<bank>.old` folder behind; the active bank is never touched | Low | open | `updater.rs` (`put_with`, `sweep`) |
+| U10 | A crash between the two renames in `updater::put` leaves the standby bank missing and a `.<bank>.old` folder behind; the active bank is never touched | Low | fixed after 0.7.0: `updater::recover` (the front's start, and every `put` before it moves anything) puts the old bank back when only `.<bank>.old` is left, and removes it when a whole new bank stands beside it | `updater::tests::a_crash_inside_an_install_is_made_whole_at_the_next_start` (crash injected after each rename) |
 | U11 | `pcds upgrade --restart` set `active` to the new bank before reading its tables; if that failed, the next reboot would have left the server down | Medium | fixed in 0.7.0: `active` goes back to the bank that runs | `tables_or_undo` test in `cli/upgrade.rs` |
 | U12 | Flips stood 35 to 1330 ms against 6 to 17 ms measured elsewhere, and two e2e tests failed once, while the host load was 33 to 114 | Info | not reproducible: seen only on a loaded host; rerun alone they pass | docs/hot-update.md, "Measured" |
 | U13 | Alternating two releases shows systemd's "unit file changed on disk" because each release's `pcds run` rewrites the unit | Info | by design: cosmetic | `refresh_unit` in `cli/systemd.rs` |
@@ -134,7 +134,7 @@ Tools were run on the whole source; each real hit was fixed with a test. The rel
 | S8 | A snapshot with a clock of 1e20 seconds panicked in `Duration::from_secs_f64` | fixed in 0.7.0 | `handoff::tests::a_corrupt_clock_is_an_error_not_a_panic` |
 | S9 | A snapshot's slot map with a corrupt free list was accepted and would panic or overwrite later | fixed in 0.7.0 | `idmap::tests::slots_round_trip_and_a_corrupt_free_list_is_refused` |
 | S10 | The control buffer for passing file descriptors was a byte vector, which has no alignment promise | fixed in 0.7.0: held in `u64`s | `ipc::tests::frames_and_memfds_cross_the_socket` |
-| S11 | Between the front and its own bank: the result of sealing a memfd is ignored, and `MSG_CTRUNC` is not checked, so a peer could make the queue of descriptors grow | open: the peer is the server's own bank | `ipc.rs` (`F_ADD_SEALS`, `recv_with_fds`) |
+| S11 | Between the front and its own bank: the result of sealing a memfd is ignored, and `MSG_CTRUNC` is not checked, so a peer could make the queue of descriptors grow | fixed after 0.7.0: a seal the kernel refuses is an error (`memfd: could not be sealed`); a message with more than 4 descriptors, or more than 16 waiting for frames that take none, breaks the link with the reason in `Link::broken` | `ipc::tests::a_failed_seal_and_a_flood_of_descriptors_break_the_link_loudly` |
 | S12 | The S3 uploader stayed busy for ever after a panic, and a failed thread start panicked the game loop | fixed in 0.7.0. A backup made in the microseconds before the uploader finishes waits for the next one, harmless | `s3::tests::a_panicking_upload_does_not_keep_the_next_ones_out` |
 | S13 | The admin acceptor spun at 100% CPU on accept errors, ended if a thread could not start, and `/api/logs` could wait for ever on `journalctl` | fixed in 0.7.0: it backs off, survives, and `journalctl` has a 6 s limit | `admin::tests::an_acceptor_that_keeps_failing_backs_off_and_recovers`, `LOGS_WAIT` in `admin.rs` |
 | S14 | If the chat hooks' delivery thread ever panics, the hooks stay off with no message | unverified: no known trigger since S5 | `front/chat_hooks.rs` |
@@ -146,7 +146,7 @@ Tools were run on the whole source; each real hit was fixed with a test. The rel
 | S20 | A new bank was renamed into place without flushing its files, so a power cut could leave empty files | fixed in 0.7.0 | `updater::tests::a_bank_is_flushed_to_disk_before_it_is_moved_into_place` |
 | S21 | `cargo audit`: one warning, `paste` 1.0.15 unmaintained (a compile-time macro pulled by `steamworks`); no vulnerability; licences all compatible | open: nothing to do here until `steamworks` moves. Not rerun for the crates added since (the plugin host, `toml`, `unicode-normalization`) | `server/Cargo.lock` |
 | S22 | The updater's checksum comes from the same server as the tarball, so it guards against damage, not a compromised release or mirror | by design: a limit of the design (the unpacked program runs as the server user), written down in docs/hot-update.md ("the sha256 guards against a damaged download, not a forged release: releases are not signed") | `updater.rs` (`unpack`) |
-| S23 | A hard link inside a release tarball passes `plain_files` (it looks like a file) | open | `updater.rs` (`plain_files`) |
+| S23 | A hard link inside a release tarball passes `plain_files` (it looks like a file) | fixed after 0.7.0: `plain_files` refuses any file with more than one name (tar extracts a hard link as a second name of the same file), as it refuses links and devices | `updater::tests::a_hard_link_in_a_tarball_is_refused` |
 | S24 | `world::hex` slices a string by bytes and panics on non-ASCII input (offline probe and load tools only) | fixed (consolidation after 0.7.0: no panic; bad hex still reads as 0, as the tools expect) | `world::tests::hex_reads_pairs_and_does_not_panic_on_text_that_is_not_ascii` |
 | S25 | Small suspects never reproduced: `serde_json` float parsing may move a huge value by one bit per save, `set_var` in a chat-hook test races other tests, `request.accept()` results ignored in the front | unverified | none |
 
@@ -171,15 +171,15 @@ stall is real but inflated. Finding numbers are those of the report.
 | D4 | The autosave's two atomic writes (four fsyncs) ran in the game loop: loops of 5 to 25 s on a loaded disk | Medium | fixed in 0.7.0: written on a thread; any later save waits for it | `bank::persist::tests::an_autosave_is_written_by_a_thread_and_never_overtakes_a_later_save`, `the_autosave_does_not_wait_for_a_slow_disk_and_a_still_world_writes_nothing` |
 | D5 | The UTP sender's window counted packets, not sequence numbers; after 64 packets between two acks a session was dropped (16 busy bots lost 2 to 4 in 200 s) | Medium | fixed in 0.7.0. Real Unity clients were not tried | `utp::tests::the_sender_never_runs_a_window_past_the_oldest_unacknowledged_packet` |
 | D6 | No watchdog on a bank: a hung or stopped bank is never replaced | Medium, design | fixed in 0.7.0: rule `limits.bankWatchdogSeconds` (default 60), not during a flip, a stop or a save | `hot_update::a_hung_bank_is_replaced_but_a_slow_paused_or_stopped_one_is_not`, README rules table |
-| D7 | Large worlds cross thresholds: 90,000 objects spike the idle loop to 100 ms; a flip stands over 100 ms from 11,000 network objects; a join takes seconds at 200,000. At rest, half the cost was the 10 Hz scan of every object for explosives | Medium, design | open in part: the snapshot and join work was made faster in 0.7.0 (snapshot in parts on several threads, writing straight to the save); the 10 Hz full scan is still in place, marked in the code | `meteo/explode.rs` (`ponytail:` comment), `tools/perf/`, docs/hot-update.md "Flip speed" |
+| D7 | Large worlds cross thresholds: 90,000 objects spike the idle loop to 100 ms; a flip stands over 100 ms from 11,000 network objects; a join takes seconds at 200,000. At rest, half the cost was the 10 Hz scan of every object for explosives | Medium, design | open in part: the snapshot and join work was made faster in 0.7.0 (snapshot in parts on several threads, writing straight to the save). The 10 Hz scan for explosives is fixed after 0.7.0: it runs only while a world object of an explosive group has a network object (a count kept at every place one gains, loses or is replaced; none in most worlds); on the 89,285-object grown bench world a tick went from 68.0 to 11.0 microseconds and the meteo part from 48.9 to 0.05, with the fingerprint unchanged. While a bomb lies about the scan is still over the whole world. Long flips and joins at 90,000 and more objects remain | `meteo::explode::tests::the_count_of_live_explosives_follows_the_world`, `bombs_armed_in_one_scan_go_off_in_slot_order`, `tools/perf/` |
 | D8 | After a bank stall the front held up to 16 MiB per client and never gave it back (9 to 226 MB) | Low | fixed in 0.7.0: bounded in all, in bytes, and returned | `what_all_clients_have_waiting_for_the_bank_is_capped_by_dropping_the_slowest`, `the_connections_together_may_not_queue_without_end`, docs/hot-update.md |
-| D9 | Saved players are never pruned: each new name adds about 1.2 KB to the save for ever | Low | open: a retention rule is a product decision | no pruning code in `players.rs` or `save.rs` |
+| D9 | Saved players are never pruned: each new name adds about 1.2 KB to the save for ever | Low | fixed after 0.7.0 by the opt-in rule `players.forgetAfterDays` (0: keep for ever): a player away that long who never crafted or earned a token, holds no more than the joining kit and is not the host or in the game is forgotten with those items; everyone else is kept | `players::tests::players_away_with_nothing_past_the_kit_are_forgotten_and_no_one_else`, `players::forget_unseen` |
 | D10 | A client that vanishes holds its slot and name for the 30 s UDP timeout; this filled the churn runs with "session full" | Low | by design: the slot is held to the UDP timeout so a client can come back | README, "Connection slots can be flooded" |
 | D11 | Unit totals were f32 and stop growing above about rate x 1.7e6 | Suspect | fixed in 0.7.0: totals are exact f64 after the first hour, the f32 the game shows is derived | `clock::tests::a_total_of_millions_keeps_growing_after_the_first_hour` |
 | D12 | The network tick counter saturates at 828 days and the logistics frame loop stops | Suspect | fixed in 0.7.0: 64-bit inside, wraps on the wire like the game's int | docs/clock.md, "Design" (the tick counter) |
 | D13 | Machine, rocket and meteo timers degrade with the f32 clock's resolution (2.5% to 10% slow at 48 to 194 days) | Suspect | fixed in 0.7.0 by the f64 clock | `clock::tests::an_old_clock_keeps_its_steps`, docs/clock.md |
 | D14 | A jump of game time was paid by catch-up loops: 3 days cost 14 CPU minutes | Suspect | fixed in 0.7.0: `take_due` counts instead of looping | `clock::tests::take_due_is_the_loop_it_replaces`, `units::tests::a_jump_of_the_clock_is_one_catch_up` |
-| D15 | If the wall clock steps back (NTP), backups stamped in the future block new backups until it catches up | Low | open: reasoning only, never run | `save.rs` (`times.iter().any(\|t\| *t > since)`) |
+| D15 | If the wall clock steps back (NTP), backups stamped in the future block new backups until it catches up | Low | fixed after 0.7.0: a stamp from the future does not count as a recent backup, is ordered before all others (pruned first, never "the newest" for S3), and the copy just made is never the one removed | `save::tests::backups_stamped_in_the_future_block_nothing_and_go_first`, `save::backup_stamps` |
 | D16 | A restarted world's heat differs from a straight run by 0.0004% to 0.06% | Low | by design: a restart is a new game on the same save and the game's own float behaves the same | docs/clock.md, "What is not the same"; `bench::restart` |
 
 Experiments that found nothing (kept for the record, no finding):
@@ -194,7 +194,7 @@ Experiments that found nothing (kept for the record, no finding):
   recover; 3 million garbage datagrams: no panic, no growth.
 * **Stress**: 16,000 RPC/s and 40 players on 16 places: loops under 10 ms. A drone farm of 200
   drones for one game hour: flat memory, worst tick 15 ms.
-* **Time**: UTC stamps for 400 years, the bank stopped for 30, 120 and 600 s: game time catches up.
+* **Time**: UTC stamps for 400 years, the bank stopped for 30, 120 and 600 s: game time caught up (changed after 0.7.0: a stall is a third of a second of game time at most, as in the game; see clock.md).
 
 Not covered: the Steam transport and invite codes, a real Unity client for D5, the hourly update
 check against a real service, and S3 against a real bucket (a fake endpoint answered).
@@ -207,20 +207,12 @@ on rootless Docker, stale module names in comments) are not repeated.
 
 Architecture:
 
-* **A5** The CLI and the server parse the admin address differently. Next: make `cli/api.rs` use the
-  parser of `config::check_env`.
-* **A6** `DISCONNECT_REASON`, the `"Prime"` fallback planet and the default session 4242 stay in
-  source. Next: move the id to `protocol.rs` and make the planet and session required values.
-* **A8** The tables folder has no owner module. Next: step 7, a `tables` module; `native` stops
-  importing `cli` and `net`.
-* **A9** File primitives are in `cli`. Next: step 13, one module for atomic write and lock.
-* **A10** Wrong-way edges between the front, the bank and the settings. Next: step 4, then step 8.
+* **A9** Two atomic writers and two lock helpers remain (`save::write_atomic` and `util::replace_file`; `updater::lock` and `util::hold`). Next: decide whether the differences are needed, then one of each.
+* **A10** The front reads settings and rules by name (`front → config`, `front → rules`). Next: step 8.
 * **A12** Typed admin requests, the `err()` helper and one timeout table are not done. Next: type
   the request bodies of kick, ban, teleport.
 * **A16** The animator sync blob and the owner-write list are game facts in source. Next: have the
   reader emit them into the tables (bumps the tables format).
-* **A20** Three silent fallbacks (`updater::active`, `"Prime"`, `world::hex`). Next: make each an
-  error.
 * **A21** S3 uploads run in the game process with statics outside the snapshot. Next: owner decides
   whether to move them to the front.
 * **A22** Join rules in four places. Next: one pure admission function with tests.
@@ -228,31 +220,16 @@ Architecture:
   `tests/hot_update.rs` first, then step 15.
 * **A24** The table reader has one ignored test. Next: run `tools/dev/tables-check.sh` on every game
   update and before touching `native/`.
-* **A26, A27** The web page restates the unit order; `hex` has three copies. Next: serve the unit
-  order from `/api/status`; use one `hex`.
-
-Update:
-
-* **U10** A crash between the two renames of `updater::put` leaves a `.<bank>.old` folder and no
-  standby bank. Next: recover `.old` in `sweep` under the lock.
+* **A26** The web page restates the unit order. Next: serve the unit order from `/api/status`.
 
 Static:
 
-* **S11** The memfd seal result and `MSG_CTRUNC` are unchecked (own bank only). Next: check both
-  and fail the frame.
 * **S21** `paste` is unmaintained (build time, via `steamworks`). Next: rerun `cargo audit` and
   `cargo deny` for the crates added since 0.6.1.
-* **S23** A hard link in a release tarball passes the file check. Next: refuse entries with a link
-  count above one, or refuse hard links in the tar listing.
 
 Dynamic:
 
-* **D7** The 10 Hz scan of every world object for explosives remains, and large worlds still
-  produce long flips and joins. Next: drive `explode::scan` from changes, not from a timer, and
-  re-measure with `tools/perf/` at 90,000 objects.
-* **D9** Saved players are never pruned. Next: owner decides a retention rule.
-* **D15** Backups stamped in the future block new ones after a clock step back. Next: write a test
-  with a clock that steps back.
+* **D7** Large worlds still produce long flips and joins (90,000 objects: a flip over 100 ms from 11,000 network objects; a join takes seconds at 200,000). The explosives' scan is fixed (see the table). Next: re-measure with `tools/perf/` at 90,000 objects and take the longest phase of the flip.
 
 Lead from the tools' smoke runs, not a finding: in two of three disk-full runs against 0.6.2,
 `GET /api/status` was refused for 8 s after a `kill -9` of the bank on a full disk although the
@@ -261,4 +238,4 @@ front's log showed the bank restarting. Not reproduced on 0.7.0; run `tools/chao
 
 Unverified (could not be checked, listed so they are not lost): **S14** (chat hooks stay off after a
 delivery panic), **S15** (two sets growing per hostile connection id), **S25** (small suspects), and
-the parts of A3, A14, A19, A26 and A27 named in their rows.
+the parts of A3, A14, A19 and A26 named in their rows.

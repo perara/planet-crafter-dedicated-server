@@ -21,6 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 use crate::msg::{json as show, BankInfo, Fallback, RolledBack};
+use crate::util::to_hex;
 
 /// The releases of this project (PCDS_RELEASES points elsewhere: a mirror, or a test).
 pub const RELEASES: &str = "https://api.github.com/repos/perara/planet-crafter-dedicated-server/releases";
@@ -112,10 +113,6 @@ pub fn lookup(base: &str, version: Option<&str>) -> Result<Release, String> {
     };
     let name = format!("pcds-{tag}-linux-x86_64.tar.gz");
     Ok(Release { tarball: asset(&name)?, checksum: asset(&format!("{name}.sha256"))?, tag, local })
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Whether the release in a bank can take over the world the running bank holds (its HELLO
@@ -283,7 +280,7 @@ fn sweep(banks: &Path) {
 /// program of the old one keeps its files (they are renamed away, not overwritten). Err leaves
 /// the bank as it was.
 pub fn put(banks: &Path, bank: &str, new: &Path) -> Result<(), String> {
-    put_with(banks, bank, new, |p| std::fs::File::open(p)?.sync_all())
+    put_with(banks, bank, new, |p| std::fs::File::open(p)?.sync_all(), |_| false)
 }
 
 /// Every file and folder under `dir`, `dir` last, through `sync` (fsync).
@@ -299,25 +296,65 @@ fn sync_tree(dir: &Path, sync: &impl Fn(&Path) -> std::io::Result<()>) -> std::i
     sync(dir)
 }
 
-/// put() with the flush as a parameter. The unpacked files reach the disk before the folder is
+/// What an install that died between its two renames left (`put`): `.<bank>.old` holds the bank
+/// as it was. With no bank in its place the old one is put back; with a whole new bank in
+/// place (it died after the second rename) the old one is only to be removed. Each thing done
+/// is returned, to be told. Under the banks' lock (`recover` takes it; `put` holds it).
+fn recover_locked(banks: &Path) -> Result<Vec<String>, String> {
+    let mut done = Vec::new();
+    for bank in BANKS {
+        let (path, old) = (banks.join(bank), banks.join(format!(".{bank}.old")));
+        if std::fs::symlink_metadata(&old).is_err() {
+            continue;
+        }
+        if std::fs::symlink_metadata(&path).is_err() {
+            std::fs::rename(&old, &path).map_err(|e| format!("{}: could not be put back as bank {bank}: {e}", old.display()))?;
+            done.push(format!("bank {bank} was missing after an install was interrupted: the bank it held is back"));
+        } else {
+            std::fs::remove_dir_all(&old).map_err(|e| format!("{}: {e}", old.display()))?;
+        }
+    }
+    Ok(done)
+}
+
+/// Makes the banks folder whole after a crash of an install (`recover_locked`), under the lock.
+/// The front does it before it picks the bank to start.
+pub fn recover(banks: &Path) -> Result<Vec<String>, String> {
+    let _lock = lock(banks)?;
+    recover_locked(banks)
+}
+
+/// put() with the flush as a parameter, and `crash`, which a test uses to end the process
+/// where it stands (true at "renamed away" and "renamed in": the function returns with the
+/// disk as a crash there leaves it). The unpacked files reach the disk before the folder is
 /// moved to the bank's name, and the move itself after: a power cut leaves the old bank or a
 /// whole new one, not a bank whose program is a name with no bytes (the data of a file the
 /// system had not written yet).
-fn put_with(banks: &Path, bank: &str, new: &Path, sync: impl Fn(&Path) -> std::io::Result<()>) -> Result<(), String> {
+fn put_with(banks: &Path, bank: &str, new: &Path, sync: impl Fn(&Path) -> std::io::Result<()>, crash: impl Fn(&str) -> bool) -> Result<(), String> {
     let _lock = lock(banks)?;
     sync_tree(new, &sync).map_err(|e| format!("{}: could not be flushed to disk before it is installed: {e}", new.display()))?;
+    // A crash of an earlier install: what it left is made whole first (never removed blindly: the
+    // bank it moved away may be the only copy).
+    for done in recover_locked(banks)? {
+        println!("banks: {done}");
+    }
     let path = banks.join(bank);
     let old = banks.join(format!(".{bank}.old"));
-    let _ = std::fs::remove_dir_all(&old);
     let had = std::fs::symlink_metadata(&path).is_ok();
     if had {
         std::fs::rename(&path, &old).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    if crash("renamed away") {
+        return Err("crashed".into());
     }
     if let Err(e) = std::fs::rename(new, &path) {
         if had && let Err(back) = std::fs::rename(&old, &path) {
             return Err(format!("{}: {e}; and the bank could not be put back from {}: {back}", path.display(), old.display()));
         }
         return Err(format!("{}: {e}", path.display()));
+    }
+    if crash("renamed in") {
+        return Err("crashed".into());
     }
     let _ = std::fs::remove_dir_all(&old);
     // The renames themselves.
@@ -329,7 +366,7 @@ fn unpack(release: &Release, new: &Path) -> Result<BankInfo, String> {
     let http = agent(release.local);
     let tarball = get(&http, &release.tarball)?;
     let published = String::from_utf8_lossy(&get(&http, &release.checksum)?).split_whitespace().next().unwrap_or("").to_ascii_lowercase();
-    let downloaded = hex(ring::digest::digest(&ring::digest::SHA256, &tarball).as_ref());
+    let downloaded = to_hex(ring::digest::digest(&ring::digest::SHA256, &tarball).as_ref());
     if published != downloaded {
         return Err(format!("{tag}: the download does not match its published sha256 ({published} published, {downloaded} downloaded); nothing installed"));
     }
@@ -349,7 +386,7 @@ fn unpack(release: &Release, new: &Path) -> Result<BankInfo, String> {
         Ok(s) => return Err(format!("{tag}: tar could not unpack it ({s})")),
         Err(e) => return Err(format!("tar: {e} (install tar with your package manager)")),
     }
-    plain_files(new, new).map_err(|e| format!("{tag}: the tarball holds {e}, which is not a file or a folder; nothing installed"))?;
+    plain_files(new, new).map_err(|e| format!("{tag}: the tarball holds {e}, which is not a file or a folder of its own (a link, a hard link or a device in it could point the server anywhere); nothing installed"))?;
     let program = new.join("pcds");
     if !program.is_file() {
         return Err(format!("{tag}: no pcds in the tarball"));
@@ -366,15 +403,17 @@ fn unpack(release: &Release, new: &Path) -> Result<BankInfo, String> {
 }
 
 /// Err names the first thing under `dir` that is neither a plain file nor a folder (a link, a
-/// device, a fifo): a link in a bank could point the server anywhere.
+/// device, a fifo) or is a file with more than one name (a hard link in the tarball, which tar
+/// extracts as a second name of the same file): a link in a bank could point the server anywhere.
 fn plain_files(root: &Path, dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
     for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
         let entry = entry.map_err(|e| e.to_string())?;
         let kind = entry.file_type().map_err(|e| e.to_string())?;
         let path = entry.path();
         if kind.is_dir() {
             plain_files(root, &path)?;
-        } else if !kind.is_file() {
+        } else if !kind.is_file() || entry.metadata().map_err(|e| e.to_string())?.nlink() > 1 {
             return Err(path.strip_prefix(root).unwrap_or(&path).display().to_string());
         }
     }
@@ -392,17 +431,22 @@ pub fn info(banks: &Path, bank: &str) -> Option<BankInfo> {
     serde_json::from_str(&text).ok().filter(|_| banks.join(bank).join("pcds").is_file())
 }
 
-/// The bank the front starts: run/bin/active ("a" when there is none yet).
-pub fn active(banks: &Path) -> String {
-    let text = std::fs::read_to_string(banks.join("active")).unwrap_or_default();
-    BANKS.iter().find(|b| **b == text.trim()).unwrap_or(&"a").to_string()
+/// The bank the front starts: run/bin/active. No file yet is a fresh installation, which starts
+/// from bank a; a file that says anything but a or b is an error saying what to do, never bank a.
+pub fn active(banks: &Path) -> Result<String, String> {
+    let path = banks.join("active");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => BANKS.iter().find(|b| **b == text.trim()).map(|b| b.to_string()).ok_or_else(|| format!("{}: it holds {:?}, and must say a or b, the bank the server runs from. Write a or b in it (the other bank is the standby), or delete the file to start from bank a", path.display(), text.trim())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("a".into()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
 }
 
 /// Points run/bin/active at a bank: written beside, flushed, and moved over (under the banks'
 /// lock), so it is one or the other, also after a crash.
 pub fn set_active(banks: &Path, bank: &str) -> Result<(), String> {
     let _lock = lock(banks)?;
-    crate::cli::replace_file(&banks.join("active"), format!("{bank}\n").as_bytes(), 0o644)
+    crate::util::replace_file(&banks.join("active"), format!("{bank}\n").as_bytes(), 0o644)
 }
 
 /// The bank the owner rolled back from, and its release (banks/rolled-back: {"bank", "tag"}).
@@ -431,7 +475,7 @@ fn note_rolled_back(banks: &Path, bank: &str, why: Option<&str>) -> Result<(), S
     let tag = held.tag.or_else(|| held.version.as_deref().map(tag));
     let note = RolledBack { bank: bank.to_string(), tag, reason: why.map(str::to_string), at: why.map(|_| SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)) };
     let _lock = lock(banks)?;
-    crate::cli::replace_file(&banks.join("rolled-back"), (crate::msg::text(&note) + "\n").as_bytes(), 0o644)
+    crate::util::replace_file(&banks.join("rolled-back"), (crate::msg::text(&note) + "\n").as_bytes(), 0o644)
 }
 
 /// The bank a release that keeps ending the game is given up for: the other one. Err (why not):
@@ -465,13 +509,13 @@ pub fn note_fallback(banks: &Path, from: &str, to: &str, reason: &str) -> Result
     let at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let note = Fallback { from: from.to_string(), to: to.to_string(), reason: reason.to_string(), at: Some(at) };
     let _lock = lock(banks)?;
-    crate::cli::replace_file(&banks.join("fallback"), (crate::msg::text(&note) + "\n").as_bytes(), 0o644)
+    crate::util::replace_file(&banks.join("fallback"), (crate::msg::text(&note) + "\n").as_bytes(), 0o644)
 }
 
 /// The fallback note, while the bank it started is the active one.
 pub fn fallback(banks: &Path) -> Option<Fallback> {
     let text = std::fs::read_to_string(banks.join("fallback")).ok()?;
-    serde_json::from_str(&text).ok().filter(|f: &Fallback| f.to == active(banks))
+    serde_json::from_str(&text).ok().filter(|f: &Fallback| active(banks).is_ok_and(|a| f.to == a))
 }
 
 pub fn clear_fallback(banks: &Path) -> Result<(), String> {
@@ -537,7 +581,12 @@ fn version_key(v: &str) -> (Vec<u64>, bool, Vec<Part<'_>>) {
 /// The admin API's view of the banks.
 pub fn describe(banks: &Path) -> Value {
     let installed: Vec<Value> = BANKS.iter().map(|b| json!({"bank": b, "info": info(banks, b)})).collect();
-    json!({"dir": banks, "active": active(banks), "installed": installed, "fallback": fallback(banks), "rolledBack": rolled_back(banks)})
+    let active = active(banks);
+    let mut v = json!({"dir": banks, "active": active.as_ref().ok(), "installed": installed, "fallback": fallback(banks), "rolledBack": rolled_back(banks)});
+    if let Err(e) = active {
+        v["error"] = json!(e);
+    }
+    v
 }
 
 #[cfg(test)]
@@ -586,7 +635,7 @@ pub mod tests {
     /// A release server for one release on 127.0.0.1; its releases URL.
     fn fake(dir: &Path, tag: &str, program: &[u8], tamper: bool) -> String {
         let tar = tarball(dir, tag, program);
-        let sum = hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
+        let sum = to_hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
         let sum = if tamper { format!("{}{}", if sum.starts_with('0') { '1' } else { '0' }, &sum[1..]) } else { sum };
         format!("{}/releases", serve(release("BASE", tag, tar, sum)))
     }
@@ -662,6 +711,54 @@ pub mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A crash between the two renames of `put` leaves the bank missing and `.<bank>.old` holding
+    /// it; a crash after them leaves a whole new bank and the old one beside it. `recover` (the
+    /// front's start) and the next `put` make either whole: the old bank is put back, or the
+    /// leftover removed; with the crash injected at each point.
+    #[test]
+    fn a_crash_inside_an_install_is_made_whole_at_the_next_start() {
+        let dir = test_dir("put-crash");
+        let banks = dir.join("bin");
+        let bank = || std::fs::read_to_string(banks.join("b/pcds")).unwrap_or_else(|e| e.to_string());
+        let stage = |n: u32| {
+            let new = banks.join(format!(".b.new.{n}"));
+            std::fs::create_dir_all(&new).unwrap();
+            std::fs::write(new.join("pcds"), "new").unwrap();
+            new
+        };
+        for point in ["renamed away", "renamed in"] {
+            let _ = std::fs::remove_dir_all(&banks);
+            std::fs::create_dir_all(banks.join("b")).unwrap();
+            std::fs::write(banks.join("b/pcds"), "old").unwrap();
+            assert_eq!(put_with(&banks, "b", &stage(1), |_| Ok(()), |at| at == point).unwrap_err(), "crashed");
+            if point == "renamed away" {
+                assert_eq!(names(&banks), [".b.new.1", ".b.old"], "the bank is missing: its folder is the .old one");
+                assert!(!banks.join("b").exists());
+            } else {
+                assert_eq!((bank(), banks.join(".b.old/pcds").is_file()), ("new".into(), true), "a whole new bank, the old one beside it");
+            }
+            let told = recover(&banks).unwrap();
+            if point == "renamed away" {
+                assert_eq!((bank(), told.len()), ("old".into(), 1), "the bank it held is back: {told:?}");
+            } else {
+                assert_eq!((bank(), told.len()), ("new".into(), 0), "the leftover goes, the new bank stays");
+            }
+            assert!(!banks.join(".b.old").exists());
+            // Nothing to recover: nothing done.
+            assert_eq!(recover(&banks).unwrap(), Vec::<String>::new());
+        }
+        // The install tried again after a crash (no recover in between) must not remove the only
+        // copy of the old bank: put finds `.old`, puts it back, and then replaces it.
+        let _ = std::fs::remove_dir_all(&banks);
+        std::fs::create_dir_all(banks.join("b")).unwrap();
+        std::fs::write(banks.join("b/pcds"), "old").unwrap();
+        put_with(&banks, "b", &stage(2), |_| Ok(()), |at| at == "renamed away").unwrap_err();
+        put_with(&banks, "b", &stage(3), |_| Ok(()), |_| false).unwrap();
+        assert_eq!(bank(), "new");
+        assert!(!banks.join(".b.old").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     const LIVE: &str = r#"{"format": 1}"#;
 
     /// A bank's info from the JSON a test spells out.
@@ -688,7 +785,7 @@ pub mod tests {
             log.borrow_mut().push((p.strip_prefix(&banks).unwrap_or(p).to_path_buf(), at));
             Ok(())
         };
-        put_with(&banks, "b", &new, record).unwrap();
+        put_with(&banks, "b", &new, record, |_| false).unwrap();
         let log = log.into_inner();
         let names: Vec<String> = log.iter().map(|(p, _)| p.display().to_string()).collect();
         // Both files, the web folder, the new folder (last of them), then the banks folder.
@@ -699,7 +796,7 @@ pub mod tests {
         // A flush that fails: nothing moved.
         std::fs::create_dir_all(dir.join("bin/.b.new.2")).unwrap();
         std::fs::write(dir.join("bin/.b.new.2/pcds"), "newer").unwrap();
-        let e = put_with(&banks, "b", &dir.join("bin/.b.new.2"), |_| Err(std::io::Error::other("disk gone"))).unwrap_err();
+        let e = put_with(&banks, "b", &dir.join("bin/.b.new.2"), |_| Err(std::io::Error::other("disk gone")), |_| false).unwrap_err();
         assert!(e.contains("could not be flushed to disk before it is installed: disk gone"), "{e}");
         assert_eq!(std::fs::read_to_string(banks.join("b/pcds")).unwrap(), "new");
         // The real flush works on files and folders.
@@ -794,12 +891,42 @@ pub mod tests {
             std::fs::remove_dir_all(dir.join(name)).unwrap();
             std::fs::read(dir.join("t.tar.gz")).unwrap()
         };
-        let sum = hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
+        let sum = to_hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
         let base = format!("{}/releases", serve(release("BASE", "v9.9.9", tar, sum)));
         let banks = dir.join("bin");
         let e = install(&lookup(&base, None).unwrap(), &banks, "b", None).unwrap_err();
         assert!(e.contains("web, which is not a file or a folder"), "{e}");
         assert!(!banks.join("b").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A hard link in a release tarball looks like a file once extracted: it is refused by its link
+    /// count (a crafted tar, made by GNU tar from two names of one file), also in a folder.
+    #[test]
+    fn a_hard_link_in_a_tarball_is_refused() {
+        let dir = test_dir("hardlink");
+        let name = "pcds-v9.9.9-linux-x86_64";
+        std::fs::create_dir_all(dir.join(name).join("web")).unwrap();
+        std::fs::write(dir.join(name).join("pcds"), script(crate::ipc::PROTOCOL)).unwrap();
+        std::fs::write(dir.join(name).join("web/a.html"), "<html></html>").unwrap();
+        std::fs::hard_link(dir.join(name).join("web/a.html"), dir.join(name).join("web/b.html")).unwrap();
+        let out = dir.join("t.tar.gz");
+        assert!(Command::new("tar").arg("-czf").arg(&out).arg("-C").arg(&dir).arg(name).status().unwrap().success());
+        let listing = Command::new("tar").arg("-tvzf").arg(&out).output().unwrap().stdout;
+        assert!(String::from_utf8_lossy(&listing).lines().any(|l| l.starts_with('h')), "the crafted tar holds a hard link entry");
+        let tar = std::fs::read(&out).unwrap();
+        let sum = to_hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
+        let base = format!("{}/releases", serve(release("BASE", "v9.9.9", tar, sum)));
+        let banks = dir.join("bin");
+        let e = install(&lookup(&base, None).unwrap(), &banks, "b", None).unwrap_err();
+        assert!(e.contains("web/") && e.contains(".html, which is not a file or a folder") && e.contains("hard link"), "{e}");
+        assert!(!banks.join("b").exists());
+        // A plain tree with no second names passes.
+        let plain = dir.join("plain");
+        std::fs::create_dir_all(plain.join("web")).unwrap();
+        std::fs::write(plain.join("web/a.html"), "x").unwrap();
+        std::fs::write(plain.join("pcds"), "x").unwrap();
+        assert_eq!(plain_files(&plain, &plain), Ok(()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -903,12 +1030,34 @@ pub mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// banks/active says a or b. A fresh installation has no file and starts from bank a; a file
+    /// that says anything else is an error that says what to do, not bank a, and the status shows it.
+    #[test]
+    fn an_active_file_that_says_neither_bank_is_an_error_and_not_bank_a() {
+        let dir = test_dir("active-garbage");
+        for garbage in ["", "c\n", "bank b", "\u{0}\u{0}"] {
+            std::fs::write(dir.join("active"), garbage).unwrap();
+            let e = active(&dir).unwrap_err();
+            assert!(e.contains("active") && e.contains("must say a or b") && e.contains("delete the file"), "{garbage:?}: {e}");
+            assert_eq!(describe(&dir)["error"], json!(e));
+            assert_eq!(describe(&dir)["active"], Value::Null);
+        }
+        // Spaces around the name do not matter; a directory in its place is an error too.
+        std::fs::write(dir.join("active"), " b \n").unwrap();
+        assert_eq!(active(&dir).unwrap(), "b");
+        assert!(describe(&dir).get("error").is_none());
+        std::fs::remove_file(dir.join("active")).unwrap();
+        std::fs::create_dir(dir.join("active")).unwrap();
+        assert!(active(&dir).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn the_active_bank_and_versions() {
         let dir = test_dir("active");
-        assert_eq!(active(&dir), "a");
+        assert_eq!(active(&dir).unwrap(), "a");
         set_active(&dir, "b").unwrap();
-        assert_eq!((active(&dir), other("b"), other("a")), ("b".to_string(), "a", "b"));
+        assert_eq!((active(&dir).unwrap(), other("b"), other("a")), ("b".to_string(), "a", "b"));
         assert!(newer("v0.6.0", "0.5.0") && newer("v0.10.0", "0.9.9") && !newer("v0.5.0", "0.5.0") && !newer("v0.4.9", "0.5.0"));
         // Semantic version order: a pre-release before its release, its parts one by one.
         let order = ["0.9.9", "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0", "v1.0.1", "1.1"];
@@ -1006,7 +1155,7 @@ pub mod tests {
         std::fs::create_dir_all(banks.join("b")).unwrap();
         std::fs::write(banks.join("b/pcds"), "the old one").unwrap();
         let serve_tar = |tag: &str, tar: Vec<u8>| {
-            let sum = hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
+            let sum = to_hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
             lookup(&format!("{}/releases", serve(release("BASE", tag, tar, sum))), None).unwrap()
         };
         let good = tarball(&dir, "v9.9.9", &script(crate::ipc::PROTOCOL));

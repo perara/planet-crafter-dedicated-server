@@ -106,6 +106,8 @@ pub static KNOBS: &[Knob] = &[
     rule("limits.maxPlayers", Type::Int, "players", "Players at once; more are refused with the game's session-full message. Unset: 16.").range(1.0, 100.0),
     rule("limits.bankWatchdogSeconds", Type::Int, "s", "A game process that says nothing (no answer to a player, an admin request or the front's ping) for this long is killed and the world starts again from the last snapshot or save, as after a crash (and counts toward the crash limit). Not during a flip, a world stop or a save the admin asked for. 0: never; else 10 to 3600.").range(0.0, 3600.0),
     rule("world.pauseWhenEmpty", Type::Bool, "", "With no player in the game (past PlayerReady, as the game counts players), the world stands still: its clock, and with it every timer, day and night, growth, production, terraformation, meteo, drone and vehicle. It goes on from there when a player is in."),
+    rule("world.dlcPlanets", Type::List, "", "The DLC planets (Humble, Toxicity) you own. The server cannot ask Steam about your account, so this is your statement of ownership, not a check: a world is on a DLC planet, or travels to one, only if it is listed here. Empty: none."),
+    rule("players.forgetAfterDays", Type::Int, "days", "A player who has not been in for this many days, who never crafted anything or earned a token, and who holds no more than a new player is given, is forgotten: their saved record and their starter items go (about 1.2 KB each). Anyone who made or holds more is kept for ever, and so is anyone in the game. 0: every player is kept for ever.").range(0.0, 36_500.0),
     rule("chat.webhooks", Type::List, "", "http:// or https:// URLs every chat message is POSTed to as JSON (see the README's chat hooks).").secret(),
     rule("chat.secret", Type::String, "", "Signs every webhook POST: X-PCDS-Signature: sha256=<HMAC-SHA256 of the body, hex>. Unset: unsigned.").secret(),
     rule("chat.exec", Type::List, "", "A program and its arguments (no shell), run for each chat message with its JSON on stdin; what it prints is said back in the chat.").secret(),
@@ -333,6 +335,67 @@ pub fn check_env(get: impl Fn(&str) -> Option<String>) -> Result<(), String> {
     if bad.is_empty() { Ok(()) } else { Err(format!("server.env: {} (pcds config edits it)", bad.join("; "))) }
 }
 
+/// The KEY=VALUE lines of a settings file, in order; comments and blank lines left out, quotes
+/// around a value taken off (as systemd's EnvironmentFile= reads it).
+pub fn parse_env(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let (key, value) = line.trim().split_once('=')?;
+            let key = key.trim();
+            if key.is_empty() || key.starts_with('#') || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                return None;
+            }
+            let value = value.trim();
+            let unquoted = ['"', '\''].iter().find_map(|q| value.strip_prefix(*q)?.strip_suffix(*q)).unwrap_or(value);
+            Some((key.to_string(), unquoted.to_string()))
+        })
+        .collect()
+}
+
+/// The text with KEY set to VALUE: every KEY= line replaced, else one added at the end.
+pub fn set_env_text(text: &str, key: &str, value: &str) -> String {
+    let prefix = format!("{key}=");
+    let mut found = false;
+    let mut out: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if line.starts_with(&prefix) {
+                found = true;
+                format!("{key}={value}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    if !found {
+        out.push(format!("{key}={value}"));
+    }
+    out.join("\n") + "\n"
+}
+
+/// One setting of a settings file changed (written beside and moved over, mode 600: it holds
+/// the admin token).
+pub fn set_env_file(path: &std::path::Path, key: &str, value: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    crate::util::replace_file(path, set_env_text(&text, key, value).as_bytes(), 0o600)
+}
+
+/// Where `pcds` reaches the admin API for a PCDS_ADMIN value: the same address check_env() accepts
+/// (a socket address, `localhost` is not one), on the loopback of its own family when it listens on
+/// every address. An address on another interface is Err: `pcds` talks to the loopback only, so
+/// the admin API must listen there too (or be asked over the network by other means).
+pub fn admin_loopback(setting: &str) -> Result<std::net::SocketAddr, String> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let addr: std::net::SocketAddr = setting.parse().map_err(|_| format!("PCDS_ADMIN={setting}: not an address (HOST:PORT, such as 127.0.0.1:7782 or [::1]:7782) or off"))?;
+    let ip = match addr.ip() {
+        ip if ip.is_loopback() => ip,
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        _ => return Err(format!("PCDS_ADMIN={setting}: pcds reaches the admin API on the loopback only (bind it to 127.0.0.1, [::1], 0.0.0.0 or [::])")),
+    };
+    Ok(std::net::SocketAddr::new(ip, addr.port()))
+}
+
 /// A whole-number server.env setting, or its default: what check_env() let through at start.
 pub fn env_number(key: &str) -> u64 {
     let k = knob_for(key).filter(|k| k.kind == Type::Int).unwrap_or_else(|| panic!("{key}: not a whole-number setting in config::KNOBS"));
@@ -437,7 +500,7 @@ pub fn set(game: &mut Game, body: &Value) -> Result<(), Value> {
         return Err(rule_error(e));
     }
     if access_changed {
-        crate::bank::enforce(game);
+        crate::access::enforce(game);
     }
     Ok(())
 }
@@ -781,6 +844,24 @@ mod tests {
         assert_eq!(keys.len(), KNOBS.len(), "every key once");
     }
 
+    /// The command line and the server read PCDS_ADMIN alike: what the server refuses at start the
+    /// command line refuses, what it accepts the command line reaches (the loopback of its family),
+    /// except an address on another interface, which only the server may listen on.
+    #[test]
+    fn the_command_line_reads_the_admin_address_as_the_server_does() {
+        let server_takes = |text: &str| check_env(|k| (k == "PCDS_ADMIN").then(|| text.to_string())).is_ok();
+        for (text, reached) in [("127.0.0.1:7782", Some("127.0.0.1:7782")), ("0.0.0.0:7782", Some("127.0.0.1:7782")), ("[::1]:7782", Some("[::1]:7782")), ("[::]:9", Some("[::1]:9")), ("192.168.1.5:7782", None), ("[2001:db8::1]:7782", None)] {
+            assert!(server_takes(text), "{text}");
+            assert_eq!(admin_loopback(text).ok().map(|a| a.to_string()), reached.map(String::from), "{text}");
+        }
+        for text in ["localhost:7782", "127.0.0.1", ":7782", "7782", "http://127.0.0.1:7782", "[::1]", "127.0.0.1:99999"] {
+            assert!(!server_takes(text), "{text}");
+            let e = admin_loopback(text).unwrap_err();
+            assert!(e.contains("PCDS_ADMIN") && e.contains("not an address"), "{text}: {e}");
+        }
+        assert!(admin_loopback("192.168.1.5:7782").unwrap_err().contains("loopback only"));
+    }
+
     /// Each rule takes what its entry says and refuses the rest, through Rules::validate (what
     /// rules.json and the API go through).
     #[test]
@@ -804,6 +885,7 @@ mod tests {
                 (Type::Int, Some((lo, hi))) => (vec![json!(lo as i64), json!(hi as i64)], vec![json!(lo as i64 - 1), json!(hi as i64 + 1), json!(lo + 0.5)]),
                 (Type::Enum, _) => (k.values.iter().map(|v| json!(v)).collect(), vec![json!("Nonsense"), json!(1)]),
                 (Type::Map, Some((lo, _))) => (vec![json!({}), json!({"Drill1": lo as i64})], vec![json!({"Drill1": lo as i64 - 1}), json!({"Drill1": "x"}), json!([])]),
+                (Type::List, None) if k.key == "world.dlcPlanets" => (vec![json!([]), json!(["Humble", "Toxicity"])], vec![json!(["Prime"]), json!(["humble"]), json!(["Humble", "Humble"]), json!([1]), json!("Humble")]),
                 (Type::List, None) if k.key == "chat.webhooks" => (vec![json!([]), json!(["https://example.com/hook"])], vec![json!(["example.com"]), json!([1]), json!("https://example.com")]),
                 (Type::List, None) if k.key == "chat.exec" => (vec![json!([]), json!(["/bin/true", "-x"])], vec![json!([""]), json!([1]), json!("/bin/true")]),
                 (Type::String, None) if k.key == "chat.secret" => (vec![json!("s3cret")], vec![json!(""), json!(1)]),

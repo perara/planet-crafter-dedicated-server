@@ -106,15 +106,22 @@ fn a_data_plugin_changes_the_rules_with_the_players_online_and_the_stream_hears_
     }
     // Six players: from the next tick on, plants grow twice as fast (a rules change by a plugin,
     // through the same validated path as the admin API's).
-    g.sim_time = Some(2.0);
-    g.tick();
+    // (Frames of a quarter second: the game's time goes on by a third of a second at most per frame.)
+    let run_to = |g: &mut crate::game::Game, end: f64| {
+        let mut t = g.sim_time.unwrap_or(0.0);
+        while t < end {
+            t += 0.25;
+            g.sim_time = Some(t);
+            g.tick();
+        }
+    };
+    run_to(&mut g, 2.0);
     assert_eq!(g.rules.speed.growth, 2.0);
     // Three of them leave: back to the game's speed.
     for client in 4..=6 {
         g.disconnect(client);
     }
-    g.sim_time = Some(4.0);
-    g.tick();
+    run_to(&mut g, 4.0);
     assert_eq!(g.rules.speed.growth, 1.0);
     send_scene(&mut g, 1, "ChatHandler.SendChatMessageServerRpc", &[json!("hello all")]);
     let (_, answer) = admin::request(&mut g, "POST", "/api/plugins/events", &json!({"after": 0, "types": ["chat", "rule_change", "player_join"]}));

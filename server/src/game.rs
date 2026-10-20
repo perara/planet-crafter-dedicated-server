@@ -252,6 +252,10 @@ pub struct Game {
     /// with terraformation, which stands still while the world is placed.
     #[serde(skip)]
     pub load_water: Option<crate::energy::Underwater>,
+    /// The hour (Unix time / 3600) players::forget_unseen last looked, so that it looks once an
+    /// hour; 0 after a start or a hot update (it looks at once, which does nothing twice).
+    #[serde(skip)]
+    pub forgot_hour: u64,
 }
 
 /// An RPC message's method hash (after sender, object and behaviour).
@@ -278,12 +282,32 @@ fn connection_data(body: &[u8]) -> Option<String> {
 /// World objects the tables cannot place are dropped when the world loads, and gone from the
 /// next save: a save from a newer game than these tables (or with mods), or an entry edited by
 /// hand. The start stops instead, saying which.
-pub fn check_save_content(save: &SaveFile, data: &GameData) -> Result<(), String> {
+pub fn check_save_content(save: &SaveFile, data: &GameData, net_data: &NetData) -> Result<(), String> {
+    world_planet(save, net_data)?;
     let unknown: Vec<&str> = save.objects.iter().filter(|o| WorldObject::from_json(o, data, 0).is_none()).map(|o| o["gId"].as_str().unwrap_or("(no group)")).collect();
     match unknown.first() {
         None => Ok(()),
         Some(first) => Err(format!("{} world objects of groups these game tables do not know (the first: {first}): a save from a newer game version, or edited? Update the server or its game data (`pcds update`), then try again", unknown.len())),
     }
+}
+
+/// The planet the world is on when it starts, and its place in the tables. SavedDataHandler.
+/// InitSavedData loads the host's planet; this server has no host, so it keeps the planet it
+/// travelled to in the world state (pcdsCurrentPlanet; the game ignores unknown fields) and marks a
+/// saved player host for the game (mark_host). A save that names no planet (settings.planetId is
+/// what the game starts a world with), or one these tables do not have, is an error saying so:
+/// there is no planet to start a world on instead.
+pub fn world_planet(save: &SaveFile, net_data: &NetData) -> Result<(String, usize), String> {
+    let known = |what: &str, id: &str| net_data.planet_index(id).ok_or_else(|| format!("{what} is {id:?}, a planet these game tables do not have: a save from a newer game version, or edited? Update the server or its game data (`pcds update`), then try again"));
+    let started = save.settings["planetId"].as_str().ok_or("settings.planetId is missing: it is the planet the world started on, and every save of the game has it. Not a save of this game, or edited?")?;
+    known("settings.planetId", started)?;
+    let host = save.players.iter().find(|p| p["host"].as_bool() == Some(true)).and_then(|p| p["planetId"].as_str()).filter(|p| !p.is_empty());
+    let (what, id) = match (save.world["pcdsCurrentPlanet"].as_str(), host) {
+        (Some(current), _) => ("world.pcdsCurrentPlanet", current),
+        (None, Some(host)) => ("the host player's planetId", host),
+        (None, None) => ("settings.planetId", started),
+    };
+    Ok((id.to_string(), known(what, id)?))
 }
 
 /// A game on a save with the test tables; None (the test skips) without them.
@@ -316,12 +340,7 @@ impl Game {
     /// A game whose clock is `sim_time` from the start (the bench's fixed clock): what the load
     /// spawns gets the same ticks in every run, not the real time the load took.
     pub fn with_clock(net_data: NetData, data: GameData, spec: Spec, save: SaveFile, scenes: crate::Scenes, sim_time: Option<f64>) -> Game {
-        // SavedDataHandler.InitSavedData loads the host's planet. This server has no host, so it
-        // keeps the planet it travelled to in the world state (pcdsCurrentPlanet; the game
-        // ignores unknown fields) and marks a saved player host for the game (mark_host).
-        let host_planet = save.players.iter().find(|p| p["host"].as_bool() == Some(true)).and_then(|p| p["planetId"].as_str()).filter(|p| !p.is_empty());
-        let planet_id = save.world["pcdsCurrentPlanet"].as_str().or(host_planet).or(save.settings["planetId"].as_str()).unwrap_or("Prime").to_string();
-        let planet = net_data.planet_index(&planet_id).unwrap_or(0);
+        let (_, planet) = world_planet(&save, &net_data).unwrap_or_else(|e| panic!("a save the start would have refused (check_save_content): {e}"));
         let mut game = Game {
             data,
             net_data,
@@ -335,6 +354,7 @@ impl Game {
             watchers: HashMap::new(),
             tmp_inventory_id: -2,
             clients: Default::default(),
+            forgot_hour: 0,
             saved_players: Vec::new(),
             total_crafted: HashMap::new(),
             all_time_tokens: HashMap::new(),
@@ -356,7 +376,7 @@ impl Game {
             access: crate::access::Access::load(None),
             rules: Default::default(),
             rules_path: None,
-            session_number: 4242,
+            session_number: crate::config::env_number("PCDS_SESSION") as u32,
             next_time_sync: crate::clock::GameTime::ZERO,
             unhandled: Default::default(),
             misrouted: Default::default(),
@@ -388,6 +408,12 @@ impl Game {
         self.sim_time.unwrap_or_else(|| self.started.elapsed().as_secs_f64())
     }
 
+    /// The planet the world started on (settings.planetId), which `world_planet` has seen to be a
+    /// planet of the tables when the world was loaded.
+    pub fn started_planet(&self) -> &str {
+        self.save.settings["planetId"].as_str().expect("settings.planetId: checked by world_planet when the world loaded")
+    }
+
     /// Network ticks since the game started, in 64 bits: nothing that counts them stops.
     pub fn tick_count(&self) -> u64 {
         ((self.clock() - self.paused) * self.net_data.tick_rate as f64) as u64
@@ -404,7 +430,7 @@ impl Game {
     /// SavedDataHandler.LoadSavedData: world objects, inventories, planets, players; then the
     /// scene's network objects and every placed world object of the current planet.
     fn load(&mut self) {
-        let default_planet = stable_hash(self.save.settings["planetId"].as_str().unwrap_or("Prime"));
+        let default_planet = stable_hash(self.started_planet());
         for o in std::mem::take(&mut self.save.objects) {
             if let Some(wo) = WorldObject::from_json(&o, &self.data, default_planet) {
                 self.wos.insert(wo.id, wo);
@@ -767,15 +793,24 @@ impl Game {
 
     /// One tick of the simulation, then the variable deltas.
     pub fn tick(&mut self) {
-        section!("rpcs", crate::handlers::run_pending(self, |g, rpc| g.rpc_cost(rpc), |g, client, rpc| g.run_rpc(client, rpc)));
         let clock = self.clock();
         let last = std::mem::replace(&mut self.last_clock, clock);
+        // Time.maximumDeltaTime: the game's time goes on by one frame at most across a stall (a
+        // stopped process, a long save, a busy host), as Unity's does. What is over is the world
+        // standing still, like a pause: no timer is due for it, no gauge drains for it. Before the
+        // RPCs: they read the network tick, which must not jump and fall back.
+        let stall = (clock - last - crate::clock::MAX_FRAME).max(0.0);
+        if stall >= 1.0 {
+            println!("world: the game loop was away {:.1} s (a stopped process, a long save or a busy host): the world's time went on by {:.2} s only, as a game's does across a hitch", stall + crate::clock::MAX_FRAME, crate::clock::MAX_FRAME);
+        }
+        self.paused += stall;
+        section!("rpcs", crate::handlers::run_pending(self, |g, rpc| g.rpc_cost(rpc), |g, client, rpc| g.run_rpc(client, rpc)));
         let empty = self.rules.world.pause_when_empty && !self.clients.values().any(|c| c.ready.is_some());
         if empty || self.held {
             // Nobody in the game, or paused by the admin: the clock (game time and network ticks)
             // holds, and every timer with it; it goes on from here. Clients still hear it each
             // second; players in a paused world still get the chat.
-            self.paused += clock - last;
+            self.paused += clock - last - stall;
             if empty {
                 crate::chathooks::drop_replies(self);
             } else {
@@ -800,7 +835,20 @@ impl Game {
         section!("flush", self.net.flush());
     }
 
+    /// The new bank of a flip failed and this one goes on: the time it stood since its last tick is
+    /// not the world's, whatever its length.
+    pub fn resume_after_stand(&mut self) {
+        let clock = self.clock();
+        self.paused += clock - self.last_clock;
+        self.last_clock = clock;
+    }
+
     fn every_second(&mut self) {
+        let now = crate::util::now_secs();
+        if self.rules.players.forget_after_days > 0 && now / 3600 != self.forgot_hour {
+            self.forgot_hour = now / 3600;
+            crate::players::forget_unseen(self, now);
+        }
         let tick = self.tick_number();
         self.out_to(Target::All, protocol::time_sync(tick));
         // A connection that never becomes a player (no request, no PlayerReady) has the world
@@ -961,6 +1009,80 @@ pub mod tests {
         game.players_rpc(client, "PlayerMainController.PlayerReadyServerRpc", &Args(vec![json!(0), json!(name)]));
         assert!(game.clients[&client].ready.is_some());
         object
+    }
+
+    /// A stall (SIGSTOP, a long save, a GC-like gap of the loop) is not game time past one frame, as
+    /// in Unity (Time.maximumDeltaTime): after a gap of any length the world is exactly where one
+    /// third of a second after the last tick leaves it: the same game time, network tick, player
+    /// gauges and terraformation, no fast-forward and no 40x drain while the gauges catch up.
+    #[test]
+    fn a_stall_of_the_loop_is_not_game_time_past_one_frame() {
+        let setup = || {
+            let mut g = test_game(save())?;
+            let ann = join(&mut g, 1, "Ann");
+            // Two seconds of the game in frames of 50 ms.
+            for i in 1..=40 {
+                g.sim_time = Some(f64::from(i) * 0.05);
+                g.tick();
+            }
+            Some((g, ann))
+        };
+        let Some((control, ann)) = setup() else { return };
+        let after = |gap: f64, later: &dyn Fn(&mut Game)| {
+            let (mut g, _) = setup().unwrap();
+            g.sim_time = Some(2.0 + gap);
+            g.tick();
+            later(&mut g);
+            g
+        };
+        let more = |g: &mut Game| {
+            // (Not on a whole tick of the network: the stalled clocks differ from the control's by
+            // a rounding that a tick boundary would show.)
+            for _ in 0..40 {
+                g.sim_time = Some(g.sim_time.unwrap() + 0.0501);
+                g.tick();
+            }
+        };
+        let seen = |g: &Game| (g.time, g.tick_number(), crate::gauges::values(g, ann), crate::units::value(g, crate::units::Kind::Terraformation, 0));
+        // The reference: one frame of exactly the longest a frame may be.
+        let one_frame = after(crate::clock::MAX_FRAME, &more);
+        assert!((one_frame.time.secs() - (2.0 + crate::clock::MAX_FRAME + 2.004)).abs() < 1e-3, "{}", one_frame.time);
+        for gap in [0.34, 1.5, 10.0, 600.0, 86_400.0] {
+            let g = after(gap, &more);
+            assert_eq!(seen(&g), seen(&one_frame), "a gap of {gap} s");
+        }
+        // A frame shorter than the limit counts whole; the world is not slowed otherwise.
+        let short = after(0.3, &more);
+        assert!((short.time.secs() - (2.0 + 0.3 + 2.004)).abs() < 1e-3, "{}", short.time);
+        let before = seen(&control);
+        assert!((before.0.secs() - 2.0).abs() < 1e-3);
+    }
+
+    /// The new bank of a flip failed and the old one goes on: the time it stood is not the world's,
+    /// whatever its length, and the network tick does not jump.
+    #[test]
+    fn the_stand_of_a_failed_flip_is_not_game_time() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        for i in 1..=20 {
+            g.sim_time = Some(f64::from(i) * 0.05);
+            g.tick();
+        }
+        let (time, tick) = (g.time, g.tick_count());
+        // The snapshot is taken and the front decides: 0.3 s later (under a frame) the old bank resumes.
+        g.sim_time = Some(1.3);
+        g.resume_after_stand();
+        assert_eq!((g.time, g.tick_count()), (time, tick), "the clock of the tick stands as it was");
+        g.sim_time = Some(1.35);
+        g.tick();
+        assert!((g.time.secs() - (time.secs() + 0.05)).abs() < 1e-3, "the first frame after is a normal one: {}", g.time);
+        // And again after a stand much longer than a frame.
+        let time = g.time;
+        g.sim_time = Some(31.35);
+        g.resume_after_stand();
+        g.sim_time = Some(31.40);
+        g.tick();
+        assert!((g.time.secs() - (time.secs() + 0.05)).abs() < 1e-3, "{}", g.time);
     }
 
     /// ConnectionRequest: another game version, another session's invite code, a refused
@@ -1390,11 +1512,39 @@ pub mod tests {
     fn a_save_with_objects_the_tables_do_not_know_is_refused() {
         let Some(g) = test_game(save()) else { return };
         let mut s = save();
-        assert!(check_save_content(&s, &g.data).is_ok());
+        assert!(check_save_content(&s, &g.data, &g.net_data).is_ok());
         s.objects.push(json!({"id": 205_000_001, "gId": "NoSuchThingInThisGame"}));
         s.objects.push(json!({"gId": "Iron"}));
-        let err = check_save_content(&s, &g.data).unwrap_err();
+        let err = check_save_content(&s, &g.data, &g.net_data).unwrap_err();
         assert!(err.contains("2 world objects") && err.contains("NoSuchThingInThisGame"), "{err}");
+    }
+
+    /// A save that names no planet to start on, or one these tables do not have, is refused with
+    /// what is wrong; no planet is made up (Prime was, and an unknown one read as the first).
+    #[test]
+    fn a_save_without_a_known_planet_is_refused() {
+        let Some(g) = test_game(save()) else { return };
+        let check = |s: &SaveFile| check_save_content(s, &g.data, &g.net_data);
+        assert!(check(&save()).is_ok());
+        let mut s = save();
+        s.settings.as_object_mut().unwrap().remove("planetId");
+        let e = check(&s).unwrap_err();
+        assert!(e.starts_with("settings.planetId is missing"), "{e}");
+        let mut s = save();
+        s.settings["planetId"] = json!("Nowhere");
+        let e = check(&s).unwrap_err();
+        assert!(e.contains("settings.planetId is \"Nowhere\"") && e.contains("pcds update"), "{e}");
+        // The planet the world travelled to, and the host's, must be known too.
+        let mut s = save();
+        s.world["pcdsCurrentPlanet"] = json!("Elsewhere");
+        assert!(check(&s).unwrap_err().contains("world.pcdsCurrentPlanet is \"Elsewhere\""));
+        let mut s = save();
+        s.players = vec![json!({"id": 5, "name": "Old", "host": true, "planetId": "Elsewhere"})];
+        assert!(check(&s).unwrap_err().contains("host player's planetId is \"Elsewhere\""));
+        assert_eq!(world_planet(&save(), &g.net_data).unwrap().0, "Prime");
+        let mut s = save();
+        s.world["pcdsCurrentPlanet"] = json!("Selenea");
+        assert_eq!(world_planet(&s, &g.net_data).unwrap().0, "Selenea");
     }
 
     /// Hostile input from joined clients never crashes the server: every server RPC with

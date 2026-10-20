@@ -8,6 +8,8 @@ use std::net::IpAddr;
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
+use crate::game::Game;
+
 pub const REFUSED: &str = "You are not allowed on this server";
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -188,6 +190,23 @@ impl Access {
             self.save(lists)?;
         }
         Ok(found)
+    }
+}
+
+/// Kicks everyone the access lists no longer let in.
+pub fn enforce(game: &mut Game) {
+    let refused: Vec<u64> = game
+        .clients
+        .values()
+        .filter(|c| {
+            let ip_refused = c.verified_steam_id.is_none() && c.ip.as_deref().is_some_and(|ip| !game.access.ip_allowed(ip));
+            let name_refused = c.ready.as_ref().is_some_and(|s| !game.access.name_allowed(&s.name, c.verified_steam_id));
+            ip_refused || name_refused
+        })
+        .map(|c| c.id)
+        .collect();
+    for c in refused {
+        game.kick(c, REFUSED);
     }
 }
 

@@ -281,6 +281,10 @@ impl Link {
             match recv_with_fds(self.stream.as_raw_fd(), &mut buf, &mut self.fds) {
                 Ok(0) => break false,
                 Ok(n) => {
+                    if self.fds.len() > MAX_QUEUED_FDS {
+                        self.broken = Some(format!("more than {MAX_QUEUED_FDS} descriptors waiting for a frame that takes them"));
+                        break false;
+                    }
                     self.inbox.extend_from_slice(&buf[..n]);
                     read += n;
                     // A blocking socket would wait for more: what came is enough. So is a read
@@ -292,6 +296,10 @@ impl Link {
                 }
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) if e.kind() == ErrorKind::WouldBlock => break true,
+                Err(e) if e.kind() == ErrorKind::InvalidData => {
+                    self.broken = Some(e.to_string());
+                    break false;
+                }
                 Err(_) => break false,
             }
         };
@@ -359,7 +367,14 @@ pub fn wait(fds: &[RawFd], out: &[bool], timeout: Duration) -> Vec<bool> {
     p.iter().map(|p| p.revents != 0).collect()
 }
 
+/// The most descriptors one read takes (a frame carries one); more in one message is a peer that
+/// is not our bank: the link breaks (`MSG_CTRUNC`).
 const CMSG_FDS: usize = 4;
+
+/// The most descriptors that may wait for a frame to claim them. A frame claims at most one and
+/// they come with it, so a few at most are ever waiting; a peer that sends descriptors with
+/// frames that take none would make the queue grow for ever.
+const MAX_QUEUED_FDS: usize = 16;
 
 fn send_with_fd(sock: RawFd, data: &[u8], fd: RawFd) -> std::io::Result<usize> {
     // SAFETY: msghdr points at a live iovec and an 8-aligned control buffer of at least CMSG_SPACE
@@ -413,6 +428,11 @@ fn recv_with_fds(sock: RawFd, buf: &mut [u8], fds: &mut VecDeque<OwnedFd>) -> st
             }
             cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
         }
+        // More descriptors than the buffer holds: the kernel closed the rest. Only a peer that is
+        // not our bank sends that many; the ones taken above close with the link.
+        if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+            return Err(std::io::Error::new(ErrorKind::InvalidData, format!("a message with more than {CMSG_FDS} descriptors (a frame carries one)")));
+        }
         Ok(n as usize)
     }
 }
@@ -432,9 +452,19 @@ pub fn memfd(name: &str, write: impl FnOnce(&mut std::io::BufWriter<&File>) -> R
         write(&mut w)?;
         w.flush().map_err(|e| format!("memfd: {e}"))?;
     }
-    // SAFETY: fcntl on our own fd.
-    unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE | libc::F_SEAL_SEAL) };
+    seal(&file)?;
     Ok(file.into())
+}
+
+/// No more writes, shrinking or growing, and no more seals. Err when the kernel refuses: a snapshot
+/// that could still change under the bank that maps it must never be passed on.
+fn seal(file: &File) -> Result<(), String> {
+    // SAFETY: fcntl on a descriptor the caller holds open.
+    let sealed = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE | libc::F_SEAL_SEAL) };
+    if sealed < 0 {
+        return Err(format!("memfd: could not be sealed: {}", std::io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 /// A sealed memfd's content mapped read-only, in place: no copy of what the old bank wrote (a
@@ -539,6 +569,79 @@ mod tests {
         assert!(front.pending(), "the socket buffer is smaller than the frame");
         assert_eq!(front.purge(3), 0);
         assert_eq!(front.queued_total, big.len() + 13);
+    }
+
+    /// A memfd the kernel will not seal is an error, not a snapshot that could change under the
+    /// reader; and the descriptors a peer sends are bounded, in one message (MSG_CTRUNC) and
+    /// waiting (frames that take none).
+    #[test]
+    fn a_failed_seal_and_a_flood_of_descriptors_break_the_link_loudly() {
+        // A memfd made without MFD_ALLOW_SEALING, and a plain file: sealing is refused.
+        // SAFETY: a valid C string; the fd is new and owned here.
+        let raw = unsafe { libc::memfd_create(c"unsealable".as_ptr(), libc::MFD_CLOEXEC) };
+        assert!(raw >= 0);
+        // SAFETY: just created, owned by nobody else.
+        let unsealable = unsafe { File::from_raw_fd(raw) };
+        let e = seal(&unsealable).unwrap_err();
+        assert!(e.starts_with("memfd: could not be sealed: "), "{e}");
+        assert!(seal(&File::open("/dev/null").unwrap()).is_err());
+        let sealed = memfd("ok", |w| w.write_all(b"x").map_err(|e| e.to_string())).unwrap();
+        assert!(map_memfd(&sealed).is_ok(), "a memfd that sealed maps");
+        // More descriptors in one message than a frame carries: the link is broken, with the reason.
+        let (a, b) = UnixStream::pair().unwrap();
+        let mut bank = Link::new(b);
+        let spare: Vec<File> = (0..CMSG_FDS + 2).map(|_| File::open("/dev/null").unwrap()).collect();
+        send_fds(a.as_raw_fd(), &encode(DATA, 1, b"x"), &spare.iter().map(AsRawFd::as_raw_fd).collect::<Vec<_>>());
+        assert!(!bank.fill(usize::MAX), "a message with too many descriptors");
+        assert!(bank.broken.as_deref().is_some_and(|why| why.contains("descriptors")), "{:?}", bank.broken);
+        assert!(bank.next().is_none() && !bank.fill(usize::MAX), "nothing more is read from it");
+        // One descriptor at a time with frames that take none: they pile up, up to a bound.
+        let (a, b) = UnixStream::pair().unwrap();
+        let mut bank = Link::new(b);
+        let null = File::open("/dev/null").unwrap();
+        let mut filled = 0;
+        for _ in 0..MAX_QUEUED_FDS + 4 {
+            send_with_fd(a.as_raw_fd(), &encode(DATA, 1, b"x"), null.as_raw_fd()).unwrap();
+            if !bank.fill(usize::MAX) {
+                break;
+            }
+            filled += 1;
+        }
+        assert!(filled <= MAX_QUEUED_FDS + 1, "{filled}");
+        assert!(bank.broken.as_deref().is_some_and(|why| why.contains("waiting for a frame")), "{:?}", bank.broken);
+        // A well-behaved peer is not disturbed: a frame with its descriptor, many times over.
+        let (a, b) = UnixStream::pair().unwrap();
+        let mut bank = Link::new(b);
+        for i in 0..100u64 {
+            let fd = memfd("t", |w| w.write_all(b"x").map_err(|e| e.to_string())).unwrap();
+            send_with_fd(a.as_raw_fd(), &encode(RESTORE, i, b"{}"), fd.as_raw_fd()).unwrap();
+            let f = bank.recv().unwrap();
+            assert_eq!((f.n, f.fd.is_some()), (i, true));
+        }
+        assert!(bank.broken.is_none());
+    }
+
+    /// One message with several descriptors (a peer that is not the bank does this).
+    fn send_fds(sock: RawFd, data: &[u8], fds: &[RawFd]) {
+        // SAFETY: msghdr points at a live iovec and an 8-aligned control buffer sized by CMSG_SPACE
+        // for these fds, as in send_with_fd.
+        unsafe {
+            let mut iov = libc::iovec { iov_base: data.as_ptr() as *mut libc::c_void, iov_len: data.len() };
+            let bytes = std::mem::size_of_val(fds) as u32;
+            let space = libc::CMSG_SPACE(bytes) as usize;
+            let mut control = vec![0u64; space.div_ceil(8)];
+            let mut msg: libc::msghdr = std::mem::zeroed();
+            msg.msg_iov = &mut iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
+            msg.msg_controllen = space;
+            let cmsg = libc::CMSG_FIRSTHDR(&msg);
+            (*cmsg).cmsg_level = libc::SOL_SOCKET;
+            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+            (*cmsg).cmsg_len = libc::CMSG_LEN(bytes) as usize;
+            std::ptr::copy_nonoverlapping(fds.as_ptr() as *const u8, libc::CMSG_DATA(cmsg), bytes as usize);
+            assert!(libc::sendmsg(sock, &msg, libc::MSG_NOSIGNAL) >= 0);
+        }
     }
 
     #[test]

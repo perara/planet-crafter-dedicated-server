@@ -23,6 +23,11 @@
 
 use std::ops::{Add, AddAssign, Sub};
 
+/// Unity's `Time.maximumDeltaTime`: a frame that took longer advances the game's time by this much
+/// only, so a stall (a stopped process, a long save, a hitch) is not game time: nothing fast-forwards
+/// and nobody is drained for it. `Game::tick` applies it to the real clock.
+pub const MAX_FRAME: f64 = 1.0 / 3.0;
+
 /// Game seconds up to which sums are the game's f32 sums (an hour: 2^-12 s resolution).
 pub const EXACT_AFTER: f64 = 3600.0;
 

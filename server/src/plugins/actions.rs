@@ -10,7 +10,9 @@ use crate::game::Game;
 use crate::net::Target;
 
 /// The rule sections a plugin with `rules.write` may change. Not `chat` (webhooks and the exec
-/// program run code outside the sandbox), `backup` (keys and endpoints) or `access` (who may play).
+/// program run code outside the sandbox), `backup` (keys and endpoints), `access` (who may play) or
+/// `players` (it forgets saved players). Inside `world`, not `dlcPlanets`: which DLC planets are
+/// owned is the operator's statement, and no plugin makes it.
 pub const PLUGIN_RULES: [&str; 7] = ["meteo", "gauges", "speed", "death", "loot", "limits", "world"];
 
 pub fn rules_patch_allowed(patch: &Value) -> Result<(), String> {
@@ -18,6 +20,9 @@ pub fn rules_patch_allowed(patch: &Value) -> Result<(), String> {
         if !PLUGIN_RULES.contains(&section.as_str()) {
             return Err(format!("{section}: plugins may change only the {} rules", PLUGIN_RULES.join(", ")));
         }
+    }
+    if patch["world"].as_object().is_some_and(|w| w.contains_key("dlcPlanets")) {
+        return Err("world.dlcPlanets: only the operator states which DLC planets they own (`pcds rules set world.dlcPlanets=...`), not a plugin".into());
     }
     Ok(())
 }
@@ -86,8 +91,15 @@ mod tests {
     #[test]
     fn a_plugin_can_not_reach_the_rules_that_run_code_or_choose_players() {
         assert!(rules_patch_allowed(&json!({"speed": {"growth": 2}, "gauges": {"noDeath": true}})).is_ok());
-        for bad in [json!({"chat": {"exec": ["/bin/sh"]}}), json!({"backup": {"s3Bucket": "x"}}), json!({"access": {"whitelist": []}}), json!({"speed": {}, "chat": null})] {
+        for bad in [json!({"chat": {"exec": ["/bin/sh"]}}), json!({"backup": {"s3Bucket": "x"}}), json!({"access": {"whitelist": []}}), json!({"speed": {}, "chat": null}), json!({"players": {"forgetAfterDays": 1}})] {
             assert!(rules_patch_allowed(&bad).is_err(), "{bad}");
+        }
+        // The operator's statement of which DLC planets they own is not a plugin's to make, though
+        // the rest of `world` is.
+        assert!(rules_patch_allowed(&json!({"world": {"pauseWhenEmpty": true}})).is_ok());
+        for bad in [json!({"world": {"dlcPlanets": ["Humble"]}}), json!({"world": {"dlcPlanets": null}}), json!({"world": {"pauseWhenEmpty": true, "dlcPlanets": []}})] {
+            let e = rules_patch_allowed(&bad).unwrap_err();
+            assert!(e.contains("world.dlcPlanets") && e.contains("operator"), "{bad}: {e}");
         }
     }
 }

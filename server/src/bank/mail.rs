@@ -1,7 +1,7 @@
 //! What the bank sends to the clients, through the front: the game's queued messages sorted into
 //! each approved client's batch (`post`), the batches written to the link in the frames it holds
 //! (`send`), a client that is no player yet bounded in what it is sent (`check_loading`), and the
-//! message a kicked player is shown (`reason_batch`). The front only moves the bytes.
+//! message a kicked player is shown is `protocol::reason_batch`). The front only moves the bytes.
 
 use std::collections::{HashMap, HashSet};
 
@@ -14,17 +14,6 @@ use crate::{protocol, wire};
 /// ConnectionApproved and this much more (the world's changes while it loads). A session from a
 /// forged address never gets further: its world is all a spoofer can have sent to the victim.
 pub(super) const LOADING_ALLOWANCE: i64 = 8 << 20;
-
-/// DisconnectReasonMessage: what a kicked or refused player is shown.
-pub fn reason_batch(reason: &str) -> Vec<u8> {
-    let units: Vec<u16> = reason.encode_utf16().collect();
-    let mut w = wire::Writer::new();
-    w.packed_i32(0).u32(units.len() as u32);
-    units.iter().for_each(|u| {
-        w.u16(*u);
-    });
-    wire::batch(&[(crate::DISCONNECT_REASON, w.0)])
-}
 
 /// Kicks a client that is no player yet and was sent more than its allowance; forgets the
 /// ones that became players or left.
@@ -50,7 +39,7 @@ pub(super) fn send(link: &mut Link, mail: &mut crate::idmap::FxHashMap<u64, wire
             // cannot go on without the batch). A join batch is ~14 bytes per world object.
             if !ipc::fits(&batch) {
                 eprintln!("client {c}: a batch of {} bytes is over the {} bytes a frame holds; it is dropped", batch.len(), ipc::MAX_FRAME);
-                link.send(ipc::DATA, *c, &reason_batch("The world is too large for this server to send"));
+                link.send(ipc::DATA, *c, &protocol::reason_batch("The world is too large for this server to send"));
                 link.send(ipc::KICK, *c, &[]);
                 continue;
             }

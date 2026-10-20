@@ -139,7 +139,7 @@ mod tests {
         let (_, s) = request(&mut game, "GET", "/api/status", &json!({}), &ctx);
         assert_eq!(serde_json::from_str::<Value>(&s).unwrap()["lastSave"]["ok"], false);
         assert_eq!(final_save(&mut game, &path), 1);
-        let kept = std::fs::read(crate::front::snapshot_path(&path)).unwrap();
+        let kept = std::fs::read(crate::worlds::snapshot_path(&path)).unwrap();
         let tables = crate::test_data().unwrap();
         let (n, d, s) = crate::tables(tables);
         let scenes = crate::scene_tables(tables, &n, &d);

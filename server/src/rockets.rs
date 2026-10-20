@@ -261,8 +261,8 @@ fn despawn_ignited_rockets(game: &mut Game) {
     game.ext.rockets.despawns = waiting;
     for (_, wo, net) in due {
         game.net.despawn(net);
-        if let Some(w) = game.wos.get_mut(&wo).filter(|w| w.net == Some(net)) {
-            w.net = None;
+        if game.wos.get(&wo).is_some_and(|w| w.net == Some(net)) {
+            game.set_wo_net(wo, None);
         }
     }
 }

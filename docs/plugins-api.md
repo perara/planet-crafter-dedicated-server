@@ -138,7 +138,7 @@ know.
 | `chat.say` | write to the chat, to everyone or to one player |
 | `player.kick` | kick players |
 | `player.teleport` | move players |
-| `rules.write` | change the server rules (gameplay sections only: `meteo`, `gauges`, `speed`, `death`, `loot`, `limits`, `world`) |
+| `rules.write` | change the server rules (gameplay sections only: `meteo`, `gauges`, `speed`, `death`, `loot`, `limits`, `world`; not `world.dlcPlanets`, which is the operator's statement of what they own) |
 | `net.http` | send HTTP requests to the hosts its manifest lists |
 | `net.http.local` | let those requests reach this machine and the local network |
 

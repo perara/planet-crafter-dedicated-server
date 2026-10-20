@@ -144,6 +144,7 @@ pub struct Status<'a> {
     busy_percent: f64,
     longest_loop_micros: u64,
     planet: &'a str,
+    dlc_planets: &'a [String],
     terraformation: f64,
     stages: Value,
     game_time: f64,
@@ -179,6 +180,7 @@ pub(super) fn build<'a>(game: &'a Game, ctx: &Ctx<'a>, now: Instant) -> Status<'
         busy_percent: (ctx.busy.0.as_secs_f64() * 1000.0).round() / 10.0,
         longest_loop_micros: ctx.busy.1.as_micros() as u64,
         planet: game.planet_id(),
+        dlc_planets: &game.rules.world.dlc_planets,
         terraformation: units::value(game, units::Kind::Terraformation, 0),
         stages: meteo::stages(game),
         game_time: game.time.secs(),
@@ -229,9 +231,9 @@ fn game_at(dir: &std::path::Path, data_dir: &str) -> Value {
         return v.clone();
     }
     let data = std::path::Path::new(data_dir).parent().unwrap_or(std::path::Path::new(data_dir));
-    let v = match crate::cli::build_id(dir) {
+    let v = match crate::tables::build_id(dir) {
         Ok(build) => {
-            let missing = crate::cli::find_tables(data, &build, crate::native::tables::TABLES_FORMAT).is_err();
+            let missing = crate::tables::find_tables(data, &build, crate::native::tables::TABLES_FORMAT).is_err();
             json!({"buildId": build, "hasTables": !missing, "warning": missing.then(|| format!("game build {build} has no tables: run pcds update"))})
         }
         Err(e) => json!({"warning": e}),
@@ -322,6 +324,7 @@ mod tests {
             "busyPercent": (ctx.busy.0.as_secs_f64() * 1000.0).round() / 10.0,
             "longestLoopMicros": ctx.busy.1.as_micros() as u64,
             "planet": game.planet_id(),
+            "dlcPlanets": game.rules.world.dlc_planets,
             "terraformation": terraformation,
             "stages": meteo::stages(game),
             "gameTime": game.time.secs(),
@@ -398,8 +401,13 @@ mod tests {
         // Fields in the API's order.
         let v: Value = serde_json::from_str(&serde_json::to_string(&build(&game, &Ctx { ticks: &ticks, save_path: "w.json", build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() }, now)).unwrap()).unwrap();
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, ["state", "gameVersion", "save", "autosaveMinutes", "tickRate", "rules", "fps", "busyPercent", "longestLoopMicros", "planet", "terraformation", "stages", "gameTime", "units", "players", "access", "serverVersion", "tables", "world", "objects", "held", "s3", "plugins", "lastSave", "tick", "backup"]);
+        assert_eq!(keys, ["state", "gameVersion", "save", "autosaveMinutes", "tickRate", "rules", "fps", "busyPercent", "longestLoopMicros", "planet", "dlcPlanets", "terraformation", "stages", "gameTime", "units", "players", "access", "serverVersion", "tables", "world", "objects", "held", "s3", "plugins", "lastSave", "tick", "backup"]);
         assert_eq!(v["players"].as_array().map(Vec::len), Some(2));
+        // The DLC planets the operator states they own (none by default).
+        assert_eq!(v["dlcPlanets"], json!([]));
+        game.rules.world.dlc_planets = vec!["Humble".into()];
+        let v: Value = serde_json::from_str(&serde_json::to_string(&build(&game, &Ctx { ticks: &ticks, save_path: "w.json", build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() }, now)).unwrap()).unwrap();
+        assert_eq!(v["dlcPlanets"], json!(["Humble"]));
     }
 
     /// The installed game's build, and a warning once it has no tables (a game update).
@@ -409,7 +417,7 @@ mod tests {
         let code = dir.join("game/Planet Crafter_Data/Managed/Assembly-CSharp.dll");
         std::fs::create_dir_all(code.parent().unwrap()).unwrap();
         std::fs::write(&code, "build 1").unwrap();
-        let build = crate::cli::build_id(&dir.join("game")).unwrap();
+        let build = crate::tables::build_id(&dir.join("game")).unwrap();
         let tables = dir.join("data/2.103");
         std::fs::create_dir_all(&tables).unwrap();
         std::fs::write(tables.join("buildid"), &build).unwrap();
@@ -419,7 +427,7 @@ mod tests {
         // The game updated (another size: a new hash at once).
         std::fs::write(&code, "build 2, longer").unwrap();
         let v = game_at(&dir.join("game"), data);
-        let build = crate::cli::build_id(&dir.join("game")).unwrap();
+        let build = crate::tables::build_id(&dir.join("game")).unwrap();
         assert_eq!(v["warning"], format!("game build {build} has no tables: run pcds update"));
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(game_at(&dir.join("game"), data)["warning"].as_str().unwrap().contains("the game is gone"));

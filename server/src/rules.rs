@@ -26,6 +26,7 @@ pub struct Rules {
     pub loot: Loot,
     pub limits: Limits,
     pub world: World,
+    pub players: Players,
     pub chat: Chat,
     pub backup: Backup,
     pub save: Save,
@@ -198,10 +199,23 @@ pub const MIN_WATCHDOG_SECONDS: u32 = 10;
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct World {
+    /// The DLC planets (Humble, Toxicity) the operator states they own. The server is an anonymous
+    /// Steam game server and cannot ask Steam about an account, so it asks the operator: a world
+    /// is on a DLC planet, or travels to one, only if the planet is listed here. Empty: none.
+    pub dlc_planets: Vec<String>,
     /// With no player in the game (past PlayerReady, as the game counts its players), the world
     /// stands still: its clock, and with it every timer, day and night, growth, production,
     /// terraformation, meteo, drone and vehicle. It goes on from there when a player is in.
     pub pause_when_empty: bool,
+}
+
+/// What the save keeps of the people who have been in the world.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct Players {
+    /// Days away after which a saved player who has made nothing and holds no more than a new
+    /// player is given is forgotten (players::forget_unseen). 0: every player is kept for ever.
+    pub forget_after_days: u32,
 }
 
 /// Chat hooks (chathooks/): every chat message as a JSON event, sent off the game thread.
@@ -271,6 +285,13 @@ fn unreadable(text: &str, e: &serde_json::Error) -> String {
     format!("not the rules' format (line {}, column {})", e.line(), e.column())
 }
 
+/// The ids of the planets that need a Steam DLC (PlanetData.steamAppId set), sorted.
+pub fn dlc_planet_ids(data: &crate::gamedata::GameData) -> Vec<String> {
+    let mut ids: Vec<String> = data.assets.iter().filter(|(k, _)| k.starts_with("PlanetData:")).filter(|(_, a)| a["steamAppId"].as_u64().is_some_and(|id| id != 0)).filter_map(|(_, a)| a["id"].as_str().map(str::to_string)).collect();
+    ids.sort();
+    ids
+}
+
 pub const DEFAULT_MAX_PLAYERS: usize = 16;
 
 pub const CONSEQUENCES: [&str; 4] = ["NoConsequences", "DropSomeItems", "DropAllItems", "DeleteSaveFile"];
@@ -327,6 +348,16 @@ impl Rules {
         }
         if self.limits.bank_watchdog_seconds != 0 && self.limits.bank_watchdog_seconds < MIN_WATCHDOG_SECONDS {
             return Err(format!("limits.bankWatchdogSeconds: 0 (off) or {MIN_WATCHDOG_SECONDS} to 3600 seconds (a shorter time would take a busy game loop for a hung one)"));
+        }
+        // The DLC planets of this game's tables: a name that is none (a free planet, a typo) is refused.
+        let dlc = dlc_planet_ids(data);
+        for (i, name) in self.world.dlc_planets.iter().enumerate() {
+            if !dlc.contains(name) {
+                return Err(format!("world.dlcPlanets: {name:?} is not a DLC planet of this game (it has {})", dlc.join(", ")));
+            }
+            if self.world.dlc_planets[..i].contains(name) {
+                return Err(format!("world.dlcPlanets: {name} is listed twice"));
+            }
         }
         for group in self.limits.buildings.keys() {
             if !data.group(group).is_some_and(|g| data.groups[g].constructible) {
@@ -445,6 +476,9 @@ fn changes_in(knobs: &[Knob], rules: &Rules) -> Vec<String> {
 /// New rules from the API: checked, kept in rules.json, and applied.
 pub fn set(game: &mut Game, rules: Rules) -> Result<(), String> {
     rules.validate(&game.data)?;
+    if let Some(why) = crate::planets::ownership_unstated(game, &rules) {
+        return Err(format!("world.dlcPlanets: {why}"));
+    }
     if let Some(path) = &game.rules_path {
         rules.save(path).map_err(|e| format!("{path}: {e}"))?;
     }
@@ -581,6 +615,12 @@ mod tests {
         }
         let hooks = serde_json::json!({"chat": {"webhooks": ["https://example.com/hook", "http://127.0.0.1:8080/"], "secret": "s", "exec": ["/usr/local/bin/on-chat"], "commandPrefix": "!"}});
         assert!(Rules::default().patched(&hooks).unwrap().validate(&data).is_ok());
+        // The DLC planets are named by their ids; a free planet or a typo is refused with the list.
+        let dlc = |names: Value| Rules::default().patched(&serde_json::json!({"world": {"dlcPlanets": names}})).and_then(|r| r.validate(&data));
+        assert!(dlc(serde_json::json!(["Humble", "Toxicity"])).is_ok());
+        let e = dlc(serde_json::json!(["Prime"])).unwrap_err();
+        assert!(e.contains("\"Prime\"") && e.contains("Humble, Toxicity"), "{e}");
+        assert!(dlc(serde_json::json!(["Humble", "Humble"])).unwrap_err().contains("twice"));
     }
 
     #[test]
@@ -742,7 +782,7 @@ mod tests {
         // Off again while empty: the world goes on.
         g.disconnect(2);
         g.rules.world.pause_when_empty = false;
-        run(&mut g, 1.0, 0.5);
+        run(&mut g, 1.0, 0.25);
         assert!((g.time.secs() - (held.secs() + 32.0)).abs() < 1e-3, "{}", g.time);
     }
 

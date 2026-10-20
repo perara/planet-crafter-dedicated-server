@@ -210,7 +210,7 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
             }
             // JSONExport.CleanStringForInsertInJson, then the FixedString128 the variable holds
             // (the world object takes the variable's value).
-            let bytes = enc::fixed_string(&a.s(0).unwrap_or_default().replace(['@', '|'], " "), 128);
+            let bytes = crate::wire::fixed_string(&a.s(0).unwrap_or_default().replace(['@', '|'], " "), 128);
             let text = String::from_utf8_lossy(&bytes[4..]).into_owned();
             game.net.set(object, "TextProxy", "_text", bytes);
             if let Some(w) = wo.and_then(|w| game.wos.get_mut(&w)) {
@@ -575,7 +575,7 @@ mod tests {
         send_on(&mut g, 1, net_b, "SettingProxy.SetSettingServerRpc", &[json!(3)]);
         assert_eq!((g.wos[&a].text.as_str(), g.wos[&a].linked_groups.clone()), ("Ore depot 1", Some(vec![g.data.group("Iron").unwrap()])), "save delimiters cleaned");
         assert_eq!((g.wos[&b].color, g.wos[&b].setting), ([0.25, 0.5, 0.75, 1.0], 3), "colour opaque");
-        assert_eq!(var(&g, net_a, "TextProxy", "_text"), enc::fixed_string("Ore depot 1", 128));
+        assert_eq!(var(&g, net_a, "TextProxy", "_text"), crate::wire::fixed_string("Ore depot 1", 128));
         assert_eq!(list(&g, net_a, "LinkedGroupsProxy", "_linkedGroupsHash"), vec![enc::int(iron)]);
         assert_eq!(var(&g, net_b, "SettingProxy", "_setting"), enc::int(3));
         let saved = saved_object(&mut g, a).unwrap();
@@ -585,7 +585,7 @@ mod tests {
         let mut g = reload(&mut g);
         join(&mut g, 1, "Ann");
         let (net_a, net_b) = (g.wos[&a].net.unwrap(), g.wos[&b].net.unwrap());
-        assert_eq!(var(&g, net_a, "TextProxy", "_text"), enc::fixed_string("Ore depot 1", 128));
+        assert_eq!(var(&g, net_a, "TextProxy", "_text"), crate::wire::fixed_string("Ore depot 1", 128));
         assert_eq!(list(&g, net_a, "LinkedGroupsProxy", "_linkedGroupsHash"), vec![enc::int(iron)]);
         assert_eq!(var(&g, net_b, "ColorProxy", "_color"), enc::color([0.25, 0.5, 0.75, 1.0]));
         assert_eq!(var(&g, net_b, "SettingProxy", "_setting"), enc::int(3));

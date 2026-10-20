@@ -193,6 +193,8 @@ struct Run {
 /// The bench loop; `swap` may replace the game after a tick, every `swap_every` seconds.
 fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game, dump: Option<usize>) -> Run {
     g.sim_time = Some(e.start);
+    // The tests' check of the explosives' count looks at every world object: not in a timing.
+    crate::meteo::explode::CHECK_LIVE.store(false, std::sync::atomic::Ordering::Relaxed);
     // More than the default 16 players, when asked for.
     if e.players as usize > g.rules.max_players() {
         g.rules.limits.max_players = Some(e.players as usize);

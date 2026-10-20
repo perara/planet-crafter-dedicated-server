@@ -1,8 +1,8 @@
-//! The admin API client: HTTP/1.1 to 127.0.0.1 with a bearer token. And the commands that go
+//! The admin API client: HTTP/1.1 to the loopback with a bearer token. And the commands that go
 //! through the admin API.
 
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
 use serde_json::{Map, Value};
@@ -48,14 +48,14 @@ pub fn read_response(r: &mut impl BufRead) -> Result<(u16, String)> {
     Ok((status, String::from_utf8_lossy(&body).into_owned()))
 }
 
-/// One request to a server on 127.0.0.1: the body of a 2xx answer, else Err with what it said.
-pub fn request(port: u16, token: &str, method: &str, path: &str, body: &str, timeout: Duration) -> Result<String> {
-    let url = format!("http://127.0.0.1:{port}{path}");
+/// One request to a server on the loopback: the body of a 2xx answer, else Err with what it said.
+pub fn request(addr: SocketAddr, token: &str, method: &str, path: &str, body: &str, timeout: Duration) -> Result<String> {
+    let url = format!("http://{addr}{path}");
     let fail = |e: String| format!("{method} {url}: {e}");
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| fail(e.to_string()))?;
+    let mut stream = TcpStream::connect(addr).map_err(|e| fail(e.to_string()))?;
     stream.set_read_timeout(Some(timeout)).and_then(|_| stream.set_write_timeout(Some(timeout))).map_err(|e| fail(e.to_string()))?;
     let head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).and_then(|_| stream.write_all(body.as_bytes())).map_err(|e| fail(e.to_string()))?;
@@ -87,10 +87,14 @@ pub fn rules_patch(args: &[String]) -> Result<Value> {
         let (key, value) = arg.split_once('=').filter(|(k, _)| k.contains('.')).ok_or_else(bad)?;
         // A rule that is text takes 12345 or true as that text (a bucket or a secret of digits):
         // read as a JSON number it would be refused as "not text" with no way to say it but quotes.
-        let is_text = crate::config::knob_for(key).is_some_and(|k| k.kind == crate::config::Type::String);
+        let kind = crate::config::knob_for(key).map(|k| k.kind);
+        let is_text = kind == Some(crate::config::Type::String);
+        // A list rule takes JSON (["a","b"]) or plain names split at commas: world.dlcPlanets=Humble,Toxicity.
+        let is_list = kind == Some(crate::config::Type::List);
         let value = match serde_json::from_str::<Value>(value) {
             Ok(Value::Number(_) | Value::Bool(_)) if is_text => Value::String(value.to_string()),
             Ok(json) => json,
+            Err(_) if is_list => Value::Array(value.split(',').filter(|n| !n.is_empty()).map(|n| Value::String(n.trim().to_string())).collect()),
             Err(_) => Value::String(value.to_string()),
         };
         let mut path: Vec<&str> = key.split('.').collect();
@@ -114,16 +118,12 @@ impl Ctx {
         let (Some(addr), Some(token)) = (addr, self.env_get("PCDS_ADMIN_TOKEN")) else {
             return Err(self.no_admin());
         };
-        let port = addr
-            .rsplit_once(':')
-            .filter(|(host, _)| ["127.0.0.1", "0.0.0.0", "localhost"].contains(host))
-            .and_then(|(_, port)| port.parse().ok())
-            .ok_or_else(|| format!("PCDS_ADMIN={addr}: pcds reaches the admin API on 127.0.0.1 only (bind it to 127.0.0.1 or 0.0.0.0)"))?;
+        let sock = crate::config::admin_loopback(&addr)?;
         if !["GET", "POST"].contains(&method) {
             return Err(format!("{method}: the admin API takes GET and POST (docs/admin-api.md)"));
         }
         let body = body.filter(|b| !b.is_empty()).unwrap_or(if method == "GET" { "" } else { "{}" });
-        request(port, &token, method, path, body, if path.starts_with("/api/world/") { WORLD_TIMEOUT } else { ADMIN_TIMEOUT }).map_err(|e| explain(e, &addr))
+        request(sock, &token, method, path, body, if path.starts_with("/api/world/") { WORLD_TIMEOUT } else { ADMIN_TIMEOUT }).map_err(|e| explain(e, &addr))
     }
 
     /// Why there is no admin API to ask: no server set up here yet, or the settings turn it off.
@@ -173,7 +173,7 @@ impl Ctx {
     /// A line for `pcds status` when the installed game has no tables for the server (a game
     /// update that pcds update has not read yet), or cannot be found.
     fn game_line(&self) -> Option<String> {
-        match self.game_dir(None).and_then(|game| super::build_id(&game)) {
+        match self.game_dir(None).and_then(|game| crate::tables::build_id(&game)) {
             Err(e) => Some(format!("game: {e}")),
             Ok(build) => self.tables(&build).err().map(|e| format!("game build {build} has no tables: {e}")),
         }
@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn requests_go_to_127_0_0_1_with_the_token() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let listener_addr = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let mut answers = Vec::new();
             for answer in ["HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong", "HTTP/1.1 401 Unauthorized\r\nContent-Length: 7\r\n\r\nno, no."] {
@@ -326,8 +326,8 @@ mod tests {
             }
             answers
         });
-        assert_eq!(request(port, "secret", "POST", "/api/save", "{}", ADMIN_TIMEOUT).unwrap(), "pong");
-        assert!(request(port, "secret", "POST", "/api/save", "{}", ADMIN_TIMEOUT).unwrap_err().contains("HTTP 401: no, no."));
+        assert_eq!(request(listener_addr, "secret", "POST", "/api/save", "{}", ADMIN_TIMEOUT).unwrap(), "pong");
+        assert!(request(listener_addr, "secret", "POST", "/api/save", "{}", ADMIN_TIMEOUT).unwrap_err().contains("HTTP 401: no, no."));
         assert!(explain("POST http://127.0.0.1:1/api/save: HTTP 401: x".into(), "127.0.0.1:1").contains("pcds restart"));
         assert!(explain("GET http://x/api/status: Connection refused (os error 111)".into(), "127.0.0.1:1").contains("pcds start"));
         assert_eq!(explain("POST http://x/api/rules: HTTP 400: {\"error\":\"speed.growth: 0 is not a number from 0.01 to 100\"}".into(), "a"), "speed.growth: 0 is not a number from 0.01 to 100");
@@ -343,6 +343,9 @@ mod tests {
         // Text rules take digits as text; null still resets; quotes still work.
         let text = rules_patch(&args(&["chat.secret=12345", "backup.s3Bucket=123456789", "chat.commandPrefix=true", "backup.s3Region=null", "backup.s3Prefix=\"7\""])).unwrap();
         assert_eq!(text, json!({"chat": {"secret": "12345", "commandPrefix": "true"}, "backup": {"s3Bucket": "123456789", "s3Region": null, "s3Prefix": "7"}}));
+        // A list rule takes names split at commas, or JSON; empty clears it.
+        let lists = rules_patch(&args(&["world.dlcPlanets=Humble,Toxicity", "chat.webhooks=[\"https://a.example/x,y\"]", "access.whitelist=", "chat.exec=null"])).unwrap();
+        assert_eq!(lists, json!({"world": {"dlcPlanets": ["Humble", "Toxicity"]}, "chat": {"webhooks": ["https://a.example/x,y"], "exec": null}, "access": {"whitelist": []}}));
         assert!(rules_patch(&args(&["speed=2"])).is_err());
         assert!(rules_patch(&args(&["speed.growth"])).is_err());
         assert!(rules_patch(&args(&["speed.growth=2", "speed.growth.x=1"])).is_err());

@@ -103,7 +103,7 @@ impl Front {
         // No world: a joining player is told so and let go; nothing else has a game to go to.
         if self.phase == Phase::Stopped {
             if kind == ipc::CONNECTED {
-                self.to_client(n, &crate::bank::reason_batch(STOPPED));
+                self.to_client(n, &crate::protocol::reason_batch(STOPPED));
                 self.net.drop_later(n, std::time::Instant::now() + KICK_DELAY);
             }
             return;

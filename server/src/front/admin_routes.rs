@@ -110,7 +110,7 @@ pub const ROUTES: &[Route] = &[
     route("POST", "/api/world/switch", Owner::Loop(Handler::WorldSwitch, ALWAYS), "`{\"world\": \"name\"}`", "Stops the world that runs, if any, and starts another."),
     route("GET", "/api/status", Owner::Loop(Handler::Status, STOPPED), "", "While the world is stopped: the front's part of the status, and which world it was."),
     route("GET", "/api/worlds", Owner::Loop(Handler::Worlds, STOPPED), "", "While the world is stopped: the worlds and the backups."),
-    route("GET", "/api/status", Owner::Bank, "", "The server's state: world, planet, players, rules changed, loop times, save and backup state, tables, plugins; the front adds the network, the invite code, the process, the banks and the update state."),
+    route("GET", "/api/status", Owner::Bank, "", "The server's state: world, planet, the DLC planets stated as owned, players, rules changed, loop times, save and backup state, tables, plugins; the front adds the network, the invite code, the process, the banks and the update state."),
     route("GET", "/api/ping", Owner::Bank, "", "Any answer is a game loop that runs (the front's watchdog asks it)."),
     route("POST", "/api/save", Owner::Bank, "", "Saves the world now (and its backup, when they are on)."),
     route("POST", "/api/kick", Owner::Bank, "`{\"id\": N}` or `{\"name\": \"...\"}`", "Kicks a player."),

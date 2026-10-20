@@ -420,6 +420,8 @@ reason in `./pcds logs`.
 | `update.checkHours` | `24` | hours between those checks |
 | `log.trace` | `false` | log every incoming message and RPC (debugging; a lot of output) |
 | `limits.buildings` | none | building group id to how many the world may have; one more is taken down at once and its materials go back to the builder |
+| `players.forgetAfterDays` | `0` | days away after which a saved player is forgotten (about 1.2 KB each). Only a player who never crafted or earned a token and holds no more than a new player is given (the starter items) is forgotten, with those items; anyone with more, the host and anyone in the game is kept for ever. `0`: every player is kept for ever. The days count from the day the rule is first on (players already saved have no time yet) |
+| `world.dlcPlanets` | none | the DLC planets (Humble, Toxicity) you own, as names: `./pcds rules set world.dlcPlanets=Humble,Toxicity`. The server cannot ask Steam about an account, so this is your statement of ownership, not a check. A world on a DLC planet does not start unless the planet is listed, and players can travel only to the DLC planets listed. `/api/status` shows them as `dlcPlanets` |
 | `world.pauseWhenEmpty` | `false` | with no player in the game the world stands still (time, day and night, growth, production, terraformation, meteo, timers and despawns, drones and vehicles) and goes on from there, with no catching up, when one is. A player counts once loaded in, as the game counts its players; one still loading sees the world as it stopped. An autosave of a world that stood still since the last one is skipped (no write, no backup) |
 
 ## Chat hooks
@@ -621,19 +623,21 @@ page's World tab has both as buttons.
 
 ## Differences from hosting in the game
 
-- **DLC planets (Humble, Toxicity) are continued, never given.** The game lets a host take its
-  world to a DLC planet when the host's Steam account owns it. This server cannot ask Steam
-  about an account (the invite-code server is an anonymous Steam game server) and checks
-  nothing, so it does not give a world a planet: a world that is on a DLC planet or lists one
-  among its planets (the game only let a host that owned it get there) keeps it, and every
-  other world cannot travel to one, nor start on one. The planet's ground (ore veins, water,
-  toxic areas, the world instances of its portals) is read by `pcds extract` from your own game
-  folder, like the free planets', into your tables; nothing of it is in this repository. A world
-  on a DLC planet whose tables do not have the ground (read before this release) does not
-  start, and says to run `pcds extract` (or `pcds update`): it would run on an empty planet.
-  Toxicity's toxic areas (the goo players clean up by picking it up) and the toxic gauge in them
-  work as in the game; the host game only knows the areas of the sectors around its own player,
-  this server all of the planet's.
+- **DLC planets (Humble, Toxicity) are on your word.** The game lets a host take its world to a
+  DLC planet when the host's Steam account owns it. This server cannot ask Steam about an
+  account (the invite-code server is an anonymous Steam game server), so you state what you
+  own: `pcds rules set world.dlcPlanets=Humble,Toxicity`. Nothing is checked, faked or patched;
+  the rule is your statement, and by default it is empty. A world saved on a DLC planet that is
+  not listed does not start, and the message says which rule to set. Players can travel only to
+  the listed DLC planets (a save that lists a planet is no longer enough), and `/api/status`
+  shows them as `dlcPlanets`. The planet's ground (ore veins, water, toxic areas, the world
+  instances of its portals) is read by `pcds extract` from your own game folder, like the free
+  planets', into your tables; nothing of it is in this repository. A world on a DLC planet
+  whose tables do not have the ground (read before this release) does not start, and says to
+  run `pcds extract` (or `pcds update`): it would run on an empty planet. Toxicity's toxic
+  areas (the goo players clean up by picking it up) and the toxic gauge in them work as in the
+  game; the host game only knows the areas of the sectors around its own player, this server
+  all of the planet's.
 - **Old saves are imported, not opened.** The game converts a save of its old layouts (2022 and
   before) when it opens one; this server refuses such a save at every entry and
   `pcds world import SAVE.json` converts it first (see "Worlds and backups").

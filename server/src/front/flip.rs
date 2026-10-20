@@ -383,8 +383,10 @@ impl Front {
             self.record(History::new(f.seq, false, message.clone()));
         }
         if self.live.is_none() {
-            let name = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
-            self.recover(&name);
+            match self.banks.as_deref().map(updater::active).transpose() {
+                Ok(name) => self.recover(&name.unwrap_or_else(|| "a".into())),
+                Err(e) => eprintln!("banks: {e}: the world stays stopped"),
+            }
         }
     }
 }

@@ -301,7 +301,8 @@ pub fn tick(game: &mut Game) {
         return;
     }
     let now = game.tick_count();
-    // ponytail: after a stall of over a second the frames in between are skipped, not replayed.
+    // A stall is at most a third of a second of ticks (Game::tick bounds a frame); were the clock to
+    // jump anyway, ponytail: past a second the frames in between are skipped, not replayed.
     let mut t = game.ext.logistics.last_tick.max(now.saturating_sub(u64::from(game.net_data.tick_rate)));
     while t < now {
         t += 1;
@@ -904,9 +905,7 @@ fn park_drone(game: &mut Game, d: i32) {
     dr.parked = game.net.objects.shift_remove(&net);
     game.net.removed += 1;
     let hidden = std::mem::take(&mut dr.hidden);
-    if let Some(w) = game.wos.get_mut(&d) {
-        w.net = None;
-    }
+    game.set_wo_net(d, None);
     let body = Writer::new().packed_u64(net).u8(0).0.clone();
     send_to_observers(game, &hidden, DESTROY_OBJECT, body);
 }
@@ -924,9 +923,7 @@ fn respawn_drone(game: &mut Game, d: i32) -> bool {
     dr.transform = motion::Transform::default();
     let net = game.net.spawn(o);
     game.ext.logistics.drones.get_mut(&d).unwrap().net = Some(net);
-    if let Some(w) = game.wos.get_mut(&d) {
-        w.net = Some(net);
-    }
+    game.set_wo_net(d, Some(net));
     true
 }
 

@@ -418,6 +418,7 @@ pub fn restore_timed(net_data: NetData, data: GameData, spec: Spec, snapshot: &[
     g.net.spec = spec;
     g.scenes = scenes;
     g.rebuild_holders();
+    crate::meteo::explode::recount(&mut g);
     laps.lap("rebuild holders");
     crate::machines::refresh_from_tables(&mut g);
     laps.lap("refresh tables");

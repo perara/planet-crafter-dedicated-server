@@ -10,10 +10,7 @@ use super::Front;
 use crate::ipc;
 use crate::msg::{self, Hello, SnapshotHead};
 
-/// Where the front keeps the last flip's snapshot when it stops with the world in no bank.
-pub fn snapshot_path(save: &str) -> String {
-    format!("{save}.snapshot")
-}
+use crate::worlds::snapshot_path;
 
 /// Why a snapshot can never run on the bank of this HELLO: it is on another game's tables, in
 /// a format the bank does not read, or no snapshot at all. None: it may (any other error is the
@@ -57,7 +54,7 @@ impl Front {
         let path = snapshot_path(&self.save);
         let kept = ipc::read_memfd(fd)
             .map_err(|e| e.to_string())
-            .and_then(|bytes| crate::cli::replace_file(std::path::Path::new(&path), &bytes, 0o600))
+            .and_then(|bytes| crate::util::replace_file(std::path::Path::new(&path), &bytes, 0o600))
             .and_then(|_| std::fs::File::options().write(true).open(&path).and_then(|f| f.set_modified(*at)).map_err(|e| e.to_string()));
         match kept {
             Ok(()) => eprintln!("the world is in no bank: the last flip's snapshot (newer than the save) is kept in {path}; the next start runs it"),
