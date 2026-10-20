@@ -55,12 +55,24 @@ fn agent(local: bool) -> ureq::Agent {
     ureq::Agent::new_with_config(config)
 }
 
+/// A releases URL as it may be shown (/api/status, /api/update, the log, an error): scheme and
+/// host only. PCDS_RELEASES can be a private mirror with a token in its user:password@, path or
+/// query.
+pub fn shown_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else { return "(not a URL)".into() };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    format!("{scheme}://{}", authority.rsplit_once('@').map_or(authority, |(_, host)| host))
+}
+
 fn get(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, String> {
-    let mut answer = agent.get(url).header("Accept", "application/vnd.github+json, application/octet-stream, */*").call().map_err(|e| format!("{url}: {e}"))?;
+    // Whatever the library says of the URL is said of its shown form.
+    let shown = shown_url(url);
+    let said = |e: String| format!("{shown}: {}", e.replace(url, &shown));
+    let mut answer = agent.get(url).header("Accept", "application/vnd.github+json, application/octet-stream, */*").call().map_err(|e| said(e.to_string()))?;
     if !answer.status().is_success() {
-        return Err(format!("{url}: HTTP {}", answer.status().as_u16()));
+        return Err(format!("{shown}: HTTP {}", answer.status().as_u16()));
     }
-    answer.body_mut().with_config().limit(MAX_DOWNLOAD).read_to_vec().map_err(|e| format!("{url}: {e}"))
+    answer.body_mut().with_config().limit(MAX_DOWNLOAD).read_to_vec().map_err(|e| said(e.to_string()))
 }
 
 /// "0.6.0" and "v0.6.0" are the tag v0.6.0.
@@ -87,9 +99,10 @@ pub fn lookup(base: &str, version: Option<&str>) -> Result<Release, String> {
         Some(v) => format!("{base}/tags/{}", tag(v)),
     };
     let local = local(base);
-    let release: Value = serde_json::from_slice(&get(&agent(local), &url)?).map_err(|e| format!("{url}: {e}"))?;
-    let tag = release["tag_name"].as_str().ok_or_else(|| format!("{url}: no tag_name"))?.to_string();
-    check_tag(&tag).map_err(|e| format!("{url}: tag_name {e}"))?;
+    let shown = shown_url(&url);
+    let release: Value = serde_json::from_slice(&get(&agent(local), &url)?).map_err(|e| format!("{shown}: {e}"))?;
+    let tag = release["tag_name"].as_str().ok_or_else(|| format!("{shown}: no tag_name"))?.to_string();
+    check_tag(&tag).map_err(|e| format!("{shown}: tag_name {e}"))?;
     let asset = |name: &str| {
         let assets = release["assets"].as_array().into_iter().flatten();
         let found = assets.into_iter().find(|a| a["name"] == name).and_then(|a| a["browser_download_url"].as_str());
@@ -269,7 +282,29 @@ fn sweep(banks: &Path) {
 /// program of the old one keeps its files (they are renamed away, not overwritten). Err leaves
 /// the bank as it was.
 pub fn put(banks: &Path, bank: &str, new: &Path) -> Result<(), String> {
+    put_with(banks, bank, new, |p| std::fs::File::open(p)?.sync_all())
+}
+
+/// Every file and folder under `dir`, `dir` last, through `sync` (fsync).
+fn sync_tree(dir: &Path, sync: &impl Fn(&Path) -> std::io::Result<()>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            sync_tree(&entry.path(), sync)?;
+        } else {
+            sync(&entry.path())?;
+        }
+    }
+    sync(dir)
+}
+
+/// put() with the flush as a parameter. The unpacked files reach the disk before the folder is
+/// moved to the bank's name, and the move itself after: a power cut leaves the old bank or a
+/// whole new one, not a bank whose program is a name with no bytes (the data of a file the
+/// system had not written yet).
+fn put_with(banks: &Path, bank: &str, new: &Path, sync: impl Fn(&Path) -> std::io::Result<()>) -> Result<(), String> {
     let _lock = lock(banks)?;
+    sync_tree(new, &sync).map_err(|e| format!("{}: could not be flushed to disk before it is installed: {e}", new.display()))?;
     let path = banks.join(bank);
     let old = banks.join(format!(".{bank}.old"));
     let _ = std::fs::remove_dir_all(&old);
@@ -284,7 +319,8 @@ pub fn put(banks: &Path, bank: &str, new: &Path) -> Result<(), String> {
         return Err(format!("{}: {e}", path.display()));
     }
     let _ = std::fs::remove_dir_all(&old);
-    Ok(())
+    // The renames themselves.
+    sync(banks).map_err(|e| format!("{}: could not be flushed to disk: {e} (the bank is installed)", banks.display()))
 }
 
 fn unpack(release: &Release, new: &Path) -> Result<Value, String> {
@@ -379,10 +415,40 @@ pub fn rolled_back(banks: &Path) -> Option<Value> {
 
 /// A rollback away from `bank`: it is noted with the release it holds.
 pub fn set_rolled_back(banks: &Path, bank: &str) -> Result<(), String> {
+    note_rolled_back(banks, bank, None)
+}
+
+/// The front's own rollback: the release in `bank` ended the game over and over after it was
+/// flipped to (front::Front::give_up). The note also says why and when, for the dashboard and
+/// `pcds status` (a rollback of the owner's is not explained: they asked for it).
+pub fn set_rolled_back_by_crashes(banks: &Path, bank: &str, why: &str) -> Result<(), String> {
+    note_rolled_back(banks, bank, Some(why))
+}
+
+fn note_rolled_back(banks: &Path, bank: &str, why: Option<&str>) -> Result<(), String> {
     let held = info(banks, bank).unwrap_or_default();
     let tag = held["tag"].as_str().map(str::to_string).or_else(|| held["version"].as_str().map(tag));
+    let mut note = json!({"bank": bank, "tag": tag});
+    if let Some(why) = why {
+        note["reason"] = why.into();
+        note["at"] = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).into();
+    }
     let _lock = lock(banks)?;
-    crate::cli::replace_file(&banks.join("rolled-back"), (json!({"bank": bank, "tag": tag}).to_string() + "\n").as_bytes(), 0o644)
+    crate::cli::replace_file(&banks.join("rolled-back"), (note.to_string() + "\n").as_bytes(), 0o644)
+}
+
+/// The bank a release that keeps ending the game is given up for: the other one. Err (why not):
+/// it holds no release, or it is the one the server was rolled back from (the release in `bad`
+/// was installed after it): going back would only bring the old trouble back.
+pub fn crash_rollback_target(banks: &Path, bad: &str) -> Result<&'static str, String> {
+    let to = other(bad);
+    if info(banks, to).is_none() {
+        return Err(format!("bank {to} holds no release to go back to"));
+    }
+    if rolled_back(banks).is_some_and(|r| r["bank"] == to) {
+        return Err(format!("bank {to} is the one the server was rolled back from"));
+    }
+    Ok(to)
 }
 
 pub fn clear_rolled_back(banks: &Path) -> Result<(), String> {
@@ -474,7 +540,7 @@ fn version_key(v: &str) -> (Vec<u64>, bool, Vec<Part<'_>>) {
 /// The admin API's view of the banks.
 pub fn describe(banks: &Path) -> Value {
     let installed: Vec<Value> = BANKS.iter().map(|b| json!({"bank": b, "info": info(banks, b)})).collect();
-    json!({"dir": banks, "active": active(banks), "installed": installed, "fallback": fallback(banks)})
+    json!({"dir": banks, "active": active(banks), "installed": installed, "fallback": fallback(banks), "rolledBack": rolled_back(banks)})
 }
 
 #[cfg(test)]
@@ -601,6 +667,45 @@ pub mod tests {
 
     const LIVE: &str = r#"{"format": 1}"#;
 
+    /// The unpacked files are flushed before the folder is moved to the bank's name, and the
+    /// move after; a flush that fails stops the install with the bank as it was.
+    #[test]
+    fn a_bank_is_flushed_to_disk_before_it_is_moved_into_place() {
+        use std::cell::RefCell;
+        let dir = test_dir("put-sync");
+        let (banks, new) = (dir.join("bin"), dir.join("bin/.b.new.1"));
+        std::fs::create_dir_all(banks.join("b")).unwrap();
+        std::fs::write(banks.join("b/pcds"), "old").unwrap();
+        std::fs::create_dir_all(new.join("web")).unwrap();
+        std::fs::write(new.join("pcds"), "new").unwrap();
+        std::fs::write(new.join("web/index.html"), "new").unwrap();
+        // What was in the bank's place at each flush.
+        let log = RefCell::new(Vec::new());
+        let record = |p: &Path| {
+            let at = std::fs::read_to_string(banks.join("b/pcds")).unwrap_or_default();
+            log.borrow_mut().push((p.strip_prefix(&banks).unwrap_or(p).to_path_buf(), at));
+            Ok(())
+        };
+        put_with(&banks, "b", &new, record).unwrap();
+        let log = log.into_inner();
+        let names: Vec<String> = log.iter().map(|(p, _)| p.display().to_string()).collect();
+        // Both files, the web folder, the new folder (last of them), then the banks folder.
+        assert_eq!(names, [".b.new.1/web/index.html", ".b.new.1/web", ".b.new.1/pcds", ".b.new.1", ""].map(String::from).to_vec(), "{names:?}");
+        assert!(log[..4].iter().all(|(_, bank)| bank == "old"), "flushed while the old bank stood: {log:?}");
+        assert_eq!(log[4].1, "new", "the move flushed after it was made");
+        assert_eq!(std::fs::read_to_string(banks.join("b/pcds")).unwrap(), "new");
+        // A flush that fails: nothing moved.
+        std::fs::create_dir_all(dir.join("bin/.b.new.2")).unwrap();
+        std::fs::write(dir.join("bin/.b.new.2/pcds"), "newer").unwrap();
+        let e = put_with(&banks, "b", &dir.join("bin/.b.new.2"), |_| Err(std::io::Error::other("disk gone"))).unwrap_err();
+        assert!(e.contains("could not be flushed to disk before it is installed: disk gone"), "{e}");
+        assert_eq!(std::fs::read_to_string(banks.join("b/pcds")).unwrap(), "new");
+        // The real flush works on files and folders.
+        put(&banks, "b", &dir.join("bin/.b.new.2")).unwrap();
+        assert_eq!(std::fs::read_to_string(banks.join("b/pcds")).unwrap(), "newer");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn a_good_release_is_installed_into_the_bank() {
         let dir = test_dir("good");
@@ -696,6 +801,25 @@ pub mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// PCDS_RELEASES may be a private mirror with a token in it: only scheme and host are shown,
+    /// also in the errors of a lookup that fails.
+    #[test]
+    fn a_releases_url_is_shown_as_scheme_and_host_only() {
+        for (url, shown) in [
+            ("https://api.github.com/repos/x/y/releases", "https://api.github.com"),
+            ("https://user:tok@mirror.example:8443/r?token=abc#f", "https://mirror.example:8443"),
+            ("http://127.0.0.1:9/releases?k=v", "http://127.0.0.1:9"),
+            ("https://tok@host?x=1", "https://host"),
+            ("no scheme/at all?token=abc", "(not a URL)"),
+        ] {
+            assert_eq!(shown_url(url), shown, "{url}");
+        }
+        let url = "http://user:s3cr3t@127.0.0.1:9/releases/latest?token=t0k3n";
+        for e in [get(&agent(true), url).unwrap_err(), lookup("http://user:s3cr3t@127.0.0.1:9/releases?token=t0k3n", None).unwrap_err()] {
+            assert!(e.starts_with("http://127.0.0.1:9: ") && !e.contains("s3cr3t") && !e.contains("t0k3n"), "{e}");
+        }
+    }
+
     /// bank-info runs with PATH, HOME and LANG only: no token of the server reaches it.
     #[test]
     fn bank_info_sees_no_more_than_path_home_and_lang() {
@@ -732,6 +856,32 @@ pub mod tests {
         assert_eq!(rolled_back(&dir).unwrap()["tag"], "v0.7.1");
         clear_rolled_back(&dir).unwrap();
         clear_rolled_back(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A release that keeps ending the game is given up for the other bank, with the reason in
+    /// the note; never for an empty bank, nor for the bank the server was rolled back from.
+    #[test]
+    fn a_release_that_keeps_crashing_is_given_up_for_the_other_bank_when_there_is_one() {
+        let dir = test_dir("crash-rollback");
+        let bank = |name: &str, tag: &str| {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+            std::fs::write(dir.join(name).join("pcds"), "").unwrap();
+            write_info(&dir.join(name), &json!({"version": "0.7.0", "tag": tag})).unwrap();
+        };
+        bank("b", "v0.7.0");
+        assert!(crash_rollback_target(&dir, "b").unwrap_err().contains("bank a holds no release"), "an empty bank is not gone back to");
+        bank("a", "v0.6.0");
+        assert_eq!(crash_rollback_target(&dir, "b").unwrap(), "a");
+        set_rolled_back_by_crashes(&dir, "b", "ended the game 6 times").unwrap();
+        let note = rolled_back(&dir).unwrap();
+        assert_eq!((note["bank"].as_str(), note["tag"].as_str(), note["reason"].as_str()), (Some("b"), Some("v0.7.0"), Some("ended the game 6 times")));
+        assert!(note["at"].as_u64().unwrap() > 0);
+        assert_eq!(describe(&dir)["rolledBack"], note, "shown in the banks of /api/status");
+        // The automatic update leaves that release out, like any rollback.
+        assert!(auto_skips(&dir, "v0.7.0").unwrap().unwrap().contains("rolled back from"));
+        // And a bank that was rolled back from is not the target of the next give-up.
+        assert!(crash_rollback_target(&dir, "a").unwrap_err().contains("bank b is the one the server was rolled back from"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -837,7 +987,7 @@ pub mod tests {
         // The redirect is followed (to a release that has no assets).
         assert!(err(Some("v1.0.0")).contains("has no pcds-v1.0.0-linux-x86_64.tar.gz"), "{}", err(Some("v1.0.0")));
         assert!(err(Some("v1.1.0")).contains("has no pcds-v1.1.0-linux-x86_64.tar.gz.sha256"), "{}", err(Some("v1.1.0")));
-        assert!(err(Some("v1.2.0")).contains("releases/tags/v1.2.0"), "nonsense is an error naming the url");
+        assert!(err(Some("v1.2.0")).starts_with("http://127.0.0.1:"), "nonsense is an error naming the server (not the path: it may hold a token)");
         assert!(err(Some("v1.3.0")).contains("no tag_name"));
         assert!(!err(Some("v1.4.0")).is_empty(), "a body cut short is an error");
         assert!(err(Some("v1.5.0")).contains("not a release version"), "a tag from the feed is checked as a typed one is");

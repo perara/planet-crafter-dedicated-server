@@ -182,9 +182,7 @@ fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, data: crate:
     save::sweep(&folder.join("backups"));
     // The save as it was before this server touched it (as every backup: none with save.backupsKept 0).
     // At most one per 10 minutes: a crash loop must not push the hourly backups out.
-    if let Err(e) = save::backup(save_path, Duration::from_secs(600), loaded_rules.save.backups_kept as usize) {
-        eprintln!("backup failed: {e}");
-    }
+    note_backup(&save::backup(save_path, Duration::from_secs(600), loaded_rules.save.backups_kept as usize).map_err(|e| format!("{save_path}: {e}")));
     let session_number = config::env_number("PCDS_SESSION") as u32;
     let version = net_data.game_version.clone();
     let mut game = Game::new(net_data, data, spec, save, scenes);
@@ -250,9 +248,51 @@ struct Bank {
     data_dir: String,
 }
 
+/// The time of the game's ticks over the last minute, for GET /api/status: a ring of fixed size
+/// (one sample is a tick's start and duration), filled in place, so a tick costs one store and no
+/// allocation. The ring holds more than a minute of ticks (one every FRAME).
+pub struct TickTimes {
+    start: Instant,
+    ring: Box<[(u32, u32)]>,
+    next: usize,
+}
+
+/// How long a tick is remembered.
+const TICK_WINDOW: Duration = Duration::from_secs(60);
+/// Samples held: a minute of 5 ms ticks and a third more.
+const TICK_SAMPLES: usize = 16_384;
+
+impl Default for TickTimes {
+    fn default() -> Self {
+        TickTimes { start: Instant::now(), ring: vec![(u32::MAX, 0); TICK_SAMPLES].into_boxed_slice(), next: 0 }
+    }
+}
+
+impl TickTimes {
+    /// A tick that began at `at` and took `took`: milliseconds since this ring began and
+    /// microseconds, as u32 (49 days; 71 minutes).
+    fn record(&mut self, at: Instant, took: Duration) {
+        let ms = at.saturating_duration_since(self.start).as_millis().min(u32::MAX as u128 - 1) as u32;
+        self.ring[self.next] = (ms, took.as_micros().min(u32::MAX as u128) as u32);
+        self.next = (self.next + 1) % self.ring.len();
+    }
+
+    /// p50, p99 and the longest tick of the last TICK_WINDOW before `now`, in microseconds (null
+    /// when there is none). Made on request: it sorts a copy.
+    fn summary(&self, now: Instant) -> Value {
+        let since = now.saturating_duration_since(self.start).as_millis().saturating_sub(TICK_WINDOW.as_millis()) as u64;
+        let mut micros: Vec<u32> = self.ring.iter().filter(|(at, _)| *at != u32::MAX && u64::from(*at) >= since).map(|(_, took)| *took).collect();
+        micros.sort_unstable();
+        // The nearest-rank percentile.
+        let at = |p: usize| micros.get((micros.len() * p).div_ceil(100).saturating_sub(1)).copied();
+        json!({"windowSeconds": TICK_WINDOW.as_secs(), "samples": micros.len(), "p50Micros": at(50), "p99Micros": at(99), "maxMicros": micros.last()})
+    }
+}
+
 /// What the status shows of this bank's loop: loops in the last second, its work time and
 /// longest loop.
 struct Ctx<'a> {
+    ticks: &'a TickTimes,
     save_path: &'a str,
     build_id: Option<&'a str>,
     data_dir: &'a str,
@@ -274,6 +314,7 @@ impl Bank {
         let (mut next_frame, mut movement_sent) = (Instant::now(), Instant::now());
         let mut loops = (0u32, Instant::now(), 0u32);
         let (mut busy, mut busy_last) = ((Duration::ZERO, Duration::ZERO), (Duration::ZERO, Duration::ZERO));
+        let mut ticks = TickTimes::default();
         // The hooks' settings, once at the start (a restored game's too).
         game.ext.chat.changed = true;
         let mut last_ops = Value::Null;
@@ -312,7 +353,7 @@ impl Bank {
                     }
                     ipc::ADMIN => {
                         let r: Value = serde_json::from_slice(&f.body).unwrap_or_default();
-                        let ctx = Ctx { save_path: &self.save_path, build_id: self.build_id.as_deref(), data_dir: &self.data_dir, loop_rate: loops.2, busy: busy_last };
+                        let ctx = Ctx { ticks: &ticks, save_path: &self.save_path, build_id: self.build_id.as_deref(), data_dir: &self.data_dir, loop_rate: loops.2, busy: busy_last };
                         let request = || admin_request(game, r["method"].as_str().unwrap_or(""), r["path"].as_str().unwrap_or(""), &r["body"], &ctx);
                         let (status, body) = contained("an admin request", request).unwrap_or_else(|| (500, "{\"error\":\"the server failed on this request\"}".to_string()));
                         self.link.send(ipc::ANSWER, f.n, admin_answer(status, body).as_bytes());
@@ -355,10 +396,16 @@ impl Bank {
                     _ => {}
                 }
             }
-            if frame && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| game.tick())).is_err() {
+            let tick_started = Instant::now();
+            let ticked = !frame || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| game.tick())).is_ok();
+            if frame {
+                ticks.record(tick_started, tick_started.elapsed());
+            }
+            if !ticked {
                 // The whole world may be half-updated: keep what there is; the front starts the
                 // bank again from the save.
                 eprintln!("the game tick panicked: saving and stopping");
+                taint();
                 let _ = persist(game, &self.save_path);
                 std::process::exit(1);
             }
@@ -419,7 +466,7 @@ fn forward_chat(game: &mut Game, link: &mut Link) {
 /// The rules the front acts on (autosave, updates): sent at the start and whenever they change.
 fn forward_ops(game: &Game, link: &mut Link, last: &mut Value) {
     let (save, update) = (&game.rules.save, &game.rules.update);
-    let ops = json!({"autosaveMinutes": save.autosave_minutes, "autoUpdate": update.auto, "updateCheckHours": update.check_hours});
+    let ops = json!({"autosaveMinutes": save.autosave_minutes, "autoUpdate": update.auto, "updateCheckHours": update.check_hours, "bankWatchdogSeconds": game.rules.limits.bank_watchdog_seconds});
     if *last != ops {
         link.send(ipc::OPS, 0, ops.to_string().as_bytes());
         *last = ops;
@@ -496,7 +543,7 @@ fn find_client(game: &Game, who: &Who) -> Result<Option<u64>, (u16, String)> {
     match who {
         Who::Id(id) => Ok(game.clients.contains_key(id).then_some(*id)),
         Who::Name(name) => {
-            let found: Vec<u64> = game.clients.values().filter(|c| c.ready.as_ref().is_some_and(|s| s.name.eq_ignore_ascii_case(name))).map(|c| c.id).collect();
+            let found: Vec<u64> = game.clients.values().filter(|c| c.ready.as_ref().is_some_and(|s| crate::access::same_name(&s.name, name))).map(|c| c.id).collect();
             match found[..] {
                 [] => Ok(None),
                 [one] => Ok(Some(one)),
@@ -571,10 +618,18 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
                 "s3": crate::s3::status(&game.rules.backup),
                 "plugins": plugins::admin::summary(game),
                 "lastSave": LAST_SAVE.with_borrow(Value::clone),
+                "tick": ctx.ticks.summary(Instant::now()),
+                "backup": backup_status(&game.rules.save),
             });
             (200, body.to_string())
         }
-        ("POST", "/api/save") => kept(persist(game, ctx.save_path)),
+        // The front's watchdog asks this of a bank that has been silent: any answer is a loop that runs.
+        ("GET", "/api/ping") => ok(),
+        // The save, and what became of its backup: a backup that failed is the answer's, too.
+        ("POST", "/api/save") => match persist(game, ctx.save_path) {
+            Ok(()) => (200, json!({"ok": true, "backup": backup_status(&game.rules.save)}).to_string()),
+            Err(e) => (500, json!({"error": e}).to_string()),
+        },
         (_, p) if p.starts_with("/api/plugins") => plugins::admin::request(game, method, path, body),
         ("POST", "/api/kick") => match who(body).and_then(|w| find_client(game, &w)) {
             Ok(Some(c)) => {
@@ -685,7 +740,9 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
             if let Err(e) = save::write_atomic(ctx.save_path, game.save_text().as_bytes()) {
                 return (500, json!({"error": format!("save failed: {e}")}).to_string());
             }
-            if let Err(e) = save::backup(ctx.save_path, Duration::ZERO, game.rules.save.backups_kept as usize) {
+            let made = save::backup(ctx.save_path, Duration::ZERO, game.rules.save.backups_kept as usize).map_err(|e| format!("{}: {e}", ctx.save_path));
+            note_backup(&made);
+            if let Err(e) = made {
                 return (500, json!({"error": format!("backup failed: {e}")}).to_string());
             }
             let made = crate::s3::newest_backup(ctx.save_path).and_then(|p| p.file_stem().map(|f| f.to_string_lossy().to_string()));
@@ -764,14 +821,28 @@ fn game_at(dir: &std::path::Path, data_dir: &str) -> Value {
     v
 }
 
-/// One client's share of the game. A panic there (the hook printed it) kicks that client and
-/// saves at once instead of ending the server for everyone.
+/// One client's share of the game. A panic there (the hook printed it) kicks that client instead
+/// of ending the server for everyone (a client must not be able to restart the world by sending
+/// something that panics). What the work had changed by then stays changed: the world may hold
+/// the half of it. So it is not saved at once, which would replace the last consistent save on
+/// disk with it at the moment it is least to be trusted; the next save, whenever it comes,
+/// first keeps that file as <save>.before-panic (taint).
 fn guarded(game: &mut Game, client: u64, save_path: &str, work: impl FnOnce(&mut Game)) {
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(game))).is_err() {
-        eprintln!("client {client}: the server panicked on it; kicked, saving");
+        taint();
+        eprintln!("client {client}: the server panicked on it; kicked. The world may hold half of what it did: the save on disk is left as it is, and the next save keeps it as {save_path}.before-panic first");
         game.kick(client, "Server error");
-        let _ = persist(game, save_path);
     }
+}
+
+thread_local! {
+    /// Work panicked since the last save: the world may be half-changed, the file on disk is the
+    /// last whole one.
+    static TAINTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn taint() {
+    TAINTED.set(true);
 }
 
 /// The admin's or a chat hook's work: a panic there (the hook printed it) is logged and the bank
@@ -780,7 +851,8 @@ fn guarded(game: &mut Game, client: u64, save_path: &str, work: impl FnOnce(&mut
 pub(crate) fn contained<T>(what: &str, work: impl FnOnce() -> T) -> Option<T> {
     let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
     if done.is_err() {
-        eprintln!("{what}: the server panicked on it; going on");
+        taint();
+        eprintln!("{what}: the server panicked on it; going on (the next save keeps the one on disk as .before-panic first)");
     }
     done.ok()
 }
@@ -792,7 +864,13 @@ pub(crate) fn contained<T>(what: &str, work: impl FnOnce() -> T) -> Option<T> {
 /// the world does not stand still for the disk.
 struct Writing {
     path: String,
-    done: std::sync::mpsc::Receiver<Result<(), String>>,
+    done: std::sync::mpsc::Receiver<Written>,
+}
+
+/// What writing a save came to: the file, and the backup made before it (Ok(false): none was due).
+struct Written {
+    saved: Result<(), String>,
+    backup: Result<bool, String>,
 }
 
 thread_local! {
@@ -801,6 +879,31 @@ thread_local! {
     static LAST_SAVE: std::cell::RefCell<Value> = const { std::cell::RefCell::new(Value::Null) };
     /// The autosave being written, if any (at most one: a save never overtakes an older one).
     static WRITING: std::cell::RefCell<Option<Writing>> = const { std::cell::RefCell::new(None) };
+    /// The backups' outcome, for GET /api/status and POST /api/save: when one was last made, and
+    /// the last failure (cleared by the next backup made).
+    static BACKUPS: std::cell::RefCell<(Option<u64>, Option<(u64, String)>)> = const { std::cell::RefCell::new((None, None)) };
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// A backup attempt's outcome kept for the status (and logged when it failed).
+fn note_backup(result: &Result<bool, String>) {
+    match result {
+        Ok(true) => BACKUPS.set((Some(unix_now()), None)),
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("backup failed: {e}");
+            BACKUPS.with_borrow_mut(|b| b.1 = Some((unix_now(), e.clone())));
+        }
+    }
+}
+
+/// The status' "backup": whether they are on (save.backupsKept), when one was last made since
+/// this process started, and the last failure with its time.
+fn backup_status(files: &crate::rules::Save) -> Value {
+    BACKUPS.with_borrow(|(ok, failed)| json!({"enabled": files.backups_kept > 0, "lastOkAt": ok, "error": failed.as_ref().map(|(at, message)| json!({"at": at, "message": message}))}))
 }
 
 /// How long a test's save writes take (a slow disk).
@@ -809,20 +912,28 @@ pub static WRITE_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 
 /// The backup and the write of a save's text (what persist does, in its order); `files` are the
 /// rules of the backups.
-fn write_save(path: &str, text: &[u8], files: &crate::rules::Save) -> Result<(), String> {
+/// `after_panic`: the file on disk is first kept as <path>.before-panic (taint).
+fn write_save(path: &str, text: &[u8], files: &crate::rules::Save, after_panic: bool) -> Written {
     #[cfg(test)]
     std::thread::sleep(Duration::from_millis(WRITE_DELAY_MS.load(std::sync::atomic::Ordering::SeqCst)));
-    if let Err(e) = save::backup(path, Duration::from_secs(u64::from(files.backup_minutes) * 60), files.backups_kept as usize) {
-        eprintln!("backup failed: {e}");
+    if after_panic {
+        let before = format!("{path}.before-panic");
+        match std::fs::read(path).map_err(|e| e.to_string()).and_then(|bytes| save::write_atomic(&before, &bytes).map_err(|e| e.to_string())) {
+            Ok(()) => eprintln!("the world is saved after a panic; the save before it is kept as {before}"),
+            Err(e) if !std::path::Path::new(path).exists() => eprintln!("a panic was contained, and there is no save yet to keep ({e})"),
+            Err(e) => eprintln!("the save before a panic could not be kept as {before} ({e}); it is replaced by the save that follows"),
+        }
     }
-    save::write_atomic(path, text).map_err(|e| format!("{path}: {e}"))
+    let backup = save::backup(path, Duration::from_secs(u64::from(files.backup_minutes) * 60), files.backups_kept as usize).map_err(|e| format!("{path}: {e}"));
+    Written { saved: save::write_atomic(path, text).map_err(|e| format!("{path}: {e}")), backup }
 }
 
 /// What a save's end does on the game thread: the status, the log, the newest backup
 /// off-site (on a thread), when S3 is set and it is not there yet, and the plugins: they hear
 /// of it and keep their state beside the world's.
-fn saved(game: &mut Game, path: &str, saved: &Result<(), String>) {
-    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+fn saved(game: &mut Game, path: &str, written: &Written) {
+    let (at, saved) = (unix_now(), &written.saved);
+    note_backup(&written.backup);
     LAST_SAVE.set(json!({"ok": saved.is_ok(), "at": at, "error": saved.as_ref().err()}));
     match saved {
         Ok(()) => println!("saved {path}"),
@@ -850,9 +961,9 @@ fn settle(game: &mut Game, wait: bool) {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
         }
     };
-    let result = result.unwrap_or_else(|| Err(format!("{}: the thread writing it ended", w.path)));
+    let result = result.unwrap_or_else(|| Written { saved: Err(format!("{}: the thread writing it ended", w.path)), backup: Ok(false) });
     saved(game, &w.path, &result);
-    if result.is_err() {
+    if result.saved.is_err() {
         game.advanced = true;
     }
 }
@@ -866,9 +977,9 @@ fn persist_later(game: &mut Game, path: &str) -> bool {
     }
     let text = game.save_text();
     let (tx, done) = std::sync::mpsc::channel();
-    let (to, files) = (path.to_string(), game.rules.save.clone());
+    let (to, files, after_panic) = (path.to_string(), game.rules.save.clone(), TAINTED.take());
     let spawned = std::thread::Builder::new().name("pcds-save".into()).spawn(move || {
-        let r = std::panic::catch_unwind(|| write_save(&to, text.as_bytes(), &files)).unwrap_or_else(|_| Err(format!("{to}: the write panicked")));
+        let r = std::panic::catch_unwind(|| write_save(&to, text.as_bytes(), &files, after_panic)).unwrap_or_else(|_| Written { saved: Err(format!("{to}: the write panicked")), backup: Ok(false) });
         let _ = tx.send(r);
     });
     match spawned {
@@ -886,9 +997,9 @@ fn persist_later(game: &mut Game, path: &str) -> bool {
 /// the one being written, which it must not be overtaken by.
 fn persist(game: &mut Game, path: &str) -> Result<(), String> {
     settle(game, true);
-    let result = write_save(path, game.save_text().as_bytes(), &game.rules.save.clone());
-    saved(game, path, &result);
-    result
+    let written = write_save(path, game.save_text().as_bytes(), &game.rules.save.clone(), TAINTED.take());
+    saved(game, path, &written);
+    written.saved
 }
 
 /// The front's autosave. A world that stood still since the last one (rules:
@@ -998,16 +1109,111 @@ mod tests {
     use super::*;
     use crate::game;
 
-    /// A panic in one client's work kicks it and saves; the next loop goes on.
+    /// A backup that fails is no secret kept in the log: /api/status and the answer of POST /api/save
+    /// say so (the save itself still goes through), until a backup is made.
     #[test]
-    fn a_panicking_client_is_kicked_and_the_world_saved() {
+    fn a_backup_that_fails_is_in_the_status_and_in_the_answer_of_a_save() {
         let Some(mut game) = game::test_game(game::tests::save()) else { return };
-        let dir = std::env::temp_dir().join(format!("pcds-guarded-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pcds-backup-status-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("world.json").to_string_lossy().to_string();
-        guarded(&mut game, 7, &path, |_| panic!("test panic"));
+        let ctx = Ctx { ticks: &Default::default(), save_path: &path, build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
+        std::fs::write(&path, "{}").unwrap();
+        // backups/ is a file: no backup can be made.
+        std::fs::write(dir.join("backups"), "in the way").unwrap();
+        let ask = |game: &mut Game, method: &str, path: &str| {
+            let (status, answer) = admin_request(game, method, path, &json!({}), &ctx);
+            (status, serde_json::from_str::<Value>(&answer).unwrap())
+        };
+        let (status, saved) = ask(&mut game, "POST", "/api/save");
+        assert_eq!(status, 200, "the save itself went through: {saved}");
+        assert!(saved["backup"]["error"]["message"].as_str().is_some_and(|m| m.contains("world.json")) && saved["backup"]["error"]["at"].as_u64() > Some(0) && saved["backup"]["lastOkAt"].is_null(), "{saved}");
+        assert_eq!(SaveFile::load(&path).map(|s| !s.objects.is_empty()).ok(), Some(true));
+        let (_, status) = ask(&mut game, "GET", "/api/status");
+        assert_eq!(status["backup"], saved["backup"]);
+        assert_eq!(status["backup"]["enabled"], true);
+        // Mended: the next save makes the backup, and the failure is gone.
+        std::fs::remove_file(dir.join("backups")).unwrap();
+        let (_, saved) = ask(&mut game, "POST", "/api/save");
+        assert!(saved["backup"]["error"].is_null() && saved["backup"]["lastOkAt"].as_u64() > Some(0), "{saved}");
+        assert_eq!(std::fs::read_dir(dir.join("backups")).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The status' tick times: p50, p99 and the longest of the last minute, from a ring of fixed size
+    /// that a tick fills in place.
+    #[test]
+    fn tick_times_are_a_percentile_of_the_last_minute_in_a_fixed_ring() {
+        let mut t = TickTimes::default();
+        let (start, capacity) = (t.start, t.ring.len());
+        assert_eq!(t.summary(start)["samples"], 0);
+        assert!(t.summary(start)["p99Micros"].is_null());
+        // 1000 ticks of 1..=1000 us over the first 5 seconds.
+        for i in 1..=1000u64 {
+            t.record(start + Duration::from_millis(i * 5), Duration::from_micros(i));
+        }
+        let s = t.summary(start + Duration::from_secs(5));
+        assert_eq!((s["samples"].as_u64(), s["p50Micros"].as_u64(), s["p99Micros"].as_u64(), s["maxMicros"].as_u64()), (Some(1000), Some(500), Some(990), Some(1000)), "{s}");
+        // A slow tick is the maximum; p99 moves by one rank only (one tick in 1001).
+        t.record(start + Duration::from_secs(6), Duration::from_millis(80));
+        let s = t.summary(start + Duration::from_secs(6));
+        assert_eq!((s["maxMicros"].as_u64(), s["p99Micros"].as_u64()), (Some(80_000), Some(991)), "{s}");
+        // A minute on, those ticks are gone, and a single new one is the whole picture.
+        t.record(start + Duration::from_secs(70), Duration::from_micros(7));
+        let s = t.summary(start + Duration::from_secs(71));
+        assert_eq!((s["samples"].as_u64(), s["maxMicros"].as_u64(), s["p50Micros"].as_u64()), (Some(1), Some(7), Some(7)), "{s}");
+        // Past its size the ring overwrites the oldest, in the same memory.
+        for i in 0..capacity * 2 {
+            t.record(start + Duration::from_secs(80) + Duration::from_micros(i as u64), Duration::from_micros(3));
+        }
+        assert_eq!(t.ring.len(), capacity);
+        assert_eq!(t.summary(start + Duration::from_secs(81))["samples"], capacity);
+        // The API carries it.
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let ctx = Ctx { ticks: &t, save_path: "", build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
+        let (_, status) = admin_request(&mut game, "GET", "/api/status", &json!({}), &ctx);
+        let status: Value = serde_json::from_str(&status).unwrap();
+        assert_eq!(status["tick"]["windowSeconds"], 60);
+        assert!(status["tick"]["p50Micros"].is_number() || status["tick"]["samples"] == 0);
+    }
+
+    /// A panic in one client's work kicks it and goes on; the world, which may hold half of what the
+    /// work did, is not saved at once over the last whole save: that file is kept as .before-panic
+    /// by the next save, once.
+    #[test]
+    fn a_panicking_client_is_kicked_and_the_save_on_disk_is_kept_not_replaced_by_its_half_done_work() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let dir = std::env::temp_dir().join(format!("pcds-guarded-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("world.json").to_string_lossy().to_string();
+        let before_path = format!("{path}.before-panic");
+        persist(&mut game, &path).unwrap();
+        let whole = std::fs::read(&path).unwrap();
+        assert!(!std::path::Path::new(&before_path).exists(), "no panic yet, nothing kept");
+        // The work changes the world and panics half way.
+        let objects = game.wos.len();
+        guarded(&mut game, 7, &path, |g| {
+            let iron = g.data.group("Iron").unwrap();
+            g.create_world_object(iron, 0, true);
+            panic!("test panic")
+        });
         assert_eq!(game.kicks.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [7]);
-        assert!(!SaveFile::load(&path).unwrap().objects.is_empty());
+        assert_eq!(game.wos.len(), objects + 1, "the world holds what the work did before it panicked");
+        assert_eq!(std::fs::read(&path).unwrap(), whole, "the half-done world was not written over the whole save");
+        // The next save keeps the whole one first, and writes the world as it is.
+        persist(&mut game, &path).unwrap();
+        assert_eq!(std::fs::read(&before_path).unwrap(), whole);
+        assert_ne!(std::fs::read(&path).unwrap(), whole);
+        assert_eq!(SaveFile::load(&path).unwrap().objects.len(), objects + 1);
+        // Once per panic: a later save does not replace the kept one with a save made after it.
+        persist(&mut game, &path).unwrap();
+        assert_eq!(std::fs::read(&before_path).unwrap(), whole);
+        // An admin or hook panic taints the same way.
+        contained("a test", || panic!("again"));
+        persist(&mut game, &path).unwrap();
+        assert_ne!(std::fs::read(&before_path).unwrap(), whole, "the save before the second panic is kept now");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1106,7 +1312,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("world.json")).unwrap();
         let path = dir.join("world.json").to_string_lossy().to_string();
-        let ctx = Ctx { save_path: &path, build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
+        let ctx = Ctx { ticks: &Default::default(), save_path: &path, build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
         let (status, answer) = admin_request(&mut game, "POST", "/api/save", &json!({}), &ctx);
         assert!(status == 500 && answer.contains("world.json"), "{status} {answer}");
         let (_, s) = admin_request(&mut game, "GET", "/api/status", &json!({}), &ctx);
@@ -1253,8 +1459,8 @@ mod tests {
         assert_eq!(
             bodies,
             [
-                (ipc::OPS, r#"{"autosaveMinutes":5,"autoUpdate":false,"updateCheckHours":24}"#.to_string()),
-                (ipc::OPS, r#"{"autosaveMinutes":7,"autoUpdate":true,"updateCheckHours":24}"#.to_string()),
+                (ipc::OPS, r#"{"autosaveMinutes":5,"autoUpdate":false,"updateCheckHours":24,"bankWatchdogSeconds":60}"#.to_string()),
+                (ipc::OPS, r#"{"autosaveMinutes":7,"autoUpdate":true,"updateCheckHours":24,"bankWatchdogSeconds":60}"#.to_string()),
                 (ipc::GONE, String::new())
             ]
         );
@@ -1262,7 +1468,7 @@ mod tests {
 
     /// An admin API call as the bank answers it: (status, JSON answer).
     fn call(game: &mut Game, method: &str, path: &str, body: Value) -> (u16, Value) {
-        let ctx = Ctx { save_path: "", build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
+        let ctx = Ctx { ticks: &Default::default(), save_path: "", build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
         let (status, answer) = admin_request(game, method, path, &body, &ctx);
         (status, serde_json::from_str(&answer).unwrap())
     }
@@ -1277,7 +1483,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let save_path = dir.join("world.json").to_string_lossy().to_string();
         game.snapshot().write(&save_path).unwrap();
-        let ctx = Ctx { save_path: &save_path, build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
+        let ctx = Ctx { ticks: &Default::default(), save_path: &save_path, build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
         let call = |game: &mut Game, method: &str, path: &str, body: Value| {
             let (status, answer) = admin_request(game, method, path, &body, &ctx);
             (status, serde_json::from_str::<Value>(&answer).unwrap())

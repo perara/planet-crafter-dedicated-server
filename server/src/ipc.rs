@@ -114,6 +114,8 @@ pub struct Link {
     outbox: VecDeque<Out>,
     /// Bytes queued per client (front only): the caller drops a client over its bound.
     pub queued: crate::idmap::FxHashMap<u64, usize>,
+    /// The sum of `queued`.
+    pub queued_total: usize,
     blocking: bool,
     /// Why the peer's bytes are no frames (a length out of bounds): the link reads nothing
     /// more and counts as gone.
@@ -124,7 +126,7 @@ impl Link {
     pub fn new(stream: UnixStream) -> Link {
         // SAFETY: F_GETFL only reads the descriptor's flags.
         let blocking = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) & libc::O_NONBLOCK == 0 };
-        Link { stream, inbox: Vec::new(), taken: 0, scratch: Vec::new(), fds: VecDeque::new(), outbox: VecDeque::new(), queued: Default::default(), blocking, broken: None }
+        Link { stream, inbox: Vec::new(), taken: 0, scratch: Vec::new(), fds: VecDeque::new(), outbox: VecDeque::new(), queued: Default::default(), queued_total: 0, blocking, broken: None }
     }
 
     pub fn fd(&self) -> RawFd {
@@ -141,6 +143,7 @@ impl Link {
         let bytes = encode(kind, n, body);
         if client != 0 {
             *self.queued.entry(client).or_default() += bytes.len();
+            self.queued_total += bytes.len();
         }
         self.outbox.push_back(Out { bytes, at: 0, fd, client });
     }
@@ -199,15 +202,37 @@ impl Link {
             }
             n -= left;
             let o = self.outbox.pop_front().unwrap();
-            if o.client != 0
-                && let Some(q) = self.queued.get_mut(&o.client)
-            {
-                *q = q.saturating_sub(o.bytes.len());
-                if *q == 0 {
-                    self.queued.remove(&o.client);
-                }
+            self.unqueue(o.client, o.bytes.len());
+        }
+        // A queue that was long once keeps its room: given back when it is empty.
+        if self.outbox.is_empty() && self.outbox.capacity() > 4096 {
+            self.outbox.shrink_to(64);
+        }
+    }
+
+    /// `bytes` of a client's frames left the queue (sent, or taken back).
+    fn unqueue(&mut self, client: u64, bytes: usize) {
+        if client != 0
+            && let Some(q) = self.queued.get_mut(&client)
+        {
+            let freed = bytes.min(*q);
+            *q -= freed;
+            self.queued_total = self.queued_total.saturating_sub(freed);
+            if *q == 0 {
+                self.queued.remove(&client);
             }
         }
+    }
+
+    /// Takes back the frames of `client` that are queued and not begun (not a half-written
+    /// one: the peer would read garbage); the bytes freed.
+    pub fn purge(&mut self, client: u64) -> usize {
+        let before = self.queued.get(&client).copied().unwrap_or(0);
+        self.outbox.retain(|o| o.client != client || o.at > 0 || o.fd.is_some());
+        let left: usize = self.outbox.iter().filter(|o| o.client == client).map(|o| o.bytes.len()).sum();
+        let freed = before.saturating_sub(left);
+        self.unqueue(client, freed);
+        freed
     }
 
     /// A frame written at once, waiting for the socket (a bank's writes).
@@ -238,6 +263,10 @@ impl Link {
             return false;
         }
         self.inbox.drain(..std::mem::take(&mut self.taken));
+        // A burst of large frames left its room; given back once the inbox is empty.
+        if self.inbox.is_empty() && self.inbox.capacity() > (8 << 20) {
+            self.inbox = Vec::new();
+        }
         let mut buf = std::mem::take(&mut self.scratch);
         buf.resize(1 << 16, 0);
         let mut read = 0;
@@ -468,6 +497,45 @@ pub fn read_memfd(fd: &OwnedFd) -> std::io::Result<Vec<u8>> {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    /// The bytes queued for the peer are counted in all and per client, follow the frames out, and a
+    /// client's frames not begun can be taken back; a frame half written stays (the peer would
+    /// read garbage).
+    #[test]
+    fn queued_bytes_are_counted_and_a_clients_frames_can_be_taken_back() {
+        let (a, b) = UnixStream::pair().unwrap();
+        a.set_nonblocking(true).unwrap();
+        let (mut front, mut bank) = (Link::new(a), Link::new(b));
+        let body = vec![1u8; 100];
+        for client in [1u64, 2, 1, 2, 1] {
+            front.queue(DATA, client, &body, None, client);
+        }
+        front.queue(SAVE, 0, &[], None, 0);
+        let frame = encode(DATA, 1, &body).len();
+        assert_eq!((front.queued_total, front.queued[&1], front.queued[&2]), (5 * frame, 3 * frame, 2 * frame));
+        // Client 1 is taken back whole (nothing was written yet); client 2 and the SAVE stay.
+        assert_eq!(front.purge(1), 3 * frame);
+        assert_eq!((front.queued_total, front.queued.get(&1).copied(), front.queued[&2]), (2 * frame, None, 2 * frame));
+        // What went out leaves the count; the frames that stayed are the ones the peer reads.
+        front.flush().unwrap();
+        assert!(!front.pending());
+        assert_eq!((front.queued_total, front.queued.len()), (0, 0));
+        let mut kinds = Vec::new();
+        while kinds.len() < 3 {
+            assert!(bank.fill(usize::MAX));
+            while let Some(f) = bank.next() {
+                kinds.push((f.kind, f.n));
+            }
+        }
+        assert_eq!(kinds, [(DATA, 2), (DATA, 2), (SAVE, 0)]);
+        // A frame the socket took part of is not taken back.
+        let big = vec![2u8; 4 << 20];
+        front.queue(DATA, 3, &big, None, 3);
+        front.flush().unwrap();
+        assert!(front.pending(), "the socket buffer is smaller than the frame");
+        assert_eq!(front.purge(3), 0);
+        assert_eq!(front.queued_total, big.len() + 13);
+    }
 
     #[test]
     fn frames_and_memfds_cross_the_socket() {

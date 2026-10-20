@@ -913,6 +913,194 @@ fn a_new_bank_that_ends_after_its_flip_restarts_from_the_flips_snapshot() {
     bank_killed_in("new-after-ready");
 }
 
+/// PCDS_RELEASES may carry a token (a private mirror): /api/update and /api/status show scheme
+/// and host only, also after a lookup that failed.
+#[test]
+fn a_releases_url_with_a_token_is_never_shown() {
+    let Some(data) = tables() else { return };
+    let dir = world_dir("releases-token", &data);
+    let banks = banks(&dir);
+    let server = start(&dir, &data, &banks, "http://user:s3cr3t@127.0.0.1:9/releases?token=t0k3n");
+    let (_, u) = server.api("GET", "/api/update", json!({}));
+    assert_eq!(u["releases"], "http://127.0.0.1:9", "{u}");
+    let done = server.update(json!({"check": true}));
+    assert_eq!(done["ok"], false, "{done}");
+    for text in [server.api("GET", "/api/update", json!({})).1.to_string(), server.api("GET", "/api/status", json!({})).1.to_string(), server.log()] {
+        assert!(!text.contains("s3cr3t") && !text.contains("t0k3n"), "{text}");
+    }
+    assert!(done["message"].as_str().unwrap().starts_with("http://127.0.0.1:9"), "{done}");
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The front's end, waited for (None: still running after `secs`).
+fn exit_within(server: &mut Server, secs: u64) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < deadline {
+        if let Some(status) = server.child.try_wait().unwrap() {
+            return Some(status);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    None
+}
+
+/// This build behind a script that makes its game end 1 s after every READY: a release that flips
+/// fine and then fails under load.
+fn crashing_program(dir: &Path) -> PathBuf {
+    let program = dir.join("crashing-pcds");
+    // bank-info runs with a cleared environment: the Steam library's folder is given here.
+    let lib = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+    std::fs::write(&program, format!("#!/bin/sh\nLD_LIBRARY_PATH=\"{lib}\" PCDS_DEV=\"${{PCDS_DEV:+$PCDS_DEV,}}bank-fail=die-after-ready\" exec {PCDS} \"$@\"\n")).unwrap();
+    std::fs::set_permissions(&program, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    program
+}
+
+/// A release that flips fine and then ends the game under load: after the crash limit the front
+/// gives it up (the note, `active`, an exit), and the front the supervisor starts again runs the
+/// bank that ran before, with the reason in /api/update and /api/status.
+#[test]
+fn a_release_that_keeps_crashing_after_its_update_is_given_up() {
+    let Some(data) = tables() else { return };
+    let dir = world_dir("crash-rollback", &data);
+    let banks = banks(&dir);
+    let releases = release_server(release(&dir, "v9.9.9", &crashing_program(&dir), false));
+    let mut server = start(&dir, &data, &banks, &releases);
+    let players = load(&server, &data, 2, 90);
+    std::thread::sleep(Duration::from_secs(3));
+    let done = server.update(json!({"version": "v9.9.9"}));
+    assert_eq!(done["ok"], true, "{done}\n{}", server.log());
+    // Six endings of the game within ten minutes: the sixth is more than the limit.
+    let status = exit_within(&mut server, 240).unwrap_or_else(|| panic!("the front did not give the release up\n{}", server.log()));
+    let log = server.log();
+    assert_eq!(status.code(), Some(1), "{log}");
+    assert!(log.matches("restarting bank b").count() == 5 && log.contains("ROLLED BACK: the release in bank b (v9.9.9)"), "{log}");
+    assert_eq!(active_bank(&banks), "a");
+    let note: Value = serde_json::from_str(&std::fs::read_to_string(banks.join("rolled-back")).unwrap()).unwrap();
+    assert_eq!((note["bank"].as_str(), note["tag"].as_str()), (Some("b"), Some("v9.9.9")), "{note}");
+    assert!(note["reason"].as_str().unwrap().contains("ended 6 times within 10 minutes after it was flipped to"), "{note}");
+    let _ = finish(players);
+    // The supervisor starts the front again: bank a runs the world, and says why.
+    drop(server);
+    let again = start(&dir, &data, &banks, &releases);
+    assert_eq!(again.live()["bank"], "a", "{}", again.log());
+    let (_, update) = again.api("GET", "/api/update", json!({}));
+    let entry = update["history"].as_array().unwrap().iter().find(|e| e["rolledBack"] == true).unwrap_or_else(|| panic!("{update}"));
+    assert!(entry["ok"] == false && entry["message"].as_str().unwrap().contains("was given up") && entry["message"].as_str().unwrap().contains("went back to bank a"), "{entry}");
+    let (_, status) = again.api("GET", "/api/status", json!({}));
+    assert_eq!(status["banks"]["rolledBack"]["bank"], "b", "{status}");
+    assert_eq!(again.api("POST", "/api/stop", json!({})).0, 200);
+    let mut again = again;
+    assert!(again.child.wait().unwrap().success(), "{}", again.log());
+    drop(again);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A bank the owner rolled back from is not gone back to: a crashing release that took the place
+/// of a rollback ends the front as it always did, and says why it did not roll back.
+#[test]
+fn a_crashing_release_is_not_given_up_for_the_bank_the_owner_rolled_back_from() {
+    let Some(data) = tables() else { return };
+    let dir = world_dir("crash-no-rollback", &data);
+    let banks = banks(&dir);
+    let bad = banks.join("b/pcds");
+    std::fs::remove_file(&bad).unwrap();
+    std::fs::copy(crashing_program(&dir), &bad).unwrap();
+    let mut server = start(&dir, &data, &banks, "http://127.0.0.1:9/releases");
+    assert_eq!(server.update(json!({"rollback": true}))["ok"], true, "{}", server.log());
+    let status = exit_within(&mut server, 240).unwrap_or_else(|| panic!("the front did not end\n{}", server.log()));
+    let log = server.log();
+    assert_eq!(status.code(), Some(1), "{log}");
+    assert!(log.contains("no rollback: bank a is the one the server was rolled back from") && !log.contains("ROLLED BACK"), "{log}");
+    assert_eq!(active_bank(&banks), "b");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The watchdog (rule limits.bankWatchdogSeconds, 10 s here; the default is 60): a bank stopped
+/// with SIGSTOP for a few seconds, a paused world and a stopped world are left alone; a bank that
+/// says nothing for longer than the rule is killed and the world starts again, as after a crash.
+#[test]
+fn a_hung_bank_is_replaced_but_a_slow_paused_or_stopped_one_is_not() {
+    let Some(data) = tables() else { return };
+    let dir = world_dir("watchdog", &data);
+    let banks = banks(&dir);
+    let server = start(&dir, &data, &banks, "http://127.0.0.1:9/releases");
+    assert_eq!(server.api("POST", "/api/config", json!({"limits.bankWatchdogSeconds": 10})).0, 200, "{}", server.log());
+    std::thread::sleep(Duration::from_secs(2));
+    let pid = server.live()["pid"].as_u64().unwrap();
+    let hung = "said nothing for";
+    // A freeze shorter than the rule: it goes on, with the same game.
+    signal(pid, libc::SIGSTOP);
+    std::thread::sleep(Duration::from_secs(4));
+    signal(pid, libc::SIGCONT);
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(server.live()["pid"].as_u64(), Some(pid), "{}", server.log());
+    // A paused world answers from its loop: left alone for longer than the rule.
+    assert_eq!(server.api("POST", "/api/pause", json!({"paused": true})).0, 200);
+    std::thread::sleep(Duration::from_secs(14));
+    assert_eq!(server.live()["pid"].as_u64(), Some(pid), "{}", server.log());
+    assert_eq!(server.api("POST", "/api/pause", json!({"paused": false})).0, 200);
+    assert!(!server.log().contains(hung), "{}", server.log());
+    // A freeze longer than the rule: killed, started again from the save, counted as a crash.
+    signal(pid, libc::SIGSTOP);
+    let log = server.wait_log(hung);
+    assert!(log.contains(&format!("bank a (pid {pid}) said nothing for")) && log.contains("limits.bankWatchdogSeconds is 10 s"), "{log}");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while server.live()["pid"].as_u64().is_none_or(|p| p == pid) {
+        assert!(Instant::now() < deadline, "no new bank\n{}", server.log());
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(survivors(&[pid]).is_empty(), "the hung bank is gone");
+    assert!(server.log().contains("restarting bank a") && server.log().contains("runs the world again"), "{}", server.log());
+    assert_eq!(server.api("GET", "/api/status", json!({})).1["banks"]["crashes"], 1);
+    // A stopped world has no bank to kill, however long it stands.
+    assert_eq!(server.api("POST", "/api/world/stop", json!({})).0, 200);
+    std::thread::sleep(Duration::from_secs(13));
+    assert_eq!(server.log().matches(hung).count(), 1, "{}", server.log());
+    assert_eq!(server.api("GET", "/api/status", json!({})).1["state"], "stopped");
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The watchdog at its default (60 s), as the audit asked: a SIGSTOP of 10 s is nothing, one of
+/// 120 s is a hang. Slow (2.5 minutes), so run by hand: cargo test --release --test hot_update -- --ignored default_watchdog
+#[test]
+#[ignore]
+fn default_watchdog_leaves_ten_seconds_alone_and_replaces_a_bank_hung_for_two_minutes() {
+    let Some(data) = tables() else { return };
+    let dir = world_dir("watchdog-default", &data);
+    let banks = banks(&dir);
+    let server = start(&dir, &data, &banks, "http://127.0.0.1:9/releases");
+    let pid = server.live()["pid"].as_u64().unwrap();
+    signal(pid, libc::SIGSTOP);
+    std::thread::sleep(Duration::from_secs(10));
+    signal(pid, libc::SIGCONT);
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(server.live()["pid"].as_u64(), Some(pid), "{}", server.log());
+    signal(pid, libc::SIGSTOP);
+    let frozen = Instant::now();
+    server.wait_log("said nothing for");
+    let killed_after = frozen.elapsed();
+    assert!(killed_after > Duration::from_secs(55) && killed_after < Duration::from_secs(90), "{killed_after:?}");
+    println!("a bank stopped for 120 s was killed after {killed_after:?}");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while server.live()["pid"].as_u64().is_none_or(|p| p == pid) {
+        assert!(Instant::now() < deadline, "no new bank\n{}", server.log());
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// What a player or the admin does while the world stands for a flip: held, then done.
 #[test]
 fn requests_and_players_during_a_flip_are_held_and_then_served() {
@@ -1005,7 +1193,19 @@ fn the_automatic_update_takes_a_new_release_once_and_leaves_the_rolled_back_one(
         assert!(Instant::now() < deadline, "no automatic update\n{}", server.log());
         std::thread::sleep(Duration::from_millis(200));
     }
-    let installed: Value = serde_json::from_str(&std::fs::read_to_string(banks.join(active_bank(&banks)).join("bank.json")).unwrap()).unwrap();
+    // The flip counts when the world is handed over; `active` is written a moment later, by the
+    // front's banks-folder thread (slower on a busy host).
+    let active_tag = |want: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let info: Value = serde_json::from_str(&std::fs::read_to_string(banks.join(active_bank(&banks)).join("bank.json")).unwrap()).unwrap();
+            if info["tag"] == want || Instant::now() > deadline {
+                return info;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let installed = active_tag("v9.9.9");
     assert_eq!(installed["tag"], "v9.9.9", "{installed}");
     // Several checks later still one flip: the release that runs is not fetched again.
     std::thread::sleep(Duration::from_secs(14));
@@ -1023,7 +1223,7 @@ fn the_automatic_update_takes_a_new_release_once_and_leaves_the_rolled_back_one(
         assert!(Instant::now() < deadline, "no automatic update to the later release\n{}", server.log());
         std::thread::sleep(Duration::from_millis(200));
     }
-    let installed: Value = serde_json::from_str(&std::fs::read_to_string(banks.join(active_bank(&banks)).join("bank.json")).unwrap()).unwrap();
+    let installed = active_tag("v9.9.10");
     assert_eq!(installed["tag"], "v9.9.10");
     assert!(!banks.join("rolled-back").exists(), "a later release ends the note");
     let (ok, said) = finish(players);

@@ -50,21 +50,78 @@ pub fn listen(listener: TcpListener, token: String, web_index: Web, chat: Arc<Fe
     let (tx, rx) = channel();
     let open = Arc::new(AtomicUsize::new(0));
     std::thread::Builder::new().name("pcds-admin".into()).spawn(move || {
-        for stream in listener.incoming().flatten() {
+        let mut accepting = Accepting::default();
+        loop {
+            let stream = match accepting.step(listener.accept().map(|(stream, _)| stream)) {
+                Step::Serve(stream) => stream,
+                Step::Pause(time) => {
+                    std::thread::sleep(time);
+                    continue;
+                }
+            };
             // Only this thread adds, so the count cannot pass the cap.
             if open.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
                 continue;
             }
             open.fetch_add(1, Ordering::SeqCst);
             let (slot, tx, token, web, chat) = (Slot(open.clone()), tx.clone(), token.clone(), web_index.clone(), chat.clone());
-            std::thread::spawn(move || {
+            let spawned = std::thread::Builder::new().name("pcds-admin-conn".into()).spawn(move || {
                 let _slot = slot;
                 let page = web.read().unwrap_or_else(|e| e.into_inner()).clone();
                 let _ = serve(stream, &tx, &token, page.as_deref(), &chat);
             });
+            // No thread for it (the process is at its limit): the connection is closed (the
+            // closure, with its slot and stream, is dropped with the error), and the acceptor goes on.
+            if let Err(e) = spawned {
+                eprintln!("admin: no thread for a connection ({e}); it was closed, the listener goes on");
+                std::thread::sleep(accepting.pause_after_failure());
+            }
         }
     })?;
     Ok(rx)
+}
+
+/// What the acceptor does with one result of accept().
+enum Step {
+    Serve(TcpStream),
+    Pause(Duration),
+}
+
+/// The acceptor's state: the accept errors in a row. An error that does not clear (no file
+/// descriptors left: EMFILE, ENFILE; no memory) made the old loop spin at 100% of a core, and
+/// logged nothing.
+#[derive(Default)]
+struct Accepting {
+    failures: u32,
+}
+
+impl Accepting {
+    fn step(&mut self, accepted: std::io::Result<TcpStream>) -> Step {
+        match accepted {
+            Ok(stream) => {
+                self.failures = 0;
+                Step::Serve(stream)
+            }
+            Err(e) => {
+                self.failures = self.failures.saturating_add(1);
+                // The first, and then one in a while: a minute of a stuck listener is a few lines.
+                if self.failures == 1 || self.failures.is_multiple_of(60) {
+                    eprintln!("admin: accept failed ({e}), {} in a row; trying again in {:?} (connections wait or are refused until it clears)", self.failures, Self::backoff(self.failures));
+                }
+                Step::Pause(Self::backoff(self.failures))
+            }
+        }
+    }
+
+    fn pause_after_failure(&mut self) -> Duration {
+        self.failures = self.failures.saturating_add(1);
+        Self::backoff(self.failures)
+    }
+
+    /// 10 ms, doubled for each error in a row, up to a second.
+    fn backoff(failures: u32) -> Duration {
+        Duration::from_millis(10u64 << failures.saturating_sub(1).min(7)).min(Duration::from_secs(1))
+    }
 }
 
 /// One connection being served; freed when its thread ends, panic or not.
@@ -261,6 +318,33 @@ mod tests {
         let mut answer = String::new();
         let _ = s.read_to_string(&mut answer);
         answer
+    }
+
+    /// An accept that keeps failing (EMFILE) is waited out with a growing pause, not spun on, and
+    /// the first good connection after it is served as ever.
+    #[test]
+    fn an_acceptor_that_keeps_failing_backs_off_and_recovers() {
+        let mut accepting = Accepting::default();
+        let emfile = || Err::<TcpStream, _>(std::io::Error::from_raw_os_error(libc::EMFILE));
+        let pauses: Vec<Duration> = (0..12)
+            .map(|_| match accepting.step(emfile()) {
+                Step::Pause(p) => p,
+                Step::Serve(_) => panic!("an error is not a connection"),
+            })
+            .collect();
+        let ms: Vec<u128> = pauses.iter().map(|p| p.as_millis()).collect();
+        assert_eq!(ms, [10, 20, 40, 80, 160, 320, 640, 1000, 1000, 1000, 1000, 1000]);
+        // A listener stuck for a minute is asked about once a second, not a million times.
+        assert!(pauses.iter().sum::<Duration>() > Duration::from_secs(5));
+        // A connection that comes ends the run of errors.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        assert!(matches!(accepting.step(Ok(stream)), Step::Serve(_)));
+        assert!(matches!(accepting.step(emfile()), Step::Pause(p) if p == Duration::from_millis(10)));
+        // A thread that could not be made is one more failure in the run.
+        assert_eq!(accepting.pause_after_failure(), Duration::from_millis(20));
+        drop(client);
     }
 
     /// Stopping, starting and switching a world are answered when done, not failed at 10 s.

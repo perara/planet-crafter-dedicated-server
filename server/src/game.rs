@@ -599,18 +599,14 @@ impl Game {
         // NaN or infinity: neither kept (the snapshot and save could not be read back) nor
         // passed on; the next state moves the object on.
         if update.as_ref().is_some_and(|u| !u.finite()) {
-            if self.unhandled.insert(format!("non-finite transform {client}")) {
-                eprintln!("client {client}: a transform that is not a number (NaN or infinity), dropped (logged once)");
-            }
+            self.limits.warn(client, "a transform that is not a number (NaN or infinity), dropped");
             return;
         }
         if let Some(u) = update.filter(|u| !u.local) {
             if let Some(o) = self.net.objects.get_mut(&u.object) {
                 // Finite values can still overflow once merged onto the last state.
                 let Some((position, rotation)) = u.applied(o.position, o.rotation) else {
-                    if self.unhandled.insert(format!("overflowing transform {client}")) {
-                        eprintln!("client {client}: a transform that overflows to NaN or infinity, dropped (logged once)");
-                    }
+                    self.limits.warn(client, "a transform that overflows to NaN or infinity, dropped");
                     return;
                 };
                 (o.position, o.rotation) = (position, rotation);

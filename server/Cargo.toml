@@ -29,6 +29,9 @@ ring = "0.17"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order", "raw_value"] }
 steamworks = "0.13.1"
+# NFKC for the names the access lists compare (access.rs fold_name): fullwidth letters, ligatures
+# and the like are the letters they stand for. Pure Rust; its only dependency is tinyvec.
+unicode-normalization = { version = "0.1.25", default-features = false, features = ["std"] }
 # plugin.toml and rules.toml: written by hand, so with comments (no default features: parser and serde only).
 toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 # Chat webhooks over HTTP and HTTPS (rustls with ring, Mozilla's roots; no OpenSSL).

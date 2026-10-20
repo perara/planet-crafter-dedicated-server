@@ -445,11 +445,12 @@ pub fn stamp(t: SystemTime) -> String {
 }
 
 /// Before a save is replaced: a copy in backups/ next to it, <stem>-<UTC time>.json, unless
-/// one is younger than `every`; only the newest `keep` stay (0: no backups).
-pub fn backup(path: &str, every: Duration, keep: usize) -> std::io::Result<()> {
+/// one is younger than `every`; only the newest `keep` stay (0: no backups). Whether a copy
+/// was made (false: none was due).
+pub fn backup(path: &str, every: Duration, keep: usize) -> std::io::Result<bool> {
     let path = Path::new(path);
     if keep == 0 || !path.exists() {
-        return Ok(());
+        return Ok(false);
     }
     let dir = path.with_file_name("backups");
     let stem = path.file_stem().unwrap_or_default().to_string_lossy();
@@ -462,7 +463,7 @@ pub fn backup(path: &str, every: Duration, keep: usize) -> std::io::Result<()> {
     let now = SystemTime::now();
     let since = stamp(now.checked_sub(every).unwrap_or(SystemTime::UNIX_EPOCH));
     if times.iter().any(|t| *t > since) {
-        return Ok(());
+        return Ok(false);
     }
     let time = stamp(now);
     // Whole or not at all: a copy cut short (a full disk) under a backup's name would count as
@@ -474,7 +475,7 @@ pub fn backup(path: &str, every: Duration, keep: usize) -> std::io::Result<()> {
     for old in &times[..times.len().saturating_sub(keep)] {
         std::fs::remove_file(dir.join(format!("{stem}-{old}.json")))?;
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]

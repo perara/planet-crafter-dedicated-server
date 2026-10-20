@@ -104,6 +104,7 @@ pub static KNOBS: &[Knob] = &[
     rule("death.dropChance", Type::Float, "%", "With DropSomeItems: the percent chance each item is dropped (with 4 items or fewer, all go). Unset: the game's 50.").range(0.0, 100.0),
     rule("loot.amount", Type::Float, "×", "Items in generated containers (wreck safes, crates), times this, up to the size of the container.").range(MULTIPLIER.0, MULTIPLIER.1),
     rule("limits.maxPlayers", Type::Int, "players", "Players at once; more are refused with the game's session-full message. Unset: 16.").range(1.0, 100.0),
+    rule("limits.bankWatchdogSeconds", Type::Int, "s", "A game process that says nothing (no answer to a player, an admin request or the front's ping) for this long is killed and the world starts again from the last snapshot or save, as after a crash (and counts toward the crash limit). Not during a flip, a world stop or a save the admin asked for. 0: never; else 10 to 3600.").range(0.0, 3600.0),
     rule("world.pauseWhenEmpty", Type::Bool, "", "With no player in the game (past PlayerReady, as the game counts players), the world stands still: its clock, and with it every timer, day and night, growth, production, terraformation, meteo, drone and vehicle. It goes on from there when a player is in."),
     rule("chat.webhooks", Type::List, "", "http:// or https:// URLs every chat message is POSTed to as JSON (see the README's chat hooks).").secret(),
     rule("chat.secret", Type::String, "", "Signs every webhook POST: X-PCDS-Signature: sha256=<HMAC-SHA256 of the body, hex>. Unset: unsigned.").secret(),

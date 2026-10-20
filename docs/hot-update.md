@@ -46,7 +46,11 @@ autosave setting; while the world is stopped the front answers `GET /api/status`
 /api/worlds` itself and refuses the rest. The answer comes back as ANSWER, and the front adds its part to
 `/api/status` (invite code, network, uptime, traffic, CPU and memory of front and banks,
 `banks`, `update`). Writes to a bank never block: frames wait in a queue per bank, and a client
-with more than 16 MiB waiting for the game (held during a flip, or a stalled bank) is dropped.
+with more than 16 MiB waiting for the game (held during a flip, or a stalled bank) is dropped, and
+so is, one by one, the client with the most waiting while all clients together have more than 256 MiB
+waiting; the memory of a stall is given back to the system when it is over. A bank that says nothing
+for `limits.bankWatchdogSeconds` (60) is killed and restarted like after a crash; the clock runs
+only while the world plays (not during a flip, a recovery or a stop).
 The bank writes blocking: a front that stopped reading stalls the world, which loses nothing.
 The frames queued together go out in one write (writev; a frame with a descriptor alone). The
 front loops every 5 ms; with nobody connected and no flip under way it loops every 20 ms (a
@@ -87,7 +91,13 @@ last snapshot when it is newer than the save, else from the save (either way `ac
 `rules.json` are read again from disk, so a ban after the last flip stays), tells its players "The server
 restarted after an error: join again" and closes their connections; the Steam login and the
 invite code stay. A snapshot restored this way drops every client in it. More than 5 crashes in
-10 minutes and the front exits (systemd's restart and start limit take over). At the first
+10 minutes and the front exits (systemd's restart and start limit take over). When the bank
+that keeps ending came by a flip of this front (an update), the release in it is given up
+first: `run/bin/rolled-back` notes it with the reason (the automatic update leaves that
+release out), `active` points at the other bank, and the restart runs the release that ran
+before; not when that bank is empty or is the one the owner rolled back from (the log says
+`no rollback:` and why). The reason is in `/api/update`'s history, `/api/status` (`banks.rolledBack`)
+and `pcds status`. At the first
 start, a bank that cannot load the world makes the front try the other bank once (a broken
 update falls back to the release that ran before), and writes `run/bin/fallback`. Every HELLO,
 at boot, flip or recovery, is checked the same way; a recovering bank of another protocol stops

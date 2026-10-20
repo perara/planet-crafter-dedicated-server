@@ -18,6 +18,15 @@ const CHAT_EVERY: f32 = 1.0;
 /// order, up to MAX_PENDING RPCs (more are dropped).
 const RPC_BUDGET: u32 = 32;
 const MAX_PENDING: usize = 8192;
+/// And the bytes of those: an RPC is up to a batch (1 MiB), so the count alone allowed gigabytes.
+const MAX_PENDING_BYTES: usize = 4 << 20;
+/// What a client may create before its PlayerReady: inventories and the items put in them as
+/// they are made. A joining game client creates its backpack and equipment (2), and the
+/// containers of the planet's scene with a display make theirs (InventoryAssociated.Start, 2 s
+/// after loading, with the loot the scene rolls: tens of items at most); a client that goes on
+/// past these is flooding (a world object per `content` entry, up to the inventory's size).
+pub(crate) const MAX_LOADING_INVENTORIES: u32 = 256;
+pub(crate) const MAX_LOADING_ITEMS: u32 = 4096;
 
 /// Transform states and variable deltas a client's objects send are passed on to every other
 /// client, so what a client may send is bounded too: MOTION_PER_SECOND units, a message costing
@@ -39,13 +48,20 @@ pub struct Limits {
     #[serde(skip)]
     used: HashMap<u64, u32>,
     pending: HashMap<u64, VecDeque<Vec<u8>>>,
+    /// The bytes of each client's pending RPCs (counted again from the queue after a restore).
+    #[serde(skip)]
+    pending_bytes: HashMap<u64, usize>,
     /// Clients already logged for going over a limit.
     #[serde(skip)]
     warned: HashSet<(u64, &'static str)>,
+    /// Per client before PlayerReady: the inventories it made and the items put into them.
+    #[serde(skip)]
+    loading_created: HashMap<u64, (u32, u32)>,
 }
 
 impl Limits {
-    fn warn(&mut self, client: u64, what: &'static str) {
+    /// `what` logged once for this client (forgotten with it: the table holds the clients there are).
+    pub(crate) fn warn(&mut self, client: u64, what: &'static str) {
         if self.warned.insert((client, what)) {
             eprintln!("client {client}: {what} (logged once)");
         }
@@ -88,21 +104,38 @@ impl Limits {
             return true;
         }
         let queue = self.pending.entry(client).or_default();
-        if queue.len() >= MAX_PENDING {
+        let bytes = *self.pending_bytes.entry(client).or_insert_with(|| queue.iter().map(Vec::len).sum());
+        if queue.len() >= MAX_PENDING || bytes + rpc.len() > MAX_PENDING_BYTES {
             self.warn(client, "RPCs over the budget and the queue, dropped");
             return false;
         }
         queue.push_back(rpc.to_vec());
+        self.pending_bytes.insert(client, bytes + rpc.len());
         self.warn(client, "RPCs over the budget of a tick, queued");
         false
     }
 
+    /// Whether a client that is no player yet may create an inventory with `items` initial items
+    /// (MAX_LOADING_INVENTORIES and MAX_LOADING_ITEMS in all); a refusal is logged once.
+    pub fn loading_create(&mut self, client: u64, items: usize) -> bool {
+        let (made, put) = self.loading_created.entry(client).or_default();
+        let items = items.min(u32::MAX as usize) as u32;
+        if *made >= MAX_LOADING_INVENTORIES || put.saturating_add(items) > MAX_LOADING_ITEMS {
+            self.warn(client, "inventories created before PlayerReady over the limit, refused");
+            return false;
+        }
+        (*made, *put) = (*made + 1, *put + items);
+        true
+    }
+
     pub fn forget(&mut self, client: u64) {
+        self.loading_created.remove(&client);
         self.chat.remove(&client);
         self.motion.remove(&client);
         self.warned.retain(|(c, _)| *c != client);
         self.used.remove(&client);
         self.pending.remove(&client);
+        self.pending_bytes.remove(&client);
     }
 }
 
@@ -129,9 +162,13 @@ pub fn run_pending(game: &mut Game, cost: impl Fn(&Game, &[u8]) -> u32, run: imp
             used += c;
             due.extend(game.limits.pending.get_mut(&client).and_then(VecDeque::pop_front));
         }
+        if let Some(bytes) = game.limits.pending_bytes.get_mut(&client) {
+            *bytes = bytes.saturating_sub(due.iter().map(Vec::len).sum());
+        }
         game.limits.used.insert(client, used);
         if game.limits.pending.get(&client).is_some_and(VecDeque::is_empty) {
             game.limits.pending.remove(&client);
+            game.limits.pending_bytes.remove(&client);
         }
         for rpc in due {
             run(game, client, &rpc);
@@ -488,6 +525,37 @@ mod tests {
     use crate::net::{enc, Target, VarValue};
     use crate::testkit::*;
     use serde_json::{json, Value};
+
+    /// The RPCs a client has waiting for the next ticks are bounded in bytes too (a count of 8192
+    /// RPCs of a batch each was gigabytes); the bytes follow the queue in and out and go with the
+    /// client.
+    #[test]
+    fn rpcs_waiting_for_a_tick_are_bounded_in_bytes_as_well_as_in_number() {
+        let Some((mut g, _)) = world() else { return };
+        let rpc = vec![0u8; 1 << 20];
+        // The first RPC of a tick runs whatever it costs; the rest wait, up to the byte bound.
+        assert!(g.limits.spend(1, 32, &rpc));
+        for _ in 0..10 {
+            assert!(!g.limits.spend(1, 1, &rpc));
+        }
+        let waiting = g.limits.pending[&1].len();
+        assert_eq!(waiting, super::MAX_PENDING_BYTES >> 20, "4 MiB wait, the others were dropped");
+        assert_eq!(g.limits.pending_bytes[&1], super::MAX_PENDING_BYTES);
+        // A small one fits no better: the bound is on bytes.
+        assert!(!g.limits.spend(1, 1, &[1]) && g.limits.pending[&1].len() == waiting + usize::from(g.limits.pending_bytes[&1] < super::MAX_PENDING_BYTES));
+        // Another client has a bound of its own.
+        assert!(g.limits.spend(2, 1, &rpc));
+        // The next ticks run them (32 a tick) and the bytes go down with the queue.
+        let ran = std::cell::Cell::new(0);
+        crate::handlers::run_pending(&mut g, |_, _| 1, |_, _, _| ran.set(ran.get() + 1));
+        assert_eq!(ran.get(), waiting);
+        assert!(!g.limits.pending_bytes.contains_key(&1) && !g.limits.pending.contains_key(&1));
+        // A client that leaves with RPCs waiting takes its bytes along.
+        assert!(g.limits.spend(3, 32, &rpc));
+        assert!(!g.limits.spend(3, 1, &rpc));
+        g.limits.forget(3);
+        assert!(!g.limits.pending_bytes.contains_key(&3) && !g.limits.pending.contains_key(&3));
+    }
 
     /// Text and linked groups set on a container's proxies, colour and setting on a building's:
     /// the variables everyone sees, the world object, the save, and the variables a reloaded

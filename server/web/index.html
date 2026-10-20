@@ -1349,13 +1349,21 @@ function renderPauseButtons(s) {
   $('stopWorld').textContent = 'Stop world'; $('stopWorld').className = 'danger';
   for (const id of ['pauseWorld', 'saveWorld', 'ovPause', 'ovSave', 'newWorld']) $(id).disabled = false;
 }
+// The local backups' state: off, the last one made, and the last failure (kept until one is made).
+function backupLine(b) {
+  if (!b) return '–';
+  if (!b.enabled) return 'off (rule save.backupsKept is 0)';
+  const made = b.lastOkAt ? `last made ${ago(b.lastOkAt)}` : 'none made since the server started';
+  return b.error ? h('span', { class: 'err' }, `FAILING ${ago(b.error.at)}: ${b.error.message}; ${made}`) : made;
+}
 function renderWorld(s) {
   const world = s.world || {};
   $('worldState').replaceChildren(s.held ? h('span', { class: 'chip warn' }, 'paused') : h('span', { class: 'chip ok' }, 'running'));
   if (s.s3) renderS3(s.s3);
   $('worldInfo').replaceChildren(...pairs([['World', s.save], ['Planet', s.planet], ['World seed', String(world.seed ?? '–')],
     ['Game time', duration(s.gameTime || 0)], ['Autosave', s.autosaveMinutes ? `every ${s.autosaveMinutes} min` : 'off'],
-    ['World objects', (s.objects?.world ?? 0).toLocaleString()]]));
+    ['World objects', (s.objects?.world ?? 0).toLocaleString()],
+    ['Backups', backupLine(s.backup)]]));
   const settings = Object.entries(world.settings || {});
   const sig = JSON.stringify(settings);
   if ($('worldSettings').dataset.sig !== sig) {
@@ -1446,7 +1454,10 @@ $('newWorld').onclick = async () => {
 };
 $('worldsRefresh').onclick = loadWorlds;
 onShow.world = loadWorlds;
-const save = btn => act('World saved', () => api('POST', '/api/save'), btn).then(() => current === 'world' && loadWorlds());
+const save = btn => act('World saved', () => api('POST', '/api/save'), btn).then(r => {
+  if (r?.backup?.error) toast(`The world is saved, but its backup failed: ${r.backup.error.message}`, 'err');
+  return current === 'world' && loadWorlds();
+});
 $('saveWorld').onclick = e => save(e.currentTarget);
 $('ovSave').onclick = e => save(e.currentTarget);
 $('backupNow').onclick = e => act(r => r.s3 ? `Backup ${r.backup} made; copying it to S3` : r.s3Error ? `Backup ${r.backup} made; S3: ${r.s3Error}` : `Backup ${r.backup} made`, () => api('POST', '/api/backup'), e.currentTarget).then(loadWorlds);

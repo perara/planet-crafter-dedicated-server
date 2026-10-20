@@ -75,6 +75,24 @@ fn fake_bank(dir: &Path, bank: &str, script: &str, tables_format: u32) {
     std::fs::write(bank.join("bank.json"), info.to_string()).unwrap();
 }
 
+/// A release the server gave up for crashing (banks/rolled-back with a reason) is in `pcds status`,
+/// a rollback of the owner's (no reason) is not explained there.
+#[test]
+fn status_says_when_a_release_was_given_up_for_crashing() {
+    let dir = test_dir("given-up");
+    let fake = fake_systemctl(&dir, "echo inactive");
+    fake_bank(&dir, "a", "true", 1);
+    fake_bank(&dir, "b", "true", 1);
+    let note = dir.join("run/bin/rolled-back");
+    std::fs::write(&note, r#"{"bank": "b", "tag": "v9.1.0", "reason": "the game ended 6 times within 10 minutes after it was flipped to", "at": 1}"#).unwrap();
+    let out = pcds(&dir, &fake, &["status"]);
+    assert!(text(&out).contains("the release in bank b (v9.1.0) was rolled back from automatically: the game ended 6 times"), "{}", text(&out));
+    std::fs::write(&note, r#"{"bank": "b", "tag": "v9.1.0"}"#).unwrap();
+    let out = pcds(&dir, &fake, &["status"]);
+    assert!(!text(&out).contains("automatically"), "{}", text(&out));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// run/bin/pcds, what the units run, hands every command to the active bank's program.
 #[test]
 fn the_launcher_hands_commands_to_the_active_bank() {

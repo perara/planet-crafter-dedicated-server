@@ -164,6 +164,11 @@ impl Ctx {
         if let Some(f) = fallback {
             println!("started from bank {} because bank {} {}", text(&f["to"]), text(&f["from"]), text(&f["reason"]));
         }
+        // The running front's view, else the note on disk: a release given up for crashes.
+        let given_up = live.map(|l| l["rolledBack"].clone()).filter(|r| !r.is_null()).or_else(|| updater::rolled_back(&banks));
+        if let Some(r) = given_up.filter(|r| r["reason"].is_string()) {
+            println!("the release in bank {} ({}) was rolled back from automatically: {}", text(&r["bank"]), text(&r["tag"]), text(&r["reason"]));
+        }
     }
 }
 

@@ -58,6 +58,14 @@ const MAX_SPLIT: usize = 1 << 20;
 /// A client's frames waiting for the bank (a stalled or flipping world) past this: the client
 /// is dropped, not the world.
 const MAX_CLIENT_QUEUE: usize = 16 << 20;
+/// All clients' frames waiting for the bank together (held while the world stands for a flip,
+/// or queued to a bank that does not read): past this the client with the most waiting, the one
+/// the stall hurts most, is dropped, until the new frame fits. 128 clients at MAX_CLIENT_QUEUE
+/// each would hold two gigabytes.
+const MAX_TOTAL_QUEUE: usize = 256 << 20;
+/// A stall that had this much waiting, once over, gives the memory back to the system (the
+/// allocator keeps freed memory of that size in the process).
+const TRIM_AFTER: usize = 8 << 20;
 /// At a stop, the live bank gets this long to take STOP and save, then as long again to end,
 /// before it is killed: 60 s in all, under the supervisor's 20 s for orphans (cli/setup.rs
 /// BANKS_GRACE) and systemd's TimeoutStopSec=90 (and Docker's --stop-timeout 90), so
@@ -103,7 +111,7 @@ const STOPPED_UPDATE: &str = "the world is stopped, so no bank runs a world to h
 
 enum Conn {
     /// Steam networking: the connection carries the verified SteamID.
-    Steam { connection: NetConnection, split: Option<(Vec<u8>, usize)> },
+    Steam { connection: NetConnection, split: Option<(Vec<u8>, usize)>, steam_id: u64 },
     Ip(utp::Token),
 }
 
@@ -115,6 +123,8 @@ struct Bank {
     /// Its HELLO (Null until it came).
     hello: Value,
     started: Instant,
+    /// The last frame it sent: the watchdog's clock (watch_verdict).
+    heard: Instant,
 }
 
 #[derive(PartialEq, Debug, Clone, Copy)]
@@ -200,12 +210,26 @@ struct Front {
     /// Frames for the bank while the world stands (and their bytes per client).
     held: Vec<(u8, u64, Vec<u8>, u64)>,
     held_bytes: HashMap<u64, usize>,
+    /// The sum of held_bytes; the most that waited since the last time the memory was given back.
+    held_total: usize,
+    waiting_peak: usize,
+    /// MAX_TOTAL_QUEUE (a field for the tests).
+    queue_cap: usize,
     /// The last snapshot a flip carried: a crashed bank starts from it when it is newer than
     /// the save.
     last_snapshot: Option<(OwnedFd, SystemTime)>,
     /// What a recovering bank starts from: the snapshot (else the save).
     recover_from: Option<OwnedFd>,
     crashes: VecDeque<Instant>,
+    /// The bank a flip (an update, a rollback) made the live one in this front's life; None
+    /// when the live bank is the one the front started with. A release that ends the game over
+    /// and over is given up (give_up) only when it came by a flip.
+    flipped: Option<String>,
+    /// Who may connect over Steam (the caps of the UDP side).
+    steam_gate: SteamGate,
+    /// The rule limits.bankWatchdogSeconds (ipc::OPS), and when the live bank was last pinged.
+    watchdog: Duration,
+    pinged: Option<Instant>,
     exiting: Vec<(Child, Instant)>,
     /// Writes of the banks folder's files that a flip made (they flush to disk, which takes as
     /// long as the disk does): off the front's thread, joined at shutdown.
@@ -306,9 +330,16 @@ impl Front {
             flip: None,
             held: Vec::new(),
             held_bytes: HashMap::new(),
+            held_total: 0,
+            waiting_peak: 0,
+            queue_cap: MAX_TOTAL_QUEUE,
             last_snapshot: None,
             recover_from: None,
             crashes: VecDeque::new(),
+            flipped: None,
+            steam_gate: SteamGate::default(),
+            watchdog: Duration::from_secs(u64::from(rules.limits.bank_watchdog_seconds)),
+            pinged: None,
             exiting: Vec::new(),
             persisting: Vec::new(),
             admin: None,
@@ -365,12 +396,18 @@ impl Front {
             });
         }
         let child = command.spawn().map_err(|e| format!("{}: {e}", exe.display()))?;
-        Ok(Bank { name: bank.to_string(), child, link: Link::new(ours), hello: Value::Null, started: Instant::now() })
+        Ok(Bank { name: bank.to_string(), child, link: Link::new(ours), hello: Value::Null, started: Instant::now(), heard: Instant::now() })
     }
 
     /// The first bank, waited for (nobody is connected yet): the active one, else the other one
     /// when the active one cannot start (a broken update), as a bootloader falls back.
     fn boot(&mut self) {
+        // A rollback the previous front made for crashes is in the history of this one (the
+        // note outlives it: banks/rolled-back, until a later release or an update clears it).
+        if let Some(r) = self.banks.as_deref().and_then(updater::rolled_back).filter(|r| r["reason"].is_string()) {
+            let message = format!("the release in bank {} ({}) was given up: {}; the server went back to bank {}", r["bank"].as_str().unwrap_or("?"), r["tag"].as_str().unwrap_or("?"), r["reason"].as_str().unwrap_or(""), updater::other(r["bank"].as_str().unwrap_or("")));
+            self.updates.history.push_back(json!({"seq": 0, "ok": false, "message": message, "at": r["at"], "rolledBack": true, "bank": r["bank"], "tag": r["tag"]}));
+        }
         let first = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
         let mut kept = self.kept_snapshot().unwrap_or_else(|e| {
             eprintln!("{e}");
@@ -411,7 +448,7 @@ impl Front {
                     {
                         eprintln!("banks: {e}");
                     }
-                    self.live = Some(b);
+                    self.live = Some(Bank { heard: Instant::now(), ..b });
                     return;
                 }
                 Err(e) => tried.push(format!("bank {bank}: {e}")),
@@ -576,6 +613,7 @@ impl Front {
             self.supervise();
             sent |= self.drops();
             self.flush_banks();
+            self.release_memory();
             if self.phase == Phase::Restoring
                 && let (Some(flip), Some(n)) = (self.flip.as_mut(), self.next.as_ref())
                 && flip.at[2] == 0
@@ -607,11 +645,22 @@ impl Front {
     fn poll_steam(&mut self) {
         let Some((steam, listen)) = &self.steam else { return };
         steam.run_callbacks();
-        let (mut joined, mut gone, mut incoming) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut joined, mut gone, mut incoming, mut accepted) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         while let Some(event) = listen.try_receive_event() {
             match event {
                 ListenSocketEvent::Connecting(request) => {
-                    let _ = request.accept();
+                    let steam_id = request.remote().steam_id().map(|id| id.raw()).unwrap_or(0);
+                    let open: Vec<u64> = self.conns.values().filter_map(|c| if let Conn::Steam { steam_id, .. } = c { Some(*steam_id) } else { None }).chain(joined.iter().map(|(_, s, _)| *s)).chain(accepted.iter().copied()).collect();
+                    match self.steam_gate.admit(steam_id, Instant::now(), &open) {
+                        Ok(()) => {
+                            accepted.push(steam_id);
+                            let _ = request.accept();
+                        }
+                        Err(why) => {
+                            println!("{steam_id}: Steam connection refused ({why})");
+                            request.reject(NetConnectionEnd::App(AppNetConnectionEnd::generic_normal()), Some("the server cannot take this connection now"));
+                        }
+                    }
                 }
                 ListenSocketEvent::Connected(event) => {
                     let steam_id = event.remote().steam_id().map(|id| id.raw()).unwrap_or(0);
@@ -633,7 +682,7 @@ impl Front {
         }
         for (client, steam_id, connection) in joined {
             println!("client {client}: connected over Steam as {steam_id}");
-            self.conns.insert(client, Conn::Steam { connection, split: None });
+            self.conns.insert(client, Conn::Steam { connection, split: None, steam_id });
             self.to_bank(ipc::CONNECTED, client, json!({"steamId": steam_id, "trusted": false}).to_string().as_bytes(), 0);
         }
         for (client, conn) in self.conns.iter_mut() {
@@ -785,8 +834,10 @@ impl Front {
         };
         if client != 0 && queued + body.len() > MAX_CLIENT_QUEUE {
             eprintln!("client {client}: over {} MiB waiting for the game; dropped", MAX_CLIENT_QUEUE >> 20);
-            self.kicked.insert(client);
-            self.close(client);
+            self.drop_waiting(client);
+            return;
+        }
+        if client != 0 && !self.make_room(client, body.len() + 13) {
             return;
         }
         match (&mut self.live, holding) {
@@ -794,9 +845,70 @@ impl Front {
             _ => {
                 if client != 0 {
                     *self.held_bytes.entry(client).or_default() += body.len() + 13;
+                    self.held_total += body.len() + 13;
                 }
                 self.held.push((kind, n, body.to_vec(), client));
             }
+        }
+    }
+
+    /// What all clients have waiting for the bank.
+    fn waiting_total(&self) -> usize {
+        self.held_total + self.live.as_ref().map_or(0, |b| b.link.queued_total)
+    }
+
+    /// The client with the most bytes waiting (held and queued), and how many.
+    fn slowest_waiting(&self) -> Option<(u64, usize)> {
+        let mut per: HashMap<u64, usize> = self.held_bytes.clone();
+        for (client, bytes) in self.live.iter().flat_map(|b| b.link.queued.iter()) {
+            *per.entry(*client).or_default() += bytes;
+        }
+        per.into_iter().max_by_key(|(client, bytes)| (*bytes, *client)).filter(|(_, bytes)| *bytes > 0)
+    }
+
+    /// Room for `need` more bytes among all clients' waiting frames: the client with the most
+    /// waiting is dropped, again and again, until it fits. False when that was `client` itself.
+    fn make_room(&mut self, client: u64, need: usize) -> bool {
+        while self.waiting_total() + need > self.queue_cap {
+            let Some((slowest, bytes)) = self.slowest_waiting() else { break };
+            eprintln!(
+                "client {slowest}: {} MiB waiting for the game, the most of the {} MiB all clients have waiting (at most {} MiB): dropped",
+                bytes >> 20,
+                self.waiting_total() >> 20,
+                self.queue_cap >> 20
+            );
+            self.drop_waiting(slowest);
+            if slowest == client {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// A client dropped for what it has waiting: its frames not yet sent to the bank are
+    /// taken back (they are the memory), then it is closed.
+    fn drop_waiting(&mut self, client: u64) {
+        if let Some(bytes) = self.held_bytes.remove(&client) {
+            self.held_total = self.held_total.saturating_sub(bytes);
+            self.held.retain(|h| h.3 != client);
+        }
+        if let Some(b) = self.live.as_mut() {
+            b.link.purge(client);
+        }
+        self.kicked.insert(client);
+        self.close(client);
+    }
+
+    /// After a stall that held a lot of memory, once it is over: the freed memory goes back to
+    /// the system (glibc keeps what a burst of large frames freed).
+    fn release_memory(&mut self) {
+        let waiting = self.waiting_total();
+        self.waiting_peak = self.waiting_peak.max(waiting);
+        if self.waiting_peak >= TRIM_AFTER && waiting < TRIM_AFTER / 64 {
+            println!("memory: {} MiB waited for the game at most; given back to the system", self.waiting_peak >> 20);
+            self.waiting_peak = 0;
+            // SAFETY: malloc_trim only returns free memory to the system.
+            unsafe { libc::malloc_trim(0) };
         }
     }
 
@@ -804,6 +916,7 @@ impl Front {
     fn release_held(&mut self) -> usize {
         let held = std::mem::take(&mut self.held);
         self.held_bytes.clear();
+        self.held_total = 0;
         let n = held.len();
         if let Some(b) = self.live.as_mut() {
             for (kind, num, body, client) in held {
@@ -858,6 +971,9 @@ impl Front {
     }
 
     fn on_live(&mut self, f: Frame) -> bool {
+        if let Some(b) = self.live.as_mut() {
+            b.heard = Instant::now();
+        }
         match f.kind {
             ipc::DATA => return self.to_client(f.n, &f.body),
             ipc::KICK => {
@@ -984,7 +1100,8 @@ impl Front {
             let _ = b.link.flush();
             self.exiting.push((b.child, Instant::now()));
         }
-        self.live = Some(new);
+        // Its loading was the flip's wait, not silence: the watchdog counts from here.
+        self.live = Some(Bank { heard: Instant::now(), ..new });
         let held = self.release_held();
         // The held frames go now: what follows waits for no disk.
         self.flush_banks();
@@ -1003,6 +1120,9 @@ impl Front {
         }
         let stood = flip.stopped.map(|t| released.duration_since(t)).unwrap_or_default();
         self.flips += 1;
+        // The crashes counted so far were another release's: the new one starts with none.
+        self.crashes.clear();
+        self.flipped = Some(to.clone());
         let verified = match ready["verified"].as_bool() {
             Some(true) => format!("; the restored state is the snapshot's, checked in {:.1} ms (in the stand)", ready["verifyMs"].as_f64().unwrap_or(0.0)),
             _ => String::new(),
@@ -1145,8 +1265,7 @@ impl Front {
             self.crashes.pop_front();
         }
         if self.crashes.len() > MAX_CRASHES {
-            eprintln!("the game ended {} times within {} minutes: stopping (systemd starts the server again)", self.crashes.len(), CRASH_WINDOW.as_secs() / 60);
-            self.shutdown(1);
+            self.give_up(bank);
         }
         let clients: Vec<u64> = self.conns.keys().copied().collect();
         let reason = crate::bank::reason_batch(RESTARTED);
@@ -1158,6 +1277,7 @@ impl Front {
         }
         self.held.clear();
         self.held_bytes.clear();
+        self.held_total = 0;
         self.answers.clear();
         // The snapshot stays held: should this bank die too before it saves, the next one
         // starts from it again.
@@ -1186,8 +1306,73 @@ impl Front {
         }
     }
 
+    /// More crashes than MAX_CRASHES within CRASH_WINDOW: the front ends (the supervisor starts
+    /// it again). When the bank that keeps ending came by a flip of this front, the release in
+    /// it is given up first: it is noted as rolled back (the automatic update leaves it out) and
+    /// `active` points at the other bank, so the supervisor's restart runs the release that ran
+    /// before. Without that the restart would start the same bank, for ever.
+    fn give_up(&mut self, bank: &str) -> ! {
+        let seen = format!("the game ended {} times within {} minutes", self.crashes.len(), CRASH_WINDOW.as_secs() / 60);
+        let rolled = match (&self.banks, self.flipped.as_deref() == Some(bank)) {
+            (Some(dir), true) => updater::crash_rollback_target(dir, bank).and_then(|to| {
+                let tag = updater::info(dir, bank).map_or("?".into(), |i| i["tag"].as_str().or(i["version"].as_str()).unwrap_or("?").to_string());
+                let why = format!("{seen} after it was flipped to");
+                updater::set_rolled_back_by_crashes(dir, bank, &why)?;
+                updater::set_active(dir, to)?;
+                Ok(format!("ROLLED BACK: the release in bank {bank} ({tag}) is given up, {why}: the server stops and starts again in bank {to}; the automatic update leaves {tag} out (pcds upgrade {tag} installs it)"))
+            }),
+            (Some(_), false) => Err(format!("bank {bank} was the active one when this server started")),
+            (None, _) => Err("this server runs from a build, without banks".into()),
+        };
+        match rolled {
+            Ok(line) => eprintln!("{line}"),
+            Err(why) => eprintln!("{seen}: stopping (systemd starts the server again); no rollback: {why}"),
+        }
+        self.shutdown(1)
+    }
+
+    /// The watchdog: a live bank whose game loop has been silent too long is killed and the
+    /// world starts again as after a crash (recover: it counts toward the crash limit). Its
+    /// clock is the last frame of any kind from the bank; a quiet bank is pinged (GET /api/ping,
+    /// an admin request every bank answers from its loop).
+    fn watch_bank(&mut self) {
+        let now = Instant::now();
+        let saving = self.answers.values().any(|(_, path)| saves(path));
+        let phase = self.phase;
+        let Some(live) = self.live.as_mut() else { return };
+        match watch_verdict(phase, now.saturating_duration_since(live.heard), self.watchdog, saving, self.pinged.map(|t| now.saturating_duration_since(t))) {
+            Watch::Rest => {
+                live.heard = now;
+                self.pinged = None;
+            }
+            Watch::Fine => {}
+            Watch::Ping => {
+                self.pinged = Some(now);
+                let id = self.next_request;
+                self.next_request += 1;
+                let ping = json!({"method": "GET", "path": "/api/ping", "body": {}});
+                live.link.queue(ipc::ADMIN, id, ping.to_string().as_bytes(), None, 0);
+            }
+            Watch::Kill(silent) => {
+                eprintln!("bank {} (pid {}) said nothing for {} s (the rule limits.bankWatchdogSeconds is {} s): it is hung; killed, and the world starts again from the last snapshot or save, as after a crash", live.name, live.child.id(), silent.as_secs(), self.watchdog.as_secs());
+                let mut b = self.live.take().expect("live bank");
+                let _ = b.child.kill();
+                // Killed, not waited for for ever: a process stuck in the disk dies when it returns.
+                let dead = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < dead && matches!(b.child.try_wait(), Ok(None)) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let name = b.name.clone();
+                self.exiting.push((b.child, Instant::now()));
+                self.pinged = None;
+                self.recover(&name);
+            }
+        }
+    }
+
     /// Timeouts and the old banks' ends.
     fn supervise(&mut self) {
+        self.watch_bank();
         if let Some(b) = &self.next {
             let late = match self.phase {
                 Phase::Starting | Phase::Recovering => b.started.elapsed() > LOAD_DEADLINE,
@@ -1307,6 +1492,9 @@ impl Front {
         if let Some(hours) = o["updateCheckHours"].as_u64() {
             self.updates.every = check_every(hours);
         }
+        if let Some(seconds) = o["bankWatchdogSeconds"].as_u64() {
+            self.watchdog = Duration::from_secs(seconds);
+        }
     }
 
     fn set_autosave(&mut self, minutes: Option<u64>) {
@@ -1392,7 +1580,7 @@ impl Front {
             "latest": u.latest,
             "available": u.newer,
             "checkedAt": u.checked,
-            "releases": self.banks.as_ref().map(|_| updater::releases_url()),
+            "releases": self.banks.as_ref().map(|_| updater::shown_url(&updater::releases_url())),
         })
     }
 
@@ -1616,6 +1804,7 @@ impl Front {
         }
         self.held.clear();
         self.held_bytes.clear();
+        self.held_total = 0;
         for (_, (reply, _)) in self.answers.drain() {
             let _ = reply.send((503, "{\"error\":\"the world stopped\"}".into()));
         }
@@ -1682,7 +1871,8 @@ impl Front {
         }
         self.game_version = b.hello["gameVersion"].as_str().unwrap_or("").to_string();
         *self.web.write().unwrap_or_else(|e| e.into_inner()) = self.web_page(&bank);
-        self.live = Some(b);
+        self.live = Some(Bank { heard: Instant::now(), ..b });
+        self.flipped = None;
         self.phase = Phase::Idle;
         self.next_save = Instant::now() + Duration::from_secs(self.autosave_minutes.max(1) * 60);
         let name = self.world_name();
@@ -1725,6 +1915,89 @@ impl Front {
         }
         std::process::exit(code)
     }
+}
+
+/// Steam connections the server takes at once, and from one SteamID: the UDP side's caps
+/// (utp::MAX_CONNECTIONS; a player has one connection, a few more while an old one closes).
+const MAX_PER_STEAM_ID: usize = 4;
+
+/// Whether a Steam connection request is accepted: the caps direct-IP sessions have (utp.rs):
+/// connections in all, connections of one SteamID, and new connections of one SteamID within
+/// a window. Steam gives every request a verified identity but no address, so the SteamID
+/// stands where the IP does there.
+#[derive(Default)]
+struct SteamGate {
+    handshakes: HashMap<u64, (Instant, u32)>,
+}
+
+impl SteamGate {
+    /// `open`: the SteamIDs of the connections there are (and the ones accepted just now).
+    /// Err says which cap.
+    fn admit(&mut self, steam_id: u64, now: Instant, open: &[u64]) -> Result<(), String> {
+        if open.len() >= utp::MAX_CONNECTIONS {
+            return Err(format!("{} connections already", open.len()));
+        }
+        let same = open.iter().filter(|s| **s == steam_id).count();
+        if same >= MAX_PER_STEAM_ID {
+            return Err(format!("{same} connections of this SteamID already"));
+        }
+        let (since, n) = self.handshakes.entry(steam_id).or_insert((now, 0));
+        if now.saturating_duration_since(*since) > utp::HANDSHAKE_WINDOW {
+            (*since, *n) = (now, 0);
+        }
+        if *n >= utp::MAX_HANDSHAKES {
+            return Err(format!("more than {} new connections in {} s", utp::MAX_HANDSHAKES, utp::HANDSHAKE_WINDOW.as_secs()));
+        }
+        *n += 1;
+        // Connections are capped, so this holds the SteamIDs of the last window and little more.
+        if self.handshakes.len() > 4 * utp::MAX_CONNECTIONS {
+            self.handshakes.retain(|_, (t, _)| now.saturating_duration_since(*t) <= utp::HANDSHAKE_WINDOW);
+        }
+        Ok(())
+    }
+}
+
+/// What the watchdog does about the live bank.
+#[derive(Debug, PartialEq)]
+enum Watch {
+    /// Its clock does not run now (not playing): start counting again from here.
+    Rest,
+    Fine,
+    /// Quiet for a while: ask it something.
+    Ping,
+    /// Silent this long: kill it.
+    Kill(Duration),
+}
+
+/// How much longer than the watchdog a bank may be silent while an admin request that writes the
+/// world's files (a save, a backup, a world's file) waits for it: a save on a slow disk is slow,
+/// not hung. Past it a save that never ends is a hang too.
+const SAVE_WAIT: Duration = Duration::from_secs(600);
+
+/// An admin request that has the bank write the world's files.
+fn saves(path: &str) -> bool {
+    ["/api/save", "/api/backup", "/api/worlds"].iter().any(|p| path.starts_with(p))
+}
+
+/// The watchdog's decision. The bank's clock runs only while the world plays (Idle): never during
+/// a flip or a recovery (the front waits for those with deadlines of its own) and never when
+/// stopped (there is no bank). A paused world is playing as far as this goes: its loop still
+/// answers. `silent`: since the bank's last frame; `watchdog`: the rule (zero: off); `saving`: a
+/// request that writes files waits; `pinged`: since the last ping.
+fn watch_verdict(phase: Phase, silent: Duration, watchdog: Duration, saving: bool, pinged: Option<Duration>) -> Watch {
+    if phase != Phase::Idle || watchdog.is_zero() {
+        return Watch::Rest;
+    }
+    let allowed = if saving { watchdog + SAVE_WAIT } else { watchdog };
+    if silent > allowed {
+        return Watch::Kill(silent);
+    }
+    // Asked a quarter of the way in, then every quarter, until it speaks.
+    let every = (watchdog / 4).max(Duration::from_secs(1));
+    if silent >= every && pinged.is_none_or(|p| p >= every) {
+        return Watch::Ping;
+    }
+    Watch::Fine
 }
 
 /// The client a Steam disconnect is about: the one whose connection carries its id; one that
@@ -1949,7 +2222,7 @@ mod tests {
         let (ours, theirs) = UnixStream::pair().unwrap();
         ours.set_nonblocking(true).unwrap();
         let child = Command::new("sleep").arg("30").spawn().unwrap();
-        (Bank { name: name.into(), child, link: Link::new(ours), hello: Value::Null, started: Instant::now() }, Link::new(theirs))
+        (Bank { name: name.into(), child, link: Link::new(ours), hello: Value::Null, started: Instant::now(), heard: Instant::now() }, Link::new(theirs))
     }
 
     fn test_front() -> Front {
@@ -1991,6 +2264,95 @@ mod tests {
         front.updates.tx.send(UpdateDone::Failed { seq: 9, message: "x".into() }).unwrap();
         front.updates();
         assert!(front.updates.next_check <= Instant::now() + Duration::from_secs(1800));
+    }
+
+    /// The watchdog's clock runs only while the world plays; a flip, a recovery, a stop, the
+    /// rule at 0 and a save the admin waits for each stop it (or lengthen it), a pause does not.
+    #[test]
+    fn the_watchdog_kills_only_a_bank_that_is_silent_while_the_world_plays() {
+        let s = Duration::from_secs;
+        let verdict = |phase, silent, saving| watch_verdict(phase, s(silent), s(60), saving, None);
+        // Quiet banks are asked, silent ones are killed after the rule's time, not before.
+        assert_eq!(verdict(Phase::Idle, 5, false), Watch::Fine);
+        assert_eq!(verdict(Phase::Idle, 15, false), Watch::Ping);
+        assert_eq!(verdict(Phase::Idle, 60, false), Watch::Ping);
+        assert_eq!(verdict(Phase::Idle, 61, false), Watch::Kill(s(61)));
+        // A SIGSTOP of 10 s is nothing; one of 120 s is a hang.
+        assert!(matches!(verdict(Phase::Idle, 10, false), Watch::Fine));
+        assert!(matches!(verdict(Phase::Idle, 120, false), Watch::Kill(_)));
+        // Asked a quarter of the way in and every quarter after it, not at every loop.
+        assert_eq!(watch_verdict(Phase::Idle, s(20), s(60), false, Some(s(2))), Watch::Fine);
+        assert_eq!(watch_verdict(Phase::Idle, s(30), s(60), false, Some(s(15))), Watch::Ping);
+        // Never during a flip, a recovery or a stop, however long.
+        for phase in [Phase::Starting, Phase::Snapshotting, Phase::Restoring, Phase::Recovering, Phase::Stopped] {
+            assert_eq!(verdict(phase, 10_000, false), Watch::Rest, "{phase:?}");
+        }
+        // The rule 0 is off.
+        assert_eq!(watch_verdict(Phase::Idle, s(10_000), s(0), false, None), Watch::Rest);
+        // A save the admin waits for gets 10 minutes more; past them it is a hang too.
+        assert_eq!(verdict(Phase::Idle, 300, true), Watch::Ping);
+        assert_eq!(verdict(Phase::Idle, 660, true), Watch::Ping);
+        assert_eq!(verdict(Phase::Idle, 661, true), Watch::Kill(s(661)));
+        assert!(saves("/api/save") && saves("/api/backup/s3") && saves("/api/worlds/restore") && !saves("/api/status") && !saves("/api/pause"));
+        // The default is a minute.
+        assert_eq!(crate::rules::Rules::default().limits.bank_watchdog_seconds, 60);
+        assert_eq!(Front::new("d", "s", None, None, 0, Arc::new(AtomicBool::new(false))).watchdog, s(60));
+    }
+
+    /// A bank that took a minute and a half to load is not "silent for a minute and a half" the
+    /// moment it takes the world: the watchdog counts from when it became the live one.
+    #[test]
+    fn a_bank_that_loaded_for_long_is_not_silent_when_it_takes_over() {
+        let mut front = test_front();
+        let (mut next, _peer) = fake_bank("b");
+        next.heard = Instant::now().checked_sub(Duration::from_secs(300)).unwrap();
+        front.next = Some(next);
+        front.phase = Phase::Recovering;
+        front.promote(b"{}");
+        assert_eq!(front.phase, Phase::Idle);
+        let live = front.live.as_ref().expect("it is the live bank");
+        assert!(live.heard.elapsed() < Duration::from_secs(2), "{:?}", live.heard.elapsed());
+        let silent = live.heard.elapsed();
+        assert!(matches!(watch_verdict(front.phase, silent, front.watchdog, false, None), Watch::Fine), "not killed at once");
+        for mut child in [front.live.take()].into_iter().flatten().map(|b| b.child).chain(front.exiting.drain(..).map(|(c, _)| c)) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    /// Steam connections have the caps direct-IP sessions have: in all, per SteamID, and how often a
+    /// SteamID may connect. (The event loop that asks it needs a Steam login and is not run by the tests.)
+    #[test]
+    fn steam_connections_have_the_udp_caps() {
+        let now = Instant::now();
+        let mut gate = SteamGate::default();
+        // One SteamID: four at once (a reconnect while the old one closes), the fifth refused.
+        let mut open: Vec<u64> = Vec::new();
+        for _ in 0..MAX_PER_STEAM_ID {
+            gate.admit(7, now, &open).unwrap();
+            open.push(7);
+        }
+        assert!(gate.admit(7, now, &open).unwrap_err().contains("4 connections of this SteamID"));
+        // Others are not held back by it.
+        gate.admit(8, now, &open).unwrap();
+        // The total: 128, whoever asks.
+        let full: Vec<u64> = (0..utp::MAX_CONNECTIONS as u64).map(|i| 1000 + i).collect();
+        assert!(gate.admit(9, now, &full).unwrap_err().contains("128 connections already"));
+        assert!(gate.admit(9, now, &full[1..]).is_ok());
+        // The rate: four new connections within the window, whatever became of them.
+        let mut gate = SteamGate::default();
+        for i in 0..utp::MAX_HANDSHAKES {
+            gate.admit(5, now + Duration::from_secs(u64::from(i)), &[]).unwrap();
+        }
+        assert!(gate.admit(5, now + Duration::from_secs(5), &[]).unwrap_err().contains("new connections in 10 s"));
+        assert!(gate.admit(6, now + Duration::from_secs(5), &[]).is_ok());
+        assert!(gate.admit(5, now + utp::HANDSHAKE_WINDOW + Duration::from_secs(1), &[]).is_ok(), "the window moves on");
+        // Many SteamIDs asking once each do not make the table grow without end.
+        let mut gate = SteamGate::default();
+        for i in 0..2000u64 {
+            gate.admit(i, now + Duration::from_secs(i / 10), &[]).unwrap();
+        }
+        assert!(gate.handshakes.len() <= 4 * utp::MAX_CONNECTIONS + 1);
     }
 
     /// A world that does not start leaves the server stopped on the world it stopped, with its
@@ -2132,6 +2494,119 @@ mod tests {
         }
     }
 
+    /// All the clients' frames waiting for the bank have a total cap: past it the client with the most
+    /// waiting is dropped (its frames taken back), whether it is the sender or another, and the
+    /// accounting follows the frames in and out.
+    #[test]
+    fn what_all_clients_have_waiting_for_the_bank_is_capped_by_dropping_the_slowest() {
+        let mut front = test_front();
+        front.queue_cap = 4 << 20;
+        let (live, _bank) = fake_bank("a");
+        front.live = Some(live);
+        // Three clients (their connections are only entries here).
+        for client in 1..=3u64 {
+            front.conns.insert(client, Conn::Ip([client as u8; 8]));
+        }
+        let mib = vec![7u8; (1 << 20) - 13];
+        // The bank is not reading: frames pile up in the link's queue. 2 MiB, 1 MiB, 0.
+        for (client, count) in [(1u64, 2), (2, 1)] {
+            for _ in 0..count {
+                front.to_bank(ipc::DATA, client, &mib, client);
+            }
+        }
+        assert_eq!(front.waiting_total(), 3 << 20);
+        assert_eq!(front.slowest_waiting(), Some((1, 2 << 20)));
+        // 1 MiB more from client 3 does not fit beside the 3: client 1 has the most and goes.
+        front.to_bank(ipc::DATA, 3, &mib, 3);
+        front.to_bank(ipc::DATA, 3, &mib, 3);
+        assert!(!front.conns.contains_key(&1) && front.conns.contains_key(&2) && front.conns.contains_key(&3), "client 1 was dropped");
+        assert_eq!(front.live.as_ref().unwrap().link.queued.get(&1), None, "its frames were taken back");
+        assert_eq!(front.waiting_total(), 3 << 20, "client 2's and client 3's: {:?}", front.live.as_ref().unwrap().link.queued);
+        // Held while the world stands (a flip): the same, from the held frames.
+        front.phase = Phase::Snapshotting;
+        front.live.as_mut().unwrap().link.purge(2);
+        front.live.as_mut().unwrap().link.purge(3);
+        assert_eq!(front.waiting_total(), 0);
+        for _ in 0..3 {
+            front.to_bank(ipc::DATA, 2, &mib, 2);
+        }
+        front.to_bank(ipc::DATA, 3, &mib, 3);
+        assert_eq!((front.held_total, front.held_bytes.len()), (4 << 20, 2));
+        // Client 3 asks for more: 2 has the most, 2 goes (held frames removed, total follows).
+        front.to_bank(ipc::DATA, 3, &mib, 3);
+        assert!(!front.conns.contains_key(&2) && front.conns.contains_key(&3));
+        assert_eq!((front.held_total, front.held.iter().filter(|h| h.3 == 2).count()), (2 << 20, 0));
+        // A client alone that is over the cap itself is dropped, the frame not kept.
+        for _ in 0..3 {
+            front.to_bank(ipc::DATA, 3, &mib, 3);
+        }
+        assert!(!front.conns.contains_key(&3));
+        assert_eq!(front.held_total, 0);
+        // Released: only the GONE frames of the two clients that were dropped in the hold are left, and nothing is counted as waiting.
+        assert_eq!(front.release_held(), 2);
+        assert_eq!(front.waiting_total(), 0);
+        for mut child in [front.live.take()].into_iter().flatten().map(|b| b.child) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    /// A measurement, not a check (run by hand: cargo test --release front::tests::measure_ -- --ignored
+    /// --nocapture --test-threads=1): a stall that holds 192 MiB of client frames (12000 of 16 KiB
+    /// from 64 clients), released into a bank that reads again, and the resident memory of the
+    /// process before, at the peak, after the queue drained, and after release_memory().
+    #[test]
+    #[ignore]
+    fn measure_memory_after_a_stall() {
+        let rss = || std::fs::read_to_string("/proc/self/statm").unwrap().split_whitespace().nth(1).unwrap().parse::<usize>().unwrap() * 4096 >> 20;
+        let mut front = test_front();
+        front.queue_cap = usize::MAX;
+        let (live, mut peer) = fake_bank("a");
+        front.live = Some(live);
+        front.phase = Phase::Snapshotting;
+        let reader = std::thread::spawn(move || {
+            let mut seen = 0usize;
+            // The bank reads again once the front lets the frames go.
+            while peer.fill(usize::MAX) {
+                while peer.next().is_some() {
+                    seen += 1;
+                }
+            }
+            seen
+        });
+        let before = rss();
+        let body = vec![5u8; 16 << 10];
+        let mut small = Vec::new();
+        for i in 0..12_000u64 {
+            front.to_bank(ipc::DATA, 1 + i % 64, &body, 1 + i % 64);
+            // What the front allocates meanwhile and keeps (connections, log lines, tables): the heap
+            // cannot shrink from its end past it.
+            if i % 8 == 0 {
+                small.push(vec![1u8; 200]);
+            }
+        }
+        let peak = rss();
+        assert_eq!(front.held_total >> 20, 12_000 * (16 << 10) >> 20);
+        front.phase = Phase::Idle;
+        front.release_held();
+        while front.live.as_ref().unwrap().link.pending() {
+            front.flush_banks();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let drained = rss();
+        front.waiting_peak = front.waiting_peak.max(TRIM_AFTER);
+        front.release_memory();
+        let trimmed = rss();
+        println!("resident memory of the front: {before} MiB before, {peak} MiB holding 192 MiB of frames, {drained} MiB after the queue drained, {trimmed} MiB after release_memory()");
+        drop(small);
+        let live = front.live.take().unwrap();
+        drop(live.link);
+        let mut child = live.child;
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(reader.join().unwrap(), 12_000);
+    }
+
     /// What the live bank says of the rules the front acts on (OPS) sets the autosave timer and
     /// the updater, and a value out of range is clamped, not trusted.
     #[test]
@@ -2147,6 +2622,11 @@ mod tests {
         ops(&mut front, "no");
         ops(&mut front, r#"{"somethingElse": 1}"#);
         assert_eq!((front.autosave_minutes, front.updates.auto), (10, true));
+        // The watchdog's rule comes the same way.
+        ops(&mut front, r#"{"bankWatchdogSeconds": 15}"#);
+        assert_eq!(front.watchdog, Duration::from_secs(15));
+        ops(&mut front, r#"{"bankWatchdogSeconds": 0}"#);
+        assert!(front.watchdog.is_zero());
     }
 
     #[test]

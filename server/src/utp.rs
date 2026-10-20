@@ -48,16 +48,19 @@ const MAX_BATCH: usize = 1 << 20;
 // Room for the world a late-game save sends on join (saves reach several MB); only approved
 // clients (the limits.maxPlayers rule) get that much sent.
 const MAX_QUEUED: usize = 64 << 20;
+/// And in all, over every connection: 128 clients at MAX_QUEUED each would be eight gigabytes.
+/// Past it the connection with the most waiting (the slowest to read) is dropped.
+const MAX_QUEUED_TOTAL: usize = 256 << 20;
 /// The room an emptied send queue keeps.
 const QUEUE_KEPT: usize = 256 << 10;
 const MAX_DATAGRAMS: usize = 4096;
-const MAX_CONNECTIONS: usize = 128;
+pub const MAX_CONNECTIONS: usize = 128;
 const MAX_PER_IP: usize = 8;
 const DATA_WITHIN: Duration = Duration::from_secs(10);
 /// New sessions per IP within HANDSHAKE_WINDOW. Loopback addresses are exempt from the per-IP
 /// limits: nobody outside can forge them, and behind a UDP relay every player has one.
-const MAX_HANDSHAKES: u32 = 4;
-const HANDSHAKE_WINDOW: Duration = Duration::from_secs(10);
+pub const MAX_HANDSHAKES: u32 = 4;
+pub const HANDSHAKE_WINDOW: Duration = Duration::from_secs(10);
 
 /// Loopback, also as an IPv4-mapped IPv6 address.
 pub fn is_loopback(ip: IpAddr) -> bool {
@@ -416,6 +419,11 @@ impl Utp {
     /// Queues one Netcode batch on the reliable stream; a client that lets more than
     /// MAX_QUEUED pile up (never acks) is dropped, and the next poll reports it.
     pub fn send(&mut self, token: &Token, batch: &[u8]) {
+        self.send_within(token, batch, MAX_QUEUED_TOTAL);
+    }
+
+    /// send() with the cap over all connections as a parameter (the tests').
+    fn send_within(&mut self, token: &Token, batch: &[u8], total_cap: usize) {
         let Some(c) = self.connections.get_mut(token) else { return };
         if c.queued.len() + batch.len() > MAX_QUEUED {
             eprintln!("utp: {}: over {} MiB waiting to be sent, dropped", c.addr, MAX_QUEUED >> 20);
@@ -423,6 +431,22 @@ impl Utp {
             self.dropped.push(*token);
             return;
         }
+        // The cap in all: the connection with the most waiting goes first, again and again
+        // until this batch fits (it may be this connection).
+        loop {
+            let total: usize = self.connections.values().map(|c| c.queued.len()).sum();
+            if total + batch.len() + 4 <= total_cap {
+                break;
+            }
+            let Some((slowest, bytes)) = self.connections.iter().map(|(t, c)| (*t, c.queued.len())).max_by_key(|(t, n)| (*n, *t)).filter(|(_, n)| *n > 0) else { break };
+            eprintln!("utp: {}: {} MiB waiting to be sent, the most of the {} MiB in all (at most {} MiB): dropped", self.connections[&slowest].addr, bytes >> 20, total >> 20, total_cap >> 20);
+            self.disconnect(&slowest);
+            self.dropped.push(slowest);
+            if slowest == *token {
+                return;
+            }
+        }
+        let Some(c) = self.connections.get_mut(token) else { return };
         c.queued.extend((batch.len() as i32).to_le_bytes());
         c.queued.extend(batch);
     }
@@ -851,6 +875,41 @@ mod tests {
         server.send(&token, &batch);
         assert!(!server.connections.contains_key(&token));
         assert!(matches!(server.poll().as_slice(), [Event::Disconnected(t)] if *t == token));
+    }
+
+    /// Every connection may have MAX_QUEUED waiting, but not all of them together: past the total the
+    /// connection with the most waiting is dropped, not the one that happens to send next.
+    #[test]
+    fn the_connections_together_may_not_queue_without_end() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let tokens: Vec<Token> = (1..=4u8).map(|i| [i; 8]).collect();
+        for (i, t) in tokens.iter().enumerate() {
+            handshake(&mut server, SocketAddr::from(([127, 0, 0, 1], 3000 + i as u16)), *t);
+        }
+        let batch = vec![0; 1 << 20];
+        let cap = 8 << 20;
+        // 1, 3, 2 and 1 MiB waiting: 7 in all.
+        for (t, mib) in tokens.iter().zip([1, 3, 2, 1]) {
+            for _ in 0..mib {
+                server.send_within(t, &batch, cap);
+            }
+        }
+        assert_eq!(server.connections.len(), 4);
+        // The 8 MiB fit exactly (with the length prefixes they do not): the one with 3 goes.
+        server.send_within(&tokens[0], &batch, cap);
+        server.send_within(&tokens[0], &batch, cap);
+        assert!(!server.connections.contains_key(&tokens[1]), "the slowest was dropped");
+        assert!(tokens.iter().filter(|t| **t != tokens[1]).all(|t| server.connections.contains_key(t)));
+        assert_eq!(server.connections[&tokens[0]].queued.len(), 3 * (batch.len() + 4));
+        // It is told at the next poll, like any dropped connection.
+        assert!(matches!(server.poll().as_slice(), [Event::Disconnected(t)] if *t == tokens[1]));
+        // The sender itself, when it is the one with the most: dropped, and the batch is not kept.
+        for _ in 0..4 {
+            server.send_within(&tokens[2], &batch, cap);
+        }
+        assert!(!server.connections.contains_key(&tokens[2]));
+        // And the real cap over many connections is what the constants say.
+        const { assert!(MAX_QUEUED_TOTAL > MAX_QUEUED && MAX_QUEUED_TOTAL < MAX_CONNECTIONS * MAX_QUEUED) };
     }
 
     #[test]

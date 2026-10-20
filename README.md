@@ -369,6 +369,7 @@ reason in `./pcds logs`.
 | `death.dropChance` | `50` | with `DropSomeItems`: the percent chance each item drops (with 4 items or fewer, all drop) |
 | `loot.amount` | `1` | items in generated containers (wreck safes, crates), times this, up to the container's size |
 | `limits.maxPlayers` | `16` | players at once; more are refused with the game's session-full message |
+| `limits.bankWatchdogSeconds` | `60` | a game process that says nothing (to a player, an admin request or the front's ping) for this long is killed and the world starts again from the last snapshot or save, as after a crash (it counts toward the crash limit). Not during a flip, a world stop or a save you asked for. `0`: never; else `10` to `3600` |
 | `save.autosaveMinutes` | `5` | minutes between saves; `0` saves only on stop |
 | `save.backupsKept` | `24` | save backups kept in `run/worlds/backups/`; `0` keeps none |
 | `save.backupMinutes` | `60` | minutes between those backups |
@@ -505,7 +506,12 @@ cannot download (`--steam-user` installs) fails `pcds update`, so the hourly uni
 - `run/worlds/backups/` keeps timestamped copies of each world (one per `save.backupMinutes`,
   the newest `save.backupsKept`), named by UTC time. Each start also backs up the world as it was
   before the server touched it, at most once per 10 minutes. To restore one, stop the server and
-  copy it over the world's file.
+  copy it over the world's file. `/api/status` (`backup`) and the dashboard say when the last one
+  was made and why one failed.
+- When the server catches a panic in a player's action (`./pcds logs` shows it; the player is
+  kicked), the world may hold half of what that action did. It is not saved at once: the next
+  save first keeps the world's file as it was as `NAME.json.before-panic` beside it, so that you can
+  go back to it (stop the server and copy it over the world's file).
 - **Old saves.** The game's save layout was another one before it had several planets (2022:
   nine sections, one player, no planets), and the game converts such a save when it opens
   one. This server does not read them as they are: the start, `world use`, the admin world
