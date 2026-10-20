@@ -143,7 +143,7 @@ impl Transport {
 
 fn login(version: &str, session_number: u32) -> Result<(Server, ListenSocket, String), String> {
     let (steam, client) = Server::init(Ipv4Addr::UNSPECIFIED, 0, 0xFFFF, ServerMode::NoAuthentication, version)
-        .map_err(|e| format!("Steam game server init failed ({e}); is steamclient.so in ~/.steam/sdk64?"))?;
+        .map_err(|e| format!("Steam game server init failed ({e}); is steamclient.so in ~/.steam/sdk64? Install the Steam client, or run 'pcds setup' again to fetch it; PCDS_STEAM=off in server.env serves direct IP only"))?;
     steam.set_product(APP_ID);
     steam.set_mod_dir("Planet Crafter");
     steam.set_game_description("Planet Crafter standalone server");
@@ -158,7 +158,7 @@ fn login(version: &str, session_number: u32) -> Result<(Server, ListenSocket, St
     let deadline = Instant::now() + Duration::from_secs(30);
     while !connected.load(Ordering::SeqCst) {
         if Instant::now() > deadline {
-            return Err("Steam game server logon timed out".into());
+            return Err(format!("Steam game server logon timed out after 30 s: is this machine online{}? PCDS_STEAM=off in server.env serves direct IP only", if crate::env("PCDS_STEAM_TOKEN").is_some() { ", and is PCDS_STEAM_TOKEN a valid login token for app 1284190 (steamcommunity.com/dev/managegameservers)" } else { "" }));
         }
         steam.run_callbacks();
         std::thread::sleep(Duration::from_millis(50));
@@ -170,7 +170,7 @@ fn login(version: &str, session_number: u32) -> Result<(Server, ListenSocket, St
     let listen = steam.networking_sockets().create_listen_socket_p2p(0, [buffer]).map_err(|_| "P2P listen socket failed")?;
     let steam_id = steam.steam_id().raw();
     let code = format!("{}{:04}", crate::protocol::invite_code(steam_id), session_number);
-    println!("steam: game server {steam_id}, invite code {code}");
+    println!("steam: game server {steam_id}, invite code {code}{}", if crate::env("PCDS_STEAM_TOKEN").is_some() { "" } else { " (it changes at every start: PCDS_STEAM_TOKEN in server.env keeps it)" });
     Ok((steam, listen, code))
 }
 

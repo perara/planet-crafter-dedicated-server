@@ -70,7 +70,10 @@ pub(super) fn access_path(save_path: &str) -> String {
 fn load_access(path: &str) -> Result<access::Access, String> {
     match std::fs::read_to_string(path) {
         Ok(text) if !text.trim().is_empty() => {
-            serde_json::from_str::<access::Lists>(&text).map_err(|e| e.to_string()).and_then(|l| l.check()).map_err(|e| format!("{path}: {e}"))?;
+            serde_json::from_str::<access::Lists>(&text)
+                .map_err(|e| format!("not valid access lists (line {}, column {}): {e}; fix the file, or move it away to start with no lists", e.line(), e.column()))
+                .and_then(|l| l.check())
+                .map_err(|e| format!("{path}: {e}"))?;
         }
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

@@ -52,6 +52,8 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
   pcds install-service | uninstall-service    start at login, check for game updates hourly
   pcds code | players | save | kick PLAYER | ban PLAYER | unban NAME_OR_IP
   pcds gui | token | config | api METHOD PATH [JSON]
+                         the admin page's address with its token | the token | edit server.env
+                         (EDITOR; 'pcds restart' applies it) | any admin API route (docs/admin-api.md)
   pcds rules [set SECTION.RULE=VALUE ... | reset]
                          show or change the server rules (rules.json; README \"Server rules\")
   pcds plugin list | check PATH | install PATH | enable ID | disable ID | reload | new ID
@@ -64,6 +66,7 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
   pcds run                    run the server in the foreground (what the service runs)
   pcds container [NEW OPTIONS]  the Docker image's start (tables, world, then run); the
                          options make the first world when there is none
+  pcds help                   this text (problems and fixes: docs/troubleshooting.md)
 
 The server and its tools:
   pcds serve DATA_DIR SAVE.json          the server itself, settings from the environment
@@ -79,6 +82,12 @@ rules.json, data/<game version>/ (the game tables), and bin/ (the program the un
 two banks a/ and b/ the server runs from, with bin/active). The game folder is --game DIR,
 PCDS_GAME_DIR, the one used last (run/game-dir), else the Steam library that lists the game.
 ";
+
+/// The commands `pcds help` lists: one of these with arguments it does not take is not an unknown command.
+const COMMANDS: &[&str] = &[
+    "up", "setup", "worlds", "world", "new", "start", "stop", "restart", "status", "logs", "upgrade", "install-service", "uninstall-service", "code", "players", "save", "kick", "ban", "unban", "gui", "token", "config", "api",
+    "rules", "plugin", "extract", "update", "selftest", "run", "container",
+];
 
 /// Where this installation's files are.
 #[derive(Clone)]
@@ -101,6 +110,12 @@ pub struct Ctx {
 }
 
 pub fn run(args: &[String]) -> ! {
+    // `pcds status | head` ends quietly (Rust ignores SIGPIPE, which turns the write error into a
+    // panic). The server itself (`run`, `container`) keeps ignoring it: a closed socket is an error there.
+    if !matches!(args.first().map(String::as_str), Some("run" | "container")) {
+        // SAFETY: restoring the default action of a signal, before any other thread exists.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
     let code = Ctx::new().and_then(|ctx| ctx.hand_over(args).and_then(|_| ctx.command(args))).unwrap_or_else(|e| {
         eprintln!("pcds: {e}");
         1
@@ -178,7 +193,7 @@ impl Ctx {
             [what @ ("start" | "stop" | "restart")] => {
                 self.not_in_container(what)?;
                 if !self.unit_dir.join(self.unit()).is_file() {
-                    return Err("run 'pcds setup' first".into());
+                    return Err("no server is set up here yet: 'pcds up' sets one up ('pcds setup', then 'pcds install-service', does the same in steps)".into());
                 }
                 // Another installation's unit of the same name is not ours to run.
                 self.check_owner()?;
@@ -190,13 +205,23 @@ impl Ctx {
                     // A newer bank may read another tables format.
                     self.ensure_tables(None)?;
                 }
-                return passthrough(&mut self.systemctl(&[what, &self.unit()]));
+                let code = passthrough(&mut self.systemctl(&[what, &self.unit()]))?;
+                if code == 0 {
+                    say(match *what {
+                        "stop" => "stopped (the world was saved); 'pcds start' runs it again",
+                        _ => "done; the world takes a few seconds to load: 'pcds status' shows it, 'pcds logs' follows it",
+                    });
+                }
+                return Ok(code);
             }
             ["upgrade", ..] => self.upgrade(&args[1..])?,
             ["status"] => self.status()?,
             ["status", "--json"] => self.status_json()?,
             ["logs"] => {
                 self.not_in_container("logs")?;
+                if !self.unit_dir.join(self.unit()).is_file() {
+                    return Err("no service to show the log of: 'pcds up' sets one up ('pcds run' runs the server in this terminal)".into());
+                }
                 return passthrough(Command::new("journalctl").args(["--user", "-o", "cat", "-u", &self.unit(), "-n", "100", "-f"]));
             }
             ["install-service"] => self.install_service()?,
@@ -205,14 +230,20 @@ impl Ctx {
             ["players"] => self.players()?,
             ["save"] => println!("{}", self.api("POST", "/api/save", None)?),
             ["kick", player] => println!("{}", self.api("POST", "/api/kick", Some(&serde_json::json!({"name": player}).to_string()))?),
-            ["kick", ..] => return usage("pcds kick PLAYER"),
+            ["kick", ..] => return usage("usage: pcds kick PLAYER"),
             ["ban", player] => println!("{}", self.api("POST", "/api/ban", Some(&serde_json::json!({"name": player}).to_string()))?),
-            ["ban", ..] => return usage("pcds ban PLAYER"),
+            ["ban", ..] => return usage("usage: pcds ban PLAYER"),
             ["unban", value] => println!("{}", self.api("POST", "/api/unban", Some(&serde_json::json!({"value": value}).to_string()))?),
-            ["unban", ..] => return usage("pcds unban NAME_OR_IP"),
-            ["gui"] => println!("{}", self.gui_url()),
-            ["token"] => println!("{}", self.env_get("PCDS_ADMIN_TOKEN").ok_or(format!("no PCDS_ADMIN_TOKEN in {}", self.env_file.display()))?),
+            ["unban", ..] => return usage("usage: pcds unban NAME_OR_IP"),
+            ["gui"] => {
+                self.env_get("PCDS_ADMIN").filter(|a| a != "off").zip(self.env_get("PCDS_ADMIN_TOKEN")).ok_or_else(|| self.no_admin())?;
+                println!("{}", self.gui_url())
+            }
+            ["token"] => println!("{}", self.env_get("PCDS_ADMIN_TOKEN").ok_or_else(|| self.no_admin())?),
             ["config"] => {
+                if !self.env_file.is_file() {
+                    return Err(self.no_admin());
+                }
                 // EDITOR may carry arguments ("code -w").
                 let editor = crate::env("EDITOR").unwrap_or_else(|| "nano".into());
                 let mut words = editor.split_whitespace();
@@ -221,7 +252,7 @@ impl Ctx {
             }
             ["api", method, path] => println!("{}", self.api(method, path, None)?),
             ["api", method, path, body] => println!("{}", self.api(method, path, Some(body))?),
-            ["api", ..] => return usage("pcds api METHOD PATH [JSON]"),
+            ["api", ..] => return usage("usage: pcds api METHOD PATH [JSON]"),
             ["rules", ..] => self.rules(&args[1..])?,
             ["plugin", ..] => self.plugin(&args[1..])?,
             ["extract", ..] => self.extract(game_option(&a[1..])?.as_deref())?,
@@ -229,10 +260,9 @@ impl Ctx {
             ["selftest"] => self.selftest()?,
             ["run"] => self.run_server()?,
             ["container", ..] => self.container(&args[1..])?,
-            _ => {
-                print!("{HELP}");
-                return Ok(1);
-            }
+            [] | ["help" | "--help" | "-h"] => print!("{HELP}"),
+            [cmd, rest @ ..] if COMMANDS.contains(cmd) => return Err(format!("pcds {cmd}: cannot use '{}' here ('pcds help' shows what each command takes)", rest.join(" "))),
+            [cmd, ..] => return Err(format!("unknown command '{cmd}' ('pcds help' lists the commands)")),
         }
         Ok(0)
     }
@@ -250,8 +280,8 @@ fn game_option(args: &[&str]) -> Result<Option<PathBuf>> {
     match args {
         [] => Ok(None),
         ["--game", dir] => Ok(Some(PathBuf::from(dir))),
-        ["--game"] => Err("--game DIR".into()),
-        [other, ..] => Err(format!("unknown option {other}")),
+        ["--game"] => Err("usage: --game DIR".into()),
+        [other, ..] => Err(format!("unknown option {other} (only --game DIR; 'pcds help')")),
     }
 }
 

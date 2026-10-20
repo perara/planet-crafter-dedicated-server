@@ -116,7 +116,7 @@ impl Bank {
                 t.approved.remove(&f.n);
                 t.kicked.remove(&f.n);
                 if game.clients.contains_key(&f.n) {
-                    println!("client {}: left", f.n);
+                    println!("client {}: left the game", f.n);
                     guarded(game, f.n, &self.save_path, |game| game.disconnect(f.n));
                 }
             }

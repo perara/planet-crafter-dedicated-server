@@ -155,7 +155,7 @@ fn ms(d: Duration) -> f64 {
 
 pub fn run(args: &[String]) {
     let [dir, save] = args else {
-        eprintln!("usage: pcds serve DATA_DIR SAVE.json (settings: see the source header of main.rs)");
+        eprintln!("usage: pcds serve DATA_DIR SAVE.json (settings are environment variables: docs/env.md; 'pcds run' is what the service runs)");
         std::process::exit(2);
     };
     // Settings that are not what they should be stop the start, before anything is opened.
@@ -179,7 +179,10 @@ pub fn run(args: &[String]) {
         "off" => None,
         addr => {
             let addr: SocketAddr = addr.parse().expect("PCDS_LISTEN: host:port");
-            let utp = Utp::bind(addr).unwrap_or_else(|e| panic!("UDP {addr}: {e}"));
+            let utp = Utp::bind(addr).unwrap_or_else(|e| {
+                eprintln!("direct IP {addr}: {e}. Another program (a second pcds server?) may use that port: change PCDS_LISTEN in server.env ('pcds config'), or set it to off");
+                std::process::exit(1)
+            });
             println!("direct IP: listening on {addr}");
             Some(utp)
         }
@@ -227,7 +230,10 @@ impl Front {
     }
 
     fn start_admin(&mut self) {
-        self.admin.start(self.hooks.feed.clone(), &self.save);
+        if let Err(e) = self.admin.start(self.hooks.feed.clone(), &self.save) {
+            eprintln!("{e}");
+            self.shutdown(1);
+        }
     }
 
     fn start_steam(&mut self) {

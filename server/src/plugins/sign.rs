@@ -268,12 +268,13 @@ impl Keys {
         Some(key)
     }
 
-    /// A key by its id, or by a start of it of 8 characters or more (as the listing shows it).
+    /// A key by its id, by a start of it of 8 characters or more (as the listing shows it), or by
+    /// the name it was trusted under.
     pub fn find(&self, id_or_prefix: &str) -> Result<&TrustedKey, String> {
-        let hits: Vec<&TrustedKey> = self.keys.iter().filter(|k| k.id == id_or_prefix || (id_or_prefix.len() >= 8 && k.id.starts_with(id_or_prefix))).collect();
+        let hits: Vec<&TrustedKey> = self.keys.iter().filter(|k| k.id == id_or_prefix || (id_or_prefix.len() >= 8 && k.id.starts_with(id_or_prefix)) || k.name.eq_ignore_ascii_case(id_or_prefix)).collect();
         match hits.as_slice() {
             [one] => Ok(one),
-            [] => Err(format!("no trusted key {id_or_prefix}")),
+            [] => Err(format!("no trusted key {id_or_prefix} (its id or the name it was trusted under; the Plugins page lists the trusted keys)")),
             _ => Err(format!("{id_or_prefix} names more than one key")),
         }
     }

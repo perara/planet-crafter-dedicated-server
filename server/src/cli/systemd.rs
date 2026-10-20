@@ -177,13 +177,16 @@ WantedBy=timers.target
 
     pub fn install_service(&self) -> Result {
         if !self.world_file().is_file() {
-            return Err("run 'pcds setup' first".into());
+            return Err("no world yet: 'pcds up' sets a server up ('pcds setup' first, then 'pcds install-service', does the same in steps)".into());
         }
         self.install_server()?;
         self.write_unit()?;
         check(&mut self.systemctl(&["enable", "--now", &self.unit(), &self.timer()]))?;
         say("the server now starts at login and checks for game updates hourly");
-        say(format!("to keep it running while you are logged out: loginctl enable-linger {}", crate::env("USER").unwrap_or_default()));
+        let user = crate::env("USER").unwrap_or_default();
+        if output(Command::new("loginctl").args(["show-user", &user, "-p", "Linger", "--value"])).as_deref() != Some("yes") {
+            say(format!("to keep it running while you are logged out: sudo loginctl enable-linger {user}"));
+        }
         Ok(())
     }
 

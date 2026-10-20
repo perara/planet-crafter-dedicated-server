@@ -474,3 +474,45 @@ fn the_wasm_template_builds_against_the_api_crate() {
     // The id must be one.
     assert!(!plugin(&dir, &work, &["new", "Bad Name"]).status.success());
 }
+
+/// Help is asked for and answered (exit 0); a mistyped command or an argument a command does not
+/// take is named, not answered with the whole help; nothing set up yet says to run `pcds up`.
+#[test]
+fn mistakes_are_answered_in_words() {
+    let dir = test_dir("mistakes");
+    let fake = fake_systemctl(&dir, "echo inactive");
+    for ask in [&["help"][..], &["--help"], &["-h"]] {
+        let out = pcds(&dir, &fake, ask);
+        assert_eq!(out.status.code(), Some(0), "{ask:?}");
+        assert!(text(&out).contains("pcds up") && text(&out).contains("pcds rules"), "{}", text(&out));
+    }
+    let out = pcds(&dir, &fake, &["frobnicate"]);
+    assert_eq!((out.status.code(), text(&out).trim().lines().count()), (Some(1), 1), "{}", text(&out));
+    assert!(text(&out).contains("unknown command 'frobnicate'") && text(&out).contains("pcds help"), "{}", text(&out));
+    let out = pcds(&dir, &fake, &["status", "--bogus"]);
+    assert!(text(&out).contains("pcds status: cannot use '--bogus'") && text(&out).trim().lines().count() == 1, "{}", text(&out));
+    assert!(text(&pcds(&dir, &fake, &["kick"])).contains("usage: pcds kick PLAYER"));
+    assert!(text(&pcds(&dir, &fake, &["api", "FOO", "/api/status"])).contains("takes GET and POST") || text(&pcds(&dir, &fake, &["api", "FOO", "/api/status"])).contains("no server is set up"));
+    // Nothing is set up here: the commands that need a server say how to get one.
+    for ask in [&["players"][..], &["rules"], &["save"], &["gui"], &["token"], &["config"]] {
+        let out = pcds(&dir, &fake, ask);
+        assert_eq!(out.status.code(), Some(1), "{ask:?}");
+        assert!(text(&out).contains("no server is set up here") && text(&out).contains("pcds up"), "{ask:?}: {}", text(&out));
+    }
+    assert!(text(&pcds(&dir, &fake, &["world", "new", "bad/name"])).contains("is not a world name"));
+    assert!(text(&pcds(&dir, &fake, &["setup", "--world", "/nonexistent/save.json"])).contains("no save at /nonexistent/save.json"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A direct-IP port another program holds stops the start with a sentence, not a panic.
+#[test]
+fn a_port_in_use_stops_the_start_in_words() {
+    let dir = test_dir("port");
+    std::fs::create_dir_all(&dir).unwrap();
+    let held = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let out = Command::new(PCDS).arg("serve").arg(dir.join("no-tables")).arg(dir.join("world.json")).env("PCDS_LISTEN", held.local_addr().unwrap().to_string()).env("PCDS_STEAM", "off").env("PCDS_ADMIN", "off").output().unwrap();
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(said.contains("direct IP 127.0.0.1:") && said.contains("PCDS_LISTEN") && !said.contains("panicked"), "{said}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

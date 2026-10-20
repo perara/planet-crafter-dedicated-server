@@ -126,7 +126,7 @@ impl Transport {
         if self.conns.remove(&client).is_none() {
             return false;
         }
-        println!("client {client}: left");
+        println!("client {client}: disconnected");
         self.ip_clients.retain(|_, c| *c != client);
         self.kicked.remove(&client);
         self.pending_drop.retain(|(c, _)| *c != client);
@@ -209,11 +209,14 @@ impl Transport {
         if let Some(utp) = &mut self.utp {
             utp.tokens().iter().for_each(|t| utp.disconnect(t));
         }
-        // The process is about to exit. Valve's library asserts when it is shut down with a socket
-        // of its own still open, and the exit then crashes (status 139: systemd restarts the unit
-        // after a stop from the admin page): close the connections, the listen socket and the login.
+        // Steam's connections, then its listen socket, then the login, in that order: leaving any of
+        // them open at exit makes Steam's own shutdown assert ("we still have sockets open") and the
+        // process end with a segmentation fault, a minidump in /tmp/dumps and a failed unit.
         self.conns.clear();
-        self.steam = None;
+        if let Some((server, listen)) = self.steam.take() {
+            drop(listen);
+            drop(server);
+        }
     }
 }
 

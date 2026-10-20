@@ -66,13 +66,16 @@ pub fn request(port: u16, token: &str, method: &str, path: &str, body: &str, tim
     Ok(answer)
 }
 
-/// JSON as python's json.tool prints it (4 spaces); anything else as it came.
-fn print_json(text: &str) {
-    let Ok(value) = serde_json::from_str::<Value>(text) else { return println!("{text}") };
-    let mut out = Vec::new();
-    let mut ser = serde_json::Serializer::with_formatter(&mut out, serde_json::ser::PrettyFormatter::with_indent(b"    "));
-    serde::Serialize::serialize(&value, &mut ser).expect("JSON to memory");
-    println!("{}", String::from_utf8_lossy(&out));
+/// An admin API failure in words that say what to do: the server's own message for a refused
+/// request, and for the two usual mistakes (a stopped server, a token the server does not run with).
+fn explain(e: String, addr: &str) -> String {
+    if e.contains("Connection refused") {
+        return format!("the server does not answer on {addr}: it is stopped or still starting ('pcds status'; 'pcds start'; 'pcds logs' when it stops again)");
+    }
+    if e.contains("HTTP 401") {
+        return "the server refused the admin token in server.env: it reads the token when it starts, so after a change run 'pcds restart'".into();
+    }
+    super::upgrade::api_error(e)
 }
 
 /// `pcds rules set` arguments as a JSON merge patch: SECTION.RULE=VALUE, a JSON value or else
@@ -109,15 +112,27 @@ impl Ctx {
     pub fn api(&self, method: &str, path: &str, body: Option<&str>) -> Result<String> {
         let addr = self.env_get("PCDS_ADMIN").filter(|a| a != "off");
         let (Some(addr), Some(token)) = (addr, self.env_get("PCDS_ADMIN_TOKEN")) else {
-            return Err(format!("no admin API in {} (PCDS_ADMIN / PCDS_ADMIN_TOKEN)", self.env_file.display()));
+            return Err(self.no_admin());
         };
         let port = addr
             .rsplit_once(':')
             .filter(|(host, _)| ["127.0.0.1", "0.0.0.0", "localhost"].contains(host))
             .and_then(|(_, port)| port.parse().ok())
             .ok_or_else(|| format!("PCDS_ADMIN={addr}: pcds reaches the admin API on 127.0.0.1 only (bind it to 127.0.0.1 or 0.0.0.0)"))?;
+        if !["GET", "POST"].contains(&method) {
+            return Err(format!("{method}: the admin API takes GET and POST (docs/admin-api.md)"));
+        }
         let body = body.filter(|b| !b.is_empty()).unwrap_or(if method == "GET" { "" } else { "{}" });
-        request(port, &token, method, path, body, if path.starts_with("/api/world/") { WORLD_TIMEOUT } else { ADMIN_TIMEOUT })
+        request(port, &token, method, path, body, if path.starts_with("/api/world/") { WORLD_TIMEOUT } else { ADMIN_TIMEOUT }).map_err(|e| explain(e, &addr))
+    }
+
+    /// Why there is no admin API to ask: no server set up here yet, or the settings turn it off.
+    pub(super) fn no_admin(&self) -> String {
+        if self.env_file.is_file() {
+            format!("the admin API is off or has no token in {} (PCDS_ADMIN, PCDS_ADMIN_TOKEN): 'pcds config' edits it, 'pcds restart' applies it", self.env_file.display())
+        } else {
+            format!("no server is set up here ({} is missing): 'pcds up' sets one up", self.env_file.display())
+        }
     }
 
     pub(super) fn api_json(&self, method: &str, path: &str) -> Result<Value> {
@@ -142,6 +157,9 @@ impl Ctx {
                 self.print_banks(Some(&status["banks"]));
                 for line in status_lines(&status) {
                     println!("{line}");
+                }
+                if status["inviteCode"].is_null() && status["state"] != "stopped" && self.env_get("PCDS_STEAM").as_deref() != Some("off") {
+                    println!("no invite code: Steam did not log in ('pcds logs' says why); players can still join by direct IP");
                 }
                 Ok(())
             }
@@ -198,20 +216,71 @@ impl Ctx {
     /// The rules through the admin API: shown, set, or all reset to the game's behaviour.
     pub fn rules(&self, args: &[String]) -> Result {
         let a: Vec<&str> = args.iter().map(String::as_str).collect();
-        let answer = match a.as_slice() {
-            [] => self.api("GET", "/api/rules", None)?,
-            ["set"] => return Err("pcds rules set SECTION.RULE=VALUE ... ('pcds rules' lists them)".into()),
-            ["set", ..] => self.api("POST", "/api/rules", Some(&rules_patch(&args[1..])?.to_string()))?,
+        match a.as_slice() {
+            [] => {
+                for line in rule_lines(&self.api_json("GET", "/api/config")?) {
+                    println!("{line}");
+                }
+            }
+            ["set"] => return Err("usage: pcds rules set SECTION.RULE=VALUE ... ('pcds rules' lists them)".into()),
+            ["set", ..] => {
+                let patch = rules_patch(&args[1..])?;
+                self.api("POST", "/api/rules", Some(&patch.to_string()))?;
+                for (key, value) in patch_leaves(&patch) {
+                    let (secret, shown) = (crate::config::knob_for(&key).is_some_and(|k| k.secret), show(&value));
+                    println!("{key} {}", if value.is_null() { "is back to its default".into() } else if secret { "is set".into() } else { format!("= {shown}") });
+                }
+            }
             ["reset"] => {
                 let rules = self.api_json("GET", "/api/rules")?;
                 let reset: Map<String, Value> = rules["defaults"].as_object().into_iter().flatten().map(|(k, _)| (k.clone(), Value::Null)).collect();
-                self.api("POST", "/api/rules", Some(&Value::Object(reset).to_string()))?
+                self.api("POST", "/api/rules", Some(&Value::Object(reset).to_string()))?;
+                println!("every rule is back to its default");
             }
-            _ => return Err("pcds rules [set SECTION.RULE=VALUE ... | reset]".into()),
-        };
-        print_json(&answer);
+            _ => return Err("usage: pcds rules [set SECTION.RULE=VALUE ... | reset]".into()),
+        }
         Ok(())
     }
+}
+
+/// A rule's value as one short piece of text.
+fn show(v: &Value) -> String {
+    match v {
+        Value::Null => "unset".into(),
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.as_f64().filter(|f| f.fract() == 0.0 && f.abs() < 1e15).map_or_else(|| n.to_string(), |f| format!("{f}")),
+        other => other.to_string(),
+    }
+}
+
+/// The "section.rule" paths a merge patch names, with their new values (a map such as
+/// limits.buildings.Drill4 is named down to the building).
+fn patch_leaves(patch: &Value) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    for (section, rules) in patch.as_object().into_iter().flatten() {
+        for (rule, value) in rules.as_object().into_iter().flatten() {
+            match value.as_object().filter(|_| rule == "buildings") {
+                Some(map) => out.extend(map.iter().map(|(k, v)| (format!("{section}.{rule}.{k}"), v.clone()))),
+                None => out.push((format!("{section}.{rule}"), value.clone())),
+            }
+        }
+    }
+    out
+}
+
+/// `pcds rules`: every rule with its value and default, a star on the ones that were changed.
+fn rule_lines(config: &Value) -> Vec<String> {
+    let knobs: Vec<&Value> = config["knobs"].as_array().into_iter().flatten().filter(|k| k["key"].as_str().is_some_and(|key| !key.starts_with("PCDS_") && !key.starts_with("access."))).collect();
+    let mut lines = vec![format!("  {:<31} {:<14} {}", "rule", "value", "default")];
+    for k in &knobs {
+        let (key, secret) = (k["key"].as_str().unwrap_or_default(), k["secret"].as_bool() == Some(true));
+        let (value, default) = (&k["value"], &k["default"]);
+        let shown = if secret && !value.is_null() && value != &Value::Array(vec![]) { "(set)".to_string() } else { show(value) };
+        let changed = if value == default { ' ' } else { '*' };
+        lines.push(format!("{changed} {key:<31} {shown:<14} {}{}", show(default), k["unit"].as_str().filter(|u| !u.is_empty() && !default.is_null()).map(|u| format!(" {u}")).unwrap_or_default()));
+    }
+    lines.push("(* changed. 'pcds rules set SECTION.RULE=VALUE ...' changes them live, 'null' as the value and 'pcds rules reset' go back to the default; README, \"Server rules\")".into());
+    lines
 }
 
 #[cfg(test)]
@@ -259,6 +328,9 @@ mod tests {
         });
         assert_eq!(request(port, "secret", "POST", "/api/save", "{}", ADMIN_TIMEOUT).unwrap(), "pong");
         assert!(request(port, "secret", "POST", "/api/save", "{}", ADMIN_TIMEOUT).unwrap_err().contains("HTTP 401: no, no."));
+        assert!(explain("POST http://127.0.0.1:1/api/save: HTTP 401: x".into(), "127.0.0.1:1").contains("pcds restart"));
+        assert!(explain("GET http://x/api/status: Connection refused (os error 111)".into(), "127.0.0.1:1").contains("pcds start"));
+        assert_eq!(explain("POST http://x/api/rules: HTTP 400: {\"error\":\"speed.growth: 0 is not a number from 0.01 to 100\"}".into(), "a"), "speed.growth: 0 is not a number from 0.01 to 100");
         let seen = server.join().unwrap();
         assert!(seen[0].starts_with("POST /api/save HTTP/1.1\r\n") && seen[0].contains("Authorization: Bearer secret\r\n") && seen[0].ends_with("Content-Length: 2\r\nConnection: close\r\n\r\n{}"));
     }
@@ -294,7 +366,7 @@ fn status_lines(s: &Value) -> Vec<String> {
         format!("network {}, port {}, autosave every {} min", text(&s["network"]), s["port"], s["autosaveMinutes"]),
     ];
     if let Some(code) = s["inviteCode"].as_str() {
-        lines.push(format!("invite code {code}"));
+        lines.push(format!("invite code {code} (it changes at every restart unless PCDS_STEAM_TOKEN is set)"));
     }
     match (u["latest"].as_str(), u["available"].as_bool()) {
         (Some(tag), Some(true)) => lines.push(format!("release {tag} available: pcds upgrade")),
