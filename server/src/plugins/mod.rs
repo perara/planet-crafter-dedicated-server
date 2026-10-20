@@ -1231,6 +1231,7 @@ pub fn read_folder_with(folder: &Path, keys: &sign::Keys) -> Loaded {
 
 /// Approves a plugin: records `grant` (default: everything it asks for; never more) and the digest
 /// of the files as they are now, and enables it. The server reads it at the next reload.
+#[cfg(test)]
 pub fn approve(dir: &Path, id: &str, grant: Option<Vec<String>>) -> Result<Approval, String> {
     approve_digest(dir, id, grant, None)
 }
