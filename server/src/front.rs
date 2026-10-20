@@ -989,6 +989,8 @@ impl Front {
                 Err(e) => eprintln!("chat: an event the front cannot read ({e})"),
             },
             ipc::OPS => self.ops(&f.body),
+            // The plugin event stream has a newer event: the long polls waiting in admin.rs ask again.
+            ipc::STREAM => admin::ring_bell(),
             ipc::CHATCFG => match chat_config(&f.body) {
                 Ok(chat) => self.hooks.configure(chat),
                 Err(e) => eprintln!("chat: {e}; the hooks keep their settings"),

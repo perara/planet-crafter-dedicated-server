@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -38,6 +38,71 @@ pub struct Request {
     pub body: Value,
     /// (status, JSON body)
     pub reply: Sender<(u16, String)>,
+}
+
+/// The longest a POST /api/plugins/events may wait for an event (`"wait"`, in seconds), and how many
+/// wait at once (more are answered 503 at once: a wait holds a thread and a connection).
+const MAX_STREAM_WAIT: f64 = 25.0;
+const MAX_STREAM_POLLS: usize = 8;
+/// Without the bank's doorbell (an older bank) a waiting poll asks the bank again this often.
+const LOOK_EVERY: Duration = Duration::from_secs(1);
+static STREAM_POLLS: AtomicUsize = AtomicUsize::new(0);
+
+/// The plugin event stream's doorbell: the bank rings it (ipc::STREAM) when the stream has a newer
+/// event, and the polls waiting here ask the bank again. Only a count of rings is kept; the bank's
+/// ring of events is where they are.
+static BELL: (Mutex<u64>, Condvar) = (Mutex::new(0), Condvar::new());
+
+/// The bank rang: wake the polls that wait.
+pub fn ring_bell() {
+    *BELL.0.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+    BELL.1.notify_all();
+}
+
+fn rings() -> u64 {
+    *BELL.0.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Waits until the bell has rung since `seen` (a count from `rings`), or `up_to` is over.
+fn wait_for_bell(seen: u64, up_to: Duration) {
+    let guard = BELL.0.lock().unwrap_or_else(|e| e.into_inner());
+    drop(BELL.1.wait_timeout_while(guard, up_to, |n| *n == seen));
+}
+
+/// POST /api/plugins/events with `"wait"`: the answer of the bank as soon as it holds an event, or
+/// empty when the wait is over. The ring and the consumers' registration are the bank's; here is only
+/// the waiting, which the bank's game loop must not do.
+fn long_poll(stream: TcpStream, tx: &Sender<Request>, path: String, body: Value, wait: f64) -> std::io::Result<()> {
+    struct Poll;
+    impl Drop for Poll {
+        fn drop(&mut self) {
+            STREAM_POLLS.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    if STREAM_POLLS.fetch_add(1, Ordering::SeqCst) >= MAX_STREAM_POLLS {
+        STREAM_POLLS.fetch_sub(1, Ordering::SeqCst);
+        return respond(stream, 503, "application/json", &serde_json::json!({"error": format!("{MAX_STREAM_POLLS} polls of the stream are already waiting: try again, or poll without wait")}).to_string());
+    }
+    let _poll = Poll;
+    let deadline = Instant::now() + Duration::from_secs_f64(wait.min(MAX_STREAM_WAIT));
+    loop {
+        // The count before the question: a ring while the bank answers is not missed.
+        let seen = rings();
+        let (reply, answer) = channel();
+        if tx.send(Request { method: "POST".into(), path: path.clone(), body: body.clone(), reply }).is_err() {
+            return respond(stream, 500, "application/json", "{\"error\":\"server stopping\"}");
+        }
+        let (status, json) = match answer.recv_timeout(ANSWER) {
+            Ok(a) => a,
+            Err(_) => return respond(stream, 500, "application/json", "{\"error\":\"the game loop did not answer\"}"),
+        };
+        let left = deadline.saturating_duration_since(Instant::now());
+        let empty = status == 200 && serde_json::from_str::<Value>(&json).is_ok_and(|v| v["events"].as_array().is_some_and(Vec::is_empty));
+        if !empty || left.is_zero() {
+            return respond(stream, status, "application/json", &json);
+        }
+        wait_for_bell(seen, left.min(LOOK_EVERY));
+    }
 }
 
 /// The web page's file: the live bank's, so a flip brings its page along.
@@ -261,6 +326,10 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
         let (status, json) = crate::chathooks::api(chat, &method, &path, &query, &body);
         return respond(stream, status, "application/json", &json);
     }
+    if method == "POST" && path == "/api/plugins/events" && body["wait"].as_f64().is_some_and(|w| w > 0.0) {
+        let wait = body["wait"].as_f64().unwrap_or(0.0);
+        return long_poll(stream, tx, path, body, wait);
+    }
     let (reply, answer) = channel();
     let wait = answer_wait(&path);
     if tx.send(Request { method, path, body, reply }).is_err() {
@@ -449,6 +518,68 @@ mod tests {
         crate::tokens::revoke(&dir, "relay").unwrap();
         assert!(ask(addr, req(&relay, "POST", "/api/plugins/events").as_bytes()).starts_with("HTTP/1.1 401"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A poll of the stream with a wait is held in the front until the bank rings (or the wait is
+    /// over), looking every second when it does not ring; the bank's side is one ask each time.
+    #[test]
+    fn a_long_poll_of_the_stream_waits_for_the_bell_and_looks_every_second_without_it() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let rx = listen(listener, "secret".into(), Default::default(), crate::chathooks::Hooks::default().feed).unwrap();
+        let post = |body: &str| format!("POST /api/plugins/events HTTP/1.1\r\nAuthorization: Bearer secret\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        let empty = || (200u16, "{\"epoch\":1,\"events\":[],\"last\":5,\"dropped\":0}".to_string());
+        let one = || (200u16, "{\"epoch\":1,\"events\":[{\"id\":6,\"type\":\"chat\"}],\"last\":6,\"dropped\":0}".to_string());
+        // Without a wait: one ask, answered as it comes (empty or not).
+        let client = std::thread::spawn({ let r = post("{\"after\":5}"); move || ask(addr, r.as_bytes()) });
+        rx.recv_timeout(Duration::from_secs(5)).unwrap().reply.send(empty()).unwrap();
+        assert!(client.join().unwrap().contains("\"events\":[]"));
+        // With a wait and a ring: the second ask comes at once after the bell, long before a second.
+        let started = Instant::now();
+        let client = std::thread::spawn({ let r = post("{\"after\":5,\"wait\":10}"); move || ask(addr, r.as_bytes()) });
+        rx.recv_timeout(Duration::from_secs(5)).unwrap().reply.send(empty()).unwrap();
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "nothing rang: it waits");
+        ring_bell();
+        let second = rx.recv_timeout(Duration::from_millis(500)).expect("the bell makes it ask the bank again");
+        assert_eq!(second.body["after"], 5, "the same question");
+        second.reply.send(one()).unwrap();
+        let answer = client.join().unwrap();
+        assert!(answer.starts_with("HTTP/1.1 200") && answer.contains("\"id\":6"), "{answer}");
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+        // With a wait and no ring: it looks again after a second.
+        let started = Instant::now();
+        let client = std::thread::spawn({ let r = post("{\"wait\":10}"); move || ask(addr, r.as_bytes()) });
+        rx.recv_timeout(Duration::from_secs(5)).unwrap().reply.send(empty()).unwrap();
+        let second = rx.recv_timeout(Duration::from_secs(4)).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(900), "{:?}", started.elapsed());
+        second.reply.send(one()).unwrap();
+        assert!(client.join().unwrap().contains("\"id\":6"));
+        // With a wait that runs out: the empty answer, after about the wait, and never past the cap.
+        let started = Instant::now();
+        let client = std::thread::spawn({ let r = post("{\"wait\":1.2}"); move || ask(addr, r.as_bytes()) });
+        while !client.is_finished() {
+            if let Ok(r) = rx.recv_timeout(Duration::from_millis(50)) {
+                r.reply.send(empty()).unwrap();
+            }
+        }
+        assert!(client.join().unwrap().contains("\"events\":[]") && (1.1..3.0).contains(&started.elapsed().as_secs_f64()), "{:?}", started.elapsed());
+        // An error of the bank is the answer, at once.
+        let client = std::thread::spawn({ let r = post("{\"wait\":10}"); move || ask(addr, r.as_bytes()) });
+        rx.recv_timeout(Duration::from_secs(5)).unwrap().reply.send((400, "{\"error\":\"no\"}".into())).unwrap();
+        assert!(client.join().unwrap().starts_with("HTTP/1.1 400"));
+        // Only MAX_STREAM_POLLS wait at once.
+        let waiting: Vec<_> = (0..MAX_STREAM_POLLS).map(|_| std::thread::spawn({ let r = post("{\"wait\":2}"); move || ask(addr, r.as_bytes()) })).collect();
+        for _ in 0..MAX_STREAM_POLLS {
+            rx.recv_timeout(Duration::from_secs(5)).unwrap().reply.send(empty()).unwrap();
+        }
+        let refused = ask(addr, post("{\"wait\":2}").as_bytes());
+        assert!(refused.starts_with("HTTP/1.1 503"), "{refused}");
+        while waiting.iter().any(|w| !w.is_finished()) {
+            if let Ok(r) = rx.recv_timeout(Duration::from_millis(50)) {
+                r.reply.send(empty()).unwrap();
+            }
+        }
+        assert_eq!(STREAM_POLLS.load(Ordering::SeqCst), 0, "the slots are given back");
     }
 
     #[test]
