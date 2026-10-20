@@ -457,6 +457,7 @@ mod tests {
         ("PCDS_BENCH_SECONDS", "bench: game seconds to run (default 300)."),
         ("PCDS_BENCH_PLAYERS", "bench: scripted players (default 0)."),
         ("PCDS_BENCH_ACTION_MS", "bench: each player acts this often (default: only moves)."),
+        ("PCDS_BENCH_START_DAYS", "bench: the game's clock starts at this many days, as of a server that has run that long (default 0)."),
         ("PCDS_BENCH_DUMP", "bench: a file for every message and the final save, to compare two runs."),
         ("PCDS_BENCH_HANDOFF", "bench handoff: seconds between handoffs (default half the run)."),
         ("PCDS_BENCH_SECTIONS", "bench: 1 also prints the time per subsystem of the tick (the section! names)."),

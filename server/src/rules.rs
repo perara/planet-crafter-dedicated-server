@@ -633,7 +633,7 @@ mod tests {
         };
         let (Some((mut normal, a)), Some((mut fast, b))) = (world(1.0), world(2.0)) else { return };
         let made = |g: &Game, wo: i32| g.inventories[&g.wos[&wo].linked_inventory].items.len();
-        while made(&normal, a) < 2 && normal.time < 5000.0 {
+        while made(&normal, a) < 2 && normal.time.secs() < 5000.0 {
             for g in [&mut normal, &mut fast] {
                 g.time += 1.0;
                 crate::machines::tick(g);
@@ -719,10 +719,10 @@ mod tests {
         g.rules.world.pause_when_empty = true;
         g.sim_time = Some(0.0);
         run(&mut g, 10.0, 0.5);
-        assert_eq!(g.time, 0.0, "empty from the start");
+        assert_eq!(g.time, crate::clock::GameTime::ZERO, "empty from the start");
         join(&mut g, 1, "Ann");
         run(&mut g, 1.0, 0.125);
-        assert!((g.time - 1.0).abs() < 1e-3, "on from where it stood, not 11 s on: {}", g.time);
+        assert!((g.time.secs() - 1.0).abs() < 1e-3, "on from where it stood, not 11 s on: {}", g.time);
         // Ann drops iron (despawns in 30 s) and leaves: nothing moves for 100 s.
         let iron = g.data.groups[g.data.group("Iron").unwrap()].hash;
         g.world_objects_rpc(1, "WorldObjectsHandler.CreateAndDropOnFloorServerRpc", &Args(vec![json!(iron), json!([560.0, 3.0, 500.0]), json!(0.6), json!(true), json!(false), json!(30.0)]));
@@ -736,14 +736,14 @@ mod tests {
         // Bob comes: the clock goes on from there, and the iron goes 30 s after it was dropped.
         join(&mut g, 2, "Bob");
         run(&mut g, 29.0, 0.125);
-        assert!((g.time - (held + 29.0)).abs() < 1e-3 && g.wos.contains_key(&wo), "no timer fires because the clock moved: {}", g.time);
+        assert!((g.time.secs() - (held.secs() + 29.0)).abs() < 1e-3 && g.wos.contains_key(&wo), "no timer fires because the clock moved: {}", g.time);
         run(&mut g, 2.0, 0.125);
         assert!(g.time >= due && !g.wos.contains_key(&wo), "the despawn came on time");
         // Off again while empty: the world goes on.
         g.disconnect(2);
         g.rules.world.pause_when_empty = false;
         run(&mut g, 1.0, 0.5);
-        assert!((g.time - (held + 32.0)).abs() < 1e-3, "{}", g.time);
+        assert!((g.time.secs() - (held.secs() + 32.0)).abs() < 1e-3, "{}", g.time);
     }
 
     /// The admin's pause stops the clock, not the players: what they do in a paused world is

@@ -5,6 +5,7 @@
 use indexmap::IndexMap;
 use serde_json::json;
 
+use crate::clock::GameTime;
 use crate::game::{Args, Game};
 use crate::net::Target;
 
@@ -15,7 +16,7 @@ struct Interpolation {
     speed: f32,
     direction: i32,
     start_value: f32,
-    start_time: f32,
+    start_time: GameTime,
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -29,7 +30,7 @@ pub fn rpc(game: &mut Game, client: u64, name: &str, a: &Args) -> bool {
         "SceneInterpolationHandler.RegisterInterpolatorServerRpc" => {
             let (wo, speed) = (a.i(0), a.f(1));
             if let Some(i) = game.ext.animals.interpolation.active.get(&wo) {
-                let args = [json!(wo), json!(i.start_value), json!(i.speed), json!(i.direction), json!(i.start_time)];
+                let args = [json!(wo), json!(i.start_value), json!(i.speed), json!(i.direction), json!(i.start_time.f32())];
                 game.net.rpc_scene(Target::Only(client), "SceneInterpolationHandler.StartInterpolationClientRpc", &args);
                 return true;
             }
@@ -82,7 +83,7 @@ fn start(game: &mut Game, wo: i32, speed: f32, direction: i32) {
     let w = game.wos.get_mut(&wo).unwrap();
     w.setting = direction;
     w.dont_save = false;
-    game.net.rpc_scene(Target::All, "SceneInterpolationHandler.StartInterpolationClientRpc", &[json!(wo), json!(current), json!(speed), json!(direction), json!(time)]);
+    game.net.rpc_scene(Target::All, "SceneInterpolationHandler.StartInterpolationClientRpc", &[json!(wo), json!(current), json!(speed), json!(direction), json!(time.f32())]);
 }
 
 /// LateUpdate on the server: progress into the world object; a finished move clears its setting.
@@ -123,7 +124,7 @@ mod tests {
     #[test]
     fn scene_interpolators_move_for_everyone_and_late_joiners_catch_up() {
         let Some((mut g, _)) = world() else { return };
-        g.time = 10.0;
+        g.time = crate::clock::GameTime::at(10.0);
         send_scene(&mut g, 1, "SceneInterpolationHandler.StartInterpolationServerRpc", &[json!(ELEVATOR), json!(0.25), json!(0)]);
         let start = sent(&g, "SceneInterpolationHandler.StartInterpolationClientRpc");
         assert_eq!(start.into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(Target::All, vec![json!(ELEVATOR), json!(0.0), json!(0.25), json!(1), json!(10.0)])], "at 0: up");

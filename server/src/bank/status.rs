@@ -181,7 +181,7 @@ pub(super) fn build<'a>(game: &'a Game, ctx: &Ctx<'a>, now: Instant) -> Status<'
         planet: game.planet_id(),
         terraformation: units::value(game, units::Kind::Terraformation, 0),
         stages: meteo::stages(game),
-        game_time: f64::from(game.time),
+        game_time: game.time.secs(),
         units: planet_units,
         players,
         access: &game.access.lists,
@@ -324,7 +324,7 @@ mod tests {
             "planet": game.planet_id(),
             "terraformation": terraformation,
             "stages": meteo::stages(game),
-            "gameTime": game.time,
+            "gameTime": game.time.secs(),
             "units": planet_units,
             "players": players,
             "access": game.access.lists,
@@ -381,7 +381,7 @@ mod tests {
         for _ in 0..30 {
             game.tick();
         }
-        game.time = 0.1;
+        game.time = crate::clock::GameTime::at(0.1);
         game.held = true;
         persist::note_backup(&Ok(true));
         let mut ticks = TickTimes::default();

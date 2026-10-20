@@ -4,6 +4,7 @@
 
 use serde_json::{json, Value};
 
+use crate::clock::GameTime;
 use crate::data::stable_hash;
 use crate::game::Game;
 use crate::net::{enc, Target, VarValue};
@@ -19,7 +20,7 @@ pub enum Timer {
 
 /// Pending timers: (game time when due, what).
 #[derive(Default, serde::Serialize, serde::Deserialize)]
-pub struct Timers(pub Vec<(f32, Timer)>);
+pub struct Timers(pub Vec<(GameTime, Timer)>);
 
 /// Rules: a dropped world object's despawn moves to `delay` seconds from now (0: never).
 pub fn set_despawn(game: &mut Game, wo: i32, delay: f32) {

@@ -9,6 +9,7 @@ use indexmap::IndexMap;
 use serde_json::{json, Value};
 
 use super::{distance2, nearest, player_distance2};
+use crate::clock::GameTime;
 use crate::game::{Args, Game};
 use crate::model::WorldObject;
 use crate::net::{enc, Target, VarValue};
@@ -42,10 +43,8 @@ struct Vehicle {
     /// UpdateNetworkRigidBodyState._rbEnabled.
     rb_enabled: bool,
     last_position: [f32; 3],
-    /// When the next rigidbody check is due: f32 like the game's while the clock is young, f64
-    /// in `late_check` after (units::advance: adding 0.15 to an f32 stops changing it at 2^22 s).
-    next_check: f32,
-    late_check: Option<f64>,
+    /// When the next rigidbody check is due (clock.rs: adding 0.15 to an f32 stops changing it at 2^22 s).
+    next_check: GameTime,
     disable_distance: f32,
 }
 
@@ -70,7 +69,7 @@ pub struct State {
     garages: IndexMap<u64, Garage>,
     /// Equipment inventory -> the vehicle's world object (VehicleEquipment).
     equipment: HashMap<i32, i32>,
-    last_frame: f32,
+    last_frame: GameTime,
     /// A seated player's object -> (where the seat put it, the owner's own last state): the
     /// game's seat overrides the copy of the player every frame, and once it lets go the copy
     /// goes back to what the owner last sent.
@@ -102,7 +101,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
         let disable_distance = component(game, w, "UpdateNetworkRigidBodyState").first().and_then(|c| c["_disableDistance"].as_f64()).unwrap_or(30.0) as f32;
         let (owner, p) = (game.net.objects[&object].owner, w.position);
         let next_check = game.time + FIRST_CHECK;
-        game.ext.animals.vehicles.vehicles.insert(object, Vehicle { owner, kinematic: false, rb_enabled: true, last_position: p, next_check, late_check: None, disable_distance });
+        game.ext.animals.vehicles.vehicles.insert(object, Vehicle { owner, kinematic: false, rb_enabled: true, last_position: p, next_check, disable_distance });
         // OnNetworkSpawn in behaviour order: OwnershipSwitcher hands a server-owned vehicle to
         // the nearest client, then UpdateNetworkRigidBodyState reads the body's state.
         if owner == 0 {
@@ -301,9 +300,9 @@ pub fn frame(game: &mut Game) {
     let vehicles: Vec<u64> = game.ext.animals.vehicles.vehicles.keys().copied().collect();
     for object in vehicles {
         let v = &game.ext.animals.vehicles.vehicles[&object];
-        if crate::units::is_due(v.next_check, v.late_check, game.time) {
+        if game.time >= v.next_check {
             let v = game.ext.animals.vehicles.vehicles.get_mut(&object).unwrap();
-            crate::units::advance(&mut v.next_check, &mut v.late_check, game.time, f64::from(CHECK));
+            v.next_check.advance(f64::from(CHECK));
             rigidbody_check(game, object);
         }
         // LockNetworkPlayerPosition.LateUpdate: a seated player is where the seat is.

@@ -14,6 +14,7 @@
 
 use serde_json::Value;
 
+use crate::clock::GameTime;
 use crate::game::{Args, Game};
 use crate::net::enc;
 use crate::units::Kind;
@@ -44,9 +45,9 @@ pub struct Meteo {
     /// online at the launch, the position was not set).
     reference: (u64, Option<[f32; 3]>),
     /// TryToLaunchAnEvent and UpdateMeteo coroutines.
-    next_try: f32,
+    next_try: GameTime,
     try_every: f32,
-    next_update: f32,
+    next_update: GameTime,
     asteroids: Asteroids,
     day: DayNight,
     story: story::Story,
@@ -106,7 +107,7 @@ pub fn init(game: &mut Game) {
 /// The planet is loaded and the world placed: the handlers' coroutines start.
 pub fn init_late(game: &mut Game) {
     let s = singleton(game, DAY_NIGHT);
-    let day = DayNight { full_day_stay: num(s, "fullDayStayTime"), speed: num(s, "nightFallSpeed"), every: num(s, "_updateCoroutineTime"), next: game.time, full_phase_reached: -99.0, ..Default::default() };
+    let day = DayNight { full_day_stay: num(s, "fullDayStayTime"), speed: num(s, "nightFallSpeed"), every: num(s, "_updateCoroutineTime"), next: game.time, full_phase_reached: GameTime::at(-99.0), ..Default::default() };
     game.ext.meteo.day = day;
     planet_loaded(game);
     explode::init(game);
@@ -239,7 +240,7 @@ fn launch_specific(game: &mut Game, index: i32, position: Option<[f32; 3]>) {
     set_seed(game, seed);
     let (client, position) = pick_reference(game, position);
     set_reference(game, client, position);
-    let now = game.time as f64;
+    let now = game.time.secs();
     game.ext.meteo.time_set = now;
     game.set_on(HANDLER, "_timeNewMeteoSet", enc::double(now));
     set_selected(game, index);
@@ -333,7 +334,7 @@ fn update_meteo(game: &mut Game) {
     let m = &game.ext.meteo;
     if m.selected != -1 {
         let duration = game.data.asset(&m.events[m.selected as usize]).map(|e| num(e, "duration")).unwrap_or(0.0);
-        if (game.time as f64 - m.time_set) as f32 >= duration {
+        if (game.time.secs() - m.time_set) as f32 >= duration {
             set_selected(game, -1);
         }
     }
@@ -370,7 +371,7 @@ pub fn between_stages(game: &Game, start: Option<&str>, stop: Option<&str>) -> b
 fn system_terraformation(game: &Game) -> f64 {
     let mut total = 0.0f64;
     for p in &game.units.planets {
-        let v = p.get(Kind::Terraformation).total as f64;
+        let v = p.get(Kind::Terraformation).total;
         total = if total < f64::EPSILON { v } else { total * v.max(1.0) };
     }
     total
@@ -412,7 +413,7 @@ pub fn stages(game: &Game) -> Value {
 struct Asteroids {
     state: u32,
     events: Vec<AsteroidEvent>,
-    next_check: f32,
+    next_check: GameTime,
     next_id: u32,
 }
 
@@ -425,9 +426,9 @@ struct AsteroidEvent {
     max_total: i32,
     existing: i32,
     total: i32,
-    last_sent: f32,
+    last_sent: GameTime,
     /// When the asteroids in flight land (Asteroid.OnImpact lowers the existing count).
-    landings: Vec<f32>,
+    landings: Vec<GameTime>,
 }
 
 /// Seconds from an asteroid's spawn to its impact. Approximation: Asteroid's speed ranges and the
@@ -437,7 +438,7 @@ const FLIGHT_SECONDS: f32 = 18.0;
 
 impl Asteroids {
     /// AddAsteroidEvent(Instantiate(asteroidEventData)).
-    fn add(&mut self, data: &Value, now: f32) -> u32 {
+    fn add(&mut self, data: &Value, now: GameTime) -> u32 {
         self.next_id += 1;
         let max_total = data["maxAsteroidsTotal"].as_i64().unwrap_or(0) as i32;
         self.events.push(AsteroidEvent {
@@ -472,7 +473,7 @@ impl Asteroids {
 
     /// SpawnAsteroid. Approximation: the target point's NextFloat2Direction is drawn once (the
     /// game draws again while the point is outside every AsteroidZone, whose bounds we lack).
-    fn spawn(&mut self, i: usize, now: f32) {
+    fn spawn(&mut self, i: usize, now: GameTime) {
         let e = &self.events[i];
         if e.existing >= e.max_simultaneous || e.total >= e.max_total {
             return;
@@ -512,8 +513,8 @@ struct DayNight {
     full_day_stay: f32,
     speed: f32,
     every: f32,
-    next: f32,
-    full_phase_reached: f32,
+    next: GameTime,
+    full_phase_reached: GameTime,
     pong: f32,
     value: f32,
 }
@@ -528,7 +529,7 @@ fn ping_pong(t: f32, length: f32) -> f32 {
 impl DayNight {
     /// One SetDayNightLerpValue step: after fullDayStayTime minutes of day the value ping-pongs
     /// to 100 (night) and back; back under 1 it snaps to 0 and the day starts over.
-    fn step(&mut self, now: f32) {
+    fn step(&mut self, now: GameTime) {
         if now > self.full_phase_reached + self.full_day_stay * 60.0 {
             self.pong += self.speed;
             let previous = self.value;
@@ -610,7 +611,7 @@ pub(crate) mod tests {
     fn the_meteo_loop_launches_queued_events_first_then_random_ones() {
         let Some(mut g) = game() else { return };
         let run = |g: &mut Game, until: f32| {
-            while g.time < until {
+            while g.time.f32() < until {
                 g.time += 0.1;
                 tick(g);
             }
@@ -629,13 +630,13 @@ pub(crate) mod tests {
         assert_eq!(g.ext.meteo.selected, -1, "over after its duration");
         assert!(g.ext.meteo.asteroids.events.is_empty(), "its asteroids stop with it");
         // Chance 0: no random event, however long.
-        let next = g.ext.meteo.next_try;
+        let next = g.ext.meteo.next_try.f32();
         let every = g.ext.meteo.try_every;
         run(&mut g, next + 3.0 * every);
         assert_eq!(g.ext.meteo.selected, -1);
         // A chance that cannot miss: the next try launches one of the planet's own events.
         g.rules.meteo.event_chance = 1.0e9;
-        let next = g.ext.meteo.next_try;
+        let next = g.ext.meteo.next_try.f32();
         run(&mut g, next + 0.5);
         assert!((0..g.ext.meteo.original_count as i32).contains(&g.ext.meteo.selected), "{}", g.ext.meteo.selected);
     }
@@ -643,12 +644,12 @@ pub(crate) mod tests {
     #[test]
     fn day_night_matches_the_real_server() {
         // _dayNightLerpValue as the real server sent it, night step 1 and the 0.35 steps after.
-        let mut d = DayNight { full_day_stay: 16.0, speed: 0.35, full_phase_reached: -99.0, ..Default::default() };
-        d.step(10.0);
+        let mut d = DayNight { full_day_stay: 16.0, speed: 0.35, full_phase_reached: GameTime::at(-99.0), ..Default::default() };
+        d.step(GameTime::at(10.0));
         assert_eq!(d.value, 0.0, "full day for the first 861 s");
         let mut seen = Vec::new();
         for n in 0..700 {
-            d.step(900.0 + n as f32 * 0.5);
+            d.step(GameTime::at(f64::from(900.0 + n as f32 * 0.5)));
             seen.push(d.value.to_bits());
         }
         assert_eq!(&seen[..3], &[0x3eb33300, 0x3f333300, 0x3f866680]);
@@ -657,7 +658,7 @@ pub(crate) mod tests {
         let top = seen.iter().map(|b| f32::from_bits(*b)).fold(0.0, f32::max);
         assert!(top > 99.0 && top <= 100.0);
         let reset = seen.iter().rposition(|b| *b == 0).unwrap();
-        assert!(reset > 560 && d.full_phase_reached > 1100.0, "{reset} {}", d.full_phase_reached);
+        assert!(reset > 560 && d.full_phase_reached.f32() > 1100.0, "{reset} {}", d.full_phase_reached);
     }
 
     #[test]
@@ -665,12 +666,31 @@ pub(crate) mod tests {
         let Some(mut g) = game() else { return };
         g.ext.meteo.day.full_day_stay = 0.0;
         for t in 0..2000 {
-            g.time = t as f32 * 0.0051;
+            g.time = GameTime::at(f64::from(t as f32 * 0.0051));
             day_night(&mut g);
         }
         // 10.2 s of 5.1 ms ticks: steps at 0, 0.5, ..., 10.0, none lost to tick rounding.
         assert_eq!((g.ext.meteo.day.pong / 0.35).round(), 21.0);
         assert_eq!(var(&g, DAY_NIGHT, "_dayNightLerpValue"), enc::float(g.ext.meteo.day.value));
+    }
+
+    /// The cycle's half-second steps do not slow down with the server's age: 21 in 10.2 s at the
+    /// first day and at the thousandth (the float's 1 s resolution would have made them whole seconds).
+    #[test]
+    fn day_night_keeps_its_schedule_at_any_age_of_the_server() {
+        for days in [0.0, 1.0, 7.0, 25.0, 100.0, 400.0, 1000.0] {
+            let Some(mut g) = game() else { return };
+            let base = days * 86_400.0;
+            g.ext.meteo.day.full_day_stay = 0.0;
+            g.time = GameTime::at(base);
+            g.ext.meteo.day.next = g.time;
+            g.ext.meteo.day.full_phase_reached = GameTime::at(base - 99.0);
+            for t in 0..2000 {
+                g.time = GameTime::at(base + f64::from(t) * 0.0051);
+                day_night(&mut g);
+            }
+            assert_eq!((g.ext.meteo.day.pong / 0.35).round(), 21.0, "{days} days");
+        }
     }
 
     #[test]
@@ -690,7 +710,7 @@ pub(crate) mod tests {
         assert_eq!(var(&g, HANDLER, "_selectedDataMeteoEventIndex"), enc::int(-1));
         assert!(g.save.messages.iter().any(|m| m["stringId"] == "Message_YouAreAConvict"), "default message");
         // A launched event sets the seed, time and index, starts its asteroids and ends on time.
-        g.time = 100.0;
+        g.time = crate::clock::GameTime::at(100.0);
         launch_specific(&mut g, 16, Some([1.0, 2.0, 3.0]));
         assert_eq!(g.ext.meteo.selected, 16);
         assert_eq!(var(&g, HANDLER, "_asteroidReferencePosition"), vec3([1.0, 2.0, 3.0]));
@@ -700,13 +720,13 @@ pub(crate) mod tests {
         assert_eq!(g.ext.meteo.asteroids.state, seed);
         // AsteroidEventSmalls: one every 3 s, the state published as _currentSeed.
         for t in 0..40 {
-            g.time = 100.0 + t as f32 * 0.1;
+            g.time = GameTime::at(f64::from(100.0 + t as f32 * 0.1));
             asteroids_tick(&mut g);
             update_meteo(&mut g);
         }
         assert_ne!(g.ext.meteo.seed, seed, "a spawn moved the random state on");
         assert_eq!(var(&g, HANDLER, "_currentSeed"), uint(g.ext.meteo.asteroids.state));
-        g.time = 100.0 + 80.0;
+        g.time = GameTime::at(180.0);
         update_meteo(&mut g);
         assert_eq!(g.ext.meteo.selected, -1);
         assert_eq!(g.ext.meteo.asteroids.state, 0, "the random state resets with the last asteroid event");

@@ -16,6 +16,7 @@ mod vehicles;
 
 use std::collections::HashSet;
 
+use crate::clock::GameTime;
 use crate::game::{Args, Game};
 use crate::model::WorldObject;
 use crate::net::enc;
@@ -30,7 +31,7 @@ pub struct State {
     pub spawn: spawn::State,
     pub vehicles: vehicles::State,
     pub interpolation: interpolation::State,
-    next_frame: f32,
+    next_frame: GameTime,
     /// Clients connected at the last tick, to see who left (NetworkManager.OnClientDisconnectCallback).
     clients: HashSet<u64>,
 }

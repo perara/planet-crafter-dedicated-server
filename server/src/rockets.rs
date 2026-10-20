@@ -11,6 +11,7 @@ mod interplanetary;
 use indexmap::IndexMap;
 use serde_json::json;
 
+use crate::clock::GameTime;
 use crate::game::{Args, Game};
 use crate::model::WorldObject;
 use crate::net::Target;
@@ -60,10 +61,10 @@ pub struct State {
     /// Space multipliers (WorldUnitMultiplierViaInventory): inventory -> world object.
     multipliers: IndexMap<i32, i32>,
     /// MachineRocket.DespawnAfterDelay: (due, rocket world object, its network object).
-    despawns: Vec<(f32, i32, u64)>,
+    despawns: Vec<(GameTime, i32, u64)>,
     interplanetary: interplanetary::State,
     /// Game time of the previous tick (Time.deltaTime for MachineRocketLand).
-    last_tick: f32,
+    last_tick: GameTime,
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -71,7 +72,7 @@ struct Departure {
     /// _sequenceStarted.
     started: bool,
     /// The SwitchPlanet coroutine: when it sends SwitchPlanetClientRpc.
-    switch_at: Option<f32>,
+    switch_at: Option<GameTime>,
     /// SwitchPlanetClientRpc went out; the switch itself follows a frame later.
     switching: bool,
     planet: i32,

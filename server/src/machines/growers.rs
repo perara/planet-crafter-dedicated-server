@@ -5,6 +5,7 @@
 use serde_json::{json, Value};
 
 use super::{f32_of, group_of_game_object, group_ref, has_energy, is_active, is_full, items, net_has, remove_item, Game};
+use crate::clock::GameTime;
 use crate::geometry::MathRandom;
 use crate::net::{enc, Target};
 
@@ -117,15 +118,15 @@ pub fn reset_current_growth(game: &mut Game, wo: i32, value: f32) {
 }
 
 /// The earliest time tick has anything to do (the times tick checks, in one place).
-pub(super) fn next_due(m: &super::Machine) -> f32 {
+pub(super) fn next_due(m: &super::Machine) -> GameTime {
     let vegetation = m.vegetation.as_ref().and_then(|v| match v.coroutine {
         Coroutine::Waiting(t) | Coroutine::Growing(t) => Some(t),
         Coroutine::None => None,
     });
-    [m.linked_grower.as_ref().map(|g| g.next), m.converter, vegetation, m.harvestable.as_ref().and_then(|h| h.next)].into_iter().flatten().fold(f32::INFINITY, f32::min)
+    [m.linked_grower.as_ref().map(|g| g.next), m.converter, vegetation, m.harvestable.as_ref().and_then(|h| h.next)].into_iter().flatten().fold(GameTime::NEVER, GameTime::min)
 }
 
-pub fn tick(game: &mut Game, wo: i32, now: f32) {
+pub fn tick(game: &mut Game, wo: i32, now: GameTime) {
     let Some(m) = game.ext.machines.list.get(&wo) else { return };
     let linked_due = m.linked_grower.as_ref().is_some_and(|g| now >= g.next);
     let convert_due = m.converter.is_some_and(|t| now >= t);
@@ -158,7 +159,7 @@ pub fn tick(game: &mut Game, wo: i32, now: f32) {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct LinkedGrower {
-    next: f32,
+    next: GameTime,
     rate: f32,
 }
 
@@ -166,11 +167,11 @@ const LINKED_UPDATE_EVERY: f32 = 2.0;
 
 impl LinkedGrower {
     pub fn refresh(&mut self, f: &Value) {
-        self.rate = LinkedGrower::new(f, 0.0).rate;
+        self.rate = LinkedGrower::new(f, GameTime::ZERO).rate;
     }
 
     /// Awake: the update loop starts once the local player has (on the server: at once).
-    pub fn new(f: &Value, now: f32) -> LinkedGrower {
+    pub fn new(f: &Value, now: GameTime) -> LinkedGrower {
         let time_to_grow = f32_of(f, "timeToGrow");
         LinkedGrower { next: now, rate: 100.0 / (time_to_grow * 60.0 / LINKED_UPDATE_EVERY) }
     }
@@ -181,7 +182,7 @@ fn linked_groups(game: &Game, wo: i32) -> Vec<usize> {
 }
 
 /// MachineGrowerIfLinkedGroup.UpdateGrowth, every 2 s.
-fn linked_grower_update(game: &mut Game, wo: i32, now: f32) {
+fn linked_grower_update(game: &mut Game, wo: i32, now: GameTime) {
     let g = game.ext.machines.get_mut(&wo).unwrap().linked_grower.as_mut().unwrap();
     g.next = now + LINKED_UPDATE_EVERY;
     let rate = g.rate;
@@ -222,9 +223,9 @@ fn convert_if_fully_grown(game: &mut Game, wo: i32) {
 pub enum Coroutine {
     None,
     /// WaitForInitBeforeGrowing, until then.
-    Waiting(f32),
+    Waiting(GameTime),
     /// UpdateGrowing, next Grow then.
-    Growing(f32),
+    Growing(GameTime),
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -242,13 +243,13 @@ impl Vegetation {
     /// The table's values, set again after a restore (machines::refresh_from_tables); what the
     /// seeds inside make it grow (things), the random sequence and the coroutine are state.
     pub fn refresh(&mut self, f: &Value) {
-        let fresh = Vegetation::new(f, 0, 0.0);
+        let fresh = Vegetation::new(f, 0, GameTime::ZERO);
         (self.original, self.grow_speed, self.interval, self.min_growth) = (fresh.original, fresh.grow_speed, fresh.interval, fresh.min_growth);
     }
 
     /// SetWorldObjectForGrower: the random sequence seeded by the world object id, the growth
     /// from the world object, then the first LaunchGrowingProcess (wait 2 s for init).
-    pub fn new(f: &Value, wo: i32, now: f32) -> Vegetation {
+    pub fn new(f: &Value, wo: i32, now: GameTime) -> Vegetation {
         let things: Vec<String> = f["thingsToGrow"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
         Vegetation {
             random: MathRandom::new(wo as u32),
@@ -342,7 +343,7 @@ pub struct Harvestable {
     /// Items still growing, with the network object they had.
     growings: Vec<(i32, u64)>,
     /// UpdateContentGrowth, next run.
-    next: Option<f32>,
+    next: Option<GameTime>,
     interval: f32,
     grow_speed: f32,
     min_growth: f32,

@@ -327,7 +327,7 @@ fn other_players_inventories_are_theirs() {
         rpc(&mut g, 1, 0, name, args.clone());
         let now = &g.inventories[&bob_inv];
         assert_eq!((&now.items, now.size), (&before.items, before.size), "{name}");
-        assert!(g.wos.get(&item).is_some_and(|w| w.lock_time == 0.0 && !w.is_placed()), "{name}");
+        assert!(g.wos.get(&item).is_some_and(|w| w.lock_time == crate::clock::GameTime::ZERO && !w.is_placed()), "{name}");
         assert!(g.inventories[&bob_eq].items.is_empty(), "{name}");
     }
     // Saved, not in the game: still Bob's.

@@ -2,7 +2,10 @@
 //! the server sends and saves (an optimization must leave the fingerprint unchanged):
 //!
 //!   PCDS_BENCH_SAVE=world.json PCDS_RNG_SEED=1 [PCDS_BENCH_SECONDS=300] [PCDS_BENCH_PLAYERS=4] \
-//!     [PCDS_BENCH_ACTION_MS=200] [PCDS_BENCH_DUMP=messages.txt] cargo test --release bench -- --ignored --nocapture
+//!     [PCDS_BENCH_ACTION_MS=200] [PCDS_BENCH_DUMP=messages.txt] [PCDS_BENCH_START_DAYS=400] cargo test --release bench -- --ignored --nocapture
+//!
+//! PCDS_BENCH_START_DAYS starts the game's clock that many days in (a server that has run that long: every
+//! timer is set at that age): the save hash printed at the end must not depend on it (docs/clock.md).
 //!
 //! PCDS_BENCH_DUMP writes every message (the joins', then per tick, sorted) and the final save, to compare two
 //! runs (two builds, two table sets) line by line.
@@ -91,19 +94,21 @@ struct Env {
     action_ms: u64,
     /// `bench` only: where every tick's messages and the final save go.
     dump: Option<String>,
+    /// The game's clock at the start, in seconds (PCDS_BENCH_START_DAYS: a server that has run that long).
+    start: f64,
 }
 
 fn env() -> Option<Env> {
     let path = std::env::var("PCDS_BENCH_SAVE").expect("bench: set PCDS_BENCH_SAVE");
     let dir = crate::test_data()?;
     let var = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok());
-    Some(Env { path, dir, seconds: var("PCDS_BENCH_SECONDS").unwrap_or(300.0), players: var("PCDS_BENCH_PLAYERS").unwrap_or(0.0) as u64, action_ms: var("PCDS_BENCH_ACTION_MS").unwrap_or(0.0) as u64, dump: std::env::var("PCDS_BENCH_DUMP").ok() })
+    Some(Env { path, dir, seconds: var("PCDS_BENCH_SECONDS").unwrap_or(300.0), players: var("PCDS_BENCH_PLAYERS").unwrap_or(0.0) as u64, action_ms: var("PCDS_BENCH_ACTION_MS").unwrap_or(0.0) as u64, dump: std::env::var("PCDS_BENCH_DUMP").ok(), start: var("PCDS_BENCH_START_DAYS").unwrap_or(0.0) * 86_400.0 })
 }
 
 fn load(e: &Env) -> Game {
     let (net_data, data, spec) = crate::tables(e.dir);
     let scenes = crate::scene_tables(e.dir, &net_data, &data);
-    Game::with_clock(net_data, data, spec, SaveFile::load(&e.path).unwrap(), scenes, Some(0.0))
+    Game::with_clock(net_data, data, spec, SaveFile::load(&e.path).unwrap(), scenes, Some(e.start))
 }
 
 /// A bench player's own bookkeeping (what load.rs's bot learns from the server's answers).
@@ -177,6 +182,8 @@ struct Run {
     /// Each tick's time in the timed part (the players' packets and actions that tick, then the tick), in ns.
     tick_ns: Vec<u32>,
     save: usize,
+    /// The hash of the final save's text alone (no ticks in it: equal across a clock that starts late).
+    save_hash: u64,
     /// The sorted messages of the tick asked for.
     dumped: Vec<String>,
     /// The game at the end.
@@ -185,7 +192,7 @@ struct Run {
 
 /// The bench loop; `swap` may replace the game after a tick, every `swap_every` seconds.
 fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game, dump: Option<usize>) -> Run {
-    g.sim_time = Some(0.0);
+    g.sim_time = Some(e.start);
     // More than the default 16 players, when asked for.
     if e.players as usize > g.rules.max_players() {
         g.rules.limits.max_players = Some(e.players as usize);
@@ -206,7 +213,7 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
     }
     while t < e.seconds {
         t += step;
-        g.sim_time = Some(t);
+        g.sim_time = Some(e.start + t);
         let started = Instant::now();
         let before = ALLOCS.get();
         if t >= next_move {
@@ -253,11 +260,16 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
     }
     let save = g.snapshot().to_text();
     save.hash(&mut h);
+    let save_hash = {
+        let mut own = std::collections::hash_map::DefaultHasher::new();
+        save.hash(&mut own);
+        own.finish()
+    };
     if let Some(f) = &mut file {
         use std::io::Write;
         writeln!(f, "save {save}").unwrap();
     }
-    Run { fingerprint: h.finish(), ticks, messages, busy, allocs, tick_ns, save: save.len(), dumped, game: g }
+    Run { fingerprint: h.finish(), ticks, messages, busy, allocs, tick_ns, save: save.len(), save_hash, dumped, game: g }
 }
 
 /// The load test's players (three, acting every 200 ms) for 20 s on the test world, played
@@ -266,7 +278,7 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
 #[test]
 fn a_played_session_ends_the_same_through_handoffs() {
     let Some(start) = crate::game::test_game(crate::game::tests::save()) else { return };
-    let e = Env { path: String::new(), dir: crate::test_data().unwrap(), seconds: 20.0, players: 3, action_ms: 200, dump: None };
+    let e = Env { path: String::new(), dir: crate::test_data().unwrap(), seconds: 20.0, players: 3, action_ms: 200, dump: None, start: 0.0 };
     // A copy of a game as a new bank makes it (one start for both runs: the same random state).
     let copy = |g: &mut Game| {
         let (net_data, data, spec, scenes) = crate::game::test_tables().unwrap();
@@ -293,14 +305,15 @@ fn bench() {
     let r = run(g, &e, f64::INFINITY, |g| g, None);
     let per_tick = r.busy / r.ticks.len() as u32;
     println!(
-        "bench: {} s simulated, {} players, {} ticks: {per_tick:?} per tick, cpu at real time {:.2}% of a core, {} messages, save {} bytes, fingerprint {:016x}",
+        "bench: {} s simulated, {} players, {} ticks: {per_tick:?} per tick, cpu at real time {:.2}% of a core, {} messages, save {} bytes, fingerprint {:016x}, save hash {:016x}",
         e.seconds,
         e.players,
         r.ticks.len(),
         100.0 * r.busy.as_secs_f64() / e.seconds,
         r.messages,
         r.save,
-        r.fingerprint
+        r.fingerprint,
+        r.save_hash
     );
     println!("bench: {:.2} allocations ({:.0} bytes) per tick, {:.2} us per tick in the timed part", r.allocs.0 as f64 / r.ticks.len() as f64, r.allocs.1 as f64 / r.ticks.len() as f64, r.busy.as_secs_f64() * 1e6 / r.ticks.len() as f64);
     let mut sorted = r.tick_ns.clone();
@@ -371,6 +384,45 @@ fn example(a: &Value, b: &Value) -> String {
 fn short(v: &Value) -> String {
     let s = v.to_string();
     if s.len() > 60 { format!("{}... ({} chars)", &s[..s.char_indices().nth(60).map(|(i, _)| i).unwrap_or(s.len())], s.len()) } else { s }
+}
+
+/// An idle world (no players: machines, growth, meteo, rockets) played PCDS_BENCH_SECONDS straight,
+/// and with the server stopped and started from its save text after half of it (the game's clock
+/// starts again at 0, as after a restart). What a restart changes is what the save does not hold:
+/// the partial cycle of every machine, the phase of every timer, the random state. The planet's
+/// unit levels at the end are printed for both.
+///
+///   PCDS_BENCH_SAVE=world.json PCDS_RNG_SEED=1 PCDS_BENCH_SECONDS=3600 cargo test --release bench::restart -- --ignored --nocapture
+#[test]
+#[ignore]
+fn restart() {
+    let Some(e) = env() else { return };
+    let levels = |g: &mut Game| {
+        let save = g.snapshot();
+        save.planets.iter().map(|p| format!("{} {}", p["planetId"].as_str().unwrap_or("?"), ["unitOxygenLevel", "unitHeatLevel", "unitPressureLevel", "unitPlantsLevel", "unitInsectsLevel", "unitAnimalsLevel"].map(|k| format!("{k}={}", p[k])).join(" "))).collect::<Vec<_>>()
+    };
+    let play = |g: &mut Game, from: f64, to: f64, origin: f64| {
+        let mut t = from;
+        while t < to {
+            t += 0.005;
+            g.sim_time = Some(t - origin);
+            g.tick();
+            g.net.out.clear();
+        }
+    };
+    let (net_data, data, spec) = crate::tables(e.dir);
+    let scenes = crate::scene_tables(e.dir, &net_data, &data);
+    let mut straight = load(&e);
+    play(&mut straight, 0.0, e.seconds, 0.0);
+    let mut first = load(&e);
+    play(&mut first, 0.0, e.seconds / 2.0, 0.0);
+    println!("restart: at the start {:?}", levels(&mut load(&e)));
+    println!("restart: at half {:?}", levels(&mut first));
+    let text = first.save_text();
+    let mut second = Game::with_clock(net_data, data, spec, SaveFile::from_text(&text), scenes, Some(0.0));
+    play(&mut second, e.seconds / 2.0, e.seconds, e.seconds / 2.0);
+    println!("restart: straight {:?}", levels(&mut straight));
+    println!("restart: restarted at {} s {:?}", e.seconds / 2.0, levels(&mut second));
 }
 
 #[test]
@@ -502,7 +554,7 @@ fn soak_growth() {
     let mut first: Option<std::collections::BTreeMap<String, usize>> = None;
     while t < seconds {
         t += step;
-        g.sim_time = Some(t);
+        g.sim_time = Some(e.start + t);
         if t >= next_act {
             next_act += 1.0;
             seq += 1;
@@ -754,7 +806,7 @@ fn flipbench() {
     let (rounds, players) = (var("PCDS_FLIPBENCH_N", 20), var("PCDS_FLIPBENCH_PLAYERS", 8) as u64);
     let saves = std::env::var("PCDS_FLIPBENCH_SAVES").or_else(|_| std::env::var("PCDS_BENCH_SAVE")).expect("flipbench: set PCDS_FLIPBENCH_SAVES");
     for path in saves.split(',') {
-        let e = Env { path: path.to_string(), dir, seconds: 0.0, players, action_ms: 0, dump: None };
+        let e = Env { path: path.to_string(), dir, seconds: 0.0, players, action_ms: 0, dump: None, start: 0.0 };
         let loading = Instant::now();
         let mut g = load(&e);
         let loaded = loading.elapsed();
@@ -861,7 +913,7 @@ fn dirtybench() {
     }
     for path in saves.split(',') {
         for delta in [0.25, 1.0, 5.0] {
-            let e = Env { path: path.to_string(), dir, seconds: 2.0 * delta + 0.01, players, action_ms, dump: None };
+            let e = Env { path: path.to_string(), dir, seconds: 2.0 * delta + 0.01, players, action_ms, dump: None, start: 0.0 };
             let taken = std::cell::RefCell::new(Vec::<[Vec<(u64, u64)>; 3]>::new());
             run(load(&e), &e, delta, |g| {
                 taken.borrow_mut().push(digests(&g));

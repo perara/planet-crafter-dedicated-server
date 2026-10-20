@@ -9,6 +9,7 @@ use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Value};
 
 use super::{distance2, nearest, player_distance2};
+use crate::clock::GameTime;
 use crate::data::{BehaviourDef, VarDef};
 use crate::game::{Args, Game};
 use crate::gamedata::Layout;
@@ -107,7 +108,7 @@ struct Spawner {
     /// _spawned: DNA sequence -> its animal (None: known, not spawned).
     spawned: IndexMap<i32, Option<u64>>,
     feeders: IndexSet<i32>,
-    last_update: f32,
+    last_update: GameTime,
     /// The world object whose unit multiplier the sequences feed (WorldUnitMultiplierViaInventory).
     multiplier: Option<i32>,
 }
@@ -346,7 +347,7 @@ fn add_spawner(game: &mut Game, wo: i32, position: [f32; 3], params: Params, mul
     *game.watchers.entry(inventory).or_default().entry(0).or_insert(0) += 1;
     let s = &mut game.ext.animals.spawn;
     s.by_inventory.insert(inventory, wo);
-    s.spawners.insert(wo, Spawner { position, planet, inventory, params, spawned, feeders, last_update: 0.0, multiplier });
+    s.spawners.insert(wo, Spawner { position, planet, inventory, params, spawned, feeders, last_update: GameTime::ZERO, multiplier });
 }
 
 /// The instance goes away (OnDisable: DespawnAll; OnDestroy: stop watching).
@@ -576,7 +577,7 @@ fn update_component(game: &mut Game, key: i32) {
     if sp.spawned.is_empty() {
         return;
     }
-    if sp.params.feeder.is_some() && sp.last_update > 0.0 {
+    if sp.params.feeder.is_some() && sp.last_update > GameTime::ZERO {
         feed(game, key, now - sp.last_update);
     }
     let sp = game.ext.animals.spawn.spawners.get_mut(&key).unwrap();
@@ -671,7 +672,7 @@ fn pet(game: &mut Game, client: u64, object: u64) {
     let sequence = game.ext.animals.spawn.animals[&object].sequence;
     let time = game.time;
     let Some(w) = game.wos.get_mut(&sequence) else { return };
-    if (w.pet_time != 0.0 && time - w.pet_time <= PET_DELAY) || w.hunger < 0.0 {
+    if (w.pet_time != GameTime::ZERO && time - w.pet_time <= PET_DELAY) || w.hunger < 0.0 {
         return;
     }
     w.pet_time = time;
@@ -830,9 +831,9 @@ mod tests {
         assert!(matches!(game.net.get(net, "AIAnimalStateController", "_hungerDecreaseSpeed"), Some(crate::net::VarValue::Plain(b)) if *b == enc::float(0.05)));
         assert_eq!((game.wos[&sequence].hunger, game.wos[&sequence].growth), (100.0, 30.0));
 
-        game.time = 1.0;
+        game.time = crate::clock::GameTime::at(1.0);
         frame(&mut game);
-        game.time = 1601.0;
+        game.time = crate::clock::GameTime::at(1601.0);
         frame(&mut game);
         // 80 hunger gone, below 25: it ate the food (+40), and grew 16.
         let w = &game.wos[&sequence];
@@ -897,13 +898,13 @@ mod tests {
         let (&net, _) = game.ext.animals.spawn.animals.iter().next().unwrap();
         let (bag, _) = backpack(&game, 1);
         let had = game.inventories[&bag].items.len();
-        game.time = 100.0;
+        game.time = crate::clock::GameTime::at(100.0);
         game.net.out.clear();
         send_on(&mut game, 1, net, "PetProxy.ActionPetServerRpc", &[]);
         let trait_hash = hash(&game, crate::genetics::TRAIT_GROUP);
         assert_eq!(one(&game, "PetProxy.ActionPetClientRpc"), vec![json!(false), json!(trait_hash)]);
         assert_eq!(game.inventories[&bag].items.len(), had + 1);
-        game.time = 120.0;
+        game.time = crate::clock::GameTime::at(120.0);
         send_on(&mut game, 1, net, "PetProxy.ActionPetServerRpc", &[]);
         assert_eq!(game.inventories[&bag].items.len(), had + 1, "not again within 30 s");
 

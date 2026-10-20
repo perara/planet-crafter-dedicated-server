@@ -97,7 +97,7 @@ mod tests {
                 let (path, name) = (entry.path(), entry.file_name().to_string_lossy().to_string());
                 if path.is_dir() {
                     walk(&path, found);
-                } else if name.ends_with(".rs") && !["bench.rs", "coverage.rs", "scenario.rs", "testkit.rs", "tests.rs", "play_tests.rs", "facts.rs"].contains(&name.as_str()) {
+                } else if name.ends_with(".rs") && !["bench.rs", "coverage.rs", "scenario.rs", "testkit.rs", "timetravel.rs", "tests.rs", "play_tests.rs", "facts.rs"].contains(&name.as_str()) {
                     let text = std::fs::read_to_string(&path).unwrap();
                     let lines: Vec<&str> = text.lines().collect();
                     let end = (0..lines.len()).find(|&i| lines[i] == "#[cfg(test)]" && lines.get(i + 1).is_some_and(|l| l.contains("mod ") && l.contains("tests"))).unwrap_or(lines.len());

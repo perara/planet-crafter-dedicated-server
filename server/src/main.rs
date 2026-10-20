@@ -72,12 +72,15 @@ mod access;
 mod admin;
 mod bank;
 mod bincodec;
+mod clock;
 mod chathooks;
 mod cli;
 #[cfg(test)]
 mod coverage;
 #[cfg(test)]
 mod scenario;
+#[cfg(test)]
+mod timetravel;
 #[cfg(test)]
 mod testkit;
 mod config;

@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::json;
 
+use crate::clock::GameTime;
 use crate::game::{Args, Game};
 use crate::net::{enc, ListEvent, Target, VarValue};
 
@@ -480,7 +481,7 @@ pub fn set_color(game: &mut Game, object: u64, mut color: [f32; 4]) {
 /// it the default colour, or the last colour the server itself set (a static in the game).
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct DefaultColors {
-    pending: Vec<(f32, i32)>,
+    pending: Vec<(GameTime, i32)>,
     last: [f32; 4],
 }
 

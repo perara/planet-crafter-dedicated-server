@@ -1089,7 +1089,7 @@ pub fn dispatch(game: &mut crate::game::Game, event: &Event<'_>) -> Verdict {
         game.ext.plugins.refresh();
         return verdict;
     };
-    let game_ms = (game.time as f64 * 1000.0) as i64;
+    let game_ms = (game.time.secs() * 1000.0) as i64;
     verdict = host.run(game, event, game_ms);
     if let Event::Chat { client, name, text } = event
         && host.interest & Kind::Command.bit() != 0
@@ -1164,7 +1164,7 @@ pub fn poll(game: &mut crate::game::Game) {
 /// The finished HTTP requests of plugins, to the plugins (`Host::deliver_http`), between two events.
 pub(crate) fn deliver_http(game: &mut crate::game::Game) {
     let Some(mut host) = game.ext.plugins.host.take() else { return };
-    let game_ms = (game.time as f64 * 1000.0) as i64;
+    let game_ms = (game.time.secs() * 1000.0) as i64;
     host.deliver_http(game, game_ms);
     if host.plugins.iter().any(|p| p.retire_due) {
         host.settle(&mut game.ext.plugins.saved);

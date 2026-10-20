@@ -565,7 +565,7 @@ acceptance test passed):
 | state | problem | fix in the spike |
 |---|---|---|
 | `Game.started`, `Client.since` (`Instant`) | not serializable; `started` is the game clock (`Time.time`, the network tick), `since` drives the 2-minute stall kick and the API's connected time | written as seconds since, read back as that long before now |
-| `ext.machines.next_due` | holds ±infinity; JSON has none (serde_json writes `null`, reading fails) | written as the f32's bits. Proven: without it the restore fails with `invalid type: null, expected f32` |
+| `ext.machines.next_due` | holds ±infinity; JSON has none (serde_json writes `null`, reading fails) | a `GameTime` (docs/clock.md), written as the f64's bits (before format 6: the f32's). Proven: without it the restore fails with `invalid type: null, expected f32` |
 | `ext.rockets.interplanetary.items` | a map keyed by `(i32, i32)`; JSON keys are strings | written as a list of pairs. Proven: without it the snapshot does not serialize |
 | the machines' unit names (`&'static str`) | cannot be read back into a static | read as strings, mapped back to the static names |
 | the tables inside `Game` and `Net` | not state | skipped (given `Default`), reloaded |

@@ -6,10 +6,11 @@
 use serde_json::{json, Value};
 
 use super::{add_new, components, dist, f32_of, force_reset, has_energy, is_active, is_full, items, remove_item, Game};
+use crate::clock::GameTime;
 use crate::net::Target;
 
 /// What tick runs now: mining rays, generate, craft, disintegrate.
-fn due(m: &super::Machine, now: f32) -> [bool; 4] {
+fn due(m: &super::Machine, now: GameTime) -> [bool; 4] {
     [
         m.generator.as_ref().and_then(|g| g.rays.as_ref()).is_some_and(|r| now >= r.next),
         m.generator.as_ref().is_some_and(|g| !g.dead && now >= g.next),
@@ -19,15 +20,15 @@ fn due(m: &super::Machine, now: f32) -> [bool; 4] {
 }
 
 /// The earliest time tick has anything to do (due(m, now) has a true from then on).
-pub(super) fn next_due(m: &super::Machine) -> f32 {
+pub(super) fn next_due(m: &super::Machine) -> GameTime {
     let g = m.generator.as_ref();
     [g.and_then(|g| g.rays.as_ref()).map(|r| r.next), g.filter(|g| !g.dead).map(|g| g.next), m.autocrafter.as_ref().map(|a| a.next), m.disintegrator.as_ref().map(|d| d.next)]
         .into_iter()
         .flatten()
-        .fold(f32::INFINITY, f32::min)
+        .fold(GameTime::NEVER, GameTime::min)
 }
 
-pub fn tick(game: &mut Game, wo: i32, now: f32) {
+pub fn tick(game: &mut Game, wo: i32, now: GameTime) {
     let Some(m) = game.ext.machines.list.get(&wo) else { return };
     let [cast, generate, craft, disintegrate] = due(m, now);
     let speed = game.rules.speed.machines;
@@ -74,7 +75,7 @@ fn by_distance(game: &Game, wo: i32, mut list: Vec<i32>) -> Vec<i32> {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Generator {
-    pub next: f32,
+    pub next: GameTime,
     spawn_every: f32,
     speed: f32,
     /// groupDatas, with the groups the mining rays found.
@@ -92,7 +93,7 @@ pub struct Generator {
 impl Generator {
     /// SetGeneratorInventory: TryToGenerate every spawnEveryXSec, and TryToCastRay. `cast`: the
     /// rays were cast already (veins::cast, for a machine on the current planet).
-    pub fn new(game: &Game, f: &Value, wo: i32, now: f32, cast: bool) -> Generator {
+    pub fn new(game: &Game, f: &Value, wo: i32, now: GameTime, cast: bool) -> Generator {
         let refs = |k: &str| f[k].as_array().into_iter().flatten().filter_map(|r| game.data.group_of_ref(r.as_str()?)).collect::<Vec<usize>>();
         let spawn_every = f["spawnEveryXSec"].as_f64().unwrap_or(0.0) as f32;
         let mut g = Generator {
@@ -140,7 +141,7 @@ const RAY_CHECK_EVERY: f32 = 5.0;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Rays {
-    next: f32,
+    next: GameTime,
     /// _miningRaysCasted.
     cast: bool,
     /// _miningTerraStage: TerraformStagesHandler.GetCurrentGlobalStage at the last cast.
@@ -155,7 +156,7 @@ pub struct Rays {
 /// (5 s later while the world still loads), then with updateMiningRaysWhenChangingTerraStage a
 /// cast 5 s after each new global stage it sees. A cast resets the linked groups to the veins
 /// found and adds those to groupDatas once more.
-fn mining_rays(game: &mut Game, wo: i32, now: f32) {
+fn mining_rays(game: &mut Game, wo: i32, now: GameTime) {
     let stage = crate::meteo::current_global_stage(game);
     let (active, loaded) = (is_active(game, wo), game.ext.machines.loaded);
     let g = game.ext.machines.get_mut(&wo).unwrap().generator.as_mut().unwrap();
@@ -265,7 +266,7 @@ fn reached_stage(game: &Game, wo: i32, field: &str) -> bool {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct AutoCrafter {
-    pub next: f32,
+    pub next: GameTime,
     pub period: f32,
     range: f32,
 }
@@ -277,7 +278,7 @@ impl AutoCrafter {
     }
 
     /// Awake: TryToCraft waits (instance count % 50) / 10 s before its loop.
-    pub fn new(f: &Value, now: f32, instanced: i32) -> AutoCrafter {
+    pub fn new(f: &Value, now: GameTime, instanced: i32) -> AutoCrafter {
         AutoCrafter { next: now + (instanced % 50) as f32 / 10.0, period: f32_of(f, "craftEveryXSec"), range: f32_of(f, "range") }
     }
 }
@@ -368,20 +369,20 @@ fn craft_if_possible(game: &mut Game, wo: i32, inventory: i32, target: usize, av
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Disintegrator {
-    pub next: f32,
+    pub next: GameTime,
     pub period: f32,
     give: i32,
 }
 
 impl Disintegrator {
     pub fn refresh(&mut self, f: &Value) {
-        let fresh = Disintegrator::new(f, 0.0);
+        let fresh = Disintegrator::new(f, GameTime::ZERO);
         (self.period, self.give) = (fresh.period, fresh.give);
     }
 
     /// SetDisintegratorInventory: the loop starts once the second inventory is known (the frame
     /// after the spawn), then breaks an object every breakEveryXSec.
-    pub fn new(f: &Value, now: f32) -> Disintegrator {
+    pub fn new(f: &Value, now: GameTime) -> Disintegrator {
         let period = f["breakEveryXSec"].as_f64().unwrap_or(0.0) as f32;
         Disintegrator { next: now + period, period, give: f["giveXIngredientsBack"].as_i64().unwrap_or(0) as i32 }
     }
@@ -637,7 +638,7 @@ mod tests {
 
     #[test]
     fn generation_speed_rounds_halves_to_even() {
-        let g = |spawn: f32, speed: f32| Generator { next: 0.0, spawn_every: spawn, speed, groups: vec![], terra_groups: vec![], terra_stage: String::new(), via_linked: false, when_vein_empty: false, rays: None, dead: false }.period();
+        let g = |spawn: f32, speed: f32| Generator { next: GameTime::ZERO, spawn_every: spawn, speed, groups: vec![], terra_groups: vec![], terra_stage: String::new(), via_linked: false, when_vein_empty: false, rays: None, dead: false }.period();
         assert_eq!(g(70.0, 1.0), 70.0);
         assert_eq!(g(65.0, 1.25), 52.0);
         assert_eq!(g(5.0, 2.0), 2.0);

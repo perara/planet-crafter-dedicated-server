@@ -18,16 +18,6 @@ pub mod instant {
     }
 }
 
-/// An f32 that may be infinite (JSON has no infinity: serde_json writes null), as its bits.
-pub mod f32_bits {
-    pub fn serialize<S: serde::Serializer>(v: &f32, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_u32(v.to_bits())
-    }
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
-        Ok(f32::from_bits(serde::Deserialize::deserialize(d)?))
-    }
-}
-
 /// A map with non-string keys (JSON object keys are strings), as a list of pairs.
 pub mod pairs {
     use std::collections::HashMap;

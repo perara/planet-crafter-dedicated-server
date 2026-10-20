@@ -60,7 +60,7 @@ pub fn tick(game: &mut Game) {
     if !wants(game, Kind::Tick) {
         return;
     }
-    let event = Event::Tick { game_ms: (game.time as f64 * 1000.0) as i64, tick: game.tick_number(), players: online(game), since_ms: 0 };
+    let event = Event::Tick { game_ms: (game.time.secs() * 1000.0) as i64, tick: game.tick_number(), players: online(game), since_ms: 0 };
     emit(game, &event);
 }
 
@@ -125,7 +125,7 @@ pub fn object_destroyed(game: &mut Game, wo: &WorldObject) {
 /// The world was saved (or the save failed).
 pub fn world_saved(game: &mut Game, ok: bool) {
     if wants(game, Kind::WorldSaved) {
-        emit(game, &Event::WorldSaved { game_ms: (game.time as f64 * 1000.0) as i64, ok });
+        emit(game, &Event::WorldSaved { game_ms: (game.time.secs() * 1000.0) as i64, ok });
     }
 }
 

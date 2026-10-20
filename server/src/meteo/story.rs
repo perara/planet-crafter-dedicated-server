@@ -5,6 +5,7 @@
 use serde_json::{json, Value};
 
 use super::{between_stages, planet_data, refs, reference, singleton};
+use crate::clock::GameTime;
 use crate::data::stable_hash;
 use crate::game::Game;
 use crate::net::{enc, ListEvent, Target};
@@ -21,7 +22,7 @@ pub struct Story {
     manual: Vec<String>,
     /// _triggeredStoryEvents.
     triggered: Vec<i32>,
-    next_try: f32,
+    next_try: GameTime,
 }
 
 fn period(game: &Game) -> f32 {

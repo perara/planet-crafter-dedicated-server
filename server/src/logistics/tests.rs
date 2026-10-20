@@ -314,3 +314,60 @@ fn a_drone_picked_up_from_the_floor_is_no_drone_any_more() {
     let destroys = game.net.out.iter().filter(|(_, kind, _)| *kind == DESTROY_OBJECT).count();
     assert_eq!(destroys, 1);
 }
+
+/// The oracle's errand with the game's clock begun `days` into the server's life: the frames run at
+/// the tick rate whatever the age (the frame loop counts ticks in 64 bits; the game's int tick, on
+/// the wire, wraps at 828 days), and the drone brings both iron home in the same ticks as on day 0.
+#[test]
+fn drones_fly_at_the_same_pace_at_any_age_of_the_server() {
+    let mut rows = Vec::new();
+    for days in [0.0, 3.0, 60.0, 400.0, 900.0, 5000.0] {
+        let Some((net_data, data, spec, scenes)) = crate::game::test_tables() else { return };
+        let mut save = SaveFile::empty();
+        save.settings = json!({"planetId": "Prime"});
+        save.world = json!({"logisticsPaused": false});
+        save.planets = vec![json!({"planetId": "Prime"})];
+        let start = days * 86_400.0;
+        let mut game = Game::with_clock(net_data, data, spec, save, scenes, Some(start));
+        build(&mut game, "EnergyGenerator6", [40.0, 2.0, 0.0]);
+        let station = build(&mut game, "DroneStation1", [10.0, 2.0, 10.0]);
+        let supply = build(&mut game, "Container1", [25.0, 2.0, 10.0]);
+        let demand = build(&mut game, "Container1", [25.0, 2.0, 30.0]);
+        let (station_inv, supply_inv, demand_inv) = (game.wos[&station].linked_inventory, game.wos[&supply].linked_inventory, game.wos[&demand].linked_inventory);
+        let iron = game.data.group("Iron").unwrap();
+        add(&mut game, "Iron", supply_inv);
+        add(&mut game, "Iron", supply_inv);
+        game.inventories.get_mut(&supply_inv).unwrap().logistic.supply = vec![iron];
+        set_dirty(&mut game, supply_inv);
+        game.inventories.get_mut(&demand_inv).unwrap().logistic.demand = vec![iron];
+        set_dirty(&mut game, demand_inv);
+        add(&mut game, "Drone1", station_inv);
+        game.net.out.clear();
+        let (mut transforms, mut delivered, mut frames) = (0, None, 0u64);
+        let first = game.tick_count();
+        // Ticks 17.1 ms apart, a pace no timer of the game divides.
+        for k in 1..=2400u32 {
+            game.sim_time = Some(start + f64::from(k) * 0.0171);
+            game.tick();
+            transforms += game.net.out.iter().filter(|m| m.1 == NETWORK_TRANSFORM).count();
+            game.net.out.clear();
+            if delivered.is_none() && group_items(&game, demand_inv, "Iron") == 2 {
+                delivered = Some(k);
+            }
+        }
+        frames += game.tick_count() - first;
+        assert_eq!(game.tick_number(), game.tick_count() as u32 as i32, "the int of the game is the low 32 bits");
+        // Past 2^31 ticks (828 days) the int is negative, until the next 2^31.
+        if days == 400.0 || days == 900.0 {
+            assert_eq!(game.tick_number() < 0, days == 900.0, "{days} days: tick {}", game.tick_number());
+        }
+        rows.push((days, transforms, delivered, frames));
+    }
+    let (_, transforms, delivered, frames) = rows[0];
+    assert!(delivered.is_some() && transforms > 50, "the errand was run at day 0: {rows:?}");
+    for (days, t, d, f) in &rows {
+        assert!(d.zip(delivered).is_some_and(|(a, b)| a.abs_diff(b) <= 2), "{days} days: delivered at tick {d:?}, day 0 at {delivered:?}: {rows:?}");
+        assert!(t.abs_diff(transforms) <= 2, "{days} days: {t} transforms against {transforms}: {rows:?}");
+        assert!(f.abs_diff(frames) <= 1, "{days} days: {f} frames against {frames}: {rows:?}");
+    }
+}

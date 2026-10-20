@@ -18,6 +18,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
+use crate::clock::GameTime;
 use crate::game::{Args, Game};
 use crate::model::WorldObject;
 use crate::net::Target;
@@ -47,14 +48,13 @@ pub struct Machines {
     ids: Vec<i32>,
     /// No machine has anything due before this (a lower bound; every change to a machine
     /// resets it, and tick skips its walk until then).
-    #[serde(with = "crate::handoff::f32_bits")]
-    next_due: f32,
+    next_due: GameTime,
 }
 
 impl Machines {
     /// A machine to change (its timers may move earlier: tick walks all machines again).
     fn get_mut(&mut self, wo: &i32) -> Option<&mut Machine> {
-        self.next_due = f32::NEG_INFINITY;
+        self.next_due = GameTime::PAST;
         self.list.get_mut(wo)
     }
 
@@ -74,7 +74,7 @@ struct Machine {
     growers: Vec<bool>,
     generator: Option<production::Generator>,
     linked_grower: Option<growers::LinkedGrower>,
-    converter: Option<f32>,
+    converter: Option<GameTime>,
     vegetation: Option<growers::Vegetation>,
     harvestable: Option<growers::Harvestable>,
     autocrafter: Option<production::AutoCrafter>,
@@ -88,7 +88,7 @@ struct Machine {
     #[serde(with = "unit_names")]
     unit_multipliers: Vec<(&'static str, bool)>,
     /// MachineFloater on water: (updateWaterSurfaceInterval, next update).
-    floater: Option<(f32, f32)>,
+    floater: Option<(f32, GameTime)>,
 }
 
 /// DataConfig.WorldUnitType names world objects keep generation for.
@@ -439,7 +439,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     let destruct = m.destruct_if_full && m.linked != 0;
     let wants_start = has_harvestable;
     let grows = m.growers.iter().any(|g| *g);
-    game.ext.machines.next_due = f32::NEG_INFINITY;
+    game.ext.machines.next_due = GameTime::PAST;
     game.ext.machines.list.insert(wo, m);
     // Rules: growth speed, as a growth fuse would add it.
     if grows && game.rules.speed.growth != 1.0 {
@@ -605,9 +605,9 @@ pub fn tick(game: &mut Game) {
     if now < game.ext.machines.next_due {
         return;
     }
-    let next_due = |m: &Machine| production::next_due(m).min(growers::next_due(m)).min(m.floater.map_or(f32::INFINITY, |(_, due)| due));
-    let mut earliest = f32::INFINITY;
-    game.ext.machines.next_due = f32::INFINITY;
+    let next_due = |m: &Machine| production::next_due(m).min(growers::next_due(m)).min(m.floater.map_or(GameTime::NEVER, |(_, due)| due));
+    let mut earliest = GameTime::NEVER;
+    game.ext.machines.next_due = GameTime::NEVER;
     let mut ids = std::mem::take(&mut game.ext.machines.ids);
     ids.clear();
     ids.extend(game.ext.machines.list.keys());
@@ -922,7 +922,7 @@ pub(crate) mod tests {
     fn floating_machines_follow_the_rising_water() {
         let Some(mut game) = game() else { return };
         // A Prime lake whose water rises from 45 m (TerraformStage4-Water) to 70 m (Lakes).
-        let set_terraformation = |game: &mut Game, total: f32| {
+        let set_terraformation = |game: &mut Game, total: f64| {
             let planet = game.planet_hash();
             game.units.planet_mut(planet).unwrap().units.iter_mut().filter(|u| u.kind == crate::units::Kind::Terraformation).for_each(|u| u.total = total);
         };
