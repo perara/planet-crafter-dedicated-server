@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::chathooks::Feed;
+use crate::tokens::{Checker, Denied};
 
 /// Connections served at once (more are closed unanswered), the bytes of one request (line,
 /// headers and body), and how long it may take to arrive: the line and headers within HEAD (an
@@ -42,11 +43,17 @@ pub struct Request {
 /// The web page's file: the live bank's, so a flip brings its page along.
 pub type Web = Arc<RwLock<Option<String>>>;
 
-pub fn start(addr: &str, token: String, web_index: Web, chat: Arc<Feed>) -> std::io::Result<Receiver<Request>> {
-    listen(TcpListener::bind(addr)?, token, web_index, chat)
+/// Starts the admin API; scoped tokens (tokens.rs) may make the requests of their scopes.
+pub fn start_with(addr: &str, token: String, web_index: Web, chat: Arc<Feed>, tokens: Arc<Checker>) -> std::io::Result<Receiver<Request>> {
+    listen_with(TcpListener::bind(addr)?, token, web_index, chat, tokens)
 }
 
+#[cfg(test)]
 pub fn listen(listener: TcpListener, token: String, web_index: Web, chat: Arc<Feed>) -> std::io::Result<Receiver<Request>> {
+    listen_with(listener, token, web_index, chat, Arc::new(Checker::none()))
+}
+
+pub fn listen_with(listener: TcpListener, token: String, web_index: Web, chat: Arc<Feed>, tokens: Arc<Checker>) -> std::io::Result<Receiver<Request>> {
     let (tx, rx) = channel();
     let open = Arc::new(AtomicUsize::new(0));
     std::thread::Builder::new().name("pcds-admin".into()).spawn(move || {
@@ -64,11 +71,11 @@ pub fn listen(listener: TcpListener, token: String, web_index: Web, chat: Arc<Fe
                 continue;
             }
             open.fetch_add(1, Ordering::SeqCst);
-            let (slot, tx, token, web, chat) = (Slot(open.clone()), tx.clone(), token.clone(), web_index.clone(), chat.clone());
+            let (slot, tx, token, web, chat, tokens) = (Slot(open.clone()), tx.clone(), token.clone(), web_index.clone(), chat.clone(), tokens.clone());
             let spawned = std::thread::Builder::new().name("pcds-admin-conn".into()).spawn(move || {
                 let _slot = slot;
                 let page = web.read().unwrap_or_else(|e| e.into_inner()).clone();
-                let _ = serve(stream, &tx, &token, page.as_deref(), &chat);
+                let _ = serve(stream, &tx, &token, page.as_deref(), &chat, &tokens);
             });
             // No thread for it (the process is at its limit): the connection is closed (the
             // closure, with its slot and stream, is dropped with the error), and the acceptor goes on.
@@ -157,24 +164,31 @@ fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0, |d, (x, y)| d | (x ^ y)) == 0
 }
 
-fn respond(mut stream: TcpStream, status: u16, content_type: &str, body: &str) -> std::io::Result<()> {
+fn respond(stream: TcpStream, status: u16, content_type: &str, body: &str) -> std::io::Result<()> {
+    respond_with(stream, status, content_type, body, "")
+}
+
+/// `extra`: more header lines, each ending in CRLF.
+fn respond_with(mut stream: TcpStream, status: u16, content_type: &str, body: &str, extra: &str) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         409 => "Conflict",
         411 => "Length Required",
         413 => "Content Too Large",
+        429 => "Too Many Requests",
         503 => "Service Unavailable",
         _ => "Error",
     };
     // The page holds the token once logged in: no other site may frame it (clickjacking).
     let frames = "X-Frame-Options: DENY\r\nContent-Security-Policy: frame-ancestors 'none'\r\n";
-    write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{frames}Connection: close\r\n\r\n{body}", body.len())
+    write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{extra}{frames}Connection: close\r\n\r\n{body}", body.len())
 }
 
-fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>, chat: &Feed) -> std::io::Result<()> {
+fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>, chat: &Feed, tokens: &Checker) -> std::io::Result<()> {
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let started = Instant::now();
     let mut reader = BufReader::new(Deadline(stream.try_clone()?, started + HEAD)).take(MAX_REQUEST);
@@ -226,7 +240,13 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
         };
     }
     if !same(&auth, &format!("Bearer {token}")) {
-        return respond(stream, 401, "application/json", "{\"error\":\"missing or wrong token\"}");
+        // Not the admin token: a scoped token may make the requests of its scopes (tokens.rs).
+        match tokens.authorize(&auth, &method, &path) {
+            Ok(_) => {}
+            Err(Denied::Unknown) => return respond(stream, 401, "application/json", "{\"error\":\"missing or wrong token\"}"),
+            Err(Denied::Scope(needs)) => return respond(stream, 403, "application/json", &serde_json::json!({"error": "this token may not make this request", "needs": needs}).to_string()),
+            Err(Denied::Rate(wait)) => return respond_with(stream, 429, "application/json", &serde_json::json!({"error": "this token is over its rate; try again later", "retryAfterSeconds": wait}).to_string(), &format!("Retry-After: {wait}\r\n")),
+        }
     }
     if method == "GET" && path == "/api/logs" {
         return respond(stream, 200, "application/json", &logs().to_string());
@@ -377,6 +397,58 @@ mod tests {
         let answer = journal(program.to_str().unwrap(), "pcds", Duration::from_secs(5));
         assert_eq!(answer["lines"], serde_json::json!(["one", "two"]));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A scoped token opens the requests of its scopes and nothing else; a revoked or unknown one,
+    /// nothing; one over its rate waits; the answers never carry a token.
+    #[test]
+    fn a_scoped_token_makes_the_requests_of_its_scopes_and_no_others() {
+        let dir = std::env::temp_dir().join(format!("pcds-admin-tokens-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_, relay) = crate::tokens::create(&dir, "relay", &["events.read".to_string(), "chat.send".to_string()], Some(5)).unwrap();
+        let (_, quick) = crate::tokens::create(&dir, "quick", &["chat.send".to_string()], Some(2)).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hooks = crate::chathooks::Hooks::default();
+        let rx = listen_with(listener, "admin-secret".into(), Default::default(), hooks.feed.clone(), Arc::new(Checker::new(dir.clone()))).unwrap();
+        let req = |token: &str, method: &str, path: &str| format!("{method} {path} HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: 13\r\n\r\n{{\"text\":\"hi\"}}");
+        // The stream endpoint reaches the game loop, as with the admin token.
+        let client = std::thread::spawn({
+            let r = req(&relay, "POST", "/api/plugins/events");
+            move || ask(addr, r.as_bytes())
+        });
+        let request = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!((request.method.as_str(), request.path.as_str()), ("POST", "/api/plugins/events"));
+        request.reply.send((200, "{\"events\":[]}".into())).unwrap();
+        assert!(client.join().unwrap().starts_with("HTTP/1.1 200"));
+        // A scope it does not have, an endpoint no scope covers, the endpoints that manage tokens:
+        // refused before the game loop hears of them.
+        for (method, path) in [("POST", "/api/kick"), ("GET", "/api/status"), ("POST", "/api/stop"), ("GET", "/api/logs"), ("POST", "/api/rules"), ("GET", "/api/plugins/tokens"), ("POST", "/api/plugins/tokens"), ("POST", "/api/plugins/tokens/revoke"), ("POST", "/api/plugins/enable"), ("POST", "/api/plugins/trust")] {
+            let answer = ask(addr, req(&relay, method, path).as_bytes());
+            assert!(answer.starts_with("HTTP/1.1 403"), "{method} {path}: {answer}");
+            assert!(!answer.contains(&relay), "a token is never echoed");
+        }
+        assert!(ask(addr, req(&relay, "POST", "/api/kick").as_bytes()).contains("player.kick"), "the answer says which scope is missing");
+        assert!(rx.try_recv().is_err());
+        // The chat endpoints are answered in the front, with the scope checked first.
+        assert!(ask(addr, req(&relay, "POST", "/api/chat").as_bytes()).starts_with("HTTP/1.1 200"), "chat.send says something");
+        assert!(ask(addr, req(&relay, "GET", "/api/chat/events").as_bytes()).starts_with("HTTP/1.1 403"));
+        // Unknown tokens and the admin token pass the old way.
+        assert!(ask(addr, req("pcdst_00", "POST", "/api/chat").as_bytes()).starts_with("HTTP/1.1 401"));
+        assert!(ask(addr, req("nothing", "POST", "/api/chat").as_bytes()).starts_with("HTTP/1.1 401"));
+        // The rate: two a minute, then 429 with the time to wait, and the other token is untouched.
+        for _ in 0..2 {
+            assert!(!ask(addr, req(&quick, "POST", "/api/chat").as_bytes()).starts_with("HTTP/1.1 4"));
+        }
+        let limited = ask(addr, req(&quick, "POST", "/api/chat").as_bytes());
+        assert!(limited.starts_with("HTTP/1.1 429") && limited.contains("Retry-After: "), "{limited}");
+        assert!(!ask(addr, req(&relay, "POST", "/api/chat").as_bytes()).starts_with("HTTP/1.1 4"));
+        // Revoked: refused on the next request.
+        std::thread::sleep(Duration::from_millis(5));
+        crate::tokens::revoke(&dir, "relay").unwrap();
+        assert!(ask(addr, req(&relay, "POST", "/api/plugins/events").as_bytes()).starts_with("HTTP/1.1 401"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

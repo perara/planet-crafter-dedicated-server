@@ -540,7 +540,9 @@ impl Front {
             eprintln!("admin: PCDS_ADMIN_TOKEN is not set: the admin API and web page are off (pcds setup writes one)");
             return;
         };
-        match admin::start(&addr, token, self.web.clone(), self.hooks.feed.clone()) {
+        // Scoped tokens (run/plugins/tokens.json, beside the plugins the bank hosts) may make the requests of their scopes.
+        let tokens = Arc::new(crate::tokens::Checker::new(PathBuf::from(crate::config::installation_file(&crate::env, &self.save, "plugins"))));
+        match admin::start_with(&addr, token, self.web.clone(), self.hooks.feed.clone(), tokens) {
             Ok(rx) => {
                 println!("admin: http://{addr}/");
                 // Plain HTTP: off this machine the token and every action travel in the clear.
