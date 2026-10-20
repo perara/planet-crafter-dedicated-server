@@ -199,6 +199,11 @@ pub fn parse_url(url: &str) -> Result<(Uri, Target), String> {
     }
     let host = authority.host().to_ascii_lowercase();
     let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(&host).to_string();
+    // An address, or a name as patterns spell names: no percent escape, no `127.1`, `0x7f.1` or `2130706433`
+    // for a resolver to read as an address, no trailing dot.
+    if host.parse::<IpAddr>().is_err() && !valid_name(&host) {
+        return Err("the host is not a DNS name or an IP address".into());
+    }
     let port = authority.port_u16().unwrap_or(scheme.default_port());
     Ok((uri, Target { scheme, host, port }))
 }
@@ -488,6 +493,12 @@ impl Connector<()> for Recheck {
 }
 
 fn agent(policy: &Arc<Policy>, dns: &Arc<dyn Dns>, deadline: Instant, plugin: &str) -> ureq::Agent {
+    agent_with(policy, Guard { policy: policy.clone(), dns: dns.clone(), deadline }, deadline, plugin)
+}
+
+/// The agent for one request: no proxy, no redirects of its own, no connection kept, and the
+/// connector's re-check in front of the connection; `resolver` is the guard (a test puts its own).
+pub(super) fn agent_with(policy: &Arc<Policy>, resolver: impl Resolver, deadline: Instant, plugin: &str) -> ureq::Agent {
     let left = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(left))
@@ -499,7 +510,7 @@ fn agent(policy: &Arc<Policy>, dns: &Arc<dyn Dns>, deadline: Instant, plugin: &s
         .max_idle_connections(0)
         .user_agent(format!("pcds/{} (plugin {plugin})", env!("CARGO_PKG_VERSION")))
         .build();
-    ureq::Agent::with_parts(config, Recheck(policy.clone()).chain(DefaultConnector::default()), Guard { policy: policy.clone(), dns: dns.clone(), deadline })
+    ureq::Agent::with_parts(config, Recheck(policy.clone()).chain(DefaultConnector::default()), resolver)
 }
 
 // ---- running a request ---------------------------------------------------------------------------
@@ -803,7 +814,7 @@ mod tests {
             assert!(!p.permits(&target(no)), "{no}");
         }
         // The things a URL parser can be fooled by.
-        for bad in ["https://discord.com@evil.net/", "https://discord.com:443@evil.net/", "https://discord.com#@evil.net/", "https://discord.com\\@evil.net/", "https:/discord.com", "//discord.com", "file:///etc/passwd", "https://disc\tord.com/", "https://discord.com/a b", "https://discord.com/\u{e9}"] {
+        for bad in ["https://127.1/", "https://0x7f.0.0.1/", "https://2130706433/", "https://0177.0.0.1/", "https://discord.com./", "https://disc%6frd.com/", "https://discord%2ecom/", "https://[fe80::1%25eth0]/", "https://discord.com@evil.net/", "https://discord.com:443@evil.net/", "https://discord.com#@evil.net/", "https://discord.com\\@evil.net/", "https:/discord.com", "//discord.com", "file:///etc/passwd", "https://disc\tord.com/", "https://discord.com/a b", "https://discord.com/\u{e9}"] {
             assert!(parse_url(bad).is_err(), "{bad}");
         }
         assert_eq!(target("https://[2001:db8::1]:8443/x").shown(), "https://[2001:db8::1]:8443");

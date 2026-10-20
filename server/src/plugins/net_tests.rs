@@ -633,3 +633,29 @@ fn a_module_asks_for_a_request_and_hears_its_answer_through_the_abi() {
     host2.run(&mut world, &Event::Chat { client: 1, name: "Ann", text: "go" }, 0);
     assert_eq!((host2.plugins[0].stats.faults, host2.plugins[0].stats.refused), (0, 1));
 }
+
+/// A resolver that checks nothing: with it the connector's re-check is the only thing in the way.
+#[derive(Debug)]
+struct Lax(SocketAddr);
+
+impl ureq::unversioned::resolver::Resolver for Lax {
+    fn resolve(&self, _: &ureq::http::Uri, _: &ureq::config::Config, _: ureq::unversioned::transport::NextTimeout) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        let mut out: ureq::unversioned::resolver::ResolvedSocketAddrs = ureq::unversioned::resolver::ArrayVec::from_fn(|_| self.0);
+        out.push(self.0);
+        Ok(out)
+    }
+}
+
+#[test]
+fn the_connector_refuses_an_address_the_resolver_let_through() {
+    let server = ok_server();
+    let policy = Arc::new(Policy { patterns: vec![super::net::Pattern::parse(&server.pattern(), true).unwrap()], local: false, timeout: Duration::from_secs(5), max_response: 1000 });
+    let agent = net::agent_with(&policy, Lax(server.addr), Instant::now() + Duration::from_secs(5), "probe");
+    let err = agent.get(server.url("/")).call().unwrap_err();
+    assert!(matches!(&err, ureq::Error::Other(o) if o.to_string().contains("may not reach")), "{err}");
+    assert_eq!(server.hits(), 0, "not a connection was made");
+    // With the local capability the very same agent connects.
+    let local = Arc::new(Policy { local: true, ..(*policy).clone() });
+    let agent = net::agent_with(&local, Lax(server.addr), Instant::now() + Duration::from_secs(5), "probe");
+    assert_eq!(agent.get(server.url("/")).call().unwrap().status().as_u16(), 200);
+}
