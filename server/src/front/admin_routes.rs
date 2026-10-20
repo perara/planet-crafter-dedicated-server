@@ -180,14 +180,16 @@ impl Admin {
     }
 
     /// Starts the HTTP listener (PCDS_ADMIN, with PCDS_ADMIN_TOKEN), serving the chat feed.
-    pub fn start(&mut self, feed: std::sync::Arc<super::Feed>, save: &str) {
+    /// Err: the address cannot be listened on, which stops the start (a server nobody can
+    /// manage, or whose admin address is another server's, is not a running server).
+    pub fn start(&mut self, feed: std::sync::Arc<super::Feed>, save: &str) -> Result<(), String> {
         let addr = crate::env("PCDS_ADMIN").unwrap_or_else(|| "127.0.0.1:7782".into());
         if addr == "off" {
-            return;
+            return Ok(());
         }
         let Some(token) = crate::env("PCDS_ADMIN_TOKEN") else {
             eprintln!("admin: PCDS_ADMIN_TOKEN is not set: the admin API and web page are off (pcds setup writes one)");
-            return;
+            return Ok(());
         };
         // Scoped tokens (run/plugins/tokens.json, beside the plugins the bank hosts) may make the requests of their scopes.
         let tokens = std::sync::Arc::new(crate::tokens::Checker::new(std::path::PathBuf::from(crate::config::installation_file(&crate::env, save, "plugins"))));
@@ -202,8 +204,9 @@ impl Admin {
                     eprintln!("admin: WARNING: {addr} is reachable from other machines over plain HTTP; bind 127.0.0.1 and use an SSH tunnel or an HTTPS proxy");
                 }
                 self.rx = Some(rx);
+                Ok(())
             }
-            Err(e) => eprintln!("admin: {addr}: {e}"),
+            Err(e) => Err(format!("admin page {addr}: {e}. Another program (a second pcds server?) may use that port: change PCDS_ADMIN in server.env ('pcds config'), or set it to off")),
         }
     }
 

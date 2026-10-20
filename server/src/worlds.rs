@@ -36,7 +36,15 @@ pub fn name(name: &str) -> Result<String, String> {
     Ok(name.to_string())
 }
 
-/// A world's name from a command line argument (a save's file name or path works too).
+/// A world's name as typed (`pcds world use NAME`): the name itself, never a path.
+pub fn name_arg(arg: &str) -> Result<String, String> {
+    if valid(arg) && !NOT_WORLDS.contains(&arg) {
+        return Ok(arg.to_string());
+    }
+    Err(format!("{arg:?} is not a world name: letters, digits, '.', '_' and '-', up to 64, starting with a letter or digit ('pcds worlds' lists them)"))
+}
+
+/// A world's name from a save's file name or path (`pcds world import`'s default).
 pub fn arg(arg: &str) -> Result<String, String> {
     let name = arg.strip_suffix(".json").unwrap_or(arg);
     let name = name.rsplit('/').next().unwrap_or(name);

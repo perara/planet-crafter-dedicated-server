@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use super::{check, say, Ctx, Result};
+use super::{say, Ctx, Result};
 
 /// --force out of a world's options, the rest for `pcds new-save`.
 fn force_and_options(args: &[String]) -> (bool, Vec<String>) {
@@ -32,8 +32,16 @@ impl Ctx {
         let beside = self.run.join(".new");
         super::mkdir(&self.worlds)?;
         super::mkdir(&beside)?;
-        let made = beside.join("world.json");
-        check(Command::new(self.program()).arg("new-save").arg(&made).arg(&data).args(options))?;
+        // Named as the world: the save's display name in the game's list is its file's name.
+        let made = beside.join(path.file_name().ok_or("no world name")?);
+        let _ = fs::remove_file(&made);
+        let out = Command::new(self.program()).arg("new-save").arg(&made).arg(&data).args(options).output().map_err(|e| format!("pcds new-save: {e}"))?;
+        if !out.status.success() {
+            // new-save says what is wrong on its first line; its usage line is for the tools.
+            let said = String::from_utf8_lossy(&out.stderr);
+            return Err(said.lines().find(|l| !l.starts_with("usage:")).unwrap_or("pcds new-save failed").to_string());
+        }
+        print!("{}", String::from_utf8_lossy(&out.stdout));
         fs::rename(&made, path).map_err(|e| format!("{}: {e}", path.display()))?;
         let _ = fs::remove_dir(&beside);
         Ok(())
@@ -84,7 +92,7 @@ impl Ctx {
         let file = |name: &str| self.worlds.join(format!("{name}.json"));
         match a.as_slice() {
             ["use", name] => {
-                let name = crate::worlds::arg(name)?;
+                let name = crate::worlds::name_arg(name)?;
                 if !file(&name).is_file() {
                     return Err(format!("no world {name} in {} ('pcds worlds' lists them)", self.worlds.display()));
                 }
@@ -98,7 +106,7 @@ impl Ctx {
                 self.restart_if_running()
             }
             ["new", name, ..] => {
-                let name = crate::worlds::arg(name)?;
+                let name = crate::worlds::name_arg(name)?;
                 let (force, options) = force_and_options(&args[2..]);
                 if file(&name).is_file() {
                     if !force {
@@ -134,7 +142,7 @@ impl Ctx {
                 Ok(())
             }
             ["remove", name] => {
-                let name = crate::worlds::arg(name)?;
+                let name = crate::worlds::name_arg(name)?;
                 if !file(&name).is_file() {
                     return Err(format!("no world {name} in {}", self.worlds.display()));
                 }

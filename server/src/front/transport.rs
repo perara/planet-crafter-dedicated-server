@@ -126,7 +126,7 @@ impl Transport {
         if self.conns.remove(&client).is_none() {
             return false;
         }
-        println!("client {client}: left");
+        println!("client {client}: disconnected");
         self.ip_clients.retain(|_, c| *c != client);
         self.kicked.remove(&client);
         self.pending_drop.retain(|(c, _)| *c != client);

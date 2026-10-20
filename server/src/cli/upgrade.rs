@@ -175,7 +175,7 @@ impl Ctx {
 
 /// What the server said in an error answer ("HTTP 400: {"error": "..."}"): the words, else the
 /// whole.
-fn api_error(e: String) -> String {
+pub(super) fn api_error(e: String) -> String {
     e.find("{\"error\"").and_then(|i| serde_json::from_str::<Value>(&e[i..]).ok()).and_then(|v| v["error"].as_str().map(str::to_string)).unwrap_or(e)
 }
 

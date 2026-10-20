@@ -224,7 +224,7 @@ impl Ctx {
                         updater::clear_fallback(&banks)?;
                     }
                 }
-                Err(why) => eprintln!("pcds: bank {first} could not start the world, and bank {}: {why}", updater::other(&first)),
+                Err(why) => eprintln!("pcds: the world did not start: the reason is in the lines above. Fix that, then 'pcds restart' (bank {first} failed, and bank {}: {why})", updater::other(&first)),
             }
         }
         // In the container: `pcds upgrade --restart` asked for a restart in place (restart_in_place).
@@ -242,18 +242,21 @@ impl Ctx {
         let (mut game, mut world, mut steam_user, mut new, mut options) = (None, None, None, false, Vec::new());
         let mut it = args.iter();
         while let Some(arg) = it.next() {
-            let mut value = |what: &str| it.next().cloned().ok_or_else(|| what.to_string());
+            let mut value = |what: &str| it.next().cloned().ok_or_else(|| format!("usage: {what} ('pcds help' shows the options)"));
             match arg.as_str() {
                 "--game" => game = Some(PathBuf::from(value("--game DIR")?)),
                 "--world" => world = Some(PathBuf::from(value("--world SAVE.json")?)),
                 "--steam-user" => steam_user = Some(value("--steam-user NAME")?),
                 "--new" => new = true,
                 _ if new => options.push(arg.clone()),
-                other => return Err(format!("unknown option {other}")),
+                other => return Err(format!("unknown option {other} ('pcds help' shows the options)")),
             }
         }
         // The save first: nothing is downloaded or installed for one this server cannot read.
-        if let Some(world) = world.as_deref().filter(|w| w.is_file()) {
+        if let Some(world) = world.as_deref() {
+            if !world.is_file() {
+                return Err(format!("no save at {}: --world takes the save's .json file (the folder for the game's saves is in the README, \"Install by hand\")", world.display()));
+            }
             super::check_world(world)?;
         }
         for tool in ["curl", "tar"] {

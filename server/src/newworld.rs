@@ -31,13 +31,19 @@ pub fn run(args: &[String]) {
     let mut o = Options { planet: None, start: "Standard".into(), seed: None, set: Vec::new() };
     let mut flags = rest.iter();
     while let Some(flag) = flags.next() {
-        let Some(value) = flags.next() else { usage() };
+        let fail = |why: String| -> ! {
+            eprintln!("{why}");
+            std::process::exit(2)
+        };
+        if !["--planet", "--start", "--seed", "--set"].contains(&flag.as_str()) {
+            fail(format!("unknown option {flag}: a new world takes --planet ID, --start LOCATION, --seed N and --set KEY=VALUE"));
+        }
+        let Some(value) = flags.next() else { fail(format!("{flag} needs a value")) };
         match flag.as_str() {
             "--planet" => o.planet = Some(value.clone()),
             "--start" => o.start = value.clone(),
-            "--seed" => o.seed = Some(value.parse().unwrap_or_else(|_| usage())),
-            "--set" => o.set.push(value.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())).unwrap_or_else(|| usage())),
-            _ => usage(),
+            "--seed" => o.seed = Some(value.parse().unwrap_or_else(|_| fail(format!("--seed {value}: the seed is a whole number from 0 to 4294967295")))),
+            _ => o.set.push(value.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())).unwrap_or_else(|| fail(format!("--set {value}: expected KEY=VALUE, for example --set modifierGaugeDrain=0.5")))),
         }
     }
     if Path::new(path).exists() {
@@ -81,7 +87,10 @@ pub fn new_save(net_data: &NetData, data: &GameData, name: &str, o: &Options, rn
     let planets: Vec<&str> = net_data.planets.iter().filter(|p| p.starting_planet && p.steam_app_id == 0).map(|p| p.id.as_str()).collect();
     let planet = o.planet.as_deref().or(planets.first().copied()).ok_or("no free starting planet in the game tables")?;
     if !planets.contains(&planet) {
-        return Err(format!("--planet {planet}: a new world starts on {}", planets.join(", ")));
+        return Err({
+            let dlc = net_data.planets.iter().any(|p| p.id == planet && p.steam_app_id != 0);
+            format!("--planet {planet}: a new world starts on {}{}", planets.join(", "), if dlc { " (a DLC planet is only continued by a world that is on it already: README, \"Differences\")" } else { "" })
+        });
     }
     let spawns = data.asset(&format!("PlanetData:PlanetData-{planet}")).and_then(|p| p["spawnPositions"].as_array()).cloned().unwrap_or_default();
     let positions = spawns.iter().find(|s| s["id"] == o.start.as_str()).and_then(|s| s["positions"].as_array()).filter(|p| !p.is_empty()).ok_or_else(|| {
@@ -172,7 +181,7 @@ mod tests {
         assert!(text.contains("\"hasPlayedIntro\":false,\"gameStartLocation\":\"Standard\"}"), "the enum fields are dropped");
         // DLC planets and unknown settings are refused.
         let o = Options { planet: Some("Humble".into()), start: "Standard".into(), seed: None, set: vec![] };
-        assert_eq!(new_save(&net_data, &data, "x", &o, &mut Rng::seeded()).err().unwrap(), "--planet Humble: a new world starts on Prime, Selenea");
+        assert_eq!(new_save(&net_data, &data, "x", &o, &mut Rng::seeded()).err().unwrap(), "--planet Humble: a new world starts on Prime, Selenea (a DLC planet is only continued by a world that is on it already: README, \"Differences\")");
         let o = Options { planet: None, start: "Standard".into(), seed: None, set: vec![("mode".into(), "Easy".into())] };
         assert!(new_save(&net_data, &data, "x", &o, &mut Rng::seeded()).is_err());
     }

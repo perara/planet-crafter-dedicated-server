@@ -199,7 +199,7 @@ pub fn installation_file(get: &impl Fn(&str) -> Option<String>, save_path: &str,
 /// The PCDS_ names of a server.env that are no setting: Err naming the file and each one.
 pub fn check_keys(file: &str, keys: impl IntoIterator<Item = String>) -> Result<(), String> {
     let unknown: Vec<String> = keys.into_iter().filter(|k| k.starts_with("PCDS_") && !knob_for(k).is_some_and(|n| n.read_only())).collect();
-    if unknown.is_empty() { Ok(()) } else { Err(format!("{file}: unknown setting {}", unknown.join(", "))) }
+    if unknown.is_empty() { Ok(()) } else { Err(format!("{file}: unknown setting {} (remove the line: server.env holds only the settings in README \"Settings\"; saves, backups, updates, speeds and limits are rules now: 'pcds rules')", unknown.join(", "))) }
 }
 
 pub fn knob_for(key: &str) -> Option<&'static Knob> {
@@ -756,7 +756,7 @@ mod tests {
     #[test]
     fn unknown_settings_and_the_installations_files() {
         let e = check_keys("/srv/run/server.env", ["PCDS_LISTEN".to_string(), "PCDS_AUTOSAVE".to_string(), "PATH".to_string(), "PCDS_HOME".to_string()]).unwrap_err();
-        assert_eq!(e, "/srv/run/server.env: unknown setting PCDS_AUTOSAVE, PCDS_HOME");
+        assert!(e.starts_with("/srv/run/server.env: unknown setting PCDS_AUTOSAVE, PCDS_HOME (remove the line") && e.contains("'pcds rules'"), "{e}");
         check_keys("f", KNOBS.iter().filter(|k| k.read_only()).map(|k| k.key.to_string())).unwrap();
         let env = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string());
         assert_eq!(installation_file(&env(&[]), "/w/world.json", "access.json"), "/w/access.json");
