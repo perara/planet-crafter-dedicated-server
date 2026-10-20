@@ -624,3 +624,32 @@ fn the_search_for_tasks_makes_the_tasks_the_first_search_made_in_the_same_order(
     }
     assert!(made > 500, "the scenarios made {made} tasks: they should exercise the search");
 }
+
+#[test]
+fn audit_drone_preserves_cargo_if_destination_fills_during_flight() {
+    let Some(mut game) = game() else { panic!("real game tables required") };
+    build(&mut game, "EnergyGenerator6", [40.0, 2.0, 0.0]);
+    let station = build(&mut game, "DroneStation1", [10.0, 2.0, 10.0]);
+    let supply = build(&mut game, "Container1", [25.0, 2.0, 10.0]);
+    let demand = build(&mut game, "Container1", [25.0, 2.0, 30.0]);
+    let [station, supply, demand] = [station, supply, demand].map(|w| game.wos[&w].linked_inventory);
+    let iron = game.data.group("Iron").unwrap();
+    let cargo = add(&mut game, "Iron", supply);
+    game.inventories.get_mut(&supply).unwrap().logistic.supply = vec![iron];
+    game.inventories.get_mut(&demand).unwrap().logistic.demand = vec![iron];
+    set_dirty(&mut game, supply); set_dirty(&mut game, demand);
+    let drone = add(&mut game, "Drone1", station);
+    let start = game.ext.logistics.last_tick;
+    let mut filled = false;
+    for t in 1..=40*30 {
+        frame(&mut game, start+t);
+        if !filled && game.ext.logistics.drones.get(&drone).is_some_and(|d| items(&game, d.inventory).contains(&cargo)) {
+            filled = true;
+            let capacity = game.inventories[&demand].size;
+            for _ in 0..capacity { add(&mut game, "ice", demand); }
+            assert!(game.inventories[&demand].is_full());
+        }
+    }
+    assert!(filled, "control: the drone picked up the iron before the destination filled");
+    assert!(game.wos.contains_key(&cargo), "iron was deleted after the destination filled during delivery");
+}
