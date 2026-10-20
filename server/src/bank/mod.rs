@@ -24,6 +24,9 @@ use crate::game::Game;
 use crate::ipc::{self, Link};
 use crate::net::Target;
 use crate::save::SaveFile;
+mod panic;
+pub(crate) use panic::contained;
+use panic::{guarded, taint};
 use crate::{access, chathooks, config, dashboard, plugins, protocol, rules, save, status, units, wire};
 
 /// What this bank says in its HELLO, and `pcds bank-info` prints: its version, the front
@@ -821,43 +824,6 @@ fn game_at(dir: &std::path::Path, data_dir: &str) -> Value {
     v
 }
 
-/// One client's share of the game. A panic there (the hook printed it) kicks that client instead
-/// of ending the server for everyone (a client must not be able to restart the world by sending
-/// something that panics). What the work had changed by then stays changed: the world may hold
-/// the half of it. So it is not saved at once, which would replace the last consistent save on
-/// disk with it at the moment it is least to be trusted; the next save, whenever it comes,
-/// first keeps that file as <save>.before-panic (taint).
-fn guarded(game: &mut Game, client: u64, save_path: &str, work: impl FnOnce(&mut Game)) {
-    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(game))).is_err() {
-        taint();
-        eprintln!("client {client}: the server panicked on it; kicked. The world may hold half of what it did: the save on disk is left as it is, and the next save keeps it as {save_path}.before-panic first");
-        game.kick(client, "Server error");
-    }
-}
-
-thread_local! {
-    /// Work panicked since the last save: the world may be half-changed, the file on disk is the
-    /// last whole one.
-    static TAINTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-fn taint() {
-    TAINTED.set(true);
-}
-
-/// The admin's or a chat hook's work: a panic there (the hook printed it) is logged and the bank
-/// goes on (there is no client to kick, and the world is the one the clients have). Some(what
-/// the work returned) when it finished.
-pub(crate) fn contained<T>(what: &str, work: impl FnOnce() -> T) -> Option<T> {
-    let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
-    if done.is_err() {
-        taint();
-        eprintln!("{what}: the server panicked on it; going on (the next save keeps the one on disk as .before-panic first)");
-    }
-    done.ok()
-}
-
-
 /// A save is written in two parts: the game thread makes the text (the world as it is now: one
 /// ms for a 2.5k-object world, 36 for 100k objects) and a thread of its own makes the backup
 /// and writes the file (copies, fsyncs, a rename: tens to hundreds of ms on a busy disk), so
@@ -977,7 +943,7 @@ fn persist_later(game: &mut Game, path: &str) -> bool {
     }
     let text = game.save_text();
     let (tx, done) = std::sync::mpsc::channel();
-    let (to, files, after_panic) = (path.to_string(), game.rules.save.clone(), TAINTED.take());
+    let (to, files, after_panic) = (path.to_string(), game.rules.save.clone(), panic::take_taint());
     let spawned = std::thread::Builder::new().name("pcds-save".into()).spawn(move || {
         let r = std::panic::catch_unwind(|| write_save(&to, text.as_bytes(), &files, after_panic)).unwrap_or_else(|_| Written { saved: Err(format!("{to}: the write panicked")), backup: Ok(false) });
         let _ = tx.send(r);
@@ -997,7 +963,7 @@ fn persist_later(game: &mut Game, path: &str) -> bool {
 /// the one being written, which it must not be overtaken by.
 fn persist(game: &mut Game, path: &str) -> Result<(), String> {
     settle(game, true);
-    let written = write_save(path, game.save_text().as_bytes(), &game.rules.save.clone(), TAINTED.take());
+    let written = write_save(path, game.save_text().as_bytes(), &game.rules.save.clone(), panic::take_taint());
     saved(game, path, &written);
     written.saved
 }
@@ -1177,46 +1143,6 @@ mod tests {
         assert_eq!(status["tick"]["windowSeconds"], 60);
         assert!(status["tick"]["p50Micros"].is_number() || status["tick"]["samples"] == 0);
     }
-
-    /// A panic in one client's work kicks it and goes on; the world, which may hold half of what the
-    /// work did, is not saved at once over the last whole save: that file is kept as .before-panic
-    /// by the next save, once.
-    #[test]
-    fn a_panicking_client_is_kicked_and_the_save_on_disk_is_kept_not_replaced_by_its_half_done_work() {
-        let Some(mut game) = game::test_game(game::tests::save()) else { return };
-        let dir = std::env::temp_dir().join(format!("pcds-guarded-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("world.json").to_string_lossy().to_string();
-        let before_path = format!("{path}.before-panic");
-        persist(&mut game, &path).unwrap();
-        let whole = std::fs::read(&path).unwrap();
-        assert!(!std::path::Path::new(&before_path).exists(), "no panic yet, nothing kept");
-        // The work changes the world and panics half way.
-        let objects = game.wos.len();
-        guarded(&mut game, 7, &path, |g| {
-            let iron = g.data.group("Iron").unwrap();
-            g.create_world_object(iron, 0, true);
-            panic!("test panic")
-        });
-        assert_eq!(game.kicks.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [7]);
-        assert_eq!(game.wos.len(), objects + 1, "the world holds what the work did before it panicked");
-        assert_eq!(std::fs::read(&path).unwrap(), whole, "the half-done world was not written over the whole save");
-        // The next save keeps the whole one first, and writes the world as it is.
-        persist(&mut game, &path).unwrap();
-        assert_eq!(std::fs::read(&before_path).unwrap(), whole);
-        assert_ne!(std::fs::read(&path).unwrap(), whole);
-        assert_eq!(SaveFile::load(&path).unwrap().objects.len(), objects + 1);
-        // Once per panic: a later save does not replace the kept one with a save made after it.
-        persist(&mut game, &path).unwrap();
-        assert_eq!(std::fs::read(&before_path).unwrap(), whole);
-        // An admin or hook panic taints the same way.
-        contained("a test", || panic!("again"));
-        persist(&mut game, &path).unwrap();
-        assert_ne!(std::fs::read(&before_path).unwrap(), whole, "the save before the second panic is kept now");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
     /// A client that is no player yet gets its world and LOADING_ALLOWANCE more, then is
     /// dropped; a player has no such bound.
     #[test]
