@@ -52,7 +52,7 @@ put("chathooks", "event", json.dumps({"id": 1, "time": 1, "client": 2, "name": "
 
 # updater: tags and the JSON of a bank's info.
 put("updater", "tags", "v0.6.1\nv0.6.0-rc.1")
-put("updater", "info", json.dumps({"tag": "v0.6.1", "protocol": 3, "tablesFormat": 2, "reads": [3, 4]}) + "\n" + json.dumps({"format": 3, "tablesFormat": 2}))
+put("updater", "info", json.dumps({"tag": "v0.6.1", "protocol": 3, "tablesFormat": 2, "format": 4}) + "\n" + json.dumps({"format": 3, "tablesFormat": 2}))
 
 # access and rules: the files an admin writes.
 put("access", "lists", json.dumps({"allowedIPs": ["10.0.0.0/8"], "whitelist": ["Ann", "76561198000000001"], "bannedNames": ["Eve"], "bannedIPs": ["203.0.113.7", "2001:db8::/32"]}))
