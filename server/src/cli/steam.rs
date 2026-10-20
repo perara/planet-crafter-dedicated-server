@@ -53,7 +53,14 @@ pub fn parse_vdf(text: &str) -> Result<Vdf> {
             }
         }
     }
-    fn keys(chars: &mut std::iter::Peekable<std::str::Chars>, nested: bool) -> Result<Vdf> {
+    /// The deepest nesting read: Steam's files go four levels down. A longer one is a file that
+    /// is no Steam's, and each level is a call of this function (a file of `"a"{` repeated would
+    /// end the process with a stack overflow).
+    const DEPTH: usize = 32;
+    fn keys(chars: &mut std::iter::Peekable<std::str::Chars>, nested: bool, depth: usize) -> Result<Vdf> {
+        if depth > DEPTH {
+            return Err(format!("keys nested over {DEPTH} levels deep"));
+        }
         let mut out = Vec::new();
         loop {
             let key = match token(chars)? {
@@ -63,14 +70,14 @@ pub fn parse_vdf(text: &str) -> Result<Vdf> {
                 other => return Err(format!("expected a key, not {other:?}")),
             };
             let value = match token(chars)?.as_deref() {
-                Some("{") => keys(chars, true)?,
+                Some("{") => keys(chars, true, depth + 1)?,
                 Some(t) if t.starts_with('"') => Vdf::Text(t[1..].to_string()),
                 other => return Err(format!("{key}: expected a value, not {other:?}")),
             };
             out.push((key, value));
         }
     }
-    keys(&mut text.chars().peekable(), false)
+    keys(&mut text.chars().peekable(), false, 0)
 }
 
 /// The libraries in libraryfolders.vdf: each one's folder and whether its "apps" lists the game.
@@ -321,6 +328,17 @@ mod tests {
         for bad in ["\"libraryfolders\" {", "\"a\" \"b", "\"a\" }", "x"] {
             assert!(parse_vdf(bad).is_err(), "{bad}");
         }
+    }
+
+    /// A file of braces opened and never closed is an error, not a stack overflow that ends the
+    /// process (a megabyte of `"a" {` is 250,000 levels of recursion); Steam's own go four deep.
+    #[test]
+    fn a_file_nested_without_end_is_refused_not_recursed_into() {
+        let deep = "\"a\" {".repeat(250_000);
+        assert!(parse_vdf(&deep).unwrap_err().contains("nested over"));
+        let ok = format!("{}{}", "\"a\" {".repeat(DEPTH_OK), "}".repeat(DEPTH_OK));
+        assert!(parse_vdf(&ok).is_ok(), "{DEPTH_OK} levels are fine");
+        const DEPTH_OK: usize = 30;
     }
 
     #[test]
