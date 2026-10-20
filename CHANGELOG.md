@@ -127,6 +127,12 @@ dashboard [grafana/pcds.json](docs/grafana/pcds.json).
 
 ### Fixed
 
+* **A front that had been stopped killed the healthy game process when it ran again.** The watchdog
+  (`limits.bankWatchdogSeconds`) counted the time since the game process last spoke; a front stopped for
+  longer than the rule (SIGSTOP, a paused virtual machine, a suspended or starved host) took its own
+  absence for the game's silence, killed the game at its first look and started the world again from the
+  last save with every player gone. The watchdog now notes when it last looked and, after a gap of more than
+  5 seconds, starts the game's clock again.
 * **A pick-up that no inventory takes left a world object behind.** `AddWorldObjectToInventoryServerRpc`
   makes the world object when the world does not have the id (an item that had despawned, or an id a
   client made up); when the inventory was full or refused it, the object stayed in the world, held by
