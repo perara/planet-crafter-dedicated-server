@@ -365,6 +365,17 @@ mod tests {
         assert!(bad("key = \"hook\"", "key = \"hook\"\n[[config]]\nkey = \"hook\"").contains("twice"));
     }
 
+    /// The digest a signature covers is sha256(manifest, 0, entry): the split is only unambiguous if no
+    /// manifest holds a zero byte (an attacker with a signed pair could else move the zero and some bytes
+    /// of the module into the manifest). TOML takes no control character, in a comment or a string.
+    #[test]
+    fn a_manifest_with_a_zero_byte_is_not_a_manifest() {
+        for at in ["\n# a comment \u{0} here", "\n# \u{0}", "\nx = \"a\u{0}b\"", "\u{0}"] {
+            assert!(Manifest::parse(&format!("{GOOD}{at}")).is_err(), "{at:?}");
+        }
+        assert!(Manifest::parse(&format!("{GOOD}\n# fine\tcomment")).is_ok());
+    }
+
     #[test]
     fn ids_and_versions() {
         assert!(valid_id("a") && valid_id("discord-bridge2") && !valid_id("2fast") && !valid_id("Bad") && !valid_id("a_b") && !valid_id(&"x".repeat(33)));

@@ -421,4 +421,56 @@ mod tests {
             assert!(matches!(r.handler.owner, Owner::Loop(h, _) if Some(h) == handler), "{} {} is answered by {handler:?}", r.method, r.path);
         }
     }
+
+    /// Every route of the table, every method and the paths that could be mistaken for it, with a token of
+    /// each scope and a token that was never made: only the five requests the scopes name pass, and each
+    /// of them lands on the route that is meant (the first the table matches), so a scope cannot reach
+    /// a route by a path the token check reads one way and the table another.
+    #[test]
+    fn a_scoped_token_reaches_only_the_five_routes_of_its_scopes_and_each_lands_where_it_is_meant() {
+        use crate::tokens::{create, scope_for, Checker, Denied, SCOPES};
+        let dir = std::env::temp_dir().join(format!("pcds-routes-scopes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tokens: Vec<(&str, String)> = SCOPES.iter().map(|(scope, _)| (*scope, create(&dir, &scope.replace('.', "-"), &[scope.to_string()], Some(6000)).unwrap().1)).collect();
+        let check = Checker::new(dir.clone());
+        let mut paths: Vec<(String, String)> = Vec::new();
+        for r in ROUTES {
+            let base = r.path.trim_end_matches('*');
+            for method in ["GET", "POST", "PUT", "DELETE", "HEAD", "get", "post"] {
+                for path in [base.to_string(), format!("{base}/"), format!("{base}x"), format!("{base}/x"), format!("{base}%2f"), format!("{base}?a=b"), base.to_uppercase(), format!("/{base}")] {
+                    paths.push((method.to_string(), path));
+                }
+            }
+        }
+        let mut passed = std::collections::BTreeSet::new();
+        for (method, path) in &paths {
+            for (scope, token) in &tokens {
+                let answer = check.authorize(&format!("Bearer {token}"), method, path);
+                match answer {
+                    Ok(_) => {
+                        assert_eq!(scope_for(method, path), Some(*scope), "{scope} passed {method} {path}");
+                        passed.insert((method.clone(), path.clone(), scope.to_string()));
+                    }
+                    Err(Denied::Scope(needs)) => assert_ne!(needs, Some(*scope), "{scope} refused {method} {path} for a scope it has"),
+                    Err(e) => panic!("{scope} {method} {path}: {e:?}"),
+                }
+            }
+            assert_eq!(check.authorize("Bearer pcdst_nothing", method, path), Err(Denied::Unknown));
+        }
+        let want: Vec<(&str, &str, &str, Owner)> = vec![
+            ("POST", "/api/plugins/events", "events.read", Owner::Bank),
+            ("GET", "/api/chat/events", "chat.read", Owner::Http(Http::Chat)),
+            ("POST", "/api/chat", "chat.send", Owner::Http(Http::Chat)),
+            ("POST", "/api/kick", "player.kick", Owner::Bank),
+            ("POST", "/api/teleport", "player.teleport", Owner::Bank),
+        ];
+        for (method, path, scope, owner) in &want {
+            assert!(passed.contains(&(method.to_string(), path.to_string(), scope.to_string())), "{scope} must pass {method} {path}");
+            let first = ROUTES.iter().find(|r| r.matches(method, path)).unwrap();
+            assert_eq!(first.handler.owner, *owner, "{method} {path} lands on {:?}", first.handler.owner);
+        }
+        assert_eq!(passed.len(), want.len(), "only those five: {passed:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
