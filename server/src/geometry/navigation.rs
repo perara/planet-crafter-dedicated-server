@@ -124,29 +124,33 @@ impl Grid {
         }
         found
     }
+    // shortcut: collider bounds overestimate some mountains; use mesh-level routing if detours dominate.
     pub fn route_with(&self, other: Option<&Self>, from: V3, to: V3) -> Vec<V3> {
-        let route = self.route(from, to);
-        let Some(other) = other else { return route };
-        let dynamic = other.route(from, to);
-        if route.len() == 1 && dynamic.len() == 1 {
-            return route;
+        let (blocked, height) = self.clearance(from, to);
+        let (other_blocked, other_height) = other.map(|g| g.clearance(from, to)).unwrap_or((false, from[1].max(to[1])));
+        if !blocked && !other_blocked {
+            return vec![to];
         }
-        let height = route.iter().chain(&dynamic).fold(from[1].max(to[1]), |h, p| h.max(p[1]));
+        let height = height.max(other_height);
         vec![[from[0], height, from[2]], [to[0], height, to[2]], to]
     }
 
-    // shortcut: collider bounds overestimate some mountains; use mesh-level routing if detours dominate.
-    pub fn route(&self, from: V3, to: V3) -> Vec<V3> {
-        let candidates = self.candidates(from, to);
-        if !candidates.iter().any(|i| self.bounds[*i].intersects(from, to, &[0, 1, 2])) {
-            return vec![to];
+    fn clearance(&self, from: V3, to: V3) -> (bool, f32) {
+        let mut blocked = false;
+        let mut height = from[1].max(to[1]);
+        for i in self.candidates(from, to) {
+            let b = &self.bounds[i];
+            if b.intersects(from, to, &[0, 2]) {
+                height = height.max(b.max[1] + CLEARANCE + 0.1);
+                blocked |= b.intersects(from, to, &[0, 1, 2]);
+            }
         }
-        let height = candidates
-            .iter()
-            .map(|i| &self.bounds[*i])
-            .filter(|b| b.intersects(from, to, &[0, 2]))
-            .fold(from[1].max(to[1]), |h, b| h.max(b.max[1] + CLEARANCE + 0.1));
-        vec![[from[0], height, from[2]], [to[0], height, to[2]], to]
+        (blocked, height)
+    }
+
+    #[cfg(test)]
+    pub fn route(&self, from: V3, to: V3) -> Vec<V3> {
+        self.route_with(None, from, to)
     }
 }
 
@@ -175,6 +179,23 @@ mod tests {
         assert_eq!(grid.route([0.0, 100.0, 0.0], [60.0, 100.0, 0.0]).len(), 1);
         assert_eq!(grid.route([0.0, 5.0, 100.0], [60.0, 5.0, 100.0]).len(), 1);
     }
+    #[test]
+    fn terrain_detours_also_clear_overhead_buildings() {
+        let terrain = Grid::new(vec![Bounds {
+            min: [10.0, 0.0, -5.0],
+            max: [20.0, 40.0, 5.0],
+        }]);
+        let overhead = Grid::new(vec![Bounds {
+            min: [30.0, 35.0, -5.0],
+            max: [40.0, 80.0, 5.0],
+        }]);
+        let (from, to) = ([0.0, 5.0, 0.0], [60.0, 5.0, 0.0]);
+        assert_eq!(overhead.route(from, to), vec![to], "the original low route passes below the building");
+        let route = terrain.route_with(Some(&overhead), from, to);
+        assert!(route[0][1] > 83.0, "the raised cruise also must clear overhead geometry");
+        assert!(terrain.bounds.iter().chain(&overhead.bounds).all(|b| !b.intersects(route[0], route[1], &[0, 1, 2])));
+    }
+
     #[test]
     fn indexed_routes_match_full_scan_across_negative_cells_and_long_diagonals() {
         let bounds: Vec<_> = (0..5000)
