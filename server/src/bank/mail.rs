@@ -74,6 +74,18 @@ pub(super) fn post(game: &mut Game, approved: &mut HashSet<u64>, mail: &mut crat
                 messages.len()
             })
             .collect();
+        // What goes to everybody (or everybody but one) and what goes to one client, by place in the
+        // queue: a client's batch is the first in order with its own, not the whole queue looked at
+        // for each client (a message to each of 100 clients was 100 x 100 looks).
+        let mut broadcast: Vec<usize> = Vec::new();
+        let mut own: crate::idmap::FxHashMap<u64, Vec<usize>> = Default::default();
+        for (i, (target, _, _)) in out.iter().enumerate() {
+            match target {
+                Target::Only(c) => own.entry(*c).or_default().push(i),
+                _ => broadcast.push(i),
+            }
+        }
+        let start_of = |i: usize| if i == 0 { 0 } else { ends[i - 1] };
         for c in approved.iter() {
             let mut give = |count: usize, from: usize, to: usize| {
                 let batch = mail.entry(*c).or_default();
@@ -82,19 +94,35 @@ pub(super) fn post(game: &mut Game, approved: &mut HashSet<u64>, mail: &mut crat
                 }
                 batch.push_run(count, &messages.0[from..to]);
             };
-            // The run of messages being gathered: (from, to, how many).
+            // The run of messages being gathered: (from, to, how many), and the place of its last.
             let mut run: Option<(usize, usize, usize)> = None;
-            let mut start = 0;
-            for ((target, _, _), end) in out.iter().zip(&ends) {
-                if target.reaches(*c) {
+            let mut last = 0;
+            let (mut b, mut o) = (0, 0);
+            let mine: &[usize] = own.get(c).map(Vec::as_slice).unwrap_or_default();
+            while b < broadcast.len() || o < mine.len() {
+                // The next message in the queue's order, from the two lists.
+                let i = if o >= mine.len() || (b < broadcast.len() && broadcast[b] < mine[o]) {
+                    b += 1;
+                    broadcast[b - 1]
+                } else {
+                    o += 1;
+                    mine[o - 1]
+                };
+                if out[i].0.reaches(*c) {
                     run = Some(match run {
-                        Some((from, _, n)) => (from, *end, n + 1),
-                        None => (start, *end, 1),
+                        // The next place in the queue: the run goes on; a gap (a message to another
+                        // client between) ends it.
+                        Some((from, _, n)) if i == last + 1 => (from, ends[i], n + 1),
+                        Some((from, to, n)) => {
+                            give(n, from, to);
+                            (start_of(i), ends[i], 1)
+                        }
+                        None => (start_of(i), ends[i], 1),
                     });
+                    last = i;
                 } else if let Some((from, to, n)) = run.take() {
                     give(n, from, to);
                 }
-                start = *end;
             }
             if let Some((from, to, n)) = run {
                 give(n, from, to);

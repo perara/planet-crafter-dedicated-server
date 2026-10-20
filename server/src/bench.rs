@@ -973,10 +973,12 @@ fn flipbench() {
         let (mut bytes, mut sizes) = (0, [0; crate::handoff::KINDS]);
         let (front_end, bank_end) = std::os::unix::net::UnixStream::pair().unwrap();
         let (mut front, mut bank) = (crate::ipc::Link::new(front_end), crate::ipc::Link::new(bank_end));
+        let counter = Instr::open_inherit();
         for round in 0..rounds + 1 {
             let (net_data, data, spec) = crate::tables(dir);
             let scenes = crate::scene_tables(dir, &net_data, &data);
             let mut phases: Vec<(&'static str, f64)> = Vec::new();
+            let instr_before = counter.as_ref().map_or(0, Instr::read);
             let fd = crate::handoff::snapshot_memfd(&mut g, &mut phases).unwrap();
             // The front passes the descriptor on: the old bank's link to the front's, then the front's to the new bank's.
             let t = Instant::now();
@@ -992,6 +994,10 @@ fn flipbench() {
             bytes = text.len();
             sizes = crate::handoff::part_sizes(&text);
             let new = crate::handoff::restore_timed(net_data, data, spec, &text, scenes, &mut phases).unwrap_or_else(|err| panic!("restore: {err}"));
+            // What the stand cost in user instructions, all its threads (they end before this): millions.
+            if let Some(c) = &counter {
+                phases.push((".stand instructions (M)", (c.read() - instr_before) as f64 / 1e6));
+            }
             // The steps inside a step (their names start with a dot) are not added twice.
             let stand: f64 = phases.iter().filter(|p| !p.0.starts_with('.')).map(|p| p.1).sum();
             phases.push(("stand", stand));
@@ -1012,7 +1018,7 @@ fn flipbench() {
         }
         println!("flipbench: {path}: {} world objects, {} network objects, {} inventories; loaded in {loaded:?}; snapshot {bytes} bytes; {rounds} flips (ms: p50 / p95 / max / min)", g.wos.len(), g.net.objects.len(), g.inventories.len());
         println!("flipbench:   bytes: {}", crate::handoff::NAMES.iter().zip(sizes).map(|(n, b)| format!("{n} {b}")).collect::<Vec<_>>().join(", "));
-        let order = ["serialize", ".write cpu rest", ".write cpu world objects", ".write cpu inventories", ".write cpu network objects", ".write cpu machines", ".write cpu water", "memfd write", "fd pass", "memfd map", "head", ".parts read", ".read cpu rest", ".read cpu world objects", ".read cpu inventories", ".read cpu network objects", ".read cpu machines", ".read cpu water", ".parts joined", ".slot indexes", ".net index", "parse", "rebuild holders", "refresh tables", "generation", "stand"];
+        let order = ["serialize", ".write cpu rest", ".write cpu world objects", ".write cpu inventories", ".write cpu network objects", ".write cpu machines", ".write cpu water", "memfd write", "fd pass", "memfd map", "head", ".parts read", ".read cpu rest", ".read cpu world objects", ".read cpu inventories", ".read cpu network objects", ".read cpu machines", ".read cpu water", ".parts joined", ".slot indexes", ".net index", "parse", "rebuild holders", "refresh tables", "generation", "stand", ".stand instructions (M)"];
         for name in order {
             let Some(v) = samples.get_mut(name) else { continue };
             v.sort_by(|a, b| a.partial_cmp(b).unwrap());

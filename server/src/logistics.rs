@@ -214,7 +214,13 @@ fn send_to_observers(game: &mut Game, hidden: &[u64], kind: u32, body: Vec<u8>) 
         game.net.out.push((Target::All, kind, body));
         return;
     }
-    let clients: Vec<u64> = game.clients.values().filter(|c| c.approved && !hidden.contains(&c.id)).map(|c| c.id).collect();
+    // A drone far from many players is hidden from many: a set, not a list searched for every client.
+    let clients: Vec<u64> = if hidden.len() > 8 {
+        let hidden: crate::idmap::FxHashSet<u64> = hidden.iter().copied().collect();
+        game.clients.values().filter(|c| c.approved && !hidden.contains(&c.id)).map(|c| c.id).collect()
+    } else {
+        game.clients.values().filter(|c| c.approved && !hidden.contains(&c.id)).map(|c| c.id).collect()
+    };
     for c in clients {
         game.net.out.push((Target::Only(c), kind, body.clone()));
     }
@@ -1373,6 +1379,9 @@ fn send_transforms(game: &mut Game, tick: i32) {
 /// on another planet are hidden from that player. The real server leaves its own (host)
 /// player out; every player here is a remote one.
 fn visibility(game: &mut Game) {
+    if game.ext.logistics.drones.is_empty() {
+        return;
+    }
     let count = game.ext.logistics.drones.len() as f32;
     let current = game.planet_hash();
     let players: Vec<(u64, V3)> = game
@@ -1381,18 +1390,24 @@ fn visibility(game: &mut Game) {
         .filter(|c| c.approved)
         .filter_map(|c| Some((c.id, game.net.objects.get(&c.player?)?.position)))
         .collect();
+    // Who is a player and who a drone is hidden from, as sets: every drone is asked about every player at
+    // every frame, and a list searched for each pair is players squared per drone.
+    let player_ids: crate::idmap::FxHashSet<u64> = players.iter().map(|p| p.0).collect();
+    let mut hidden_from: crate::idmap::FxHashSet<u64> = Default::default();
     let ids: Vec<i32> = game.ext.logistics.drones.keys().copied().collect();
     for d in ids {
         let active = planet_of(game, d) == current;
         let dr = game.ext.logistics.drones.get_mut(&d).unwrap();
         let Some(net) = dr.net else { continue };
-        dr.hidden.retain(|c| players.iter().any(|p| p.0 == *c));
+        dr.hidden.retain(|c| player_ids.contains(c));
+        hidden_from.clear();
+        hidden_from.extend(dr.hidden.iter().copied());
         let [min, max, most] = dr.visibility;
         let range = min + (max - min) * (1.0 - (count / most).min(1.0));
         let mut changes = Vec::new();
         for (c, p) in &players {
             let far = !active || motion::distance_sq(dr.position, *p) > range * range;
-            let hidden = dr.hidden.contains(c);
+            let hidden = hidden_from.contains(c);
             if far && !hidden {
                 dr.hidden.push(*c);
                 changes.push((*c, false));
