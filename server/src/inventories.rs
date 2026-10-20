@@ -124,7 +124,11 @@ impl Game {
 
     fn sort_inventory(&mut self, inventory: i32) {
         let Some(mut items) = self.inventories.get(&inventory).map(|i| i.items.clone()) else { return };
-        items.sort_by(|a, b| {
+        // Inventory.AutoSort: List<WorldObject>.Sort(SortInventory), an introsort: items that
+        // compare equal (the same group, or the same group, trait and colour) end in its order.
+        // SortInventory is no order when one item has a trait and the other has none; the game's
+        // sort lives with that, and so does this one (an error where the game throws).
+        let _ = crate::dotnet_sort::sort_by(&mut items, |a, b| {
             let (Some(x), Some(y)) = (self.wos.get(a), self.wos.get(b)) else { return Ordering::Equal };
             culture_cmp(&self.data.groups[x.group].id, &self.data.groups[y.group].id).then_with(|| trait_order((x.trait_type, x.trait_value, x.color), (y.trait_type, y.trait_value, y.color)))
         });
@@ -692,17 +696,15 @@ impl Game {
     }
 }
 
-/// The order of two items of one group by their genetic trait. Items without a trait (type 0)
-/// are equal to each other and come before those with one, which go by type, value and color.
-/// (The game's comparer called a trait-less item equal to everything it was compared with first:
-/// no order, and Rust's sort panics on that from 21 items on, mixed traits in one inventory being
-/// something a client can make with CreateNewTraitWorldObject.)
+/// SortInventory's order of two items of one group: an item without a trait (type 0) is equal to
+/// every other (it is not looked at further), one with a trait goes by type, value and the text
+/// of its color (Color.ToString(): three decimals). So x with a trait comes after y without one,
+/// but y without one is equal to x: no order, which only the game's own sort gives the answer to.
 fn trait_order(x: (i32, i32, [f32; 4]), y: (i32, i32, [f32; 4])) -> Ordering {
-    match (x.0, y.0) {
-        (0, 0) => Ordering::Equal,
-        (0, _) => Ordering::Less,
-        (_, 0) => Ordering::Greater,
-        _ => x.0.cmp(&y.0).then(x.1.cmp(&y.1)).then_with(|| format!("{:?}", x.2).cmp(&format!("{:?}", y.2))),
+    let text = |c: [f32; 4]| format!("RGBA({:.3}, {:.3}, {:.3}, {:.3})", c[0], c[1], c[2], c[3]);
+    match x.0 {
+        0 => Ordering::Equal,
+        _ => x.0.cmp(&y.0).then(x.1.cmp(&y.1)).then_with(|| culture_cmp(&text(x.2), &text(y.2))),
     }
 }
 
@@ -727,8 +729,9 @@ mod tests {
     use serde_json::Value;
 
     #[test]
-    fn items_with_and_without_traits_sort_without_panicking() {
-        // A comparer that is not an order makes Rust's sort panic from 21 items on.
+    fn items_with_and_without_traits_sort_as_the_games_sort_does() {
+        // SortInventory is no order (a trait-less item is equal to all): the game's sort takes
+        // what comes, and ends; this one must not panic on it.
         let mut seed = 7u64;
         let mut next = move || {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -737,12 +740,28 @@ mod tests {
         for n in [5, 21, 22, 40, 100, 400] {
             for _ in 0..200 {
                 let mut items: Vec<(i32, i32, [f32; 4])> = (0..n).map(|_| (if next() % 2 == 0 { 0 } else { next() % 9 }, next() % 5, [(next() % 3) as f32, 0.0, 0.0, 1.0])).collect();
-                items.sort_by(|x, y| trait_order(*x, *y));
-                assert!(items.windows(2).all(|w| trait_order(w[0], w[1]) != Ordering::Greater));
+                let _ = crate::dotnet_sort::sort_by(&mut items, |x, y| trait_order(*x, *y));
             }
         }
-        assert_eq!(trait_order((0, 5, [0.0; 4]), (0, 9, [1.0; 4])), Ordering::Equal, "no trait: equal, as before");
+        assert_eq!(trait_order((0, 5, [0.0; 4]), (0, 9, [1.0; 4])), Ordering::Equal, "no trait: equal");
+        assert_eq!(trait_order((0, 5, [0.0; 4]), (2, 9, [1.0; 4])), Ordering::Equal, "x without a trait is equal to all");
+        assert_eq!(trait_order((2, 9, [1.0; 4]), (0, 5, [0.0; 4])), Ordering::Greater, "but one with a trait is after it");
         assert_eq!(trait_order((2, 1, [0.0; 4]), (2, 3, [0.0; 4])), Ordering::Less);
+        // The color goes by its text with three decimals: colors that round alike are equal.
+        assert_eq!(trait_order((2, 1, [0.1, 0.0, 0.0, 1.0]), (2, 1, [0.1004, 0.0, 0.0, 1.0])), Ordering::Equal);
+        assert_eq!(trait_order((2, 1, [0.1, 0.0, 0.0, 1.0]), (2, 1, [0.2, 0.0, 0.0, 1.0])), Ordering::Less);
+    }
+
+    #[test]
+    fn sorting_an_inventory_of_many_equal_items_is_the_games_introsort() {
+        let Some((mut g, _)) = world() else { return };
+        let chest = g.create_inventory(30, 0, 0, &[], &[]);
+        let items: Vec<i32> = (0..20).map(|_| give(&mut g, "Iron", chest)).collect();
+        send_scene(&mut g, 1, "InventoriesHandler.SortInventoryServerRpc", &[json!(chest)]);
+        let mut want = items.clone();
+        crate::dotnet_sort::sort_by(&mut want, |_, _| Ordering::Equal).unwrap();
+        assert_ne!(want, items, "20 equal items are moved by the introsort");
+        assert_eq!(g.inventories[&chest].items, want);
     }
 
     /// The one AddOrRemoveItemClientRpc result each request gets.

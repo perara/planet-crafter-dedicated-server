@@ -84,6 +84,7 @@ mod config;
 mod dashboard;
 mod data;
 mod deconstruct;
+mod dotnet_sort;
 mod energy;
 mod equipment;
 mod events;

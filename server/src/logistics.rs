@@ -476,10 +476,12 @@ fn tasks_coroutine(game: &mut Game) {
         for id in ids {
             set_inventory_status(game, id);
         }
-        // ponytail: a stable sort; .NET's introsort orders equal priorities the same up to 16
-        // demand inventories only.
+        // _demandInventories.Sort(CompareInventoryPriority): List<T>.Sort is an introsort, which
+        // reorders equal priorities (above 16 demand inventories).
         let mut demand = std::mem::take(&mut game.ext.logistics.demand);
-        demand.sort_by_key(|i| std::cmp::Reverse(game.inventories.get(i).map(|i| i.logistic.priority).unwrap_or(0)));
+        let priority = |i: &i32| game.inventories.get(i).map(|i| i.logistic.priority).unwrap_or(0);
+        // The priorities are plain integers: a comparer that is an order cannot fail.
+        let _ = crate::dotnet_sort::sort_by(&mut demand, |x, y| priority(y).cmp(&priority(x)));
         game.ext.logistics.demand = demand;
         game.ext.logistics.inventories_inited = true;
     }
@@ -710,7 +712,8 @@ fn release_drones(game: &mut Game) {
             .filter(|(_, s)| s.planet == planet)
             .map(|(st, _)| (*st, motion::distance(station_position(game, *st), from).round_ties_even() as i32))
             .collect();
-        distances.sort_by_key(|d| d.1);
+        // _stationsDistancesBuffer.Sort(): LogisticStationDistanceToTask.CompareTo, nearest first.
+        let _ = crate::dotnet_sort::sort_by(&mut distances, |a, b| a.1.cmp(&b.1));
         for (st, _) in distances {
             if let Some(d) = release_one_drone(game, st) {
                 add_to_fleet(game, d, false);

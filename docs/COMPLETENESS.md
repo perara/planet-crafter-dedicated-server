@@ -199,7 +199,7 @@ Severity is how likely a normal player or server owner meets it times how bad it
 | 3 | **Old-format saves were destroyed on the first save. Fixed.** The 2022 single-planet save loaded as an empty world, silently; its 5 136 objects were kept as 5 136 "players" and the next save wrote that. | The old-format save, loaded and stopped: `world: 0 world objects`, section 2 of the output held 5 136 records. The real game imports all of it (5 129 distinct objects: seven ids are listed twice in the file; and 181 more made by the machines), 358 inventories, planet Prime. | Done in this branch: the loader refuses what it cannot read (`save::layout`), `pcds world import` ports the game's conversion (`oldsave.rs`), parity-checked against the game (EXPECTED.md "Old saves"). |
 | 4 | **The autosave holds the game for a third of a second or more.** | Soak: the slowest loop of the second was 250 to 620 ms at each autosave with eight bots, 3 to 27 ms in between; the 99th percentile of round trips is the autosave. | Write the autosave on a thread: done on `integrate` (ca4e517). |
 | 5 | **The clock is a 32-bit float.** After about 1.5 days of play the clock's step is 15 ms, after 97 days one second; timers of 0.1 and 0.2 s then run at the wrong rate. | `game.time` is `(clock - paused) as f32` (`game.rs`); the game has the same float but does not run for months. | Keep the due times in f64: done for gauges and units on `integrate` (40242e8, c318e13); machines and logistics still to do. |
-| 6 | **Drones serve equal-priority demands in another order than the game.** Over 5-minute runs honey ended 10 to 12 lower here than on the game in three runs (the game's own spread is 3 to 6): the first kind of beehive ends empty here and with 8 to 9 on the game. | `logistics.rs` sorts demand inventories with a stable sort and says in a `ponytail:` comment that .NET's introsort differs above 16 equal priorities; the save has 253 demand inventories, 159 at priority 0. Totals of everything else agree. | Port .NET's `Array.Sort` (introsort: insertion sort up to 16, heap sort at the depth limit): about 80 lines, then run the logistics script against the game. |
+| 6 | **Drones served equal-priority demands in another order than the game. Fixed.** The game sorts its demand inventories once, at start, with `List<T>.Sort` (an introsort: equal priorities end in an order of their own above 16 elements; same for the stations by distance, `SortInventory` and the optimizer's machines). | A save with 17 demand inventories at priority 9 and 17 at priority 0 (among the save's 159), 8 items to give them: the same 8 of 17 are served in three runs of the game, in each of the two classes; this server before the port served 14 and 12 other ones of 17 (stable sort), after it 0 and 0 (`completeness/demand_order.py`). The honey shortfall of the 5-minute runs (10 to 12 lower here, the first beehive empty at the end) was **not** this: the demand honey has one inventory, and the same runs gave the same honey before and after the port. It was the game's head start of 10 to 13 s before the probe joins (class b: the same 4.4 % in the terraformation units) against the beehive's 70 s cycle of being emptied by drones and refilled; with 12 s given to this server honey ends 189 and 192 before the port, 187 and 189 after, against 190, 191 and 192 on the game. | Done: `dotnet_sort.rs`, the game's own steps read from the IL of its `mscorlib` and checked against a real Mono. |
 | 7 | A corrupt entry in a save is skipped without a word (v0.6.2). | `save.rs` `entries()` filters with `.ok()`. This save has none (all 36 000 or so entries parse), so nothing was lost here. | Done on `integrate` (an error naming the entry). |
 | 8 | Wrecks: a pool of 64 layouts per size, not each wreck's seed; a save made by an older generator loses all its wrecks (the game does the same). | README "Differences"; the save's 8 instances (version 15) were dropped by both hosts, 805 objects with them. | Run the Tessera port at generation time instead of the pool (known open item). |
 | 9 | Escape pods can be deconstructed by a client that sends the call; the game ignores it. | lg_real: the world's pod is gone here, still there on the game. Known, EXPECTED.md "A second escape pod"; no game client sends it. | Treat the groups whose `ActionDeconstructible` sits under `WorldContainer` as not deconstructible. |
@@ -210,8 +210,36 @@ Severity is how likely a normal player or server owner meets it times how bad it
 | 14 | Documented limits: no physics (the nearest player owns what falls and drives), every player sees every animal, endings do not restart the session, sleeping does not skip the night, 64-layout wrecks. | README "Differences". | None planned. |
 | 15 | `NetworkTransform.SetStateServerRpc` is not handled. | No game code sends it. | None. |
 
-**Fixed in this branch:** gap 3 (the `old-saves` branch: refusal and import) and gap 1 (commit 9520160) and a one-line change to the probe so a script can address
+**Fixed in this branch:** gap 1 (commit 9520160), gap 3 (the `old-saves` branch: refusal and import), gap 6 (the .NET sort, below the table) and a one-line change to the probe so a script can address
 the world's own objects (6f34b0a). Everything else above is listed with its smallest fix and not started.
+
+### Gap 6: where the game sorts, and what this server does
+
+Every sort in the game's code (Assembly-CSharp, Netcode, Tessera, Sylves, DeBroglie), found by its IL, not its source:
+
+| game | sort | here |
+|---|---|---|
+| `LogisticManager.SetTasksCoroutine` | `_demandInventories.Sort(CompareInventoryPriority)`, once at start | `dotnet_sort` (`logistics.rs`) |
+| `LogisticManager.SetLogisticTasks` | `_stationsDistancesBuffer.Sort()` (a struct, `IComparable<T>`; ties are common: the distance is rounded to whole metres) | `dotnet_sort` |
+| `Inventory.AutoSort` (`SortInventoryServerRpc`) | `Sort(SortInventory)`; the comparison is no order (an item without a trait is equal to all, one with a trait is after it) | `dotnet_sort`, and the game's comparison now (it was made a total order only because Rust's sort panics on that) |
+| `MachineOptimizer` (two) | `result.Sort` by `Vector3.Distance` | `dotnet_sort` (the input order, the physics order of the sphere cast, is still not the game's) |
+| `WorldInstanceGenerator.CreateRecipe` | `list.Sort` by id (equal ids are the same ingredient) | `dotnet_sort` |
+| `UnlockingHandler`, UI windows (DNA extractor, teleporters) | `Sort` of doubles / for the screen | not needed (ties are equal values / client only) |
+| `EnvironmentUpdater`, UI, Tessera, DeBroglie, Netcode's config | `OrderBy` (stable) | stable sorts |
+| Netcode `SceneEventData.SortObjectsToSync` | `Sort` of the network objects of a joining client, with a comparison that is 0 for everything (the game registers no prefab handler): the introsort still moves them above 16 objects | **not ported**: only the order in which a joining client creates its objects, no state; one call of `dotnet_sort` when wanted |
+
+The sort is `ArraySortHelper<T>.IntrospectiveSort` of the game's Mono (read from the IL of the shipped `mscorlib.dll`): up to 16 elements an
+insertion sort (2 and 3 elements by compare-and-swap), above that median-of-three quicksort and a heap sort when the depth
+`2 * bit length of the count` is spent. `server/tests/dotnet_sort/reference.py` writes the same steps in Python and
+`vectors.txt` holds 78 cases (equal keys, few-valued keys, the shape of the save's demand list, adversarial inputs that reach the heap sort);
+`Check.cs` ran them on a real Mono (wine-mono): `List<T>.Sort(Comparison<T>)` and the struct with `IComparable<T>` gave the same
+order as the Python on all 78, and this module gives it too (a unit test). Parity: `completeness/demand_order.py` and the
+numbers in the table above.
+
+Remaining differences in what the game orders: the neighbours of a machine come from a physics sphere cast, and this server uses the
+order of its world objects (the same note as `production.rs`'s `ponytail:`; it is what AutoCrafter ingredients and the optimizer's
+list depend on); the colour in `SortInventory`'s last tie-break is `Color.ToString()` formatted as the game does, compared by this server's
+culture comparison of ASCII, not .NET's.
 
 ## The old-format save
 
@@ -228,7 +256,7 @@ the game), a save then a load then a save changes nothing, and a probe player pl
 * DLC planet support: scene dumps for Humble and Toxicity from an owner's install (extraction work, no new game
   logic), then the toxic areas (one module, the `ToxicArea` registrations and two client calls).
 * Each wreck's own Tessera seed (the port exists in `native/tessera.rs`; it runs at extraction now).
-* The .NET sort for logistics (gap 6) and f64 clocks for machines and logistics (gap 5).
+* f64 clocks for machines and logistics (gap 5).
 
 ## What could not be checked, and why
 
