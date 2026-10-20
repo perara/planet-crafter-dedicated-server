@@ -84,6 +84,71 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
 #[global_allocator]
 static COUNTING: Counting = Counting;
 
+/// The allocations this thread has made so far (what the tests of the efficiency budgets count between two points).
+pub fn allocations() -> u64 {
+    ALLOCS.get().0
+}
+
+/// The user instructions this thread has executed, from the kernel's performance counters
+/// (perf_event_open): they do not depend on how busy the machine is, which a time does. None
+/// where the kernel does not allow the process to count (perf_event_paranoid, a container, a VM
+/// without counters). A hybrid CPU has one counter per core type; the thread moves between them.
+struct Instr(Vec<i32>);
+
+impl Instr {
+    fn open() -> Option<Instr> {
+        Instr::open_with(false)
+    }
+
+    /// Counting the threads this thread starts from now on as well (read once they have ended).
+    fn open_inherit() -> Option<Instr> {
+        Instr::open_with(true)
+    }
+
+    fn open_with(inherit: bool) -> Option<Instr> {
+        // The performance monitoring units: one, or on a hybrid CPU one per core type.
+        let pmu = |name: &str| std::fs::read_to_string(format!("/sys/devices/{name}/type")).ok()?.trim().parse::<u64>().ok();
+        let units: Vec<u64> = if pmu("cpu_core").is_some() { ["cpu_core", "cpu_atom"].iter().filter_map(|n| pmu(n)).collect() } else { vec![0] };
+        let mut fds = Vec::new();
+        for unit in units {
+            // perf_event_attr: type (HARDWARE), size, config (INSTRUCTIONS, with the unit's number above bit 32 on
+            // a hybrid CPU), then the flags word: exclude_kernel (bit 5) and exclude_hv (bit 6).
+            let mut attr = [0u64; 16];
+            attr[0] = 128 << 32;
+            attr[1] = 1 | (unit << 32);
+            attr[5] = (1 << 5) | (1 << 6) | (u64::from(inherit) << 1);
+            // SAFETY: the kernel reads 128 bytes of a live attribute block; pid 0 is this thread, no cpu, no group.
+            let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, attr.as_ptr(), 0, -1, -1, 8) } as i32;
+            if fd < 0 {
+                return None;
+            }
+            fds.push(fd);
+        }
+        Some(Instr(fds))
+    }
+
+    fn read(&self) -> u64 {
+        self.0
+            .iter()
+            .map(|fd| {
+                let mut count = 0u64;
+                // SAFETY: reads 8 bytes into a live u64.
+                let n = unsafe { libc::read(*fd, (&mut count as *mut u64).cast(), 8) };
+                if n == 8 { count } else { 0 }
+            })
+            .sum()
+    }
+}
+
+impl Drop for Instr {
+    fn drop(&mut self) {
+        // SAFETY: closes descriptors this value opened.
+        self.0.iter().for_each(|fd| unsafe {
+            libc::close(*fd);
+        });
+    }
+}
+
 static SECTIONS: AtomicBool = AtomicBool::new(false);
 thread_local!(static TIMES: RefCell<HashMap<&'static str, Duration>> = RefCell::new(HashMap::new()));
 
@@ -201,6 +266,8 @@ struct Run {
     busy: Duration,
     /// Allocation calls and bytes inside the timed part of the ticks.
     allocs: (u64, u64),
+    /// User instructions inside the timed part (None: this process may not count them).
+    instructions: Option<u64>,
     /// Each tick's time in the timed part (the players' packets and actions that tick, then the tick), in ns.
     tick_ns: Vec<u32>,
     save: usize,
@@ -230,6 +297,8 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
     let (step, net_tick, act_every) = (0.005, 1.0 / g.net_data.tick_rate as f64, e.action_ms as f64 / 1000.0);
     let (mut t, mut next_move, mut next_act, mut next_swap, mut busy, mut seq) = (0.0, 0.0, act_every, swap_every, Duration::ZERO, 0);
     let mut allocs = (0u64, 0u64);
+    let counter = Instr::open();
+    let mut instructions = 0u64;
     let mut tick_ns = Vec::with_capacity((e.seconds / step) as usize + 1);
     let (mut ticks, mut dumped) = (Vec::new(), Vec::new());
     let mut worst: Vec<(usize, u32, Vec<(&'static str, Duration)>)> = Vec::new();
@@ -245,6 +314,7 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
         let sections_before = SECTIONS.load(Ordering::Relaxed).then(|| TIMES.with(|m| m.borrow().clone()));
         let started = Instant::now();
         let before = ALLOCS.get();
+        let instr_before = counter.as_ref().map_or(0, Instr::read);
         if t >= next_move {
             next_move += net_tick;
             for (i, object) in objects.iter().enumerate() {
@@ -282,6 +352,7 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
         }
         let after = ALLOCS.get();
         allocs = (allocs.0 + after.0 - before.0, allocs.1 + after.1 - before.1);
+        instructions += counter.as_ref().map_or(0, Instr::read) - instr_before;
         let (n, own, tick) = fingerprint(&mut h, &mut g.net.out);
         messages += n;
         if let Some(f) = &mut file {
@@ -310,7 +381,7 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
         use std::io::Write;
         writeln!(f, "save {save}").unwrap();
     }
-    Run { fingerprint: h.finish(), ticks, messages, busy, allocs, tick_ns, save: save.len(), save_hash, dumped, worst, game: g }
+    Run { fingerprint: h.finish(), ticks, messages, busy, allocs, instructions: counter.map(|_| instructions), tick_ns, save: save.len(), save_hash, dumped, worst, game: g }
 }
 
 /// The load test's players (three, acting every 200 ms) for 20 s on the test world, played
@@ -356,6 +427,9 @@ fn bench() {
         r.fingerprint,
         r.save_hash
     );
+    if let Some(i) = r.instructions {
+        println!("bench: {:.0} user instructions per tick in the timed part", i as f64 / r.ticks.len() as f64);
+    }
     println!("bench: {:.2} allocations ({:.0} bytes) per tick, {:.2} us per tick in the timed part", r.allocs.0 as f64 / r.ticks.len() as f64, r.allocs.1 as f64 / r.ticks.len() as f64, r.busy.as_secs_f64() * 1e6 / r.ticks.len() as f64);
     let mut sorted = r.tick_ns.clone();
     sorted.sort_unstable();
@@ -771,10 +845,24 @@ fn scale() {
     println!("scale: snapshot (JSON trees) {took:?}, to_text {:?}, {} bytes, rss {} MiB", t.elapsed(), text.len(), peak >> 10);
     drop(snapshot);
     let before = rss_kib();
-    let t = Cpu::now();
     let direct = g.save_text();
-    println!("scale: save_text (no trees) {:?}, rss {} MiB (+{} MiB)", t.elapsed(), rss_kib() >> 10, rss_kib().saturating_sub(before) >> 10);
     assert!(direct == text, "save_text is the snapshot's text");
+    // What the game thread stands for (wall time: the text is written by several threads) and what all threads spend.
+    let process_cpu = || {
+        let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: clock_gettime fills the timespec it is given.
+        unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut t) };
+        Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+    };
+    let (mut walls, cpu0) = (Vec::new(), process_cpu());
+    for _ in 0..9 {
+        let t = Instant::now();
+        let again = g.save_text();
+        walls.push(t.elapsed());
+        assert!(again.len() == direct.len());
+    }
+    walls.sort();
+    println!("scale: save_text (no trees) wall min {:?} median {:?}, all threads' cpu {:?} each, rss {} MiB (+{} MiB)", walls[0], walls[4], (process_cpu() - cpu0) / 9, rss_kib() >> 10, rss_kib().saturating_sub(before) >> 10);
     let snapshot = g.snapshot();
     let dir = std::env::temp_dir().join(format!("pcds-scale-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -981,5 +1069,156 @@ fn dirtybench() {
             }
             println!("{line}");
         }
+    }
+}
+
+/// The efficiency guard (docs/performance.md): budgets on what a tick, a snapshot and a join cost,
+/// counted in things that do not depend on how busy the machine is (allocations, bytes, user
+/// instructions), so that a change that makes the server dearer fails a test.
+mod budget {
+    use super::*;
+    use crate::game::tests::{save, join};
+
+    /// About `buildings` buildings on the test world, in the proportions of a base: containers that
+    /// supply and demand iron and magnesium, water collectors and autocrafters running on the energy
+    /// two generators make, a drone station with three drones. Unseeded: the same every time.
+    pub(super) fn world(buildings: usize) -> Option<Game> {
+        use crate::testkit::{give, place};
+        let mut g = crate::game::test_game(save())?;
+        let at = |i: usize| [500.0 + (i % 50) as f32 * 3.0, 3.5, 450.0 + (i / 50) as f32 * 3.0];
+        let (iron, magnesium) = (g.data.group("Iron").unwrap(), g.data.group("Magnesium").unwrap());
+        for i in 0..2 {
+            place(&mut g, "EnergyGenerator6", [540.0 + i as f32 * 8.0, 3.5, 540.0]);
+        }
+        let (station, _) = place(&mut g, "DroneStation1", [560.0, 3.5, 560.0]);
+        let station_inventory = g.wos[&station].linked_inventory;
+        for _ in 0..3 {
+            give(&mut g, "Drone1", station_inventory);
+        }
+        let target = g.data.group("Rod-iridium").unwrap();
+        for i in 0..buildings {
+            match i % 8 {
+                // Supply and demand: half of the containers.
+                0..=3 => {
+                    let (wo, _) = place(&mut g, "Container1", at(i));
+                    let inventory = g.wos[&wo].linked_inventory;
+                    for _ in 0..6 {
+                        give(&mut g, if i % 2 == 0 { "Iron" } else { "Magnesium" }, inventory);
+                    }
+                    let (supply, demand) = if i % 2 == 0 { (vec![iron], vec![magnesium]) } else { (vec![magnesium], vec![iron]) };
+                    let inv = g.inventories.get_mut(&inventory).unwrap();
+                    inv.logistic.supply = supply;
+                    inv.logistic.demand = demand;
+                    crate::logistics::set_dirty(&mut g, inventory);
+                }
+                4..=6 => {
+                    let (wo, _) = place(&mut g, "WaterCollector1", at(i));
+                    g.ext.machines.energy.insert(wo, true);
+                }
+                _ => {
+                    let (wo, _) = place(&mut g, "AutoCrafter1", at(i));
+                    g.wos.get_mut(&wo).unwrap().linked_groups = Some(vec![target]);
+                    g.ext.machines.energy.insert(wo, true);
+                }
+            }
+        }
+        g.net.out.clear();
+        Some(g)
+    }
+
+    /// What `seconds` of the world with `players` do, per tick: (allocations, user instructions
+    /// when this process may count them), and the world's size.
+    pub(super) fn tick_cost(buildings: usize, players: u64, action_ms: u64, seconds: f64) -> Option<(f64, Option<f64>, usize)> {
+        let g = world(buildings)?;
+        let objects = g.wos.len();
+        let e = Env { path: String::new(), dir: crate::test_data().unwrap(), seconds, players, action_ms, dump: None, start: 0.0 };
+        let r = run(g, &e, f64::INFINITY, |g| g, None);
+        let ticks = r.ticks.len() as f64;
+        Some((r.allocs.0 as f64 / ticks, r.instructions.map(|i| i as f64 / ticks), objects))
+    }
+
+    /// The tick's cost on the guard world, measured in what does not depend on the machine's load.
+    /// `allocations` per tick and (where the kernel lets the process count) user `instructions` per
+    /// tick. A budget is about one and a half times what the build measures; one that is passed is a
+    /// change that made the server dearer: find it (tools/perf, docs/performance.md) or, if the cost is
+    /// the point of the change, raise the budget there and here.
+    #[test]
+    fn the_tick_stays_within_its_budget() {
+        // (buildings, players, they act every N ms, allocations per tick, instructions per tick)
+        let cases: [(usize, u64, u64, f64, f64); 5] = [(0, 0, 0, 2.0, 6_000.0), (400, 0, 0, 30.0, 32_000.0), (400, 4, 0, 38.0, 38_000.0), (400, 4, 200, 45.0, 45_000.0), (1600, 4, 200, 120.0, 130_000.0)];
+        for (buildings, players, action_ms, max_allocs, max_instr) in cases {
+            let Some((allocs, instr, objects)) = tick_cost(buildings, players, action_ms, 20.0) else { return };
+            let what = format!("{buildings} buildings ({objects} world objects), {players} players acting every {action_ms} ms");
+            assert!(allocs <= max_allocs, "{what}: {allocs:.1} allocations per tick, the budget is {max_allocs} (docs/performance.md)");
+            match instr {
+                Some(i) => assert!(i <= max_instr, "{what}: {i:.0} instructions per tick, the budget is {max_instr} (docs/performance.md)"),
+                None => eprintln!("SKIPPED the instruction budget of {what}: this process may not count instructions (perf_event_paranoid, a container or a VM without counters); the allocations were checked"),
+            }
+        }
+    }
+
+    /// Four times the buildings is about four times the tick, not sixteen: nothing in a tick may
+    /// look at every building for every building.
+    #[test]
+    fn a_tick_costs_about_the_same_per_building_at_four_times_the_size() {
+        let Some((_, Some(small), n_small)) = tick_cost(400, 0, 0, 20.0) else { return };
+        let (_, Some(large), n_large) = tick_cost(1600, 0, 0, 20.0).unwrap() else { return };
+        let (per_small, per_large) = (small / n_small as f64, large / n_large as f64);
+        assert!(per_large <= per_small * 2.0, "{per_small:.1} instructions per tick and world object at {n_small}, {per_large:.1} at {n_large}: something in the tick grew faster than the world");
+    }
+
+    /// The bytes of the world as the server keeps and moves them: a hot update's snapshot, the save
+    /// text and what a joining player is sent, per world object.
+    #[test]
+    fn the_snapshot_the_save_and_the_join_stay_within_their_budget() {
+        let Some(mut g) = world(400) else { return };
+        let objects = g.wos.len();
+        let snapshot = crate::handoff::snapshot(&mut g).unwrap().len();
+        let save = g.save_text().len();
+        join(&mut g, 90, "Joiner");
+        let joined: usize = g.net.out.iter().filter(|(to, _, _)| *to == crate::net::Target::Only(90)).map(|(_, _, b)| b.len()).sum();
+        let per = |bytes: usize| bytes as f64 / objects as f64;
+        assert!(per(snapshot) <= 300.0, "a snapshot is {:.0} bytes per world object, the budget is 300 (docs/performance.md)", per(snapshot));
+        assert!(per(save) <= 100.0, "a save is {:.0} bytes per world object, the budget is 100 (docs/performance.md)", per(save));
+        assert!(per(joined) <= 24.0, "a join sends {:.0} bytes per world object, the budget is 24 (docs/performance.md)", per(joined));
+    }
+
+    /// What a hot update's world stand costs per world object, in user instructions (the snapshot
+    /// and the restore, all the threads they use): None where this process may not count them.
+    fn stand_instructions(buildings: usize) -> Option<f64> {
+        let mut g = world(buildings)?;
+        let (net_data, data, spec, scenes) = crate::game::test_tables()?;
+        let Some(counter) = Instr::open_inherit() else {
+            eprintln!("SKIPPED the instruction budget of the hot update's stand: this process may not count instructions");
+            return None;
+        };
+        let objects = g.wos.len();
+        let before = counter.read();
+        let text = crate::handoff::snapshot(&mut g).unwrap();
+        let restored = crate::handoff::restore(net_data, data, spec, &text, scenes).unwrap();
+        assert_eq!(restored.wos.len(), objects);
+        Some((counter.read() - before) as f64 / objects as f64)
+    }
+
+    /// What a hot update's world stand costs in instructions: the largest cost the players feel.
+    #[test]
+    fn the_stand_of_a_hot_update_stays_within_its_budget() {
+        let Some(per) = stand_instructions(1600) else { return };
+        assert!(per <= 14_000.0, "a snapshot and its restore cost {per:.0} instructions per world object, the budget is 14000 (docs/performance.md)");
+    }
+
+    #[test]
+    #[ignore]
+    fn numbers() {
+        for (buildings, players, action_ms) in [(0, 0, 0), (400, 0, 0), (400, 4, 0), (400, 4, 200), (1600, 0, 0), (1600, 4, 200)] {
+            let Some((allocs, instr, objects)) = tick_cost(buildings, players, action_ms, 60.0) else { return };
+            println!("budget: {buildings} buildings ({objects} world objects), {players} players acting every {action_ms} ms: {allocs:.2} allocations, {} instructions per tick", instr.map_or("-".into(), |i| format!("{i:.0}")));
+        }
+        let mut g = world(400).unwrap();
+        let (snapshot, save) = (crate::handoff::snapshot(&mut g).unwrap().len(), g.save_text().len());
+        join(&mut g, 90, "Joiner");
+        let joined: usize = g.net.out.iter().filter(|(to, _, _)| *to == crate::net::Target::Only(90)).map(|(_, _, b)| b.len()).sum();
+        println!("budget: {} world objects: snapshot {snapshot} bytes, save {save} bytes, join {joined} bytes", g.wos.len());
+        println!("budget: a hot update's stand: {:?} instructions per world object", stand_instructions(1600));
     }
 }

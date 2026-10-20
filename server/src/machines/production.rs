@@ -308,9 +308,11 @@ fn try_to_craft(game: &mut Game, wo: i32) {
 
 /// SetItemsInRange: loose items (not growing) and what logistics-enabled buildings hold.
 fn items_in_range(game: &Game, wo: i32, range: f32) -> Vec<i32> {
+    // In the order they are first met; `seen` says whether one was (a list of thousands is no place for contains).
     let mut out: Vec<i32> = Vec::new();
-    let add = |id: i32, out: &mut Vec<i32>| {
-        if !out.contains(&id) {
+    let mut seen: crate::idmap::FxHashSet<i32> = Default::default();
+    let mut add = |id: i32, out: &mut Vec<i32>| {
+        if seen.insert(id) {
             out.push(id);
         }
     };
@@ -335,7 +337,7 @@ fn items_in_range(game: &Game, wo: i32, range: f32) -> Vec<i32> {
                 continue;
             }
             let inventory = if index < 0 { w.linked_inventory } else { w.secondary_inventories.get(index as usize).copied().unwrap_or(0) };
-            for item in items(game, inventory) {
+            for &item in game.inventories.get(&inventory).map(|i| i.items.as_slice()).unwrap_or_default() {
                 if game.wos.get(&item).is_some_and(|i| !i.is_placed() || i.growth == 100.0) {
                     add(item, &mut out);
                 }

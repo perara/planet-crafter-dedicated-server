@@ -1067,6 +1067,36 @@ mod tests {
 
     /// Sequence numbers are 16 bits: a session that lasts past 65536 packets each way (80 MB
     /// at the full size) goes on delivering and acknowledging across the wrap.
+    /// The cost of the transport in allocations (the test build's allocator counts them; no game
+    /// tables needed, so CI runs this): polling sessions with nothing to say allocates nothing, a
+    /// datagram of a big batch two buffers (its payload, kept for a resend, and the packet). Budgets
+    /// of docs/performance.md.
+    #[test]
+    fn polling_idle_sessions_and_sending_a_batch_allocate_a_bounded_number_of_times() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        for i in 0..64u16 {
+            let (from, token) = (SocketAddr::from(([127, 0, 0, 1], 20_000 + i)), [i as u8 + 1; 8]);
+            handshake(&mut server, from, token);
+            server.datagram(&[[DATA].as_slice(), &token].concat(), from, Instant::now(), &mut Vec::new());
+        }
+        // The first poll looks at every session; the polls after it need not.
+        assert!(server.poll().is_empty());
+        let before = crate::bench::allocations();
+        for _ in 0..100 {
+            assert!(server.poll().is_empty());
+        }
+        let polled = crate::bench::allocations() - before;
+        assert_eq!(polled, 0, "100 polls of 64 idle sessions allocated {polled} times");
+        let token = [1; 8];
+        server.send(&token, &vec![0; 8 * CHUNK]);
+        let before = crate::bench::allocations();
+        server.flush();
+        let sent = server.connections[&token].in_flight.len();
+        let allocated = crate::bench::allocations() - before;
+        assert_eq!(sent, INITIAL_WINDOW);
+        assert!(allocated <= 4 * sent as u64 + 8, "a flush of {sent} datagrams allocated {allocated} times");
+    }
+
     #[test]
     fn sequences_wrap_around() {
         let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();

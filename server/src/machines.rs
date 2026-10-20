@@ -62,6 +62,10 @@ pub struct Machines {
     /// Counts the machines added and removed (a walk in progress compares it).
     #[serde(skip)]
     structure: u64,
+    /// The authorized and unauthorized item groups of a building's inventory (and whether it is
+    /// equipment), per building group: worked out from the tables once.
+    #[serde(skip)]
+    authorized: crate::idmap::FxHashMap<usize, (Vec<usize>, Vec<usize>, bool)>,
 }
 
 impl Machines {
@@ -200,13 +204,7 @@ mod unit_names {
 /// Serialized fields of a group's prefab components of one type; `root` keeps those on the
 /// prefab's root object only (GetComponent rather than GetComponentInChildren).
 fn components<'a>(game: &'a Game, group: usize, ty: &str, root: bool) -> Vec<&'a Value> {
-    game.data.group_prefabs[&game.data.groups[group].id]["components"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|c| c["type"] == ty && (!root || c["path"] == ""))
-        .map(|c| &c["fields"])
-        .collect()
+    game.data.group_prefabs.components(&game.data.groups[group].id, ty, root)
 }
 
 /// The first such component on the prefab root.
@@ -256,7 +254,7 @@ pub fn refresh_from_tables(game: &mut Game) {
 
 /// GetComponent<MachineRocketBackAndForth>() (its trade and interplanetary subclasses).
 fn is_rocket_platform(game: &Game, group: usize) -> bool {
-    crate::rockets::PLATFORM_CLASSES.iter().any(|class| root(game, group, class).is_some())
+    crate::rockets::PLATFORM_CLASSES.iter().any(|class| !components(game, group, class, true).is_empty())
 }
 
 fn f32_of(v: &Value, key: &str) -> f32 {
@@ -423,11 +421,8 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
         floater: None,
     };
     // MachineGrowerBase and its subclasses on the root, in component order (growth fuses).
-    for c in game.data.group_prefabs[&game.data.groups[group].id]["components"].as_array().into_iter().flatten() {
-        if c["path"] != "" {
-            continue;
-        }
-        match c["type"].as_str().unwrap_or("") {
+    for ty in game.data.group_prefabs.root_types(&game.data.groups[group].id) {
+        match ty {
             "MachineGrowerBase" | "MachineGrowerVegetationStatic" | "MachineGrowerVegetationHarvestable" => m.growers.push(true),
             "MachineGrowerIfLinkedGroup" | "MachineFlockSpawner" => m.growers.push(false),
             _ => {}
@@ -474,7 +469,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     if linked != 0 && game.inventories.contains_key(&linked) {
         m.linked = linked;
         if let Some(f) = root(game, group, "InventoryAuthorizedGroups") {
-            set_authorized_groups(game, linked, &f);
+            set_authorized_groups(game, linked, group, &f);
         }
         if let Some(f) = root(game, group, "MachineGenerator") {
             // TryToCastRay casts only while the machine is active: one on another planet keeps
@@ -757,22 +752,27 @@ fn float_on_water(game: &mut Game, wo: i32) {
 // ---- inventory listeners ----------------------------------------------------------------
 
 /// InventoryAssociated.SetInventory: InventoryAuthorizedGroups on the inventory.
-fn set_authorized_groups(game: &mut Game, inventory: i32, f: &Value) {
-    let groups = |categories: &str, sub_categories: &str| -> Vec<usize> {
-        let list = |k: &str| f[k].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
-        let mut out: Vec<usize> = Vec::new();
-        let items = || game.data.groups.iter().enumerate().filter(|(_, g)| !g.constructible);
-        for c in list(categories) {
-            out.extend(items().filter(|(i, g)| g.str("itemCategory") == c && !out.contains(i)).map(|(i, _)| i).collect::<Vec<_>>());
-        }
-        for c in list(sub_categories) {
-            out.extend(items().filter(|(i, g)| g.str("itemSubCategory") == c && !out.contains(i)).map(|(i, _)| i).collect::<Vec<_>>());
-        }
-        out
-    };
-    let authorized = groups("authorizedItemCategories", "authorizedItemSubCategories");
-    let unauthorized = groups("unauthorizedItemCategories", "unauthorizedItemSubCategories");
-    let equipment = authorized.first().is_some_and(|g| game.data.groups[*g].str("itemCategory") == "Equipment");
+fn set_authorized_groups(game: &mut Game, inventory: i32, group: usize, f: &Value) {
+    // The same for every building of a group: worked out once (the tables do not change).
+    if !game.ext.machines.authorized.contains_key(&group) {
+        let groups = |categories: &str, sub_categories: &str| -> Vec<usize> {
+            let list = |k: &str| f[k].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
+            let mut out: Vec<usize> = Vec::new();
+            let items = || game.data.groups.iter().enumerate().filter(|(_, g)| !g.constructible);
+            for c in list(categories) {
+                out.extend(items().filter(|(i, g)| g.str("itemCategory") == c && !out.contains(i)).map(|(i, _)| i).collect::<Vec<_>>());
+            }
+            for c in list(sub_categories) {
+                out.extend(items().filter(|(i, g)| g.str("itemSubCategory") == c && !out.contains(i)).map(|(i, _)| i).collect::<Vec<_>>());
+            }
+            out
+        };
+        let authorized = groups("authorizedItemCategories", "authorizedItemSubCategories");
+        let unauthorized = groups("unauthorizedItemCategories", "unauthorizedItemSubCategories");
+        let equipment = authorized.first().is_some_and(|g| game.data.groups[*g].str("itemCategory") == "Equipment");
+        game.ext.machines.authorized.insert(group, (authorized, unauthorized, equipment));
+    }
+    let (authorized, unauthorized, equipment) = game.ext.machines.authorized[&group].clone();
     if let Some(inv) = game.inventories.get_mut(&inventory) {
         inv.authorized = authorized;
         inv.unauthorized = unauthorized;

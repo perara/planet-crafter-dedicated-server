@@ -10,6 +10,7 @@
 
 mod motion;
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use indexmap::{IndexMap, IndexSet};
@@ -598,6 +599,56 @@ fn can_grab(game: &Game, w: &WorldObject) -> bool {
     w.growth >= 100.0 || !game.is_held(w.id)
 }
 
+/// What demands of one group on one planet may take in a search for tasks (SetLogisticTasks), in
+/// the order the game meets it: the items of the supplies in the supplies' order, or the dropped items
+/// in theirs. An item that has a task is taken for good, so each demand goes through the items left,
+/// not through all of them again.
+struct Candidates {
+    /// (the supply it is in, the world object).
+    list: Vec<(Option<i32>, i32)>,
+    taken: Vec<bool>,
+    /// Everything before this is taken.
+    first: usize,
+}
+
+impl Candidates {
+    fn new(game: &Game, list: Vec<(Option<i32>, i32)>) -> Candidates {
+        let taken = list.iter().map(|(_, wo)| game.ext.logistics.all_tasks.contains_key(wo)).collect();
+        let mut c = Candidates { list, taken, first: 0 };
+        c.skip_taken();
+        c
+    }
+
+    fn skip_taken(&mut self) {
+        while self.first < self.list.len() && self.taken[self.first] {
+            self.first += 1;
+        }
+    }
+
+    /// Tasks for the demand `demand`, which wants `available` more (above 0): each item that gets a
+    /// task is one less, and it stops at none. Returns what it still wants. create_task refuses an
+    /// item that has a task, which is then taken for the rest of the search. The demand's own
+    /// items are not for it.
+    fn take(&mut self, game: &mut Game, demand: i32, mut available: i32, spawned: bool) -> i32 {
+        let mut i = self.first;
+        while i < self.list.len() {
+            let (supply, wo) = self.list[i];
+            if !self.taken[i] && supply != Some(demand) {
+                self.taken[i] = true;
+                if create_task(game, supply, demand, wo, spawned).is_some() {
+                    available -= 1;
+                    if available == 0 {
+                        break;
+                    }
+                }
+            }
+            i += 1;
+        }
+        self.skip_taken();
+        available
+    }
+}
+
 /// SetLogisticTasks, first frame: tasks for every demand that supplies or the ground can
 /// fill, by priority, then the tasks that are over. The next two frames follow in
 /// assign_idle_drones and release_drones. (The game also pauses every 400 iterations; one
@@ -620,6 +671,8 @@ fn set_logistic_tasks(game: &mut Game) {
         }
     }
     let mut suppliers: Option<Vec<Vec<(i32, i32, usize)>>> = None;
+    let mut item_groups: crate::idmap::FxHashMap<i32, crate::idmap::FxHashMap<usize, Vec<i32>>> = Default::default();
+    let (mut from_supplies, mut from_ground): (crate::idmap::FxHashMap<(usize, i32), Candidates>, crate::idmap::FxHashMap<(usize, i32), Candidates>) = Default::default();
     for p in game.ext.logistics.priorities.values_mut() {
         p.clear();
     }
@@ -655,41 +708,91 @@ fn set_logistic_tasks(game: &mut Game) {
                 }
                 by_group
             });
-            for i in 0..suppliers_of_g[g].len() {
-                let (s, supply_planet, _) = suppliers_of_g[g][i];
-                if s == d || supply_planet != planet {
+            // The game's loops count `available` down to none and stop there: a group met with none left
+            // (an earlier group of the demand took the last) takes all it finds, and its first supply is
+            // the only one looked at when it finds nothing. That is done as the game does it.
+            if available <= 0 {
+                for i in 0..suppliers_of_g[g].len() {
+                    let (s, supply_planet, _) = suppliers_of_g[g][i];
+                    if s == d || supply_planet != planet {
+                        continue;
+                    }
+                    let by_group = item_groups.entry(s).or_insert_with(|| {
+                        let mut by_group: crate::idmap::FxHashMap<usize, Vec<i32>> = Default::default();
+                        for &wo in game.inventories.get(&s).map(|i| i.items.as_slice()).unwrap_or_default() {
+                            if let Some(w) = game.wos.get(&wo) {
+                                by_group.entry(w.group).or_default().push(wo);
+                            }
+                        }
+                        by_group
+                    });
+                    for &wo in by_group.get(&g).map(Vec::as_slice).unwrap_or_default() {
+                        if create_task(game, Some(s), d, wo, false).is_some() {
+                            available -= 1;
+                            if available == 0 {
+                                break;
+                            }
+                        }
+                    }
+                    if available == 0 {
+                        break;
+                    }
+                }
+                if available == 0 {
                     continue;
                 }
-                // The supply's items of the group (nothing the tasks do changes an inventory or a group).
-                let of_group: Vec<i32> = game.inventories.get(&s).map(|i| i.items.iter().copied().filter(|wo| game.wos.get(wo).is_some_and(|w| w.group == g)).collect()).unwrap_or_default();
-                for wo in of_group {
-                    if create_task(game, Some(s), d, wo, false).is_some() {
+                for &wo in pickables.get(&g).map(Vec::as_slice).unwrap_or_default() {
+                    if game.ext.logistics.all_tasks.contains_key(&wo) {
+                        continue;
+                    }
+                    let ok = game.wos.get(&wo).is_some_and(|w| w.net.is_some() && motion::length_sq(w.position) >= 1e-10 && can_grab(game, w) && w.planet_hash() == planet);
+                    if ok && create_task(game, None, d, wo, true).is_some() {
                         available -= 1;
                         if available == 0 {
                             break;
                         }
                     }
                 }
-                if available == 0 {
-                    break;
-                }
+                continue;
             }
+            // What a demand of this group on this planet may take, from the supplies and then from the ground.
+            let supplies = match from_supplies.entry((g, planet)) {
+                Entry::Occupied(o) => o.into_mut(),
+                Entry::Vacant(v) => {
+                    let mut list = Vec::new();
+                    for &(s, supply_planet, _) in &suppliers_of_g[g] {
+                        if supply_planet != planet {
+                            continue;
+                        }
+                        // The supply's items of the group, in its order (nothing the tasks do changes an
+                        // inventory or a group): its items sorted by group once per search.
+                        let by_group = item_groups.entry(s).or_insert_with(|| {
+                            let mut by_group: crate::idmap::FxHashMap<usize, Vec<i32>> = Default::default();
+                            for &wo in game.inventories.get(&s).map(|i| i.items.as_slice()).unwrap_or_default() {
+                                if let Some(w) = game.wos.get(&wo) {
+                                    by_group.entry(w.group).or_default().push(wo);
+                                }
+                            }
+                            by_group
+                        });
+                        list.extend(by_group.get(&g).into_iter().flatten().map(|&wo| (Some(s), wo)));
+                    }
+                    v.insert(Candidates::new(game, list))
+                }
+            };
+            available = supplies.take(game, d, available, false);
             if available == 0 {
                 continue;
             }
-            for &wo in pickables.get(&g).map(Vec::as_slice).unwrap_or_default() {
-                // A task for it already: create_task refuses it, so its checks can wait.
-                if game.ext.logistics.all_tasks.contains_key(&wo) {
-                    continue;
+            let ground = match from_ground.entry((g, planet)) {
+                Entry::Occupied(o) => o.into_mut(),
+                Entry::Vacant(v) => {
+                    // A task for it already: create_task refuses it, so its checks can wait.
+                    let list = pickables.get(&g).into_iter().flatten().copied().filter(|wo| !game.ext.logistics.all_tasks.contains_key(wo)).filter(|wo| game.wos.get(wo).is_some_and(|w| w.net.is_some() && motion::length_sq(w.position) >= 1e-10 && can_grab(game, w) && w.planet_hash() == planet)).map(|wo| (None, wo)).collect();
+                    v.insert(Candidates::new(game, list))
                 }
-                let ok = game.wos.get(&wo).is_some_and(|w| w.net.is_some() && motion::length_sq(w.position) >= 1e-10 && can_grab(game, w) && w.planet_hash() == planet);
-                if ok && create_task(game, None, d, wo, true).is_some() {
-                    available -= 1;
-                    if available == 0 {
-                        break;
-                    }
-                }
-            }
+            };
+            available = ground.take(game, d, available, true);
         }
         if available > 0 {
             let hashes: Vec<i32> = groups.iter().map(|g| game.data.groups[*g].hash).collect();

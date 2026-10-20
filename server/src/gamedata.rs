@@ -123,17 +123,24 @@ struct Prefab {
     /// How often `mentions` looked through the text: a prefab asked about again and again is
     /// parsed, which is cheaper than searching it each time.
     asked: std::sync::atomic::AtomicU32,
+    /// The type of each component and whether it is on the root (its path is empty), by place in
+    /// the prefab's list: what a search for a type goes through, without a lookup of the JSON.
+    kinds: std::sync::OnceLock<Vec<(Option<Box<str>>, bool)>>,
 }
 
 impl Clone for Prefab {
     fn clone(&self) -> Prefab {
-        Prefab { raw: self.raw.clone(), parsed: self.parsed.clone(), asked: Default::default() }
+        Prefab { raw: self.raw.clone(), parsed: self.parsed.clone(), asked: Default::default(), kinds: self.kinds.clone() }
     }
 }
 
 impl Prefab {
     fn value(&self) -> &Value {
         self.parsed.get_or_init(|| serde_json::from_str(self.raw.get()).unwrap_or(Value::Null))
+    }
+
+    fn kinds(&self) -> &[(Option<Box<str>>, bool)] {
+        self.kinds.get_or_init(|| self.value()["components"].as_array().into_iter().flatten().map(|c| (c["type"].as_str().map(Box::from), c["path"] == "")).collect())
     }
 }
 
@@ -142,6 +149,22 @@ impl Prefabs {
     /// such word, so that asking does not parse the prefabs that cannot answer.
     pub fn mentions(&self, group: &str, word: &str) -> bool {
         self.0.get(group).is_some_and(|p| p.parsed.get().is_some() || p.asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= MENTIONS_BEFORE_PARSING || p.raw.get().contains(word))
+    }
+
+    /// The serialized fields of a group's prefab components of type `ty`, in the prefab's order
+    /// (`root_only`: those on the root object). Empty for a group without a prefab.
+    pub fn components(&self, group: &str, ty: &str, root_only: bool) -> Vec<&Value> {
+        let Some(p) = self.0.get(group) else { return Vec::new() };
+        if !self.mentions(group, ty) {
+            return Vec::new();
+        }
+        let list = p.value()["components"].as_array().map(Vec::as_slice).unwrap_or_default();
+        p.kinds().iter().zip(list).filter(|((t, root), _)| t.as_deref() == Some(ty) && (!root_only || *root)).map(|(_, c)| &c["fields"]).collect()
+    }
+
+    /// The types of a group's prefab components on the root object, in the prefab's order.
+    pub fn root_types(&self, group: &str) -> impl Iterator<Item = &str> {
+        self.0.get(group).into_iter().flat_map(|p| p.kinds().iter()).filter(|(_, root)| *root).filter_map(|(t, _)| t.as_deref())
     }
 
     /// Whether any prefab has a component of type `ty`: only the prefabs whose text has the word
@@ -167,8 +190,10 @@ impl std::ops::Index<&str> for Prefabs {
 
 impl std::ops::IndexMut<&str> for Prefabs {
     fn index_mut(&mut self, group: &str) -> &mut Value {
-        let prefab = self.0.entry(group.to_string()).or_insert_with(|| Prefab { raw: serde_json::value::RawValue::NULL.to_owned(), parsed: Default::default(), asked: Default::default() });
+        let prefab = self.0.entry(group.to_string()).or_insert_with(|| Prefab { raw: serde_json::value::RawValue::NULL.to_owned(), parsed: Default::default(), asked: Default::default(), kinds: Default::default() });
         prefab.value();
+        // What is handed out may be changed: the list of kinds is made again from it.
+        prefab.kinds = Default::default();
         prefab.parsed.get_mut().expect("parsed above")
     }
 }
@@ -237,7 +262,7 @@ impl GameData {
             by_hash,
             layouts: Arc::new(layouts),
             assets: Arc::new(assets),
-            group_prefabs: Arc::new(Prefabs(root.group_prefabs.into_iter().map(|(k, raw)| (k, Prefab { raw, parsed: Default::default(), asked: Default::default() })).collect())),
+            group_prefabs: Arc::new(Prefabs(root.group_prefabs.into_iter().map(|(k, raw)| (k, Prefab { raw, parsed: Default::default(), asked: Default::default(), kinds: Default::default() })).collect())),
             panels: Arc::new(root.panels),
             singletons: Arc::new(root.singletons),
         })
@@ -263,10 +288,7 @@ impl GameData {
 
     /// Components of a group's prefab with a given type (a group's machine parameters).
     pub fn prefab_components(&self, group: &str, ty: &str) -> Vec<&Value> {
-        if !self.group_prefabs.mentions(group, ty) {
-            return Vec::new();
-        }
-        self.group_prefabs[group]["components"].as_array().into_iter().flatten().filter(|c| c["type"] == ty).map(|c| &c["fields"]).collect()
+        self.group_prefabs.components(group, ty, false)
     }
 }
 

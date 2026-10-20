@@ -19,6 +19,7 @@ Commands are run from the repository root unless a `cd` is shown. On a shared ma
 | [Parity sweep](#parity-with-the-game-the-sweep) | yes, and the game | no | `server/tests/parity/sweep.sh` |
 | [Completeness map](#completeness-map) | `check`: no | `check` only | `map.py check` |
 | [Benchmarks](#benchmarks-and-fingerprints) | yes, and a save | no | `make bench` and `cargo test ... -- --ignored` |
+| [Efficiency budgets](#efficiency-budgets) | most of them | yes, without the tables (the transport's) | with the unit tests |
 | [Load, chaos, soak and churn](#load-chaos-soak-and-churn) | yes, and a built server | no | `tools/chaos`, `tools/perf` |
 | [Docker](#docker) | part 2 | no | `make docker-test` |
 | [The flip gate](#the-flip-gate-and-the-release-checklist) | yes | no | `make gate` |
@@ -237,7 +238,7 @@ PCDS_BENCH_SAVE=run/worlds/world.json PCDS_RNG_SEED=1 \
 
 | Test | What it does | Variables |
 |---|---|---|
-| `bench::bench` (`make bench SAVE=... PLAYERS=4`) | The tick on a real save with a fixed clock and seed, 4 scripted players by default: microseconds per tick (mean, p50, p99), allocations per tick, and a **fingerprint** of every message the server sends and every byte it saves. | `PCDS_BENCH_SECONDS` (300), `PCDS_BENCH_PLAYERS`, `PCDS_BENCH_ACTION_MS` (players act that often; default they only walk), `PCDS_BENCH_START_DAYS` (the game's clock starts that many days in: the save hash must not depend on it), `PCDS_BENCH_DUMP` (every message and the final save, to a file, to compare two runs), `PCDS_BENCH_SECTIONS=1` (time per part of the tick) |
+| `bench::bench` (`make bench SAVE=... PLAYERS=4`) | The tick on a real save with a fixed clock and seed, 4 scripted players by default: microseconds per tick (mean, p50, p99), user instructions per tick (where the kernel lets the process count them), allocations per tick, and a **fingerprint** of every message the server sends and every byte it saves. | `PCDS_BENCH_SECONDS` (300), `PCDS_BENCH_PLAYERS`, `PCDS_BENCH_ACTION_MS` (players act that often; default they only walk), `PCDS_BENCH_START_DAYS` (the game's clock starts that many days in: the save hash must not depend on it), `PCDS_BENCH_DUMP` (every message and the final save, to a file, to compare two runs), `PCDS_BENCH_SECTIONS=1` (time per part of the tick, and the sections of the slowest ticks), `PCDS_BENCH_ALLOC_SITES=N` (the places in the code that allocate in the tick) |
 | `bench::handoff` | The same run straight, and with the game snapshotted and rebuilt from the snapshot every N seconds (what a hot update does). The two fingerprints must be `EQUAL`. | the same, and `PCDS_BENCH_HANDOFF` |
 | `bench::restart` | An idle world run straight and with the process restarted from its save at half time (the clock starts at 0 again); prints the units' levels of both. What differs is what the save does not hold. | the same |
 | `bench::scale` | Load, save and memory of a world of any size: the time of each step of a start and of an autosave. | `PCDS_BENCH_SAVE` |
@@ -263,12 +264,38 @@ resolution ([clock.md](clock.md)).
 `pcds load` and `pcds probe` (the scripted clients) and `GET /api/status` (`busyPercent`,
 `longestLoopMicros`) are the live equivalents; see [Load, chaos, soak and churn](#load-chaos-soak-and-churn).
 
+Times on a shared machine are not the code's: compare **instructions** (the bench prints them;
+`perf stat -e instructions:u` for a process) and allocations. docs/performance.md has the numbers of
+a build, how to profile and the budgets below.
+
 Ignored soak tests in the same spirit: `soak_growth` (`PCDS_SOAK_SECONDS`, `PCDS_SOAK_STEP`,
 `PCDS_SOAK_REPORT`: what grows over a long game), `drone_farm_runs_for_hours` (`PCDS_FARM_STATIONS`,
 `_DRONES`, `_PAIRS`, `_SECONDS`: stations, drones and a supply and demand that never end; prints per game
 minute the worst tick, the sizes of what could grow and the memory) and `perf_logistics_and_destroy`
 (`PCDS_REVIEW_STATIONS`, `PCDS_REVIEW_SECONDS`: the cost of the logistics search in a world with tens of
 thousands of stored items). Run each with `cargo test --release NAME -- --ignored --nocapture`.
+
+## Efficiency budgets
+
+Tests that fail when the server gets dearer (docs/performance.md has the table of budgets and what
+they were when set). They count what does not depend on the machine's load: allocations, bytes and
+user instructions (the kernel's counter, `perf_event_open`; where the process may not count, the
+instruction budgets say so and are skipped, the allocation and byte budgets still run).
+
+- `bench::budget::*`: a world of about 0, 400 and 1,600 buildings that anyone can build (containers
+  that supply and demand, water collectors, autocrafters, a drone station) with 0 and 4 players:
+  allocations and instructions per tick, the growth of the tick with the world, the bytes per world
+  object of a hot update's snapshot, the save and a join, and the instructions of a snapshot and its
+  restore. `cargo test --release bench::budget::numbers -- --ignored --nocapture` prints the
+  measured numbers to set a budget from.
+- `utp::tests::polling_idle_sessions_and_sending_a_batch_allocate_a_bounded_number_of_times`:
+  allocations of the transport; needs no tables, CI runs it.
+- `tests/hot_update.rs`, `an_idle_server_wakes_up_within_its_budget`: the wake-ups a second of an idle
+  front and bank (the kernel's count of voluntary context switches).
+
+A budget is about one and a half times what the build measured. A failure says which and by how much;
+if the cost is the point of the change, raise the budget in the test and in docs/performance.md in
+the same commit.
 
 ## Load, chaos, soak and churn
 
@@ -292,8 +319,8 @@ clients the program has:
   ```
 
   Variables: `PCDS_LOAD_SERVER` (required), `PCDS_LOAD_PLAYERS`, `PCDS_LOAD_SECONDS`, `PCDS_LOAD_SEED`,
-  `PCDS_LOAD_REUSE_NAMES`, `PCDS_LOAD_CHAT_BYTES`. The bots receive worlds of any size here (the 1 MiB
-  limit on a message is lifted in test builds only).
+  `PCDS_LOAD_REUSE_NAMES`, `PCDS_LOAD_CHAT_BYTES`. The bots receive worlds of any size (a client takes
+  batches up to 256 MiB; the server's own limit on the batches it receives is 1 MiB), so `pcds load` joins a 200,000-object world.
 
 The scripts that start a scratch server, run these and check the server afterwards are in
 `tools/chaos/` (chaos, soak, churn, stress, stall, limits, disk full) and `tools/perf/` (load runs

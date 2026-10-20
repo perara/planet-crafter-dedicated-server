@@ -53,7 +53,7 @@ for `limits.bankWatchdogSeconds` (60) is killed and restarted like after a crash
 only while the world plays (not during a flip, a recovery or a stop).
 The bank writes blocking: a front that stopped reading stalls the world, which loses nothing.
 The frames queued together go out in one write (writev; a frame with a descriptor alone). The
-front loops every 5 ms; with nobody connected and no flip under way it loops every 20 ms (a
+front loops every 5 ms; with nobody connected and no flip under way it loops every 50 ms (a
 datagram or a bank frame wakes it at once; an admin request, a chat reply, a stop signal and
 Steam's callbacks wait for the frame).
 

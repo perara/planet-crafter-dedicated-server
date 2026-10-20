@@ -40,10 +40,12 @@ Python 3.9+, standard library only.
 
 ## perf/: what the server costs
 
+The numbers of a build, how to read them and the budgets that hold them are in [docs/performance.md](../docs/performance.md).
+
 | Tool | What |
 |---|---|
 | `bench.py` | The game loop's cost per tick for several player counts, best of N (drives the ignored `bench::bench`). |
-| `loadrun.py` | What a real server (front and bank) costs idle and under `pcds load` players. |
+| `loadrun.py` | What a real server (front and bank) costs idle and under `pcds load` players: CPU, instructions, context switches, memory, round trips, and what went over the wire (datagrams, bytes, acknowledgements). A save on a DLC planet: `PCDS_TOOLS_RULES='{"world":{"dlcPlanets":["Humble"]}}'` (merged over the rules of every tool). |
 | `profile.py`, `pstack.py` | `perf record` of the front and bank under load, a save or idle; and the call graph read as plain tables. |
 | `memory.py` | The front's and bank's RSS, PSS and anonymous memory over time, with saves. |
 | `scale.py` | How the server behaves on worlds of growing size (start, save, memory). |
