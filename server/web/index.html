@@ -7,9 +7,10 @@
 <style>
   :root {
     --bg: #eef2f5; --panel: #ffffff; --panel2: #f6f8fa; --text: #17202b; --muted: #5f6b7d; --line: #dbe1e8;
-    --accent: #1f8a64; --accent2: #2d7fb8; --accent-soft: #e1f3eb; --danger: #c2412d; --danger-soft: #fbe7e3;
-    --warn: #a36a0a; --warn-soft: #fbf0d9; --chip: #edf1f5; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 4px 16px rgba(16,24,40,.06);
-    --c1: #1f8a64; --c2: #2d7fb8; --c3: #8a5cc2; --c4: #d0822a; --c5: #c2412d; --c6: #13a3a3;
+    --accent: #177554; --accent2: #2874ab; --accent-soft: #e1f3eb; --danger: #b53a27; --danger-soft: #fbe7e3;
+    --warn: #8f5c08; --warn-soft: #fbf0d9; --chip: #edf1f5; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 4px 16px rgba(16,24,40,.06);
+    --on-accent: #fff; --on-danger: #fff;
+    --c1: #177554; --c2: #2874ab; --c3: #8a5cc2; --c4: #d0822a; --c5: #c2412d; --c6: #13a3a3;
     --map-bg: #f3f6f8; --map-grid: rgba(80,100,120,.12); --map-building: rgba(70,85,105,.55);
     color-scheme: light;
   }
@@ -17,6 +18,7 @@
     --bg: #0d1117; --panel: #161b23; --panel2: #1c222c; --text: #e6eaf0; --muted: #94a0b2; --line: #29313d;
     --accent: #45c98f; --accent2: #5aa9e6; --accent-soft: #163327; --danger: #ef7a66; --danger-soft: #3a1d18;
     --warn: #e6b555; --warn-soft: #3a2d12; --chip: #232a35; --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.25);
+    --on-accent: #0d1117; --on-danger: #0d1117;
     --c1: #45c98f; --c2: #5aa9e6; --c3: #b18be8; --c4: #f0a54d; --c5: #ef7a66; --c6: #3fd0d0;
     --map-bg: #10161d; --map-grid: rgba(150,170,190,.10); --map-building: rgba(160,175,195,.55);
     color-scheme: dark;
@@ -26,7 +28,8 @@
       --bg: #0d1117; --panel: #161b23; --panel2: #1c222c; --text: #e6eaf0; --muted: #94a0b2; --line: #29313d;
       --accent: #45c98f; --accent2: #5aa9e6; --accent-soft: #163327; --danger: #ef7a66; --danger-soft: #3a1d18;
       --warn: #e6b555; --warn-soft: #3a2d12; --chip: #232a35; --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.25);
-      --c1: #45c98f; --c2: #5aa9e6; --c3: #b18be8; --c4: #f0a54d; --c5: #ef7a66; --c6: #3fd0d0;
+      --on-accent: #0d1117; --on-danger: #0d1117;
+    --c1: #45c98f; --c2: #5aa9e6; --c3: #b18be8; --c4: #f0a54d; --c5: #ef7a66; --c6: #3fd0d0;
       --map-bg: #10161d; --map-grid: rgba(150,170,190,.10); --map-building: rgba(160,175,195,.55);
       color-scheme: dark;
     }
@@ -53,7 +56,7 @@
   .side nav button svg { width: 18px; height: 18px; flex: none; }
   .side nav button:hover { background: var(--chip); color: var(--text); }
   .side nav button[aria-current=page] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-  .side nav .count { margin-left: auto; font-size: 11px; background: var(--accent); color: #fff; border-radius: 99px; padding: 0 7px; min-width: 20px; text-align: center; }
+  .side nav .count { margin-left: auto; font-size: 11px; background: var(--accent); color: var(--on-accent); border-radius: 99px; padding: 0 7px; min-width: 20px; text-align: center; }
   .side nav kbd { margin-left: auto; font-size: 10px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; opacity: .7; }
   .side nav .count + kbd { margin-left: 6px; }
   .side .foot { margin-top: auto; display: flex; flex-direction: column; gap: 8px; padding: 8px; font-size: 12px; color: var(--muted); }
@@ -81,7 +84,7 @@
   /* ---- cards and grids ---- */
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; box-shadow: var(--shadow); min-width: 0; }
   .card > .head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
-  .card > .head .right { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+  .card > .head .right { margin-left: auto; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
   .view > * + .card, .view > * + .grid, #knobs > .card + .card, .stack > * + * { margin-top: 16px; }
   .sub { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
   .grid { display: grid; gap: 16px; }
@@ -105,10 +108,10 @@
   button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
   button:active:not(:disabled) { transform: translateY(1px); }
   button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent2); outline-offset: 1px; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
   button.primary:hover:not(:disabled) { box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 35%, transparent); }
   button.danger { color: var(--danger); }
-  button.danger.solid { background: var(--danger); border-color: var(--danger); color: #fff; }
+  button.danger.solid { background: var(--danger); border-color: var(--danger); color: var(--on-danger); }
   button.small { padding: 3px 9px; font-size: 12.5px; border-radius: 7px; }
   button.ghost { background: none; border-color: transparent; }
   button:disabled { opacity: .5; cursor: default; }
@@ -265,9 +268,9 @@
   .skel { background: linear-gradient(90deg, var(--chip), var(--panel2), var(--chip)); background-size: 200% 100%; animation: shimmer 1.4s linear infinite; border-radius: 8px; color: transparent !important; }
   @keyframes shimmer { to { background-position: -200% 0; } }
 
-  @media (max-width: 1100px) { .cols { grid-template-columns: 1fr; } .mapwrap { grid-template-columns: 1fr; } .mapbox { height: 62vh; } }
+  @media (max-width: 1100px) { .cols { grid-template-columns: minmax(0, 1fr); } .mapwrap { grid-template-columns: minmax(0, 1fr); } .mapbox { height: 62vh; } }
   @media (max-width: 860px) {
-    .shell { grid-template-columns: 1fr; }
+    .shell { grid-template-columns: minmax(0, 1fr); }
     .side { position: sticky; top: 0; z-index: 6; height: auto; flex-direction: row; align-items: center; padding: 8px; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }
     .brand { padding: 0 6px; } .brand div { display: none; }
     .side nav { flex-direction: row; }
@@ -277,7 +280,7 @@
     .top { position: static; padding: 12px 16px; }
     .content { padding: 16px 16px 64px; }
     .banner { margin: 12px 16px 0; }
-    .players { grid-template-columns: 1fr; }
+    .players { grid-template-columns: minmax(0, 1fr); }
   }
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 </style>
@@ -321,6 +324,7 @@
       <h2>Admin token</h2>
       <p class="sub" style="margin-top:6px">Run <code>pcds gui</code> to open this page with the token, or paste the one <code>pcds token</code> prints.</p>
       <form class="row" id="tokenForm"><input id="tokenInput" type="password" autocomplete="off" aria-label="Admin token" placeholder="Token"><button class="primary">Sign in</button></form>
+      <p class="err" id="loginNote" role="alert" style="margin-top:10px" hidden></p>
     </section>
 
     <div class="content" id="app" hidden>
@@ -571,7 +575,7 @@
   </div>
 </div>
 <div id="toasts" aria-live="polite"></div>
-<dialog id="dlg"><form method="dialog"><h2 id="dlgTitle"></h2><div class="body" id="dlgBody"></div><div class="acts"><button value="cancel" id="dlgCancel">Cancel</button><button value="ok" class="primary" id="dlgOk">OK</button></div></form></dialog>
+<dialog id="dlg" aria-labelledby="dlgTitle"><form method="dialog"><h2 id="dlgTitle"></h2><div class="body" id="dlgBody"></div><div class="acts"><button value="cancel" id="dlgCancel">Cancel</button><button value="ok" class="primary" id="dlgOk">OK</button></div></form></dialog>
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
@@ -671,7 +675,14 @@ async function api(method, path, body, timeoutMs) {
     throw new Error(e.name === 'AbortError' ? 'the server did not answer in time' : 'the server cannot be reached');
   } finally { clearTimeout(timer); }
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401) { showLogin(); const e = new Error('token rejected'); e.auth = true; throw e; }
+  if (res.status === 401) {
+    // The token is wrong or the server runs with another one (it reads the token at its start): forget it and say so.
+    token = '';
+    try { localStorage.removeItem('pcdsToken'); } catch (x) {}
+    clearTimeout(pollTimer);
+    showLogin('The server did not accept that token. "pcds gui" opens this page with the right one, "pcds token" prints it; after a change of PCDS_ADMIN_TOKEN in server.env the server needs "pcds restart".');
+    const e = new Error('token rejected'); e.auth = true; throw e;
+  }
   if (!res.ok) { const e = new Error(data.error || res.statusText || `HTTP ${res.status}`); e.key = data.key; e.status = res.status; throw e; }
   return data;
 }
@@ -694,6 +705,8 @@ function ask({ title, body, ok, danger }) {
   const dlg = $('dlg');
   $('dlgTitle').textContent = title;
   $('dlgBody').replaceChildren(...[].concat(body || []).map(x => x instanceof Node ? x : h('p', { style: 'margin:0' }, x)));
+  // A field with no label of its own is named by the question.
+  for (const i of $('dlgBody').querySelectorAll('input:not([type=checkbox]), select, textarea')) if (!i.labels.length && !i.getAttribute('aria-label')) i.setAttribute('aria-label', title);
   $('dlgOk').textContent = ok || 'OK';
   $('dlgOk').className = danger ? 'danger solid' : 'primary';
   return new Promise(resolve => {
@@ -718,7 +731,7 @@ function show(name, replace) {
   const hash = '#/' + name;
   if (location.hash !== hash) history[replace ? 'replaceState' : 'pushState'](null, '', hash);
   if (onShow[name]) onShow[name]();
-  if (status) render(status);
+  if (status) status.state === 'stopped' ? renderStopped(status) : render(status);
 }
 for (const b of document.querySelectorAll('#nav button')) b.onclick = () => show(b.dataset.view);
 document.addEventListener('click', e => { const go = e.target.closest('[data-go]'); if (go) show(go.dataset.go); });
@@ -751,7 +764,7 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { ma
 
 // ---- polling GET /api/status ----
 let status = null, failures = 0, pollTimer = 0, inflight = false;
-function showLogin() { $('login').hidden = false; $('app').hidden = true; setPill('down', 'Signed out'); $('hdrSub').textContent = 'Admin token needed'; }
+function showLogin(why) { if (why !== undefined) { $('loginNote').hidden = !why; $('loginNote').textContent = why; } $('login').hidden = false; $('app').hidden = true; setPill('down', 'Signed out'); $('hdrSub').textContent = 'Admin token needed'; }
 async function refresh() {
   clearTimeout(pollTimer);
   if (!token) { showLogin(); return; }
@@ -1495,6 +1508,7 @@ function renderStopped(s) {
   if (current === 'world' && worldsSig !== [s.worldControl, s.state, worldsData && worldsData.current].join('|')) loadWorlds();
   // The Updates page says the world is stopped and what is possible (its buttons are off).
   if (current === 'updates') renderUpdates(s);
+  if (current === 'tools') { $('bans').dataset.sig = 'stopped'; $('bans').replaceChildren(h('div', { class: 'empty' }, 'The ban list is read from the running world: start it first.')); }
 }
 async function startWorld(name, btn) {
   const r = await act(r => `World ${r.world} is running`, () => api('POST', '/api/world/start', name ? { world: name } : {}, 210000), btn);
@@ -1556,7 +1570,10 @@ function renderUpdates(s) {
   const noBanks = !b.dir;
   const stopped = worldStopped(s);
   for (const id of ['updNow', 'updCheck', 'updInstall']) $(id).disabled = !!busy || noBanks || stopped;
-  $('updRollback').disabled = !!busy || stopped;
+  // Nothing to go back to while the other bank is empty (a server that was never updated).
+  const noOther = !noBanks && !(b.installed || []).some(x => x.info && (!b.live || x.bank !== b.live.bank));
+  $('updRollback').disabled = !!busy || stopped || noOther;
+  $('updRollback').title = noOther ? 'The other bank is empty: there is no earlier release to go back to' : '';
   $('updNow').textContent = u.available ? `Update to ${u.latest}` : 'Update now';
   $('updNote').textContent = stopped ? 'The world is stopped, so no release runs it and there is nothing to hand over: start the world first, then update. (pcds upgrade VERSION --restart on the host installs a release and restarts the server.)' : noBanks ? 'This server runs from a build, not from installed banks (pcds run): updates need pcds run; Roll back flips between two copies of this build.'
     : `${rollbackBlocked(s) ? `Rolling back needs a restart (${rollbackBlocked(s)}): pcds upgrade --rollback --restart on the host. ` : ''}Automatic updates: ${u.auto ? `on, a check every ${u.checkHours} h` : 'off (rule update.auto in Config)'}. Releases from ${u.releases || 'GitHub'}.`;
@@ -1618,6 +1635,7 @@ $('updRollback').onclick = async e => {
 };
 
 // ---- config: drawn from the schema GET /api/config serves; no setting is named here ----
+let cfgTried = 0;
 let edits = {}, inputs = new Map(), errors = new Map(), knobEls = [], bad = new Set();
 function label(key) {
   const s = key.split('.').pop().replace(/([a-z])([A-Z])(?=[a-z])/g, (_, a, b) => a + ' ' + b.toLowerCase()).replace(/([a-z])([A-Z])/g, '$1 $2');
@@ -1709,7 +1727,13 @@ function filterConfig() {
 $('cfgSearch').oninput = filterConfig; $('cfgChanged').onchange = filterConfig;
 function dirty() { const n = Object.keys(edits).length; $('saveConfig').disabled = !n || bad.size > 0; $('saveConfig').textContent = n ? `Save ${n} change${n > 1 ? 's' : ''}` : 'Save changes'; $('configMsg').textContent = n ? 'Unsaved changes' : ''; }
 async function loadConfig() {
-  try { renderConfig((await api('GET', '/api/config')).knobs); } catch (e) { if (!e.auth) toast(e.message, 'err'); }
+  try { renderConfig((await api('GET', '/api/config')).knobs); }
+  catch (e) {
+    if (e.auth) return;
+    // A stopped world has no rules to show: say so on the page, and load them when it runs again.
+    if (status && status.state === 'stopped') { knobEls = []; $('knobs').replaceChildren(h('div', { class: 'empty' }, 'The world is stopped, and the settings are read from the running world: start it first (World page). They are kept in rules.json, access.json and server.env.')); }
+    else toast(e.message, 'err');
+  }
 }
 onShow.config = () => { if (!Object.keys(edits).length) loadConfig(); };
 $('saveConfig').onclick = async e => {
@@ -1907,6 +1931,7 @@ function render(s) {
   renderPauseButtons(s);
   if (current === 'world' && worldsData && worldsSig !== [s.worldControl, s.state, worldsData.current].join('|')) loadWorlds();
   updateMapPlayers(s);
+  if (current === 'config' && !knobEls.length && Date.now() - cfgTried > 10000) { cfgTried = Date.now(); loadConfig(); }
   if (current === 'overview') renderOverview(s);
   if (current === 'players') renderPlayers(s);
   if (current === 'world') renderWorld(s);
@@ -1919,7 +1944,7 @@ $('signOut').onclick = () => {
   token = '';
   try { localStorage.removeItem('pcdsToken'); } catch (e) {}
   clearTimeout(pollTimer);
-  showLogin();
+  showLogin('');
 };
 $('tokenForm').onsubmit = e => {
   e.preventDefault();
