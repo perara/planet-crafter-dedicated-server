@@ -744,3 +744,50 @@ fn a_hundred_loads_and_unloads_leave_nothing_and_cost_no_tick_time() {
     assert!(after < before * 5.0 + 5000.0, "tick cost before {before:.0} ns, after {after:.0} ns");
     println!("100 cycles: tick cost {before:.0} ns before, {after:.0} ns after");
 }
+
+// ---- the cost of a host call (security review v0.7+) ---------------------------------------------
+
+/// A module that calls one host function in a loop for as long as its fuel lasts, with the buffers
+/// of a plugin that wants the host to do the most work: a big range of its memory (16 pages,
+/// 1 MiB) and a world with many players. `call` is the loop body (an expression of no result).
+fn host_call_loop(call: &str, pages: u32) -> String {
+    let body = format!("(local $i i32) (loop $l {call} (local.set $i (i32.add (local.get $i) (i32.const 1))) (br_if $l (i32.lt_u (local.get $i) (i32.const 1000000)))) (i32.const 0)");
+    module(&body, "")
+        .replacen("(module", "(module (import \"pcds\" \"log\" (func $log (param i32 i32 i32))) (import \"pcds\" \"http_request\" (func $http (param i32 i32) (result i64)))", 1)
+        .replace("(memory (export \"memory\") 1)", &format!("(memory (export \"memory\") {pages})"))
+}
+
+/// One event of a plugin that asks the host for as much work as one call can: it is over within
+/// the time its fuel buys, however large the buffers it names. (Fuel is the plugin's budget of
+/// work; a host function that does work by the byte must take that work out of it.)
+fn one_event_takes(call: &str, caps: &[&str], players: u32) -> (Duration, bool) {
+    let dir = fresh_dir("host-call-cost");
+    install(&dir, "greedy", &host_call_loop(call, 20), caps, SUBSCRIBE_CHAT, None);
+    let mut host = boot(&dir);
+    let mut world = Mock { players, ..Default::default() };
+    let t = Instant::now();
+    host.run(&mut world, &chat("x"), 0);
+    (t.elapsed(), plugin(&host, "greedy").stats.faults == 1)
+}
+
+#[test]
+fn a_host_call_with_a_megabyte_buffer_is_paid_for_in_fuel() {
+    let bound = Duration::from_millis(300);
+    // `log` needs no capability at all: a plugin that asks for nothing could keep the game thread busy.
+    let (took, cut) = one_event_takes("(call $log (i32.const 2) (i32.const 0) (i32.const 1048576))", &["event.chat"], 0);
+    assert!(took < bound && cut, "log with a 1 MiB range: {took:?} (cut by its fuel: {cut})");
+    let (took, cut) = one_event_takes("(drop (call $say (i32.const 0) (i32.const 1048576)))", &CHAT_SAY, 0);
+    assert!(took < bound && cut, "say with a 1 MiB range: {took:?} (cut by its fuel: {cut})");
+    let (took, cut) = one_event_takes("(drop (call $patch (i32.const 0) (i32.const 1048576)))", &["event.chat", "rules.write"], 0);
+    assert!(took < bound && cut, "rules_patch with a 1 MiB range: {took:?} (cut by its fuel: {cut})");
+    // The request is copied before anything is checked, capability included.
+    let (took, cut) = one_event_takes("(drop (call $http (i32.const 0) (i32.const 1179648)))", &["event.chat"], 0);
+    assert!(took < bound && cut, "http_request with a 1.1 MiB range, no capability: {took:?} (cut by its fuel: {cut})");
+}
+
+#[test]
+fn asking_the_world_again_and_again_is_paid_for_in_fuel() {
+    let bound = Duration::from_millis(300);
+    let (took, cut) = one_event_takes("(drop (call $query (i32.const 1) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 1048576)))", &["event.chat", "world.read"], 2000);
+    assert!(took < bound && cut, "query of 2000 players into 1 MiB: {took:?} (cut by its fuel: {cut})");
+}

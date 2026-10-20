@@ -517,6 +517,7 @@ The change is in `front/` and `admin.rs`, which a hot update does not replace: i
 | What | Limit | When it is over |
 |---|---|---|
 | work per event | fuel: 1,000,000 by default (about 0.3 ms of plain arithmetic), 20,000,000 at most; the manifest may ask for less or more up to the maximum, the admin may lower it | the call stops with a trap: a fault |
+| the host's work for a call | each host call costs 200 fuel besides the call itself, and each byte the host copies for it (a text, a `query` answer) 1, each byte it parses (a rules patch, an HTTP request) 16; a `log`, `say`, `tell` or `kick` text is cut at 4096 bytes, a rules patch over 64 KiB is refused (`-1`); a `query` is built once per call | the call runs out of fuel: a fault |
 | work for `pcds_save` | 5,000,000 by default, 50,000,000 at most | a fault; the plugin keeps its older saved state |
 | starting a plugin | 100,000,000 | the plugin is `failed` |
 | memory | 64 pages (4 MiB) by default, 1024 (64 MiB) at most; one memory, one table | growth fails (the module sees -1); a module that needs more at its start does not start |

@@ -128,73 +128,105 @@ fn slice(memory: &[u8], ptr: u32, len: u32) -> Result<&[u8], Error> {
     end.map(|end| &memory[ptr as usize..end]).ok_or_else(|| trap("the module gave the host a pointer outside its memory"))
 }
 
-fn text(memory: &[u8], ptr: u32, len: u32) -> Result<String, Error> {
-    Ok(String::from_utf8_lossy(slice(memory, ptr, len)?).into_owned())
+/// Takes `fuel` out of the call's budget: the host's work for a plugin is the plugin's to pay,
+/// or a module that names big buffers would have the host copy, convert and parse for as long as
+/// its instructions last (a million-byte `log` costs the host a thousand times what the call
+/// instruction costs the module). Out of fuel ends the call as any other overrun does.
+fn charge(c: &mut Caller<'_, Inner>, fuel: u64) -> Result<(), Error> {
+    let left = c.get_fuel()?;
+    if fuel > left {
+        c.set_fuel(0)?;
+        return Err(Error::from(wasmi::TrapCode::OutOfFuel));
+    }
+    c.set_fuel(left - fuel)
+}
+
+/// At most `max` bytes at `ptr` as text, paid for in fuel: the call, and a fuel for each byte.
+/// A text longer than `max` is cut there (every user of the text cuts it shorter still).
+fn text(c: &mut Caller<'_, Inner>, ptr: u32, len: u32, max: usize) -> Result<String, Error> {
+    let len = len.min(max as u32);
+    charge(c, limits::HOST_CALL_FUEL + len as u64 * limits::FUEL_PER_BYTE)?;
+    let (mem, _) = split(c)?;
+    Ok(String::from_utf8_lossy(slice(mem, ptr, len)?).into_owned())
 }
 
 fn linker(engine: &Engine) -> Result<Linker<Inner>, String> {
     let mut l = <Linker<Inner>>::new(engine);
     let e = |e: wasmi::errors::LinkerError| e.to_string();
     l.func_wrap("pcds", "log", |mut c: Caller<'_, Inner>, level: i32, ptr: u32, len: u32| -> Result<(), Error> {
-        let (mem, inner) = split(&mut c)?;
         let level = match level {
             0 => Level::Error,
             1 => Level::Warn,
             3 => Level::Debug,
             _ => Level::Info,
         };
-        inner.ctx.log(level, &text(mem, ptr, len)?);
+        // A log line is cut to LOG_LINE_CHARS characters: more bytes than that are never looked at.
+        let line = text(&mut c, ptr, len, limits::LOG_LINE_CHARS * 4)?;
+        c.data_mut().ctx.log(level, &line);
         Ok(())
     })
     .map_err(e)?;
     l.func_wrap("pcds", "query", |mut c: Caller<'_, Inner>, kind: u32, _arg: u32, _arg_len: u32, out: u32, cap: u32| -> Result<i32, Error> {
+        charge(&mut c, limits::HOST_CALL_FUEL)?;
         let (mem, inner) = split(&mut c)?;
+        // The answer is built once for a call (the world stands still during it): asking again costs the copy.
         let answer = match inner.ctx.query(kind) {
             Ok(a) => a,
             Err(code) => return Ok(code),
         };
         let n = answer.len().min(cap as usize);
+        let total = answer.len() as i32;
         let end = (out as usize).checked_add(n).filter(|e| *e <= mem.len()).ok_or_else(|| trap("the module gave the host a buffer outside its memory"))?;
         mem[out as usize..end].copy_from_slice(&answer[..n]);
-        Ok(answer.len() as i32)
+        charge(&mut c, n as u64 * limits::FUEL_PER_BYTE)?;
+        Ok(total)
     })
     .map_err(e)?;
     l.func_wrap("pcds", "say", |mut c: Caller<'_, Inner>, ptr: u32, len: u32| -> Result<i32, Error> {
-        let (mem, inner) = split(&mut c)?;
-        let t = text(mem, ptr, len)?;
-        Ok(inner.ctx.say(&t))
+        let t = text(&mut c, ptr, len, limits::MAX_TEXT_BYTES)?;
+        Ok(c.data_mut().ctx.say(&t))
     })
     .map_err(e)?;
     l.func_wrap("pcds", "tell", |mut c: Caller<'_, Inner>, client: u64, ptr: u32, len: u32| -> Result<i32, Error> {
-        let (mem, inner) = split(&mut c)?;
-        let t = text(mem, ptr, len)?;
-        Ok(inner.ctx.tell(client, &t))
+        let t = text(&mut c, ptr, len, limits::MAX_TEXT_BYTES)?;
+        Ok(c.data_mut().ctx.tell(client, &t))
     })
     .map_err(e)?;
     l.func_wrap("pcds", "kick", |mut c: Caller<'_, Inner>, client: u64, ptr: u32, len: u32| -> Result<i32, Error> {
-        let (mem, inner) = split(&mut c)?;
-        let t = text(mem, ptr, len)?;
-        Ok(inner.ctx.kick(client, &t))
+        let t = text(&mut c, ptr, len, limits::MAX_TEXT_BYTES)?;
+        Ok(c.data_mut().ctx.kick(client, &t))
     })
     .map_err(e)?;
     l.func_wrap("pcds", "teleport", |mut c: Caller<'_, Inner>, client: u64, x: f32, y: f32, z: f32| -> i32 { c.data_mut().ctx.teleport(client, [x, y, z]) }).map_err(e)?;
     l.func_wrap("pcds", "rules_patch", |mut c: Caller<'_, Inner>, ptr: u32, len: u32| -> Result<i32, Error> {
-        let (mem, inner) = split(&mut c)?;
-        let t = text(mem, ptr, len)?;
-        Ok(inner.ctx.rules_patch(&t))
+        if len as usize > limits::MAX_PATCH_BYTES {
+            c.data_mut().ctx.refused += 1;
+            return Ok(pcds_plugin_api::host::E_BAD);
+        }
+        // Parsed as JSON before anything else is looked at: a fuel for each byte copied and more for the parse.
+        charge(&mut c, len as u64 * limits::FUEL_PER_PARSED_BYTE)?;
+        let t = text(&mut c, ptr, len, limits::MAX_PATCH_BYTES)?;
+        Ok(c.data_mut().ctx.rules_patch(&t))
     })
     .map_err(e)?;
     // ABI 1.2. The request is a buffer of its own size limit (a body may be a megabyte): a length over
     // it is refused with a code, a range outside the memory traps as everywhere.
     l.func_wrap("pcds", "http_request", |mut c: Caller<'_, Inner>, ptr: u32, len: u32| -> Result<i64, Error> {
+        charge(&mut c, limits::HOST_CALL_FUEL)?;
         let (mem, inner) = split(&mut c)?;
         let end = (ptr as usize).checked_add(len as usize).filter(|e| *e <= mem.len()).ok_or_else(|| trap("the module gave the host a pointer outside its memory"))?;
         if len as usize > limits::MAX_HTTP_REQUEST {
             inner.ctx.refused += 1;
             return Ok(pcds_plugin_api::host::E_BAD as i64);
         }
+        // Nothing is copied for a plugin that may not make requests.
+        if let Some(code) = inner.ctx.http_refused() {
+            return Ok(code);
+        }
         let bytes = mem[ptr as usize..end].to_vec();
-        Ok(inner.ctx.http_request(&bytes))
+        // The copy, and the request taken apart, checked and copied again (a byte of URL, header or body costs the host more than a byte of text).
+        charge(&mut c, len as u64 * limits::FUEL_PER_PARSED_BYTE)?;
+        Ok(c.data_mut().ctx.http_request(&bytes))
     })
     .map_err(e)?;
     Ok(l)

@@ -92,12 +92,15 @@ pub struct Ctx {
     /// `net.http`: set when the capability is granted.
     pub net: Option<NetCtx>,
     http_second: (Instant, u32),
+    /// The answers to `query` in this call, by kind: the world stands still during a call, so an
+    /// answer is built once however often it is asked for.
+    answers: Vec<(u32, Vec<u8>)>,
 }
 
 impl Ctx {
     pub fn new(id: &str, grant: Grant) -> Ctx {
         let now = Instant::now();
-        Ctx { id: id.to_string(), grant, world: None, actions: Vec::new(), denied: 0, refused: 0, second: (now, 0), rules_second: (now, 0), log_second: (now, 0), log_dropped: 0, net: None, http_second: (now, 0) }
+        Ctx { id: id.to_string(), grant, world: None, actions: Vec::new(), denied: 0, refused: 0, second: (now, 0), rules_second: (now, 0), log_second: (now, 0), log_dropped: 0, net: None, http_second: (now, 0), answers: Vec::new() }
     }
 
     /// A fresh context for the same plugin (a restart after a fault): same id, grant and network access.
@@ -114,11 +117,13 @@ impl Ctx {
         let ptr: *const (dyn World + '_) = world;
         self.world = Some(WorldRef(unsafe { std::mem::transmute::<*const (dyn World + '_), *const (dyn World + 'static)>(ptr) }));
         self.actions.clear();
+        self.answers.clear();
     }
 
     /// Ends a call: the plugin reads no more, and the queued actions go to the host.
     pub fn end(&mut self) -> Vec<Action> {
         self.world = None;
+        self.answers.clear();
         std::mem::take(&mut self.actions)
     }
 
@@ -172,10 +177,13 @@ impl Ctx {
         }
     }
 
-    /// `query`: the answer's bytes, or the error code.
-    pub fn query(&mut self, kind: u32) -> Result<Vec<u8>, i32> {
+    /// `query`: the answer's bytes, or the error code. Built the first time it is asked for in a call.
+    pub fn query(&mut self, kind: u32) -> Result<&[u8], i32> {
         if !self.allowed(caps::WORLD_READ) {
             return Err(E_DENIED);
+        }
+        if let Some(i) = self.answers.iter().position(|(k, _)| *k == kind) {
+            return Ok(&self.answers[i].1);
         }
         let Some(world) = self.world() else { return Err(E_UNSUPPORTED) };
         let mut w = Writer::new();
@@ -187,7 +195,8 @@ impl Ctx {
             }
             _ => return Err(E_UNSUPPORTED),
         }
-        Ok(w.0)
+        self.answers.push((kind, w.0));
+        Ok(&self.answers[self.answers.len() - 1].1)
     }
 
     /// The world's facts for a data plugin.
@@ -231,6 +240,18 @@ impl Ctx {
             return E_BAD;
         }
         self.queue(Action::Teleport(client, position))
+    }
+
+    /// The answer of `http_request` for a plugin that could not make a request at all (no capability,
+    /// no `[net]`), so that the host copies nothing for it; None: it may.
+    pub fn http_refused(&mut self) -> Option<i64> {
+        if !self.allowed(caps::NET_HTTP) {
+            Some(E_DENIED as i64)
+        } else if self.net.is_none() {
+            Some(E_UNSUPPORTED as i64)
+        } else {
+            None
+        }
     }
 
     /// `http_request`: a ticket (positive), or the error code. The request is checked here, as far as

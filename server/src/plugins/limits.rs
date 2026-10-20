@@ -38,6 +38,17 @@ pub const FLIP_BUDGET: Duration = Duration::from_millis(25);
 /// it; this is for finding it).
 pub const SLOW_CALL: Duration = Duration::from_millis(5);
 
+/// What the host's work for a plugin costs it in fuel (wasm.rs `charge`): a host call, then each
+/// byte the host copies for it and each it parses (JSON, a URL, headers: several times a copy).
+/// A million fuel is about a third of a millisecond, so this keeps a call that names big buffers
+/// to the time its fuel is worth. A `log` or `say` text is cut at `MAX_TEXT_BYTES` (every user of
+/// it cuts it shorter), a rules patch is refused over `MAX_PATCH_BYTES`.
+pub const HOST_CALL_FUEL: u64 = 200;
+pub const FUEL_PER_BYTE: u64 = 1;
+pub const FUEL_PER_PARSED_BYTE: u64 = 16;
+pub const MAX_TEXT_BYTES: usize = 4096;
+pub const MAX_PATCH_BYTES: usize = 64 << 10;
+
 /// Actions a plugin may queue in one call, and in one second.
 pub const ACTIONS_PER_CALL: usize = 16;
 pub const ACTIONS_PER_SECOND: u32 = 200;
