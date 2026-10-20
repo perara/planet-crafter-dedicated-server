@@ -59,6 +59,7 @@ mod chat_hooks;
 mod clients;
 mod flip;
 mod history;
+mod metrics;
 mod ops;
 mod queue;
 mod snapshot;

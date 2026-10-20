@@ -274,7 +274,7 @@ impl Front {
             Handler::WorldStart => self.answer_world_start(body),
             Handler::WorldSwitch => self.answer_world_switch(body),
             Handler::Status => (200, self.stopped_status().to_string()),
-            Handler::Worlds => (200, crate::dashboard::worlds(&self.save).to_string()),
+            Handler::Worlds => (200, crate::worlds::overview(&self.save).to_string()),
         }
     }
 

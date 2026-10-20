@@ -13,7 +13,9 @@
 //! refuses a second one in the same second, the command line numbers it (cli::free_path).
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde_json::{json, Value};
 
 /// The folder of a world's backups, beside its save.
 pub const BACKUPS: &str = "backups";
@@ -97,6 +99,26 @@ pub fn worlds(save_path: &str) -> Vec<Entry> {
     list(dir(save_path), &|n| !NOT_WORLDS.contains(&n))
 }
 
+/// The worlds beside the save and this world's backups as the admin API lists them (GET
+/// /api/worlds): by name, with their size and modification time (Unix seconds).
+pub fn overview(save_path: &str) -> Value {
+    let current = stem(save_path);
+    let listed = |mut entries: Vec<Entry>| {
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        entries
+            .into_iter()
+            .filter_map(|e| {
+                let modified = e.modified?.duration_since(UNIX_EPOCH).ok()?.as_secs();
+                Some(json!({ "name": e.name, "bytes": e.bytes, "modified": modified }))
+            })
+            .collect::<Vec<Value>>()
+    };
+    let worlds = listed(worlds(save_path));
+    // save::backup's names: <world>-YYYYMMDD-HHMMSS.
+    let backups = listed(list(&backups(save_path), &|n| n.strip_prefix(&format!("{current}-")).is_some_and(|t| t.len() == 15)));
+    json!({ "current": current, "worlds": worlds, "backups": backups })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +165,20 @@ mod tests {
         let all = list(&dir, &|_| true);
         assert!(all.iter().any(|e| e.name == "access") && all.iter().all(|e| e.bytes == 2 && e.modified.is_some()));
         assert!(list(&dir.join("nothing"), &|_| true).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn worlds_lists_saves_and_this_worlds_backups() {
+        let dir = std::env::temp_dir().join(format!("pcds-worlds-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("backups")).unwrap();
+        for f in ["world.json", "other.json", "access.json", "rules.json", "world.json.tmp", "backups/world-20261018-120000.json", "backups/other-20261018-120000.json"] {
+            std::fs::write(dir.join(f), "{}").unwrap();
+        }
+        let w = overview(dir.join("world.json").to_str().unwrap());
+        let names = |k: &str| w[k].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!((w["current"].as_str(), names("worlds"), names("backups")), (Some("world"), vec!["other".to_string(), "world".into()], vec!["world-20261018-120000".to_string()]));
+        assert_eq!(w["worlds"][0]["bytes"], 2);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

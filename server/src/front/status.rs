@@ -18,12 +18,12 @@ impl Front {
             }
         }
         let banks: Vec<u32> = [&self.live, &self.next].into_iter().flatten().map(|b| b.child.id()).collect();
-        let (mut cpu, mut memory) = (crate::dashboard::reaped_children_cpu(), 0);
-        let me = crate::dashboard::process();
+        let (mut cpu, mut memory) = (super::metrics::reaped_children_cpu(), 0);
+        let me = super::metrics::process();
         cpu += me["cpuSeconds"].as_f64().unwrap_or(0.0);
         memory += me["memoryBytes"].as_u64().unwrap_or(0);
         for pid in banks {
-            let (c, m) = crate::dashboard::process_of(pid);
+            let (c, m) = super::metrics::process_of(pid);
             cpu += c;
             memory += m;
         }
@@ -34,7 +34,7 @@ impl Front {
         s["uptimeSeconds"] = self.started.elapsed().as_secs().into();
         s["autosaveMinutes"] = self.autosave.minutes.into();
         s["process"] = json!({"cpuSeconds": cpu, "memoryBytes": memory});
-        s["traffic"] = crate::dashboard::traffic();
+        s["traffic"] = super::metrics::traffic();
         s["banks"] = self.banks_status();
         s["worldControl"] = true.into();
         s["update"] = self.update_status();

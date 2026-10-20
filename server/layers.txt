@@ -64,8 +64,6 @@ debt front -> bank
 debt bank -> front
 # The access policy `enforce` sits in bank.rs and config.rs calls it (4: into access.rs).
 debt config -> bank
-# The front reads settings and rules by name, and process metrics from the dashboard (8: typed
-# settings; 6: the front's own metrics).
+# The front reads settings and rules by name (8: typed settings).
 debt front -> config
 debt front -> rules
-debt front -> dashboard

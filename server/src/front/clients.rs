@@ -10,7 +10,7 @@ use serde_json::json;
 
 use super::transport::{steam, Sent};
 use super::{Front, KICK_DELAY};
-use crate::dashboard::{BYTES_IN, BYTES_OUT};
+use super::metrics::{BYTES_IN, BYTES_OUT};
 use crate::ipc;
 use crate::utp;
 

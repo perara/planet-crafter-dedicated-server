@@ -127,10 +127,10 @@ impl Front {
         Ok(())
     }
 
-    /// Err when a flip would not fit in the container's memory (dashboard::flip_memory).
+    /// Err when a flip would not fit in the container's memory (metrics::flip_memory).
     pub(super) fn flip_fits(&self) -> Result<(), String> {
-        let live = self.live.as_ref().map_or(0, |b| crate::dashboard::process_of(b.child.id()).1);
-        crate::dashboard::flip_memory(live, crate::dashboard::cgroup_memory())
+        let live = self.live.as_ref().map_or(0, |b| super::metrics::process_of(b.child.id()).1);
+        super::metrics::flip_memory(live, super::metrics::cgroup_memory())
     }
 
     /// A frame of the next bank: its HELLO starts a flip's hand-over (or a restart), its READY
@@ -175,8 +175,8 @@ impl Front {
                 "flip: bank {} has loaded its tables after {:.0} ms and holds {:.0} MiB; the live bank holds {:.0} MiB",
                 n.name,
                 n.started.elapsed().as_secs_f64() * 1000.0,
-                crate::dashboard::process_of(n.child.id()).1 as f64 / 1048576.0,
-                crate::dashboard::process_of(l.child.id()).1 as f64 / 1048576.0
+                super::metrics::process_of(n.child.id()).1 as f64 / 1048576.0,
+                super::metrics::process_of(l.child.id()).1 as f64 / 1048576.0
             );
         }
         // Quiesce: from here the world stands.
