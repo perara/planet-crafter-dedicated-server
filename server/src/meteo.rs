@@ -646,6 +646,51 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn ordinary_showers_launch_at_the_water_stage_with_default_chance() {
+        let mut save = crate::game::tests::save();
+        save.settings["modifierMeteoOccurence"] = serde_json::json!(1.0);
+        let Some(mut g) = crate::game::test_game(save) else { return };
+        let player = crate::game::tests::join(&mut g, 7, "Meteor observer");
+        let position = [100.0, 20.0, 100.0];
+        g.net.objects.get_mut(&player).unwrap().position = position;
+        let planet = g.planet_hash();
+        g.units.planet_mut(planet).unwrap().units.iter_mut().find(|u| u.kind == Kind::Terraformation).unwrap().total = 24_571_346.0;
+        g.rng = crate::game::Rng::fixed(12345);
+        // Isolate ordinary weather from one-off story-triggered showers.
+        g.ext.meteo.story.current_planet.clear();
+        g.ext.meteo.queue.clear();
+        let eligible: Vec<_> = g.ext.meteo.events[..g.ext.meteo.original_count].iter().filter(|key| {
+            let e = g.data.asset(key).unwrap();
+            between_stages(&g, reference(e, "startTerraformStage"), reference(e, "stopTerraformStage"))
+        }).collect();
+        assert_eq!(eligible.len(), 14);
+        assert_eq!(eligible.iter().filter(|key| g.data.asset(key).unwrap()["asteroidEventData"].is_string()).count(), 2);
+        assert_eq!(num(singleton(&g, HANDLER), "eventChanceOnOneHundred"), 2.0);
+        assert_eq!(g.ext.meteo.try_every, 20.0);
+        let (mut weather, mut showers, mut spawned) = (0, 0, 0);
+        for second in 0..12 * 3600 {
+            g.time = GameTime::at(f64::from(second));
+            let previous = g.ext.meteo.time_set;
+            tick(&mut g);
+            if g.ext.meteo.time_set != previous {
+                weather += 1;
+                if !g.ext.meteo.asteroids.events.is_empty() {
+                    showers += 1;
+                    assert!([16, 20].contains(&g.ext.meteo.selected), "ordinary basic-ore showers");
+                    assert_eq!(var(&g, HANDLER, "_selectedDataMeteoEventIndex"), enc::int(g.ext.meteo.selected));
+                    assert_eq!(var(&g, HANDLER, "_asteroidReferenceClient"), enc::ulong(7));
+                    assert_eq!(var(&g, HANDLER, "_asteroidReferencePosition"), vec3(position));
+                    assert!(g.ext.meteo.seed > 0);
+                }
+            }
+            spawned = spawned.max(g.ext.meteo.asteroids.events.iter().map(|e| e.total).sum::<i32>());
+            g.net.out.clear();
+        }
+        println!("12 simulated hours, default chance at Water stage: {weather} weather events, {showers} meteor showers; most asteroid spawns in one shower: {spawned}");
+        assert!(showers > 0 && spawned > 0);
+    }
+
+    #[test]
     fn day_night_matches_the_real_server() {
         // _dayNightLerpValue as the real server sent it, night step 1 and the 0.35 steps after.
         let mut d = DayNight { full_day_stay: 16.0, speed: 0.35, full_phase_reached: GameTime::at(-99.0), ..Default::default() };

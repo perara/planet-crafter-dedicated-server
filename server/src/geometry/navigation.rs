@@ -1,6 +1,6 @@
 //! Conservative aerial clearance. Docking shafts may cross walls; cruise never crosses bounds.
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 type V3 = [f32; 3];
 const CELL: f32 = 64.0;
@@ -77,13 +77,15 @@ pub struct Grid {
     bounds: Vec<Bounds>,
     cells: HashMap<(i32, i32), Vec<usize>>,
     large: Vec<usize>,
+    visits: Vec<u32>,
+    query: u32,
 }
 fn cell(x: f32) -> i32 {
     (x / CELL).floor() as i32
 }
 impl Grid {
     pub fn new(bounds: Vec<Bounds>) -> Self {
-        let mut grid = Self { bounds, ..Default::default() };
+        let mut grid = Self { visits: vec![0; bounds.len()], bounds, ..Default::default() };
         for (i, b) in grid.bounds.iter().enumerate() {
             let (x0, x1, z0, z1) = (
                 cell(b.min[0] - CLEARANCE),
@@ -103,29 +105,53 @@ impl Grid {
         }
         grid
     }
-    fn candidates(&self, a: V3, b: V3) -> HashSet<usize> {
-        // Walk cells along the segment, rather than all cells in its bounding rectangle.
-        let steps = (((b[0] - a[0]).abs().max((b[2] - a[2]).abs()) / (CELL * 0.5)).ceil() as usize).max(1);
-        if steps > 4096 {
+    fn candidates(&mut self, a: V3, b: V3) -> Vec<usize> {
+        let (mut x, mut z, end_x, end_z) = (cell(a[0]), cell(a[2]), cell(b[0]), cell(b[2]));
+        if i64::from(end_x).abs_diff(i64::from(x)) + i64::from(end_z).abs_diff(i64::from(z)) > 4096 {
             return (0..self.bounds.len()).collect();
         }
-        let mut found: HashSet<_> = self.large.iter().copied().collect();
-        for i in 0..=steps {
-            let t = i as f32 / steps as f32;
-            let (x, z) = (cell(a[0] + (b[0] - a[0]) * t), cell(a[2] + (b[2] - a[2]) * t));
-            // Neighbour cells include corner crossings and the drone's clearance radius.
-            for dx in -1..=1 {
-                for dz in -1..=1 {
-                    if let Some(v) = self.cells.get(&(x + dx, z + dz)) {
-                        found.extend(v);
-                    }
+        self.query = self.query.wrapping_add(1);
+        if self.query == 0 {
+            self.visits.fill(0);
+            self.query = 1;
+        }
+        let mut found = Vec::new();
+        let mut collect = |items: &[usize]| {
+            for &i in items {
+                if self.visits[i] != self.query {
+                    self.visits[i] = self.query;
+                    found.push(i);
                 }
+            }
+        };
+        collect(&self.large);
+        let (dx, dz) = ((end_x - x).signum(), (end_z - z).signum());
+        let crossing = |axis: usize, c: i32, step: i32| {
+            if step == 0 { f64::INFINITY } else {
+                (f64::from(c + i32::from(step > 0)) * f64::from(CELL) - f64::from(a[axis])) / (f64::from(b[axis]) - f64::from(a[axis]))
+            }
+        };
+        loop {
+            if let Some(v) = self.cells.get(&(x, z)) { collect(v); }
+            if x == end_x && z == end_z { break; }
+            let (tx, tz) = (if x == end_x { f64::INFINITY } else { crossing(0, x, dx) }, if z == end_z { f64::INFINITY } else { crossing(2, z, dz) });
+            // Bounds are already padded in the index; only crossed cells are needed.
+            // Include both side cells at a corner, even when floating point rounds the tie.
+            if (tx - tz).abs() <= 1e-10 {
+                if let Some(v) = self.cells.get(&(x + dx, z)) { collect(v); }
+                if let Some(v) = self.cells.get(&(x, z + dz)) { collect(v); }
+                x += dx;
+                z += dz;
+            } else if tx < tz {
+                x += dx;
+            } else {
+                z += dz;
             }
         }
         found
     }
     // shortcut: collider bounds overestimate some mountains; use mesh-level routing if detours dominate.
-    pub fn route_with(&self, other: Option<&Self>, from: V3, to: V3) -> Vec<V3> {
+    pub fn route_with(&mut self, other: Option<&mut Self>, from: V3, to: V3) -> Vec<V3> {
         let (blocked, height) = self.clearance(from, to);
         let (other_blocked, other_height) = other.map(|g| g.clearance(from, to)).unwrap_or((false, from[1].max(to[1])));
         if !blocked && !other_blocked {
@@ -135,7 +161,7 @@ impl Grid {
         vec![[from[0], height, from[2]], [to[0], height, to[2]], to]
     }
 
-    fn clearance(&self, from: V3, to: V3) -> (bool, f32) {
+    fn clearance(&mut self, from: V3, to: V3) -> (bool, f32) {
         let mut blocked = false;
         let mut height = from[1].max(to[1]);
         for i in self.candidates(from, to) {
@@ -149,7 +175,7 @@ impl Grid {
     }
 
     #[cfg(test)]
-    pub fn route(&self, from: V3, to: V3) -> Vec<V3> {
+    pub fn route(&mut self, from: V3, to: V3) -> Vec<V3> {
         self.route_with(None, from, to)
     }
 }
@@ -169,7 +195,7 @@ mod tests {
                 max: [45.0, 60.0, 2.0],
             },
         ];
-        let grid = Grid::new(bounds);
+        let mut grid = Grid::new(bounds);
         let route = grid.route([0.0, 5.0, 0.0], [60.0, 5.0, 0.0]);
         assert_eq!(route.len(), 3);
         assert!(route[0][1] > 63.0);
@@ -181,17 +207,17 @@ mod tests {
     }
     #[test]
     fn terrain_detours_also_clear_overhead_buildings() {
-        let terrain = Grid::new(vec![Bounds {
+        let mut terrain = Grid::new(vec![Bounds {
             min: [10.0, 0.0, -5.0],
             max: [20.0, 40.0, 5.0],
         }]);
-        let overhead = Grid::new(vec![Bounds {
+        let mut overhead = Grid::new(vec![Bounds {
             min: [30.0, 35.0, -5.0],
             max: [40.0, 80.0, 5.0],
         }]);
         let (from, to) = ([0.0, 5.0, 0.0], [60.0, 5.0, 0.0]);
         assert_eq!(overhead.route(from, to), vec![to], "the original low route passes below the building");
-        let route = terrain.route_with(Some(&overhead), from, to);
+        let route = terrain.route_with(Some(&mut overhead), from, to);
         assert!(route[0][1] > 83.0, "the raised cruise also must clear overhead geometry");
         assert!(terrain.bounds.iter().chain(&overhead.bounds).all(|b| !b.intersects(route[0], route[1], &[0, 1, 2])));
     }
@@ -208,18 +234,55 @@ mod tests {
                 }
             })
             .collect();
-        let grid = Grid::new(bounds.clone());
-        let full = Grid {
-            bounds,
-            large: (0..5000).collect(),
-            ..Default::default()
-        };
+        let mut grid = Grid::new(bounds.clone());
+        let mut full = Grid::new(bounds);
+        full.cells.clear();
+        full.large = (0..5000).collect();
         for i in 0..50 {
             let a = [-3000.0, 10.0, i as f32 * 63.0 - 1600.0];
             let b = [3000.0, 10.0, 1600.0 - i as f32 * 63.0];
             assert_eq!(grid.route(a, b), full.route(a, b));
         }
         assert!(grid.candidates([-100.0, 2.0, -100.0], [0.0, 2.0, 0.0]).len() < 100);
+    }
+
+    #[test]
+    fn crossed_cells_match_full_scan_at_edges_corners_and_in_both_directions() {
+        let bounds: Vec<_> = (-12..=12).flat_map(|x| (-12..=12).map(move |z| Bounds {
+            min: [x as f32 * CELL - CLEARANCE, -10.0, z as f32 * CELL - CLEARANCE],
+            max: [x as f32 * CELL + CLEARANCE, (x * x + z * z) as f32, z as f32 * CELL + CLEARANCE],
+        })).chain(std::iter::once(Bounds { min: [-10000.0, -20.0, -10000.0], max: [10000.0, -10.0, 10000.0] })).collect();
+        let mut grid = Grid::new(bounds.clone());
+        let mut full = Grid::new(bounds);
+        full.cells.clear();
+        full.large = (0..full.bounds.len()).collect();
+        let mut rng = crate::game::Rng::fixed(81);
+        for i in 0..1000 {
+            let a = [rng.range(-1000, 1000) as f32, rng.range(-20, 400) as f32, rng.range(-1000, 1000) as f32];
+            let mut b = [rng.range(-1000, 1000) as f32, rng.range(-20, 400) as f32, rng.range(-1000, 1000) as f32];
+            match i % 5 {
+                0 => b = a,
+                1 => b[0] = a[0],
+                2 => b[2] = a[2],
+                3 => b = [a[2], b[1], a[0]],
+                _ => {}
+            }
+            assert_eq!(grid.route(a, b), full.route(a, b), "{a:?} -> {b:?}");
+            assert_eq!(grid.route(b, a), full.route(b, a), "{b:?} -> {a:?}");
+        }
+        for (a, b) in [
+            ([-1024.0, 5.0, -1024.0], [1024.0, 5.0, 1024.0]),
+            ([64.0, 5.0, -1024.0], [64.0, 5.0, 1024.0]),
+            ([-1024.0, 5.0, 64.0], [1024.0, 5.0, 64.0]),
+            ([-200000.0, 5.0, 0.0], [200000.0, 5.0, 0.0]),
+        ] {
+            assert_eq!(grid.route(a, b), full.route(a, b));
+            assert_eq!(grid.route(b, a), full.route(b, a));
+        }
+        grid.query = u32::MAX;
+        grid.visits.fill(1);
+        let (a, b) = ([-500.0, 5.0, 0.0], [500.0, 5.0, 0.0]);
+        assert_eq!(grid.route(a, b), full.route(a, b), "visit stamps reset when the counter wraps");
     }
     #[test]
     fn invalid_or_stale_maps_are_refused() {

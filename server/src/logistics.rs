@@ -534,12 +534,12 @@ fn update(game: &mut Game) {
             l.at_target.push_back(i);
             continue;
         }
-        if let Some(grid) = l.terrain_navigation.get(&a.planet) {
+        if let Some(grid) = l.terrain_navigation.get_mut(&a.planet) {
             if dr.route_goal != Some(a.target) || dr.route_epoch != l.navigation_epoch {
                 if routes_left == 0 { continue; }
                 routes_left -= 1;
                 l.navigation_cursor = (i + 1) % count;
-                dr.route = grid.route_with(l.navigation.get(&a.planet), dr.position, a.target).into();
+                dr.route = grid.route_with(l.navigation.get_mut(&a.planet), dr.position, a.target).into();
                 dr.route_goal = Some(a.target);
                 dr.route_epoch = l.navigation_epoch;
             }

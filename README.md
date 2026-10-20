@@ -913,7 +913,8 @@ Terrain heightmaps are split into conservative patches; holes remain covered for
 wreck interiors, moving scenery, vehicles, players and temporary meteor debris are outside this map.
 
 The server indexes obstacles by location, caches each drone's route, and rebuilds only the
-building index after construction or destruction. The static terrain index is reused. Route planning is limited to 16 drones per tick
+building index after construction or destruction. The static terrain index is reused. Queries
+visit crossed grid cells and reuse obstacle visit stamps to avoid duplicate checks. Route planning is limited to 16 drones per tick
 and rotates through the fleet; drones wait for a checked route instead of flying through an
 obstacle while planning is pending. Navigation caches are rebuilt after snapshot
 restore and add no saved-world or snapshot-format fields. Collision maps are opt-in; without

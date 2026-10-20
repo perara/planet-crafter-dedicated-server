@@ -730,6 +730,21 @@ mod tests {
         assert!(unpack(packed(3, 0, &[])).is_err());
         assert!(unpack(packed(1, 33, &[0; 8])).is_err());
     }
+    #[test]
+    fn height_patches_cover_peaks_at_shared_edges_and_the_last_cell() {
+        let mut heights = vec![0; 18 * 18];
+        heights[16 * 18 + 16] = 32766;
+        heights[17 * 18 + 17] = 16383;
+        let b = height_patches(18, [2.0, 600.0, 3.0], &heights).unwrap();
+        assert_eq!(b.len(), 4);
+        assert!(b.iter().all(|b| b.max[1] > 600.0));
+        assert_eq!(b[3].max[0], 34.0);
+        assert_eq!(b[3].max[2], 51.0);
+        heights.fill(-16383);
+        let below = height_patches(18, [2.0, 600.0, 3.0], &heights).unwrap();
+        assert!(below.iter().all(|b| b.max[1] > -300.0 && b.max[1] < -299.0));
+    }
+
 }
 
 // Unity 6000.3 release type-tree field descriptors; validated against installed game data.
@@ -962,23 +977,4 @@ fn height_patches(res: usize, scale: [f32; 3], heights: &[i16]) -> Result<Vec<cr
         }
     }
     Ok(out)
-}
-
-#[cfg(test)]
-mod navigation_tests {
-    use super::*;
-    #[test]
-    fn height_patches_cover_peaks_at_shared_edges_and_the_last_cell() {
-        let mut heights = vec![0; 18 * 18];
-        heights[16 * 18 + 16] = 32766;
-        heights[17 * 18 + 17] = 16383;
-        let b = height_patches(18, [2.0, 600.0, 3.0], &heights).unwrap();
-        assert_eq!(b.len(), 4);
-        assert!(b.iter().all(|b| b.max[1] > 600.0));
-        assert_eq!(b[3].max[0], 34.0);
-        assert_eq!(b[3].max[2], 51.0);
-        heights.fill(-16383);
-        let below = height_patches(18, [2.0, 600.0, 3.0], &heights).unwrap();
-        assert!(below.iter().all(|b| b.max[1] > -300.0 && b.max[1] < -299.0));
-    }
 }
