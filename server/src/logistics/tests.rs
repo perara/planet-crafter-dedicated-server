@@ -118,6 +118,34 @@ fn slots_reuse_the_last_freed_entry_like_dotnet() {
     assert_eq!(s.iter().map(|(k, _)| *k).collect::<Vec<_>>(), vec![1, 6, 3, 5, 7]);
 }
 
+/// More than 16 demands of one priority: List<T>.Sort is an introsort, so they end in the order
+/// reference.py gives for 20 equal keys (equal20 of tests/dotnet_sort/vectors.txt), not the order
+/// they were put in. (On the real game, 17 demands at one priority and 8 items to give them: the
+/// same 8 of the 17 are served each time, and the same 8 here: completeness/demand_order.py.)
+#[test]
+fn equal_priority_demands_are_sorted_like_the_games_introsort() {
+    let Some(mut game) = game() else { return };
+    build(&mut game, "DroneStation1", [10.0, 2.0, 10.0]);
+    let iron = game.data.group("Iron").unwrap();
+    for i in 0..20 {
+        let w = build(&mut game, "Container1", [25.0, 2.0, 30.0 + 4.0 * i as f32]);
+        let inv = game.wos[&w].linked_inventory;
+        game.inventories.get_mut(&inv).unwrap().logistic.demand = vec![iron];
+        set_dirty(&mut game, inv);
+    }
+    // AddNewDemandInventory puts an equal priority before the others: the last one is first.
+    let put_in = game.ext.logistics.demand.clone();
+    assert_eq!(put_in.len(), 20);
+    let start = game.ext.logistics.last_tick;
+    for t in 1..=31 {
+        frame(&mut game, start + t);
+    }
+    let line = include_str!("../../tests/dotnet_sort/vectors.txt").lines().find(|l| l.starts_with("equal20|")).unwrap();
+    let order: Vec<usize> = line.rsplit('|').next().unwrap().split(',').map(|i| i.parse().unwrap()).collect();
+    assert_eq!(game.ext.logistics.demand, order.iter().map(|i| put_in[*i]).collect::<Vec<_>>());
+    assert_ne!(game.ext.logistics.demand, put_in);
+}
+
 /// Two demands for one item: the higher priority one gets the task, and _taskPriorities keeps
 /// lower ones from taking iron while the higher one still has room for more.
 #[test]
