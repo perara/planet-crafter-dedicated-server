@@ -271,7 +271,9 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
     let (mut auth, mut length, mut chunked) = (None::<String>, None::<Option<usize>>, false);
     loop {
         let mut header = String::new();
-        if reader.read_line(&mut header)? == 0 || header.trim().is_empty() {
+        // The end of the head is an empty line (CRLF, or LF alone): one with only blanks on it is a folded line
+        // (a proxy may read the headers after it as part of the one before), refused below.
+        if reader.read_line(&mut header)? == 0 || header == "\r\n" || header == "\n" {
             break;
         }
         // The head is read as one reader reads it or not at all: what a proxy in front may read
@@ -281,7 +283,7 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
         if !header.ends_with('\n') {
             return respond(stream, 431, "application/json", "{\"error\":\"the head of a request is at most 64 KiB\"}");
         }
-        if header.starts_with([' ', '\t']) {
+        if header.starts_with([' ', '\t']) || header.trim().is_empty() {
             return bad("a header folded over lines");
         }
         let Some((k, v)) = header.split_once(':') else { return bad("a header line without a colon") };
@@ -290,7 +292,8 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
         }
         match k.to_ascii_lowercase().as_str() {
             "authorization" if auth.replace(v.trim().to_string()).is_some() => return bad("two Authorization headers"),
-            "content-length" if length.replace(v.trim().parse().ok()).is_some() => return bad("two Content-Length headers"),
+            // Digits only: usize::from_str also takes "+5", which a proxy reads as no length at all.
+            "content-length" if length.replace(Some(v.trim()).filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).and_then(|n| n.parse().ok())).is_some() => return bad("two Content-Length headers"),
             "transfer-encoding" => chunked = true,
             _ => {}
         }
@@ -666,6 +669,10 @@ mod tests {
             ("two lengths", format!("POST /api/save HTTP/1.1\r\n{auth}Content-Length: 5\r\ncontent-length: 0\r\n\r\n")),
             ("a line without a colon", format!("GET /api/ping HTTP/1.1\r\n{auth}garbage\r\n\r\n")),
             ("an empty name", format!("GET /api/ping HTTP/1.1\r\n{auth}: x\r\n\r\n")),
+            // A line of blanks ends no head: a proxy reads it as a folded line and the headers after it as part of the one before.
+            ("a line of blanks after the token", format!("GET /api/ping HTTP/1.1\r\n{auth} \r\n\r\n")),
+            ("a line of blanks and a tab", format!("GET /api/ping HTTP/1.1\r\n{auth}\t \r\n\r\n")),
+            ("a length with a sign", format!("POST /api/save HTTP/1.1\r\n{auth}Content-Length: +2\r\n\r\n{{}}")),
         ] {
             let answer = ask(addr, request.as_bytes());
             assert!(answer.starts_with("HTTP/1.1 400"), "{what}: {answer}");
