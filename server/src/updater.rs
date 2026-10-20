@@ -94,6 +94,21 @@ pub fn check_tag(tag: &str) -> Result<(), String> {
 
 /// The release `version` (None: the latest) and its two assets.
 pub fn lookup(base: &str, version: Option<&str>) -> Result<Release, String> {
+    lookup_with(&agent(local(base)), base, version)
+}
+
+/// The latest release's tag, asked with a short timeout and nothing downloaded (`pcds doctor`).
+pub fn latest_tag(base: &str) -> Result<String, String> {
+    let config = ureq::Agent::config_builder()
+        .https_only(!local(base))
+        .timeout_global(Some(Duration::from_secs(15)))
+        .http_status_as_error(false)
+        .user_agent(concat!("pcds/", env!("CARGO_PKG_VERSION")))
+        .build();
+    lookup_with(&ureq::Agent::new_with_config(config), base, None).map(|r| r.tag)
+}
+
+fn lookup_with(agent: &ureq::Agent, base: &str, version: Option<&str>) -> Result<Release, String> {
     if let Some(v) = version {
         check_tag(v)?;
     }
@@ -103,7 +118,7 @@ pub fn lookup(base: &str, version: Option<&str>) -> Result<Release, String> {
     };
     let local = local(base);
     let shown = shown_url(&url);
-    let release: Value = serde_json::from_slice(&get(&agent(local), &url)?).map_err(|e| format!("{shown}: {e}"))?;
+    let release: Value = serde_json::from_slice(&get(agent, &url)?).map_err(|e| format!("{shown}: {e}"))?;
     let tag = release["tag_name"].as_str().ok_or_else(|| format!("{shown}: no tag_name"))?.to_string();
     check_tag(&tag).map_err(|e| format!("{shown}: tag_name {e}"))?;
     let asset = |name: &str| {

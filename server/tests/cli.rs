@@ -547,3 +547,31 @@ fn a_port_in_use_stops_the_start_in_words() {
     assert!(said.contains("direct IP 127.0.0.1:") && said.contains("PCDS_LISTEN") && !said.contains("panicked"), "{said}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `pcds doctor` on an installation with nothing in it: every check that cannot pass says FAIL with
+/// a line to type, the exit code is 1, and `--json` prints the same list as JSON. With a server.env
+/// that turns the network checks off and a free port, the ones that can pass do.
+#[test]
+fn doctor_says_what_is_wrong_and_exits_nonzero() {
+    let dir = test_dir("doctor");
+    let fake = fake_systemctl(&dir, "echo inactive");
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    let held = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    std::fs::write(dir.join("run/server.env"), format!("PCDS_LISTEN={}\nPCDS_STEAM=off\nPCDS_ADMIN=off\nPCDS_RELEASES=http://127.0.0.1:9\n", held.local_addr().unwrap())).unwrap();
+    std::fs::set_permissions(dir.join("run/server.env"), std::fs::Permissions::from_mode(0o600)).unwrap();
+    let out = pcds(&dir, &fake, &["doctor"]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(said.contains("FAIL  game folder") && said.contains("fix: pcds up --game") && said.contains("FAIL  world") && said.contains("FAIL  game port") && said.contains("PASS  server.env"), "{said}");
+    assert!(said.contains("the server is not running") && said.contains("FAIL, "), "{said}");
+    let out = pcds(&dir, &fake, &["doctor", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    assert_eq!((json["ok"].as_bool(), json["serverRunning"].as_bool()), (Some(false), Some(false)));
+    let level = |id: &str| json["checks"].as_array().unwrap().iter().find(|c| c["id"] == id).map(|c| c["level"].as_str().unwrap().to_string());
+    assert_eq!((level("game folder").as_deref(), level("server.env").as_deref(), level("admin port").as_deref()), (Some("fail"), Some("pass"), Some("pass")), "{json}");
+    assert!(json["checks"].as_array().unwrap().iter().all(|c| c["fix"].is_string() == (c["level"] != "pass")), "every WARN and FAIL has a fix line, no PASS has: {json}");
+    let out = pcds(&dir, &fake, &["doctor", "--fast"]);
+    assert!(text(&out).contains("usage: pcds doctor [--json]") && out.status.code() == Some(1), "{}", text(&out));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

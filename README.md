@@ -326,10 +326,25 @@ file and the name.
 ./pcds token                   # the admin token alone, for curl and scripts
 ./pcds api GET /api/status     # any admin API route, through the token in server.env
 ./pcds status --json           # the whole status, for scripts
+./pcds doctor                  # checks everything the server needs, with the fix for each problem
 ```
 
 `./pcds help` lists every command. When a command cannot do what you asked, it says what to do;
 [docs/troubleshooting.md](docs/troubleshooting.md) has the usual problems from the symptom to the fix.
+
+`./pcds doctor` is the first thing to run on a new machine, after an update, and when something
+is wrong. It prints one line per check, `PASS`, `WARN` or `FAIL`, and under each problem the line
+to type that fixes it: the game folder and its tables (and that they are whole, with the DLC
+ground when the world is on a DLC planet), the world file, `server.env`, `rules.json` and
+`access.json`, the two ports (free, or this server's) and whether the admin port can be reached
+from other machines, the file modes of the files that hold secrets, free disk space against the
+world and its backups, the clock, the systemd unit and lingering, Steam (a login token, the
+client library, the network), the two banks, whether the release feed answers, the plugins that
+wait for approval or fail, the memory limit against what a hot update needs and the open-files
+limit. With the server running it also asks the admin API: the invite code, the last save, the
+backups, the off-site copies and the crashes. It changes nothing. The exit code is 1 when a check
+FAILs and 0 otherwise (a `WARN` is advice); `--json` prints the same list for scripts and
+monitoring. In Docker: `docker exec pcds pcds doctor`.
 
 The admin web page has nine sections (keys 1 to 9 switch between them). **Overview**: players,
 CPU, memory, loop load, loop rate and network traffic with live graphs of the last minutes, the

@@ -19,6 +19,20 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+### Added
+
+* **`pcds doctor`** checks everything an operator needs in one command and prints PASS, WARN or
+  FAIL with the line to type that fixes each problem: the game folder and its tables (build,
+  tables format, game version, the DLC ground when the world is on a DLC planet and the rule
+  `world.dlcPlanets`), the world file, `server.env`, `rules.json` and `access.json`, both ports
+  (free, or this server's) and whether the admin port is open to other machines, the modes of the
+  files that hold secrets, free disk against the world and its backups, the clock (backups
+  stamped in the future), the systemd unit and lingering, Steam (login token, `steamclient.so`,
+  network), both banks, the release feed, plugins that wait or fail, the memory limit against the
+  size a hot update needs, and the open-files limit. With the server running it also asks the
+  admin API (invite code, last save, backups, S3, crashes). It changes nothing; the exit code is 1
+  when a check FAILs; `--json` is for scripts.
+
 ## [0.8.0] - 2026-10-20
 
 The DLC planets (Humble, Toxicity) run on their own ground, and you say which of them you own; the

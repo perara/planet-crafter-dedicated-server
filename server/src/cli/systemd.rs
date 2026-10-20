@@ -13,7 +13,7 @@ impl Ctx {
         format!("{}.service", self.unit_name)
     }
 
-    fn timer(&self) -> String {
+    pub(super) fn timer(&self) -> String {
         format!("{}-update.timer", self.unit_name)
     }
 

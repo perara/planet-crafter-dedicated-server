@@ -4,9 +4,11 @@ Find the line you saw, read what it means, run the command. Every command here r
 folder with `pcds` (or as `pcds` when you ran `make install`); `PCDS_HOME` and `PCDS_UNIT` have to
 be set the same way as for the server when you run a second one on the machine.
 
-Two commands answer most questions: `pcds status` (is it running, which world, the invite code,
-what is wrong with the game tables) and `pcds logs` (what the server said, newest last; press
-Ctrl+C to leave).
+Three commands answer most questions: `pcds doctor` (checks everything the server needs, one line
+each as PASS, WARN or FAIL, and the line to type under each problem; works when the server is
+stopped and when it runs), `pcds status` (is it running, which world, the invite code, what is
+wrong with the game tables) and `pcds logs` (what the server said, newest last; press Ctrl+C to
+leave). Run `pcds doctor` first: most of the table below is what it already checks.
 
 ## The server does not start
 

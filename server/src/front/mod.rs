@@ -71,6 +71,7 @@ mod world_control;
 
 pub use admin_routes::{find_http, Http, Owner};
 pub use chat_hooks::{api as chat_api, Feed, Hooks};
+pub use metrics::{cgroup_memory, flip_memory, process_of};
 use admin_routes::Admin;
 use bank_link::Bank;
 use flip::{Flip, Phase};
