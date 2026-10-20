@@ -112,6 +112,9 @@ fn saved(game: &mut Game, path: &str, written: &Written, took: Duration) {
     let (at, saved) = (unix_now(), &written.saved);
     SAVE_MILLIS.set(Some((took.as_secs_f64() * 1e4).round() / 10.0));
     note_backup(&written.backup);
+    if matches!(written.backup, Ok(true)) {
+        verify_if_on(game, path);
+    }
     LAST_SAVE.set(Some(LastSave { ok: saved.is_ok(), at, error: saved.as_ref().err().cloned() }));
     match saved {
         Ok(()) => info!("path" = path, "millis" = (took.as_secs_f64() * 1e4).round() / 10.0; "saved {path}"),
@@ -121,6 +124,54 @@ fn saved(game: &mut Game, path: &str, written: &Written, took: Duration) {
         warn!("backup: {e}");
     }
     super::plugins_glue::world_saved(game, saved.is_ok());
+}
+
+/// What reading the newest backup back came to (the rule save.verifyBackups), for the metrics.
+#[derive(Clone, Serialize)]
+pub struct Verified {
+    pub file: String,
+    pub ok: bool,
+    pub at: u64,
+    pub world_objects: usize,
+    pub error: Option<String>,
+}
+
+static VERIFIED: std::sync::Mutex<Option<Verified>> = std::sync::Mutex::new(None);
+
+/// The last backup that was read back, if the rule is on and one has been.
+pub(super) fn verified() -> Option<Verified> {
+    VERIFIED.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// A backup file as a restore would read it: the layout, then the content against the tables.
+/// Returns its world objects.
+fn check_backup(path: &std::path::Path, data: &crate::gamedata::GameData, net: &crate::data::NetData) -> Result<usize, String> {
+    let save = save::SaveFile::load(&path.to_string_lossy()).map_err(|e| e.to_string())?;
+    crate::game::check_save_content(&save, data, net)?;
+    Ok(save.objects.len())
+}
+
+/// After a backup was made: it is read back when the rule save.verifyBackups is on. The newest
+/// backup of the world at `save_path` is read on a thread of its own (the loop never waits for
+/// the disk): the outcome is logged and kept for the metrics.
+pub(super) fn verify_if_on(game: &Game, save_path: &str) {
+    if !game.rules.save.verify_backups {
+        return;
+    }
+    let Some(file) = crate::s3::newest_backup(save_path) else { return };
+    let (data, net) = (game.data.clone(), game.net_data.clone());
+    let name = file.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let spawned = std::thread::Builder::new().name("pcds-verify".into()).spawn(move || {
+        let result = check_backup(&file, &data, &net);
+        match &result {
+            Ok(n) => info!("file" = name, "worldObjects" = n; "backup {name} reads back: {n} world objects"),
+            Err(e) => error!("file" = name; "backup {name} does NOT load: {e}; restore an older one with pcds backup restore, after pcds backup verify finds one that loads"),
+        }
+        *VERIFIED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Verified { file: name, ok: result.is_ok(), at: unix_now(), world_objects: *result.as_ref().unwrap_or(&0), error: result.err() });
+    });
+    if let Err(e) = spawned {
+        warn!("backup verification: no thread ({e})");
+    }
 }
 
 /// The save being written, once it has ended (`wait`: waiting for it). A failed one is tried
@@ -217,6 +268,43 @@ mod tests {
     use super::*;
     use crate::game;
     use crate::save::SaveFile;
+
+    /// With the rule save.verifyBackups on, the backup a save makes is read back on a thread of its own
+    /// and the outcome is kept; a file that does not load is said so, with the reason.
+    #[test]
+    fn a_backup_is_read_back_when_the_rule_is_on() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let dir = std::env::temp_dir().join(format!("pcds-verify-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("world.json").to_string_lossy().to_string();
+        // Off: a backup is made and nothing reads it.
+        *VERIFIED.lock().unwrap() = None;
+        game.rules.save.backup_minutes = 0;
+        assert_eq!(persist(&mut game, &path), Ok(()));
+        assert_eq!(persist(&mut game, &path), Ok(()));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(verified().is_none() && std::fs::read_dir(dir.join("backups")).unwrap().count() >= 1);
+        // On: the next backup is read back.
+        game.rules.save.verify_backups = true;
+        assert_eq!(persist(&mut game, &path), Ok(()));
+        let started = std::time::Instant::now();
+        let v = loop {
+            if let Some(v) = verified() {
+                break v;
+            }
+            assert!(started.elapsed() < Duration::from_secs(20), "the backup was not read back");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(v.ok && v.error.is_none() && v.world_objects > 0 && v.file.starts_with("world-"), "{}", serde_json::to_string(&v).unwrap());
+        // A backup that does not load is told apart, with what is wrong.
+        let bad = dir.join("backups/world-20300101-000000.json");
+        std::fs::write(&bad, "this is not a save").unwrap();
+        let e = check_backup(&bad, &game.data, &game.net_data).unwrap_err();
+        assert!(!e.is_empty(), "{e}");
+        assert_eq!(check_backup(&dir.join("world.json"), &game.data, &game.net_data).map(|n| n > 0), Ok(true));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     /// An autosave is written beside the game: the call returns with the text made, the file
     /// arrives, and a save made right after it (a stop) is never overtaken by it.

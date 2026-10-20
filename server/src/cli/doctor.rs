@@ -138,6 +138,7 @@ impl Ctx {
         self.check_ports(&mut r, &live);
         self.check_modes(&mut r);
         self.check_disk(&mut r, world.as_ref());
+        self.check_backups(&mut r, &live);
         self.check_clock(&mut r, world.as_ref());
         self.check_service(&mut r);
         self.check_steam(&mut r, &live);
@@ -403,6 +404,34 @@ impl Ctx {
             r.warn("disk space", detail, "the backups will fill the disk: free space, lower the rule save.backupsKept (pcds rules set save.backupsKept=N), or move run/ to a bigger disk");
         } else {
             r.pass("disk space", detail);
+        }
+    }
+
+    /// The backups: on, there, recent, and whether any copy leaves this machine.
+    fn check_backups(&self, r: &mut Report, live: &Live) {
+        let rules = crate::rules::Rules::load(&self.rules_file()).unwrap_or_default();
+        if rules.save.backups_kept == 0 {
+            r.warn("backups", "backups are off (the rule save.backupsKept is 0): a damaged world file cannot be restored", "pcds rules set save.backupsKept=24 (docs/disaster-recovery.md)");
+            return;
+        }
+        let list = self.backup_list();
+        let off_site = if rules.backup.s3_bucket.is_some() { "; the S3 rules are set, so each is copied off this machine" } else { "; all of them are on this machine" };
+        let detail = match list.first() {
+            None => format!("none yet (one is made each {} minutes while the server runs){off_site}", rules.save.backup_minutes),
+            Some(b) => {
+                let age = SystemTime::now().duration_since(b.modified).unwrap_or_default().as_secs();
+                let late = live.running() && rules.save.backup_minutes > 0 && age > u64::from(rules.save.backup_minutes) * 120 + 600;
+                if late {
+                    r.warn("backups", format!("{} backups, the newest {} old, though one is made each {} minutes while the server runs", list.len(), super::backup::age_text(age), rules.save.backup_minutes), "pcds logs --grep backup says why none was made (a full disk, permissions of worlds/backups)");
+                    return;
+                }
+                format!("{} backups, the newest {} old{off_site}", list.len(), super::backup::age_text(age))
+            }
+        };
+        if rules.backup.s3_bucket.is_none() {
+            r.warn("backups", detail, "set the backup.s3* rules so a lost disk does not take the backups with it, and check them with pcds backup verify (docs/disaster-recovery.md)");
+        } else {
+            r.pass("backups", format!("{detail}; pcds backup verify loads them"));
         }
     }
 
@@ -883,6 +912,43 @@ mod tests {
         ctx.check_disk(&mut r, Some(&World { bytes: 1 << 20, planet: None }));
         assert_ne!(level(&r, "disk space"), Level::Fail);
         assert!(find(&r, "disk space")[0].detail.contains("free") && find(&r, "disk space")[0].detail.contains("backups"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn backups_off_or_only_on_this_machine_warn_and_a_bucket_passes() {
+        let (dir, ctx) = scratch("doctor-backups");
+        let stopped = Live { status: None, plugins: None, unreachable: None };
+        let running = Live { status: Some(json!({"state": "running"})), plugins: None, unreachable: None };
+        let check = |live: &Live| {
+            let mut r = Report::default();
+            ctx.check_backups(&mut r, live);
+            r
+        };
+        fs::write(ctx.run.join("rules.json"), r#"{"save": {"backupsKept": 0}}"#).unwrap();
+        let r = check(&stopped);
+        assert_eq!(level(&r, "backups"), Level::Warn);
+        assert!(find(&r, "backups")[0].detail.contains("backups are off") && find(&r, "backups")[0].fix.as_ref().unwrap().contains("save.backupsKept=24"));
+        // On, none yet, no bucket: the warning is about where they are.
+        fs::write(ctx.run.join("rules.json"), "{}").unwrap();
+        let r = check(&stopped);
+        assert!(find(&r, "backups")[0].detail.contains("none yet") && find(&r, "backups")[0].detail.contains("all of them are on this machine"), "{r:?}");
+        let backups = ctx.worlds.join("backups");
+        fs::create_dir_all(&backups).unwrap();
+        fs::write(backups.join("world-20261001-120000.json"), "{}").unwrap();
+        let r = check(&stopped);
+        assert_eq!(level(&r, "backups"), Level::Warn);
+        assert!(find(&r, "backups")[0].detail.contains("1 backups, the newest"), "{r:?}");
+        // The file is old (the stamp is the name's; the age is the file's time): late while the server runs.
+        let long_ago = fs::File::options().write(true).open(backups.join("world-20261001-120000.json")).unwrap();
+        long_ago.set_modified(SystemTime::now() - Duration::from_secs(5 * 86_400)).unwrap();
+        assert!(find(&check(&running), "backups")[0].detail.contains("5 days old, though one is made each 60 minutes"));
+        assert!(!find(&check(&stopped), "backups")[0].detail.contains("though"), "a stopped server makes none");
+        // A bucket: the backups leave the machine, and it is a pass.
+        fs::write(ctx.run.join("rules.json"), r#"{"backup": {"s3Endpoint": "https://s3.example", "s3Bucket": "saves", "s3AccessKey": "a", "s3SecretKey": "b"}}"#).unwrap();
+        let r = check(&stopped);
+        assert_eq!(level(&r, "backups"), Level::Pass);
+        assert!(find(&r, "backups")[0].detail.contains("copied off this machine"));
         fs::remove_dir_all(&dir).unwrap();
     }
 

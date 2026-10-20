@@ -43,7 +43,7 @@ Every release has two parts a reader can rely on:
   update does not turn it red. A new token scope, `metrics.read`, opens the metrics route and
   nothing else (`pcds plugin token create prometheus --scope metrics.read`), so the scraper does
   not hold the admin token. [docs/monitoring.md](docs/monitoring.md) has the list of metrics, a
-  scrape configuration, 17 alert rules (checked with `promtool check rules`) and the Grafana
+  scrape configuration, 18 alert rules (checked with `promtool check rules`) and the Grafana
   dashboard [docs/grafana/pcds.json](docs/grafana/pcds.json) (all its queries run on a real
   Prometheus). `pcds health` is the command form of the health route.
 
@@ -76,6 +76,23 @@ Every release has two parts a reader can rely on:
   to give `/data` away) and a process limit; `docker/test.sh` runs its hot update with the same
   flags. The base images are pinned by digest (Dependabot's `docker` entry proposes new ones).
   The Kubernetes example mounts no service account token.
+
+* **Backups can be checked and restored from the command line**
+  ([docs/disaster-recovery.md](docs/disaster-recovery.md)). `pcds backup list`; `pcds backup
+  verify` loads the newest backups (3 by default, `--count N`, `--all`) with the loader the server
+  uses, reports what each holds and whether the server would start it, checks the S3 copy of the
+  newest, and exits 1 when one does not load; `pcds backup restore NAME` asks, keeps the world it
+  replaces, refuses while the server runs and loads the backup before it changes anything
+  (`--as WORLD` makes a new world instead); `pcds backup fetch [NAME]` copies one from the bucket
+  (HEAD, GET and listing are new in the S3 client, signed like the upload; the signer is checked
+  against AWS's own examples, and ran against a real S3 server). The new rule
+  `save.verifyBackups` (off by default) reads each new backup back on a thread of its own and
+  says so in the log, in `pcds_backup_verify_last_ok` and
+  `pcds_backup_verify_last_timestamp_seconds`, with an alert rule in docs/monitoring.md. The
+  guide covers what to keep, restoring on the same machine, on a new one, from the bucket and from a
+  Docker volume, and was rehearsed on a scratch installation: a late-game world restored from the
+  bucket into an empty installation on other ports, which a scripted player and two load players
+  then joined.
 
 ### Changed
 

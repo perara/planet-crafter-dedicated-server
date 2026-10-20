@@ -346,7 +346,7 @@ to type that fixes it: the game folder and its tables (and that they are whole, 
 ground when the world is on a DLC planet), the world file, `server.env`, `rules.json` and
 `access.json`, the two ports (free, or this server's) and whether the admin port can be reached
 from other machines, the file modes of the files that hold secrets, free disk space against the
-world and its backups, the clock, the systemd unit and lingering, Steam (a login token, the
+world and its backups, whether the backups are on and leave this machine, the clock, the systemd unit and its sandbox and lingering, Steam (a login token, the
 client library, the network), the two banks, whether the release feed answers, the plugins that
 wait for approval or fail, the memory limit against what a hot update needs and the open-files
 limit. With the server running it also asks the admin API: the invite code, the last save, the
@@ -450,6 +450,7 @@ reason in `./pcds logs`.
 | `save.autosaveMinutes` | `5` | minutes between saves; `0` saves only on stop |
 | `save.backupsKept` | `24` | save backups kept in `run/worlds/backups/`; `0` keeps none |
 | `save.backupMinutes` | `60` | minutes between those backups |
+| `save.verifyBackups` | `false` | read each new backup back after it is written (on a thread of its own) and say in the log and the metrics whether it loads; `./pcds backup verify` does the full check on demand |
 | `update.auto` | `false` | install each new server release and hand the world over to it (see [Upgrading](#upgrading)); off: nothing contacts GitHub on its own |
 | `update.checkHours` | `24` | hours between those checks |
 | `log.trace` | `false` | log every incoming message and RPC (debugging; a lot of output; written whatever `log.level` is) |
@@ -608,9 +609,17 @@ cannot download (`--steam-user` installs) fails `pcds update`, so the hourly uni
 - `./pcds new [OPTIONS] --force` replaces the running world with a new one; the old one is kept.
 - `run/worlds/backups/` keeps timestamped copies of each world (one per `save.backupMinutes`,
   the newest `save.backupsKept`), named by UTC time. Each start also backs up the world as it was
-  before the server touched it, at most once per 10 minutes. To restore one, stop the server and
-  copy it over the world's file. `/api/status` (`backup`) and the dashboard say when the last one
-  was made and why one failed.
+  before the server touched it, at most once per 10 minutes. `/api/status` (`backup`) and the
+  dashboard say when the last one was made and why one failed.
+- `./pcds backup list` shows them. `./pcds backup verify` loads the newest three (`--count N`,
+  `--all`) the way the server loads a world and says what each holds and whether the server would
+  start it (exit 1 when one does not load; with a bucket set it also checks the bucket's copy).
+  `./pcds backup restore NAME` puts one back as the world: it loads it first, asks, keeps the world
+  it replaces as `<world>-replaced-<time>.json`, and refuses while the server runs;
+  `--as WORLD` makes it a new world instead (also while the server runs). The rule
+  `save.verifyBackups` reads each new backup back and says so in the log and the metrics.
+  [docs/disaster-recovery.md](docs/disaster-recovery.md) has what to keep, restoring on a new
+  machine, from the bucket and from a Docker volume.
 - When the server catches a panic in a player's action (`./pcds logs` shows it; the player is
   kicked), the world may hold half of what that action did. It is not saved at once: the next
   save first keeps the world's file as it was as `NAME.json.before-panic` beside it, so that you can
@@ -655,7 +664,9 @@ never logged, and `/api/rules` and `/api/status` show them as `(set)`. `GET /api
 outcome). `POST /api/backup` saves the world and makes a backup now (answers 400 when
 `save.backupsKept` is `0`) and copies it to the bucket; `POST /api/backup/s3` copies the newest
 backup again (answers 400 when S3 is off or incomplete, or there is no backup yet). The web
-page's World tab has both as buttons.
+page's World tab has both as buttons. `./pcds backup verify` asks the bucket whether the newest
+backup is there with the file's size; `./pcds backup fetch [NAME]` copies a backup from the bucket
+into `run/worlds/backups/` (the newest of this world without a name), for a new machine.
 
 ## Differences from hosting in the game
 

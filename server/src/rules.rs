@@ -44,11 +44,13 @@ pub struct Save {
     pub backups_kept: u32,
     /// Minutes between those backups.
     pub backup_minutes: u32,
+    /// Load each new backup after it is written, to see that it can be restored.
+    pub verify_backups: bool,
 }
 
 impl Default for Save {
     fn default() -> Self {
-        Save { autosave_minutes: 5, backups_kept: 24, backup_minutes: 60 }
+        Save { autosave_minutes: 5, backups_kept: 24, backup_minutes: 60, verify_backups: false }
     }
 }
 

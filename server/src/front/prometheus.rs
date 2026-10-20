@@ -150,6 +150,8 @@ pub fn render(m: &Value) -> String {
     o.gauge("pcds_backup_enabled", "1 if the world is backed up (the rule save.backupsKept is above 0).", flag(&s["backup"]["enabled"]));
     o.gauge("pcds_backup_last_success_timestamp_seconds", "When the last backup was made, Unix time. Absent until one is made after this start.", num(&s["backup"]["lastOkAt"]));
     o.gauge("pcds_backup_last_ok", "1 if the last backup attempt worked, 0 if it failed.", s["backup"]["enabled"].as_bool().map(|_| if s["backup"]["error"].is_null() { 1.0 } else { 0.0 }));
+    o.gauge("pcds_backup_verify_last_ok", "1 if the last backup read back after it was written loads, 0 if not (the rule save.verifyBackups). Absent while the rule is off.", flag(&bank["backupVerify"]["ok"]));
+    o.gauge("pcds_backup_verify_last_timestamp_seconds", "When that backup was read back, Unix time.", num(&bank["backupVerify"]["at"]));
     let s3 = &s["s3"];
     o.gauge("pcds_s3_enabled", "1 if backups are copied to an S3 bucket (the rule backup.s3Bucket is set).", flag(&s3["enabled"]));
     o.gauge("pcds_s3_uploading", "1 while a backup is being copied to the bucket.", flag(&s3["uploading"]));
@@ -340,7 +342,7 @@ mod tests {
                 {"id": "broken", "status": "failed", "stats": {"calls": 3, "faults": 3, "restarts": 2, "slow": 0, "shed": 0, "denied": 0, "refused": 0, "actions": 0, "vetoes": 0, "fuel": 99}}
             ],
             "front": {"connections": {"ip": 1, "steam": 1}, "memory": {"front": 50_000_000, "bank": 80_000_000, "next_bank": null}, "flipsFailed": 1, "lastStandMillis": 12.5, "crashes": 4, "watchdogKills": 2, "queue": {"waitingBytes": 10, "droppedClients": 1, "droppedBytes": 17_000_000}},
-            "bank": {"maxPlayers": 16, "saveMillis": 250.0}
+            "bank": {"maxPlayers": 16, "saveMillis": 250.0, "backupVerify": {"file": "w-1", "ok": false, "at": 1_792_000_300, "worldObjects": 0, "error": "x"}}
         })
     }
 
@@ -354,6 +356,7 @@ mod tests {
         let samples = parse(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
         let v = |n: &str, l: &[(&str, &str)]| value(&samples, n, l).unwrap_or_else(|| panic!("no {n} {l:?}\n{text}"));
         assert_eq!((v("pcds_players_online", &[]), v("pcds_players_max", &[]), v("pcds_world_running", &[]), v("pcds_paused", &[])), (2.0, 16.0, 1.0, 0.0));
+        assert_eq!((v("pcds_backup_verify_last_ok", &[]), v("pcds_backup_verify_last_timestamp_seconds", &[])), (0.0, 1_792_000_300.0));
         assert_eq!((v("pcds_tick_p50_seconds", &[]), v("pcds_tick_p99_seconds", &[]), v("pcds_tick_max_seconds", &[])), (0.00015, 0.0009, 0.004));
         assert_eq!((v("pcds_loop_busy_ratio", &[]), v("pcds_memory_resident_bytes", &[("process", "bank")]), v("pcds_world_objects", &[])), (0.125, 80_000_000.0, 33583.0));
         assert!(value(&samples, "pcds_memory_resident_bytes", &[("process", "next_bank")]).is_none(), "a bank that is not there has no series");

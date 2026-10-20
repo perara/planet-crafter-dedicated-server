@@ -124,6 +124,7 @@ pub static KNOBS: &[Knob] = &[
     rule("save.autosaveMinutes", Type::Int, "min", "Minutes between saves; 0: only on stop and through the API.").range(0.0, crate::MAX_AUTOSAVE as f64),
     rule("save.backupsKept", Type::Int, "", "Save backups kept in backups/ next to the world; 0 keeps none.").range(0.0, 10_000.0),
     rule("save.backupMinutes", Type::Int, "min", "Minutes between those backups.").range(0.0, 525_600.0),
+    rule("save.verifyBackups", Type::Bool, "", "After each backup is written, read it back the way a restore would (the file's layout and its content against the game tables, on a thread of its own) and say in the log and the metrics whether it loads. Off by default; `pcds backup verify` does the full check, loading the world, whenever you run it."),
     rule("update.auto", Type::Bool, "", "Install each new server release from GitHub as it comes out, into the standby bank, and hand the running world over to it (a hot update: players stay connected). A release that needs a front restart is not installed. Off: nothing contacts GitHub on its own."),
     rule("update.checkHours", Type::Int, "h", "With update.auto: hours between the checks for a new release.").range(1.0, 8760.0),
     rule("log.trace", Type::Bool, "", "Log every incoming message and RPC (debugging; a lot of output). These lines are written whatever log.level is."),

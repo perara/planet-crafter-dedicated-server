@@ -112,6 +112,8 @@ the world is stopped, and `pcds_world_running` is 0.
 | `pcds_backup_enabled` | gauge | none | 1 if the world is backed up (the rule save.backupsKept is above 0). |
 | `pcds_backup_last_success_timestamp_seconds` | gauge | none | When the last backup was made, Unix time. Absent until one is made after this start. |
 | `pcds_backup_last_ok` | gauge | none | 1 if the last backup attempt worked, 0 if it failed. |
+| `pcds_backup_verify_last_ok` | gauge | none | 1 if the last backup read back after it was written loads, 0 if not (the rule save.verifyBackups). Absent while the rule is off. |
+| `pcds_backup_verify_last_timestamp_seconds` | gauge | none | When that backup was read back, Unix time. |
 | `pcds_s3_enabled` | gauge | none | 1 if backups are copied to an S3 bucket (the rule backup.s3Bucket is set). |
 | `pcds_s3_uploading` | gauge | none | 1 while a backup is being copied to the bucket. |
 | `pcds_s3_last_upload_ok` | gauge | none | 1 if the last copy to the bucket worked, 0 if it failed. |
@@ -188,6 +190,10 @@ groups:
         for: 10m
         labels: { severity: warning }
         annotations: { summary: "No backup for 6 hours" }
+      - alert: PcdsBackupDoesNotLoad
+        expr: pcds_backup_verify_last_ok == 0
+        labels: { severity: critical }
+        annotations: { summary: "The last backup read back does not load (rule save.verifyBackups); pcds backup verify finds one that does" }
       - alert: PcdsS3Failing
         expr: pcds_s3_enabled == 1 and pcds_s3_last_upload_ok == 0
         for: 1h

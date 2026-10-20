@@ -3,6 +3,7 @@
 //! a systemd user service (or as the Docker container's own process).
 
 mod api;
+mod backup;
 mod doctor;
 mod env;
 mod extract;
@@ -41,6 +42,10 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
                          import also converts a save of the game's old layouts (2022, one
                          planet) as the game does when it opens one; setup --world, world
                          use and the start refuse such a save and say so
+  pcds backup list | verify [--count N | --all] | restore NAME [--as WORLD] [--yes] | fetch [NAME]
+                         the world's backups: load them the way the server does, put one back
+                         as the world (or as a new world), copy one from the S3 bucket
+                         (docs/disaster-recovery.md)
   pcds new [--planet ID] [--start LOCATION] [--seed N] [--set KEY=VALUE]... [--force]
                          replace the current world with a new one (kept in backups/)
   pcds start | stop | restart | status [--json]
@@ -95,7 +100,7 @@ PCDS_GAME_DIR, the one used last (run/game-dir), else the Steam library that lis
 /// The commands `pcds help` lists: one of these with arguments it does not take is not an unknown command.
 const COMMANDS: &[&str] = &[
     "up", "setup", "worlds", "world", "new", "start", "stop", "restart", "status", "logs", "upgrade", "install-service", "uninstall-service", "code", "players", "save", "kick", "ban", "unban", "gui", "token", "config", "api",
-    "rules", "plugin", "extract", "update", "selftest", "run", "container", "doctor", "health",
+    "rules", "plugin", "extract", "update", "selftest", "run", "container", "doctor", "health", "backup",
 ];
 
 /// Where this installation's files are.
@@ -231,6 +236,7 @@ impl Ctx {
                 say("server.env is fine for this release");
             }
             ["health"] => self.health()?,
+            ["backup", ..] => return self.backup(&args[1..]),
             ["doctor", rest @ ..] => return self.doctor(&rest.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
             ["status"] => self.status()?,
             ["status", "--json"] => self.status_json()?,

@@ -20,7 +20,7 @@ pub(super) fn status(game: &mut Game, r: &Request) -> Reply {
 pub(super) fn metrics(game: &mut Game, r: &Request) -> Reply {
     let status = serde_json::to_value(status::build(game, r.ctx, Instant::now())).unwrap_or_default();
     let plugins: Vec<serde_json::Value> = game.ext.plugins.host.as_ref().map(|h| h.plugins.iter().map(plugins::admin::plugin_json).collect()).unwrap_or_default();
-    let bank = serde_json::json!({"maxPlayers": game.rules.max_players(), "saveMillis": crate::bank::persist::save_millis()});
+    let bank = serde_json::json!({"maxPlayers": game.rules.max_players(), "saveMillis": crate::bank::persist::save_millis(), "backupVerify": crate::bank::persist::verified()});
     (200, serde_json::json!({"status": status, "plugins": plugins, "bank": bank}).to_string())
 }
 

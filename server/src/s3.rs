@@ -146,15 +146,16 @@ fn sha256(data: &[u8]) -> String {
     to_hex(ring::digest::digest(&ring::digest::SHA256, data).as_ref())
 }
 
-/// The Authorization header of a request (AWS Signature Version 4, service s3). `headers`:
+/// The Authorization header of a request (AWS Signature Version 4, service s3). `query`: the
+/// canonical query string (names sorted, names and values encoded), "" for none. `headers`:
 /// lower-case names with their values, host and x-amz-date among them.
-fn authorization(method: &str, path: &str, headers: &[(&str, String)], payload_hash: &str, region: &str, access: &str, secret: &str, amz_date: &str) -> String {
+fn authorization(method: &str, path: &str, query: &str, headers: &[(&str, String)], payload_hash: &str, region: &str, access: &str, secret: &str, amz_date: &str) -> String {
     let mut headers: Vec<&(&str, String)> = headers.iter().collect();
     headers.sort_by_key(|(k, _)| *k);
     let canonical_headers: String = headers.iter().map(|(k, v)| format!("{k}:{}\n", v.trim())).collect();
     let signed: Vec<&str> = headers.iter().map(|(k, _)| *k).collect();
     let signed = signed.join(";");
-    let request = format!("{method}\n{}\n\n{canonical_headers}\n{signed}\n{payload_hash}", encode(path, true));
+    let request = format!("{method}\n{}\n{query}\n{canonical_headers}\n{signed}\n{payload_hash}", encode(path, true));
     let date = &amz_date[..8];
     let scope = format!("{date}/{region}/s3/aws4_request");
     let to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}", sha256(request.as_bytes()));
@@ -173,35 +174,92 @@ fn host_header(uri: &ureq::http::Uri) -> Option<String> {
     })
 }
 
-/// PUT one object (path-style: <endpoint>/<bucket>/<key>, which every S3-compatible service takes).
-fn put(b: &Backup, key: &str, body: &[u8], now: SystemTime) -> Result<(), String> {
+/// One signed request to the bucket (path-style: <endpoint>/<bucket>/<key>, which every S3-compatible
+/// service takes). `query`: (name, value) pairs. The answer is returned whatever its status.
+fn send(b: &Backup, method: &str, key: &str, query: &[(&str, &str)], body: &[u8], now: SystemTime) -> Result<ureq::http::Response<ureq::Body>, String> {
     let (Some(endpoint), Some(bucket), Some(access), Some(secret)) = (&b.s3_endpoint, &b.s3_bucket, &b.s3_access_key, &b.s3_secret_key) else { return Err("not configured".into()) };
     let uri: ureq::http::Uri = endpoint.parse().map_err(|_| "backup.s3Endpoint is not a URL".to_string())?;
     let scheme = uri.scheme_str().unwrap_or("https");
     let host = host_header(&uri).ok_or("backup.s3Endpoint has no host")?;
-    let path = format!("/{bucket}/{key}");
+    let path = if key.is_empty() { format!("/{bucket}") } else { format!("/{bucket}/{key}") };
     let stamp = crate::save::stamp(now);
     let amz_date = format!("{}T{}Z", &stamp[..8], &stamp[9..]);
     let hash = sha256(body);
     let headers = [("host", host.clone()), ("x-amz-content-sha256", hash.clone()), ("x-amz-date", amz_date.clone())];
-    let auth = authorization("PUT", &path, &headers, &hash, &b.s3_region, access, secret, &amz_date);
+    let mut pairs: Vec<(String, String)> = query.iter().map(|(k, v)| (encode(k, false), encode(v, false))).collect();
+    pairs.sort();
+    let query = pairs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&");
+    let auth = authorization(method, &path, &query, &headers, &hash, &b.s3_region, access, secret, &amz_date);
     let config = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(300))).http_status_as_error(false).max_redirects(0).build();
     let agent = ureq::Agent::new_with_config(config);
-    let url = format!("{scheme}://{host}{}", encode(&path, true));
-    let mut answer = agent
-        .put(&url)
-        .header("x-amz-content-sha256", &hash)
-        .header("x-amz-date", &amz_date)
-        .header("Authorization", &auth)
-        .send(body)
-        .map_err(|e| e.to_string())?;
-    if answer.status().is_success() {
-        return Ok(());
+    let url = format!("{scheme}://{host}{}{}", encode(&path, true), if query.is_empty() { String::new() } else { format!("?{query}") });
+    if method == "PUT" {
+        return agent.put(&url).header("x-amz-content-sha256", &hash).header("x-amz-date", &amz_date).header("Authorization", &auth).send(body).map_err(|e| e.to_string());
     }
-    // S3 errors are XML: <Code>AccessDenied</Code><Message>...</Message>. Never echoes the keys.
+    let request = if method == "HEAD" { agent.head(&url) } else { agent.get(&url) };
+    request.header("x-amz-content-sha256", &hash).header("x-amz-date", &amz_date).header("Authorization", &auth).call().map_err(|e| e.to_string())
+}
+
+/// What an error answer says: "HTTP 403: AccessDenied (message)". S3 errors are XML:
+/// <Code>AccessDenied</Code><Message>...</Message>. Never echoes the keys.
+fn failure(mut answer: ureq::http::Response<ureq::Body>) -> String {
+    let status = answer.status().as_u16();
     let text = answer.body_mut().with_config().limit(16 << 10).read_to_string().unwrap_or_default();
     let field = |tag: &str| text.split(&format!("<{tag}>")).nth(1).and_then(|r| r.split(&format!("</{tag}>")).next()).map(str::to_string);
-    Err(format!("HTTP {}{}", answer.status().as_u16(), field("Code").map(|c| format!(": {c}{}", field("Message").map(|m| format!(" ({m})")).unwrap_or_default())).unwrap_or_default()))
+    format!("HTTP {status}{}", field("Code").map(|c| format!(": {c}{}", field("Message").map(|m| format!(" ({m})")).unwrap_or_default())).unwrap_or_default())
+}
+
+/// PUT one object.
+fn put(b: &Backup, key: &str, body: &[u8], now: SystemTime) -> Result<(), String> {
+    let answer = send(b, "PUT", key, &[], body, now)?;
+    if answer.status().is_success() { Ok(()) } else { Err(failure(answer)) }
+}
+
+/// The size of an object (HEAD), None when the bucket has none by that key.
+pub fn head(b: &Backup, key: &str) -> Result<Option<u64>, String> {
+    let answer = send(b, "HEAD", key, &[], &[], SystemTime::now())?;
+    match answer.status().as_u16() {
+        404 => Ok(None),
+        200..=299 => Ok(answer.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok())),
+        _ => Err(failure(answer)),
+    }
+}
+
+/// An object's bytes (at most 256 MiB).
+pub fn get(b: &Backup, key: &str) -> Result<Vec<u8>, String> {
+    let mut answer = send(b, "GET", key, &[], &[], SystemTime::now())?;
+    if !answer.status().is_success() {
+        return Err(failure(answer));
+    }
+    answer.body_mut().with_config().limit(256 << 20).read_to_vec().map_err(|e| e.to_string())
+}
+
+/// The keys that begin with `prefix` (ListObjectsV2), all pages (at most 10).
+pub fn list(b: &Backup, prefix: &str) -> Result<Vec<String>, String> {
+    let (mut keys, mut token) = (Vec::new(), None::<String>);
+    for _ in 0..10 {
+        let mut query = vec![("list-type", "2"), ("prefix", prefix)];
+        if let Some(t) = &token {
+            query.push(("continuation-token", t));
+        }
+        let mut answer = send(b, "GET", "", &query, &[], SystemTime::now())?;
+        if !answer.status().is_success() {
+            return Err(failure(answer));
+        }
+        let xml = answer.body_mut().with_config().limit(16 << 20).read_to_string().map_err(|e| e.to_string())?;
+        let each = |tag: &str| -> Vec<String> { xml.split(&format!("<{tag}>")).skip(1).filter_map(|r| r.split(&format!("</{tag}>")).next()).map(unescape).collect() };
+        keys.extend(each("Key"));
+        token = each("NextContinuationToken").pop().filter(|_| xml.contains("<IsTruncated>true</IsTruncated>"));
+        if token.is_none() {
+            return Ok(keys);
+        }
+    }
+    Err("the bucket lists more than 10,000 backups under that prefix: use a longer prefix or clear old ones".into())
+}
+
+/// The XML entities S3 uses in a key.
+fn unescape(text: &str) -> String {
+    text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
 }
 
 #[cfg(test)]
@@ -240,7 +298,7 @@ mod tests {
     fn signs_like_aws() {
         let empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         let headers = [("host", "examplebucket.s3.amazonaws.com".to_string()), ("range", "bytes=0-9".to_string()), ("x-amz-content-sha256", empty.to_string()), ("x-amz-date", "20130524T000000Z".to_string())];
-        let auth = authorization("GET", "/test.txt", &headers, empty, "us-east-1", "AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "20130524T000000Z");
+        let auth = authorization("GET", "/test.txt", "", &headers, empty, "us-east-1", "AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "20130524T000000Z");
         assert_eq!(
             auth,
             "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;range;x-amz-content-sha256;x-amz-date, Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41"
@@ -271,8 +329,90 @@ mod tests {
         let (headers, _) = server.join().unwrap();
         let get = |k: &str| headers.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap();
         let sent = [("host", get("host")), ("x-amz-content-sha256", get("x-amz-content-sha256")), ("x-amz-date", get("x-amz-date"))];
-        let again = authorization("PUT", "/saves/pcds/world.json", &sent, &get("x-amz-content-sha256"), "us-east-1", "AKIAEXAMPLE", "secret", &get("x-amz-date"));
+        let again = authorization("PUT", "/saves/pcds/world.json", "", &sent, &get("x-amz-content-sha256"), "us-east-1", "AKIAEXAMPLE", "secret", &get("x-amz-date"));
         assert_eq!(get("authorization"), again);
+    }
+
+    /// AWS's own example for a request with a query ("GET Bucket (List Objects)").
+    #[test]
+    fn signs_a_query_like_aws() {
+        let empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let headers = [("host", "examplebucket.s3.amazonaws.com".to_string()), ("x-amz-content-sha256", empty.to_string()), ("x-amz-date", "20130524T000000Z".to_string())];
+        let auth = authorization("GET", "/", "max-keys=2&prefix=J", &headers, empty, "us-east-1", "AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "20130524T000000Z");
+        assert!(auth.ends_with("SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7"), "{auth}");
+    }
+
+    /// A bucket's answers to HEAD, GET and the listing (two pages), on a stand-in server that records
+    /// each request line: sizes, a missing key, bytes, an error with its S3 code, and keys with the
+    /// characters XML escapes.
+    #[test]
+    fn the_bucket_is_asked_for_a_size_a_file_and_a_listing() {
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let answers: Vec<Vec<u8>> = vec![
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2458107\r\nConnection: close\r\n\r\n".to_vec(),
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nsave".to_vec(),
+            {
+                let xml = "<ListBucketResult><IsTruncated>true</IsTruncated><Contents><Key>pcds/world-20261020-170930.json</Key></Contents><Contents><Key>pcds/a&amp;b.json</Key></Contents><NextContinuationToken>tok/en+1</NextContinuationToken></ListBucketResult>";
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}", xml.len()).into_bytes()
+            },
+            {
+                let xml = "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>pcds/world-20261021-010000.json</Key></Contents></ListBucketResult>";
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}", xml.len()).into_bytes()
+            },
+            {
+                let xml = "<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>";
+                format!("HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}", xml.len()).into_bytes()
+            },
+        ];
+        let server = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for answer in answers {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                let (mut auth, mut length, mut line) = (false, 0usize, String::new());
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).unwrap() == 0 || line.trim().is_empty() {
+                        break;
+                    }
+                    auth |= line.to_ascii_lowercase().starts_with("authorization: aws4-hmac-sha256 credential=akiaexample/");
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                }
+                reader.read_exact(&mut vec![0; length]).unwrap();
+                seen.push(format!("{} signed={auth}", first.trim()));
+                stream.write_all(&answer).unwrap();
+            }
+            seen
+        });
+        let b = Backup { s3_endpoint: Some(format!("http://127.0.0.1:{port}")), s3_bucket: Some("saves".into()), s3_access_key: Some("AKIAEXAMPLE".into()), s3_secret_key: Some("secret".into()), ..Backup::default() };
+        assert_eq!(head(&b, "pcds/world-1.json"), Ok(Some(2_458_107)));
+        assert_eq!(head(&b, "pcds/none.json"), Ok(None));
+        assert_eq!(head(&b, "pcds/denied.json").unwrap_err(), "HTTP 403");
+        assert_eq!(get(&b, "pcds/world-1.json").unwrap(), b"save");
+        assert_eq!(list(&b, "pcds/world-").unwrap(), ["pcds/world-20261020-170930.json", "pcds/a&b.json", "pcds/world-20261021-010000.json"]);
+        assert_eq!(list(&b, "pcds/").unwrap_err(), "HTTP 403: AccessDenied (Access Denied)");
+        assert_eq!(
+            server.join().unwrap(),
+            [
+                "HEAD /saves/pcds/world-1.json HTTP/1.1 signed=true",
+                "HEAD /saves/pcds/none.json HTTP/1.1 signed=true",
+                "HEAD /saves/pcds/denied.json HTTP/1.1 signed=true",
+                "GET /saves/pcds/world-1.json HTTP/1.1 signed=true",
+                "GET /saves?list-type=2&prefix=pcds%2Fworld- HTTP/1.1 signed=true",
+                "GET /saves?continuation-token=tok%2Fen%2B1&list-type=2&prefix=pcds%2Fworld- HTTP/1.1 signed=true",
+                "GET /saves?list-type=2&prefix=pcds%2F HTTP/1.1 signed=true",
+            ]
+        );
+        let off = Backup::default();
+        assert_eq!(head(&off, "x"), Err("not configured".into()));
     }
 
     #[test]
