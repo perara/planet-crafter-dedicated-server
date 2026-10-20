@@ -1421,7 +1421,7 @@ impl Front {
             "latest": u.latest,
             "available": u.newer,
             "checkedAt": u.checked,
-            "releases": self.banks.as_ref().map(|_| updater::releases_url()),
+            "releases": self.banks.as_ref().map(|_| updater::shown_url(&updater::releases_url())),
         })
     }
 

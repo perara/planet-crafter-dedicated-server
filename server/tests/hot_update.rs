@@ -976,6 +976,29 @@ fn a_new_bank_that_ends_after_its_flip_restarts_from_the_flips_snapshot() {
     bank_killed_in("new-after-ready");
 }
 
+/// PCDS_RELEASES may carry a token (a private mirror): /api/update and /api/status show scheme
+/// and host only, also after a lookup that failed.
+#[test]
+fn a_releases_url_with_a_token_is_never_shown() {
+    let Some(data) = tables() else { return };
+    let dir = world_dir("releases-token", &data);
+    let banks = banks(&dir);
+    let server = start(&dir, &data, &banks, "http://user:s3cr3t@127.0.0.1:9/releases?token=t0k3n");
+    let (_, u) = server.api("GET", "/api/update", json!({}));
+    assert_eq!(u["releases"], "http://127.0.0.1:9", "{u}");
+    let done = server.update(json!({"check": true}));
+    assert_eq!(done["ok"], false, "{done}");
+    for text in [server.api("GET", "/api/update", json!({})).1.to_string(), server.api("GET", "/api/status", json!({})).1.to_string(), server.log()] {
+        assert!(!text.contains("s3cr3t") && !text.contains("t0k3n"), "{text}");
+    }
+    assert!(done["message"].as_str().unwrap().starts_with("http://127.0.0.1:9"), "{done}");
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// The front's end, waited for (None: still running after `secs`).
 fn exit_within(server: &mut Server, secs: u64) -> Option<std::process::ExitStatus> {
     let deadline = Instant::now() + Duration::from_secs(secs);

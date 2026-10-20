@@ -55,12 +55,24 @@ fn agent(local: bool) -> ureq::Agent {
     ureq::Agent::new_with_config(config)
 }
 
+/// A releases URL as it may be shown (/api/status, /api/update, the log, an error): scheme and
+/// host only. PCDS_RELEASES can be a private mirror with a token in its user:password@, path or
+/// query.
+pub fn shown_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else { return "(not a URL)".into() };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    format!("{scheme}://{}", authority.rsplit_once('@').map_or(authority, |(_, host)| host))
+}
+
 fn get(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, String> {
-    let mut answer = agent.get(url).header("Accept", "application/vnd.github+json, application/octet-stream, */*").call().map_err(|e| format!("{url}: {e}"))?;
+    // Whatever the library says of the URL is said of its shown form.
+    let shown = shown_url(url);
+    let said = |e: String| format!("{shown}: {}", e.replace(url, &shown));
+    let mut answer = agent.get(url).header("Accept", "application/vnd.github+json, application/octet-stream, */*").call().map_err(|e| said(e.to_string()))?;
     if !answer.status().is_success() {
-        return Err(format!("{url}: HTTP {}", answer.status().as_u16()));
+        return Err(format!("{shown}: HTTP {}", answer.status().as_u16()));
     }
-    answer.body_mut().with_config().limit(MAX_DOWNLOAD).read_to_vec().map_err(|e| format!("{url}: {e}"))
+    answer.body_mut().with_config().limit(MAX_DOWNLOAD).read_to_vec().map_err(|e| said(e.to_string()))
 }
 
 /// "0.6.0" and "v0.6.0" are the tag v0.6.0.
@@ -87,9 +99,10 @@ pub fn lookup(base: &str, version: Option<&str>) -> Result<Release, String> {
         Some(v) => format!("{base}/tags/{}", tag(v)),
     };
     let local = local(base);
-    let release: Value = serde_json::from_slice(&get(&agent(local), &url)?).map_err(|e| format!("{url}: {e}"))?;
-    let tag = release["tag_name"].as_str().ok_or_else(|| format!("{url}: no tag_name"))?.to_string();
-    check_tag(&tag).map_err(|e| format!("{url}: tag_name {e}"))?;
+    let shown = shown_url(&url);
+    let release: Value = serde_json::from_slice(&get(&agent(local), &url)?).map_err(|e| format!("{shown}: {e}"))?;
+    let tag = release["tag_name"].as_str().ok_or_else(|| format!("{shown}: no tag_name"))?.to_string();
+    check_tag(&tag).map_err(|e| format!("{shown}: tag_name {e}"))?;
     let asset = |name: &str| {
         let assets = release["assets"].as_array().into_iter().flatten();
         let found = assets.into_iter().find(|a| a["name"] == name).and_then(|a| a["browser_download_url"].as_str());
@@ -726,6 +739,25 @@ pub mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// PCDS_RELEASES may be a private mirror with a token in it: only scheme and host are shown,
+    /// also in the errors of a lookup that fails.
+    #[test]
+    fn a_releases_url_is_shown_as_scheme_and_host_only() {
+        for (url, shown) in [
+            ("https://api.github.com/repos/x/y/releases", "https://api.github.com"),
+            ("https://user:tok@mirror.example:8443/r?token=abc#f", "https://mirror.example:8443"),
+            ("http://127.0.0.1:9/releases?k=v", "http://127.0.0.1:9"),
+            ("https://tok@host?x=1", "https://host"),
+            ("no scheme/at all?token=abc", "(not a URL)"),
+        ] {
+            assert_eq!(shown_url(url), shown, "{url}");
+        }
+        let url = "http://user:s3cr3t@127.0.0.1:9/releases/latest?token=t0k3n";
+        for e in [get(&agent(true), url).unwrap_err(), lookup("http://user:s3cr3t@127.0.0.1:9/releases?token=t0k3n", None).unwrap_err()] {
+            assert!(e.starts_with("http://127.0.0.1:9: ") && !e.contains("s3cr3t") && !e.contains("t0k3n"), "{e}");
+        }
+    }
+
     /// bank-info runs with PATH, HOME and LANG only: no token of the server reaches it.
     #[test]
     fn bank_info_sees_no_more_than_path_home_and_lang() {
@@ -893,7 +925,7 @@ pub mod tests {
         // The redirect is followed (to a release that has no assets).
         assert!(err(Some("v1.0.0")).contains("has no pcds-v1.0.0-linux-x86_64.tar.gz"), "{}", err(Some("v1.0.0")));
         assert!(err(Some("v1.1.0")).contains("has no pcds-v1.1.0-linux-x86_64.tar.gz.sha256"), "{}", err(Some("v1.1.0")));
-        assert!(err(Some("v1.2.0")).contains("releases/tags/v1.2.0"), "nonsense is an error naming the url");
+        assert!(err(Some("v1.2.0")).starts_with("http://127.0.0.1:"), "nonsense is an error naming the server (not the path: it may hold a token)");
         assert!(err(Some("v1.3.0")).contains("no tag_name"));
         assert!(!err(Some("v1.4.0")).is_empty(), "a body cut short is an error");
         assert!(err(Some("v1.5.0")).contains("not a release version"), "a tag from the feed is checked as a typed one is");
