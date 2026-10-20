@@ -31,6 +31,8 @@ const MANAGER: &str = "LogisticManager";
 /// SetTasksCoroutine(1f).
 const TASKS_EVERY: f32 = 1.0;
 const UP: f32 = 2.0;
+/// Bound dispatch/topology-change bursts instead of planning a whole fleet in one tick.
+const ROUTES_PER_FRAME: usize = 16;
 /// NetworkObject.SceneObject flag.
 const DESTROY_WITH_SCENE: u16 = 1 << 6;
 
@@ -155,6 +157,8 @@ pub struct Logistics {
     navigation_dirty: bool,
     #[serde(skip)]
     navigation_epoch: u64,
+    #[serde(skip)]
+    navigation_cursor: usize,
 }
 
 // ---- small lookups ------------------------------------------------------------------------
@@ -511,7 +515,11 @@ fn update(game: &mut Game) {
     }
     let dt = tick_seconds(game);
     let l = &mut game.ext.logistics;
-    for i in 0..l.access.len() {
+    let count = l.access.len();
+    let start = l.navigation_cursor % count.max(1);
+    let mut routes_left = ROUTES_PER_FRAME;
+    for offset in 0..count {
+        let i = (start + offset) % count;
         let (Some(d), a) = (l.access[i], l.access_data[i]) else { continue };
         let Some(dr) = l.drones.get_mut(&d) else { continue };
         if motion::length_sq(a.target) <= motion::EPSILON || !powered.contains(&a.planet) {
@@ -523,6 +531,9 @@ fn update(game: &mut Game) {
         }
         if let Some(grid) = l.navigation.get(&a.planet) {
             if dr.route_goal != Some(a.target) || dr.route_epoch != l.navigation_epoch {
+                if routes_left == 0 { continue; }
+                routes_left -= 1;
+                l.navigation_cursor = (i + 1) % count;
                 dr.route = grid.route(dr.position, a.target).into();
                 dr.route_goal = Some(a.target);
                 dr.route_epoch = l.navigation_epoch;

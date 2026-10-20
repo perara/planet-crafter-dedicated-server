@@ -844,3 +844,30 @@ fn mixed_drone_types_use_their_own_arrival_distance() {
     assert!(game.ext.logistics.at_target.contains(&(game.ext.logistics.drones[&a].access as usize)));
     assert!(!game.ext.logistics.at_target.contains(&(game.ext.logistics.drones[&b].access as usize)));
 }
+
+#[test]
+fn route_planning_is_bounded_and_fair_across_the_fleet() {
+    use crate::geometry::navigation::Data;
+    let Some(mut game) = game() else { return };
+    build(&mut game,"EnergyGenerator6",[40.0,2.0,0.0]);
+    game.data.drone_navigation=Some(std::sync::Arc::new(Data { planets:HashMap::from([(game.planet_hash(),vec![])]),..Default::default() }));
+    let mut drones=Vec::new();
+    for i in 0..40 {
+        let d=build(&mut game,"Drone1",[10.0+i as f32,4.0,10.0]);
+        add_to_fleet(&mut game,d,false);
+        set_target(&mut game,d,[1000.0,2.0,10.0]);
+        drones.push(d);
+    }
+    game.ext.logistics.enabled=true;
+    update(&mut game);
+    assert_eq!(game.ext.logistics.drones.values().filter(|d| d.route_goal.is_some()).count(),ROUTES_PER_FRAME);
+    let waiting=drones[ROUTES_PER_FRAME];
+    assert_eq!(game.ext.logistics.drones[&waiting].position,[10.0+ROUTES_PER_FRAME as f32,4.0,10.0],"no movement without a checked route");
+    // Busy first slots must not starve later drones when their own targets keep changing.
+    for &d in &drones[..ROUTES_PER_FRAME] { set_target(&mut game,d,[1500.0,2.0,10.0]); }
+    update(&mut game);
+    assert!(drones[ROUTES_PER_FRAME..2*ROUTES_PER_FRAME].iter().all(|d| game.ext.logistics.drones[d].route_goal.is_some()));
+    assert_eq!(game.ext.logistics.drones[&drones[0]].route_goal,Some([1000.0,4.0,10.0]));
+    for _ in 0..3 { update(&mut game); }
+    assert!(game.ext.logistics.drones.values().all(|d| d.route_goal==Some(d.target)));
+}
