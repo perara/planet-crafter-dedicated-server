@@ -466,7 +466,7 @@ fn invariants(g: &Game) -> Vec<String> {
                 // A plant of a grower whose item was destroyed keeps its network object on purpose (the game's
                 // own: objects.rs destroy_world_object, the parity sweep): it is the machine's child and goes
                 // with the machine.
-                None if o.parent.is_some_and(|p| g.net.objects.contains_key(&p)) => {}
+                None if g.ext.machines.grower_of(w).is_some_and(|m| g.wos.contains_key(&m)) => {}
                 None => bad.push(format!("net object {} stands for world object {w}, which is gone", o.id)),
                 Some(wo) if wo.net != Some(o.id) => bad.push(format!("net object {} stands for world object {w} ({}), whose net is {:?}", o.id, g.data.groups[wo.group].id, wo.net)),
                 _ => {}
