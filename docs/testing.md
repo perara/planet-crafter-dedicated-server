@@ -200,7 +200,8 @@ change to the transport, the save code or anything `unsafe`. All need a nightly 
 - **Overflow checks** (`CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true cargo test --release`): the release build wraps
   (S18), so an arithmetic overflow a client could reach is silent there; with the checks on, the whole suite,
   the late-game bench, a 3600 s soak of the late-game save and the hostile RPCs on it (`PCDS_FUZZ_SEED` 1 to 6,
-  30,000 rounds) find none at v0.8.0.
+  30,000 rounds) find none at v0.8.0. The same RPCs without the checks, seeds 1 to 11 (18,900 rounds each, about
+  5 to 14 minutes a seed), hold the invariants once the grower's plants (audits.md R2) are fixed.
 
 ## Parity with the game: the sweep
 
