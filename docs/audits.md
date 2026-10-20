@@ -179,7 +179,7 @@ stall is real but inflated. Finding numbers are those of the report.
 | D12 | The network tick counter saturates at 828 days and the logistics frame loop stops | Suspect | fixed in 0.7.0: 64-bit inside, wraps on the wire like the game's int | docs/clock.md, "Design" (the tick counter) |
 | D13 | Machine, rocket and meteo timers degrade with the f32 clock's resolution (2.5% to 10% slow at 48 to 194 days) | Suspect | fixed in 0.7.0 by the f64 clock | `clock::tests::an_old_clock_keeps_its_steps`, docs/clock.md |
 | D14 | A jump of game time was paid by catch-up loops: 3 days cost 14 CPU minutes | Suspect | fixed in 0.7.0: `take_due` counts instead of looping | `clock::tests::take_due_is_the_loop_it_replaces`, `units::tests::a_jump_of_the_clock_is_one_catch_up` |
-| D15 | If the wall clock steps back (NTP), backups stamped in the future block new backups until it catches up | Low | open: reasoning only, never run | `save.rs` (`times.iter().any(\|t\| *t > since)`) |
+| D15 | If the wall clock steps back (NTP), backups stamped in the future block new backups until it catches up | Low | fixed after 0.7.0: a stamp from the future does not count as a recent backup, is ordered before all others (pruned first, never "the newest" for S3), and the copy just made is never the one removed | `save::tests::backups_stamped_in_the_future_block_nothing_and_go_first`, `save::backup_stamps` |
 | D16 | A restarted world's heat differs from a straight run by 0.0004% to 0.06% | Low | by design: a restart is a new game on the same save and the game's own float behaves the same | docs/clock.md, "What is not the same"; `bench::restart` |
 
 Experiments that found nothing (kept for the record, no finding):
@@ -251,8 +251,6 @@ Dynamic:
   produce long flips and joins. Next: drive `explode::scan` from changes, not from a timer, and
   re-measure with `tools/perf/` at 90,000 objects.
 * **D9** Saved players are never pruned. Next: owner decides a retention rule.
-* **D15** Backups stamped in the future block new ones after a clock step back. Next: write a test
-  with a clock that steps back.
 
 Lead from the tools' smoke runs, not a finding: in two of three disk-full runs against 0.6.2,
 `GET /api/status` was refused for 8 s after a `kill -9` of the bank on a full disk although the

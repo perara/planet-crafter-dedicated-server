@@ -64,20 +64,14 @@ fn missing(b: &Backup) -> Vec<&'static str> {
     [("s3Endpoint", b.s3_endpoint.is_none()), ("s3AccessKey", b.s3_access_key.is_none()), ("s3SecretKey", b.s3_secret_key.is_none())].into_iter().filter(|(_, m)| *m).map(|(k, _)| k).collect()
 }
 
-/// The newest backup of the save at `save_path` (backups/<world>-<time>.json).
+/// The newest backup of the save at `save_path` (backups/<world>-<time>.json), by
+/// `save::backup_stamps`: a stamp from the future (the clock stepped back) is not the newest.
 pub fn newest_backup(save_path: &str) -> Option<PathBuf> {
     let path = Path::new(save_path);
     let stem = path.file_stem()?.to_string_lossy().to_string();
     let dir = path.with_file_name("backups");
-    std::fs::read_dir(&dir)
-        .ok()?
-        .filter_map(|e| {
-            let name = e.ok()?.file_name().to_string_lossy().to_string();
-            let time = name.strip_prefix(&format!("{stem}-"))?.strip_suffix(".json")?;
-            (time.len() == 15 && time.bytes().enumerate().all(|(i, b)| if i == 8 { b == b'-' } else { b.is_ascii_digit() })).then_some(name)
-        })
-        .max()
-        .map(|name| dir.join(name))
+    let stamps = crate::save::backup_stamps(&dir, &stem, &crate::save::stamp(std::time::SystemTime::now())).ok()?;
+    stamps.last().map(|t| dir.join(format!("{stem}-{t}.json")))
 }
 
 /// After a backup: the newest one uploaded, unless it already was (`force`: again anyway); with

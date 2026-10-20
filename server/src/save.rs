@@ -444,9 +444,26 @@ pub fn stamp(t: SystemTime) -> String {
     format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", secs / 3600, secs / 60 % 60, secs % 60)
 }
 
+/// The time stamps of a save's backups in `dir`, oldest first. A stamp after `now` comes from a
+/// clock that has stepped back since (NTP, a wrong RTC at boot): the backup was made earlier than
+/// anything stamped now, so it is ordered before all the others, however far ahead its stamp is.
+/// Names cannot tell more than that, and nothing here ever refuses a backup for a stamp ahead.
+pub fn backup_stamps(dir: &Path, stem: &str, now: &str) -> std::io::Result<Vec<String>> {
+    // This save's backups by time ("world-2-<time>" belongs to world-2, not world).
+    let mut times: Vec<String> = std::fs::read_dir(dir)?
+        .filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().strip_prefix(&format!("{stem}-"))?.strip_suffix(".json")?.to_string()))
+        .filter(|t| t.len() == 15 && t.bytes().enumerate().all(|(i, b)| if i == 8 { b == b'-' } else { b.is_ascii_digit() }))
+        .collect();
+    times.sort();
+    times.dedup();
+    let (past, ahead): (Vec<String>, Vec<String>) = times.into_iter().partition(|t| t.as_str() <= now);
+    Ok(ahead.into_iter().chain(past).collect())
+}
+
 /// Before a save is replaced: a copy in backups/ next to it, <stem>-<UTC time>.json, unless
 /// one is younger than `every`; only the newest `keep` stay (0: no backups). Whether a copy
-/// was made (false: none was due).
+/// was made (false: none was due). A backup stamped in the future (the clock stepped back) is not
+/// "younger than `every`" and is the first to go (`backup_stamps`).
 pub fn backup(path: &str, every: Duration, keep: usize) -> std::io::Result<bool> {
     let path = Path::new(path);
     if keep == 0 || !path.exists() {
@@ -455,23 +472,19 @@ pub fn backup(path: &str, every: Duration, keep: usize) -> std::io::Result<bool>
     let dir = path.with_file_name("backups");
     let stem = path.file_stem().unwrap_or_default().to_string_lossy();
     std::fs::create_dir_all(&dir)?;
-    // This save's backups by time ("world-2-<time>" belongs to world-2, not world).
-    let mut times: Vec<String> = std::fs::read_dir(&dir)?
-        .filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().strip_prefix(&format!("{stem}-"))?.strip_suffix(".json")?.to_string()))
-        .filter(|t| t.len() == 15 && t.bytes().enumerate().all(|(i, b)| if i == 8 { b == b'-' } else { b.is_ascii_digit() }))
-        .collect();
     let now = SystemTime::now();
+    let time = stamp(now);
+    let mut times = backup_stamps(&dir, &stem, &time)?;
     let since = stamp(now.checked_sub(every).unwrap_or(SystemTime::UNIX_EPOCH));
-    if times.iter().any(|t| *t > since) {
+    if times.iter().any(|t| *t > since && *t <= time) {
         return Ok(false);
     }
-    let time = stamp(now);
     // Whole or not at all: a copy cut short (a full disk) under a backup's name would count as
     // this hour's backup.
     write_atomic(&dir.join(format!("{stem}-{time}.json")).to_string_lossy(), &std::fs::read(path)?)?;
+    // The copy just made is the newest, whatever the others are stamped.
+    times.retain(|t| *t != time);
     times.push(time);
-    times.sort();
-    times.dedup();
     for old in &times[..times.len().saturating_sub(keep)] {
         std::fs::remove_file(dir.join(format!("{stem}-{old}.json")))?;
     }
@@ -893,6 +906,50 @@ mod tests {
         assert_eq!(names.len(), 3, "{names:?}");
         assert_eq!(names[..2], ["world-2-20200101-000000.json", "world-20200101-010000.json"], "the oldest pruned, other saves' kept");
         assert_eq!(std::fs::read_to_string(backups.join(&names[2])).unwrap(), "v1", "one per hour: the second save made none");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The wall clock stepped back (NTP, a wrong RTC at boot): backups stamped ahead of now do not
+    /// block the next backup, are the first to be pruned, and are not "the newest" for S3. The
+    /// copy just made is never the one removed, whatever `keep` is.
+    #[test]
+    fn backups_stamped_in_the_future_block_nothing_and_go_first() {
+        let dir = std::env::temp_dir().join(format!("pcds-backup-future-{}", std::process::id()));
+        let backups = dir.join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        let save = dir.join("world.json");
+        std::fs::write(&save, "v1").unwrap();
+        let ahead = |secs: u64| format!("world-{}.json", stamp(SystemTime::now() + Duration::from_secs(secs)));
+        let behind = |secs: u64| format!("world-{}.json", stamp(SystemTime::now() - Duration::from_secs(secs)));
+        let (f1, f2, p1) = (ahead(3600), ahead(7200), behind(86_400));
+        for f in [&f1, &f2, &p1] {
+            std::fs::write(backups.join(f), "old").unwrap();
+        }
+        let names = || {
+            let mut n: Vec<String> = std::fs::read_dir(&backups).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+            n.sort();
+            n
+        };
+        // A backup is made although two are stamped ahead; room for all four.
+        assert!(backup(save.to_str().unwrap(), Duration::from_secs(3600), 4).unwrap());
+        assert_eq!(names().len(), 4);
+        // The newest for S3 is the one just made, not a stamp from the future.
+        let newest = crate::s3::newest_backup(save.to_str().unwrap()).unwrap();
+        assert_eq!(std::fs::read_to_string(&newest).unwrap(), "v1");
+        assert!(![&f1, &f2].contains(&&newest.file_name().unwrap().to_string_lossy().to_string()));
+        // Room for two: the futures go before the day-old past one, and the new copy stays.
+        std::fs::write(&save, "v2").unwrap();
+        assert!(backup(save.to_str().unwrap(), Duration::ZERO, 2).unwrap());
+        let left = names();
+        assert_eq!(left.len(), 2, "{left:?}");
+        assert!(left.contains(&p1) && !left.contains(&f1) && !left.contains(&f2), "{left:?}");
+        // Room for one: only the copy just made is left.
+        std::fs::write(&save, "v3").unwrap();
+        std::fs::write(backups.join(ahead(60)), "old").unwrap();
+        assert!(backup(save.to_str().unwrap(), Duration::ZERO, 1).unwrap());
+        let left = names();
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert_eq!(std::fs::read_to_string(backups.join(&left[0])).unwrap(), "v3");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
