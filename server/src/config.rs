@@ -335,6 +335,22 @@ pub fn check_env(get: impl Fn(&str) -> Option<String>) -> Result<(), String> {
     if bad.is_empty() { Ok(()) } else { Err(format!("server.env: {} (pcds config edits it)", bad.join("; "))) }
 }
 
+/// Where `pcds` reaches the admin API for a PCDS_ADMIN value: the same address check_env() accepts
+/// (a socket address, `localhost` is not one), on the loopback of its own family when it listens on
+/// every address. An address on another interface is Err: `pcds` talks to the loopback only, so
+/// the admin API must listen there too (or be asked over the network by other means).
+pub fn admin_loopback(setting: &str) -> Result<std::net::SocketAddr, String> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let addr: std::net::SocketAddr = setting.parse().map_err(|_| format!("PCDS_ADMIN={setting}: not an address (HOST:PORT, such as 127.0.0.1:7782 or [::1]:7782) or off"))?;
+    let ip = match addr.ip() {
+        ip if ip.is_loopback() => ip,
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        _ => return Err(format!("PCDS_ADMIN={setting}: pcds reaches the admin API on the loopback only (bind it to 127.0.0.1, [::1], 0.0.0.0 or [::])")),
+    };
+    Ok(std::net::SocketAddr::new(ip, addr.port()))
+}
+
 /// A whole-number server.env setting, or its default: what check_env() let through at start.
 pub fn env_number(key: &str) -> u64 {
     let k = knob_for(key).filter(|k| k.kind == Type::Int).unwrap_or_else(|| panic!("{key}: not a whole-number setting in config::KNOBS"));
@@ -781,6 +797,24 @@ mod tests {
         keys.sort();
         keys.dedup();
         assert_eq!(keys.len(), KNOBS.len(), "every key once");
+    }
+
+    /// The command line and the server read PCDS_ADMIN alike: what the server refuses at start the
+    /// command line refuses, what it accepts the command line reaches (the loopback of its family),
+    /// except an address on another interface, which only the server may listen on.
+    #[test]
+    fn the_command_line_reads_the_admin_address_as_the_server_does() {
+        let server_takes = |text: &str| check_env(|k| (k == "PCDS_ADMIN").then(|| text.to_string())).is_ok();
+        for (text, reached) in [("127.0.0.1:7782", Some("127.0.0.1:7782")), ("0.0.0.0:7782", Some("127.0.0.1:7782")), ("[::1]:7782", Some("[::1]:7782")), ("[::]:9", Some("[::1]:9")), ("192.168.1.5:7782", None), ("[2001:db8::1]:7782", None)] {
+            assert!(server_takes(text), "{text}");
+            assert_eq!(admin_loopback(text).ok().map(|a| a.to_string()), reached.map(String::from), "{text}");
+        }
+        for text in ["localhost:7782", "127.0.0.1", ":7782", "7782", "http://127.0.0.1:7782", "[::1]", "127.0.0.1:99999"] {
+            assert!(!server_takes(text), "{text}");
+            let e = admin_loopback(text).unwrap_err();
+            assert!(e.contains("PCDS_ADMIN") && e.contains("not an address"), "{text}: {e}");
+        }
+        assert!(admin_loopback("192.168.1.5:7782").unwrap_err().contains("loopback only"));
     }
 
     /// Each rule takes what its entry says and refuses the rest, through Rules::validate (what

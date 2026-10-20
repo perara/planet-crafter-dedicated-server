@@ -1,8 +1,8 @@
-//! The admin API client: HTTP/1.1 to 127.0.0.1 with a bearer token. And the commands that go
+//! The admin API client: HTTP/1.1 to the loopback with a bearer token. And the commands that go
 //! through the admin API.
 
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
 use serde_json::{Map, Value};
@@ -48,14 +48,14 @@ pub fn read_response(r: &mut impl BufRead) -> Result<(u16, String)> {
     Ok((status, String::from_utf8_lossy(&body).into_owned()))
 }
 
-/// One request to a server on 127.0.0.1: the body of a 2xx answer, else Err with what it said.
-pub fn request(port: u16, token: &str, method: &str, path: &str, body: &str, timeout: Duration) -> Result<String> {
-    let url = format!("http://127.0.0.1:{port}{path}");
+/// One request to a server on the loopback: the body of a 2xx answer, else Err with what it said.
+pub fn request(addr: SocketAddr, token: &str, method: &str, path: &str, body: &str, timeout: Duration) -> Result<String> {
+    let url = format!("http://{addr}{path}");
     let fail = |e: String| format!("{method} {url}: {e}");
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| fail(e.to_string()))?;
+    let mut stream = TcpStream::connect(addr).map_err(|e| fail(e.to_string()))?;
     stream.set_read_timeout(Some(timeout)).and_then(|_| stream.set_write_timeout(Some(timeout))).map_err(|e| fail(e.to_string()))?;
     let head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).and_then(|_| stream.write_all(body.as_bytes())).map_err(|e| fail(e.to_string()))?;
@@ -115,13 +115,9 @@ impl Ctx {
         let (Some(addr), Some(token)) = (addr, self.env_get("PCDS_ADMIN_TOKEN")) else {
             return Err(format!("no admin API in {} (PCDS_ADMIN / PCDS_ADMIN_TOKEN)", self.env_file.display()));
         };
-        let port = addr
-            .rsplit_once(':')
-            .filter(|(host, _)| ["127.0.0.1", "0.0.0.0", "localhost"].contains(host))
-            .and_then(|(_, port)| port.parse().ok())
-            .ok_or_else(|| format!("PCDS_ADMIN={addr}: pcds reaches the admin API on 127.0.0.1 only (bind it to 127.0.0.1 or 0.0.0.0)"))?;
+        let addr = crate::config::admin_loopback(&addr)?;
         let body = body.filter(|b| !b.is_empty()).unwrap_or(if method == "GET" { "" } else { "{}" });
-        request(port, &token, method, path, body, if path.starts_with("/api/world/") { WORLD_TIMEOUT } else { ADMIN_TIMEOUT })
+        request(addr, &token, method, path, body, if path.starts_with("/api/world/") { WORLD_TIMEOUT } else { ADMIN_TIMEOUT })
     }
 
     pub(super) fn api_json(&self, method: &str, path: &str) -> Result<Value> {
@@ -244,7 +240,7 @@ mod tests {
     #[test]
     fn requests_go_to_127_0_0_1_with_the_token() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let listener_addr = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let mut answers = Vec::new();
             for answer in ["HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong", "HTTP/1.1 401 Unauthorized\r\nContent-Length: 7\r\n\r\nno, no."] {
@@ -261,8 +257,8 @@ mod tests {
             }
             answers
         });
-        assert_eq!(request(port, "secret", "POST", "/api/save", "{}", ADMIN_TIMEOUT).unwrap(), "pong");
-        assert!(request(port, "secret", "POST", "/api/save", "{}", ADMIN_TIMEOUT).unwrap_err().contains("HTTP 401: no, no."));
+        assert_eq!(request(listener_addr, "secret", "POST", "/api/save", "{}", ADMIN_TIMEOUT).unwrap(), "pong");
+        assert!(request(listener_addr, "secret", "POST", "/api/save", "{}", ADMIN_TIMEOUT).unwrap_err().contains("HTTP 401: no, no."));
         let seen = server.join().unwrap();
         assert!(seen[0].starts_with("POST /api/save HTTP/1.1\r\n") && seen[0].contains("Authorization: Bearer secret\r\n") && seen[0].ends_with("Content-Length: 2\r\nConnection: close\r\n\r\n{}"));
     }
