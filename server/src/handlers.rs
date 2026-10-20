@@ -259,6 +259,9 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
             if let Some(w) = wo.and_then(|w| game.wos.get_mut(&w)) {
                 w.setting = a.i(0);
             }
+            if let Some(wo) = wo {
+                crate::rockets::launch_if_full(game, wo);
+            }
         }
         "LinkedGroupsProxy.SetLinkedGroupsServerRpc" => set_linked_groups(game, object, &a.ints(0).unwrap_or_default()),
         "LinkedPlanetProxy.SetLinkedPlanetServerRpc" => {

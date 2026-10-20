@@ -340,3 +340,50 @@ fn automatic_exchange_rockets_go_again_when_they_land_full() {
     run_until(&mut g, 120.0, |g| g.wos[&exchange].growth == 0.0).expect("the rocket comes back");
     assert!(run_until(&mut g, 6.0, |g| g.wos[&exchange].growth > 0.0).is_some_and(|t| t >= 4.9), "launched again after 5 s");
 }
+
+#[test]
+fn enabling_automatic_launch_checks_full_rockets() {
+    let (platform, inventory) = (210_000_100, 90);
+    for (group, count, growth, destination, setting, launches) in [
+        ("TradePlatform1", 25, 0, 0, 1, true),
+        ("TradePlatform1", 24, 0, 0, 1, false),
+        ("TradePlatform1", 25, 1, 0, 1, false),
+        ("TradePlatform1", 25, 0, 0, 0, false),
+        ("InterplanetaryExchangePlatform1", 25, 0, stable_hash("Humble"), 1, true),
+        ("InterplanetaryExchangePlatform1", 25, 0, 0, 1, false),
+        ("Destructor1", 25, 0, 0, 1, false),
+    ] {
+        let mut objects = vec![placed(platform, group, "100,10,100", "Prime", json!({"liId": inventory, "grwth": growth, "liPlanet": destination}))];
+        let ids: Vec<i32> = (0..count).map(|n| platform + 1 + n).collect();
+        objects.extend(ids.iter().map(|id| json!({"id": id, "gId": "astrofood2"})));
+        objects.extend(crate::testkit::save().objects);
+        let Some(mut g) = game(objects, vec![json!({"id": inventory, "woIds": ids.iter().map(i32::to_string).collect::<Vec<_>>().join(","), "size": 25})]) else { return };
+        crate::testkit::join(&mut g, 1, "Ann");
+        let net = g.wos[&platform].net.unwrap();
+        g.net.out.clear();
+        // A repeated enable must not ignite an already-flying rocket again.
+        for _ in 0..2 {
+            crate::testkit::send_on(&mut g, 1, net, "SettingProxy.SetSettingServerRpc", &[json!(setting)]);
+        }
+        assert_eq!(g.wos[&platform].setting, setting, "{group}");
+        assert_eq!(g.wos[&platform].growth, if launches { 1.0 } else { growth as f32 }, "{group}, {count} items, destination {destination}, setting {setting}");
+        let sent = crate::testkit::sent(&g, "ConstructibleProxy.SendInSpaceRocketBackAndForthClientRpc");
+        assert_eq!(sent.len(), usize::from(launches), "{group}");
+        if launches {
+            assert_eq!((sent[0].to, sent[0].object), (crate::net::Target::All, net));
+        }
+    }
+}
+
+#[test]
+fn automatic_trade_rocket_launches_when_the_last_item_is_added() {
+    let platform = 210_000_100;
+    let Some(mut g) = game(vec![placed(platform, "TradePlatform1", "100,10,100", "Prime", json!({"liId": 90, "set": 1}))], vec![json!({"id": 90, "woIds": "", "size": 25})]) else { return };
+    let group = g.data.group("astrofood2").unwrap();
+    for _ in 0..24 {
+        assert!(g.add_new_item(group, 90, 0).0);
+    }
+    assert_eq!(g.wos[&platform].growth, 0.0);
+    assert!(g.add_new_item(group, 90, 0).0);
+    assert_eq!(g.wos[&platform].growth, 1.0);
+}

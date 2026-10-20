@@ -24,7 +24,7 @@ use crate::planets::switch_to_planet;
 
 // For the machines port: MachineOptimizer's fuses, and an item finishing its growth inside an
 // inventory (Inventory.inventoryContentGrowthFinished).
-pub use back_and_forth::add_speed_multiplier;
+pub use back_and_forth::{add_speed_multiplier, launch_if_full};
 pub use interplanetary::inventory_growth_finished;
 
 /// GameConfig.spaceGlobalMultipliersGroupIds: the building in space that holds the rockets

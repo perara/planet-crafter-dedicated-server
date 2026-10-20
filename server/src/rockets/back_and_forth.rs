@@ -119,7 +119,7 @@ fn on_enable(game: &mut Game, wo: i32) {
         m.landing = None;
     }
     start_growth(game, wo);
-    inventory_modified(game, wo);
+    launch_if_full(game, wo);
 }
 
 /// OnDisable: a landing rocket counts as landed.
@@ -132,8 +132,8 @@ fn on_disable(game: &mut Game, wo: i32) {
     }
 }
 
-/// OnRocketBackAndForthInventoryModified: setting 1 sends the rocket once the inventory is full.
-fn inventory_modified(game: &mut Game, wo: i32) {
+/// OnRocketBackAndForthInventoryModified: also checked when automatic launch is enabled.
+pub fn launch_if_full(game: &mut Game, wo: i32) {
     if game.wos.get(&wo).is_some_and(|w| w.setting == 1) && inventory_full(game, wo) {
         send_rocket(game, wo, None);
     }
@@ -142,7 +142,7 @@ fn inventory_modified(game: &mut Game, wo: i32) {
 pub fn inventory_changed(game: &mut Game, inventory: i32) {
     let owner = game.ext.rockets.machines.keys().copied().find(|m| game.wos.get(m).is_some_and(|w| w.linked_inventory == inventory));
     if let Some(wo) = owner {
-        inventory_modified(game, wo);
+        launch_if_full(game, wo);
     }
 }
 

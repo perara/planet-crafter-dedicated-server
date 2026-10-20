@@ -144,7 +144,7 @@ SceneInterpolationHandler.RegisterInterpolatorServerRpc,SceneInterpolationHandle
 SceneInterpolationHandler.SetInitialPositionToEndClientRpc,SceneInterpolationHandler,client,sent,animals::interpolation,,,,
 SceneInterpolationHandler.StartInterpolationClientRpc,SceneInterpolationHandler,client,sent,animals::interpolation,,,,
 SceneInterpolationHandler.StartInterpolationServerRpc,SceneInterpolationHandler,server,yes,animals::interpolation,2,0,3,
-SettingProxy.SetSettingServerRpc,SettingProxy,server,yes,handlers,1,1,30,
+SettingProxy.SetSettingServerRpc,SettingProxy,server,yes,handlers,2,1,30,
 StoryEventsHandler.AnEventHasBeenTriggeredClientRpc,StoryEventsHandler,client,sent,meteo::story,,,,
 StoryEventsHandler.LaunchSpecificStoryEventEventServerRpc,StoryEventsHandler,server,yes,meteo,1,4,0,
 TextProxy.SetTextServerRpc,TextProxy,server,yes,handlers,1,1,11,
