@@ -1256,7 +1256,19 @@ fn the_automatic_update_takes_a_new_release_once_and_leaves_the_rolled_back_one(
         assert!(Instant::now() < deadline, "no automatic update\n{}", server.log());
         std::thread::sleep(Duration::from_millis(200));
     }
-    let installed: Value = serde_json::from_str(&std::fs::read_to_string(banks.join(active_bank(&banks)).join("bank.json")).unwrap()).unwrap();
+    // The flip counts when the world is handed over; `active` is written a moment later, by the
+    // front's banks-folder thread (slower on a busy host).
+    let active_tag = |want: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let info: Value = serde_json::from_str(&std::fs::read_to_string(banks.join(active_bank(&banks)).join("bank.json")).unwrap()).unwrap();
+            if info["tag"] == want || Instant::now() > deadline {
+                return info;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let installed = active_tag("v9.9.9");
     assert_eq!(installed["tag"], "v9.9.9", "{installed}");
     // Several checks later still one flip: the release that runs is not fetched again.
     std::thread::sleep(Duration::from_secs(14));
@@ -1274,7 +1286,7 @@ fn the_automatic_update_takes_a_new_release_once_and_leaves_the_rolled_back_one(
         assert!(Instant::now() < deadline, "no automatic update to the later release\n{}", server.log());
         std::thread::sleep(Duration::from_millis(200));
     }
-    let installed: Value = serde_json::from_str(&std::fs::read_to_string(banks.join(active_bank(&banks)).join("bank.json")).unwrap()).unwrap();
+    let installed = active_tag("v9.9.10");
     assert_eq!(installed["tag"], "v9.9.10");
     assert!(!banks.join("rolled-back").exists(), "a later release ends the note");
     let (ok, said) = finish(players);
