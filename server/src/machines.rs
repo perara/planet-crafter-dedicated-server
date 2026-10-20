@@ -290,6 +290,14 @@ impl<'de> serde::Deserialize<'de> for Machine {
     }
 }
 
+impl Machines {
+    /// (machines, machines with a component), for the memory tests.
+    #[cfg(test)]
+    pub fn census(&self) -> (usize, usize) {
+        (self.list.len(), self.list.values().filter(|m| m.parts.is_some()).count())
+    }
+}
+
 /// How many machines have each component: where the machines' memory goes (bench::scale).
 #[cfg(test)]
 pub fn census(machines: &Machines) -> String {

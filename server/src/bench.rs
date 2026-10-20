@@ -45,6 +45,13 @@ use crate::wire::Writer;
 /// server's code it comes from (see `alloc_sites`).
 struct Counting;
 thread_local!(static ALLOCS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) });
+// Bytes this thread holds from malloc (what its allocations take, glibc's chunks: a header and a
+// multiple of 16, 32 at least), for the tests of how much memory a part of the game keeps.
+thread_local!(static LIVE: std::cell::Cell<i64> = const { std::cell::Cell::new(0) });
+
+fn chunk(size: usize) -> i64 {
+    ((size + 8 + 15) & !15).max(32) as i64
+}
 thread_local!(static SAMPLING: std::cell::Cell<(u64, u64, bool)> = const { std::cell::Cell::new((0, 0, false)) });
 thread_local!(static SITES: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new()));
 
@@ -61,6 +68,7 @@ fn sample_site() {
 unsafe impl std::alloc::GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
         let _ = ALLOCS.try_with(|a| a.set((a.get().0 + 1, a.get().1 + l.size() as u64)));
+        let _ = LIVE.try_with(|a| a.set(a.get() + chunk(l.size())));
         let _ = SAMPLING.try_with(|s| {
             let (every, n, busy) = s.get();
             if every > 0 && !busy {
@@ -73,10 +81,12 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
         unsafe { std::alloc::System.alloc(l) }
     }
     unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
+        let _ = LIVE.try_with(|a| a.set(a.get() - chunk(l.size())));
         unsafe { std::alloc::System.dealloc(p, l) }
     }
     unsafe fn realloc(&self, p: *mut u8, l: std::alloc::Layout, n: usize) -> *mut u8 {
         let _ = ALLOCS.try_with(|a| a.set((a.get().0 + 1, a.get().1 + n as u64)));
+        let _ = LIVE.try_with(|a| a.set(a.get() + chunk(n) - chunk(l.size())));
         unsafe { std::alloc::System.realloc(p, l, n) }
     }
 }
@@ -87,6 +97,11 @@ static COUNTING: Counting = Counting;
 /// The allocations this thread has made so far (what the tests of the efficiency budgets count between two points).
 pub fn allocations() -> u64 {
     ALLOCS.get().0
+}
+
+/// The bytes this thread holds from malloc now.
+pub fn live_bytes() -> i64 {
+    LIVE.get()
 }
 
 /// The user instructions this thread has executed, from the kernel's performance counters
@@ -747,6 +762,23 @@ fn rss_kib() -> u64 {
     std::fs::read_to_string("/proc/self/statm").ok().and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok()).unwrap_or(0) * 4
 }
 
+/// The most resident memory this process has had, in KiB (VmHWM).
+fn peak_kib() -> u64 {
+    std::fs::read_to_string("/proc/self/status").ok().and_then(|s| s.lines().find_map(|l| l.strip_prefix("VmHWM:")?.split_whitespace().next()?.parse().ok())).unwrap_or(0)
+}
+
+/// The anonymous part of this process's resident memory, in KiB (RssAnon): the heap and the maps
+/// of malloc, without the program's and the libraries' files.
+fn rss_anon_kib() -> u64 {
+    std::fs::read_to_string("/proc/self/status").ok().and_then(|s| s.lines().find_map(|l| l.strip_prefix("RssAnon:")?.split_whitespace().next()?.parse().ok())).unwrap_or(0)
+}
+
+/// Bytes in malloc's free lists (glibc's mallinfo2): memory the process holds that nothing uses.
+fn heap_free_bytes() -> u64 {
+    // SAFETY: mallinfo2 only reads malloc's counters.
+    unsafe { libc::mallinfo2() }.fordblks as u64
+}
+
 /// Bytes malloc has handed out and not had back (glibc's mallinfo2): what the program holds,
 /// not what the process keeps resident after a free.
 fn heap_bytes() -> u64 {
@@ -813,11 +845,12 @@ fn scale() {
     let scenes = crate::scene_tables(e.dir, &net_data, &data);
     let tables_rss = rss_kib();
     let t = Cpu::now();
-    let save = SaveFile::load(&e.path).unwrap();
-    println!("scale: heap after tables {} MiB; tables {} MiB rss; read+parse save {:?}, {} objects", heap_bytes() >> 20, tables_rss >> 10, t.elapsed(), save.objects.len());
+    // As a start reads it: the world objects stay in the text and are read one at a time by the game.
+    let save = SaveFile::load_deferred(&e.path).unwrap();
+    println!("scale: heap after tables {} MiB; tables {} MiB rss; read save {:?}, {} objects", heap_bytes() >> 20, tables_rss >> 10, t.elapsed(), save.world_objects().count());
     let t = Cpu::now();
     let mut g = Game::with_clock(net_data, data, spec, save, scenes, Some(0.0));
-    println!("scale: Game::new {:?}, {} world objects, {} network objects, rss {} MiB (+{} MiB), heap {} MiB", t.elapsed(), g.wos.len(), g.net.objects.len(), rss_kib() >> 10, (rss_kib() - tables_rss) >> 10, heap_bytes() >> 20);
+    println!("scale: Game::new {:?}, {} world objects, {} network objects, rss {} MiB (+{} MiB, peak {} MiB), heap {} MiB", t.elapsed(), g.wos.len(), g.net.objects.len(), rss_kib() >> 10, (rss_kib() - tables_rss) >> 10, peak_kib() >> 10, heap_bytes() >> 20);
     {
         // A player joining: ConnectionApproved with the whole world, then PlayerReady.
         let t = Cpu::now();
@@ -835,7 +868,7 @@ fn scale() {
     let (before, t) = (rss_kib(), Cpu::now());
     // SAFETY: malloc_trim only returns free memory to the system.
     unsafe { libc::malloc_trim(0) };
-    println!("scale: malloc_trim(0) after the load {:?}: rss {} MiB -> {} MiB, malloc in use {:.1} MiB", t.elapsed(), before >> 10, rss_kib() >> 10, heap_bytes() as f64 / 1048576.0);
+    println!("scale: malloc_trim(0) after the load {:?}: rss {} MiB -> {} MiB (anonymous {} MiB), malloc in use {:.1} MiB, free in malloc {:.1} MiB", t.elapsed(), before >> 10, rss_kib() >> 10, rss_anon_kib() >> 10, heap_bytes() as f64 / 1048576.0, heap_free_bytes() as f64 / 1048576.0);
     let t = Cpu::now();
     let snapshot = g.snapshot();
     let took = t.elapsed();
@@ -936,6 +969,20 @@ fn scale() {
     measure("saved_players", &mut || g.saved_players = Vec::new());
     measure("net_wos", &mut || g.net_wos = Default::default());
     measure("units", &mut || g.units = Default::default());
+    // The tables: the layouts, the prefabs (the text and what the world has parsed), the assets
+    // (a group's fields are the same trees), the panels and singletons, the scene dumps, the network tables.
+    measure("tables.layouts", &mut || g.data.layouts = Default::default());
+    measure("tables.prefabs", &mut || g.data.group_prefabs = Default::default());
+    measure("tables.panels+singletons", &mut || {
+        g.data.panels = Default::default();
+        g.data.singletons = Default::default();
+    });
+    measure("tables.assets+groups", &mut || {
+        g.data.assets = Default::default();
+        g.data.groups = Vec::new();
+    });
+    measure("tables.scenes", &mut || g.scenes = Default::default());
+    measure("tables.net_data", &mut || g.net_data = Default::default());
     println!("scale: heap MiB by part ({wos} world objects, {net} network objects, {invs} inventories, {holders} holders): {}", parts.join(", "));
     std::fs::remove_dir_all(dir).ok();
 }
@@ -1204,6 +1251,37 @@ mod budget {
         assert!(per(snapshot) <= 300.0, "a snapshot is {:.0} bytes per world object, the budget is 300 (docs/performance.md)", per(snapshot));
         assert!(per(save) <= 100.0, "a save is {:.0} bytes per world object, the budget is 100 (docs/performance.md)", per(save));
         assert!(per(joined) <= 24.0, "a join sends {:.0} bytes per world object, the budget is 24 (docs/performance.md)", per(joined));
+    }
+
+    /// What the parts of the world keep, in the bytes malloc holds for them (what each frees when it
+    /// is dropped), on the guard world with its 1,600 buildings: per world object, network object,
+    /// machine and inventory. The same on a 200,000-object save is in docs/performance.md; the guard
+    /// world has more buildings per object, so these are higher than that.
+    pub(super) fn memory_of_the_parts(buildings: usize) -> Option<[f64; 4]> {
+        let mut g = world(buildings)?;
+        let (wos, nets, machines, invs) = (g.wos.len() as f64, g.net.objects.len() as f64, g.ext.machines.census().0 as f64, g.inventories.len() as f64);
+        let freed = |drop_it: &mut dyn FnMut()| {
+            let before = live_bytes();
+            drop_it();
+            (before - live_bytes()) as f64
+        };
+        let net = freed(&mut || drop(std::mem::take(&mut g.net.objects)));
+        let wo = freed(&mut || drop(std::mem::take(&mut g.wos)));
+        let machine = freed(&mut || drop(std::mem::take(&mut g.ext.machines)));
+        let inv = freed(&mut || drop(std::mem::take(&mut g.inventories)));
+        Some([wo / wos, net / nets, machine / machines, inv / invs])
+    }
+
+    /// The memory of the world's parts stays within about one and a third times what it measures
+    /// (the guard world: a world object 134 bytes, a network object 839, a machine 391, an inventory 262).
+    #[test]
+    fn the_memory_of_the_world_stays_within_its_budget() {
+        let Some([wo, net, machine, inv]) = memory_of_the_parts(1600) else { return };
+        eprintln!("memory per world object {wo:.0}, network object {net:.0}, machine {machine:.0}, inventory {inv:.0}");
+        let budgets = [("world object", wo, 175.0), ("network object", net, 1100.0), ("machine", machine, 510.0), ("inventory", inv, 340.0)];
+        for (what, measured, budget) in budgets {
+            assert!(measured <= budget, "a {what} keeps {measured:.0} bytes, the budget is {budget} (docs/performance.md)");
+        }
     }
 
     /// What a hot update's world stand costs per world object, in user instructions (the snapshot
