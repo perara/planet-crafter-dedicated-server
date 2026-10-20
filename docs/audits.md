@@ -134,7 +134,7 @@ Tools were run on the whole source; each real hit was fixed with a test. The rel
 | S8 | A snapshot with a clock of 1e20 seconds panicked in `Duration::from_secs_f64` | fixed in 0.7.0 | `handoff::tests::a_corrupt_clock_is_an_error_not_a_panic` |
 | S9 | A snapshot's slot map with a corrupt free list was accepted and would panic or overwrite later | fixed in 0.7.0 | `idmap::tests::slots_round_trip_and_a_corrupt_free_list_is_refused` |
 | S10 | The control buffer for passing file descriptors was a byte vector, which has no alignment promise | fixed in 0.7.0: held in `u64`s | `ipc::tests::frames_and_memfds_cross_the_socket` |
-| S11 | Between the front and its own bank: the result of sealing a memfd is ignored, and `MSG_CTRUNC` is not checked, so a peer could make the queue of descriptors grow | open: the peer is the server's own bank | `ipc.rs` (`F_ADD_SEALS`, `recv_with_fds`) |
+| S11 | Between the front and its own bank: the result of sealing a memfd is ignored, and `MSG_CTRUNC` is not checked, so a peer could make the queue of descriptors grow | fixed after 0.7.0: a seal the kernel refuses is an error (`memfd: could not be sealed`); a message with more than 4 descriptors, or more than 16 waiting for frames that take none, breaks the link with the reason in `Link::broken` | `ipc::tests::a_failed_seal_and_a_flood_of_descriptors_break_the_link_loudly` |
 | S12 | The S3 uploader stayed busy for ever after a panic, and a failed thread start panicked the game loop | fixed in 0.7.0. A backup made in the microseconds before the uploader finishes waits for the next one, harmless | `s3::tests::a_panicking_upload_does_not_keep_the_next_ones_out` |
 | S13 | The admin acceptor spun at 100% CPU on accept errors, ended if a thread could not start, and `/api/logs` could wait for ever on `journalctl` | fixed in 0.7.0: it backs off, survives, and `journalctl` has a 6 s limit | `admin::tests::an_acceptor_that_keeps_failing_backs_off_and_recovers`, `LOGS_WAIT` in `admin.rs` |
 | S14 | If the chat hooks' delivery thread ever panics, the hooks stay off with no message | unverified: no known trigger since S5 | `front/chat_hooks.rs` |
@@ -233,8 +233,6 @@ Architecture:
 
 Static:
 
-* **S11** The memfd seal result and `MSG_CTRUNC` are unchecked (own bank only). Next: check both
-  and fail the frame.
 * **S21** `paste` is unmaintained (build time, via `steamworks`). Next: rerun `cargo audit` and
   `cargo deny` for the crates added since 0.6.1.
 
