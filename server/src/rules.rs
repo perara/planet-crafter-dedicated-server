@@ -653,6 +653,44 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A merge patch sets what it names and a null puts the default back, for every rule there
+    /// is: whatever value is accepted, `null` for the rule or for its whole section restores the
+    /// defaults, and the result reads back from its own serialization (rules.json).
+    #[test]
+    fn a_null_puts_back_every_rule_a_patch_set() {
+        let defaults = Rules::default();
+        let json = serde_json::to_value(&defaults).unwrap();
+        let (mut accepted, mut refused) = (0, 0);
+        for (section, fields) in json.as_object().expect("sections") {
+            for (field, default) in fields.as_object().expect("rules") {
+                let mut candidates: Vec<Value> = vec![Value::Null, serde_json::json!("x"), serde_json::json!([]), serde_json::json!({})];
+                match default {
+                    Value::Bool(b) => candidates.push(Value::Bool(!b)),
+                    Value::Number(n) => {
+                        let d = n.as_f64().unwrap_or(0.0);
+                        candidates.extend([serde_json::json!(d + 1.0), serde_json::json!(d * 2.0), serde_json::json!(3), serde_json::json!(0.5), serde_json::json!(-1), serde_json::json!(1e30)]);
+                    }
+                    Value::String(_) => candidates.push(serde_json::json!("Creative")),
+                    _ => candidates.extend([serde_json::json!(["https://example.com/h"]), serde_json::json!({"Drill1": 2})]),
+                }
+                for value in candidates {
+                    let patch = serde_json::json!({ section: { field: value } });
+                    let Ok(changed) = defaults.patched(&patch) else {
+                        refused += 1;
+                        continue;
+                    };
+                    accepted += 1;
+                    let text = serde_json::to_string(&changed).unwrap();
+                    assert!(serde_json::from_str::<Rules>(&text).is_ok_and(|r| r == changed), "{patch} does not read back: {text}");
+                    for reset in [serde_json::json!({ section: { field: null } }), serde_json::json!({ section: null })] {
+                        assert!(changed.patched(&reset).unwrap() == defaults, "{patch} then {reset} is not the defaults");
+                    }
+                }
+            }
+        }
+        assert!(accepted > 100 && refused > 100, "{accepted} accepted, {refused} refused");
+    }
+
     #[test]
     fn a_bad_rules_file_is_named_without_its_values() {
         let dir = std::env::temp_dir().join(format!("pcds-rules-load-{}", std::process::id()));

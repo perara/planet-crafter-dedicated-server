@@ -878,6 +878,171 @@ mod tests {
         assert!(events.is_empty() && server.connections[&token].fragments[0].buffer.is_empty());
     }
 
+    /// A UDP relay between a client and a server that loses, duplicates and delays datagrams: what
+    /// the open internet does to a game's packets, on loopback. Stopped when dropped.
+    struct Lossy {
+        front: SocketAddr,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Lossy {
+        /// `loss` and `dup` in percent, `delay` the most a datagram waits (so they overtake each other).
+        fn start(server: SocketAddr, loss: u64, dup: u64, delay: Duration) -> Lossy {
+            let front = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let back = UdpSocket::bind("127.0.0.1:0").unwrap();
+            for s in [&front, &back] {
+                s.set_nonblocking(true).unwrap();
+            }
+            let addr = front.local_addr().unwrap();
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = stop.clone();
+            let thread = std::thread::spawn(move || {
+                let mut x = 0x2545_f491_4f6c_dd1du64;
+                let mut random = move |n: u64| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    x % n
+                };
+                let mut client: Option<SocketAddr> = None;
+                // (due, to the server?, bytes), delivered when due.
+                let mut waiting: Vec<(Instant, bool, Vec<u8>)> = Vec::new();
+                let mut buffer = [0u8; 2048];
+                while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    for (socket, to_server) in [(&front, true), (&back, false)] {
+                        while let Ok((n, from)) = socket.recv_from(&mut buffer) {
+                            if to_server {
+                                client = Some(from);
+                            }
+                            if random(100) < loss {
+                                continue;
+                            }
+                            for _ in 0..1 + (random(100) < dup) as usize {
+                                waiting.push((Instant::now() + Duration::from_micros(random(delay.as_micros() as u64 + 1)), to_server, buffer[..n].to_vec()));
+                            }
+                        }
+                    }
+                    let now = Instant::now();
+                    let (due, later): (Vec<_>, Vec<_>) = waiting.drain(..).partition(|(t, _, _)| *t <= now);
+                    waiting = later;
+                    for (_, to_server, bytes) in due {
+                        let _ = if to_server { back.send_to(&bytes, server) } else { client.map_or(Ok(0), |c| front.send_to(&bytes, c)) };
+                    }
+                    std::thread::sleep(Duration::from_micros(300));
+                }
+            });
+            Lossy { front: addr, stop, thread: Some(thread) }
+        }
+    }
+
+    impl Drop for Lossy {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+
+    /// What a network does to datagrams (loss, duplication, reordering) changes nothing in what
+    /// arrives: every batch each way, once, in order, byte for byte, with the window never past
+    /// its 64 packets and nothing left buffered; no session is dropped on the way.
+    #[test]
+    fn data_crosses_a_network_that_loses_duplicates_and_reorders() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let relay = Lossy::start(server.socket.local_addr().unwrap(), 10, 10, Duration::from_millis(40));
+        // The client connects as Utp::connect does, but with the server polled meanwhile (one thread:
+        // a Utp is not Send). The request is repeated until the accept comes through the relay.
+        let mut client = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let client_token: Token = [9, 8, 7, 6, 5, 4, 3, 2];
+        let request = [SIGNATURE.as_slice(), &[REQUEST], &client_token].concat();
+        let mut early = Vec::new();
+        let connect_by = Instant::now() + Duration::from_secs(60);
+        let mut buffer = [0u8; 2048];
+        'connect: loop {
+            assert!(Instant::now() < connect_by, "no handshake through the relay");
+            client.socket.send_to(&request, relay.front).unwrap();
+            let wait = Instant::now() + Duration::from_millis(200);
+            while Instant::now() < wait {
+                early.extend(server.poll());
+                if let Ok((n, from)) = client.socket.recv_from(&mut buffer) {
+                    if from == relay.front && n >= 13 && buffer[..4] == SIGNATURE && buffer[4] == ACCEPT && buffer[5..13] == client_token {
+                        let mut c = Connection::new(relay.front, Instant::now());
+                        c.data_seen = true;
+                        client.connections.insert(client_token, c);
+                        break 'connect;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        let mut server_token = early.iter().find_map(|e| if let Event::Connected(t, _) = e { Some(*t) } else { None });
+        // Batch i: its number, then bytes that depend on both.
+        let batch = |side: u8, i: u32| -> Vec<u8> {
+            let len = 1 + (i as usize * 977 + side as usize * 131) % 3000;
+            let mut b = i.to_le_bytes().to_vec();
+            b.extend((0..len).map(|k| (k as u32 * 31 + i * 7 + side as u32) as u8));
+            b
+        };
+        const BATCHES: u32 = 150;
+        let (mut sent, mut sent_back) = (0u32, 0u32);
+        let (mut at_server, mut at_client) = (0u32, 0u32);
+        let started = Instant::now();
+        while (at_server < BATCHES || at_client < BATCHES) && started.elapsed() < Duration::from_secs(120) {
+            for event in server.poll() {
+                match event {
+                    Event::Connected(t, _) => server_token = Some(t),
+                    Event::Data(_, b) => {
+                        assert_eq!(b, batch(0, at_server), "batch {at_server} from the client");
+                        at_server += 1;
+                    }
+                    Event::Disconnected(_) => panic!("the server dropped the session after {at_server} + {at_client} batches"),
+                }
+            }
+            for event in client.poll() {
+                match event {
+                    Event::Data(_, b) => {
+                        assert_eq!(b, batch(1, at_client), "batch {at_client} from the server");
+                        at_client += 1;
+                    }
+                    Event::Disconnected(_) => panic!("the client was dropped after {at_server} + {at_client} batches"),
+                    Event::Connected(..) => {}
+                }
+            }
+            // A few batches are queued at a time, as a game sends them.
+            while sent < BATCHES && client.connections[&client_token].queued.len() < 8000 {
+                client.send(&client_token, &batch(0, sent));
+                sent += 1;
+            }
+            if let Some(t) = server_token {
+                while sent_back < BATCHES && server.connections.get(&t).is_some_and(|c| c.queued.len() < 8000) {
+                    server.send(&t, &batch(1, sent_back));
+                    sent_back += 1;
+                }
+            }
+            server.flush();
+            client.flush();
+            for c in server.connections.values().chain(client.connections.values()) {
+                assert!(c.in_flight.len() <= WINDOW && c.early.len() < WINDOW, "{} in flight, {} early", c.in_flight.len(), c.early.len());
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!((at_server, at_client), (BATCHES, BATCHES), "everything crossed within {:?}", started.elapsed());
+        // Quiet: whatever was duplicated or late is acknowledged, nothing is left to resend or buffer.
+        let settle = Instant::now();
+        while settle.elapsed() < Duration::from_secs(5) && server.connections.values().chain(client.connections.values()).any(|c| !c.in_flight.is_empty()) {
+            server.poll();
+            client.poll();
+            server.flush();
+            client.flush();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        for c in server.connections.values().chain(client.connections.values()) {
+            assert!(c.in_flight.is_empty() && c.early.is_empty() && c.queued.is_empty(), "{} in flight, {} early, {} queued", c.in_flight.len(), c.early.len(), c.queued.len());
+        }
+    }
+
     #[test]
     fn a_client_that_never_acks_is_dropped() {
         let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
