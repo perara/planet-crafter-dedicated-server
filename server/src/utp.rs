@@ -1094,6 +1094,7 @@ mod tests {
         let sent = server.connections[&token].in_flight.len();
         let allocated = crate::bench::allocations() - before;
         assert_eq!(sent, INITIAL_WINDOW);
+        eprintln!("a flush of {sent} datagrams allocated {allocated} times");
         assert!(allocated <= 4 * sent as u64 + 8, "a flush of {sent} datagrams allocated {allocated} times");
     }
 

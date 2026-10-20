@@ -394,7 +394,7 @@ Static:
 
 Dynamic:
 
-* **D7** Large worlds still produce long flips and joins (90,000 objects: a flip over 100 ms from 11,000 network objects; a join takes seconds at 200,000). The explosives' scan is fixed (see the table). Next: re-measure with `tools/perf/` at 90,000 objects and take the longest phase of the flip.
+* **D7** Re-measured after 0.8.0 (docs/performance.md, docs/hot-update.md "Flip speed"): at 200,000 objects a join is 12 ms of the game thread (2.4 MB sent), a flip stands 95 to 129 ms (real front and banks, no players; 162 ms in process), the idle tick on a late-game save went from 196 to 24 M instructions a second. The longest phase of the flip was the restore's re-reading of the machines' tables, now once for each group; what is left is the decoding of the world objects.
 
 Lead from the tools' smoke runs, not a finding: in two of three disk-full runs against 0.6.2,
 `GET /api/status` was refused for 8 s after a `kill -9` of the bank on a full disk although the

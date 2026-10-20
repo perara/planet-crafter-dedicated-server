@@ -765,8 +765,9 @@ Before tagging a release: the release checklist in [docs/hot-update.md](docs/hot
 (`make test`, `make docker-test` and `make gate` need the game tables, so CI does not run them).
 
 [docs/testing.md](docs/testing.md) describes every kind of test and check (unit and end-to-end tests,
-fuzzing, the parity sweep, the benchmarks and their fingerprints, the load and chaos tools, Docker, the flip
-gate) and how to run each; [tools/README.md](tools/README.md) indexes the scripts, and
+fuzzing, the parity sweep, the benchmarks and their fingerprints, the efficiency budgets, the load and chaos
+tools, Docker, the flip gate) and how to run each; [docs/performance.md](docs/performance.md) has what the
+server costs, how to profile it and how big a machine a world needs; [tools/README.md](tools/README.md) indexes the scripts, and
 [docs/audits.md](docs/audits.md) holds the findings of the v0.6.1 audits.
 
 Tests that need game tables use `run/data/2.103` (or `PCDS_TEST_DATA`) and fail without

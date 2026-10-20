@@ -135,6 +135,8 @@ Measured, each with a hot update and a restart:
 
 ### Memory and CPU
 
+(Measured again for 0.8.x: a bank of 100,000 objects is 121 MiB, of 200,000 198 MiB; a flip holds 2.2 times the bank and the front in all (267 MiB and 436 MiB); the table below is of 0.6.2's JSON snapshot. docs/performance.md has the sizes.)
+
 A hot update holds the old bank, the world's snapshot (a memfd, which counts against the
 container's memory) and the new bank, which peaks above the old one while it restores. Measured
 (`bench` world of 2551 objects: bank 69 MB, container 104 MB; a world of 100000 objects: bank
