@@ -604,6 +604,9 @@ make build      # server/target/release/pcds (make install links it as ~/.local/
 make test       # also: make lint, make plugin-bench, make gate, make docker, make docker-test, make dist (the release tarball), make clean
 ```
 
+Before tagging a release: the release checklist in [docs/hot-update.md](docs/hot-update.md) ("Release checklist")
+(`make test`, `make docker-test` and `make gate` need the game tables, so CI does not run them).
+
 Tests that need game tables use `run/data/2.103` (or `PCDS_TEST_DATA`) and fail without
 them; `PCDS_TEST_DATA=none` skips them, as CI does (the tables are not in the repository).
 `src/coverage.txt` names the tests of every server RPC and every module; a test fails when an
