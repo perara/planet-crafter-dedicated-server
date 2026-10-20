@@ -14,7 +14,6 @@
 //! run/bin/a/ and run/bin/b/ are the banks, each a whole release (pcds, libsteam_api.so, web/) with its bank.json (what bank-info said, the tag, the tarball's
 //! sha256); run/bin/active names the one the front starts.
 
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -911,7 +910,7 @@ pub mod tests {
             std::fs::remove_dir_all(dir.join(name)).unwrap();
             std::fs::read(dir.join("t.tar.gz")).unwrap()
         };
-        let sum = hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
+        let sum = to_hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
         let base = format!("{}/releases", serve(release("BASE", "v9.9.8", tar, sum)));
         let banks = dir.join("bin");
         let e = install(&lookup(&base, None).unwrap(), &banks, "b", None).unwrap_err();
