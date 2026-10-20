@@ -63,7 +63,7 @@ pub fn rpc(game: &mut Game, client: u64, name: &str, a: &Args) -> bool {
 /// leaves its end (up from 0, down from above 0).
 fn start(game: &mut Game, wo: i32, speed: f32, direction: i32) {
     // Scene world objects have positive ids below the players'; 0 would make a fresh one.
-    if wo <= 0 || !crate::model::is_from_scene(wo) || !(speed >= MIN_SPEED) {
+    if wo <= 0 || !crate::model::is_from_scene(wo) || speed.is_nan() || speed < MIN_SPEED {
         return;
     }
     if let Some(i) = game.ext.animals.interpolation.active.get_mut(&wo) {
