@@ -63,6 +63,13 @@ const BIOLUMINESCENCE: i32 = 7;
 const SIZE: i32 = 8;
 /// Enum.GetNames(typeof(GeneticTraitType)).Length: a sequence's inventory size.
 const TRAIT_TYPES: i32 = 9;
+/// The kinds of trait a sequence holds are the game's: more than TRAIT_TYPES in a request are no
+/// sequence of the game, and each would be a world object per animal asked for.
+const MAX_TRAIT_KINDS: usize = TRAIT_TYPES as usize;
+/// Wild spawners (scene world objects the clients register and ask animals of) the world holds at
+/// most, and the requests waiting for the next frame. A planet's scene has dozens of spawners.
+const MAX_WILD_SPAWNERS: usize = 1024;
+const MAX_PENDING: usize = 256;
 
 /// InventorySpawnContent's serialized fields.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -199,11 +206,17 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, name: &str, a: &Args) -> b
         "WorldAnimalSpawnerHandler.SpawnerRegisteredServerRpc" => {
             let wo = a.i(0);
             let s = &mut game.ext.animals.spawn;
+            // A scene world object, and not more than the scene has (this is allowed before PlayerReady).
+            if !s.counts.contains_key(&wo) && (wo <= 0 || !crate::model::is_from_scene(wo) || s.counts.len() >= MAX_WILD_SPAWNERS) {
+                game.limits.warn(client, "spawner registrations that are no scene spawner's, ignored");
+                return true;
+            }
             if let std::collections::hash_map::Entry::Vacant(e) = s.counts.entry(wo) {
                 e.insert(0);
                 game.net.rpc_scene(Target::Only(client), "WorldAnimalSpawnerHandler.SendSpawnerDataClientRpc", &[json!(wo)]);
             }
-            *game.ext.animals.spawn.counts.get_mut(&wo).unwrap() += 1;
+            let count = game.ext.animals.spawn.counts.get_mut(&wo).unwrap();
+            *count = count.saturating_add(1);
         }
         "WorldAnimalSpawnerHandler.SpawnerUnregisteredServerRpc" => spawner_unregistered(game, a.i(0)),
         "WorldAnimalSpawnerHandler.SpawnAnimalsServerRpc" => {
@@ -211,7 +224,9 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, name: &str, a: &Args) -> b
             // the server create them all in one tick.
             let range = a.0.get(2).map(|v| [0, 1].map(|i| v[i].as_i64().unwrap_or(0).clamp(0, 20) as i32)).unwrap_or([0, 0]);
             let traits = a.0.get(3).and_then(Value::as_array).cloned().unwrap_or_default();
-            game.ext.animals.spawn.pending.push(Pending { wo: a.i(0), position: a.v3(1), range, traits });
+            if game.ext.animals.spawn.pending.len() < MAX_PENDING {
+                game.ext.animals.spawn.pending.push(Pending { wo: a.i(0), position: a.v3(1), range, traits });
+            }
         }
         "PetProxy.ActionPetServerRpc" if game.ext.animals.spawn.animals.contains_key(&object) => pet(game, client, object),
         "GrowthProxy.GetCurrentGrowthServerRpc" if game.ext.animals.spawn.animals.contains_key(&object) => {
@@ -262,6 +277,10 @@ fn spawn_delayed(game: &mut Game, p: Pending) {
         return;
     }
     if !game.ext.animals.spawn.spawners.contains_key(&p.wo) {
+        // A wild spawner is a scene object, and the world holds as many as its scene has.
+        if !crate::model::is_from_scene(p.wo) || game.ext.animals.spawn.spawners.len() >= MAX_WILD_SPAWNERS {
+            return;
+        }
         if !game.wos.contains_key(&p.wo) {
             // WorldObjectFromScene on the spawner prefab (its group is not in the game data).
             let Some(group) = game.data.group("DNASequence") else { return };
@@ -280,7 +299,10 @@ fn spawn_delayed(game: &mut Game, p: Pending) {
     // Traits by type, in first-seen order.
     let mut by_type: IndexMap<i32, Vec<&Value>> = IndexMap::new();
     for t in &p.traits {
-        by_type.entry(t[0].as_i64().unwrap_or(0) as i32).or_default().push(t);
+        let kind = t[0].as_i64().unwrap_or(0) as i32;
+        if by_type.len() < MAX_TRAIT_KINDS || by_type.contains_key(&kind) {
+            by_type.entry(kind).or_default().push(t);
+        }
     }
     let (Some(dna), Some(trait_group)) = (game.data.group("DNASequence"), game.data.group(crate::genetics::TRAIT_GROUP)) else { return };
     // Unity's NextInt needs min < max; a reversed range would wrap to billions.
@@ -880,6 +902,54 @@ mod tests {
         assert!(g.inventories.get(&inventory).is_none_or(|i| i.items.is_empty()));
         // Never registered: the game's dictionary would throw; nothing happens.
         send_scene(&mut g, 2, "WorldAnimalSpawnerHandler.SpawnerUnregisteredServerRpc", &[json!(spawner + 1)]);
+    }
+
+    /// A spawner's animals are asked for with a list of traits the client writes: one trait object
+    /// is made for each kind of trait in it, for each animal, so a list of thousands of kinds in
+    /// one RPC (up to a megabyte) made millions of world objects in a tick. The kinds are the
+    /// game's (a few), so a list is read up to MAX_TRAITS entries and the kinds up to the game's own.
+    #[test]
+    fn a_list_of_traits_cannot_make_millions_of_world_objects() {
+        use crate::testkit::*;
+        let Some((mut g, _)) = world() else { return };
+        let spawner = 101_500_000;
+        send_scene(&mut g, 1, "WorldAnimalSpawnerHandler.SpawnerRegisteredServerRpc", &[json!(spawner)]);
+        let before = g.wos.len();
+        let hostile: Vec<Value> = (0..20_000).map(|i| json!([1000 + i, [0.0, 0.0, 0.0, 0.0], 1])).collect();
+        send_scene(&mut g, 1, "WorldAnimalSpawnerHandler.SpawnAnimalsServerRpc", &[json!(spawner), json!([565.0, 3.0, 494.0]), json!([20, 20]), json!(hostile)]);
+        g.time += 1.0;
+        frame(&mut g);
+        let made = g.wos.len() - before;
+        assert!(made <= 20 * (MAX_TRAIT_KINDS + 2) + 1, "{made} world objects from one RPC");
+    }
+
+    /// Wild spawners are scene world objects, as many as the scene has: a client (before PlayerReady
+    /// too) cannot register or ask animals of one more, nor of one from the players' id range.
+    #[test]
+    fn a_client_cannot_make_wild_spawners_without_end() {
+        use crate::testkit::*;
+        let Some((mut g, _)) = world() else { return };
+        for i in 0..MAX_WILD_SPAWNERS as i32 + 40 {
+            send_scene(&mut g, 1, "WorldAnimalSpawnerHandler.SpawnerRegisteredServerRpc", &[json!(101_000_000 + i)]);
+            send_scene(&mut g, 1, "WorldAnimalSpawnerHandler.SpawnerRegisteredServerRpc", &[json!(200_000_000 + i)]);
+            if i % 16 == 15 {
+                g.time += 0.2;
+                g.tick();
+            }
+        }
+        for _ in 0..200 {
+            g.time += 0.2;
+            g.tick();
+        }
+        assert_eq!(g.ext.animals.spawn.counts.len(), MAX_WILD_SPAWNERS);
+        assert!(g.ext.animals.spawn.counts.keys().all(|wo| crate::model::is_from_scene(*wo)));
+        let (before, inventories) = (g.wos.len(), g.inventories.len());
+        for wo in [200_000_001, 1_999_999_999] {
+            send_scene(&mut g, 1, "WorldAnimalSpawnerHandler.SpawnAnimalsServerRpc", &[json!(wo), json!([565.0, 3.0, 494.0]), json!([2, 2]), json!(aqualis())]);
+        }
+        g.time += 1.0;
+        frame(&mut g);
+        assert_eq!((g.wos.len(), g.inventories.len()), (before, inventories), "no spawner is made of a world object that is no scene's");
     }
 
     /// Petting a shelter animal gives a genetic trait (into the backpack) once per 30 s; its
