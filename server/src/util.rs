@@ -21,6 +21,25 @@ pub fn utc(unix: u64) -> (i64, i64, i64, i64, i64, i64) {
     (yoe + era * 400 + (m <= 2) as i64, m, d, secs / 3600, secs / 60 % 60, secs % 60)
 }
 
+/// JSON text without the whitespace between its tokens: the tables are written indented, and a
+/// table kept as text takes half the room without it (a prefab, a planet's scene dump).
+pub fn compact_json(json: &str) -> Box<str> {
+    let mut out = Vec::with_capacity(json.len() / 2);
+    let (mut in_string, mut escaped) = (false, false);
+    for &b in json.as_bytes() {
+        match b {
+            _ if escaped => escaped = false,
+            b'\\' if in_string => escaped = true,
+            b'"' => in_string = !in_string,
+            b' ' | b'\t' | b'\n' | b'\r' if !in_string => continue,
+            _ => {}
+        }
+        out.push(b);
+    }
+    out.shrink_to_fit();
+    String::from_utf8(out).expect("only ASCII whitespace was dropped from valid UTF-8").into_boxed_str()
+}
+
 /// Bytes as lower-case hex.
 pub fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()

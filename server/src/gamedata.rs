@@ -118,7 +118,8 @@ pub struct Prefabs(HashMap<String, Prefab>);
 const MENTIONS_BEFORE_PARSING: u32 = 8;
 
 struct Prefab {
-    raw: Box<serde_json::value::RawValue>,
+    /// The prefab's JSON without the whitespace of the file it was read from (which is indented).
+    raw: Box<str>,
     parsed: std::sync::OnceLock<Value>,
     /// How often `mentions` looked through the text: a prefab asked about again and again is
     /// parsed, which is cheaper than searching it each time.
@@ -136,7 +137,7 @@ impl Clone for Prefab {
 
 impl Prefab {
     fn value(&self) -> &Value {
-        self.parsed.get_or_init(|| serde_json::from_str(self.raw.get()).unwrap_or(Value::Null))
+        self.parsed.get_or_init(|| serde_json::from_str(&self.raw).unwrap_or(Value::Null))
     }
 
     fn kinds(&self) -> &[(Option<Box<str>>, bool)] {
@@ -148,7 +149,7 @@ impl Prefabs {
     /// Whether the prefab can hold `word` (a component type): false only when its text has no
     /// such word, so that asking does not parse the prefabs that cannot answer.
     pub fn mentions(&self, group: &str, word: &str) -> bool {
-        self.0.get(group).is_some_and(|p| p.parsed.get().is_some() || p.asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= MENTIONS_BEFORE_PARSING || p.raw.get().contains(word))
+        self.0.get(group).is_some_and(|p| p.parsed.get().is_some() || p.asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= MENTIONS_BEFORE_PARSING || p.raw.contains(word))
     }
 
     /// The serialized fields of a group's prefab components of type `ty`, in the prefab's order
@@ -170,7 +171,7 @@ impl Prefabs {
     /// Whether any prefab has a component of type `ty`: only the prefabs whose text has the word
     /// are parsed to see.
     pub fn any_component_of_type(&self, ty: &str) -> bool {
-        self.0.values().filter(|p| p.parsed.get().is_some() || p.raw.get().contains(ty)).any(|p| p.value()["components"].as_array().into_iter().flatten().any(|c| c["type"] == ty))
+        self.0.values().filter(|p| p.parsed.get().is_some() || p.raw.contains(ty)).any(|p| p.value()["components"].as_array().into_iter().flatten().any(|c| c["type"] == ty))
     }
 
     /// (parsed, all): how many prefabs have been read.
@@ -190,7 +191,7 @@ impl std::ops::Index<&str> for Prefabs {
 
 impl std::ops::IndexMut<&str> for Prefabs {
     fn index_mut(&mut self, group: &str) -> &mut Value {
-        let prefab = self.0.entry(group.to_string()).or_insert_with(|| Prefab { raw: serde_json::value::RawValue::NULL.to_owned(), parsed: Default::default(), asked: Default::default(), kinds: Default::default() });
+        let prefab = self.0.entry(group.to_string()).or_insert_with(|| Prefab { raw: "null".into(), parsed: Default::default(), asked: Default::default(), kinds: Default::default() });
         prefab.value();
         // What is handed out may be changed: the list of kinds is made again from it.
         prefab.kinds = Default::default();
@@ -262,7 +263,7 @@ impl GameData {
             by_hash,
             layouts: Arc::new(layouts),
             assets: Arc::new(assets),
-            group_prefabs: Arc::new(Prefabs(root.group_prefabs.into_iter().map(|(k, raw)| (k, Prefab { raw, parsed: Default::default(), asked: Default::default(), kinds: Default::default() })).collect())),
+            group_prefabs: Arc::new(Prefabs(root.group_prefabs.into_iter().map(|(k, raw)| (k, Prefab { raw: crate::util::compact_json(raw.get()), parsed: Default::default(), asked: Default::default(), kinds: Default::default() })).collect())),
             panels: Arc::new(root.panels),
             singletons: Arc::new(root.singletons),
         })
@@ -295,6 +296,16 @@ impl GameData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A prefab kept as text without its indentation is the same document: strings keep their
+    /// spaces, escaped quotes and backslashes, and what comes back is the compact form serde_json writes.
+    #[test]
+    fn compact_text_is_the_same_document_without_its_indentation() {
+        let doc = serde_json::json!({"components": [{"type": "A b", "fields": {"s": "a \"quoted\" \\ text\n\t with  spaces ", "n": [1, 2.5, -3e-7, null, true], "e": {}, "l": []}}], "k y": "\\\""});
+        for text in [serde_json::to_string_pretty(&doc).unwrap(), serde_json::to_string(&doc).unwrap(), format!(" \r\n{}\t ", serde_json::to_string_pretty(&doc).unwrap())] {
+            assert_eq!(&*crate::util::compact_json(&text), serde_json::to_string(&doc).unwrap());
+        }
+    }
 
     #[test]
     fn loads_groups_and_layouts() {
