@@ -343,8 +343,7 @@ pub struct Harvestable {
     spawn_on_this: bool,
     down_value: f32,
     /// allowedLayers is the Water layer alone (1 << 4): a spot is where a ray down meets water.
-    /// From the tables, so not in a snapshot (a snapshot of a release before it has none):
-    /// `refresh` sets it again after a restore.
+    /// From the tables, so not in a snapshot: `refresh` sets it again after a restore.
     #[serde(skip)]
     water_only: bool,
     things: Vec<String>,
@@ -755,9 +754,8 @@ mod tests {
         assert!(dry_crops.is_empty(), "no water under the ring, no spot, no crop (CreateNewGrowable gives up)");
     }
 
-    /// Hot update from 0.6.0 to 0.6.1 failed with "missing field water_only": the snapshot of
-    /// the release before had no such field. What the tables give is not in a snapshot, and a
-    /// restored algae generator still knows it needs water.
+    /// What the tables give is not in a snapshot, and a restored algae generator still knows it
+    /// needs water.
     #[test]
     fn a_restored_algae_generator_still_needs_water() {
         let Some(mut game) = game() else { return };

@@ -151,10 +151,9 @@ fn root(game: &Game, group: usize, ty: &str) -> Option<Value> {
     components(game, group, ty, true).first().map(|v| (*v).clone())
 }
 
-/// What a machine takes from the tables, set again from them after a restore. A snapshot of
-/// an earlier release has no field a later one added from the tables (0.6.1's `water_only`
-/// broke the first hot update that way), and has the values the release that wrote it
-/// derived, which this one may read differently: neither may be kept. State (timers, what is
+/// What a machine takes from the tables, set again from them after a restore. A snapshot
+/// holds the values the release that wrote it derived from the tables, which the release that
+/// restores it (of the same format) may read differently: they may not be kept. State (timers, what is
 /// growing, the random sequence, what the rays found) is the snapshot's. A machine part that
 /// keeps table values beside its state is listed here (docs/hot-update.md, "State"); Generator
 /// (spawn_every, speed, groups) mixes both and is not refreshed.
@@ -864,8 +863,8 @@ pub(crate) mod tests {
     }
 
     /// A restore sets what machines take from the tables again and keeps their state: a
-    /// snapshot of an earlier release holds the values that release derived (here, every one
-    /// changed), and the restored game has this release's, the snapshot's timers and all.
+    /// snapshot holds the values the release that wrote it derived (here, every one changed),
+    /// and the restored game has this release's, the snapshot's timers and all.
     #[test]
     fn a_restore_sets_the_table_values_again_and_keeps_the_state() {
         let Some(mut game) = game() else { return };
@@ -878,7 +877,7 @@ pub(crate) mod tests {
             tick(&mut game);
         }
         let text = crate::handoff::snapshot(&mut game).unwrap();
-        // The state of the game as JSON, with the table values changed, is the earlier release's.
+        // The state of the game as JSON, with the table values changed, is another release's.
         let mut state: Value = serde_json::to_value(&game).unwrap();
         let mut parts = std::collections::BTreeMap::<&str, usize>::new();
         let wrong = |v: &mut Value, keys: &[&str]| {
