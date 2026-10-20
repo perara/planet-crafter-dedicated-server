@@ -17,23 +17,23 @@ use crate::{access, config, rules, save};
 pub(super) fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, data: crate::gamedata::GameData, spec: crate::rpcspec::Spec, scenes: crate::Scenes) -> Game {
     let save = SaveFile::load(save_path).unwrap_or_else(|e| {
         match e.kind() {
-            std::io::ErrorKind::NotFound => eprintln!("no save {save_path}: make a new world with `pcds new-save {save_path} {dir}`"),
-            _ => eprintln!("{save_path}: {e}"),
+            std::io::ErrorKind::NotFound => error!("no save {save_path}: make a new world with `pcds new-save {save_path} {dir}`"),
+            _ => error!("{save_path}: {e}"),
         }
         std::process::exit(1)
     });
     if let Err(e) = crate::game::check_save_content(&save, &data, &net_data) {
-        eprintln!("{save_path}: {e}");
+        error!("{save_path}: {e}");
         std::process::exit(1);
     }
     // A rules or access file that does not hold up stops the start, before the world loads.
     let rules_path = rules_path(save_path);
     let loaded_rules = rules::Rules::load(&rules_path).and_then(|r| r.validate(&data).map(|_| r)).unwrap_or_else(|e| {
-        eprintln!("rules: {e}");
+        error!("rules: {e}");
         std::process::exit(1)
     });
     let loaded_access = load_access(&access_path(save_path)).unwrap_or_else(|e| {
-        eprintln!("access: {e}");
+        error!("access: {e}");
         std::process::exit(1)
     });
     let folder = std::path::Path::new(save_path).parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
@@ -46,17 +46,17 @@ pub(super) fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, d
     let mut game = Game::new(net_data, data, spec, save, scenes);
     // A world on a DLC planet needs that planet's ground in the tables: not silently empty.
     if let Some(why) = crate::planets::ground_missing(&game, game.planet) {
-        eprintln!("{save_path}: the world cannot start: {why}");
+        error!("{save_path}: the world cannot start: {why}");
         std::process::exit(1);
     }
     // ... and the operator's statement that they own it (the server cannot ask Steam).
     if let Some(why) = crate::planets::ownership_unstated(&game, &loaded_rules) {
-        eprintln!("{save_path}: the world cannot start: {why}");
+        error!("{save_path}: the world cannot start: {why}");
         std::process::exit(1);
     }
     rules::start(&mut game, loaded_rules, rules_path);
     game.access = loaded_access;
-    println!("world: {} world objects, {} network objects, planet {}, game {version}", game.wos.len(), game.net.objects.len(), game.planet_id());
+    info!("worldObjects" = game.wos.len(), "networkObjects" = game.net.objects.len(), "planet" = game.planet_id(); "world: {} world objects, {} network objects, planet {}, game {version}", game.wos.len(), game.net.objects.len(), game.planet_id());
     game
 }
 
@@ -120,14 +120,14 @@ pub(super) fn restore(f: &Frame, net_data: crate::data::NetData, data: crate::ga
             if config::dev("flip-verify").is_some() {
                 let t = std::time::Instant::now();
                 if let Err(e) = crate::handoff::verify(&g, &snapshot) {
-                    eprintln!("bank: {e}");
+                    warn!("bank: {e}");
                     std::process::exit(3);
                 }
                 verified = Some(true);
                 verify_ms = t.elapsed().as_secs_f64() * 1000.0;
             }
             if let Err(e) = reread(&mut g, &access_path(save_path), &rules_path(save_path)) {
-                eprintln!("bank: restore failed: {e}");
+                error!("bank: restore failed: {e}");
                 std::process::exit(3);
             }
             if recover {
@@ -138,7 +138,7 @@ pub(super) fn restore(f: &Frame, net_data: crate::data::NetData, data: crate::ga
             (g, Verified { verified, ms: verify_ms })
         }
         Err(e) => {
-            eprintln!("bank: restore failed: {e}");
+            error!("bank: restore failed: {e}");
             std::process::exit(3);
         }
     }

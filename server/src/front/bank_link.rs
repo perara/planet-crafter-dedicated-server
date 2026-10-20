@@ -58,7 +58,7 @@ impl Bank {
 /// A bank whose socket closed (it is ending) or broke (it is killed): waited for; how it ended.
 pub(super) fn end(b: &mut Bank) -> String {
     if let Some(why) = &b.link.broken {
-        eprintln!("bank {} (pid {}): {why}; killed", b.name, b.child.id());
+        warn!("bank {} (pid {}): {why}; killed", b.name, b.child.id());
         let _ = b.child.kill();
     }
     let status = b.child.wait().map(|s| s.to_string()).unwrap_or_default();
@@ -83,7 +83,7 @@ fn wait_frame(b: &mut Bank, deadline: Instant) -> Option<Frame> {
         ipc::wait(&[b.link.fd()], &[b.link.pending()], Duration::from_millis(100));
         if !b.link.fill(usize::MAX) {
             let status = end(b);
-            eprintln!("bank {} ended ({status})", b.name);
+            warn!("bank {} ended ({status})", b.name);
             return None;
         }
     }
@@ -163,17 +163,17 @@ impl Front {
         // An install that died between its two renames left a bank missing: put it back first.
         if let Some(dir) = &self.banks {
             match updater::recover(dir) {
-                Ok(done) => done.iter().for_each(|d| println!("banks: {d}")),
-                Err(e) => eprintln!("banks: {e}"),
+                Ok(done) => done.iter().for_each(|d| info!("banks: {d}")),
+                Err(e) => warn!("banks: {e}"),
             }
         }
         let first = self.banks.as_deref().map(updater::active).transpose().unwrap_or_else(|e| {
-            eprintln!("banks: {e}");
+            warn!("banks: {e}");
             std::process::exit(1)
         });
         let first = first.unwrap_or_else(|| "a".into());
         let mut kept = self.kept_snapshot().unwrap_or_else(|e| {
-            eprintln!("{e}");
+            error!("{e}");
             std::process::exit(1)
         });
         let mut tried = Vec::new();
@@ -184,24 +184,24 @@ impl Front {
             let snapshot = match kept.as_ref().map(|(fd, _)| fd.try_clone()).transpose() {
                 Ok(fd) => fd,
                 Err(e) => {
-                    eprintln!("{}: {e}", crate::worlds::snapshot_path(&self.save));
+                    warn!("{}: {e}", crate::worlds::snapshot_path(&self.save));
                     std::process::exit(1);
                 }
             };
             match self.boot_bank(&bank, snapshot, &mut kept) {
                 Ok(b) => {
-                    println!("bank {bank} (pid {}, pcds {}) running the world after {:?}", b.child.id(), b.version().unwrap_or("?"), b.started.elapsed());
+                    info!("bank {bank} (pid {}, pcds {}) running the world after {:?}", b.child.id(), b.version().unwrap_or("?"), b.started.elapsed());
                     if let Some((fd, at)) = kept {
-                        println!("the world is the one kept in {} at the last stop (the last flip's snapshot, newer than the save)", crate::worlds::snapshot_path(&self.save));
+                        info!("the world is the one kept in {} at the last stop (the last flip's snapshot, newer than the save)", crate::worlds::snapshot_path(&self.save));
                         self.last_snapshot = Some((fd, at));
                     }
                     if bank != first {
                         let reason = tried.join("; ");
-                        eprintln!("bank {first} could not start the world ({reason}); running bank {bank}, which ran before");
+                        error!("bank {first} could not start the world ({reason}); running bank {bank}, which ran before");
                         if let Some(dir) = &self.banks
                             && let Err(e) = updater::note_fallback(dir, &first, &bank, &format!("could not load the world: {reason}"))
                         {
-                            eprintln!("banks: {e}");
+                            warn!("banks: {e}");
                         }
                     }
                     self.game_version = b.game_version().to_string();
@@ -209,7 +209,7 @@ impl Front {
                     if let Some(dir) = &self.banks
                         && let Err(e) = updater::set_active(dir, &bank)
                     {
-                        eprintln!("banks: {e}");
+                        warn!("banks: {e}");
                     }
                     self.live = Some(Bank { heard: Instant::now(), ..b });
                     return;
@@ -220,9 +220,9 @@ impl Front {
                 break;
             }
         }
-        eprintln!("no bank could start the world: {}", tried.join("; "));
+        error!("no bank could start the world: {}", tried.join("; "));
         if kept.is_some() {
-            eprintln!("they were given the world kept in {} at the last stop; move it away to start from the save instead", crate::worlds::snapshot_path(&self.save));
+            warn!("they were given the world kept in {} at the last stop; move it away to start from the save instead", crate::worlds::snapshot_path(&self.save));
         }
         std::process::exit(BOOT_FAILED);
     }
@@ -242,8 +242,8 @@ impl Front {
             let path = crate::worlds::snapshot_path(&self.save);
             let aside = format!("{path}.unusable-{}", crate::save::stamp(SystemTime::now()));
             match std::fs::rename(&path, &aside) {
-                Ok(()) => eprintln!("{path} can never run ({why}): moved to {aside}; the world starts from the save, which is older"),
-                Err(e) => eprintln!("{path} can never run ({why}), and could not be moved aside ({e}); the world starts from the save, which is older"),
+                Ok(()) => error!("{path} can never run ({why}): moved to {aside}; the world starts from the save, which is older"),
+                Err(e) => error!("{path} can never run ({why}), and could not be moved aside ({e}); the world starts from the save, which is older"),
             }
             (snapshot, *kept) = (None, None);
         }
@@ -296,7 +296,7 @@ impl Front {
             match self.phase {
                 Phase::Recovering => {
                     let b = self.next.take().unwrap();
-                    eprintln!("bank {} ended while starting ({status})", b.name);
+                    warn!("bank {} ended while starting ({status})", b.name);
                     self.recover(&b.name);
                 }
                 _ => self.fail_flip(&format!("the new bank ended ({status})")),
@@ -318,14 +318,14 @@ impl Front {
             ipc::ANSWER => self.answer(f.n, &f.body),
             ipc::CHAT => match msg::parse(&f.body) {
                 Ok(event) => self.hooks.feed.push(event),
-                Err(e) => eprintln!("chat: an event the front cannot read ({e})"),
+                Err(e) => warn!("chat: an event the front cannot read ({e})"),
             },
             ipc::OPS => self.ops(&f.body),
             // The plugin event stream has a newer event: the long polls waiting in admin.rs ask again.
             ipc::STREAM => crate::admin::ring_bell(),
             ipc::CHATCFG => match super::chat_hooks::chat_config(&f.body) {
                 Ok(chat) => self.hooks.configure(chat),
-                Err(e) => eprintln!("chat: {e}; the hooks keep their settings"),
+                Err(e) => warn!("chat: {e}; the hooks keep their settings"),
             },
             ipc::SNAPSHOT => self.on_snapshot(f),
             _ => {}

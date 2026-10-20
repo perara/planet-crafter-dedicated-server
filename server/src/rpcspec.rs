@@ -325,12 +325,12 @@ impl Spec {
     /// Method hash and arguments of "Class.Method"; an unknown name is logged and sent as 0.
     pub fn encode(&self, name: &str, args: &[Value]) -> (u32, Vec<u8>) {
         let Some(hash) = self.hash(name) else {
-            eprintln!("unknown RPC {name}");
+            warn!("unknown RPC {name}");
             return (0, Vec::new());
         };
         let rpc = &self.by_hash[&hash];
         if !rpc.decodable {
-            eprintln!("RPC {name} has an INetworkSerializable argument, which is not supported");
+            warn!("RPC {name} has an INetworkSerializable argument, which is not supported");
             return (0, Vec::new());
         }
         let mut w = Writer::new();

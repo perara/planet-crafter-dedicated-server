@@ -59,6 +59,8 @@ spec:
     metadata:
       labels: { app: pcds }
     spec:
+      # The server never talks to the Kubernetes API: no token in the pod.
+      automountServiceAccountToken: false
       # The server saves at SIGTERM: its front gives the bank 30 s twice, then 20 s for what
       # is left (80 s); 120 s leaves room for a slow disk.
       terminationGracePeriodSeconds: 120
@@ -81,24 +83,25 @@ spec:
           ports:
             - { name: game, containerPort: 7777, protocol: UDP }
             - { name: admin, containerPort: 7782, protocol: TCP }
-          # The same check as the image's HEALTHCHECK: the admin API answers once the world
-          # runs. The first start extracts the game's tables (under a minute), so the startup
-          # probe allows 10 minutes; a hot update stands the world for 50 to 600 ms, far
-          # inside the liveness probe's 3 x 15 s.
+          # GET /api/health needs no token: 200 while the server serves a world (a hot update
+          # does not change that), 503 while it is stopped, loading, or starting the game
+          # process again after a crash. The first start extracts the game's tables (under a
+          # minute), so the startup probe allows 10 minutes. The liveness probe restarts the pod
+          # only after 5 minutes without a world: a crash heals itself in seconds.
           startupProbe:
-            exec: { command: ["pcds", "api", "GET", "/api/status"] }
+            httpGet: { path: /api/health, port: admin }
             periodSeconds: 10
-            timeoutSeconds: 15
+            timeoutSeconds: 5
             failureThreshold: 60
           readinessProbe:
-            exec: { command: ["pcds", "api", "GET", "/api/status"] }
+            httpGet: { path: /api/health, port: admin }
             periodSeconds: 15
-            timeoutSeconds: 15
+            timeoutSeconds: 5
           livenessProbe:
-            exec: { command: ["pcds", "api", "GET", "/api/status"] }
+            httpGet: { path: /api/health, port: admin }
             periodSeconds: 30
-            timeoutSeconds: 15
-            failureThreshold: 3
+            timeoutSeconds: 5
+            failureThreshold: 10
           # A hot update holds the old bank, the world's snapshot and the new bank in memory
           # at once: about 3 times the running bank (docs/docker.md). The bank of a small world
           # is about 70 MB, of a world of 100000 objects 320 MB (1.2 GB for the pod). A flip that

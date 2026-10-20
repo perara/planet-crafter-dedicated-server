@@ -444,22 +444,15 @@ pub fn sweep(dir: &Path) {
         // SAFETY: signal 0 only asks whether the process is there.
         let gone = pid > 0 && unsafe { libc::kill(pid, 0) } < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
         if gone && std::fs::remove_file(dir.join(&name)).is_ok() {
-            println!("removed {}: a write cut short by a process that ended", dir.join(&name).display());
+            info!("removed {}: a write cut short by a process that ended", dir.join(&name).display());
         }
     }
 }
 
-/// UTC "YYYYMMDD-HHMMSS" (days to civil date: Howard Hinnant's algorithm).
+/// UTC "YYYYMMDD-HHMMSS".
 pub fn stamp(t: SystemTime) -> String {
-    let s = t.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-    let (z, secs) = (s.div_euclid(86_400) + 719_468, s.rem_euclid(86_400));
-    let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
-    let y = yoe + era * 400 + (m <= 2) as i64;
-    format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+    let (y, m, d, h, mi, s) = crate::util::utc(t.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+    format!("{y:04}{m:02}{d:02}-{h:02}{mi:02}{s:02}")
 }
 
 /// The time stamps of a save's backups in `dir`, oldest first. A stamp after `now` comes from a

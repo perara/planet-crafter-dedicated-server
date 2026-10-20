@@ -76,7 +76,7 @@ impl Limits {
     /// `what` logged once for this client (forgotten with it: the table holds the clients there are).
     pub(crate) fn warn(&mut self, client: u64, what: &'static str) {
         if self.warned.insert((client, what)) {
-            eprintln!("client {client}: {what} (logged once)");
+            warn!("client {client}: {what} (logged once)");
         }
     }
 
@@ -204,7 +204,7 @@ pub fn run_pending(game: &mut Game, cost: impl Fn(&Game, &[u8]) -> u32, run: imp
             // These run inside the tick, which a panic ends the bank in (the world restarts from its
             // save): a client's RPC is contained as one that ran on arrival is (bank/panic.rs guarded).
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(game, client, &rpc))).is_err() {
-                eprintln!("client {client}: the server panicked on an RPC that waited for its turn; kicked");
+                error!("client {client}: the server panicked on an RPC that waited for its turn; kicked");
                 game.panicked = true;
                 game.kick(client, "Server error");
                 break;
@@ -340,7 +340,7 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
                 None => None,
             };
             let Some(inventory) = inventory else {
-                eprintln!("{group} (world object {}): behaviour {behaviour} asked for an inventory it has no data for (proxy {nth:?}, secondary index {index:?})", w.id);
+                warn!("{group} (world object {}): behaviour {behaviour} asked for an inventory it has no data for (proxy {nth:?}, secondary index {index:?})", w.id);
                 return true;
             };
             {
@@ -362,7 +362,7 @@ pub fn change_panel(game: &mut Game, object: u64, index: u16, sub_type: i32, ref
     // Only the game's own panel types: any other number would be shown to every client, saved,
     // and counted as a new entry of a list the wire cannot carry past 65535.
     if !(0..crate::panels::SUB_TYPES.len() as i32).contains(&sub_type) {
-        eprintln!("panel type {sub_type} is not one of the game's (0 to {}): ignored", crate::panels::SUB_TYPES.len() - 1);
+        warn!("panel type {sub_type} is not one of the game's (0 to {}): ignored", crate::panels::SUB_TYPES.len() - 1);
         return;
     }
     let current = game.net.behaviour_var(object, index, "_currentSubPanelType").cloned();
@@ -454,7 +454,7 @@ pub fn set_linked_groups(game: &mut Game, object: u64, hashes: &[i32]) {
     // A group each at most: a longer list is not the game's, and a NetworkList cannot carry
     // 65536 events or items on the wire (its count is a ushort), which would break every client.
     if hashes.len() > game.data.groups.len() {
-        eprintln!("linked groups: {} groups sent for object {object}, more than the game has ({}): ignored", hashes.len(), game.data.groups.len());
+        warn!("linked groups: {} groups sent for object {object}, more than the game has ({}): ignored", hashes.len(), game.data.groups.len());
         return;
     }
     let mut events = vec![ListEvent::Clear];

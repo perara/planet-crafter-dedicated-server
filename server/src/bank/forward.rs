@@ -18,8 +18,15 @@ pub(super) fn forward_chat(game: &mut Game, link: &mut Link) {
 
 /// The rules the front acts on (autosave, updates): sent at the start and whenever they change.
 pub(super) fn forward_ops(game: &Game, link: &mut Link, last: &mut Option<Ops>) {
-    let (save, update) = (&game.rules.save, &game.rules.update);
-    let ops = Ops { autosave_minutes: Some(save.autosave_minutes.into()), auto_update: Some(update.auto), update_check_hours: Some(update.check_hours.into()), bank_watchdog_seconds: Some(game.rules.limits.bank_watchdog_seconds.into()) };
+    let (save, update, log) = (&game.rules.save, &game.rules.update, &game.rules.log);
+    let ops = Ops {
+        autosave_minutes: Some(save.autosave_minutes.into()),
+        auto_update: Some(update.auto),
+        update_check_hours: Some(update.check_hours.into()),
+        bank_watchdog_seconds: Some(game.rules.limits.bank_watchdog_seconds.into()),
+        log_format: Some(log.format.clone()),
+        log_level: Some(log.level.clone()),
+    };
     if last.as_ref() != Some(&ops) {
         link.send(ipc::OPS, 0, &msg::body(&ops));
         *last = Some(ops);
@@ -56,8 +63,8 @@ mod tests {
         assert_eq!(
             bodies,
             [
-                (ipc::OPS, r#"{"autosaveMinutes":5,"autoUpdate":false,"updateCheckHours":24,"bankWatchdogSeconds":60}"#.to_string()),
-                (ipc::OPS, r#"{"autosaveMinutes":7,"autoUpdate":true,"updateCheckHours":24,"bankWatchdogSeconds":60}"#.to_string()),
+                (ipc::OPS, r#"{"autosaveMinutes":5,"autoUpdate":false,"updateCheckHours":24,"bankWatchdogSeconds":60,"logFormat":"text","logLevel":"info"}"#.to_string()),
+                (ipc::OPS, r#"{"autosaveMinutes":7,"autoUpdate":true,"updateCheckHours":24,"bankWatchdogSeconds":60,"logFormat":"text","logLevel":"info"}"#.to_string()),
                 (ipc::GONE, String::new())
             ]
         );

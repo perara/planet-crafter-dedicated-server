@@ -4,9 +4,11 @@ Find the line you saw, read what it means, run the command. Every command here r
 folder with `pcds` (or as `pcds` when you ran `make install`); `PCDS_HOME` and `PCDS_UNIT` have to
 be set the same way as for the server when you run a second one on the machine.
 
-Two commands answer most questions: `pcds status` (is it running, which world, the invite code,
-what is wrong with the game tables) and `pcds logs` (what the server said, newest last; press
-Ctrl+C to leave).
+Three commands answer most questions: `pcds doctor` (checks everything the server needs, one line
+each as PASS, WARN or FAIL, and the line to type under each problem; works when the server is
+stopped and when it runs), `pcds status` (is it running, which world, the invite code, what is
+wrong with the game tables) and `pcds logs` (what the server said, newest last; press Ctrl+C to
+leave). Run `pcds doctor` first: most of the table below is what it already checks.
 
 ## The server does not start
 
@@ -17,6 +19,7 @@ Ctrl+C to leave).
 | `no game in … the game folder holds 'Planet Crafter.exe' and 'Planet Crafter_Data'` | The folder you named is not the game's. | Give the folder that has both. |
 | `no game tables … run pcds update`, or `the game changed: run pcds update` | The game was updated (or the server reads its tables in a newer format) and the tables of the new version were not read yet. The server only runs on tables of the game it finds. | `pcds update`. It reads the new tables and restarts the server. |
 | `tables format 3, the server reads format 4` | Same, after a server upgrade. | `pcds update`. |
+| `…/worlds/world.json: …` and the world does not load (a file cut short, no game settings, objects the tables do not know) | The world file is damaged, or from a newer game than the tables. | `pcds backup verify --all` finds the backups that load; `pcds backup restore NAME` (server stopped) puts one back and keeps the damaged file. [disaster-recovery.md](disaster-recovery.md). |
 | `server.env: unknown setting PCDS_…` | A line of `server.env` names something that is not a setting. Saves, backups, updates, speeds and limits moved to the rules. | `pcds config`, delete the line, `pcds restart`. Set the same thing with `pcds rules set …` (`pcds rules` lists them). |
 | `server.env: PCDS_SESSION: "five" is not a whole number …` | A setting has a value it cannot take. The message says what it takes. | `pcds config`, fix the line, `pcds restart`. |
 | `direct IP 0.0.0.0:7777: Address already in use` | Another program, often a second pcds server, already uses that UDP port. | Stop that one, or give this server another port: `PCDS_LISTEN` in `pcds config`, then `pcds restart`. |
@@ -29,7 +32,7 @@ Ctrl+C to leave).
 | The unit stops after a few starts and `systemctl` says `start-limit-hit` | The server crashed 5 times in 10 minutes. The older backups are kept. | `pcds logs` for the reason, then `systemctl --user reset-failed pcds` and `pcds start`. |
 | `no systemd user session here: start the server with 'pcds run'` | A machine without a systemd user session (a plain SSH login on some systems, a container). | `pcds run` keeps the server in that terminal; use `tmux` or the Docker image to leave it running. |
 
-When the world does not start, the reason is a few lines above the last message in `pcds logs`.
+When the world does not start, the reason is a few lines above the last message in `pcds logs`. Narrow it with `pcds logs --since "1 hour ago" --grep error`; the log's format and level are the rules `log.format` and `log.level`, and how long it is kept is in [monitoring.md](monitoring.md#the-log).
 
 ## Players cannot join
 

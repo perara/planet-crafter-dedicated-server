@@ -137,11 +137,16 @@ impl Ctx {
     /// The game folder: --game DIR, PCDS_GAME_DIR, the one used last (run/game-dir), else the
     /// Steam library that lists the game. The one chosen is remembered.
     pub fn game_dir(&self, arg: Option<&Path>) -> Result<PathBuf> {
-        self.find_game_dir(arg, crate::env("PCDS_GAME_DIR"))
+        self.find_game_dir(arg, crate::env("PCDS_GAME_DIR"), true)
+    }
+
+    /// game_dir(None) that remembers nothing (`pcds doctor` only looks).
+    pub fn game_dir_peek(&self) -> Result<PathBuf> {
+        self.find_game_dir(None, crate::env("PCDS_GAME_DIR"), false)
     }
 
     /// game_dir with PCDS_GAME_DIR given (tests give their own, whatever the process has).
-    fn find_game_dir(&self, arg: Option<&Path>, env_dir: Option<String>) -> Result<PathBuf> {
+    fn find_game_dir(&self, arg: Option<&Path>, env_dir: Option<String>, remember: bool) -> Result<PathBuf> {
         let remembered = self.run.join("game-dir");
         let (dir, from) = if let Some(dir) = arg {
             (dir.to_path_buf(), "--game".to_string())
@@ -174,7 +179,7 @@ impl Ctx {
             return Err(format!("no game in {} (from {from}): the game folder holds 'Planet Crafter.exe' and 'Planet Crafter_Data'", dir.display()));
         }
         let dir = dir.canonicalize().map_err(|e| format!("{}: {e}", dir.display()))?;
-        if fs::read_to_string(&remembered).ok().as_deref() != Some(&format!("{}\n", dir.display())) {
+        if remember && fs::read_to_string(&remembered).ok().as_deref() != Some(&format!("{}\n", dir.display())) {
             super::mkdir(&self.run)?;
             super::write(&remembered, format!("{}\n", dir.display()))?;
         }
@@ -355,7 +360,7 @@ mod tests {
             fs::create_dir_all(&saves).unwrap();
             fs::write(saves.join(name), "{\"saveDisplayName\":\"x\"}").unwrap();
         };
-        assert!(ctx.find_game_dir(None, None).unwrap_err().contains(".var/app/com.valvesoftware.Steam"), "no list anywhere: all three named");
+        assert!(ctx.find_game_dir(None, None, true).unwrap_err().contains(".var/app/com.valvesoftware.Steam"), "no list anywhere: all three named");
 
         // A native Steam without the game, also reached through ~/.steam/steam; the game in the Flatpak's.
         let native = dir.join("home/.local/share/Steam");
@@ -376,7 +381,7 @@ mod tests {
         list(&native, &format!("228980\" \"1\" \"{APP_ID}"));
         manifest(&native);
 
-        assert_eq!(ctx.find_game_dir(None, None).unwrap(), game.canonicalize().unwrap());
+        assert_eq!(ctx.find_game_dir(None, None, true).unwrap(), game.canonicalize().unwrap());
         let mut names: Vec<String> = ctx.local_saves().iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
         names.sort();
         assert_eq!(names, ["Flatpak-1.json", "Native-1.json"], "each save once");

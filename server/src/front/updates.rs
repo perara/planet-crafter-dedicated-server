@@ -209,13 +209,13 @@ impl Front {
                 let tag = info.tag.as_deref().unwrap_or("?").to_string();
                 self.updates.latest = Some(tag.clone());
                 self.updates.newer = false;
-                println!("update: {tag} installed in bank {bank} (sha256 {} checked)", info.sha256.as_deref().unwrap_or(""));
+                info!("tag" = tag, "bank" = bank; "update: {tag} installed in bank {bank} (sha256 {} checked)", info.sha256.as_deref().unwrap_or(""));
                 if let Err(e) = self.flip_to(&bank, &format!("update to {tag}"), seq, None) {
                     self.record(History::new(seq, false, format!("{tag} is in bank {bank}, but the flip did not start: {e}")));
                 }
             }
             Done::Failed { seq, message } => {
-                eprintln!("update: {message}");
+                warn!("update: {message}");
                 if self.updates.auto_seq == Some(seq) {
                     self.updates.next_check = Instant::now() + CHECK_RETRY.min(self.updates.every);
                 }
@@ -227,7 +227,7 @@ impl Front {
                 self.record(History::new(seq, true, format!("up to date ({tag} is the latest release)")));
             }
             Done::Skipped { seq, message } => {
-                println!("update: {message}");
+                info!("update: {message}");
                 self.record(History::new(seq, true, message));
             }
             Done::Checked { seq, tag, newer } => {
@@ -247,12 +247,12 @@ impl Front {
                 let bank = updater::other(&live.name).to_string();
                 self.updates.seq += 1;
                 let seq = self.updates.seq;
-                println!("update: checking for a new release (the rule update.auto is on)");
+                info!("update: checking for a new release (the rule update.auto is on)");
                 self.updates.auto_seq = Some(seq);
                 self.download(seq, dir, bank, None, true, true);
             } else {
                 self.updates.next_check = Instant::now() + BUSY_RETRY.min(self.updates.every);
-                println!("update: the automatic check waits ({}): next in {} min", if self.live.is_none() || self.phase != Phase::Idle { format!("the world is not running ({:?})", self.phase) } else { "an update is under way".into() }, BUSY_RETRY.min(self.updates.every).as_secs() / 60);
+                info!("update: the automatic check waits ({}): next in {} min", if self.live.is_none() || self.phase != Phase::Idle { format!("the world is not running ({:?})", self.phase) } else { "an update is under way".into() }, BUSY_RETRY.min(self.updates.every).as_secs() / 60);
             }
         }
     }

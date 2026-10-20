@@ -90,7 +90,7 @@ impl Bank {
             turn.busy = (turn.busy.0 + work, turn.busy.1.max(work));
             let pause = turn.next_frame.saturating_duration_since(Instant::now());
             if ipc::wait(&[self.link.fd()], &[], pause)[0] && !self.link.fill(usize::MAX) {
-                println!("bank: the front is gone; saving and stopping");
+                info!("bank: the front is gone; saving and stopping");
                 std::process::exit(final_save(&mut self.game, &self.save_path));
             }
         }
@@ -116,7 +116,7 @@ impl Bank {
                 t.approved.remove(&f.n);
                 t.kicked.remove(&f.n);
                 if game.clients.contains_key(&f.n) {
-                    println!("client {}: left the game", f.n);
+                    info!("client {}: left the game", f.n);
                     guarded(game, f.n, &self.save_path, |game| game.disconnect(f.n));
                 }
             }
@@ -158,7 +158,7 @@ impl Bank {
                 match self.link.recv() {
                     Some(f) if f.kind == ipc::RESUME => {
                         game.resume_after_stand();
-                        println!("bank: resumed, the new bank failed")
+                        info!("bank: resumed, the new bank failed")
                     }
                     Some(f) if f.kind == ipc::EXIT => {
                         settle(game, true);
@@ -168,7 +168,7 @@ impl Bank {
                 }
             }
             Err(e) => {
-                eprintln!("bank: no snapshot ({e}); going on");
+                warn!("bank: no snapshot ({e}); going on");
                 self.link.send(ipc::SNAPSHOT, n, &[]);
             }
         }
@@ -185,7 +185,7 @@ impl Bank {
         if !ok {
             // The whole world may be half-updated: keep what there is; the front starts the
             // bank again from the save.
-            eprintln!("the game tick panicked: saving and stopping");
+            error!("the game tick panicked: saving and stopping");
             taint();
             let _ = persist(game, &self.save_path);
             std::process::exit(1);
@@ -225,7 +225,7 @@ impl Bank {
             if !t.kicked.insert(client) {
                 continue;
             }
-            println!("client {client}: kicked ({reason})");
+            info!("client {client}: kicked ({reason})");
             send(&mut self.link, &mut t.mail, &[client], &mut HashMap::new());
             self.link.send(ipc::DATA, client, &crate::protocol::reason_batch(&reason));
             self.link.send(ipc::KICK, client, &[]);

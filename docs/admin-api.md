@@ -1,8 +1,8 @@
 # The admin API
 
 Generated from the table in `server/src/front/admin_routes.rs` (a test keeps the two equal; the text below
-is what it expects). Every route but the web page needs `Authorization: Bearer <token>` (docs/hot-update.md, README).
-The answers are JSON; an error is `{"error": "..."}` with the status. Who answers: the HTTP thread (admin.rs: its own
+is what it expects). Every route but the web page and `GET /api/health` needs `Authorization: Bearer <token>` (docs/hot-update.md, README).
+The answers are JSON (`GET /api/metrics` is Prometheus text); an error is `{"error": "..."}` with the status. Who answers: the HTTP thread (admin.rs: its own
 thread, never held by the game loop), the front's loop (the process: updates, stopping, the world's controls), or the bank
 (the world; the front passes the request on and adds its part to `GET /api/status`).
 
@@ -20,9 +20,12 @@ thread, never held by the game loop), the front's loop (the process: updates, st
 | `POST /api/world/stop` | front | nothing | Tells every player, saves the world and ends its bank; the page and API stay. |
 | `POST /api/world/start` | front | `{"world"?: "name"}` | Starts the world that ran, or another one, in the active bank. |
 | `POST /api/world/switch` | front | `{"world": "name"}` | Stops the world that runs, if any, and starts another. |
+| `GET /api/health` | front | nothing | Liveness for container probes and uptime monitors, no token: 200 `{"ok":true}` while the server serves a world (a hot update does not change that: the old game serves until the new one takes over), 503 `{"ok":false}` while there is no game process to serve one (the world is stopped, still starting, or starting again after a crash) or the loop does not answer within 3 s. Nothing else is said. |
+| `GET /api/metrics` | front, while the world is stopped | nothing | While the world is stopped: the front's numbers alone, in the Prometheus text format. |
 | `GET /api/status` | front, while the world is stopped | nothing | While the world is stopped: the front's part of the status, and which world it was. |
 | `GET /api/worlds` | front, while the world is stopped | nothing | While the world is stopped: the worlds and the backups. |
 | `GET /api/status` | bank | nothing | The server's state: world, planet, the DLC planets stated as owned, players, rules changed, loop times, save and backup state, tables, plugins; the front adds the network, the invite code, the process, the banks and the update state. |
+| `GET /api/metrics` | bank | nothing | The numbers for a monitor in the Prometheus text format (version 0.0.4, `text/plain`), not JSON: players online and the limit, tick times, loop load, memory of the front and the game, objects, saves, backups, the off-site copies, hand-overs, crashes, the watchdog, the waiting queue, plugins by state and what each costs. The scoped token scope `metrics.read` allows this route alone (docs/monitoring.md). |
 | `GET /api/ping` | bank | nothing | Any answer is a game loop that runs (the front's watchdog asks it). |
 | `POST /api/save` | bank | nothing | Saves the world now (and its backup, when they are on). |
 | `POST /api/kick` | bank | `{"id": N}` or `{"name": "..."}` | Kicks a player. |

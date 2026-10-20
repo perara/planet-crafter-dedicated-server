@@ -62,6 +62,9 @@ macro_rules! section {
     };
 }
 
+// The log's macros (info!, warn!, error!, debug!, trace!) are used by every module after this line.
+#[macro_use]
+mod logging;
 #[cfg(any(fuzzing, pcds_corpus))]
 #[path = "../fuzz/entry.rs"]
 mod fuzz_entry;
@@ -163,20 +166,26 @@ fn env(name: &str) -> Option<String> {
 
 /// The game's tables in DATA_DIR (data/<version>/); without them nothing runs.
 fn tables(dir: &str) -> (NetData, GameData, Spec) {
-    let (net, spec) = network_tables(dir);
-    let data = GameData::load(&format!("{dir}/gamedata.json")).unwrap_or_else(|e| no_tables(dir, e));
-    facts::check(&data, &spec).unwrap_or_else(|e| no_tables(dir, e));
-    (net, data, spec)
+    try_tables(dir).unwrap_or_else(|e| no_tables(dir, e))
+}
+
+/// tables(), with the reason as an error (`pcds doctor` and `pcds backup verify` say it).
+fn try_tables(dir: &str) -> Result<(NetData, GameData, Spec), String> {
+    let (net, spec) = try_network_tables(dir)?;
+    let data = GameData::load(&format!("{dir}/gamedata.json"))?;
+    facts::check(&data, &spec)?;
+    Ok((net, data, spec))
 }
 
 /// The network tables alone: all a scripted player needs (the extraction joins with them
 /// before the game data is written).
 fn network_tables(dir: &str) -> (NetData, Spec) {
-    let load = || {
-        check_format(dir)?;
-        Ok::<_, String>((NetData::load(&format!("{dir}/netdata.json"))?, Spec::load(&format!("{dir}/rpcs.json"))?))
-    };
-    load().unwrap_or_else(|e| no_tables(dir, e))
+    try_network_tables(dir).unwrap_or_else(|e| no_tables(dir, e))
+}
+
+fn try_network_tables(dir: &str) -> Result<(NetData, Spec), String> {
+    check_format(dir)?;
+    Ok((NetData::load(&format!("{dir}/netdata.json"))?, Spec::load(&format!("{dir}/rpcs.json"))?))
 }
 
 /// Tables another reader wrote (another format, or none) are not loaded: their files may say
@@ -192,7 +201,7 @@ fn check_format(dir: &str) -> Result<(), String> {
 }
 
 fn no_tables(dir: &str, e: String) -> ! {
-    eprintln!("the game tables in {dir} cannot be used: run `pcds update`, which reads them again (see README) ({e})");
+    error!("the game tables in {dir} cannot be used: run `pcds update`, which reads them again (see README) ({e})");
     std::process::exit(1)
 }
 
@@ -254,19 +263,21 @@ fn planet_scene(dir: &str, planet: &str, data: &GameData) -> Result<PlanetScene,
 /// scene the planet's portals open. A free planet's file must be there; a DLC planet's may be
 /// missing (tables read before the extraction knew the DLC planets).
 fn scene_tables(dir: &str, net: &NetData, data: &GameData) -> Scenes {
-    let load = || -> Result<Scenes, String> {
-        let wrecks = std::fs::read_to_string(format!("{dir}/wrecks.json")).map_err(|e| format!("{dir}/wrecks.json: {e}"))?;
-        let wrecks = instances::generate::Wrecks::parse(&wrecks).map_err(|e| format!("{dir}/wrecks.json: {e}"))?;
-        let mut planets = HashMap::new();
-        for planet in &net.planets {
-            if planet.steam_app_id != 0 && !std::path::Path::new(&format!("{dir}/scenes/{}.json", planet.id)).is_file() {
-                continue;
-            }
-            planets.insert(planet.id.clone(), planet_scene(dir, &planet.id, data)?);
+    try_scene_tables(dir, net, data).unwrap_or_else(|e| no_tables(dir, e))
+}
+
+/// scene_tables(), with the reason as an error.
+fn try_scene_tables(dir: &str, net: &NetData, data: &GameData) -> Result<Scenes, String> {
+    let wrecks = std::fs::read_to_string(format!("{dir}/wrecks.json")).map_err(|e| format!("{dir}/wrecks.json: {e}"))?;
+    let wrecks = instances::generate::Wrecks::parse(&wrecks).map_err(|e| format!("{dir}/wrecks.json: {e}"))?;
+    let mut planets = HashMap::new();
+    for planet in &net.planets {
+        if planet.steam_app_id != 0 && !std::path::Path::new(&format!("{dir}/scenes/{}.json", planet.id)).is_file() {
+            continue;
         }
-        Ok(Scenes { wrecks: Arc::new(wrecks), planets })
-    };
-    load().unwrap_or_else(|e| no_tables(dir, e))
+        planets.insert(planet.id.clone(), planet_scene(dir, &planet.id, data)?);
+    }
+    Ok(Scenes { wrecks: Arc::new(wrecks), planets })
 }
 
 /// What water.rs, veins.rs and toxic.rs read from a scene dump is complete: story interpolations

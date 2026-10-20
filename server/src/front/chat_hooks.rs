@@ -129,7 +129,7 @@ impl Hooks {
             let (feed, last) = (self.feed.clone(), lock(&self.feed.ring).next - 1);
             match std::thread::Builder::new().name("pcds-chathooks".into()).spawn(move || deliver(&feed, last)) {
                 Ok(_) => self.worker = true,
-                Err(e) => eprintln!("chat hooks: no worker thread ({e}); the hooks are off until the next change of the chat rules"),
+                Err(e) => warn!("chat hooks: no worker thread ({e}); the hooks are off until the next change of the chat rules"),
             }
         }
     }
@@ -175,7 +175,7 @@ fn next_for_hooks(feed: &Feed, last: u64, wait: Duration) -> Vec<Event> {
     let missed = events.first().map_or(0, |e| e.id - last - 1);
     if missed > 0 {
         feed.dropped.fetch_add(missed, Ordering::Relaxed);
-        eprintln!("chat hooks: {missed} events dropped, the hooks were {KEPT} behind");
+        warn!("chat hooks: {missed} events dropped, the hooks were {KEPT} behind");
     }
     events
 }
@@ -206,7 +206,7 @@ fn deliver(feed: &Feed, mut last: u64) {
                         continue;
                     }
                     if *skipped > 0 {
-                        eprintln!("chat hooks: webhook {} gets events again ({skipped} skipped while it failed)", i + 1);
+                        info!("chat hooks: webhook {} gets events again ({skipped} skipped while it failed)", i + 1);
                     }
                     resting.remove(url);
                 }
@@ -215,7 +215,7 @@ fn deliver(feed: &Feed, mut last: u64) {
                     Ok(Some(reply)) => reply_or_log(feed, &reply),
                     Ok(None) => {}
                     Err(e) => {
-                        eprintln!("chat hooks: webhook {} failed: {e}; left out for {}s", i + 1, COOL_DOWN.as_secs());
+                        error!("chat hooks: webhook {} failed: {e}; left out for {}s", i + 1, COOL_DOWN.as_secs());
                         resting.insert(url.clone(), (Instant::now() + COOL_DOWN, 0));
                     }
                 }
@@ -223,7 +223,7 @@ fn deliver(feed: &Feed, mut last: u64) {
             if !chat.exec.is_empty() {
                 match exec(&chat.exec, &body, timeout) {
                     Ok(reply) => reply_or_log(feed, &reply),
-                    Err(e) => eprintln!("chat hooks: exec failed: {e}"),
+                    Err(e) => error!("chat hooks: exec failed: {e}"),
                 }
             }
         }
@@ -232,7 +232,7 @@ fn deliver(feed: &Feed, mut last: u64) {
 
 fn reply_or_log(feed: &Feed, reply: &str) {
     if !feed.say(reply) {
-        eprintln!("chat hooks: {REPLIES} replies are waiting for the chat; a hook's reply was dropped");
+        warn!("chat hooks: {REPLIES} replies are waiting for the chat; a hook's reply was dropped");
     }
 }
 

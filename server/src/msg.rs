@@ -180,6 +180,9 @@ pub struct Ops {
     pub auto_update: Option<bool>,
     pub update_check_hours: Option<u64>,
     pub bank_watchdog_seconds: Option<u64>,
+    /// The rules log.format and log.level, which the front applies to its own lines.
+    pub log_format: Option<String>,
+    pub log_level: Option<String>,
 }
 
 /// banks/rolled-back, and the status' `banks.rolledBack`: the bank the server went back from and
@@ -257,8 +260,8 @@ mod tests {
         let call = AdminCall { method: "GET".into(), path: "/api/ping".into(), body: serde_json::json!({}) };
         assert_eq!(text(&call), r#"{"method":"GET","path":"/api/ping","body":{}}"#);
         assert_eq!(text(&AdminAnswer { status: Some(200), body: Some("{}".into()) }), r#"{"status":200,"body":"{}"}"#);
-        let ops = Ops { autosave_minutes: Some(5), auto_update: Some(false), update_check_hours: Some(24), bank_watchdog_seconds: Some(60) };
-        assert_eq!(text(&ops), r#"{"autosaveMinutes":5,"autoUpdate":false,"updateCheckHours":24,"bankWatchdogSeconds":60}"#);
+        let ops = Ops { autosave_minutes: Some(5), auto_update: Some(false), update_check_hours: Some(24), bank_watchdog_seconds: Some(60), log_format: Some("json".into()), log_level: Some("warn".into()) };
+        assert_eq!(text(&ops), r#"{"autosaveMinutes":5,"autoUpdate":false,"updateCheckHours":24,"bankWatchdogSeconds":60,"logFormat":"json","logLevel":"warn"}"#);
         assert_eq!(text(&SnapshotHead { format: 5, game_version: "2.103".into() }), r#"{"format":5,"game_version":"2.103"}"#);
     }
 

@@ -24,7 +24,8 @@ if [ "$(id -u)" = 0 ]; then
   if ! find /data -xdev \( ! -uid "$PUID" -o ! -gid "$PGID" \) -exec chown -h "$PUID:$PGID" {} +; then
     echo "entrypoint: not every file in /data could be given to $PUID:$PGID (see above): the server cannot write those" >&2
   fi
-  exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups /opt/pcds/pcds container "$@"
+  # --no-new-privs: nothing the server starts (a chat hook program) can gain rights, whatever it runs.
+  exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups --no-new-privs /opt/pcds/pcds container "$@"
 fi
 # Not root: /data is written as this user or not at all, and the server says so now.
 mkdir -p /data/home || {

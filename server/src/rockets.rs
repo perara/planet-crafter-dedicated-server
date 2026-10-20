@@ -199,7 +199,7 @@ fn send_in_space(game: &mut Game, client: u64, object: u64) {
     let (spot, platform_position) = match (send_pose(game, platform, Some("locationGameObject")), send_pose(game, platform, None)) {
         (Ok(s), Ok(b)) => (s, b),
         (Err(e), _) | (_, Err(e)) => {
-            eprintln!("rocket launch refused: {e}");
+            warn!("rocket launch refused: {e}");
             game.net.rpc(Target::Only(client), object, "ConstructibleProxy.SendInSpaceDisplayErrorClientRpc", &[]);
             return;
         }

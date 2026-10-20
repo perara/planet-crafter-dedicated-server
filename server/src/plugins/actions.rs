@@ -52,7 +52,7 @@ pub fn apply(game: &mut Game, plugin: &str, actions: Vec<Action>) -> Applied {
             Action::Kick(client, reason) => {
                 let there = game.clients.contains_key(&client) && !game.kicks.iter().any(|(c, _)| *c == client);
                 if there {
-                    println!("plugin {plugin}: kicks client {client} ({reason})");
+                    info!("plugin {plugin}: kicks client {client} ({reason})");
                     game.kick(client, &reason);
                 }
                 there
@@ -63,12 +63,12 @@ pub fn apply(game: &mut Game, plugin: &str, actions: Vec<Action>) -> Applied {
                 Ok(changed) => {
                     if changed {
                         // Only the gameplay sections can be in it: no secret.
-                        println!("plugin {plugin}: changed the rules: {patch}");
+                        info!("plugin {plugin}: changed the rules: {patch}");
                     }
                     true
                 }
                 Err(e) => {
-                    eprintln!("plugin {plugin}: its rules change was refused: {e}");
+                    warn!("plugin {plugin}: its rules change was refused: {e}");
                     false
                 }
             },
