@@ -334,6 +334,7 @@ pub fn solve(w: &Wrecks, index: usize, seed: u32, scene: &[tessera::SceneTile]) 
 fn create(game: &mut Game, group: &str, position: [f32; 3], rotation: [f32; 4]) -> Vec<i32> {
     let Some(group) = game.data.group(group) else { return Vec::new() };
     let (id, _) = game.create_and_instantiate(group, position, rotation, false, true, true);
+    crate::machines::growers::announce_growth(game, id);
     let inventory = game.wos[&id].linked_inventory;
     let mut ids = vec![id];
     ids.extend(game.inventories.get(&inventory).map(|i| i.items.clone()).unwrap_or_default());

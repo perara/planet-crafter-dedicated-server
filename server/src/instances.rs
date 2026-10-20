@@ -836,6 +836,10 @@ mod tests {
             assert_eq!(spawned.len(), count, "wreck {index} of seed {seed}: {} made", made.len());
             assert!(close(spawned[0], samples[0]) && close(spawned[1], samples[1]) && close(spawned[count - 1], samples[2]), "wreck {index} of seed {seed}: {:?}", &spawned[..2]);
         }
+        // The planters of the last three told everyone their growth: 3, 2 and 2 of them (the game's
+        // GrowthProxy.SetGrowth(0) on a static grower that appears).
+        let growth = crate::planets::tests::rpcs_sent(&g).into_iter().filter(|n| n == "GrowthProxy.SetCurrentGrowthClientRpc").count();
+        assert_eq!(growth, 7);
     }
 
     #[test]
