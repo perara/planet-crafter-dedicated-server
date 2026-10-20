@@ -84,10 +84,14 @@ pub fn rules_patch(args: &[String]) -> Result<Value> {
         let (key, value) = arg.split_once('=').filter(|(k, _)| k.contains('.')).ok_or_else(bad)?;
         // A rule that is text takes 12345 or true as that text (a bucket or a secret of digits):
         // read as a JSON number it would be refused as "not text" with no way to say it but quotes.
-        let is_text = crate::config::knob_for(key).is_some_and(|k| k.kind == crate::config::Type::String);
+        let kind = crate::config::knob_for(key).map(|k| k.kind);
+        let is_text = kind == Some(crate::config::Type::String);
+        // A list rule takes JSON (["a","b"]) or plain names split at commas: world.dlcPlanets=Humble,Toxicity.
+        let is_list = kind == Some(crate::config::Type::List);
         let value = match serde_json::from_str::<Value>(value) {
             Ok(Value::Number(_) | Value::Bool(_)) if is_text => Value::String(value.to_string()),
             Ok(json) => json,
+            Err(_) if is_list => Value::Array(value.split(',').filter(|n| !n.is_empty()).map(|n| Value::String(n.trim().to_string())).collect()),
             Err(_) => Value::String(value.to_string()),
         };
         let mut path: Vec<&str> = key.split('.').collect();
@@ -271,6 +275,9 @@ mod tests {
         // Text rules take digits as text; null still resets; quotes still work.
         let text = rules_patch(&args(&["chat.secret=12345", "backup.s3Bucket=123456789", "chat.commandPrefix=true", "backup.s3Region=null", "backup.s3Prefix=\"7\""])).unwrap();
         assert_eq!(text, json!({"chat": {"secret": "12345", "commandPrefix": "true"}, "backup": {"s3Bucket": "123456789", "s3Region": null, "s3Prefix": "7"}}));
+        // A list rule takes names split at commas, or JSON; empty clears it.
+        let lists = rules_patch(&args(&["world.dlcPlanets=Humble,Toxicity", "chat.webhooks=[\"https://a.example/x,y\"]", "access.whitelist=", "chat.exec=null"])).unwrap();
+        assert_eq!(lists, json!({"world": {"dlcPlanets": ["Humble", "Toxicity"]}, "chat": {"webhooks": ["https://a.example/x,y"], "exec": null}, "access": {"whitelist": []}}));
         assert!(rules_patch(&args(&["speed=2"])).is_err());
         assert!(rules_patch(&args(&["speed.growth"])).is_err());
         assert!(rules_patch(&args(&["speed.growth=2", "speed.growth.x=1"])).is_err());

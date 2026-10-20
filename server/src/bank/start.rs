@@ -50,6 +50,11 @@ pub(super) fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, d
         eprintln!("{save_path}: the world cannot start: {why}");
         std::process::exit(1);
     }
+    // ... and the operator's statement that they own it (the server cannot ask Steam).
+    if let Some(why) = crate::planets::ownership_unstated(&game, &loaded_rules) {
+        eprintln!("{save_path}: the world cannot start: {why}");
+        std::process::exit(1);
+    }
     rules::start(&mut game, loaded_rules, rules_path);
     game.access = loaded_access;
     game.session_number = session_number;

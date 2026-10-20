@@ -10,7 +10,8 @@
 //! - The host loads the new planet's scene before planetIsLoaded runs; here it runs right after
 //!   the RPC, in the same tick.
 //! - Only planets in _availablePlanets can be travelled to (the game does not check): the
-//!   standalone server offers only the free planets and cannot check DLC ownership.
+//!   standalone server offers the free planets and the DLC planets the operator states they own
+//!   (the rule world.dlcPlanets), because it cannot ask Steam about an account.
 
 mod loot;
 
@@ -47,6 +48,21 @@ pub fn ground_missing(game: &Game, index: usize) -> Option<String> {
         format!(
             "{0} is a DLC planet and the game tables have no ground for it (no scenes/{0}.json): its ore veins, water, toxic areas and world instances would be missing and the planet would run empty. Run `pcds extract` to read them from the game folder (or `pcds update`)",
             planet.id
+        )
+    })
+}
+
+/// A world on a DLC planet the operator has not stated they own (`rules.world.dlcPlanets`). The
+/// server cannot ask Steam about an account, so it asks the operator, and says exactly what to
+/// set. `rules` are the ones the world would run with (at start, or a change being made).
+pub fn ownership_unstated(game: &Game, rules: &crate::rules::Rules) -> Option<String> {
+    let planet = &game.net_data.planets[game.planet];
+    (planet.steam_app_id != 0 && !rules.world.dlc_planets.contains(&planet.id)).then(|| {
+        let owned: Vec<&str> = rules.world.dlc_planets.iter().map(String::as_str).chain([planet.id.as_str()]).collect();
+        format!(
+            "the world is on {0}, a DLC planet. This server cannot ask Steam whether you own it, so you state it: `pcds rules set world.dlcPlanets={1}` (list the DLC planets you own; it is your statement of ownership, not a check). Without it the world does not run on {0}",
+            planet.id,
+            owned.join(",")
         )
     })
 }
@@ -116,7 +132,7 @@ fn landing_transform(game: &Game, platform: &WorldObject) -> ([f32; 3], [f32; 4]
 pub fn switch_to_planet(game: &mut Game, planet_hash: i32, rocket_wo: i32, spawn_index: i32) {
     let Some(index) = game.net_data.planets.iter().position(|p| stable_hash(&p.id) == planet_hash) else { return };
     if !crate::scene::available_planets(game).contains(&index) {
-        eprintln!("switch to planet {}: not available in this world (a DLC planet is only continued, never given: the server cannot check ownership)", game.net_data.planets[index].id);
+        eprintln!("switch to planet {}: not available in this world (a DLC planet needs the rule world.dlcPlanets to list it: `pcds rules set world.dlcPlanets=NAME`)", game.net_data.planets[index].id);
         return;
     }
     if let Some(why) = ground_missing(game, index) {
@@ -354,21 +370,30 @@ pub mod tests {
         assert_eq!(g.planet_id(), "Selenea", "the save keeps where the world is");
     }
 
-    /// The server cannot check DLC ownership, so it gives no world a DLC planet: travel to one is
-    /// refused unless the world has it already (its save lists it), and then it needs the
-    /// planet's ground in the tables.
+    /// The server cannot check DLC ownership, so the operator states it (world.dlcPlanets): travel to
+    /// a DLC planet is refused unless the rule lists it, whatever the save lists, and then it needs
+    /// the planet's ground in the tables. A world on a DLC planet the rule does not list does not run.
     #[test]
-    fn a_world_is_given_no_dlc_planet_but_keeps_the_one_it_has() {
+    fn a_dlc_planet_is_travelled_to_only_if_the_operator_states_they_own_it() {
         let Some(mut g) = game() else { return };
         let humble = stable_hash("Humble");
         let index = g.net_data.planet_index("Humble").unwrap();
+        let state = |g: &mut Game, planets: &[&str]| g.rules.world.dlc_planets = planets.iter().map(|p| p.to_string()).collect();
         assert!(!crate::scene::available_planets(&g).contains(&index));
         switch_to_planet(&mut g, humble, 0, 0);
-        assert_eq!(g.planet_id(), "Prime", "a world that never had Humble does not get it");
-        // The save lists it (its host owned it when the world got there): available, and the
-        // travel works where the tables hold the planet's ground (a stand-in here).
+        assert_eq!(g.planet_id(), "Prime", "no statement, no Humble");
+        // A save that lists Humble (an older server let it stand for the ownership) is no statement.
         g.save.planets.push(json!({"planetId": "Humble"}));
         crate::units::create(&mut g, "Humble", None);
+        assert!(!crate::scene::available_planets(&g).contains(&index));
+        switch_to_planet(&mut g, humble, 0, 0);
+        assert_eq!(g.planet_id(), "Prime", "the save is not the operator's word");
+        // Toxicity stated, Humble not: only Toxicity is offered.
+        state(&mut g, &["Toxicity"]);
+        assert!(!crate::scene::available_planets(&g).contains(&index));
+        assert!(crate::scene::available_planets(&g).contains(&g.net_data.planet_index("Toxicity").unwrap()));
+        // Stated: the travel works where the tables hold the planet's ground (a stand-in here).
+        state(&mut g, &["Humble"]);
         assert!(crate::scene::available_planets(&g).contains(&index));
         let ground = g.scenes.planets.remove("Humble");
         assert!(ground_missing(&g, index).is_some_and(|why| why.contains("pcds extract")), "tables without the planet's ground say what to do");
@@ -379,7 +404,22 @@ pub mod tests {
         assert_eq!(ground_missing(&g, index), None);
         switch_to_planet(&mut g, humble, 0, 0);
         assert_eq!(g.planet_id(), "Humble");
-        // A free planet never lacks its ground (the tables refuse to load without it).
-        assert_eq!(ground_missing(&g, g.net_data.planet_index("Prime").unwrap()), None);
+        // On Humble the rule must list it: the start refuses the world otherwise, saying what to set,
+        // and so does a rules change that would take the statement away under the players.
+        let none = crate::rules::Rules::default();
+        let why = ownership_unstated(&g, &none).expect("on Humble without the statement");
+        assert!(why.contains("pcds rules set world.dlcPlanets=Humble") && why.contains("statement of ownership"), "{why}");
+        let mut stated = none.clone();
+        stated.world.dlc_planets = vec!["Humble".into()];
+        assert_eq!(ownership_unstated(&g, &stated), None);
+        let err = crate::rules::set(&mut g, none).unwrap_err();
+        assert!(err.starts_with("world.dlcPlanets: ") && err.contains("world.dlcPlanets=Humble"), "{err}");
+        assert_eq!(g.rules.world.dlc_planets, ["Humble"], "the refused change is not applied");
+        // A statement that lists more keeps the others in the advice.
+        state(&mut g, &["Toxicity"]);
+        assert!(ownership_unstated(&g, &g.rules).is_some_and(|w| w.contains("world.dlcPlanets=Toxicity,Humble")));
+        // A free planet needs nothing.
+        g.planet = g.net_data.planet_index("Prime").unwrap();
+        assert_eq!(ownership_unstated(&g, &crate::rules::Rules::default()), None);
     }
 }

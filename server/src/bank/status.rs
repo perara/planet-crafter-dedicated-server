@@ -144,6 +144,7 @@ pub struct Status<'a> {
     busy_percent: f64,
     longest_loop_micros: u64,
     planet: &'a str,
+    dlc_planets: &'a [String],
     terraformation: f64,
     stages: Value,
     game_time: f64,
@@ -179,6 +180,7 @@ pub(super) fn build<'a>(game: &'a Game, ctx: &Ctx<'a>, now: Instant) -> Status<'
         busy_percent: (ctx.busy.0.as_secs_f64() * 1000.0).round() / 10.0,
         longest_loop_micros: ctx.busy.1.as_micros() as u64,
         planet: game.planet_id(),
+        dlc_planets: &game.rules.world.dlc_planets,
         terraformation: units::value(game, units::Kind::Terraformation, 0),
         stages: meteo::stages(game),
         game_time: game.time.secs(),
@@ -322,6 +324,7 @@ mod tests {
             "busyPercent": (ctx.busy.0.as_secs_f64() * 1000.0).round() / 10.0,
             "longestLoopMicros": ctx.busy.1.as_micros() as u64,
             "planet": game.planet_id(),
+            "dlcPlanets": game.rules.world.dlc_planets,
             "terraformation": terraformation,
             "stages": meteo::stages(game),
             "gameTime": game.time.secs(),
@@ -398,8 +401,13 @@ mod tests {
         // Fields in the API's order.
         let v: Value = serde_json::from_str(&serde_json::to_string(&build(&game, &Ctx { ticks: &ticks, save_path: "w.json", build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() }, now)).unwrap()).unwrap();
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, ["state", "gameVersion", "save", "autosaveMinutes", "tickRate", "rules", "fps", "busyPercent", "longestLoopMicros", "planet", "terraformation", "stages", "gameTime", "units", "players", "access", "serverVersion", "tables", "world", "objects", "held", "s3", "plugins", "lastSave", "tick", "backup"]);
+        assert_eq!(keys, ["state", "gameVersion", "save", "autosaveMinutes", "tickRate", "rules", "fps", "busyPercent", "longestLoopMicros", "planet", "dlcPlanets", "terraformation", "stages", "gameTime", "units", "players", "access", "serverVersion", "tables", "world", "objects", "held", "s3", "plugins", "lastSave", "tick", "backup"]);
         assert_eq!(v["players"].as_array().map(Vec::len), Some(2));
+        // The DLC planets the operator states they own (none by default).
+        assert_eq!(v["dlcPlanets"], json!([]));
+        game.rules.world.dlc_planets = vec!["Humble".into()];
+        let v: Value = serde_json::from_str(&serde_json::to_string(&build(&game, &Ctx { ticks: &ticks, save_path: "w.json", build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() }, now)).unwrap()).unwrap();
+        assert_eq!(v["dlcPlanets"], json!(["Humble"]));
     }
 
     /// The installed game's build, and a warning once it has no tables (a game update).

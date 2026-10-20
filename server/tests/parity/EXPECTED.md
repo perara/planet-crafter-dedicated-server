@@ -163,7 +163,7 @@ energy: the grower's random state).
   `PlanetList.GetIsPlanetPurchased` is false for a DLC planet, `GetPlanetIndex` gives -1 for it and
   the host disconnects a world saved there (`PlanetNetworkLoader.LoadPlanetFromSave`). It could be
   made to run one only by a Steam stand-in or a patch of `PlanetList`, and a faked ownership is not
-  done, here or in the server. What the server does with them is checked another way (COMPLETENESS.md
+  done, here or in the server (the server asks the operator instead: the rule `world.dlcPlanets` is their statement of ownership). What the server does with them is checked another way (COMPLETENESS.md
   "DLC planets"). The few things that would differ, if a licensed host were compared: the host game
   knows the toxic areas of the sectors around its own player only (here all of the planet's, so a
   remote player in a far area is hurt here and not there); an area's key is made from the dump's

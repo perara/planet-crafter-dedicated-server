@@ -44,8 +44,8 @@ for a late-game world.** In ten lines:
    it runs; `integrate` writes it on a thread.
 9. Start 1.0 s, 94 MB, 3.9 % of a core idle, a join in about 0.1 s, thirty minutes with eight bots
    and 72 000 actions without a fault (numbers below).
-10. Not checked: Steam networking and invite codes, DLC ownership (the server checks none and
-    gives no world a DLC planet it did not have), a real game client, and any reference run on a
+10. Not checked: Steam networking and invite codes, DLC ownership (the server checks none: the operator
+    states what they own in `world.dlcPlanets`), a real game client, and any reference run on a
     DLC planet (the reference owns no DLC and has no honest way to).
 
 ## The numbers
@@ -172,7 +172,7 @@ planets removed** (`nodlc.py`); the full save is run once for the record.
 | blueprints, unlocks | `unlocks.rs` | 2 | `scripts/crafting.json` | 190 unlocked | done |
 | genetics | `genetics.rs`, `animals/spawn.rs` | 3 | sweep convert/animals | 511 trait items | done (random traits are class d) |
 | Tessera (wreck layouts) | `tessera.rs` (run on a wreck's seed, off the tick), `native/wrecks.rs` (the tile sets, at extraction) | 1 | 24 wrecks and 8 world instances against the game; the six recorded wrecks of `wrecks_of_any_seed_come_out_as_the_game_lays_them` | 8 instances | done |
-| travel between planets | `planets.rs` | 5 | `scripts/travel_chat.json`; lg_travel | 5 planets | done for free planets; a DLC planet only where the world has it already (the server cannot check ownership) |
+| travel between planets | `planets.rs` | 5 | `scripts/travel_chat.json`; lg_travel | 5 planets | done for free planets; a DLC planet only where the operator states they own it (`world.dlcPlanets`; the server cannot check ownership) |
 | **DLC planets (Humble, Toxicity)** | `scene.rs`, `planets.rs`, `machines/veins.rs`, `water.rs`, `toxic.rs`, `instances/` | 15 (9 of them for toxic areas) | none possible (the reference owns no DLC); the real game's own save of a Humble world, see "DLC planets" | 10 554 objects | done, not comparable with the game; see "DLC planets" |
 | save, load, backups | `save.rs`, `load.rs` | 9 | load fidelity above | whole | done (fix in this branch) |
 | hot update | `handoff.rs`, `front/`, `bank/` | 25 + 4 | bench handoff EQUAL | whole | done |
@@ -269,9 +269,11 @@ takes a world to a planet. Nothing of it is in this repository: `pcds extract` w
 * `toxic.rs`: the areas, their registration under the game's key, cleaned goo counted from the world objects at start and from
   scene objects picked up or disabled after, the clients' registrations and the progress and end calls, the tracked area the toxic
   gauge reads (`gauges.rs`), the totals the map asks for. Snapshot format 7 (the registrations).
-* Ownership: `scene::available_planets` offers a DLC planet only to a world that has it (the planet it is on, or one its save
-  lists). The game's own list is the host's purchases; this server has no account, so the world's own file is the record, and
-  nothing is checked, faked or patched.
+* Ownership: `scene::available_planets` offers a DLC planet only if the operator states they own it (the rule
+  `world.dlcPlanets`, empty by default). The game's own list is the host's purchases; this server has no Steam account to ask,
+  so the operator's statement stands for it, and nothing is checked, faked or patched. A world saved on a DLC planet that the
+  rule does not list does not start (`planets::ownership_unstated`, in `bank/start.rs`), and the message says which rule to set;
+  a rules change that would take the planet away from a world standing on it is refused. `/api/status` shows `dlcPlanets`.
 * Census of what a DLC planet's scenes hold that no free planet's does: the toxic classes (`ToxicArea`, `ToxicAreaVolumes`,
   `ToxicAreaDecal`, `ToxicTag`, `ToxicSwitchState`, `ActionDrinkToxicWater`), the trains' `SceneInterpolationPath` and
   `ActionInterpolator`s (the server's `SceneInterpolationHandler` serves any interpolator), `WorldAutoSpawnerOnFloor` and the
@@ -287,13 +289,13 @@ takes a world to a planet. Nothing of it is in this repository: `pcds extract` w
 | (b) structure | unit test `the_dlc_planets_veins_read_from_an_install_hold_together` and `the_toxic_areas_read_from_an_install_hold_together` (they skip loudly without DLC tables): every vein group known, a collider for the ray to find, a world object exactly when a vein has content, positions within the span of the free planets, unique keys and scene ids across the toxic areas, every instance scene listed by PlanetData present (`the_portals_of_the_dlc_planets_open_all_their_scenes` opens each). |
 | (c) the real game's own save | **Humble**: of the 28 extractors the player had chosen an ore for, 21 have that ore among the groups of the vein the extracted ground puts under them (`dlc_selection.py`): every extractor set to Osmium, Uraninite, Obsidian, Zeolite, Titanium, Dolomite or Bauxite. The 7 that do not are set to Sulfur, Silicon, Magnesium, Cobalt or Iron and hold two items each; the free planets show the same (7 of 14 on Prime, 4 of 5 on Selenea), so they are machines set up by hand over no vein for the ore. **Toxicity**: 3 ToxicGoo items of the save carry scene ids that the extracted areas list, with the same group (by chance one in thousands). **Floating machines** on Humble settle on the water the ground now has, at the height the save has less the 0.6094 EXPECTED.md already names for the free planets. |
 | (c) behaviour | the late-game save run for 345 s on Humble, before and after: the 12 extractors with room made 89 items in both (17 were full; OreExtractor3 mines the ore chosen, not a vein's). The same 29 extractors turned into OreExtractor2 at their own places (`OreExtractor1/2` need the veins): 146 items in 160 s; **62 are ores of the vein under the extractor, and none is outside the basic ores plus that vein's**; before this branch 0 of 146 were. The world moved to Toxicity with a probe player standing in an area and registering as the game's client does: `GetCurrentPlanetToxicProgress` answers the totals, `UpdateAreaToxicProgressClientRpc` follows the registration, and the saved toxic gauge is the world's drain rate times the seconds in the area (4.96 for 24.8 s at 0.2 a second, the save's `modifierGaugeDrain`). |
-| (d) synthetic | 9 tests of `toxic.rs` on areas written by hand (registration, progress and end calls, goo picked up and disabled, destroy that counts nothing, areas cleaned at start, gauge fill and the filter and the limit, leaving, registrations of two clients, a key a rounding step off, a hot update), `a_dlc_planets_veins_are_mined_like_a_free_planets`, `a_world_is_given_no_dlc_planet_but_keeps_the_one_it_has`. |
+| (d) synthetic | 9 tests of `toxic.rs` on areas written by hand (registration, progress and end calls, goo picked up and disabled, destroy that counts nothing, areas cleaned at start, gauge fill and the filter and the limit, leaving, registrations of two clients, a key a rounding step off, a hot update), `a_dlc_planets_veins_are_mined_like_a_free_planets`, `a_dlc_planet_is_travelled_to_only_if_the_operator_states_they_own_it`. |
 
 **What remains unverifiable.** Against the real game: any DLC planet behaviour other than what its own save shows (the
 reference owns no DLC, see EXPECTED.md); the keys of the toxic areas (made from the dump's positions in single precision;
 a client that computes another is taken to mean the area within 4 of it, `KEY_SLACK`); which sectors the real host has
 loaded when a remote player is in an area (here all of the planet's); whether a player who owns the DLC can take a
-world with no DLC planet to one (refused here, by the ownership rule); the volumes, decal and map marker (client pictures of
+world with no DLC planet to one (refused here unless the operator lists the planet in `world.dlcPlanets`); the volumes, decal and map marker (client pictures of
 the two calls); the Toxicity vein world objects' use by the toxic water collectors beyond the count tests.
 
 ## The old-format save
@@ -313,7 +315,7 @@ the game), a save then a load then a save changes nothing, and a probe player pl
 
 * **Steam networking and invite codes**: no Steam login here; the direct IP path was used throughout.
 * **DLC ownership and any run of the DLC planets in the real game**: this server never checks ownership (it has no Steam account to
-  ask) and gives no world a planet it did not have. The reference, the game under Wine without Steam, owns no DLC
+  ask): the operator states what they own in `world.dlcPlanets`, and a DLC planet is offered only then. The reference, the game under Wine without Steam, owns no DLC
   (`PlanetList.GetIsPlanetPurchased` is false there, so its host refuses a world saved on one), and the only ways to make it
   run one are a Steam stand-in or a patch of the planet list, which would fake ownership: not done. So nothing on Humble or
   Toxicity was compared with the game; the other evidence is in "DLC planets".

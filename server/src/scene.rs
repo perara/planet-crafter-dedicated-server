@@ -44,14 +44,13 @@ fn list_i32(items: impl Iterator<Item = i32>) -> Vec<Vec<u8>> {
 }
 
 /// Planet indices players may travel to (PlanetNetworkLoader._availablePlanets): the free ones,
-/// and a DLC planet the world already has, the one it is on or one its save lists. The game
-/// fills the list with the planets its host owns (PlanetList.GetIsPlanetPurchased: Steam asks
-/// about the host's account). This server has no account to ask, and a world's host owned its
-/// DLC planets when it got there, so the world's own file stands for the ownership; a world
-/// that never had a DLC planet is not given one (the server checks nothing and bypasses nothing).
+/// and the DLC planets the operator states they own (the rule world.dlcPlanets). The game fills
+/// the list with the planets its host owns (PlanetList.GetIsPlanetPurchased: Steam asks about the
+/// host's account). This server is an anonymous Steam game server with no account to ask, so the
+/// operator's statement stands for the ownership; nothing is faked or patched.
 pub fn available_planets(game: &Game) -> Vec<usize> {
-    let has = |id: &str| game.save.planets.iter().any(|s| s["planetId"].as_str() == Some(id));
-    game.net_data.planets.iter().enumerate().filter(|(i, p)| p.steam_app_id == 0 || *i == game.planet || has(&p.id)).map(|(i, _)| i).collect()
+    let stated = &game.rules.world.dlc_planets;
+    game.net_data.planets.iter().enumerate().filter(|(_, p)| p.steam_app_id == 0 || stated.contains(&p.id)).map(|(i, _)| i).collect()
 }
 
 pub fn init(game: &mut Game) {

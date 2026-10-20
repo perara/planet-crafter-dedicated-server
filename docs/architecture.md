@@ -235,13 +235,16 @@ Three rules keep the DLC planets apart from everything else:
 - **A world on a DLC planet does not start without the planet's ground** (`planets::ground_missing`,
   checked in `bank/start.rs`): an empty ground would run silently wrong. The message says to run
   `pcds extract`. A travel to such a planet is refused the same way.
-- **Ownership is never decided here.** The game lets a host take a world to a DLC planet when the
-  host's Steam account owns it (`PlanetList.GetIsPlanetPurchased`, `BIsDlcInstalled`); this server
-  has no account to ask. `scene::available_planets` (the game's `_availablePlanets`) offers the free
-  planets, the planet the world is on and the planets its save lists, the ones a host that owned
-  them took it to. No world is given a DLC planet it did not have, and nothing is faked or
-  patched: not here, and not in the Wine reference, which has no Steam and so owns no DLC
-  (see COMPLETENESS.md "What could not be checked").
+- **Ownership is never decided here; the operator states it.** The game lets a host take a world
+  to a DLC planet when the host's Steam account owns it (`PlanetList.GetIsPlanetPurchased`,
+  `BIsDlcInstalled`); this server is an anonymous Steam game server with no account to ask. The
+  rule `world.dlcPlanets` (empty by default) lists the DLC planets the operator says they own.
+  `scene::available_planets` (the game's `_availablePlanets`) offers the free planets and those
+  listed, and nothing else: a save that lists a planet is no evidence. A world saved on a DLC planet
+  that is not listed does not start (`planets::ownership_unstated`, in `bank/start.rs`; the same
+  check refuses a rules change that would unlist the planet under a running world), and the message
+  names the rule to set. Nothing is faked or patched: not here, and not in the Wine reference, which
+  has no Steam and so owns no DLC (see COMPLETENESS.md "What could not be checked").
 
 `toxic.rs` is the one new game logic: Toxicity's `ToxicAreaHandler` and `ToxicArea` (see its header).
 The areas are read again from the scene dump and the world objects after a hot update; only the

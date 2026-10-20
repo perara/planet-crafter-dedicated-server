@@ -22,7 +22,7 @@ thread, never held by the game loop), the front's loop (the process: updates, st
 | `POST /api/world/switch` | front | `{"world": "name"}` | Stops the world that runs, if any, and starts another. |
 | `GET /api/status` | front, while the world is stopped | nothing | While the world is stopped: the front's part of the status, and which world it was. |
 | `GET /api/worlds` | front, while the world is stopped | nothing | While the world is stopped: the worlds and the backups. |
-| `GET /api/status` | bank | nothing | The server's state: world, planet, players, rules changed, loop times, save and backup state, tables, plugins; the front adds the network, the invite code, the process, the banks and the update state. |
+| `GET /api/status` | bank | nothing | The server's state: world, planet, the DLC planets stated as owned, players, rules changed, loop times, save and backup state, tables, plugins; the front adds the network, the invite code, the process, the banks and the update state. |
 | `GET /api/ping` | bank | nothing | Any answer is a game loop that runs (the front's watchdog asks it). |
 | `POST /api/save` | bank | nothing | Saves the world now (and its backup, when they are on). |
 | `POST /api/kick` | bank | `{"id": N}` or `{"name": "..."}` | Kicks a player. |
