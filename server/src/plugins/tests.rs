@@ -852,3 +852,36 @@ fn a_plugin_folder_with_a_pipe_or_a_device_in_place_of_a_file_does_not_hold_the_
     std::os::unix::fs::symlink(&big, &link).unwrap();
     assert_eq!(read_regular(&link, 2000).unwrap().len(), 1001);
 }
+
+// ---- bulk memory operations and deep recursion (security review v0.7+) ---------------------------
+
+/// wasmi charged one fuel for 64 bytes of memory.fill: a fill of the 64 MiB a module may have was a
+/// million fuel and 14 ms, where a million fuel is meant to be a third of a millisecond. A byte
+/// moved by a bulk operation now costs a quarter of a fuel (limits::BYTES_COPIED_PER_FUEL).
+#[test]
+fn a_bulk_memory_operation_is_paid_for_by_the_byte() {
+    let fill = |bytes: u32| {
+        let wat = module(&format!("(memory.fill (i32.const 0) (i32.const 1) (i32.const {bytes})) (i32.const 0)"), "").replace("(memory (export \"memory\") 1)", "(memory (export \"memory\") 16)");
+        let dir = fresh_dir("bulk");
+        install(&dir, "filler", &wat, &CHAT_SAY, SUBSCRIBE_CHAT, None);
+        let mut host = boot(&dir);
+        host.run(&mut Mock::default(), &chat("x"), 0);
+        plugin(&host, "filler").stats.fuel
+    };
+    let (small, big) = (fill(64), fill(1 << 20));
+    assert!(big - small >= ((1 << 20) - 64) / limits::BYTES_COPIED_PER_FUEL as u64, "a megabyte filled cost {} fuel more than 64 bytes", big - small);
+}
+
+/// A module that calls itself for ever, or does with frames of many locals, ends in a trap.
+#[test]
+fn endless_recursion_ends_in_a_trap_and_the_plugin_goes_on() {
+    for (what, extra) in [("plain", "(func $r (call $r))".to_string()), ("30000 locals a frame", format!("(func $r {} (call $r))", "(local i64) ".repeat(30000)))] {
+        let dir = fresh_dir("recursion");
+        install(&dir, "deep", &module("(call $r) (i32.const 0)", &extra), &CHAT_SAY, SUBSCRIBE_CHAT, None);
+        let mut host = boot(&dir);
+        let t = Instant::now();
+        host.run(&mut Mock::default(), &chat("x"), 0);
+        let p = plugin(&host, "deep");
+        assert!(t.elapsed() < Duration::from_millis(250) && p.stats.last_error.as_deref().unwrap().contains("call stack exhausted") && p.running(), "{what}: {:?} {:?}", t.elapsed(), p.stats.last_error);
+    }
+}

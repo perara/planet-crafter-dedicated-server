@@ -51,6 +51,10 @@ pub const FUEL_PER_PARSED_BYTE: u64 = 16;
 pub const MAX_TEXT_BYTES: usize = 4096;
 pub const MAX_PATCH_BYTES: usize = 64 << 10;
 
+/// Bytes a module's bulk memory operation (memory.fill, memory.copy) moves for one unit of fuel
+/// (wasmi's default is 64; see wasm.rs `engine`).
+pub const BYTES_COPIED_PER_FUEL: u32 = 4;
+
 /// Actions a plugin may queue in one call, and in one second.
 pub const ACTIONS_PER_CALL: usize = 16;
 pub const ACTIONS_PER_SECOND: u32 = 200;
