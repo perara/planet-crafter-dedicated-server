@@ -86,7 +86,7 @@ impl Ctx {
     /// goes back to `previous` and nothing is restarted. A release that has no such command
     /// (it prints its help and no error) is not asked.
     fn settings_or_undo(&self, banks: &std::path::Path, previous: &str) -> Result {
-        let now = updater::active(banks);
+        let now = updater::active(banks)?;
         let out = std::process::Command::new(banks.join(&now).join("pcds")).arg("check-settings").env("PCDS_HOME", &self.run).stdin(std::process::Stdio::null()).output().map_err(|e| format!("bank {now}: {e}"))?;
         let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
         if out.status.success() || said.is_empty() {
@@ -275,14 +275,14 @@ mod tests {
         updater::set_active(&banks, "b").unwrap();
         let e = ctx.settings_or_undo(&banks, "a").unwrap_err();
         assert!(e.contains("unknown setting GONE_ONE") && e.contains("not restarted") && e.contains("bank a is still the active one"), "{e}");
-        assert_eq!(updater::active(&banks), "a");
+        assert_eq!(updater::active(&banks).unwrap(), "a");
         // Accepted, and an older release that prints its help and no error: both go on.
         put("b", "exit 0");
         updater::set_active(&banks, "b").unwrap();
         ctx.settings_or_undo(&banks, "a").unwrap();
         put("b", "echo 'pcds: install and run a Planet Crafter dedicated server'; exit 1");
         ctx.settings_or_undo(&banks, "a").unwrap();
-        assert_eq!(updater::active(&banks), "b");
+        assert_eq!(updater::active(&banks).unwrap(), "b");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
