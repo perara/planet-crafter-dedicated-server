@@ -420,7 +420,7 @@ pub fn set_rolled_back(banks: &Path, bank: &str) -> Result<(), String> {
 }
 
 /// The front's own rollback: the release in `bank` ended the game over and over after it was
-/// flipped to (front::Front::give_up). The note also says why and when, for the dashboard and
+/// flipped to (front/supervise.rs give_up). The note also says why and when, for the dashboard and
 /// `pcds status` (a rollback of the owner's is not explained: they asked for it).
 pub fn set_rolled_back_by_crashes(banks: &Path, bank: &str, why: &str) -> Result<(), String> {
     note_rolled_back(banks, bank, Some(why))

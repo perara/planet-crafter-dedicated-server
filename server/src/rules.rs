@@ -181,7 +181,7 @@ pub struct Limits {
     pub buildings: BTreeMap<String, u32>,
     /// The front kills a bank whose game loop has said nothing (to a player, an admin request or
     /// its ping) for this many seconds and starts the world again like after a crash (it counts
-    /// toward the crash limit); 0: never. See front::watch_verdict.
+    /// toward the crash limit); 0: never. See front/supervise.rs watch_verdict.
     pub bank_watchdog_seconds: u32,
 }
 

@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use super::admin_routes::error;
 use crate::msg::{ChatEvent as Event, CHAT_MAX_REPLY as MAX_REPLY, CHAT_REPLIES as REPLIES};
 use crate::rules::Chat;
 
@@ -150,7 +151,7 @@ pub fn api(feed: &Feed, method: &str, path: &str, query: &str, body: &Value) -> 
             let _poll = if wait > 0 {
                 if POLLS.fetch_add(1, Ordering::SeqCst) >= MAX_POLLS as u64 {
                     POLLS.fetch_sub(1, Ordering::SeqCst);
-                    return (503, json!({"error": format!("{MAX_POLLS} chat polls are already waiting: try again, or poll without wait")}).to_string());
+                    return error(503, &format!("{MAX_POLLS} chat polls are already waiting: try again, or poll without wait"));
                 }
                 Some(Poll)
             } else {
@@ -161,10 +162,10 @@ pub fn api(feed: &Feed, method: &str, path: &str, query: &str, body: &Value) -> 
         }
         ("POST", "/api/chat") => match body["text"].as_str().filter(|t| !t.trim().is_empty()) {
             Some(text) if feed.say(text) => (200, "{\"ok\":true}".into()),
-            Some(_) => (503, "{\"error\":\"too many chat messages waiting\"}".into()),
-            None => (400, "{\"error\":\"'text' is required\"}".into()),
+            Some(_) => error(503, "too many chat messages waiting"),
+            None => error(400, "'text' is required"),
         },
-        _ => (404, "{\"error\":\"unknown endpoint\"}".into()),
+        _ => error(404, "unknown endpoint"),
     }
 }
 

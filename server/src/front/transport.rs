@@ -8,10 +8,10 @@ use std::net::SocketAddr;
 use std::os::fd::RawFd;
 use std::time::Instant;
 
-use serde_json::json;
 use steamworks::networking_types::{AppNetConnectionEnd, NetConnectionEnd};
 use steamworks::networking_sockets::NetConnection;
 
+use crate::msg::{self, Connected};
 use crate::utp::{self, Utp};
 
 pub(super) mod steam;
@@ -107,8 +107,8 @@ impl Transport {
         println!("client {client}: connected from {addr}");
         self.ip_clients.insert(token, client);
         self.conns.insert(client, Conn::Ip(token));
-        let body = json!({"ip": addr.ip().to_string(), "trusted": trusted(addr.ip(), crate::config::dev("trust-loopback").is_some())});
-        (client, body.to_string())
+        let body = Connected { steam_id: None, ip: Some(addr.ip().to_string()), trusted: trusted(addr.ip(), crate::config::dev("trust-loopback").is_some()) };
+        (client, msg::text(&body))
     }
 
     pub fn ip_client(&self, token: &utp::Token) -> Option<u64> {

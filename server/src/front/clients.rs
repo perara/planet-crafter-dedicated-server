@@ -6,12 +6,11 @@
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use serde_json::json;
-
 use super::transport::{steam, Sent};
 use super::{Front, KICK_DELAY};
 use super::metrics::{BYTES_IN, BYTES_OUT};
 use crate::ipc;
+use crate::msg::{self, Connected};
 use crate::utp;
 
 impl Front {
@@ -21,7 +20,7 @@ impl Front {
         for j in joined {
             let (client, steam_id) = (j.client, j.steam_id);
             self.net.add_steam(j);
-            self.to_bank(ipc::CONNECTED, client, json!({"steamId": steam_id, "trusted": false}).to_string().as_bytes(), 0);
+            self.to_bank(ipc::CONNECTED, client, &msg::body(&Connected { steam_id: Some(steam_id), ip: None, trusted: false }), 0);
         }
         let incoming = self.net.steam_receive(&mut gone);
         for client in gone {

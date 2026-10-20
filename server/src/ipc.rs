@@ -15,16 +15,16 @@ use std::time::Duration;
 /// needs the front restarted (`pcds restart`). 3: HANDOFF and SNAPSHOT carry the flip's number.
 pub const PROTOCOL: u64 = 3;
 
-// game -> front: n PROTOCOL; body JSON {"version", "gameVersion", "format", "tablesFormat"}.
+// game -> front: n PROTOCOL; body msg::Hello (version, protocol, format, tablesFormat, gameVersion).
 pub const HELLO: u8 = 1;
 // front -> bank: load the save.
 pub const START: u8 = 2;
-// front -> bank: a memfd with a snapshot; body JSON {"recover": bool} (recover: every client
+// front -> bank: a memfd with a snapshot; body msg::Restore {"recover": bool} (recover: every client
 // in it is gone, the bank restarts after a crash).
 pub const RESTORE: u8 = 3;
-// bank -> front: running (the health check); body JSON {"restoreMs", "verified"}.
+// bank -> front: running (the health check); body msg::Ready.
 pub const READY: u8 = 4;
-// front -> bank: n client; body JSON {"ip", "steamId", "trusted"}.
+// front -> bank: n client; body msg::Connected {"ip" or "steamId", "trusted"}.
 pub const CONNECTED: u8 = 5;
 // both ways: n client; body one Netcode batch.
 pub const DATA: u8 = 6;
@@ -34,30 +34,30 @@ pub const GONE: u8 = 7;
 pub const KICK: u8 = 8;
 // front -> bank: n the flip; send everything queued, stop, snapshot.
 pub const HANDOFF: u8 = 9;
-// bank -> front: n the flip of the HANDOFF it answers; a memfd with the snapshot, body JSON
-// {"bytes", "ms"}; no memfd: none could be written and the bank went on. Then it waits for EXIT
+// bank -> front: n the flip of the HANDOFF it answers; a memfd with the snapshot, body
+// msg::SnapshotNote {"bytes", "ms", ...}; no memfd: none could be written and the bank went on. Then it waits for EXIT
 // or RESUME. The front takes only the SNAPSHOT of the flip under way.
 pub const SNAPSHOT: u8 = 10;
 // front -> old bank: the new one runs, end.
 pub const EXIT: u8 = 11;
 // front -> old bank: the new one failed, go on.
 pub const RESUME: u8 = 12;
-// front -> bank: n request id; body JSON {"method", "path", "body"}.
+// front -> bank: n request id; body msg::AdminCall {"method", "path", "body"}.
 pub const ADMIN: u8 = 13;
-// bank -> front: n request id; body JSON {"status", "body"}.
+// bank -> front: n request id; body msg::AdminAnswer {"status", "body"}.
 pub const ANSWER: u8 = 14;
 // front -> bank: the autosave is due.
 pub const SAVE: u8 = 15;
 // front -> bank: save and end.
 pub const STOP: u8 = 16;
-// bank -> front: a chat event (chathooks.rs) for the feed.
+// bank -> front: a chat event (msg::ChatEvent) for the feed (front/chat_hooks.rs).
 pub const CHAT: u8 = 17;
 // front -> bank: body text into the chat, from the server.
 pub const SAY: u8 = 18;
 // bank -> front: body JSON, the rules' chat section (the hooks' settings).
 pub const CHATCFG: u8 = 19;
-// bank -> front: body JSON {"autosaveMinutes", "autoUpdate", "updateCheckHours"}, the rules the
-// front acts on (save, update); at the start and whenever they change.
+// bank -> front: body msg::Ops, the rules the front acts on (save, update, the watchdog); at the
+// start and whenever they change.
 pub const OPS: u8 = 20;
 
 /// The largest frame either side takes (a world's join batch is a few MiB; a snapshot never

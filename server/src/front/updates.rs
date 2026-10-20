@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::history::{FlipNote, History};
+use super::admin_routes::error;
 use super::{Front, Phase};
 use crate::msg::BankInfo;
 use crate::updater;
@@ -116,7 +117,7 @@ impl Front {
         if self.updates.busy.is_some() || self.phase != Phase::Idle {
             return (409, json!({"error": "an update or a flip is under way", "doing": self.updates.busy.as_ref().map(|b| b.1.clone())}).to_string());
         }
-        let Some(live) = &self.live else { return (503, "{\"error\":\"the game is starting\"}".into()) };
+        let Some(live) = &self.live else { return error(503, "the game is starting") };
         let target = updater::other(&live.name).to_string();
         // The e2e tests' fault injection; off unless the front was started with PCDS_DEV=test-faults.
         let fail = body["failForTest"].as_str().filter(|_| crate::config::dev("test-faults").is_some()).map(str::to_string);
@@ -124,18 +125,18 @@ impl Front {
         let seq = self.updates.seq;
         if body["rollback"] == true {
             if let Some(dir) = &self.banks {
-                let Some(info) = updater::info(dir, &target) else { return (400, json!({"error": format!("bank {target} holds no release to go back to")}).to_string()) };
+                let Some(info) = updater::info(dir, &target) else { return error(400, &format!("bank {target} holds no release to go back to")) };
                 if let Err(e) = updater::compatible_for(&info, live.info(), true) {
-                    return (400, json!({"error": e}).to_string());
+                    return error(400, &e);
                 }
             }
             return match self.flip_to(&target, "rollback", seq, fail.as_deref()) {
                 Ok(()) => (200, json!({"ok": true, "seq": seq, "bank": target}).to_string()),
-                Err(e) => (500, json!({"error": e}).to_string()),
+                Err(e) => error(500, &e),
             };
         }
         let Some(dir) = self.banks.clone() else {
-            return (400, "{\"error\":\"no banks: this server runs from a build, not from pcds run (PCDS_HOME/bin); rollback flips between two copies of it\"}".into());
+            return error(400, "no banks: this server runs from a build, not from pcds run (PCDS_HOME/bin); rollback flips between two copies of it");
         };
         if body["check"] == true {
             self.check(seq);
@@ -143,7 +144,7 @@ impl Front {
         }
         // Before the download: a release that cannot be flipped to is not fetched for nothing.
         if let Err(e) = self.flip_fits() {
-            return (409, json!({"error": e}).to_string());
+            return error(409, &e);
         }
         let version = body["version"].as_str().map(str::to_string);
         self.download(seq, dir, target, version, body["onlyNewer"] == true, false);

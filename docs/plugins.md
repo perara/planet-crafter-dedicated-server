@@ -577,7 +577,7 @@ The server is GPL-3.0-or-later. What that means for a plugin, honestly:
 
 | Built-in | Today | As a user of the same API | Done here |
 |---|---|---|---|
-| Chat hooks (webhooks, exec, `GET /api/chat/events`) | `chathooks.rs`: the bank queues a chat event, the front's worker delivers | the front-side half is an integration that reads the stream; the bank-side half is `events::chat`'s first subscriber | the bank side is already the first subscriber of `events`. Replacing the front's worker by the stream needs the front-side long-poll, and the file split (docs/architecture.md, step 6): not done |
+| Chat hooks (webhooks, exec, `GET /api/chat/events`) | `chathooks.rs`: the bank queues a chat event; `front/chat_hooks.rs`: the front's worker delivers | the front-side half is an integration that reads the stream; the bank-side half is `events::chat`'s first subscriber | the bank side is already the first subscriber of `events`. Replacing the front's worker by the stream needs the front-side long-poll; the file split is done (`front/chat_hooks.rs` is the front's half, `chathooks.rs` the bank's) |
 | Rules (`speed.*`, `gauges.*`...) | `rules.rs`, read by the game's code | stays core: it changes how the game computes, and parity depends on it | plugins change rules with `rules.write`; `rules::set` emits `rule_change` |
 | Backups to S3 | `s3.rs` called from `bank.rs`: network I/O and a thread in the game process, with process-wide statics that a flip resets | the first user of a future `net.http` capability, on `world_saved`, its status kept as plugin state | the event exists; the capability and the thread model do not. Until then it stays where it is |
 | `world.pauseWhenEmpty`, the pause | the clock | stays core | |
