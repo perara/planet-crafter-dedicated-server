@@ -49,13 +49,76 @@ pub struct Machines {
     /// No machine has anything due before this (a lower bound; every change to a machine
     /// resets it, and tick skips its walk until then).
     next_due: GameTime,
+    /// `next_due(m)` of every machine, in list order, so that the walk reads a flat array and
+    /// looks at a machine only when it is due or changed. Valid while `dues_ok`; a machine got
+    /// through `get_mut` is in `dirty` (its place in the list) until its entry is made again.
+    /// Adding or removing a machine makes the whole array again at the next walk.
+    #[serde(skip)]
+    dues: Vec<GameTime>,
+    #[serde(skip)]
+    dues_ok: bool,
+    #[serde(skip)]
+    dirty: Vec<usize>,
+    /// Counts the machines added and removed (a walk in progress compares it).
+    #[serde(skip)]
+    structure: u64,
 }
 
 impl Machines {
     /// A machine to change (its timers may move earlier: tick walks all machines again).
     fn get_mut(&mut self, wo: &i32) -> Option<&mut Machine> {
         self.next_due = GameTime::PAST;
+        if self.dues_ok {
+            self.dirty.extend(self.list.get_index_of(wo));
+        }
         self.list.get_mut(wo)
+    }
+
+    /// A machine added (at the end of the list, or in place of the one of the same world object).
+    fn insert(&mut self, wo: i32, m: Machine) {
+        self.next_due = GameTime::PAST;
+        self.structure += 1;
+        let due = (self.dues_ok).then(|| due_of(&m));
+        let (i, replaced) = self.list.insert_full(wo, m);
+        if let Some(due) = due {
+            if replaced.is_some() {
+                self.dues[i] = due;
+            } else {
+                self.dues.push(due);
+            }
+        }
+    }
+
+    /// A machine taken out; whether there was one.
+    fn remove(&mut self, wo: &i32) -> bool {
+        let Some((i, _, _)) = self.list.shift_remove_full(wo) else { return false };
+        self.structure += 1;
+        if self.dues_ok {
+            self.dues.remove(i);
+            self.dirty.retain(|d| *d != i);
+            for d in self.dirty.iter_mut().filter(|d| **d > i) {
+                *d -= 1;
+            }
+        }
+        true
+    }
+
+    /// The array of due times as the machines are now.
+    fn refresh_dues(&mut self, next_due: impl Fn(&Machine) -> GameTime) {
+        if self.dues_ok {
+            let mut dirty = std::mem::take(&mut self.dirty);
+            for i in dirty.drain(..) {
+                if let Some((_, m)) = self.list.get_index(i) {
+                    self.dues[i] = next_due(m);
+                }
+            }
+            self.dirty = dirty;
+        } else {
+            self.dirty.clear();
+            self.dues.clear();
+            self.dues.extend(self.list.values().map(next_due));
+            self.dues_ok = true;
+        }
     }
 
     pub fn with_energy(&self) -> Vec<i32> {
@@ -159,6 +222,7 @@ fn root(game: &Game, group: usize, ty: &str) -> Option<Value> {
 /// (spawn_every, speed, groups) mixes both and is not refreshed.
 pub fn refresh_from_tables(game: &mut Game) {
     let machines: Vec<i32> = game.ext.machines.list.keys().copied().collect();
+    game.ext.machines.dues_ok = false;
     for wo in machines {
         let Some(group) = game.wos.get(&wo).map(|w| w.group) else { continue };
         let f = |ty: &str| root(game, group, ty);
@@ -440,7 +504,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     let wants_start = has_harvestable;
     let grows = m.growers.iter().any(|g| *g);
     game.ext.machines.next_due = GameTime::PAST;
-    game.ext.machines.list.insert(wo, m);
+    game.ext.machines.insert(wo, m);
     // Rules: growth speed, as a growth fuse would add it.
     if grows && game.rules.speed.growth != 1.0 {
         production::add_growth_speed(game, wo, game.rules.speed.growth - 1.0);
@@ -478,7 +542,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
 pub fn on_destroyed(game: &mut Game, wo: &WorldObject) {
     let machines = &mut game.ext.machines;
     machines.energy.swap_remove(&wo.id);
-    if machines.list.shift_remove(&wo.id).is_some() {
+    if machines.remove(&wo.id) {
         machines.listening.retain(|_, m| *m != wo.id);
     }
     // ConstructibleProxy.OnDestroy: WorldObjectsHandler.onConstructibleDestroyed.
@@ -580,6 +644,11 @@ pub fn planet_loaded(game: &mut Game) {
     }
 }
 
+/// The earliest time `tick` has something to do for this machine.
+fn due_of(m: &Machine) -> GameTime {
+    production::next_due(m).min(growers::next_due(m)).min(m.floater.map_or(GameTime::NEVER, |(_, due)| due))
+}
+
 pub fn tick(game: &mut Game) {
     veins::ensure(game);
     // Start / `yield return null`: the frame after instantiation.
@@ -605,15 +674,43 @@ pub fn tick(game: &mut Game) {
     if now < game.ext.machines.next_due {
         return;
     }
-    let next_due = |m: &Machine| production::next_due(m).min(growers::next_due(m)).min(m.floater.map_or(GameTime::NEVER, |(_, due)| due));
+    let next_due = due_of;
     let mut earliest = GameTime::NEVER;
     game.ext.machines.next_due = GameTime::NEVER;
     let mut ids = std::mem::take(&mut game.ext.machines.ids);
     ids.clear();
     ids.extend(game.ext.machines.list.keys());
-    for &wo in &ids {
+    game.ext.machines.refresh_dues(next_due);
+    let structure = game.ext.machines.structure;
+    let mut k = 0;
+    while k < ids.len() {
+        // Machines nothing has changed, nothing due: the array says it (the common case, in one run).
+        // (Not once a machine was added or removed in this walk: the ids are the list before.)
+        let m = &game.ext.machines;
+        if m.dues_ok && m.structure == structure && m.dirty.is_empty() {
+            let rest = &m.dues[k..];
+            let stop = rest.iter().position(|d| now >= *d).unwrap_or(rest.len());
+            earliest = rest[..stop].iter().fold(earliest, |e, d| e.min(*d));
+            k += stop;
+            if k >= ids.len() {
+                break;
+            }
+        }
+        let wo = ids[k];
         // Nothing due at its turn: the ticks below would do nothing.
-        let Some(due) = game.ext.machines.list.get(&wo).map(next_due) else { continue };
+        let due = if game.ext.machines.dues_ok && game.ext.machines.structure == structure {
+            game.ext.machines.refresh_dues(next_due);
+            game.ext.machines.dues[k]
+        } else {
+            match game.ext.machines.list.get(&wo).map(next_due) {
+                Some(due) => due,
+                None => {
+                    k += 1;
+                    continue;
+                }
+            }
+        };
+        k += 1;
         if now < due {
             earliest = earliest.min(due);
             continue;

@@ -596,7 +596,17 @@ fn can_grab(game: &Game, w: &WorldObject) -> bool {
 /// frame does it all here.)
 fn set_logistic_tasks(game: &mut Game) {
     game.ext.logistics.updating = 1;
-    let pickables: Vec<i32> = game.pickables.iter().copied().collect();
+    // The ground's items by group, in the pickables' order: a demand asks for a few groups, and
+    // asked of every pickable it was the whole list for each (no task changes a world object's group).
+    let mut pickables: crate::idmap::FxHashMap<usize, Vec<i32>> = Default::default();
+    for &wo in game.pickables.iter() {
+        if let Some(w) = game.wos.get(&wo) {
+            pickables.entry(w.group).or_default().push(wo);
+        }
+    }
+    // The supplies that supply a group, with their planet (nothing the loop does changes either).
+    let wanted: crate::idmap::FxHashSet<usize> = game.ext.logistics.demand.iter().filter_map(|d| game.inventories.get(d)).flat_map(|i| i.logistic.demand.iter().copied()).collect();
+    let mut suppliers: Option<crate::idmap::FxHashMap<usize, Vec<(i32, i32)>>> = None;
     for p in game.ext.logistics.priorities.values_mut() {
         p.clear();
     }
@@ -617,9 +627,23 @@ fn set_logistic_tasks(game: &mut Game) {
             if game.ext.logistics.priorities[&planet].get(&hash).is_some_and(|v| priority < *v) {
                 continue;
             }
-            for s in game.ext.logistics.supply.clone() {
-                let supplies = game.inventories.get(&s).is_some_and(|i| i.logistic.supply.contains(&g));
-                if s == d || entity_wo(game, s).is_none() || entity_planet(game, s) != planet || !supplies {
+            let suppliers_of_g = suppliers.get_or_insert_with(|| {
+                let mut by_group: crate::idmap::FxHashMap<usize, Vec<(i32, i32)>> = Default::default();
+                for &s in &game.ext.logistics.supply {
+                    let (Some(inv), Some(_)) = (game.inventories.get(&s), entity_wo(game, s)) else { continue };
+                    let planet = entity_planet(game, s);
+                    for (n, &g) in inv.logistic.supply.iter().enumerate() {
+                        // A group listed twice by one inventory is one supplier.
+                        if wanted.contains(&g) && !inv.logistic.supply[..n].contains(&g) {
+                            by_group.entry(g).or_default().push((s, planet));
+                        }
+                    }
+                }
+                by_group
+            });
+            for i in 0..suppliers_of_g.get(&g).map_or(0, Vec::len) {
+                let (s, supply_planet) = suppliers_of_g[&g][i];
+                if s == d || supply_planet != planet {
                     continue;
                 }
                 for wo in items(game, s) {
@@ -637,12 +661,12 @@ fn set_logistic_tasks(game: &mut Game) {
             if available == 0 {
                 continue;
             }
-            for &wo in &pickables {
+            for &wo in pickables.get(&g).map(Vec::as_slice).unwrap_or_default() {
                 // A task for it already: create_task refuses it, so its checks can wait.
                 if game.ext.logistics.all_tasks.contains_key(&wo) {
                     continue;
                 }
-                let ok = game.wos.get(&wo).is_some_and(|w| w.group == g && w.net.is_some() && motion::length_sq(w.position) >= 1e-10 && can_grab(game, w) && w.planet_hash() == planet);
+                let ok = game.wos.get(&wo).is_some_and(|w| w.net.is_some() && motion::length_sq(w.position) >= 1e-10 && can_grab(game, w) && w.planet_hash() == planet);
                 if ok && create_task(game, None, d, wo, true).is_some() {
                     available -= 1;
                     if available == 0 {

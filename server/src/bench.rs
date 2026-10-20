@@ -186,6 +186,8 @@ struct Run {
     save_hash: u64,
     /// The sorted messages of the tick asked for.
     dumped: Vec<String>,
+    /// With PCDS_BENCH_SECTIONS: the slowest ticks (index, ns) and what each section took in them.
+    worst: Vec<(usize, u32, Vec<(&'static str, Duration)>)>,
     /// The game at the end.
     game: Game,
 }
@@ -208,6 +210,7 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
     let mut allocs = (0u64, 0u64);
     let mut tick_ns = Vec::with_capacity((e.seconds / step) as usize + 1);
     let (mut ticks, mut dumped) = (Vec::new(), Vec::new());
+    let mut worst: Vec<(usize, u32, Vec<(&'static str, Duration)>)> = Vec::new();
     let mut file = e.dump.as_ref().map(|p| std::io::BufWriter::new(std::fs::File::create(p).unwrap()));
     if let Some(f) = &mut file {
         use std::io::Write;
@@ -216,6 +219,7 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
     while t < e.seconds {
         t += step;
         g.sim_time = Some(e.start + t);
+        let sections_before = SECTIONS.load(Ordering::Relaxed).then(|| TIMES.with(|m| m.borrow().clone()));
         let started = Instant::now();
         let before = ALLOCS.get();
         if t >= next_move {
@@ -240,7 +244,17 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
         }
         section!("tick", g.tick());
         busy += started.elapsed();
-        tick_ns.push(started.elapsed().as_nanos().min(u32::MAX as u128) as u32);
+        let this_tick = started.elapsed().as_nanos().min(u32::MAX as u128) as u32;
+        tick_ns.push(this_tick);
+        if let Some(sections_before) = sections_before
+            && (worst.len() < 5 || worst.iter().any(|w| w.1 < this_tick))
+        {
+            let mut parts: Vec<(&'static str, Duration)> = TIMES.with(|m| m.borrow().iter().map(|(k, v)| (*k, *v - sections_before.get(k).copied().unwrap_or_default())).filter(|(_, d)| *d > Duration::from_micros(30)).collect());
+            parts.sort_by_key(|p| std::cmp::Reverse(p.1));
+            worst.push((tick_ns.len() - 1, this_tick, parts));
+            worst.sort_by_key(|w| std::cmp::Reverse(w.1));
+            worst.truncate(5);
+        }
         let after = ALLOCS.get();
         allocs = (allocs.0 + after.0 - before.0, allocs.1 + after.1 - before.1);
         let (n, own, tick) = fingerprint(&mut h, &mut g.net.out);
@@ -271,7 +285,7 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
         use std::io::Write;
         writeln!(f, "save {save}").unwrap();
     }
-    Run { fingerprint: h.finish(), ticks, messages, busy, allocs, tick_ns, save: save.len(), save_hash, dumped, game: g }
+    Run { fingerprint: h.finish(), ticks, messages, busy, allocs, tick_ns, save: save.len(), save_hash, dumped, worst, game: g }
 }
 
 /// The load test's players (three, acting every 200 ms) for 20 s on the test world, played
@@ -324,6 +338,9 @@ fn bench() {
     println!("bench: per tick p50 {:.2} us, p99 {:.2} us, p99.9 {:.2} us, max {:.2} us", at(0.5), at(0.99), at(0.999), at(1.0));
     let mut times: Vec<_> = TIMES.with(|m| m.borrow().iter().map(|(k, v)| (*k, *v)).collect());
     times.sort_by_key(|t| std::cmp::Reverse(t.1));
+    for (index, ns, parts) in &r.worst {
+        println!("bench: slow tick {index} ({:.2} ms): {}", *ns as f64 / 1e6, parts.iter().map(|(k, d)| format!("{k} {:.2}", d.as_secs_f64() * 1e3)).collect::<Vec<_>>().join(", "));
+    }
     for (name, t) in times {
         println!("bench: section {name:12} {:9.1} ms, {:8.3} us per tick, {:5.1}% of the busy time", t.as_secs_f64() * 1e3, t.as_secs_f64() * 1e6 / r.ticks.len() as f64, 100.0 * t.as_secs_f64() / r.busy.as_secs_f64());
     }
