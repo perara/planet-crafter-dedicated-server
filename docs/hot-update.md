@@ -191,7 +191,10 @@ CI has: it is part of the release checklist below, not a CI job.
 3. `make test` with game tables, and `make docker-test`.
 4. `make gate`. Read its output: "SKIPPED - format changed" is expected after a bump in step 2
    and nothing else; anything else must pass.
-5. If a plugin or `plugin-api` changed: `scripts/build-plugin-examples --check` (on the toolchain the
+5. If a setting was retired (`config::RETIRED`) or a format was bumped: [upgrading.md](upgrading.md) is
+   current (its table of retired settings, its formats table), and was rehearsed once on a systemd
+   unit with the previous release (`pcds upgrade vX --restart`, `--rollback --restart`, again).
+6. If a plugin or `plugin-api` changed: `scripts/build-plugin-examples --check` (on the toolchain the
    committed `plugin.wasm` files were built with; the check does not depend on the checkout's path),
    and `scripts/sign-plugin-examples` after a rebuild.
 
