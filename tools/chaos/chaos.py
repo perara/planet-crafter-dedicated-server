@@ -24,6 +24,16 @@ The bots are NOT a pcds command: they are the ignored cargo test load::tests::re
 PCDS_LOAD_PLAYERS, PCDS_LOAD_SECONDS and PCDS_TEST_DATA; this tool sets them. They print one
 JSON line per join (t, n, joined, actions, failed).
 
+Two ways to supervise the server (--unit): by this tool (the default: it stands in for `pcds run`
+and the unit, and starts the front again when it is gone), or by systemd (--unit pcds-qa-NAME: the
+server is installed by `pcds setup` in its own folder and run as `pcds run` under a transient user
+unit with the service file's restart rules; a start limit that systemd reaches is reset, counted and
+reported as an event, as an owner would). Besides the faults above the stream draws: a 120 s SIGSTOP
+of the bank (limits.bankWatchdogSeconds must replace it) and a 10 s one (it must not), a world switch,
+a real update from a local release feed (download, install, flip) and, from a thread of its own all
+the time, plugin churn on examples/plugins/hello-stats (install, approve, disable, remove, a flipped
+byte in its module or manifest, commands), checked after every action against what was done.
+
 Requirements: python3 (3.9+), a built `pcds` (make build), the game tables, a save to run on
 (copied, never written), cargo (to build the test once; or --test-bin a binary built with
 `cargo test --release --no-run`). Linux (/proc, signals). Runs the server with PCDS_DEV=flip-verify.
@@ -62,6 +72,9 @@ def main():
     ap.add_argument("--bots", type=int, default=6, help="rejoining players (default %(default)s)")
     ap.add_argument("--no-flip", action="store_true", help="leave out the actions that flip to the other bank")
     ap.add_argument("--only", default="", help="only these actions, comma-separated (names after a_ below)")
+    ap.add_argument("--unit", default="", help="run the server as a transient systemd user unit of this name (must start with pcds-qa-) instead of supervising it here")
+    ap.add_argument("--no-plugins", action="store_true", help="no plugin churn")
+    ap.add_argument("--cpus", default="8-15", help="AllowedCPUs of the unit (default %(default)s)")
     args = ap.parse_args()
     lib.check_inputs(args)
     os.makedirs(args.work, exist_ok=True)
@@ -76,12 +89,32 @@ def main():
 
     # ---- a fake webhook / S3 endpoint that can misbehave --------------------------------
     fake = dict(mode="ok", hits=0)
+    FEED = os.path.join(args.work, f"chaos-{args.seed}-feed")
+    shutil.rmtree(FEED, ignore_errors=True)
+    os.makedirs(os.path.join(FEED, "releases", "tags"))
+    os.makedirs(os.path.join(FEED, "download"))
 
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
 
+        def feed(self):
+            """GET /releases/... and /download/...: the local release feed (files of FEED)."""
+            path = self.path.split("?")[0]
+            f = os.path.join(FEED, path.lstrip("/"))
+            if not (path.startswith(("/releases/", "/download/")) and os.path.isfile(f) and ".." not in path):
+                return False
+            data = open(f, "rb").read()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(data)
+            return True
+
         def handle_any(self):
+            if self.command == "GET" and self.feed():
+                return
             fake["hits"] += 1
             n = int(self.headers.get("Content-Length") or 0)
             if n:
@@ -103,13 +136,32 @@ def main():
     endpoint = f"http://{lib.LOOPBACK}:{PORT + 2}"
 
     # ---- the target ----------------------------------------------------------------------
-    srv = lib.Srv(name, args, banks=True, dev="flip-verify",
-                  rules={"save": {"autosaveMinutes": 1, "backupsKept": 6, "backupMinutes": 1}, "limits": {"maxPlayers": 16}})
+    rules = {"save": {"autosaveMinutes": 1, "backupsKept": 6, "backupMinutes": 1}, "limits": {"maxPlayers": 16}}
+    feed_env = {"PCDS_RELEASES": f"{endpoint}/releases"}
+    if args.unit:
+        srv = lib.UnitSrv(name, args, args.unit, dev="flip-verify", rules=rules, env=feed_env, cpus=args.cpus)
+    else:
+        srv = lib.Srv(name, args, banks=True, dev="flip-verify", rules=rules, env=feed_env)
     home = srv.home
+    events = dict(start_limit=0, restarts=0, replaced=0, updates=0)
 
     def supervise(timeout=70):
-        """Stand in for `pcds run` / the unit: when the front is gone, wait for its banks, start it again."""
+        """Stand in for `pcds run` / the unit: when the front is gone, wait for its banks, start it again.
+        With --unit systemd does that; this only resets a unit that gave up."""
         p = srv.pids()
+        if args.unit:
+            if not p["serve"]:
+                t = time.time()
+                while srv.pids()["bank"] and time.time() - t < timeout:
+                    time.sleep(0.5)
+                if srv.pids()["bank"]:
+                    FAIL("an orphan bank outlived its front", banks=srv.pids()["bank"])
+                    srv.kill_all()
+                why = srv.ensure_running()
+                if why:
+                    events["start_limit"] += 1
+                    L("supervisor: the unit had given up (Result=%s); reset and started" % why)
+            return
         if not p["serve"]:
             t = time.time()
             while srv.pids()["bank"] and time.time() - t < timeout:
@@ -212,6 +264,7 @@ def main():
             time.sleep(2)
         if n != BOTS:
             FAIL("players did not get back in", label=label, players=n, expected=BOTS, bots=bots.stats(since))
+        pl_verify(label)
         L("  check", label, counts)
 
     # ---- actions -------------------------------------------------------------------------
@@ -379,6 +432,9 @@ def main():
         kill(p, signal.SIGSTOP)
         time.sleep(d)
         kill(p, signal.SIGCONT)
+        time.sleep(1)
+        if bank_pid() != p:
+            FAIL("a SIGSTOP of %.1f s replaced the bank" % d, old=p, now=bank_pid())
         return f"SIGSTOP bank {p} {d:.1f}s"
 
     def a_sigstop_front():
@@ -534,12 +590,238 @@ def main():
             n += 1
         return f"{n} status calls in 3 s"
 
+
+    # ---- more actions: watchdog, world switch, a real update, the supervisor ----------------
+    def stopped_bank(secs, expect_replaced):
+        """SIGSTOP the bank for up to `secs`: limits.bankWatchdogSeconds (60) must replace it when
+        it is stopped longer, and a shorter stop must not."""
+        mark()
+        p = bank_pid()
+        if not p:
+            return "no bank"
+        t0 = time.time()
+        kill(p, signal.SIGSTOP)
+        new = None
+        while time.time() - t0 < secs:
+            time.sleep(1 if expect_replaced else 0.5)
+            new = next((q for q in srv.pids()["bank"] if q != p), None)
+            if new:
+                break
+        waited = time.time() - t0
+        kill(p, signal.SIGCONT)
+        time.sleep(4)
+        if expect_replaced:
+            events["replaced"] += 1 if new else 0
+            if not new:
+                FAIL("a bank stopped for %d s was not replaced by the watchdog" % secs, bank=p, waited=round(waited))
+            elif waited < 50:
+                FAIL("the watchdog replaced a bank after %d s (rule: 60)" % waited, bank=p)
+            try:
+                state = open(f"/proc/{p}/stat").read().rsplit(")", 1)[1].split()[0]
+            except FileNotFoundError:
+                state = "gone"
+            if state not in ("gone", "Z"):
+                FAIL("the stopped bank was not killed when it was replaced", bank=p, state=state)
+        else:
+            if bank_pid() != p:
+                FAIL("a stop of %d s replaced the bank (watchdog rule: 60 s)" % secs, old=p, now=bank_pid())
+        return f"SIGSTOP bank {p} {waited:.0f} s -> {'replaced by %s' % new if new else 'same bank'}"
+
+    def a_watchdog_long():
+        return stopped_bank(125, True)
+
+    def a_watchdog_short():
+        return stopped_bank(10, False)
+
+    def a_kill_supervisor():
+        """kill -9 of `pcds run` itself (the unit's main process): systemd ends the rest and starts again."""
+        if not args.unit:
+            return "skipped (no unit)"
+        mark()
+        pid = int(srv.unit_state().get("MainPID") or srv.sysctl("show", "-p", "MainPID", "--value", f"{srv.unit}.service").stdout.strip() or 0)
+        if pid:
+            kill(pid)
+        return f"kill -9 pcds run {pid}"
+
+    def a_world_switch():
+        r = []
+        s, j = srv.post("/api/worlds/new", {"name": "alt", "planet": "Prime"}, timeout=90)
+        r.append(("new", s))
+        s, j = srv.post("/api/world/switch", {"world": "alt"}, timeout=200)
+        r.append(("switch", s, str(j)[:80]))
+        time.sleep(rnd.uniform(1, 5))
+        st = srv.status()[1]
+        if s == 200 and not (isinstance(st, dict) and st.get("save") == "alt"):
+            FAIL("a switch to alt answered 200 but the world that runs is not alt", save=(st or {}).get("save") if isinstance(st, dict) else st)
+        for _ in range(4):
+            st = srv.status()[1]
+            if isinstance(st, dict) and st.get("save") == "world" and st.get("state") == "running":
+                break
+            s2, j2 = srv.post("/api/world/switch", {"world": "world"}, timeout=200)
+            if s2 != 200:
+                srv.post("/api/world/start", {"world": "world"}, timeout=200)
+            r.append(("back", s2, str(j2)[:80]))
+            time.sleep(1)
+        return f"world switch {r}"
+
+    rel_n = {"n": 0}
+
+    def a_update_release():
+        """A real update: this build published as a new tag in the local feed; download, install in the standby bank, flip."""
+        import hashlib
+        import tarfile
+        rel_n["n"] += 1
+        tag = f"v0.7.0-qa.{rel_n['n']}"
+        name = f"pcds-{tag}-linux-x86_64"
+        exe = os.path.realpath(args.bin)
+        d = os.path.dirname(exe)
+        tar = os.path.join(FEED, "download", name + ".tar.gz")
+        web = os.path.join(d, "web", "index.html")
+        web = web if os.path.exists(web) else os.path.join(lib.REPO, "server", "web", "index.html")
+        with tarfile.open(tar, "w:gz", compresslevel=1) as tf:
+            for src, arc in ((exe, "pcds"), (os.path.join(d, "libsteam_api.so"), "libsteam_api.so"), (web, "web/index.html")):
+                tf.add(src, arcname=f"{name}/{arc}")
+        sha = hashlib.sha256(open(tar, "rb").read()).hexdigest()
+        open(tar + ".sha256", "w").write(f"{sha}  {name}.tar.gz\n")
+        base = f"{endpoint}/download"
+        doc = {"tag_name": tag, "assets": [{"name": name + ".tar.gz", "browser_download_url": f"{base}/{name}.tar.gz"}, {"name": name + ".tar.gz.sha256", "browser_download_url": f"{base}/{name}.tar.gz.sha256"}]}
+        json.dump(doc, open(os.path.join(FEED, "releases", "tags", tag), "w"))
+        shutil.copy(os.path.join(FEED, "releases", "tags", tag), os.path.join(FEED, "releases", "latest"))
+        t = time.time()
+        mark()
+        s, j = srv.post("/api/update", {"version": tag}, timeout=60)
+        if s != 200:
+            return f"update refused {s} {str(j)[:100]}"
+        seq, done = j["seq"], None
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            u = srv.get("/api/update")[1]
+            if isinstance(u, dict):
+                done = next((e for e in u.get("history", []) if e.get("seq") == seq), None)
+                if done:
+                    break
+            time.sleep(0.3)
+        time.sleep(2)
+        events["updates"] += 1
+        st = bots.stats(t)
+        if st["fails"]:
+            FAIL("a real update dropped players", stats=st, outcome=str(done)[:200])
+        if done and done.get("ok") is False:
+            FAIL("a real update failed", tag=tag, outcome=str(done)[:300])
+        for old in sorted(glob.glob(os.path.join(FEED, "download", "*.tar.gz")))[:-2]:
+            os.remove(old)
+        return f"update {tag} {str(done)[:140]}"
+
+    # ---- plugin churn: hello-stats installed, approved, disabled, removed, damaged, all the time ----
+    PL_SRC = os.path.join(lib.REPO, "examples", "plugins", "hello-stats")
+    PL_ID = "hello-stats"
+    PL_DIR = os.path.join(home, "plugins", PL_ID)
+    pl = dict(present=False, pristine=True, expect="absent", ops=0, faults=0, seen={})
+    pl_lock = threading.Lock()
+    pl_stop = threading.Event()
+    prnd = random.Random(args.seed + 1000)
+    wasm0, toml0 = open(os.path.join(PL_SRC, "plugin.wasm"), "rb").read(), open(os.path.join(PL_SRC, "plugin.toml"), "rb").read()
+
+    def pl_write(path, data):
+        tmp = path + ".part"
+        open(tmp, "wb").write(data)
+        os.replace(tmp, path)
+
+    def pl_put(wasm, toml):
+        stage = os.path.join(home, ".pl-stage")
+        shutil.rmtree(stage, ignore_errors=True)
+        os.makedirs(stage)
+        open(os.path.join(stage, "plugin.wasm"), "wb").write(wasm)
+        open(os.path.join(stage, "plugin.toml"), "wb").write(toml)
+        os.makedirs(os.path.dirname(PL_DIR), exist_ok=True)
+        shutil.rmtree(PL_DIR, ignore_errors=True)
+        os.rename(stage, PL_DIR)
+
+    def pl_op():
+        r = prnd.choices(["install", "enable", "disable", "remove", "mutate_wasm", "mutate_toml", "restore", "cmd", "reload"], [3, 6, 3, 2, 3, 1, 3, 4, 1])[0]
+        with pl_lock:
+            pl["ops"] += 1
+            if r == "install":
+                pl_put(wasm0, toml0)
+                pl.update(present=True, pristine=True, expect=None)
+            elif r == "enable":
+                s, _ = srv.post("/api/plugins/enable", {"id": PL_ID}, timeout=30)
+                if s == 200 and pl["present"] and pl["pristine"]:
+                    pl["expect"] = "running"
+                r += f" {s}"
+            elif r == "disable":
+                s, _ = srv.post("/api/plugins/disable", {"id": PL_ID}, timeout=30)
+                if s == 200 and pl["present"] and pl["pristine"]:  # a damaged manifest stays "invalid", disabled or not
+                    pl["expect"] = "disabled"
+                r += f" {s}"
+            elif r == "remove":
+                shutil.rmtree(PL_DIR, ignore_errors=True)
+                pl.update(present=False, expect="absent")
+            elif r == "mutate_wasm" and pl["present"]:
+                w = bytearray(open(os.path.join(PL_DIR, "plugin.wasm"), "rb").read())
+                for _ in range(prnd.choice([1, 1, 3])):
+                    w[prnd.randrange(8, len(w))] ^= 1 << prnd.randrange(8)
+                pl_write(os.path.join(PL_DIR, "plugin.wasm"), bytes(w))
+                pl.update(pristine=False, expect=None)
+            elif r == "mutate_toml" and pl["present"]:
+                pl_write(os.path.join(PL_DIR, "plugin.toml"), prnd.choice([toml0[: len(toml0) // 2], b"\x00\xff[[[plugin", toml0.replace(b"abi = 1", b"abi = 99"), toml0.replace(b"world.read", b"world.write")]))
+                pl.update(pristine=False, expect=None)
+            elif r == "restore" and pl["present"]:
+                pl_write(os.path.join(PL_DIR, "plugin.wasm"), wasm0)
+                pl_write(os.path.join(PL_DIR, "plugin.toml"), toml0)
+                pl.update(pristine=True, expect=None)
+            elif r == "cmd":
+                srv.post("/api/chat", {"text": prnd.choice(["!stats", "!uses", "!stats extra", "!nosuch"])}, timeout=10)
+            elif r == "reload":
+                srv.post("/api/plugins/reload", timeout=30)
+        return r
+
+    def pl_thread():
+        while not pl_stop.wait(prnd.uniform(1.5, 7)):
+            try:
+                pl_op()
+            except Exception as e:  # a file operation racing the server's own scan: the check afterwards decides
+                L("  plugin op raised", repr(e))
+
+    def pl_verify(label):
+        """What the churn did against what the server says, with the churn held (pl_lock)."""
+        if args.no_plugins:
+            return
+        with pl_lock:
+            for _ in range(6):
+                if srv.post("/api/plugins/reload", timeout=30)[0] == 200:
+                    break
+                time.sleep(1)
+            s, j = srv.get("/api/plugins")
+            if s != 200 or not isinstance(j, dict):
+                FAIL("GET /api/plugins failed", label=label, status=s, body=str(j)[:100])
+                return
+            mine = next((p for p in j["plugins"] if p["id"] == PL_ID), None)
+            summ = (srv.status()[1] or {}).get("plugins") if isinstance(srv.status()[1], dict) else None
+            if summ and summ.get("loaded") != len(j["plugins"]):
+                FAIL("the status counts other plugins than the list shows", label=label, summary=summ, listed=len(j["plugins"]))
+            if not pl["present"] and mine is not None:
+                FAIL("a removed plugin is still listed", label=label, status=mine["status"])
+            elif pl["present"] and mine is None:
+                FAIL("an installed plugin is not listed", label=label)
+            elif mine and pl["expect"] == "running" and mine["status"] != "running":
+                FAIL("an approved plugin does not run", label=label, status=mine["status"], detail=mine.get("detail"), stats=mine["stats"])
+            elif mine and pl["expect"] == "disabled" and mine["status"] != "disabled":
+                FAIL("a disabled plugin is not disabled", label=label, status=mine["status"])
+            elif mine and mine["status"] not in ("running", "pending", "disabled", "changed", "invalid", "incompatible", "failed"):
+                FAIL("an unknown plugin status", label=label, status=mine["status"])
+            seen = mine["status"] if mine else "absent"
+            pl["seen"][seen] = pl["seen"].get(seen, 0) + 1
+            if mine:
+                pl["faults"] = max(pl["faults"], mine["stats"]["faults"])
+
     # (function, weight)
     table = [(a_kill_bank, 10), (a_kill_front, 8), (a_world_stop_start, 6), (a_pause, 4), (a_flip, 10), (a_save, 6), (a_config, 8), (a_rules, 6),
              (a_access, 6), (a_chat_hook, 5), (a_s3, 4), (a_sigstop_bank, 5), (a_sigstop_front, 3), (a_freeze_clients, 4), (a_ro_world, 3), (a_kill_bank_during_save, 4),
              (a_flip_kill_new_bank, 5), (a_flip_kill_old_bank, 4), (a_flip_kill_front, 3), (a_flip_flip, 3), (a_flip_stopworld, 3), (a_sigstop_new_bank, 3),
              (a_stop_start_burst, 4), (a_kill_after_start, 3), (a_kill_both, 3), (a_sigterm_bank, 2), (a_sigterm_front, 3), (a_save_storm_flip, 3), (a_big_chat, 1),
-             (a_status_hammer, 1)]
+             (a_status_hammer, 1), (a_world_switch, 3), (a_update_release, 4), (a_watchdog_long, 1), (a_watchdog_short, 2), (a_kill_supervisor, 3 if args.unit else 0)]
+    table = [x for x in table if x[1] > 0]
     if args.no_flip:
         table = [t for t in table if not t[0].__name__.startswith("a_flip") and t[0] not in (a_sigstop_new_bank,)]
     if args.only:
@@ -550,6 +832,8 @@ def main():
 
     check("initial")
     time.sleep(10)
+    if not args.no_plugins:
+        threading.Thread(target=pl_thread, daemon=True).start()
     for i in range(args.actions):
         fn = rnd.choices([t[0] for t in table], weights=[t[1] for t in table])[0]
         t = time.time()
@@ -562,7 +846,8 @@ def main():
         check(f"#{i} {fn.__name__}", since=t)
         time.sleep(rnd.uniform(0.3, 3))
 
-    L("bots", bots.stats())
+    pl_stop.set()
+    L("bots", bots.stats(), "plugin ops", pl["ops"], "plugin faults seen", pl["faults"], "events", events)
     bots.stop()
     settle()
     srv.post("/api/save")
@@ -574,10 +859,10 @@ def main():
     left = srv.pids()
     if left["serve"] or left["bank"]:
         FAIL("processes left after the stop", pids=left)
-    if srv.proc.returncode != 0:
-        FAIL("the final stop did not exit 0", rc=srv.proc.returncode)
+    if srv.final_rc() != 0:
+        FAIL("the final stop did not exit 0", rc=srv.final_rc())
     L("DONE actions", args.actions, "failures", len(verdict.failures))
-    verdict.exit(name=name, actions=args.actions)
+    verdict.exit(name=name, actions=args.actions, events=events, plugin_ops=pl["ops"], plugin_faults=pl["faults"], plugin_states_seen=pl["seen"], mode="unit " + args.unit if args.unit else "serve")
 
 
 if __name__ == "__main__":

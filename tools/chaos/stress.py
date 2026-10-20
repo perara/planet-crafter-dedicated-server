@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stress: four short abuse scenarios against one fresh server each.
+"""Stress: short abuse scenarios against one fresh server each.
 
   burst    16 `pcds load` players act every 200, 20, 5 and 1 ms for 30 s each: the game loop's
            longest tick and busy time must stay low, nobody may be dropped.
@@ -13,8 +13,16 @@
            bank stands (it holds the players' frames), it must answer again and the players must
            be back. (This also covers what was a separate "stall" driver.)
 
+  queuecap 64 rejoining players (--cap-players) whose chat lines are 900 KB, while the bank is stopped
+           for 40 s (--cap-seconds, under the watchdog's 60): the frames wait in the front, which
+           must drop the client with the most waiting once all together hold 256 MiB (the log says
+           so) and keep its memory bounded (--max-cap-front-mb); then answer again.
+  slowclient  8 healthy players and 4 whose process is stopped (SIGSTOP) for 40 s: the loop and
+           the healthy players must not notice, the silent sessions must time out (30 s), the
+           front's memory must stay flat.
+
 Requirements: python3 (3.9+), a built `pcds` (make build), the game tables, a save to run on
-(copied, never written), cargo for bigchat/full/stop (the bots are the ignored cargo tests of
+(copied, never written), cargo for bigchat/full/stop/queuecap/slowclient (the bots are the ignored cargo tests of
 server/src/load/tests.rs, driven by PCDS_LOAD_SERVER, PCDS_LOAD_PLAYERS, PCDS_LOAD_SECONDS and
 PCDS_LOAD_CHAT_BYTES, PCDS_TEST_DATA; or --test-bin a binary built with
 `cargo test --release --no-run`). Linux (/proc).
@@ -41,16 +49,19 @@ import lib  # noqa: E402
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter, epilog="See the header of this file for requirements and what a pass is.")
-    ap.add_argument("scenarios", nargs="*", help="burst, bigchat, full, stop (default: all four)")
+    ap.add_argument("scenarios", nargs="*", help="burst, bigchat, full, stop, queuecap, slowclient (default: all six)")
     lib.add_server_args(ap)
     ap.add_argument("--max-loop-ms", type=float, default=250.0, help="the longest game loop allowed (default %(default)s)")
     ap.add_argument("--stop-seconds", default="30,120", help="how long the bank is stopped, comma-separated (default %(default)s)")
     ap.add_argument("--stop-players", type=int, default=16, help="rejoining players during the stop scenario (default %(default)s)")
     ap.add_argument("--max-front-mb", type=int, default=512, help="the front's memory allowed while the bank stands (default %(default)s)")
+    ap.add_argument("--cap-players", type=int, default=64, help="players in queuecap (default %(default)s)")
+    ap.add_argument("--cap-seconds", type=int, default=40, help="how long the bank stands in queuecap and the clients in slowclient (default %(default)s)")
+    ap.add_argument("--max-cap-front-mb", type=int, default=700, help="the front's memory allowed in queuecap: 256 MiB of frames, their copies, the base (default %(default)s)")
     args = ap.parse_args()
-    which = args.scenarios or ["burst", "bigchat", "full", "stop"]
-    if [w for w in which if w not in ("burst", "bigchat", "full", "stop")]:
-        ap.error("scenarios: burst, bigchat, full, stop")
+    which = args.scenarios or ["burst", "bigchat", "full", "stop", "queuecap", "slowclient"]
+    if [w for w in which if w not in ("burst", "bigchat", "full", "stop", "queuecap", "slowclient")]:
+        ap.error("scenarios: burst, bigchat, full, stop, queuecap, slowclient")
     lib.check_inputs(args)
     os.makedirs(args.work, exist_ok=True)
     log = lib.Log(os.path.join(args.work, "stress.log"))
@@ -152,6 +163,74 @@ def main():
             alive(srv, f"stop {secs} s")
             bots.stop()
             srv.stop()
+
+    if "queuecap" in which:
+        n = args.cap_players
+        srv = fresh("st-qcap", maxp=n)
+        addr = f"{lib.LOOPBACK}:{srv.port}"
+        bots = lib.Bots("rejoin", args, addr, players=n, seconds=args.cap_seconds + 240, PCDS_LOAD_CHAT_BYTES=900000)
+        lib.wait_for(lambda: (lambda s, j: s == 200 and len(j["players"]) >= n * 0.9)(*srv.status(timeout=30)), 30 + n * 0.2, 1)
+        bank, since, peak, rows = srv.bank_pid(), time.time(), 0, []
+        base = lib.proc(srv.pid)["rss"] // 1024
+        log(f"queuecap: {len(srv.status()[1]['players'])} players in, front {base} MB; the bank stops for {args.cap_seconds} s")
+        os.kill(bank, signal.SIGSTOP)
+        t0 = time.time()
+        while time.time() - t0 < args.cap_seconds:
+            time.sleep(2)
+            rss = lib.proc(srv.pid)["rss"] // 1024
+            peak = max(peak, rss)
+            dropped = sum(1 for l in srv.logtext().splitlines() if "waiting for the game; dropped" in l or "dropped" in l and "waiting" in l)
+            rows.append((round(time.time() - t0), rss, dropped))
+        os.kill(bank, signal.SIGCONT)
+        log("queuecap: (seconds, front MB, drop lines):", rows[::3])
+        t1 = time.time()
+        back = lib.wait_for(lambda: srv.status(timeout=30)[0] == 200, 60)
+        text = srv.logtext()
+        drops = [l for l in text.splitlines() if "dropped" in l and ("waiting" in l or "MiB" in l)]
+        log(f"queuecap: peak front {peak} MB (base {base}); {len(drops)} drop lines, e.g. {drops[:2]}; status again after {time.time() - t1:.1f} s; players now {len(srv.status()[1]['players']) if back else '?'}; bank stands: {lib.proc(srv.bank_pid() or 0) is not None}")
+        if not back:
+            verdict.fail("queuecap: no status 60 s after CONT")
+        if peak > args.max_cap_front_mb:
+            verdict.fail("queuecap: the front's memory grew past the bound", peak_mb=peak, limit_mb=args.max_cap_front_mb)
+        if not drops:
+            verdict.fail("queuecap: nobody was dropped although the clients sent hundreds of MiB", peak_mb=peak)
+        bots.stop()
+        if "panicked" in text:
+            verdict.fail("queuecap: a panic", log=srv.log)
+        srv.stop()
+
+    if "slowclient" in which:
+        srv = fresh("st-slow", maxp=16)
+        addr = f"{lib.LOOPBACK}:{srv.port}"
+        good = lib.load_proc(srv, args, 8, args.cap_seconds + 75, 200)
+        slow = lib.load_proc(srv, args, 4, args.cap_seconds + 75, 200, stdout=open(os.path.join(srv.home, "slow.out"), "ab"), name="Slow")
+        time.sleep(20)
+        n0 = len(srv.status()[1]["players"])
+        f0 = lib.proc(srv.pid)["rss"] // 1024
+        w0 = lib.window(srv, 10)
+        os.kill(slow.pid, signal.SIGSTOP)
+        t0, peak, longest, counts = time.time(), 0, 0, []
+        while time.time() - t0 < args.cap_seconds + 10:
+            s, j = srv.status(timeout=30)
+            if s == 200:
+                longest = max(longest, j["longestLoopMicros"] / 1000)
+                counts.append(len(j["players"]))
+            peak = max(peak, lib.proc(srv.pid)["rss"] // 1024)
+            time.sleep(2)
+        os.kill(slow.pid, signal.SIGCONT)
+        log(f"slowclient: players {n0} -> {counts[-1] if counts else '?'} while 4 stood still for {args.cap_seconds + 10} s (min {min(counts) if counts else '?'}); healthy loop before {w0[0]} ms, longest during {longest:.1f} ms; front {f0} -> peak {peak} MB")
+        if not counts or counts[-1] > n0 - 4:
+            verdict.fail("slowclient: the silent sessions did not time out", before=n0, after=counts[-1] if counts else None)
+        loop_check("slowclient", longest)
+        if peak > f0 + 100:
+            verdict.fail("slowclient: the front's memory grew", before_mb=f0, peak_mb=peak)
+        out, _ = good.communicate(timeout=args.cap_seconds + 120)
+        log("slowclient: healthy players:", " | ".join(x.strip() for x in out.splitlines()[:4]))
+        if good.returncode != 0:
+            verdict.fail("slowclient: a healthy player failed", out=out[-300:])
+        slow.terminate()
+        alive(srv, "slowclient")
+        srv.stop()
     verdict.exit(scenarios=which)
 
 
