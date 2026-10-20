@@ -209,6 +209,14 @@ impl Transport {
         if let Some(utp) = &mut self.utp {
             utp.tokens().iter().for_each(|t| utp.disconnect(t));
         }
+        // Steam's connections, then its listen socket, then the login, in that order: leaving any of
+        // them open at exit makes Steam's own shutdown assert ("we still have sockets open") and the
+        // process end with a segmentation fault, a minidump in /tmp/dumps and a failed unit.
+        self.conns.clear();
+        if let Some((server, listen)) = self.steam.take() {
+            drop(listen);
+            drop(server);
+        }
     }
 }
 
