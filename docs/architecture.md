@@ -214,6 +214,39 @@ front (READY, the snapshot's note, OPS: the structs of `msg.rs`). Golden tests (
 the old hand-built JSON in the test and compare bytes: the API's names, their order, and numbers
 (the game's f32 values go out as the f64 they widen to, as `json!` made them). The HELLO (`info()`) is `msg::BankInfo`, which `pcds bank-info` and `pcds up` extend.
 
+## The planets' ground, and the DLC planets
+
+What the server knows of a planet's scenes comes from the tables, one file per planet:
+`scenes/<planet>.json` (water volumes, ore veins, toxic areas, the world instance scenes of its
+portals), read by `native/scenes.rs` from the planet's scene and every sector it can load, loaded
+by `scene_tables` (`main.rs`) into `Scenes.planets`, and used by `water.rs`, `machines/veins.rs`,
+`toxic.rs` and `instances/`. The reader does not know free planets from DLC planets: `read-game`
+writes the file of every planet of the PlanetList, from the same scene files of the install (the
+DLC planets' scenes are in the base game's own depot), by the same code. A free planet's file must
+be there; a DLC planet's may be missing (tables read before the server knew them).
+
+Three rules keep the DLC planets apart from everything else:
+
+- **Nothing of the game's DLC data is in the repository.** The tables are made on each owner's
+  machine; the unit tests of the DLC planets build their scene dumps by hand (a Humble with two
+  veins, a Toxicity with one area of four goo), and the few that look at what an install really
+  holds (`testkit::dlc_grounds`: counts, bounds, unique keys, every group known) say so, loudly, and
+  skip when the test tables have no DLC ground, as CI's have not.
+- **A world on a DLC planet does not start without the planet's ground** (`planets::ground_missing`,
+  checked in `bank/start.rs`): an empty ground would run silently wrong. The message says to run
+  `pcds extract`. A travel to such a planet is refused the same way.
+- **Ownership is never decided here.** The game lets a host take a world to a DLC planet when the
+  host's Steam account owns it (`PlanetList.GetIsPlanetPurchased`, `BIsDlcInstalled`); this server
+  has no account to ask. `scene::available_planets` (the game's `_availablePlanets`) offers the free
+  planets, the planet the world is on and the planets its save lists, the ones a host that owned
+  them took it to. No world is given a DLC planet it did not have, and nothing is faked or
+  patched: not here, and not in the Wine reference, which has no Steam and so owns no DLC
+  (see COMPLETENESS.md "What could not be checked").
+
+`toxic.rs` is the one new game logic: Toxicity's `ToxicAreaHandler` and `ToxicArea` (see its header).
+The areas are read again from the scene dump and the world objects after a hot update; only the
+clients' registrations are in the snapshot (`ext.toxic`, snapshot format 7).
+
 ## Chat hooks and the event bus
 
 ```

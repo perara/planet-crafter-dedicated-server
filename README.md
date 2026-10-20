@@ -65,7 +65,8 @@ See [Docker](#docker) for the data folder, managing worlds and Compose.
 
 **No Wine.** The server is native Linux code, and so is reading the game: once per game version
 `pcds` reads the tables the server needs (network registrations, items, buildings, every
-planet's scene, the wrecks' tile sets) straight from the game's files, in under a minute.
+planet's scene, DLC planets included, the wrecks' tile sets) straight from the game's files, in
+under a minute.
 
 Tested with game version 2.103.
 
@@ -578,7 +579,19 @@ page's World tab has both as buttons.
 
 ## Differences from hosting in the game
 
-- **Free planets only.** DLC planets need DLC ownership, which only the game itself has.
+- **DLC planets (Humble, Toxicity) are continued, never given.** The game lets a host take its
+  world to a DLC planet when the host's Steam account owns it. This server cannot ask Steam
+  about an account (the invite-code server is an anonymous Steam game server) and checks
+  nothing, so it does not give a world a planet: a world that is on a DLC planet or lists one
+  among its planets (the game only let a host that owned it get there) keeps it, and every
+  other world cannot travel to one, nor start on one. The planet's ground (ore veins, water,
+  toxic areas, the world instances of its portals) is read by `pcds extract` from your own game
+  folder, like the free planets', into your tables; nothing of it is in this repository. A world
+  on a DLC planet whose tables do not have the ground (read before this release) does not
+  start, and says to run `pcds extract` (or `pcds update`): it would run on an empty planet.
+  Toxicity's toxic areas (the goo players clean up by picking it up) and the toxic gauge in them
+  work as in the game; the host game only knows the areas of the sectors around its own player,
+  this server all of the planet's.
 - **Old saves are imported, not opened.** The game converts a save of its old layouts (2022 and
   before) when it opens one; this server refuses such a save at every entry and
   `pcds world import SAVE.json` converts it first (see "Worlds and backups").
