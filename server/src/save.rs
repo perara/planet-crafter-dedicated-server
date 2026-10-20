@@ -160,6 +160,21 @@ fn layout(sections: &[&str], save: &SaveFile) -> Result<(), String> {
     Ok(())
 }
 
+/// Every entry of the lists is a record (a JSON object). `layout` looks at the first entry of each
+/// section; an entry after it that is a string, a number or an array is a file damaged or edited, and
+/// the game's code assigns fields to its entries (`p["host"] = ...` when the save is written): it would
+/// panic in the game loop at the first autosave and every one after it, with the world unsaved.
+fn records(save: &SaveFile) -> Result<(), String> {
+    let lists = [("planets", &save.planets), ("players", &save.players), ("world objects", &save.objects), ("inventories", &save.inventories), ("messages", &save.messages), ("story events", &save.story_events), ("procedural instances", &save.procedural)];
+    for (name, entries) in lists {
+        if let Some((at, bad)) = entries.iter().enumerate().find(|(_, v)| !v.is_object()) {
+            let shown: String = bad.to_string().chars().take(40).collect();
+            return Err(format!("{name}: entry {} is no record ({shown}): the file is damaged or was edited", at + 1));
+        }
+    }
+    Ok(())
+}
+
 /// A file with no game settings is no save, or one cut short (a copy still under way): read as an
 /// empty world, the next save would write over what it held. Settings of the game's older
 /// versions (a game mode, no dying consequences) are the game's to convert, which `pcds world
@@ -343,6 +358,7 @@ impl SaveFile {
             procedural: list(9)?,
         };
         layout(&sections, &save)?;
+        records(&save)?;
         Ok(save)
     }
 
@@ -588,6 +604,24 @@ mod tests {
         if let Ok(path) = std::env::var("PCDS_BENCH_SAVE") {
             let real = SaveFile::load(&path).unwrap();
             assert_eq!(real.to_text(), reference_text(&real));
+        }
+    }
+
+    /// An entry of a list that is no record is refused at the load, naming the list: the entries after
+    /// the first are not looked at by `layout`, and a string in `players` panicked the bank at its first
+    /// autosave (found by the loadsave fuzz target).
+    #[test]
+    fn an_entry_that_is_no_record_is_refused_not_kept_to_panic_a_save_later() {
+        let good = SaveFile::tiny_text("w");
+        assert!(SaveFile::parse(&good).is_ok());
+        let sections: Vec<&str> = good.split("\r@").collect();
+        // The players' section (the third) with a record, then a string / a number / an array / a null.
+        for bad in ["\"x\"", "5", "[1]", "null", "true"] {
+            let mut s = sections.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+            s[2] = format!("\r{{\"id\":1,\"playerPosition\":\"0,0,0\"}}|\n{bad}\r");
+            let text = s.join("\r@");
+            let e = SaveFile::parse(&text).err().unwrap_or_else(|| panic!("{bad} was taken"));
+            assert!(e.contains("players: entry 2 is no record"), "{bad}: {e}");
         }
     }
 
