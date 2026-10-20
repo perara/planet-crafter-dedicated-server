@@ -170,8 +170,8 @@ fn network_tables(dir: &str) -> (NetData, Spec) {
     load().unwrap_or_else(|e| no_tables(dir, e))
 }
 
-/// Tables another reader wrote (another format, or none: a pcds from before table formats)
-/// are not loaded: their files may say something else than this server reads them as.
+/// Tables another reader wrote (another format, or none) are not loaded: their files may say
+/// something else than this server reads them as.
 fn check_format(dir: &str) -> Result<(), String> {
     let path = format!("{dir}/tables-format");
     let ours = native::tables::TABLES_FORMAT;

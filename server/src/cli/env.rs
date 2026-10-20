@@ -180,12 +180,7 @@ PCDS_WORLD=world
         }
         let info = updater::info(&banks, &active).ok_or_else(|| format!("bank {active} has no readable bank.json in {}", banks.display()))?;
         let format = info["tablesFormat"].as_u64().and_then(|f| u32::try_from(f).ok());
-        format.ok_or_else(|| {
-            format!(
-                "bank {active} (pcds {}) does not say which game tables it reads (a build from before table formats): put a newer one in its place (make build and pcds restart, or pcds upgrade --restart)",
-                info["version"].as_str().unwrap_or("?")
-            )
-        })
+        format.ok_or_else(|| format!("bank {active} (pcds {}) does not say which game tables it reads: reinstall it (make build and pcds restart, or pcds upgrade --restart)", info["version"].as_str().unwrap_or("?")))
     }
 
     /// The tables of the installed game.
@@ -320,8 +315,8 @@ mod tests {
         updater::write_info(&bank, &serde_json::json!({"version": "9.0.0", "tablesFormat": ours + 1})).unwrap();
         assert_eq!(ctx.program(), bank.join("pcds"));
         assert!(ctx.tables("b1").unwrap_err().contains(&format!("the server reads format {}", ours + 1)));
-        updater::write_info(&bank, &serde_json::json!({"version": "0.5.9"})).unwrap();
-        assert!(ctx.tables("b1").unwrap_err().contains("from before table formats"));
+        updater::write_info(&bank, &serde_json::json!({"version": "9.0.0"})).unwrap();
+        assert!(ctx.tables("b1").unwrap_err().contains("does not say which game tables it reads"));
         fs::remove_dir_all(&dir).unwrap();
     }
 

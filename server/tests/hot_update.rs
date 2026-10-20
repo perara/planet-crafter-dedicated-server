@@ -288,7 +288,7 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
     let banks = banks(&dir);
     // The releases: a good one (this build), one with a wrong sha256, one of another protocol.
     let fake = dir.join("fake-pcds");
-    std::fs::write(&fake, "#!/bin/sh\n[ \"$1\" = bank-info ] && echo '{\"version\":\"9.9.7\",\"protocol\":999,\"format\":1,\"reads\":[0,1]}'\n").unwrap();
+    std::fs::write(&fake, "#!/bin/sh\n[ \"$1\" = bank-info ] && echo '{\"version\":\"9.9.7\",\"protocol\":999,\"format\":1}'\n").unwrap();
     std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let mut routes = release(&dir, "v9.9.9", Path::new(PCDS), false);
     routes.extend(release(&dir, "v9.9.8", Path::new(PCDS), true));

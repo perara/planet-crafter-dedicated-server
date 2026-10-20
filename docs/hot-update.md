@@ -71,7 +71,7 @@ any other flip (a late one from a flip that timed out). A frame shorter than its
 longer than 64 MiB ends the link: the front treats that bank as ended.
 
 **A flip** (`POST /api/update`, `pcds upgrade`): the front starts the other bank; its HELLO is
-checked (front protocol, game tables, and that it reads the running world's snapshot format;
+checked (front protocol, game tables, and that it is in the running world's snapshot format;
 a refusal names `pcds upgrade --restart VERSION` and says a restart disconnects every player,
 Steam players with a new invite code unless PCDS_STEAM_TOKEN is set); HANDOFF; the old bank
 sends what is queued, snapshots and waits; RESTORE; the new bank restores and says READY within
@@ -111,8 +111,8 @@ stopped): the release from `PCDS_RELEASES` (default GitHub's API for
 perara/planet-crafter-dedicated-server), `pcds-<tag>-linux-x86_64.tar.gz` and its `.sha256` as
 the release workflow publishes them; the tarball's SHA-256 (ring) against the published one;
 `tar -xzf --strip-components=1` into `run/bin/.<bank>.new.<pid>`; `pcds bank-info` of the
-unpacked program (front protocol, snapshot formats and tables format; a release from before hot updates has none and is
-refused); the compatibility check; `bank.json`; then the folder is renamed over the bank. Any
+unpacked program (front protocol, snapshot format and tables format; a program that does not
+answer is refused); the compatibility check; `bank.json`; then the folder is renamed over the bank. Any
 failure leaves the bank as it was (a failed rename puts the old bank back). Downloads are https
 only (http only for a `PCDS_RELEASES` on 127.0.0.1, which the tests use); versions and tags
 must match `v?[0-9A-Za-z._-]+`; the unpacked tree may hold only plain files and folders;
@@ -130,7 +130,7 @@ left and that bank's tag); the automatic check skips that tag, and a later relea
 update or the next rollback clears or replaces the note.
 
 **Rollback.** The other bank's release takes the world only if it passes the same check as an
-update (front protocol, tables format, and that it reads the running world's snapshot format).
+update (front protocol, tables format, and that it is in the running world's snapshot format).
 Across a change of any of them the way back is `pcds upgrade --rollback --restart` (the server
 saves as it stops and the other release loads that save; every player joins again): `--rollback`
 alone answers with that, changes nothing, and the dashboard says so in the Updates section and
@@ -143,8 +143,8 @@ restores it is another program than the one that wrote it. There is no legacy su
 snapshot is read in full by the format it was written in, or refused. The rules:
 - Any change to what is serialized (a field added, removed, renamed or retyped, a different
   encoding) bumps `handoff::FORMAT`. There are no `#[serde(default)]`s to keep an older snapshot
-  readable, no `migrate` and no list of older formats: `reads` in `pcds bank-info` (and
-  bank.json) is `[FORMAT]`, an exact match. The front checks it before a flip
+  readable, no `migrate` and no list of older formats: `format` in `pcds bank-info` (and
+  bank.json) is the one format a release writes and reads, an exact match. The front checks it before a flip
   (`updater::compatible`), so a release of another format is a restart install
   (`pcds upgrade --restart`; the world saves as the server stops and the new release loads the
   save), and so is the way back across it.
@@ -255,8 +255,7 @@ per phase p50 / p95 / max / min, plus the CPU time of each kind of part):
 real thing: front, two banks, 8 `pcds load` players, sockets; the front's timeline of the flip on
 one monotonic clock: HANDOFF to the old bank, its snapshot, the SNAPSHOT to the front, the relay,
 the RESTORE to the new bank, its restore, the READY, the held frames out): `cargo test --release
---test hot_update flipbench -- --ignored --nocapture`, same variables; `PCDS_FLIPBENCH_OLD=dir`
-makes an older unpacked release bank a. `bench::dirtybench` counts what changes while a
+--test hot_update flipbench -- --ignored --nocapture`, same variables. `bench::dirtybench` counts what changes while a
 pre-copy would run. The state check is off in all of them.
 
 **The stand before and after**, ms (v0.6.2 is the code this branch was cut from):
@@ -564,7 +563,7 @@ so state crosses a flip only serialized, never as shared memory. `restore` (`han
 - refuses a snapshot made on other game tables (state holds indices into the tables);
 - reads `FORMAT` and nothing else: there is no `migrate` and there are no older formats. A
   release that changes the state's shape or the encoding bumps `FORMAT`; its bank-info says
-  `reads: [FORMAT]`, so the front refuses a hot flip between releases of different formats and
+  `format: FORMAT` (it reads that one only), so the front refuses a hot flip between releases of different formats and
   says to use `pcds upgrade --restart VERSION` (the world then loads from the save); a rollback
   across a format bump is refused the same way. A snapshot kept on disk by an older release is
   moved aside (`world.json.snapshot.unusable-*`) and the world starts from the save;
@@ -651,7 +650,7 @@ as after a long frame); for the pauses measured, clients' network time sees abou
 
 - **Frame protocol.** HELLO carries `PROTOCOL`; the front refuses a bank with another one
   before stopping anything. A release that changes the frames also needs a front update.
-- **Snapshot format and tables.** As above: `FORMAT` in the head, `reads` an exact match,
+- **Snapshot format and tables.** As above: `FORMAT` in the head, bank-info's `format` an exact match,
   refusal otherwise; the game version in HELLO and in the head (the refactor should add
   the tables' build id). A game update is a cold restart in any case: the players' clients must
   update too, and old clients are refused.

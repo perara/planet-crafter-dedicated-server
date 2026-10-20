@@ -135,7 +135,7 @@ pub fn compatible_for(info: &Value, live: &Value, rollback: bool) -> Result<(), 
     // The tables on disk are the running bank's: a release that reads another format would
     // refuse them (a live of Null: a HELLO checked on its own, nothing runs yet).
     if !live.is_null() && info["tablesFormat"] != live["tablesFormat"] {
-        let theirs = |v: &Value| v.as_u64().map_or("none (a pcds from before table formats)".to_string(), |f| f.to_string());
+        let theirs = |v: &Value| v.to_string();
         return Err(format!(
             "{what} reads game tables of format {}, the running server's are of format {}: it cannot take over the running world. {restart} {} the game tables again and restarts the server, which disconnects every player",
             theirs(&info["tablesFormat"]),
@@ -144,13 +144,13 @@ pub fn compatible_for(info: &Value, live: &Value, rollback: bool) -> Result<(), 
         ));
     }
     let format = live["format"].as_u64().unwrap_or(0);
-    if !info["reads"].as_array().is_some_and(|r| r.iter().any(|f| f.as_u64() == Some(format))) {
-        // The release before cannot read what the release that runs writes: a rollback across
-        // a change of the snapshot format is a restart (the stop saves the world; the other
-        // release loads the save). No loss: players are disconnected, nothing is rolled back in the world.
+    if info["format"].as_u64() != Some(format) {
+        // A release reads its own snapshot format only: across a change of it an update or a
+        // rollback is a restart (the stop saves the world; the other release loads the save).
+        // No loss: players are disconnected, nothing is rolled back in the world.
         return Err(format!(
-            "{what} reads snapshot formats {}, the running world is in format {format}: {} needs a restart ({restart}; the server saves the world as it stops and {what} loads that save), which disconnects every player",
-            info["reads"],
+            "{what} reads snapshot format {}, the running world is in format {format}: {} needs a restart ({restart}; the server saves the world as it stops and {what} loads that save), which disconnects every player",
+            info["format"],
             if rollback { "a rollback across a change of the snapshot format" } else { "it" }
         ));
     }
@@ -160,7 +160,7 @@ pub fn compatible_for(info: &Value, live: &Value, rollback: bool) -> Result<(), 
 /// Why a program did not say what it is.
 #[derive(Debug)]
 enum Asked {
-    /// It ran, and did not answer bank-info as a release since hot updates does.
+    /// It ran, and did not answer bank-info with a front protocol.
     Unknown,
     Failed(String),
 }
@@ -176,8 +176,8 @@ fn ask(program: &Path) -> Result<Value, Asked> {
             command.env(key, v);
         }
     }
-    // A program that cannot be run (not executable, wrong architecture) is not "a release from
-    // before hot updates".
+    // A program that cannot be run (not executable, wrong architecture) is told apart from one
+    // that runs and answers wrongly.
     // ETXTBSY: another thread's fork holds the file's write descriptor until its exec (the tests
     // run installs side by side); it passes at once.
     let mut tries = 0;
@@ -318,7 +318,7 @@ fn unpack(release: &Release, new: &Path) -> Result<Value, String> {
         return Err(format!("{tag}: no pcds in the tarball"));
     }
     let mut info = ask(&program).map_err(|e| match e {
-        Asked::Unknown => format!("{tag}: its pcds does not know bank-info: a release from before hot updates. It needs a front restart (pcds upgrade --restart {tag}), which disconnects every player"),
+        Asked::Unknown => format!("{tag}: its pcds does not answer bank-info; nothing installed"),
         Asked::Failed(e) => format!("{tag}: {e}"),
     })?;
     info["tag"] = tag.clone().into();
@@ -517,7 +517,7 @@ pub mod tests {
 
     /// A pcds that answers bank-info as a release speaking `protocol` would.
     fn script(protocol: u64) -> Vec<u8> {
-        format!("#!/bin/sh\n[ \"$1\" = bank-info ] && echo '{{\"version\":\"9.9.9\",\"protocol\":{protocol},\"format\":1,\"reads\":[0,1]}}'\n").into_bytes()
+        format!("#!/bin/sh\n[ \"$1\" = bank-info ] && echo '{{\"version\":\"9.9.9\",\"protocol\":{protocol},\"format\":1}}'\n").into_bytes()
     }
 
     /// A release server for one release on 127.0.0.1; its releases URL.
@@ -647,15 +647,15 @@ pub mod tests {
         assert!(!banks.join("b").exists());
         // Stopped, a release of any protocol installs (the front starts from it).
         install(&lookup(&base, None).unwrap(), &banks, "b", None).unwrap();
-        // A release from before hot updates has no bank-info.
+        // A release whose pcds does not answer bank-info is not installed.
         let base = fake(&dir, "v0.4.0", b"#!/bin/sh\nexit 1\n", false);
         let e = install(&lookup(&base, None).unwrap(), &banks, "a", Some(&live)).unwrap_err();
-        assert!(e.contains("before hot updates"), "{e}");
+        assert!(e.contains("does not answer bank-info"), "{e}");
         // A release that cannot read the running world's snapshot format.
         let old: Value = serde_json::from_str(r#"{"protocol": 2, "format": 7}"#).unwrap();
         assert!(compatible(&super::info(&banks, "b").map(|mut i| { i["protocol"] = crate::ipc::PROTOCOL.into(); i }).unwrap(), &old).unwrap_err().contains("format 7"));
         // A release that reads game tables of another format than the running bank's.
-        let tables = |f: u64| json!({"version": "9.9.9", "tag": "v9.9.9", "protocol": crate::ipc::PROTOCOL, "reads": [1], "tablesFormat": f});
+        let tables = |f: u64| json!({"version": "9.9.9", "tag": "v9.9.9", "protocol": crate::ipc::PROTOCOL, "format": 1, "tablesFormat": f});
         let live = json!({"format": 1, "tablesFormat": 1});
         assert!(compatible(&tables(1), &live).is_ok());
         let e = compatible(&tables(2), &live).unwrap_err();
@@ -875,7 +875,7 @@ pub mod tests {
         };
         let e = install(&serve_tar("v9.9.9", empty), &banks, "b", None).unwrap_err();
         assert!(e.contains("no pcds in the tarball"), "{e}");
-        // A pcds that is not executable is not "a release from before hot updates".
+        // A pcds that is not executable cannot be run: that is not an answer to bank-info.
         let plain = {
             let root = dir.join("pcds-v9.9.8-linux-x86_64");
             std::fs::create_dir_all(&root).unwrap();
@@ -884,7 +884,7 @@ pub mod tests {
             std::fs::read(dir.join("p.tar.gz")).unwrap()
         };
         let e = install(&serve_tar("v9.9.8", plain), &banks, "b", None).unwrap_err();
-        assert!(e.contains("cannot be run") && !e.contains("before hot updates"), "{e}");
+        assert!(e.contains("cannot be run") && !e.contains("does not answer"), "{e}");
         // A disk that takes no more (/dev/full behind the tarball's name): the partial file is
         // removed, and the bank is as it was.
         let release_good = serve_tar("v9.9.9", good);
@@ -898,13 +898,13 @@ pub mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Going back to the release before, when it cannot read what the running one writes (0.6.1
-    /// writes snapshot format 3, 0.6.0 reads 1 and 2): refused with `--rollback --restart`, not
+    /// Going back to the release before, when it cannot read what the running one writes (the
+    /// running world is in snapshot format 3, that release is in 2): refused with `--rollback --restart`, not
     /// `--restart VERSION`, also for a bank that holds a build and has no tag; an update names
     /// the release by its tag, or by its version when there is no tag.
     #[test]
     fn a_rollback_across_a_snapshot_format_is_a_restart_and_says_which() {
-        let before = json!({"version": "0.6.0", "protocol": crate::ipc::PROTOCOL, "reads": [1, 2], "tablesFormat": 2});
+        let before = json!({"version": "0.6.0", "protocol": crate::ipc::PROTOCOL, "format": 2, "tablesFormat": 2});
         let live = json!({"format": 3, "tablesFormat": 2});
         let e = compatible_for(&before, &live, true).unwrap_err();
         assert!(e.contains("a rollback across a change of the snapshot format") && e.contains("pcds upgrade --rollback --restart") && !e.contains("VERSION") && e.contains("disconnects every player"), "{e}");
@@ -920,10 +920,10 @@ pub mod tests {
         let mut other = tagged.clone();
         other["tablesFormat"] = 1.into();
         assert!(compatible_for(&other, &live, true).unwrap_err().contains("pcds upgrade --rollback --restart goes back, reads"));
-        // The release that reads the format goes back hot.
-        let mut reads = before.clone();
-        reads["reads"] = json!([2, 3]);
-        assert!(compatible_for(&reads, &live, true).is_ok());
+        // The release in the format of the running world goes back hot.
+        let mut same = before.clone();
+        same["format"] = 3.into();
+        assert!(compatible_for(&same, &live, true).is_ok());
     }
 
     /// A banks folder that cannot be written (permissions): the install fails with the path, the

@@ -15,7 +15,7 @@ use std::time::Duration;
 /// needs the front restarted (`pcds restart`). 3: HANDOFF and SNAPSHOT carry the flip's number.
 pub const PROTOCOL: u64 = 3;
 
-// game -> front: n PROTOCOL; body JSON {"version", "gameVersion", "format", "reads"}.
+// game -> front: n PROTOCOL; body JSON {"version", "gameVersion", "format", "tablesFormat"}.
 pub const HELLO: u8 = 1;
 // front -> bank: load the save.
 pub const START: u8 = 2;

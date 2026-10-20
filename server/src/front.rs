@@ -1774,8 +1774,8 @@ fn never_runs(snapshot: &[u8], hello: &Value) -> Option<String> {
     if head["game_version"] != hello["gameVersion"] {
         return Some(format!("it is on game {}'s tables, the bank has {}'s", head["game_version"], hello["gameVersion"]));
     }
-    if !hello["reads"].as_array().is_some_and(|r| r.contains(&head["format"])) {
-        return Some(format!("snapshot format {}, the bank reads {}", head["format"], hello["reads"]));
+    if hello["format"] != head["format"] {
+        return Some(format!("snapshot format {}, the bank reads {}", head["format"], hello["format"]));
     }
     None
 }
@@ -2073,7 +2073,7 @@ mod tests {
     /// never run; one the bank may run goes to it (its own errors stop the start).
     #[test]
     fn a_snapshot_that_can_never_run_is_told_apart() {
-        let hello = json!({"gameVersion": "2.103", "reads": [0, 1]});
+        let hello = json!({"gameVersion": "2.103", "format": 1});
         assert_eq!(never_runs(b"{\"format\":1,\"game_version\":\"2.103\"}\n{\"broken", &hello), None);
         for bad in [&b"{\"format\":1,\"game_version\":\"0.0.1\"}\n{}"[..], b"{\"format\":7,\"game_version\":\"2.103\"}\n{}", b"garbage"] {
             assert!(never_runs(bad, &hello).is_some(), "{}", String::from_utf8_lossy(bad));
@@ -2085,13 +2085,14 @@ mod tests {
     #[test]
     fn a_flip_takes_only_the_snapshot_of_its_own_handoff() {
         let mut front = test_front();
-        let (live, mut old) = fake_bank("a");
+        let (mut live, mut old) = fake_bank("a");
+        live.hello = json!({"format": 1});
         let (next, mut new) = fake_bank("b");
         front.live = Some(live);
         front.next = Some(next);
         front.phase = Phase::Starting;
         front.flip = Some(Flip { seq: 2, reason: "test".into(), stopped: None, snapshot: Value::Null, at: [0; 5], kept: None });
-        front.on_next(Frame { kind: ipc::HELLO, n: ipc::PROTOCOL, body: br#"{"format":1,"reads":[0,1]}"#.to_vec(), fd: None });
+        front.on_next(Frame { kind: ipc::HELLO, n: ipc::PROTOCOL, body: br#"{"format":1}"#.to_vec(), fd: None });
         assert_eq!(front.phase, Phase::Snapshotting);
         let handoff = old.recv().unwrap();
         assert_eq!((handoff.kind, handoff.n), (ipc::HANDOFF, 2), "HANDOFF carries the flip");

@@ -71,7 +71,7 @@ fn fake_bank(dir: &Path, bank: &str, script: &str, tables_format: u32) {
     std::fs::create_dir_all(&bank).unwrap();
     std::fs::write(bank.join("pcds"), format!("#!/bin/sh\n{script}\n")).unwrap();
     std::fs::set_permissions(bank.join("pcds"), std::fs::Permissions::from_mode(0o755)).unwrap();
-    let info = serde_json::json!({"version": "9.0.0", "protocol": 3, "format": 1, "reads": [0, 1], "tablesFormat": tables_format});
+    let info = serde_json::json!({"version": "9.0.0", "protocol": 3, "format": 1, "tablesFormat": tables_format});
     std::fs::write(bank.join("bank.json"), info.to_string()).unwrap();
 }
 
@@ -184,7 +184,7 @@ fn a_start_falls_back_to_the_other_bank() {
     for f in ["format", "build"] {
         std::fs::copy(dir.join("run/bin/a").join(f), dir.join("run/bin/b").join(f)).unwrap();
     }
-    // The unit a 0.5 release folder wrote: pcds run writes this version's in its place.
+    // A unit that differs from this release's (a shorter stop timeout): pcds run writes this release's in its place.
     let units = dir.join("home/.config/systemd/user");
     std::fs::create_dir_all(&units).unwrap();
     let old = format!("[Service]\nEnvironmentFile={}\nExecStart=\"{}/pcds\" run\nTimeoutStopSec=60\n", dir.join("run/server.env").display(), dir.display());
@@ -224,7 +224,7 @@ fn an_unknown_setting_stops_the_start() {
     let dir = test_dir("unknown");
     let fake = fake_systemctl(&dir, "echo inactive");
     std::fs::create_dir_all(dir.join("run")).unwrap();
-    // Names of settings that older releases had (not spelled out: the guard test of config.rs reads this file).
+    // Names of settings that do not exist (not spelled out: the guard test of config.rs reads this file).
     let (autosave, backups) = (concat!("PCDS_", "AUTOSAVE"), concat!("PCDS_", "BACKUPS"));
     std::fs::write(dir.join("run/server.env"), format!("PCDS_ADMIN_TOKEN=s3cret-token\n{autosave}=10\n{backups}=5\n")).unwrap();
     let out = pcds(&dir, &fake, &["run"]);
