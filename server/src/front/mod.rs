@@ -2698,5 +2698,5 @@ mod tests {
 }
 
 #[cfg(any(fuzzing, pcds_corpus))]
-#[path = "../fuzz/targets/front.rs"]
+#[path = "../../fuzz/targets/front.rs"]
 pub mod fuzz;
