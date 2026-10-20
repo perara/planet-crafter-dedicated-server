@@ -284,6 +284,10 @@ impl Ctx {
                 other => return Err(format!("unknown option {other}")),
             }
         }
+        // The save first: nothing is downloaded or installed for one this server cannot read.
+        if let Some(world) = world.as_deref().filter(|w| w.is_file()) {
+            super::check_world(world)?;
+        }
         for tool in ["curl", "tar"] {
             need(tool, "install it with your package manager")?;
         }
