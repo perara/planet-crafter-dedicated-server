@@ -4,8 +4,10 @@
 Purpose: see how much memory a world costs, and what a save or a backup adds at its peak. It
 starts the server (front + two banks) on a copy of a save with autosave on, optionally with
 `pcds load` players, and every --every seconds prints per process the RSS, PSS and anonymous
-memory in MiB (from /proc/PID/smaps_rollup) and the bank's peak (VmHWM). At the end it says the
-bank's peak before the first autosave and after it: the difference is what saving costs.
+memory in MiB (from /proc/PID/smaps_rollup) and the bank's peak (VmHWM), and last how much of each
+process the host has swapped out (on a host with swap an idle process's RSS falls as its cold pages
+leave: read the first rows, or add the swapped to the RSS). At the end it says the bank's peak
+before the first autosave and after it: the difference is what saving costs.
 
 Requirements: python3 (3.9+), a built `pcds` (make build), the game tables, a save to run on
 (copied, never written), Linux (/proc/PID/smaps_rollup). Players need no cargo here (`pcds load`).
@@ -30,14 +32,14 @@ import lib  # noqa: E402
 
 
 def mem(pid):
-    """RSS, PSS, anonymous MiB and the peak RSS (VmHWM) MiB of a pid; None if it is gone."""
+    """RSS, PSS, anonymous, swapped-out MiB and the peak RSS (VmHWM) MiB of a pid; None if it is gone."""
     try:
         roll = open(f"/proc/{pid}/smaps_rollup").read()
         status = open(f"/proc/{pid}/status").read()
     except OSError:
         return None
     kb = lambda text, k: int(re.search(rf"^{k}:\s+(\d+)", text, re.M).group(1)) / 1024
-    return dict(rss=kb(roll, "Rss"), pss=kb(roll, "Pss"), anon=kb(roll, "Anonymous"), hwm=kb(status, "VmHWM"))
+    return dict(rss=kb(roll, "Rss"), pss=kb(roll, "Pss"), anon=kb(roll, "Anonymous"), swap=kb(roll, "Swap"), hwm=kb(status, "VmHWM"))
 
 
 def main():
@@ -57,7 +59,7 @@ def main():
     front, bank = srv.pid, srv.bank_pid()
     load = lib.load_proc(srv, args, args.players, args.seconds) if args.players else None
     print(f"started in {start_s:.2f} s; front {front}, bank {bank}")
-    print(f"{'t':>5} {'front rss/pss/anon':>22} {'bank rss/pss/anon':>22} {'bank peak':>10} saves")
+    print(f"{'t':>5} {'front rss/pss/anon':>22} {'bank rss/pss/anon':>22} {'bank peak':>10} saves  swapped out (front, bank)")
     rows, first_save_at, saves, last_at = [], None, 0, None
     t0 = time.time()
     while time.time() - t0 < args.seconds:
@@ -69,7 +71,7 @@ def main():
             last_at, saves = at, saves + 1
             first_save_at = first_save_at or len(rows)
         rows.append(dict(t=round(time.time() - t0), front=f, bank=b))
-        print(f"{rows[-1]['t']:5} {f['rss']:8.1f}/{f['pss']:6.1f}/{f['anon']:6.1f} {b['rss']:8.1f}/{b['pss']:6.1f}/{b['anon']:6.1f} {b['hwm']:10.1f} {saves}")
+        print(f"{rows[-1]['t']:5} {f['rss']:8.1f}/{f['pss']:6.1f}/{f['anon']:6.1f} {b['rss']:8.1f}/{b['pss']:6.1f}/{b['anon']:6.1f} {b['hwm']:10.1f} {saves}  {f['swap']:.1f} {b['swap']:.1f}")
     peak_before = max((r["bank"]["hwm"] for r in rows[:first_save_at]), default=None) if first_save_at else None
     peak_after = rows[-1]["bank"]["hwm"]
     if load and load.poll() is None:

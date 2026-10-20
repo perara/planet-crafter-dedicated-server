@@ -404,6 +404,30 @@ impl SaveFile {
         }
     }
 
+    /// How many world objects the save has.
+    pub fn object_count(&self) -> usize {
+        self.pending.as_ref().map_or(self.objects.len(), |p| p.objects.len())
+    }
+
+    /// `load`'s refusals for a save read deferred: every world object and inventory entry is read and
+    /// let go, and a damaged one is the error `parse` would have given.
+    pub fn check_entries(&self) -> Result<(), String> {
+        for (section, entries) in [(3, self.world_objects()), (4, self.inventory_entries())] {
+            for entry in entries {
+                entry.map_err(|e| format!("section {section}: {e}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `load`, for a caller that only asks whether the file is a save this server reads (a world to
+    /// start or restore): the entries are checked one at a time, not kept as a tree.
+    pub fn check_file(path: &str) -> std::io::Result<SaveFile> {
+        let save = SaveFile::load_deferred(path)?;
+        save.check_entries().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        Ok(save)
+    }
+
     /// Lets go of the world objects and inventories, and of the text they were in: the game has them.
     pub fn release_world(&mut self) {
         self.objects = Vec::new();
@@ -823,6 +847,16 @@ mod tests {
         let (whole_error, deferred_error) = (SaveFile::parse(&damaged).err().unwrap(), SaveFile::parse_deferred(damaged).unwrap());
         let found = deferred_error.world_objects().find_map(Result::err).unwrap();
         assert!(whole_error.starts_with("section 3: ") && whole_error.contains(&found), "{whole_error} / {found}");
+        // A caller that only asks whether a file is a save reads the entries one at a time, with the same answers.
+        let dir = std::env::temp_dir().join(format!("pcds-check-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (good, bad) = (dir.join("good.json"), dir.join("bad.json"));
+        std::fs::write(&good, &text).unwrap();
+        std::fs::write(&bad, text.replacen("\"id\":200000007", "\"id\":", 1)).unwrap();
+        assert_eq!(SaveFile::check_file(&good.to_string_lossy()).unwrap().object_count(), 50);
+        let (refused, loaded) = (SaveFile::check_file(&bad.to_string_lossy()).err().unwrap(), SaveFile::load(&bad.to_string_lossy()).err().unwrap());
+        assert_eq!((refused.kind(), refused.to_string()), (loaded.kind(), loaded.to_string()));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

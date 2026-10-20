@@ -531,6 +531,8 @@ impl Game {
     pub fn disconnect(&mut self, client: u64) {
         let Some(c) = self.clients.shift_remove(&client) else { return };
         self.limits.forget(client);
+        // Client ids are never used twice: what was told once about this one need not be remembered.
+        self.refused_inventories.remove(&client);
         if !c.approved {
             return;
         }
@@ -1170,6 +1172,18 @@ pub mod tests {
         assert!(g.net.out.iter().any(|(to, kind, _)| *to == Target::Except(5) && *kind == protocol::client_disconnected(5).0));
         g.disconnect(6);
         g.disconnect(99);
+    }
+
+    /// What the game remembers about a client it has told once (a refused inventory) goes with the
+    /// client: ids are never used twice, so the set would only grow with every connection.
+    #[test]
+    fn a_client_that_leaves_is_forgotten_by_the_set_of_refused_inventories() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        join(&mut g, 2, "Bob");
+        g.refused_inventories.extend([1, 2]);
+        g.disconnect(1);
+        assert_eq!(g.refused_inventories.iter().copied().collect::<Vec<_>>(), [2]);
     }
 
     /// Every animator ServerRpc an owner sends goes out as its ClientRpc.
