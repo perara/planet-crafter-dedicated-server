@@ -7,7 +7,7 @@ use serde_json::Value;
 use crate::game::Game;
 use crate::geometry::{conj, mul, q, rotate, sub, v3};
 use crate::handlers::change_panel;
-use crate::net::{enc, NetBehaviour, NetObj, VarValue};
+use crate::net::{enc, BehaviourRef, NetObj, VarValue};
 
 /// DataConfig.BuildPanelSubType.
 pub const SUB_TYPES: [&str; 17] = ["WallNull", "WallPlain", "WallCorridor", "WallGlass", "WallDoor", "FloorLight", "FloorGlass", "FloorPlain", "FloorLab", "WallLab", "FloorNoLight", "WallInside", "None", "WallWaterLife", "FloorAnglePlain", "FloorAngleGlass", "FloorAngleLight"];
@@ -37,8 +37,8 @@ struct WorldPanel<'a> {
 }
 
 /// Panel.GetSubPanelType of a Panel behaviour.
-pub fn sub_type(b: &NetBehaviour) -> i32 {
-    match b.vars.iter().find(|v| v.name == "_currentSubPanelType").map(|v| &v.value) {
+pub fn sub_type(b: BehaviourRef) -> i32 {
+    match b.var("_currentSubPanelType") {
         Some(VarValue::Plain(v)) if v.len() == 4 => i32::from_le_bytes(v[..4].try_into().unwrap()),
         _ => 0,
     }
@@ -48,8 +48,7 @@ pub fn sub_type(b: &NetBehaviour) -> i32 {
 fn panels_of<'a>(game: &'a Game, o: &NetObj) -> Vec<WorldPanel<'a>> {
     let Some(w) = o.wo.and_then(|w| game.wos.get(&w)) else { return Vec::new() };
     let Some(data) = game.data.panels["groups"][&game.data.groups[w.group].id].as_array() else { return Vec::new() };
-    o.behaviours
-        .iter()
+    o.behaviours()
         .filter(|b| b.class == "Panel")
         .zip(data)
         .map(|(b, d)| WorldPanel {
@@ -185,15 +184,13 @@ pub fn change_contiguous_panels(game: &mut Game, o: &mut NetObj) {
     // ChangePanelServerRpc on the new building, refreshing its panels' ids.
     let mut changed = false;
     for index in own {
-        let Some(v) = o.behaviours.iter_mut().find(|b| b.index == index).and_then(|b| b.vars.iter_mut().find(|v| v.name == "_currentSubPanelType")) else { continue };
-        if !matches!(&v.value, VarValue::Plain(b) if *b == enc::enumeration(WALL_CORRIDOR)) {
-            v.value = VarValue::Plain(enc::enumeration(WALL_CORRIDOR).into());
+        if o.init_in_behaviour(index, "_currentSubPanelType", enc::enumeration(WALL_CORRIDOR)) == Some(true) {
             game.panel_constructed(WALL_CORRIDOR);
             changed = true;
         }
     }
     if let Some(w) = o.wo.and_then(|w| game.wos.get_mut(&w)).filter(|_| changed) {
-        w.panels = Some(o.behaviours.iter().filter(|b| b.class == "Panel").map(sub_type).collect());
+        w.panels = Some(o.behaviours().filter(|b| b.class == "Panel").map(sub_type).collect());
     }
 }
 

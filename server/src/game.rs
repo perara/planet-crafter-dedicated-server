@@ -1327,9 +1327,9 @@ pub mod tests {
         let b = g.net.objects[&object].behaviour(class).unwrap();
         let mut w = Writer::new();
         w.packed_u64(object).packed_u16(b.index).i32(4);
-        for v in &b.vars {
-            w.bool(v.name == var);
-            if v.name == var {
+        for (name, _, _) in b.vars() {
+            w.bool(name == var);
+            if name == var {
                 w.bytes(bytes);
             }
         }

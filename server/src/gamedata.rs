@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::data::{stable_hash, BehaviourDef, ObjectDef};
+use crate::data::{stable_hash, BehaviourDef, Compiled, ObjectDef};
 use crate::wire::Writer;
 
 /// DataConfig.WorldUnitType, in the game's order.
@@ -52,10 +52,18 @@ pub struct Layout {
     pub hash: u32,
     pub flags: u16,
     pub scale: [f32; 3],
-    pub behaviours: Vec<BehaviourDef>,
+    /// The behaviours' shape and starting values.
+    pub compiled: Arc<Compiled>,
     pub tail: Vec<u8>,
     /// Offset in `tail` of the root transform state's position, filled in at each send.
     pub tail_position: Option<usize>,
+}
+
+impl Layout {
+    /// A layout made on the spot (a generator, an animal) from its behaviours.
+    pub fn new(hash: u32, flags: u16, behaviours: &[BehaviourDef], tail: Vec<u8>, tail_position: Option<usize>) -> Layout {
+        Layout { hash, flags, scale: [1.0; 3], compiled: Arc::new(Compiled::of(behaviours)), tail, tail_position }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -104,7 +112,7 @@ impl ObjectDef {
             }
             w.bytes(&state.0);
         }
-        Layout { hash: self.hash, flags: self.flags, scale: self.scale.unwrap_or([1.0; 3]), behaviours: self.behaviours.clone(), tail: w.0, tail_position }
+        Layout { hash: self.hash, flags: self.flags, scale: self.scale.unwrap_or([1.0; 3]), compiled: self.compiled(), tail: w.0, tail_position }
     }
 }
 

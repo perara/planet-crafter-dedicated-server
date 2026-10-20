@@ -5,12 +5,11 @@
 use serde_json::Value;
 
 use crate::compact::{Bytes, Sym};
-use crate::data::BehaviourDef;
+use crate::data::{Shape, ShapeBehaviour, Signature};
 use crate::gamedata::Layout;
 use crate::protocol::{self, CHANGE_OWNERSHIP, CLIENT_RPC, HAS_PARENT, HAS_TRANSFORM, NETWORK_VARIABLE_DELTA};
 use crate::rpcspec::Spec;
 use crate::wire::Writer;
-use crate::world::hex;
 
 /// Who a message goes to (among approved clients).
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -89,19 +88,11 @@ pub enum VarValue {
     List(#[serde(with = "crate::bincodec::byte_lists")] Vec<Vec<u8>>),
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct NetVar {
-    pub name: Sym,
-    pub ty: Sym,
-    pub value: VarValue,
-    /// Pending delta: the new value, or the list events since the last flush.
-    dirty: Option<Box<Vec<ListEvent>>>,
-}
-
-impl NetVar {
+impl VarValue {
+    /// The bytes a variable is sent as in a spawn: the value, or a list's count and items.
     #[cfg(test)]
     fn full(&self) -> Vec<u8> {
-        match &self.value {
+        match self {
             VarValue::Plain(b) => b.to_vec(),
             VarValue::List(items) => {
                 let mut w = Writer::new();
@@ -115,14 +106,11 @@ impl NetVar {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct NetBehaviour {
-    pub class: Sym,
-    pub index: u16,
-    pub vars: Vec<NetVar>,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// The shape (names, types, order) of an object's variables is in `shape`, shared by every object
+/// of its kind; what the object has of its own is `values`, one per variable in the shape's order
+/// (behaviour after behaviour), and the deltas waiting to go out. Serialized as it always was,
+/// behaviours with their variables by name (`serde_flat` below), so the snapshot is the same bytes.
+#[derive(Clone, Debug)]
 pub struct NetObj {
     pub id: u64,
     /// The layout this object was made from (group id, "#static" variant, or prefab name).
@@ -133,8 +121,11 @@ pub struct NetObj {
     pub position: [f32; 3],
     pub rotation: [f32; 4],
     pub scale: [f32; 3],
-    pub behaviours: Vec<NetBehaviour>,
-    #[serde(with = "crate::compact::bytes")]
+    shape: &'static Shape,
+    values: Box<[VarValue]>,
+    /// Pending deltas: per variable (its place in the shape) the new value, or the list events
+    /// since the last flush. None nearly always.
+    dirty: Option<Box<Vec<(u16, Vec<ListEvent>)>>>,
     pub tail: Bytes,
     pub tail_position: Option<usize>,
     /// The world object it stands for.
@@ -142,6 +133,31 @@ pub struct NetObj {
     /// In-scene objects come with the scene and are never spawned or despawned.
     pub scene: bool,
 }
+
+/// One behaviour of an object, as `NetObj::behaviours` lists them.
+#[derive(Clone, Copy)]
+pub struct BehaviourRef<'a> {
+    pub class: Sym,
+    pub index: u16,
+    object: &'a NetObj,
+    first: usize,
+    count: usize,
+}
+
+impl<'a> BehaviourRef<'a> {
+    /// The value of the behaviour's variable called `name`.
+    pub fn var(&self, name: &str) -> Option<&'a VarValue> {
+        let at = self.object.shape.vars[self.first..self.first + self.count].iter().position(|v| v.name == name)?;
+        Some(&self.object.values[self.first + at])
+    }
+
+    /// Its variables: name, type, value.
+    pub fn vars(&self) -> impl Iterator<Item = (Sym, Sym, &'a VarValue)> + use<'a> {
+        let o = self.object;
+        (self.first..self.first + self.count).map(move |i| (o.shape.vars[i].name, o.shape.vars[i].ty, &o.values[i]))
+    }
+}
+
 
 /// List items of a NetworkList<T> from its serialized full value; None for item types this
 /// server does not know (the value then stays raw bytes).
@@ -250,11 +266,12 @@ pub fn apply_delta(net: &mut Net, client: u64, body: &[u8]) -> bool {
     if o.owner != client {
         return false;
     }
-    let Some(b) = o.behaviours.iter_mut().find(|b| b.index == behaviour) else { return false };
+    let Some(b) = o.shape.behaviours.iter().find(|b| b.index == behaviour) else { return false };
     // Read first, applied only when every value is good: a NaN or infinity is neither kept nor
     // passed on (a float the server keeps could make the snapshot unreadable).
     let mut writes = Vec::new();
-    for (i, v) in b.vars.iter().enumerate() {
+    for i in b.first as usize..(b.first + b.count) as usize {
+        let v = &o.shape.vars[i];
         // Netcode writes a flag for every variable of the behaviour: a message that ends before the
         // last is cut, and is neither applied nor passed on (every other client would read past its end).
         let Some(dirty) = r.bool() else { return false };
@@ -268,7 +285,7 @@ pub fn apply_delta(net: &mut Net, client: u64, body: &[u8]) -> bool {
         writes.push((i, bytes));
     }
     for (i, bytes) in writes {
-        b.vars[i].value = VarValue::Plain(bytes.into());
+        o.values[i] = VarValue::Plain(bytes.into());
     }
     true
 }
@@ -290,6 +307,9 @@ fn finite(ty: &str, bytes: &[u8]) -> bool {
 
 impl NetObj {
     pub fn from_layout(layout: &Layout) -> NetObj {
+        let compiled = &*layout.compiled;
+        // No bytes: the server sets the value (an empty value is none, see check).
+        let values = compiled.shape.vars.iter().zip(compiled.defaults.iter()).map(|(v, d)| if v.list { value_of(&v.ty, d.to_vec()) } else { VarValue::Plain(d.clone()) }).collect();
         NetObj {
             id: 0,
             hash: layout.hash,
@@ -299,7 +319,9 @@ impl NetObj {
             position: [0.0; 3],
             rotation: [0.0, 0.0, 0.0, 1.0],
             scale: layout.scale,
-            behaviours: behaviours(&layout.behaviours),
+            shape: compiled.shape,
+            values,
+            dirty: None,
             tail: Bytes::new(&layout.tail),
             tail_position: layout.tail_position,
             wo: None,
@@ -307,34 +329,86 @@ impl NetObj {
         }
     }
 
-    pub fn behaviour(&self, class: &str) -> Option<&NetBehaviour> {
-        self.behaviours.iter().find(|b| b.class == class)
+    /// The object's behaviours, in order.
+    pub fn behaviours(&self) -> impl Iterator<Item = BehaviourRef<'_>> + '_ {
+        self.shape.behaviours.iter().map(move |b| BehaviourRef { class: b.class, index: b.index, object: self, first: b.first as usize, count: b.count as usize })
     }
 
-    fn var_mut(&mut self, class: &str, name: &str) -> Option<&mut NetVar> {
-        self.behaviours.iter_mut().find(|b| b.class == class)?.vars.iter_mut().find(|v| v.name == name)
+    /// The first behaviour of a class.
+    pub fn behaviour(&self, class: &str) -> Option<BehaviourRef<'_>> {
+        self.behaviours().find(|b| b.class == class)
+    }
+
+    /// The place of a variable: in the first behaviour of `class`, the one called `name`.
+    fn var_of(&self, class: &str, name: &str) -> Option<usize> {
+        let b = self.shape.behaviours.iter().find(|b| b.class == class)?;
+        self.var_in(b, name)
+    }
+
+    /// The place of the variable called `name` in the behaviour with this index.
+    fn var_of_behaviour(&self, behaviour: u16, name: &str) -> Option<usize> {
+        let b = self.shape.behaviours.iter().find(|b| b.index == behaviour)?;
+        self.var_in(b, name)
+    }
+
+    fn var_in(&self, b: &ShapeBehaviour, name: &str) -> Option<usize> {
+        let (first, count) = (b.first as usize, b.count as usize);
+        Some(first + self.shape.vars[first..first + count].iter().position(|v| v.name == name)?)
     }
 
     /// Sets a variable's initial value, without a delta (before the object is spawned).
     pub fn init(&mut self, class: &str, name: &str, bytes: Vec<u8>) {
-        if let Some(v) = self.var_mut(class, name) {
-            v.value = value_of(&v.ty, bytes);
+        if let Some(i) = self.var_of(class, name) {
+            self.values[i] = value_of(&self.shape.vars[i].ty, bytes);
         }
     }
 
     pub fn init_list(&mut self, class: &str, name: &str, items: Vec<Vec<u8>>) {
-        if let Some(v) = self.var_mut(class, name) {
-            v.value = VarValue::List(items);
+        if let Some(i) = self.var_of(class, name) {
+            self.values[i] = VarValue::List(items);
         }
+    }
+
+    /// Sets a plain variable of the behaviour with this index, without a delta; whether it changed
+    /// (None: no such variable).
+    pub fn init_in_behaviour(&mut self, behaviour: u16, name: &str, bytes: Vec<u8>) -> Option<bool> {
+        let i = self.var_of_behaviour(behaviour, name)?;
+        let changed = !matches!(&self.values[i], VarValue::Plain(b) if *b == bytes);
+        self.values[i] = VarValue::Plain(bytes.into());
+        Some(changed)
+    }
+
+    /// The events of a variable's pending delta, made if it had none.
+    fn dirty_mut(&mut self, var: usize) -> &mut Vec<ListEvent> {
+        let list = self.dirty.get_or_insert_with(Default::default);
+        let var = var as u16;
+        let at = match list.iter().position(|(v, _)| *v == var) {
+            Some(at) => at,
+            None => {
+                list.push((var, Vec::new()));
+                list.len() - 1
+            }
+        };
+        &mut list[at].1
+    }
+
+    /// Sets a plain variable and marks it for a delta; false (and no change) when it already holds the value.
+    fn set_plain(&mut self, var: usize, bytes: Vec<u8>) -> bool {
+        if matches!(&self.values[var], VarValue::Plain(b) if *b == bytes) {
+            return false;
+        }
+        self.values[var] = VarValue::Plain(bytes.into());
+        self.dirty_mut(var).clear();
+        true
     }
 
     /// Panics on a variable without a value: one the tables leave to the server (its type has
     /// its own serializer) that the server did not set before the object went out.
     pub fn check(&self) {
-        for b in &self.behaviours {
-            for v in &b.vars {
-                if matches!(&v.value, VarValue::Plain(bytes) if bytes.is_empty()) {
-                    panic!("{}.{} ({}) has no value: the server must set it before the object is sent", b.class, v.name, v.ty);
+        for b in self.behaviours() {
+            for (name, ty, value) in b.vars() {
+                if matches!(value, VarValue::Plain(bytes) if bytes.is_empty()) {
+                    panic!("{}.{name} ({ty}) has no value: the server must set it before the object is sent", b.class);
                 }
             }
         }
@@ -350,8 +424,8 @@ impl NetObj {
 
     /// `sync`, appended to `out`: no Vec of its own for each variable and the tail.
     pub fn sync_into(&self, out: &mut Vec<u8>) {
-        for v in self.behaviours.iter().flat_map(|b| &b.vars) {
-            match &v.value {
+        for v in self.values.iter() {
+            match v {
                 VarValue::Plain(b) => out.extend_from_slice(b),
                 VarValue::List(items) => {
                     out.extend_from_slice(&(items.len() as u16).to_le_bytes());
@@ -405,22 +479,173 @@ impl NetObj {
     }
 }
 
-pub fn behaviours(defs: &[BehaviourDef]) -> Vec<NetBehaviour> {
-    defs.iter()
-        .map(|b| NetBehaviour {
-            class: b.class,
-            index: b.behaviour_id,
-            vars: b
-                .vars
-                .iter()
-                .map(|v| {
-                    // No bytes: the server sets the value (an empty value is none, see check).
-                    let bytes = v.bytes.as_deref().map(hex).unwrap_or_default();
-                    NetVar { name: v.name, ty: v.ty, value: value_of(&v.ty, bytes), dirty: None }
-                })
-                .collect(),
+// ---- the snapshot's NetObj -----------------------------------------------------------------
+//
+// An object is written as it was when it held its behaviours and their variables by name (the
+// snapshot is the same bytes whatever an object keeps in memory), and read back into a shape:
+// the words of the names and types are looked up, not made, and the shape is the one every
+// object of that kind has.
+
+struct Variable<'a> {
+    name: Sym,
+    ty: Sym,
+    value: &'a VarValue,
+    dirty: Option<&'a Vec<ListEvent>>,
+}
+
+impl serde::Serialize for Variable<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut t = s.serialize_struct("NetVar", 4)?;
+        t.serialize_field("name", &self.name)?;
+        t.serialize_field("ty", &self.ty)?;
+        t.serialize_field("value", self.value)?;
+        t.serialize_field("dirty", &self.dirty)?;
+        t.end()
+    }
+}
+
+struct Variables<'a>(&'a NetObj, BehaviourRef<'a>);
+
+impl serde::Serialize for Variables<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let (o, b) = (self.0, self.1);
+        let mut t = s.serialize_seq(Some(b.count))?;
+        for i in b.first..b.first + b.count {
+            let v = &o.shape.vars[i];
+            t.serialize_element(&Variable { name: v.name, ty: v.ty, value: &o.values[i], dirty: o.dirty.as_ref().and_then(|d| d.iter().find(|(var, _)| *var as usize == i)).map(|(_, e)| e) })?;
+        }
+        t.end()
+    }
+}
+
+struct Behaviours<'a>(&'a NetObj);
+
+impl serde::Serialize for Behaviours<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeSeq, SerializeStruct};
+        struct One<'a>(&'a NetObj, BehaviourRef<'a>);
+        impl serde::Serialize for One<'_> {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                let mut t = s.serialize_struct("NetBehaviour", 3)?;
+                t.serialize_field("class", &self.1.class)?;
+                t.serialize_field("index", &self.1.index)?;
+                t.serialize_field("vars", &Variables(self.0, self.1))?;
+                t.end()
+            }
+        }
+        let mut t = s.serialize_seq(Some(self.0.shape.behaviours.len()))?;
+        for b in self.0.behaviours() {
+            t.serialize_element(&One(self.0, b))?;
+        }
+        t.end()
+    }
+}
+
+impl serde::Serialize for NetObj {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        struct Tail<'a>(&'a Bytes);
+        impl serde::Serialize for Tail<'_> {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                crate::compact::bytes::serialize(self.0, s)
+            }
+        }
+        let mut t = s.serialize_struct("NetObj", 13)?;
+        t.serialize_field("id", &self.id)?;
+        t.serialize_field("hash", &self.hash)?;
+        t.serialize_field("flags", &self.flags)?;
+        t.serialize_field("owner", &self.owner)?;
+        t.serialize_field("parent", &self.parent)?;
+        t.serialize_field("position", &self.position)?;
+        t.serialize_field("rotation", &self.rotation)?;
+        t.serialize_field("scale", &self.scale)?;
+        t.serialize_field("behaviours", &Behaviours(self))?;
+        t.serialize_field("tail", &Tail(&self.tail))?;
+        t.serialize_field("tail_position", &self.tail_position)?;
+        t.serialize_field("wo", &self.wo)?;
+        t.serialize_field("scene", &self.scene)?;
+        t.end()
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct FlatVar {
+    name: Sym,
+    ty: Sym,
+    value: VarValue,
+    dirty: Option<Vec<ListEvent>>,
+}
+
+#[derive(serde::Deserialize)]
+struct FlatBehaviour {
+    class: Sym,
+    index: u16,
+    vars: Vec<FlatVar>,
+}
+
+#[derive(serde::Deserialize)]
+struct Flat {
+    id: u64,
+    hash: u32,
+    flags: u16,
+    owner: u64,
+    parent: Option<u64>,
+    position: [f32; 3],
+    rotation: [f32; 4],
+    scale: [f32; 3],
+    behaviours: Vec<FlatBehaviour>,
+    #[serde(with = "crate::compact::bytes")]
+    tail: Bytes,
+    tail_position: Option<usize>,
+    wo: Option<i32>,
+    scene: bool,
+}
+
+impl<'de> serde::Deserialize<'de> for NetObj {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<NetObj, D::Error> {
+        thread_local!(static SIGNATURE: std::cell::RefCell<Signature> = std::cell::RefCell::new(Signature::default()));
+        let f = Flat::deserialize(d)?;
+        let mut vars = 0;
+        // One signature for all the objects this thread reads: no allocation for each.
+        let shape = SIGNATURE.with_borrow_mut(|sig| {
+            sig.clear();
+            for b in &f.behaviours {
+                sig.behaviour(b.class, b.index, b.vars.len());
+                b.vars.iter().for_each(|v| sig.var(v.name, v.ty));
+                vars += b.vars.len();
+            }
+            Shape::intern(sig, || {
+                let pairs: Vec<Vec<(Sym, Sym)>> = f.behaviours.iter().map(|b| b.vars.iter().map(|v| (v.name, v.ty)).collect()).collect();
+                Shape::build(f.behaviours.iter().zip(&pairs).map(|(b, p)| (b.class, b.index, p.as_slice())))
+            })
+        });
+        let (mut values, mut pending) = (Vec::with_capacity(vars), Vec::new());
+        for v in f.behaviours.into_iter().flat_map(|b| b.vars) {
+            if let Some(events) = v.dirty {
+                pending.push((values.len() as u16, events));
+            }
+            values.push(v.value);
+        }
+        Ok(NetObj {
+            id: f.id,
+            hash: f.hash,
+            flags: f.flags,
+            owner: f.owner,
+            parent: f.parent,
+            position: f.position,
+            rotation: f.rotation,
+            scale: f.scale,
+            shape,
+            values: values.into_boxed_slice(),
+            dirty: (!pending.is_empty()).then(|| Box::new(pending)),
+            tail: f.tail,
+            tail_position: f.tail_position,
+            wo: f.wo,
+            scene: f.scene,
         })
-        .collect()
+    }
 }
 
 /// The scene handle every object goes out with: none (NetworkSceneHandle.IsEmpty), so clients
@@ -478,7 +703,7 @@ impl Net {
         self.out.push((Target::All, protocol::CREATE_OBJECT, w.0));
         let id = o.id;
         // A respawned object (a parked drone) keeps changes made while it was away.
-        if o.behaviours.iter().any(|b| b.vars.iter().any(|v| v.dirty.is_some())) {
+        if o.dirty.is_some() {
             self.dirty.push(id);
         }
         self.objects.insert(id, o);
@@ -553,42 +778,42 @@ impl Net {
     }
 
     pub fn get(&self, object: u64, class: &str, name: &str) -> Option<&VarValue> {
-        Some(&self.objects.get(&object)?.behaviour(class)?.vars.iter().find(|v| v.name == name)?.value)
+        self.objects.get(&object)?.behaviour(class)?.var(name)
     }
 
     pub fn behaviour_var(&self, object: u64, index: u16, name: &str) -> Option<&VarValue> {
-        Some(&self.objects.get(&object)?.behaviours.iter().find(|b| b.index == index)?.vars.iter().find(|v| v.name == name)?.value)
+        self.objects.get(&object)?.behaviours().find(|b| b.index == index)?.var(name)
     }
 
     /// Sets a variable of one behaviour by index (objects with several of the same class).
     pub fn set_behaviour_var(&mut self, object: u64, index: u16, name: &str, bytes: Vec<u8>) {
-        let Some(v) = self.objects.get_mut(&object).and_then(|o| o.behaviours.iter_mut().find(|b| b.index == index)).and_then(|b| b.vars.iter_mut().find(|v| v.name == name)) else { return };
-        if matches!(&v.value, VarValue::Plain(b) if *b == bytes) {
-            return;
+        let Some(o) = self.objects.get_mut(&object) else { return };
+        let Some(i) = o.var_of_behaviour(index, name) else { return };
+        if o.set_plain(i, bytes) {
+            self.dirty.push(object);
         }
-        v.value = VarValue::Plain(bytes.into());
-        v.dirty = Some(Box::default());
-        self.dirty.push(object);
     }
 
     /// Sets a plain variable; a change goes out as a delta at the end of the tick.
     pub fn set(&mut self, object: u64, class: &str, name: &str, bytes: Vec<u8>) {
-        let Some(v) = self.objects.get_mut(&object).and_then(|o| o.var_mut(class, name)) else {
+        let Some(o) = self.objects.get_mut(&object) else {
             debug!("set {class}.{name}: not on object {object}");
             return;
         };
-        if matches!(&v.value, VarValue::Plain(b) if *b == bytes) {
+        let Some(i) = o.var_of(class, name) else {
+            debug!("set {class}.{name}: not on object {object}");
             return;
+        };
+        if o.set_plain(i, bytes) {
+            self.dirty.push(object);
         }
-        v.value = VarValue::Plain(bytes.into());
-        v.dirty = Some(Box::default());
-        self.dirty.push(object);
     }
 
     /// Applies explicit list events (when the game's own add/remove order matters).
     pub fn list_events(&mut self, object: u64, class: &str, name: &str, events: Vec<ListEvent>) {
-        let Some(v) = self.objects.get_mut(&object).and_then(|o| o.var_mut(class, name)) else { return };
-        let VarValue::List(items) = &mut v.value else { return };
+        let Some(o) = self.objects.get_mut(&object) else { return };
+        let Some(i) = o.var_of(class, name) else { return };
+        let VarValue::List(items) = &mut o.values[i] else { return };
         for e in &events {
             match e {
                 ListEvent::Add(i) => items.push(i.clone()),
@@ -605,7 +830,7 @@ impl Net {
                 ListEvent::Clear => items.clear(),
             }
         }
-        v.dirty.get_or_insert_with(Box::default).extend(events);
+        o.dirty_mut(i).extend(events);
         self.dirty.push(object);
     }
 
@@ -621,26 +846,28 @@ impl Net {
         self.dirty = dirty;
         for i in at {
             let (_, o) = self.objects.get_index_mut(i).unwrap();
-            for b in &mut o.behaviours {
-                if b.vars.iter().all(|v| v.dirty.is_none()) {
+            let Some(pending) = o.dirty.take() else { continue };
+            for b in o.shape.behaviours.iter() {
+                let range = b.first as usize..(b.first + b.count) as usize;
+                if !pending.iter().any(|(v, _)| range.contains(&(*v as usize))) {
                     continue;
                 }
                 let mut w = Writer::new();
                 w.packed_u64(o.id).packed_u16(b.index).i32(RELIABLE_FRAGMENTED_SEQUENCED);
-                for v in &mut b.vars {
-                    match v.dirty.take() {
+                for i in range {
+                    match pending.iter().find(|(v, _)| *v as usize == i) {
                         None => {
                             w.bool(false);
                         }
-                        Some(events) => {
+                        Some((_, events)) => {
                             w.bool(true);
-                            match &v.value {
+                            match &o.values[i] {
                                 // FixedStringSerializer.WriteDelta: a flag byte first, 1 = the
                                 // whole string follows. ponytail: always whole; the game sends
                                 // only the changed bytes (flag 0) when that is shorter.
-                                VarValue::Plain(bytes) if v.ty.starts_with("NetworkVariable<FixedString") => w.u8(1).bytes(bytes),
+                                VarValue::Plain(bytes) if o.shape.vars[i].fixed_string => w.u8(1).bytes(bytes),
                                 VarValue::Plain(bytes) => w.bytes(bytes),
-                                VarValue::List(_) => w.bytes(&encode_events(&events)),
+                                VarValue::List(_) => w.bytes(&encode_events(events)),
                             };
                         }
                     }
@@ -683,7 +910,7 @@ mod tests {
     fn scene_objects_are_written_in_place_with_the_bytes_they_always_had() {
         let Some(g) = crate::game::test_game(crate::game::tests::save()) else { return };
         let reference = |o: &NetObj| {
-            let mut out: Vec<u8> = o.behaviours.iter().flat_map(|b| b.vars.iter().flat_map(|v| v.full())).collect();
+            let mut out: Vec<u8> = o.behaviours().flat_map(|b| b.vars().flat_map(|(_, _, v)| v.full())).collect();
             let mut tail = o.tail.to_vec();
             if let Some(at) = o.tail_position {
                 if let Some(slot) = tail.get_mut(at..at + 12) {
@@ -721,6 +948,96 @@ mod tests {
         assert!(kinds.len() >= 3 && with_position > 100, "{} tail sizes, {with_position} objects with a position in their tail", kinds.len());
     }
 
+    /// The shape of an object, and the snapshot it is written as: the same bytes as when an object held
+    /// a String for each name and type (the structs of the old layout, here), and the same object
+    /// back, on the shape every object of its kind shares.
+    #[test]
+    fn an_object_is_written_as_when_it_held_its_names_and_reads_back_on_a_shared_shape() {
+        #[derive(serde::Serialize)]
+        struct OldVar {
+            name: String,
+            ty: String,
+            value: VarValue,
+            dirty: Option<Vec<ListEvent>>,
+        }
+        #[derive(serde::Serialize)]
+        struct OldBehaviour {
+            class: String,
+            index: u16,
+            vars: Vec<OldVar>,
+        }
+        #[derive(serde::Serialize)]
+        struct OldObj<'a> {
+            id: u64,
+            hash: u32,
+            flags: u16,
+            owner: u64,
+            parent: Option<u64>,
+            position: [f32; 3],
+            rotation: [f32; 4],
+            scale: [f32; 3],
+            behaviours: Vec<OldBehaviour>,
+            #[serde(with = "crate::bincodec::bytes")]
+            tail: &'a [u8],
+            tail_position: Option<usize>,
+            wo: Option<i32>,
+            scene: bool,
+        }
+        let Some(g) = crate::game::test_game(crate::game::tests::save()) else { return };
+        let pending = |o: &NetObj, var: usize| o.dirty.as_ref().and_then(|d| d.iter().find(|(v, _)| *v as usize == var)).map(|(_, e)| e.clone());
+        let mut shared = std::collections::HashMap::new();
+        for (name, def) in g.data.layouts.iter().chain(g.net_data.prefabs.iter()) {
+            let mut o = NetObj::from_layout(&def.layout(7));
+            (o.id, o.owner, o.parent, o.wo) = (5, 3, Some(9), Some(77));
+            o.position = [1.5, -2.25, 300.0];
+            // Some variables with a delta waiting: a plain one, a list one, one twice.
+            let places: Vec<usize> = (0..o.values.len()).step_by(3).collect();
+            for (n, i) in places.into_iter().enumerate() {
+                match n % 3 {
+                    0 => o.values[i] = VarValue::Plain(vec![n as u8; n % 30].into()),
+                    1 => o.values[i] = VarValue::List(vec![vec![1, 2, 3, 4]; n % 4]),
+                    _ => {}
+                }
+                *o.dirty_mut(i) = if n % 2 == 0 { Vec::new() } else { vec![ListEvent::Add(vec![n as u8; 4]), ListEvent::RemoveAt(1), ListEvent::Clear] };
+            }
+            let old = OldObj {
+                id: o.id,
+                hash: o.hash,
+                flags: o.flags,
+                owner: o.owner,
+                parent: o.parent,
+                position: o.position,
+                rotation: o.rotation,
+                scale: o.scale,
+                behaviours: o
+                    .behaviours()
+                    .map(|b| OldBehaviour {
+                        class: b.class.to_string(),
+                        index: b.index,
+                        vars: b.vars().map(|(n, t, v)| OldVar { name: n.to_string(), ty: t.to_string(), value: v.clone(), dirty: pending(&o, o.shape.vars.iter().zip(&o.values).position(|(sv, val)| std::ptr::eq(val, v) && sv.name == n).unwrap()) }).collect(),
+                    })
+                    .collect(),
+                tail: &o.tail,
+                tail_position: o.tail_position,
+                wo: o.wo,
+                scene: o.scene,
+            };
+            let wanted = crate::bincodec::to_vec(&old).unwrap();
+            let written = crate::bincodec::to_vec(&o).unwrap();
+            assert_eq!(written, wanted, "{name}");
+            let back: NetObj = crate::bincodec::from_slice(&written).unwrap();
+            assert_eq!(crate::bincodec::to_vec(&back).unwrap(), wanted, "{name}: and back");
+            assert!(std::ptr::eq(back.shape, o.shape), "{name}: the shape read is the shape made");
+            assert_eq!(format!("{:?}", back.values), format!("{:?}", o.values), "{name}");
+            // The same kind of object shares its shape, whatever the layout it came from.
+            let key: Vec<(String, u16, usize)> = o.behaviours().map(|b| (b.class.to_string(), b.index, b.vars().count())).collect();
+            shared.entry(key).or_insert_with(Vec::new).push(o.shape as *const Shape);
+        }
+        assert!(shared.values().any(|shapes| shapes.len() > 1 && shapes.iter().all(|s| *s == shapes[0])), "layouts of one kind share a shape");
+        let (layouts, kinds) = (g.data.layouts.len() + g.net_data.prefabs.len(), shared.len());
+        assert!(kinds * 3 < layouts, "{kinds} kinds of {layouts} layouts");
+    }
+
     /// Every owner-written variable of a class the tables have is one of its variables (a
     /// renamed one would otherwise be refused without a word).
     #[test]
@@ -748,9 +1065,9 @@ mod tests {
             .net
             .objects
             .values()
-            .flat_map(|o| o.behaviours.iter().flat_map(move |b| b.vars.iter().map(move |v| (o.id, b, v))))
-            .find(|(_, _, v)| v.ty.starts_with("NetworkVariable<FixedString"))
-            .map(|(o, b, v)| (o, b.class.clone(), v.name.clone()))
+            .flat_map(|o| o.behaviours().flat_map(move |b| b.vars().map(move |(name, ty, _)| (o.id, b.class, name, ty))))
+            .find(|(_, _, _, ty)| ty.starts_with("NetworkVariable<FixedString"))
+            .map(|(o, class, name, _)| (o, class, name))
             .expect("a FixedString variable");
         g.net.flush();
         g.net.out.clear();

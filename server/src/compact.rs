@@ -22,8 +22,26 @@ fn table() -> &'static RwLock<HashSet<Sym>> {
     TABLE.get_or_init(Default::default)
 }
 
+// The words this thread made lately, by a few of their letters: a snapshot restored says the same
+// names and types for every network object, and a lookup in the table (a hash, a lock) for each costs
+// more than the object did before it had words.
+thread_local!(static RECENT: std::cell::RefCell<[Option<Sym>; 256]> = const { std::cell::RefCell::new([None; 256]) });
+
 impl Sym {
     pub fn new(s: &str) -> Sym {
+        let b = s.as_bytes();
+        let letter = |at: Option<usize>| usize::from(at.and_then(|i| b.get(i)).copied().unwrap_or(0));
+        let slot = (b.len().wrapping_mul(31) ^ (letter(Some(0)) << 1) ^ letter(b.len().checked_sub(1)) ^ (letter(Some(b.len() / 2)) << 3)) & 255;
+        if let Some(sym) = RECENT.with_borrow(|recent| recent[slot]).filter(|sym| sym.as_str() == s) {
+            return sym;
+        }
+        let sym = Sym::of(s);
+        RECENT.with_borrow_mut(|recent| recent[slot] = Some(sym));
+        sym
+    }
+
+    /// The word in the table, made if it is not there.
+    fn of(s: &str) -> Sym {
         let table = table();
         if let Some(sym) = table.read().unwrap_or_else(|e| e.into_inner()).get(s) {
             return *sym;
@@ -40,6 +58,11 @@ impl Sym {
 
     pub fn as_str(&self) -> &'static str {
         self.0
+    }
+
+    /// The word's address: equal for equal words, the key of a table of what is made of words.
+    pub fn addr(&self) -> usize {
+        self.0 as *const &str as usize
     }
 }
 

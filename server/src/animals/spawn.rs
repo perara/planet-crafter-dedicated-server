@@ -482,7 +482,7 @@ fn animal_layout(hash: u32, tick: i32) -> Layout {
     tail.bytes(&state.0);
     let animator = crate::world::hex(ANIMATOR_SYNC);
     tail.u16(ANIMATOR).i32(animator.len() as i32).bytes(&animator);
-    Layout { hash, flags: FLAGS, scale: [1.0; 3], behaviours, tail: tail.0, tail_position: Some(tail_position) }
+    Layout::new(hash, FLAGS, &behaviours, tail.0, Some(tail_position))
 }
 
 /// SpawnWorldObject: the sequence's animal, owned by `owner` (0: the first animal's owner, or

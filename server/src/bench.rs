@@ -882,13 +882,13 @@ fn scale() {
     {
         let (mut vars, mut behaviours, mut name_bytes, mut value_bytes, mut list_items) = (0usize, 0usize, 0usize, 0usize, 0usize);
         for o in g.net.objects.values() {
-            behaviours += o.behaviours.len();
-            name_bytes += o.behaviours.iter().map(|b| b.class.len()).sum::<usize>();
-            for b in &o.behaviours {
-                vars += b.vars.len();
-                for v in &b.vars {
-                    name_bytes += v.name.len() + v.ty.len();
-                    match &v.value {
+            for b in o.behaviours() {
+                behaviours += 1;
+                name_bytes += b.class.len();
+                for (name, ty, value) in b.vars() {
+                    vars += 1;
+                    name_bytes += name.len() + ty.len();
+                    match value {
                         crate::net::VarValue::Plain(x) => value_bytes += x.len(),
                         crate::net::VarValue::List(l) => list_items += l.len(),
                     }

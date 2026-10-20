@@ -1083,7 +1083,7 @@ fn awake_drone(game: &mut Game, wo: i32, c: &Value, vis: &Value) {
     let f = |v: &Value, k: &str, default: f32| v[k].as_f64().map(|x| x as f32).unwrap_or(default);
     let Some(net) = game.wos.get(&wo).and_then(|w| w.net) else { return };
     let Some(o) = game.net.objects.get(&net) else { return };
-    let behaviour = o.behaviours.iter().find(|b| b.class == "ClientNetworkTransform").map(|b| b.index).unwrap_or(0);
+    let behaviour = o.behaviours().find(|b| b.class == "ClientNetworkTransform").map(|b| b.index).unwrap_or(0);
     let rotation = if o.rotation.iter().all(|v| *v == 0.0) { motion::IDENTITY } else { o.rotation };
     let (position, owner) = (o.position, o.owner);
     // GroupNetworkContainer keeps server ownership of a child with a Rigidbody, as drones are.

@@ -216,7 +216,7 @@ pub fn client_left(game: &mut Game, client: u64) {
         .net
         .objects
         .values()
-        .flat_map(|o| o.behaviours.iter().filter(|b| b.class == "LockNetworkPlayerPosition").map(move |b| (o.id, b.index)))
+        .flat_map(|o| o.behaviours().filter(|b| b.class == "LockNetworkPlayerPosition").map(move |b| (o.id, b.index)))
         .filter(|(o, b)| seat(game, *o, *b) == Some(client))
         .collect();
     for (object, index) in seats {
@@ -310,7 +310,7 @@ pub fn frame(game: &mut Game) {
         let (p, turn) = (o.position, o.rotation);
         let group = o.wo.and_then(|w| game.wos.get(&w)).map(|w| game.data.groups[w.group].id.clone()).unwrap_or_default();
         let seats = SEATS.iter().find(|(g, _)| *g == group).map(|(_, s)| *s).unwrap_or(&[]);
-        let indices: Vec<u16> = o.behaviours.iter().filter(|b| b.class == "LockNetworkPlayerPosition").map(|b| b.index).collect();
+        let indices: Vec<u16> = o.behaviours().filter(|b| b.class == "LockNetworkPlayerPosition").map(|b| b.index).collect();
         for (k, index) in indices.into_iter().enumerate() {
             let Some(player) = seat(game, object, index).and_then(|c| game.player_object(c)) else { continue };
             let (offset, yaw) = seats.get(k).copied().unwrap_or(([0.0; 3], 0.0));
@@ -345,7 +345,7 @@ pub fn frame(game: &mut Game) {
 /// The player objects locked into the seats of a vehicle.
 fn seated_players(game: &Game, object: u64) -> Vec<u64> {
     let Some(o) = game.net.objects.get(&object) else { return Vec::new() };
-    o.behaviours.iter().filter(|b| b.class == "LockNetworkPlayerPosition").filter_map(|b| seat(game, object, b.index)).filter_map(|c| game.player_object(c)).collect()
+    o.behaviours().filter(|b| b.class == "LockNetworkPlayerPosition").filter_map(|b| seat(game, object, b.index)).filter_map(|c| game.player_object(c)).collect()
 }
 
 fn garage_frame(game: &mut Game, garage: u64, dt: f32) {
@@ -417,7 +417,7 @@ fn rigidbody_check(game: &mut Game, object: u64) {
 /// every client, laid out like the object's own transform state.
 fn teleport(game: &mut Game, object: u64, position: [f32; 3], rotation: [f32; 4]) {
     let Some(o) = game.net.objects.get(&object) else { return };
-    let Some(behaviour) = o.behaviours.iter().find(|b| b.class.ends_with("NetworkTransform")).map(|b| b.index) else { return };
+    let Some(behaviour) = o.behaviours().find(|b| b.class.ends_with("NetworkTransform")).map(|b| b.index) else { return };
     let bits = (transform_bits(&o.tail, behaviour).unwrap_or(POSITION.iter().chain(&ROTATION).sum()) & !SYNCHRONIZATION) | TELEPORTING | RELIABLE;
     let message = transform_message(object, behaviour, bits, game.tick_number(), position, rotation, o.scale);
     game.out_to(Target::All, (crate::protocol::NETWORK_TRANSFORM, message));
@@ -524,7 +524,7 @@ mod tests {
         let (id, net) = g.create_and_instantiate(truck, [560.0, 3.0, 494.0], [0.0, 0.0, 0.0, 1.0], false, true, false);
         let components = g.data.group_prefabs["VehicleTruck"]["components"].as_array().unwrap();
         let nth = components.iter().filter(|c| c["type"] == "InventoryAssociatedProxy").position(|c| c["path"] == "InventoryEquipment").unwrap();
-        let proxy = g.net.objects[&net].behaviours.iter().filter(|b| b.class == "InventoryAssociatedProxy").nth(nth).unwrap().index;
+        let proxy = g.net.objects[&net].behaviours().filter(|b| b.class == "InventoryAssociatedProxy").nth(nth).unwrap().index;
         g.net.out.clear();
         send_rpc(&mut g, 1, net, proxy, "InventoryAssociatedProxy.GetInventoryIdServerRpc", &[]);
         let answers: Vec<(u16, Value)> = client_rpcs(&g, "InventoryAssociatedProxy.GetInventoryIdClientRpc").into_iter().map(|(b, a)| (b, a[2].clone())).collect();
@@ -574,7 +574,7 @@ mod tests {
         let player = crate::game::tests::join(&mut g, 1, "Ann");
         let truck = g.data.group("VehicleTruck").unwrap();
         let (_, net) = g.create_and_instantiate(truck, [560.0, 3.0, 494.0], [0.0, 0.0, 0.0, 1.0], false, true, false);
-        let seats: Vec<u16> = g.net.objects[&net].behaviours.iter().filter(|b| b.class == "LockNetworkPlayerPosition").map(|b| b.index).collect();
+        let seats: Vec<u16> = g.net.objects[&net].behaviours().filter(|b| b.class == "LockNetworkPlayerPosition").map(|b| b.index).collect();
         assert_eq!(seats.len(), 3);
         for (seat_index, (expect, yaw)) in seats.iter().skip(1).zip([([560.696, 5.5, 492.075], 90.0), ([559.25, 5.5, 492.075], -90.0)]) {
             send_rpc(&mut g, 1, net, *seat_index, "LockNetworkPlayerPosition.SetPlayerLockedServerRpc", &[json!(true), json!(1)]);

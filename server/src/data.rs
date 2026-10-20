@@ -2,8 +2,11 @@
 //! `pcds read-game`) and the game's string hash.
 
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::Deserialize;
+
+use crate::compact::{Bytes, Sym};
 
 #[derive(Deserialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +41,126 @@ pub struct ObjectDef {
     /// Whether a world object of this prefab keeps its group hash at spawn (the root carries
     /// a GroupNetworkBase and has children).
     pub group_hash_on_spawn: bool,
+    /// `behaviours` made ready to spawn from, the first time one is spawned.
+    #[serde(skip)]
+    compiled: OnceLock<Arc<Compiled>>,
+}
+
+impl ObjectDef {
+    /// The behaviours' shape and starting values, made once.
+    pub fn compiled(&self) -> Arc<Compiled> {
+        self.compiled.get_or_init(|| Arc::new(Compiled::of(&self.behaviours))).clone()
+    }
+}
+
+/// What the network objects made from one layout (or one signature) have in common: the classes
+/// and indices of their behaviours and the names and types of their variables, in order. A
+/// network object holds only its values and points at one of these (there are a few hundred in
+/// the whole game: 1.7 KB an object of names and types became 8 bytes).
+#[derive(Debug)]
+pub struct Shape {
+    pub behaviours: Box<[ShapeBehaviour]>,
+    pub vars: Box<[ShapeVar]>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ShapeBehaviour {
+    pub class: Sym,
+    pub index: u16,
+    /// Its variables are `vars[first..first + count]`.
+    pub first: u16,
+    pub count: u16,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ShapeVar {
+    pub name: Sym,
+    pub ty: Sym,
+    /// A NetworkList<T>.
+    pub list: bool,
+    /// A NetworkVariable<FixedString..>: its delta starts with a flag byte.
+    pub fixed_string: bool,
+}
+
+/// The shapes made so far, by the hash of their signature (see `Signature`), with the signatures
+/// to tell apart the rare two that hash alike.
+type Shapes = HashMap<u64, Vec<(Box<[usize]>, &'static Shape)>>;
+
+fn shapes() -> &'static RwLock<Shapes> {
+    static SHAPES: OnceLock<RwLock<Shapes>> = OnceLock::new();
+    SHAPES.get_or_init(Default::default)
+}
+
+/// A shape written as numbers: per behaviour its class, index and number of variables, then per
+/// variable its name and type (the addresses of the words). Two shapes are the same when these are.
+#[derive(Default)]
+pub struct Signature(Vec<usize>);
+
+impl Signature {
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+    pub fn behaviour(&mut self, class: Sym, index: u16, vars: usize) {
+        self.0.extend([class.addr(), index as usize, vars]);
+    }
+    pub fn var(&mut self, name: Sym, ty: Sym) {
+        self.0.extend([name.addr(), ty.addr()]);
+    }
+}
+
+impl Shape {
+    /// The shape with this signature: the one made before, or the one `build` makes now.
+    pub fn intern(sig: &Signature, build: impl FnOnce() -> Shape) -> &'static Shape {
+        let hash = sig.0.iter().fold(0u64, |h, w| (h.rotate_left(5) ^ *w as u64).wrapping_mul(0x517c_c1b7_2722_0a95));
+        let known = |t: &Shapes| t.get(&hash).and_then(|same| same.iter().find(|(s, _)| s[..] == sig.0[..])).map(|(_, shape)| *shape);
+        let table = shapes();
+        if let Some(shape) = known(&table.read().unwrap_or_else(|e| e.into_inner())) {
+            return shape;
+        }
+        let mut write = table.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(shape) = known(&write) {
+            return shape;
+        }
+        let shape: &'static Shape = Box::leak(Box::new(build()));
+        write.entry(hash).or_default().push((sig.0.clone().into_boxed_slice(), shape));
+        shape
+    }
+
+    /// A shape from its behaviours' parts: (class, index, [(name, type)]).
+    pub fn build<'a>(behaviours: impl Iterator<Item = (Sym, u16, &'a [(Sym, Sym)])>) -> Shape {
+        let (mut shape_behaviours, mut vars) = (Vec::new(), Vec::new());
+        for (class, index, list) in behaviours {
+            let first = u16::try_from(vars.len()).expect("fewer than 65536 variables on an object");
+            let count = u16::try_from(list.len()).expect("fewer than 65536 variables on a behaviour");
+            shape_behaviours.push(ShapeBehaviour { class, index, first, count });
+            vars.extend(list.iter().map(|&(name, ty)| ShapeVar { name, ty, list: ty.starts_with("NetworkList"), fixed_string: ty.starts_with("NetworkVariable<FixedString") }));
+        }
+        Shape { behaviours: shape_behaviours.into(), vars: vars.into() }
+    }
+}
+
+/// A layout's behaviours ready to spawn from: their shape, and the value each variable starts
+/// with (empty: the server sets it).
+#[derive(Debug)]
+pub struct Compiled {
+    pub shape: &'static Shape,
+    pub defaults: Box<[Bytes]>,
+}
+
+impl Compiled {
+    pub fn of(defs: &[BehaviourDef]) -> Compiled {
+        let mut sig = Signature::default();
+        for b in defs {
+            sig.behaviour(b.class, b.behaviour_id, b.vars.len());
+            b.vars.iter().for_each(|v| sig.var(v.name, v.ty));
+        }
+        let shape = Shape::intern(&sig, || {
+            let pairs: Vec<Vec<(Sym, Sym)>> = defs.iter().map(|b| b.vars.iter().map(|v| (v.name, v.ty)).collect()).collect();
+            Shape::build(defs.iter().zip(&pairs).map(|(b, p)| (b.class, b.behaviour_id, p.as_slice())))
+        });
+        let defaults = defs.iter().flat_map(|b| &b.vars).map(|v| v.bytes.as_deref().map(|h| Bytes::from(crate::world::hex(h))).unwrap_or_default()).collect();
+        Compiled { shape, defaults }
+    }
 }
 
 #[derive(Deserialize, Clone)]
