@@ -9,10 +9,11 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde::Serialize;
+use serde_json::Value;
 
 use super::admin;
-use super::forward::{forward_chat, forward_ops};
+use super::forward::{forward_chat, forward_ops, Ops};
 use super::mail::{check_loading, post, reason_batch, send};
 use super::panic::{contained, guarded, taint, ticked};
 use super::persist::{autosave, final_save, persist, persist_later, settle};
@@ -29,6 +30,17 @@ pub(super) struct Bank {
     pub save_path: String,
     pub build_id: Option<String>,
     pub data_dir: String,
+}
+
+/// What the front is told with the snapshot of a flip (SNAPSHOT frame): its size, how long it took
+/// and when (the monotonic clock, ns), which puts it on the flip's timeline in the front.
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotHead {
+    bytes: u64,
+    ms: f64,
+    got_at: u64,
+    done_at: u64,
 }
 
 /// What the loop keeps from one turn to the next.
@@ -49,7 +61,7 @@ struct Turn {
     busy: (Duration, Duration),
     busy_last: (Duration, Duration),
     ticks: TickTimes,
-    last_ops: Value,
+    last_ops: Option<Ops>,
 }
 
 impl Bank {
@@ -67,7 +79,7 @@ impl Bank {
             busy: (Duration::ZERO, Duration::ZERO),
             busy_last: (Duration::ZERO, Duration::ZERO),
             ticks: TickTimes::default(),
-            last_ops: Value::Null,
+            last_ops: None,
         };
         // The hooks' settings, once at the start (a restored game's too).
         self.game.ext.chat.changed = true;
@@ -153,8 +165,8 @@ impl Bank {
         match crate::handoff::snapshot_memfd(game, &mut Vec::new()) {
             Ok(fd) => {
                 let len = std::fs::File::from(fd.try_clone().expect("dup")).metadata().map(|m| m.len()).unwrap_or(0);
-                let head = json!({"bytes": len, "ms": started.elapsed().as_secs_f64() * 1000.0, "gotAt": got_at, "doneAt": ipc::now_ns()});
-                self.link.send_fd(ipc::SNAPSHOT, n, head.to_string().as_bytes(), Some(fd));
+                let head = SnapshotHead { bytes: len, ms: started.elapsed().as_secs_f64() * 1000.0, got_at, done_at: ipc::now_ns() };
+                self.link.send_fd(ipc::SNAPSHOT, n, serde_json::to_string(&head).unwrap_or_default().as_bytes(), Some(fd));
                 // The world stays in memory until the new bank runs.
                 match self.link.recv() {
                     Some(f) if f.kind == ipc::RESUME => println!("bank: resumed, the new bank failed"),
@@ -226,5 +238,20 @@ impl Bank {
         }
         forward_chat(game, &mut self.link);
         forward_ops(game, &mut self.link, &mut t.last_ops);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The snapshot's head prints the bytes the json! macro made of it.
+    #[test]
+    fn the_snapshot_head_prints_what_the_json_macro_did() {
+        for (bytes, ms, got_at, done_at) in [(0u64, 0.0f64, 0u64, 0u64), (123_456_789, 41.7000000001, 1_234_567_890_123, 1_234_567_990_123), (u64::from(u32::MAX) + 1, 1e-7, 7, 8)] {
+            let old = json!({"bytes": bytes, "ms": ms, "gotAt": got_at, "doneAt": done_at}).to_string();
+            assert_eq!(serde_json::to_string(&SnapshotHead { bytes, ms, got_at, done_at }).unwrap(), old);
+        }
     }
 }

@@ -2,7 +2,7 @@
 //! front's hooks act on (chat hooks deliver from the front, so they outlive a flip), and the rules
 //! the front acts on itself (autosave, updates, the watchdog).
 
-use serde_json::{json, Value};
+use serde::Serialize;
 
 use crate::game::Game;
 use crate::ipc::{self, Link};
@@ -17,13 +17,23 @@ pub(super) fn forward_chat(game: &mut Game, link: &mut Link) {
     }
 }
 
+/// The rules the front acts on (OPS frame): autosave, updates and the watchdog.
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct Ops {
+    autosave_minutes: u32,
+    auto_update: bool,
+    update_check_hours: u32,
+    bank_watchdog_seconds: u32,
+}
+
 /// The rules the front acts on (autosave, updates): sent at the start and whenever they change.
-pub(super) fn forward_ops(game: &Game, link: &mut Link, last: &mut Value) {
+pub(super) fn forward_ops(game: &Game, link: &mut Link, last: &mut Option<Ops>) {
     let (save, update) = (&game.rules.save, &game.rules.update);
-    let ops = json!({"autosaveMinutes": save.autosave_minutes, "autoUpdate": update.auto, "updateCheckHours": update.check_hours, "bankWatchdogSeconds": game.rules.limits.bank_watchdog_seconds});
-    if *last != ops {
-        link.send(ipc::OPS, 0, ops.to_string().as_bytes());
-        *last = ops;
+    let ops = Ops { autosave_minutes: save.autosave_minutes, auto_update: update.auto, update_check_hours: update.check_hours, bank_watchdog_seconds: game.rules.limits.bank_watchdog_seconds };
+    if last.as_ref() != Some(&ops) {
+        link.send(ipc::OPS, 0, serde_json::to_string(&ops).unwrap_or_default().as_bytes());
+        *last = Some(ops);
     }
 }
 
@@ -40,7 +50,7 @@ mod tests {
         let (a, b) = UnixStream::pair().unwrap();
         a.set_nonblocking(true).unwrap();
         let (mut front, mut bank) = (Link::new(a), Link::new(b));
-        let mut last = Value::Null;
+        let mut last = None;
         forward_ops(&game, &mut bank, &mut last);
         forward_ops(&game, &mut bank, &mut last);
         game.rules.save.autosave_minutes = 7;

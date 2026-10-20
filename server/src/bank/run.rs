@@ -7,7 +7,8 @@ use std::os::fd::FromRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde::Serialize;
+use serde_json::Value;
 
 use super::{info, plugins_glue, serve, start};
 use crate::config;
@@ -24,6 +25,20 @@ fn minor_faults() -> u64 {
 
 fn fail_for_test(what: &str) -> bool {
     config::dev("bank-fail").is_some_and(|v| v == what)
+}
+
+/// What the front is told with READY: what the restore took (and the check of the restored state,
+/// when PCDS_DEV=flip-verify asked for it: `verified` is true, else null), when it began and ended on
+/// the monotonic clock (ns), and the page faults it cost.
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Ready {
+    restore_ms: f64,
+    verify_ms: f64,
+    verified: Value,
+    got_at: u64,
+    ready_at: u64,
+    faults: u64,
 }
 
 pub fn run(args: &[String]) {
@@ -84,12 +99,12 @@ pub fn run(args: &[String]) {
     // SAFETY: malloc_trim only returns free memory to the system.
     unsafe { libc::malloc_trim(0) };
     // gotAt and readyAt (the monotonic clock, ns) put the restore on the flip's timeline in the front.
-    let ready = json!({"restoreMs": started.elapsed().as_secs_f64() * 1000.0 - verify_ms, "verifyMs": verify_ms, "verified": verified, "gotAt": got_at, "readyAt": ipc::now_ns(), "faults": minor_faults() - faults_before});
+    let ready = Ready { restore_ms: started.elapsed().as_secs_f64() * 1000.0 - verify_ms, verify_ms, verified, got_at, ready_at: ipc::now_ns(), faults: minor_faults() - faults_before };
     if fail_for_test("slow-ready") {
         println!("bank: holding its ready for 2 s (PCDS_DEV=bank-fail=slow-ready)");
         std::thread::sleep(Duration::from_secs(2));
     }
-    link.send(ipc::READY, 0, ready.to_string().as_bytes());
+    link.send(ipc::READY, 0, serde_json::to_string(&ready).unwrap_or_default().as_bytes());
     if fail_for_test("die-after-ready") {
         println!("bank: ending 1 s after its ready (PCDS_DEV=bank-fail=die-after-ready)");
         std::thread::spawn(|| {
@@ -98,4 +113,19 @@ pub fn run(args: &[String]) {
         });
     }
     serve::Bank { game, link, save_path: save_path.clone(), build_id, data_dir: dir.clone() }.serve();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// READY prints the bytes the json! macro made of it.
+    #[test]
+    fn the_ready_message_prints_what_the_json_macro_did() {
+        for (restore_ms, verify_ms, verified, got_at, ready_at, faults) in [(0.0f64, 0.0f64, Value::Null, 0u64, 0u64, 0u64), (812.3456789, 12.5, Value::Bool(true), 99_000_000_000, 99_812_000_000, 301_227)] {
+            let old = json!({"restoreMs": restore_ms, "verifyMs": verify_ms, "verified": verified, "gotAt": got_at, "readyAt": ready_at, "faults": faults}).to_string();
+            assert_eq!(serde_json::to_string(&Ready { restore_ms, verify_ms, verified, got_at, ready_at, faults }).unwrap(), old);
+        }
+    }
 }

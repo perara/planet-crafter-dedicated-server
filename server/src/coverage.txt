@@ -153,8 +153,8 @@ module bank::mail bank::mail::tests::a_batch_over_the_frame_limit_drops_its_clie
 module bank::panic bank::panic::tests::a_panicking_client_is_kicked_and_the_save_on_disk_is_kept_not_replaced_by_its_half_done_work
 module bank::persist bank::persist::tests::an_autosave_is_written_by_a_thread_and_never_overtakes_a_later_save bank::persist::tests::the_autosave_does_not_wait_for_a_slow_disk_and_a_still_world_writes_nothing
 module bank::plugins_glue hot_update::a_plugins_state_goes_through_hot_updates_and_a_restart hot_update::plugins_load_and_unload_while_the_server_runs
-module bank::run hot_update::the_world_moves_between_banks_with_nobody_disconnected hot_update::a_new_bank_killed_while_it_restores_resumes_the_old_one
-module bank::serve hot_update::requests_and_players_during_a_flip_are_held_and_then_served hot_update::a_stop_whose_save_fails_keeps_the_world
+module bank::run hot_update::the_world_moves_between_banks_with_nobody_disconnected hot_update::a_new_bank_killed_while_it_restores_resumes_the_old_one bank::run::tests::the_ready_message_prints_what_the_json_macro_did
+module bank::serve hot_update::requests_and_players_during_a_flip_are_held_and_then_served hot_update::a_stop_whose_save_fails_keeps_the_world bank::serve::tests::the_snapshot_head_prints_what_the_json_macro_did
 module bank::start bank::start::tests::a_restored_game_takes_access_and_rules_from_their_files
 module bank::status bank::status::tests::tick_times_are_a_percentile_of_the_last_minute_in_a_fixed_ring bank::status::tests::status_warns_of_a_game_without_tables bank::status::tests::the_tick_summary_prints_what_the_json_macro_did bank::status::tests::the_backup_status_prints_what_the_json_macro_did bank::status::tests::the_whole_status_prints_what_the_json_macro_did
 module bincodec  bincodec::tests::what_is_written_reads_back_exactly bincodec::tests::the_same_types_are_json_when_the_format_is_json bincodec::tests::damaged_snapshots_are_errors_not_panics_or_huge_allocations  # the snapshot codec (handoff format 4)
