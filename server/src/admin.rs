@@ -30,6 +30,9 @@ const DEADLINE: Duration = Duration::from_secs(10);
 const ANSWER: Duration = Duration::from_secs(10);
 const WORLD_ANSWER: Duration = Duration::from_secs(200);
 
+/// The page's Content-Security-Policy (see `respond_with`).
+const PAGE_POLICY: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; base-uri 'none'; frame-ancestors 'none'";
+
 pub struct Request {
     pub method: String,
     pub path: String,
@@ -246,8 +249,11 @@ fn respond_with(mut stream: TcpStream, status: u16, content_type: &str, body: &s
         503 => "Service Unavailable",
         _ => "Error",
     };
-    // The page holds the token once logged in: no other site may frame it (clickjacking).
-    let frames = "X-Frame-Options: DENY\r\nContent-Security-Policy: frame-ancestors 'none'\r\n";
+    // The page holds the token once logged in: no other site may frame it (clickjacking). The page
+    // itself may talk to this server and nobody else (a script that got in could not send the token
+    // anywhere), load nothing from elsewhere and take no <base>; its script and style are inline.
+    let policy = if content_type.starts_with("text/html") { PAGE_POLICY } else { "frame-ancestors 'none'" };
+    let frames = format!("X-Frame-Options: DENY\r\nContent-Security-Policy: {policy}\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCache-Control: no-store\r\n");
     write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{extra}{frames}Connection: close\r\n\r\n{body}", body.len())
 }
 
@@ -672,5 +678,27 @@ mod tests {
         let request = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         request.reply.send((200, "{}".into())).unwrap();
         assert!(client.join().unwrap().starts_with("HTTP/1.1 200"));
+    }
+
+    /// The page may talk to this server and nobody else, load nothing from elsewhere and not be kept
+    /// by a cache; the API's answers carry the framing and caching rules but not the page's policy.
+    #[test]
+    fn the_page_has_a_policy_of_its_own_and_the_api_does_not_need_it() {
+        let dir = std::env::temp_dir().join(format!("pcds-admin-page-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("index.html");
+        std::fs::write(&file, "<!doctype html><title>x</title>").unwrap();
+        let web: Web = Arc::new(RwLock::new(Some(file.display().to_string())));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _rx = listen(listener, "secret".into(), web, crate::front::Hooks::default().feed).unwrap();
+        let page = ask(addr, b"GET / HTTP/1.1\r\n\r\n");
+        assert!(page.starts_with("HTTP/1.1 200") && page.contains("Content-Type: text/html"), "{page}");
+        for header in ["default-src 'none'", "connect-src 'self'", "base-uri 'none'", "frame-ancestors 'none'", "X-Frame-Options: DENY\r\n", "X-Content-Type-Options: nosniff\r\n", "Referrer-Policy: no-referrer\r\n", "Cache-Control: no-store\r\n"] {
+            assert!(page.contains(header), "{header}: {page}");
+        }
+        let api = ask(addr, b"GET /api/status HTTP/1.1\r\n\r\n");
+        assert!(api.contains("Cache-Control: no-store\r\n") && api.contains("Content-Security-Policy: frame-ancestors 'none'\r\n") && !api.contains("script-src"), "{api}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
