@@ -8,7 +8,7 @@ static DATA: OnceLock<crate::gamedata::GameData> = OnceLock::new();
 pub fn run(data: &[u8]) {
     let game = DATA.get_or_init(|| crate::gamedata::GameData::load(&format!("{}/gamedata.json", crate::fuzz_entry::data_dir())).expect("gamedata.json"));
     let Ok(text) = std::str::from_utf8(data) else { return };
-    if let Ok(rules) = serde_json::from_str::<Rules>(text) {
+    if let Ok(rules) = Rules::parse(text) {
         let _ = rules.validate(game);
         let _ = shown(&rules);
         let _ = changes(&rules);
@@ -18,8 +18,8 @@ pub fn run(data: &[u8]) {
             let again: Rules = serde_json::from_str(&serde_json::to_string_pretty(&rules).unwrap()).expect("rules written by the server read back");
             assert!(again == rules);
         }
-    } else {
-        let _ = unreadable(text, &serde_json::from_str::<Rules>(text).err().unwrap());
+    } else if let Err(e) = serde_json::from_str::<Rules>(text) {
+        let _ = unreadable(text, &e);
     }
     // As a patch onto the defaults.
     if let Ok(patch) = serde_json::from_str::<Value>(text) {

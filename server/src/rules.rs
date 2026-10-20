@@ -391,6 +391,9 @@ impl Rules {
     /// Each value is checked as JSON first: a number past f32 would become infinity, which
     /// serializes as null and leaves a rules.json the server cannot load.
     pub fn patched(&self, patch: &Value) -> Result<Rules, String> {
+        if !patch.is_object() {
+            return Err("a change of the rules is a JSON object of sections".into());
+        }
         let mut v = serde_json::to_value(self).map_err(|e| e.to_string())?;
         merge(&mut v, patch);
         for knob in crate::config::KNOBS.iter().filter(|k| k.source == crate::config::Source::Rules) {
@@ -399,11 +402,21 @@ impl Rules {
         serde_json::from_value(v).map_err(|e| e.to_string())
     }
 
+    /// The rules in a JSON text: an object of sections. A struct's derived Deserialize also takes an
+    /// array, its fields in order, so `[[0.5]]` would set meteo.eventChance: a rules file that is no
+    /// object is a mistake to say, as a misspelt rule is.
+    pub fn parse(text: &str) -> Result<Rules, String> {
+        if serde_json::from_str::<Value>(text).is_ok_and(|v| !v.is_object()) {
+            return Err("not a JSON object of sections".into());
+        }
+        serde_json::from_str(text).map_err(|e| unreadable(text, &e))
+    }
+
     /// rules.json, or the defaults when there is none.
     pub fn load(path: &str) -> Result<Rules, String> {
         match std::fs::read_to_string(path) {
             Ok(text) if text.trim().is_empty() => Ok(Rules::default()),
-            Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{path}: {}", unreadable(&text, &e))),
+            Ok(text) => Rules::parse(&text).map_err(|e| format!("{path}: {e}")),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Rules::default()),
             Err(e) => Err(format!("{path}: {e}")),
         }
@@ -621,6 +634,23 @@ mod tests {
         let e = dlc(serde_json::json!(["Prime"])).unwrap_err();
         assert!(e.contains("\"Prime\"") && e.contains("Humble, Toxicity"), "{e}");
         assert!(dlc(serde_json::json!(["Humble", "Humble"])).unwrap_err().contains("twice"));
+    }
+
+    /// A rules file or a patch that is an array is not read as the sections' fields in order.
+    #[test]
+    fn rules_are_an_object_of_sections_never_an_array_read_by_position() {
+        for text in ["[[0.5]]", "[]", "[{}]", "5", "\"x\"", "null", "true"] {
+            assert!(Rules::parse(text).is_err(), "{text}");
+            assert!(Rules::default().patched(&serde_json::from_str(text).unwrap()).is_err(), "{text}");
+        }
+        assert!(Rules::parse("{}").unwrap() == Rules::default());
+        assert!(Rules::parse(r#"{"speed": {"growth": 2}}"#).unwrap().speed.growth == 2.0);
+        let dir = std::env::temp_dir().join(format!("pcds-rules-array-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rules.json").to_string_lossy().into_owned();
+        std::fs::write(&path, "[[0.5]]").unwrap();
+        assert!(Rules::load(&path).unwrap_err().contains("not a JSON object"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
