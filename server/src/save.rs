@@ -390,7 +390,9 @@ impl SaveFile {
 pub fn write_atomic(path: &str, bytes: &[u8]) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let mode = std::fs::metadata(path).map(|m| m.permissions().mode() & 0o7777).unwrap_or(0o600);
+    // Not through a link: the file the rename puts there replaces the link, and a link someone else
+    // planted (/tmp/pcds-<pid>-...) must not choose its mode.
+    let mode = std::fs::symlink_metadata(path).ok().filter(|m| m.is_file()).map(|m| m.permissions().mode() & 0o7777).unwrap_or(0o600);
     // A name of its own: a leftover of an earlier process with this pid (a container's pids repeat)
     // and this counter is not ours to overwrite, nor a reason to fail the save: the next name.
     let (mut tmp, mut created) = (String::new(), Err(std::io::ErrorKind::AlreadyExists.into()));
@@ -644,6 +646,26 @@ mod tests {
         let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
         left.sort();
         assert_eq!(left, ["notes.tmp".to_string(), "rules.json".into(), live]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A path that is a link to a file of another mode (a planted /tmp/pcds-<pid>-... in front of
+    /// the fallback snapshot, say) must not lend that file's mode to the world written over it.
+    #[test]
+    fn a_link_in_the_way_does_not_lend_its_targets_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pcds-write-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("public");
+        std::fs::write(&target, "x").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let path = dir.join("pcds-1-world.snapshot");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        write_atomic(path.to_str().unwrap(), b"private").unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0o600, "a new file is 0600 whatever the link pointed at");
+        assert!(!std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "x", "the target is not written through");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
