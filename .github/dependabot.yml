@@ -1,0 +1,23 @@
+# Proposes updates to the pinned actions of the workflows (the commit and the tag in its comment)
+# and to the crates (server/Cargo.lock), weekly. Nothing is merged without a review and CI.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /server
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directory: /plugin-api
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

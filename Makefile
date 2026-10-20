@@ -13,7 +13,9 @@
 #   make docker      the Docker image (IMAGE=...)
 #   make docker-test the image's hot update, end to end (docker/test.sh; needs game tables:
 #                    PCDS_TEST_DATA=DIR, else run/data/2.103)
-#   make dist        the release tarball, as the release workflow makes it (VERSION=vX.Y.Z)
+#   make dist        the release tarball, as the release workflow makes it (VERSION=vX.Y.Z); owner root,
+#                    files sorted, no time in the gzip header
+#   make licenses    THIRD_PARTY_LICENSES again, from server/Cargo.lock (CI checks it is current)
 #   make clean
 
 SHELL := /bin/bash
@@ -29,7 +31,7 @@ IMAGE ?= planet-crafter-dedicated-server
 SAVE ?= run/worlds/world.json
 PLAYERS ?= 4
 
-.PHONY: build install test bench gate plugin-bench lint docker docker-test dist clean
+.PHONY: build install test bench gate plugin-bench lint docker docker-test dist licenses clean
 
 # The program finds libsteam_api.so next to itself; copied then renamed, so a running copy keeps its own.
 build:
@@ -69,11 +71,14 @@ docker-test: docker
 
 dist: build
 	rm -rf dist/$(DIST) && mkdir -p dist/$(DIST)/web
-	cp $(RELEASE)/pcds $(RELEASE)/libsteam_api.so install.sh README.md LICENSE dist/$(DIST)/
+	cp $(RELEASE)/pcds $(RELEASE)/libsteam_api.so install.sh README.md CHANGELOG.md LICENSE THIRD_PARTY_LICENSES dist/$(DIST)/
 	cp server/web/index.html dist/$(DIST)/web/
 	cp -r docs dist/$(DIST)/docs
-	tar -C dist -czf dist/$(DIST).tar.gz $(DIST)
+	set -o pipefail; tar -C dist --owner=0 --group=0 --numeric-owner --sort=name -cf - $(DIST) | gzip -n > dist/$(DIST).tar.gz
 	cd dist && sha256sum $(DIST).tar.gz > $(DIST).tar.gz.sha256
+
+licenses:
+	scripts/third-party-licenses
 
 clean:
 	cargo clean $(MANIFEST)

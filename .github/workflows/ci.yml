@@ -5,17 +5,27 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only: nothing in CI publishes or comments.
+permissions:
+  contents: read
+
 jobs:
   server:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-10-20
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: server
       - run: cargo build --release --locked
         working-directory: server
+      # THIRD_PARTY_LICENSES is what the lock file gives (make licenses).
+      - run: python3 scripts/third-party-licenses --check
       # Neither the game tables nor the game are here: the tests that need them skip, by these.
       - run: cargo test --release --locked
         working-directory: server
@@ -33,9 +43,12 @@ jobs:
   plugins:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-10-20
+        with:
+          toolchain: stable
           targets: wasm32-unknown-unknown
       - run: cargo test --locked
         working-directory: plugin-api
@@ -49,8 +62,13 @@ jobs:
   script:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - run: shellcheck -S error install.sh docker/entrypoint.sh docker/test.sh tools/flip-gate.sh
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: shellcheck -S error install.sh docker/entrypoint.sh docker/test.sh tools/flip-gate.sh scripts/release-notes
       # The scripts in tools/ are run by hand, never here; they only have to parse.
       - run: for f in tools/*/*.sh; do bash -n "$f"; done
       - run: python3 -m compileall -q tools && find tools -name __pycache__ -prune -exec rm -rf {} +
+      # Every section of CHANGELOG.md is dated and has its Breaking changes and Upgrade parts: the
+      # release workflow takes the release text from it (docs/hot-update.md, release checklist).
+      - run: scripts/release-notes --check

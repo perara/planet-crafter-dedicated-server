@@ -4,19 +4,31 @@ on:
   push:
     tags: ['v*']
 
-permissions:
-  contents: write
+# Nothing by default; each job asks for what it needs. Third-party actions are pinned by commit
+# (the comment names the tag; Dependabot proposes the next one, .github/dependabot.yml).
+permissions: {}
 
 jobs:
-  linux:
+  # Builds and tests with a read-only token. Nothing here can publish.
+  build:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable, 2026-10-20
+        with:
+          toolchain: stable
       # The updater compares release tags with the running program's version: a tag that is not
       # server/Cargo.toml's version would look newer forever (automatic updates would reinstall it).
-      - name: The tag is the server's version
-        run: test "${GITHUB_REF_NAME#v}" = "$(sed -n 's/^version = "\(.*\)"/\1/p' server/Cargo.toml | head -1)"
+      # The release text is CHANGELOG.md's section of the tag (scripts/release-notes): a tag without
+      # one, without its date or without Breaking changes and Upgrade is not released.
+      - name: The tag is the server's version, and its release notes are written
+        run: |
+          test "${GITHUB_REF_NAME#v}" = "$(sed -n 's/^version = "\(.*\)"/\1/p' server/Cargo.toml | head -1)"
+          scripts/release-notes "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
       - run: cargo build --release --locked
         working-directory: server
       # Neither the game tables nor the game are here: the tests that need them skip, by these.
@@ -26,58 +38,111 @@ jobs:
           PCDS_TEST_DATA: none
           PCDS_GAME_DIR: none
       # pcds-<tag>-linux-x86_64/: the pcds program with libsteam_api.so and web/ beside it,
-      # install.sh, README.md and LICENSE (Makefile, dist).
+      # install.sh, README.md, CHANGELOG.md, LICENSE and THIRD_PARTY_LICENSES (Makefile, dist).
       - name: Package
-        run: make dist VERSION="${GITHUB_REF_NAME}"
-      - uses: softprops/action-gh-release@v2
+        run: |
+          make dist VERSION="${GITHUB_REF_NAME}"
+          cp "$RUNNER_TEMP/release-notes.md" dist/release-notes.md
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/release-notes.md
+          if-no-files-found: error
+
+  # Publishes what the build job made, unchanged: the tarball is attested (who built it, from which
+  # commit, by which workflow run: `gh attestation verify`, docs/hot-update.md), then released.
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+      # The body is the CHANGELOG section; GitHub's generated notes (merged pull requests, new
+      # contributors) follow it. A tag with a hyphen (v1.0.0-rc.1) is a prerelease.
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: |
             dist/*.tar.gz
             dist/*.sha256
+          body_path: dist/release-notes.md
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
-  # The Docker image of the same tag, only once the release job's tag guard, build and tests
-  # have passed.
+  # The Docker image of the same tag, only once the release exists: the tag guard, build and
+  # tests have passed and the tarball is published.
   image:
-    needs: linux
+    needs: release
     runs-on: ubuntu-22.04
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # 1.2.3, 1.2 and latest; a prerelease (v1.2.3-rc.1) gets its own version tag only.
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
       # The image is built and tried before it is published: docker/test.sh runs the updater of
       # the image on a read-only root and checks the start without a game. Its second part, the
       # hot update of a running server with players, needs the game's tables, which CI does not
       # have: run it where they are before tagging (make docker-test), with make gate (the release checklist,
       # docs/hot-update.md).
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           load: true
           tags: pcds-test
+          provenance: false
+          sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - run: docker/test.sh pcds-test
-      - uses: docker/build-push-action@v6
+      # linux/amd64 only: libsteam_api.so is Valve's x86-64 build. BuildKit attaches a provenance
+      # attestation and an SBOM to the image.
+      - id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: true
+          platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # The same digest, attested by GitHub: `gh attestation verify oci://ghcr.io/...`.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false

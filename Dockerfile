@@ -21,7 +21,8 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 # One program, /opt/pcds/pcds, with what it uses beside it (as in a release).
 COPY --from=build /src/server/target/release/pcds /src/server/target/release/libsteam_api.so /opt/pcds/
-COPY README.md LICENSE /opt/pcds/
+# The licences travel with libsteam_api.so (THIRD_PARTY_LICENSES says whose terms are whose).
+COPY README.md CHANGELOG.md LICENSE THIRD_PARTY_LICENSES /opt/pcds/
 COPY server/web/index.html /opt/pcds/web/index.html
 COPY docker/entrypoint.sh /opt/pcds/entrypoint.sh
 RUN useradd --uid 1000 --home-dir /data/home --no-create-home pcds \

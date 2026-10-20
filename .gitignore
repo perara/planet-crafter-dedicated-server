@@ -18,3 +18,7 @@ __pycache__/
 /server/fuzz/artifacts/
 /server/fuzz/target/
 /server/fuzz/coverage/
+# The Wine-era extractor was removed; a local copy must never be committed.
+/extractor/
+# Scratch space.
+/scratch/
