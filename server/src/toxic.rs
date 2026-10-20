@@ -128,7 +128,8 @@ fn ensure(game: &mut Game) {
 /// The area a client's key means.
 fn find(areas: &[Area], key: i32) -> Option<&Area> {
     areas.iter().find(|a| a.id == key).or_else(|| {
-        let mut near = areas.iter().filter(|a| (a.id - key).abs() <= KEY_SLACK);
+        // abs_diff: a client's key is any number (i32::MIN minus an area's key overflows i32).
+        let mut near = areas.iter().filter(|a| a.id.abs_diff(key) <= KEY_SLACK.unsigned_abs());
         near.next().filter(|_| near.next().is_none())
     })
 }
@@ -342,6 +343,22 @@ mod tests {
         tick(&mut g);
         assert!(sent(&g, PROGRESS).is_empty() && sent(&g, FINISHED).is_empty());
         assert_eq!(tracked_area_progress(&g, 1), None);
+    }
+
+    /// A client's key is any number: the area within the slack is found whatever the keys are, and
+    /// i32::MIN is no neighbour of the area at the origin (its difference overflowed and read as near).
+    #[test]
+    fn a_key_far_from_every_area_finds_none_whatever_the_numbers() {
+        let area = |id| Area { id, time: 1.0, total: 1, todo: vec![], cleaned: 0 };
+        let areas = [area(0), area(1000), area(i32::MAX)];
+        for key in [i32::MIN, i32::MIN + 1, -5, -4, 5, 997, 1004, 1005, i32::MAX - 5, i32::MAX - 4] {
+            let found = find(&areas, key).map(|a| a.id);
+            let near: Vec<i32> = areas.iter().map(|a| a.id).filter(|id| (*id as i64 - key as i64).abs() <= KEY_SLACK as i64).collect();
+            assert_eq!(found, if near.len() == 1 { Some(near[0]) } else { None }, "key {key}");
+        }
+        assert_eq!(find(&areas, i32::MIN).map(|a| a.id), None);
+        assert_eq!(find(&areas, 1002).map(|a| a.id), Some(1000));
+        assert_eq!(find(&areas, i32::MAX).map(|a| a.id), Some(i32::MAX));
     }
 
     /// The key is the integer part of the squared length of the position, in single precision.
