@@ -1,8 +1,8 @@
 //! The front's parsers of bytes from outside: the Steam transport's Split<n> reassembly, the
 //! chat config a bank sends, the head of a kept snapshot.
+use super::chat_hooks::chat_config;
 use super::snapshot::never_runs;
 use super::transport::steam::{disconnected, parts, reassemble, MAX_SPLIT};
-use super::*;
 use crate::msg::Hello;
 use serde_json::Value;
 
