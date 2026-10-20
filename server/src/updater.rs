@@ -282,7 +282,29 @@ fn sweep(banks: &Path) {
 /// program of the old one keeps its files (they are renamed away, not overwritten). Err leaves
 /// the bank as it was.
 pub fn put(banks: &Path, bank: &str, new: &Path) -> Result<(), String> {
+    put_with(banks, bank, new, |p| std::fs::File::open(p)?.sync_all())
+}
+
+/// Every file and folder under `dir`, `dir` last, through `sync` (fsync).
+fn sync_tree(dir: &Path, sync: &impl Fn(&Path) -> std::io::Result<()>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            sync_tree(&entry.path(), sync)?;
+        } else {
+            sync(&entry.path())?;
+        }
+    }
+    sync(dir)
+}
+
+/// put() with the flush as a parameter. The unpacked files reach the disk before the folder is
+/// moved to the bank's name, and the move itself after: a power cut leaves the old bank or a
+/// whole new one, not a bank whose program is a name with no bytes (the data of a file the
+/// system had not written yet).
+fn put_with(banks: &Path, bank: &str, new: &Path, sync: impl Fn(&Path) -> std::io::Result<()>) -> Result<(), String> {
     let _lock = lock(banks)?;
+    sync_tree(new, &sync).map_err(|e| format!("{}: could not be flushed to disk before it is installed: {e}", new.display()))?;
     let path = banks.join(bank);
     let old = banks.join(format!(".{bank}.old"));
     let _ = std::fs::remove_dir_all(&old);
@@ -297,7 +319,8 @@ pub fn put(banks: &Path, bank: &str, new: &Path) -> Result<(), String> {
         return Err(format!("{}: {e}", path.display()));
     }
     let _ = std::fs::remove_dir_all(&old);
-    Ok(())
+    // The renames themselves.
+    sync(banks).map_err(|e| format!("{}: could not be flushed to disk: {e} (the bank is installed)", banks.display()))
 }
 
 fn unpack(release: &Release, new: &Path) -> Result<Value, String> {
@@ -643,6 +666,45 @@ pub mod tests {
     }
 
     const LIVE: &str = r#"{"format": 1}"#;
+
+    /// The unpacked files are flushed before the folder is moved to the bank's name, and the
+    /// move after; a flush that fails stops the install with the bank as it was.
+    #[test]
+    fn a_bank_is_flushed_to_disk_before_it_is_moved_into_place() {
+        use std::cell::RefCell;
+        let dir = test_dir("put-sync");
+        let (banks, new) = (dir.join("bin"), dir.join("bin/.b.new.1"));
+        std::fs::create_dir_all(banks.join("b")).unwrap();
+        std::fs::write(banks.join("b/pcds"), "old").unwrap();
+        std::fs::create_dir_all(new.join("web")).unwrap();
+        std::fs::write(new.join("pcds"), "new").unwrap();
+        std::fs::write(new.join("web/index.html"), "new").unwrap();
+        // What was in the bank's place at each flush.
+        let log = RefCell::new(Vec::new());
+        let record = |p: &Path| {
+            let at = std::fs::read_to_string(banks.join("b/pcds")).unwrap_or_default();
+            log.borrow_mut().push((p.strip_prefix(&banks).unwrap_or(p).to_path_buf(), at));
+            Ok(())
+        };
+        put_with(&banks, "b", &new, record).unwrap();
+        let log = log.into_inner();
+        let names: Vec<String> = log.iter().map(|(p, _)| p.display().to_string()).collect();
+        // Both files, the web folder, the new folder (last of them), then the banks folder.
+        assert_eq!(names, [".b.new.1/web/index.html", ".b.new.1/web", ".b.new.1/pcds", ".b.new.1", ""].map(String::from).to_vec(), "{names:?}");
+        assert!(log[..4].iter().all(|(_, bank)| bank == "old"), "flushed while the old bank stood: {log:?}");
+        assert_eq!(log[4].1, "new", "the move flushed after it was made");
+        assert_eq!(std::fs::read_to_string(banks.join("b/pcds")).unwrap(), "new");
+        // A flush that fails: nothing moved.
+        std::fs::create_dir_all(dir.join("bin/.b.new.2")).unwrap();
+        std::fs::write(dir.join("bin/.b.new.2/pcds"), "newer").unwrap();
+        let e = put_with(&banks, "b", &dir.join("bin/.b.new.2"), |_| Err(std::io::Error::other("disk gone"))).unwrap_err();
+        assert!(e.contains("could not be flushed to disk before it is installed: disk gone"), "{e}");
+        assert_eq!(std::fs::read_to_string(banks.join("b/pcds")).unwrap(), "new");
+        // The real flush works on files and folders.
+        put(&banks, "b", &dir.join("bin/.b.new.2")).unwrap();
+        assert_eq!(std::fs::read_to_string(banks.join("b/pcds")).unwrap(), "newer");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_good_release_is_installed_into_the_bank() {
