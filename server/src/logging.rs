@@ -204,10 +204,13 @@ fn render(json: bool, tagged: bool, level: Level, component: &str, message: &str
         fields.iter().for_each(|(k, v)| {
             f.insert((*k).into(), v.clone());
         });
-        let line = json!({"timestamp": when, "level": level.name(), "component": component, "message": message, "fields": f}).to_string();
+        // JSON leaves U+0085, U+2028 and U+2029 as they are, and readers that split lines by Unicode
+        // (Python's splitlines, many shippers) would cut the one line of an event in two.
+        let line = json!({"timestamp": when, "level": level.name(), "component": component, "message": message, "fields": f}).to_string().replace('\u{85}', "\\u0085").replace('\u{2028}', "\\u2028").replace('\u{2029}', "\\u2029");
         return if tagged { format!("<{}>{line}", level.priority()) } else { line };
     }
     // The text says it all in words; the fields are for the machine that reads JSON.
+    let message = visible(message);
     let mut lines = message.lines();
     let head = format!("{when} {:<5} {component}: {}", level.name().to_uppercase(), lines.next().unwrap_or(""));
     // A message of several lines keeps every line a line of its own, each marked as part of it.
@@ -220,6 +223,21 @@ fn render(json: bool, tagged: bool, level: Level, component: &str, message: &str
     } else {
         out
     }
+}
+
+/// A message for a log read in a terminal: a carriage return, an escape sequence or another
+/// control character in it (a name, a reply from a bucket or a release feed, a plugin's text) would
+/// rewrite the line before it or the screen, so each is written as `\u{..}`. Line breaks stay
+/// (render marks every line as a line of its own) and so do tabs. JSON escapes them itself.
+fn visible(message: &str) -> String {
+    message.replace("\r\n", "\n").chars().fold(String::new(), |mut out, c| {
+        if c.is_control() && !matches!(c, '\n' | '\t') {
+            out += &format!("\\u{{{:x}}}", c as u32);
+        } else {
+            out.push(c);
+        }
+        out
+    })
 }
 
 /// The line for a message, or None when the level leaves it out. `forced`: written whatever the level.
@@ -323,6 +341,20 @@ mod tests {
         assert!(render(false, true, Level::Info, "x", "a\nb", &[], at(), 1, "front").lines().all(|l| l.starts_with("<6>")));
     }
 
+    /// A message cannot rewrite the line before it or the terminal: control characters other than
+    /// line breaks and tabs are written out, in text; JSON escapes them in its own way.
+    #[test]
+    fn a_message_cannot_steer_a_terminal_through_the_log() {
+        let hostile = "name\r2026-10-20T00:00:00.000Z INFO  front: forged\x1b[2J\u{85}\x07 end\u{2028}\r\nsecond\tline";
+        let text = render(false, false, Level::Warn, "front", hostile, &[], at(), 1, "front");
+        assert!(text.chars().all(|c| !c.is_control() || c == '\n' || c == '\t'), "{text:?}");
+        assert_eq!(text.lines().count(), 2, "a CRLF is one line break, a lone CR is none: {text:?}");
+        assert!(text.contains("name\\u{d}2026") && text.contains("\\u{1b}[2J") && text.contains("second\tline"), "{text:?}");
+        let json = render(true, false, Level::Warn, "front", hostile, &[], at(), 1, "front");
+        assert!(json.chars().all(|c| !c.is_control() && !matches!(c, '\u{2028}' | '\u{2029}')), "{json:?}");
+        assert_eq!(serde_json::from_str::<Value>(&json).unwrap()["message"], hostile);
+    }
+
     #[test]
     fn the_level_leaves_out_what_is_below_it_and_a_trace_line_is_always_there() {
         let wrote = |at_most: Level, level: Level, forced: bool| build(false, at_most, level, "pcds::game", &[], "x", forced).is_some();
@@ -395,3 +427,7 @@ mod tests {
         assert!(module_path!().starts_with("pcds::logging"), "{}", module_path!());
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/logline.rs"]
+pub mod fuzz;

@@ -1534,12 +1534,7 @@ pub(crate) fn read_regular(path: &Path, max: usize) -> std::io::Result<Vec<u8>> 
     Ok(bytes)
 }
 
-/// Text an author chose, made safe to put on a terminal and in a log: a control character (an escape
-/// sequence that hides, redraws or sets the clipboard; a line break that forges a line), a mark that
-/// turns the text around (U+202E) and the zero-width ones become `?`. Plain text is returned as it is.
-pub fn clean(s: &str) -> String {
-    s.chars().map(|c| if c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}') { '?' } else { c }).collect()
-}
+pub use crate::util::clean;
 
 /// The same, with the keys the admin trusts (for the signature to be judged).
 pub fn read_folder_with(folder: &Path, keys: &sign::Keys) -> Loaded {
@@ -1603,3 +1598,7 @@ pub fn disable(dir: &Path, id: &str) -> Result<(), String> {
 pub fn wants_rpc(game: &crate::game::Game, name: &str) -> bool {
     game.ext.plugins.host.as_ref().is_some_and(|h| h.plugins.iter().any(|p| p.running() && p.rpc.contains(name)))
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../../fuzz/targets/wasmhost.rs"]
+pub mod fuzz_wasm;

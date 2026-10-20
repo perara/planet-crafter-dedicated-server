@@ -253,6 +253,53 @@ mod tests {
         }
     }
 
+    /// The loop `take_due` stands for, over random starts, paces and jumps: the same number of
+    /// steps, a due time that is the first one after `now`, and no step lost to a time that is
+    /// neither the game's float nor an exact sum (the clock only ever goes forward through
+    /// the hour where the rule changes).
+    #[test]
+    fn take_due_counts_the_steps_of_the_loop_for_any_start_pace_and_jump() {
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % n
+        };
+        let paces = [0.1, 0.2, 1.0, 0.05, 2.5, 0.016, 10.0];
+        for _ in 0..20_000 {
+            let start = match next(4) {
+                0 => next(3_600_000) as f64 / 1000.0,
+                1 => 3600.0 - next(50) as f64 / 10.0,
+                2 => 3600.0 + next(50) as f64 / 10.0,
+                _ => next(200 * 86_400) as f64 + next(1000) as f64 / 1000.0,
+            };
+            let step = paces[next(paces.len() as u64) as usize];
+            // The loop is the reference: a jump of at most 400 steps keeps it short.
+            let jump = next((step * 400.0 * 1000.0) as u64) as f64 / 1000.0;
+            let mut timer = GameTime::at(start);
+            let mut by_loop = timer;
+            let now = GameTime::at(start + jump);
+            let mut expected = 0u64;
+            while now >= by_loop {
+                by_loop.advance(step);
+                expected += 1;
+            }
+            let steps = timer.take_due(now, step);
+            // Where `now` falls on a due time to a millionth of a second, the loop (added up) and take_due
+            // (multiplied) round differently and may disagree by the one step on the edge: either is the
+            // game's, whose own float would do the same. Anywhere else the counts are the same.
+            let on_the_edge = (by_loop.secs() - now.secs()).abs() < 1e-6 || ((timer.secs() - step) - now.secs()).abs() < 1e-6;
+            if on_the_edge {
+                assert!(steps.abs_diff(expected) <= 1, "start {start}, pace {step}, jump {jump}: {steps} against {expected}");
+                continue;
+            }
+            assert_eq!(steps, expected, "start {start}, pace {step}, jump {jump}");
+            assert!(timer > now && timer.secs() - now.secs() <= step * 1.001 + 1e-3, "start {start}, pace {step}: due {timer:?} at {now:?}");
+            assert!((timer.secs() - by_loop.secs()).abs() < 1e-3 + step * 1e-4, "start {start}, pace {step}, jump {jump}: {timer:?} against the loop's {by_loop:?}");
+        }
+    }
+
     /// The accumulator: the float sum while young, the exact one after.
     #[test]
     fn a_total_of_millions_keeps_growing_after_the_first_hour() {

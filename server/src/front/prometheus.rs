@@ -218,123 +218,125 @@ pub fn render(m: &Value) -> String {
     o.text
 }
 
+#[cfg(any(test, fuzzing, pcds_corpus))]
+/// A strict reader of the text format: what a scraper would refuse, this refuses. Returns
+/// (family, labels, value) for every sample.
+pub fn parse(text: &str) -> Result<Vec<(String, std::collections::BTreeMap<String, String>, f64)>, String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let name_ok = |n: &str, colon: bool| !n.is_empty() && !n.as_bytes()[0].is_ascii_digit() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || (colon && b == b':'));
+    if !text.ends_with('\n') {
+        return Err("the text must end with a line break".into());
+    }
+    let (mut helps, mut types, mut done, mut series) = (BTreeSet::new(), BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
+    let (mut open, mut samples) = (None::<String>, Vec::new());
+    for (n, line) in text.lines().enumerate() {
+        let at = |e: &str| format!("line {}: {e}: {line:?}", n + 1);
+        if line.is_empty() {
+            return Err(at("empty line"));
+        }
+        if let Some(rest) = line.strip_prefix("# HELP ") {
+            let (name, help) = rest.split_once(' ').ok_or_else(|| at("HELP without text"))?;
+            if !name_ok(name, true) || !helps.insert(name.to_string()) {
+                return Err(at("bad or repeated HELP"));
+            }
+            // Only \\ and \n are escapes in help text.
+            let mut chars = help.chars();
+            while let Some(c) = chars.next() {
+                if c == '\\' && !matches!(chars.next(), Some('\\' | 'n')) {
+                    return Err(at("bad escape in help"));
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("# TYPE ") {
+            let (name, kind) = rest.split_once(' ').ok_or_else(|| at("TYPE without a type"))?;
+            if !name_ok(name, true) || !["counter", "gauge", "histogram", "summary", "untyped"].contains(&kind) || types.insert(name.to_string(), kind.to_string()).is_some() {
+                return Err(at("bad or repeated TYPE"));
+            }
+            if kind == "counter" && !name.ends_with("_total") {
+                return Err(at("a counter's name ends in _total"));
+            }
+            if !helps.contains(name) {
+                return Err(at("TYPE before HELP"));
+            }
+        } else if line.starts_with('#') {
+            return Err(at("a comment other than HELP and TYPE"));
+        } else {
+            let name_end = line.find(['{', ' ']).ok_or_else(|| at("no value"))?;
+            let name = &line[..name_end];
+            if !name_ok(name, true) || !types.contains_key(name) {
+                return Err(at("a sample of a family with no TYPE"));
+            }
+            if open.as_deref() != Some(name) {
+                if let Some(prev) = open.replace(name.to_string()) {
+                    done.insert(prev);
+                }
+                if done.contains(name) {
+                    return Err(at("the samples of a family are not together"));
+                }
+            }
+            let mut labels = BTreeMap::new();
+            let mut rest = &line[name_end..];
+            if let Some(inner) = rest.strip_prefix('{') {
+                let (bytes, mut start) = (inner.as_bytes(), 0);
+                loop {
+                    let eq = inner[start..].find('=').ok_or_else(|| at("label without ="))? + start;
+                    let key = &inner[start..eq];
+                    if !name_ok(key, false) || key.starts_with("__") || labels.contains_key(key) {
+                        return Err(at("bad or repeated label name"));
+                    }
+                    if bytes.get(eq + 1) != Some(&b'"') {
+                        return Err(at("label value not quoted"));
+                    }
+                    let (mut value, mut i) = (String::new(), eq + 2);
+                    loop {
+                        match bytes.get(i).ok_or_else(|| at("label value not closed"))? {
+                            b'"' => break,
+                            b'\\' => {
+                                value.push(match bytes.get(i + 1) {
+                                    Some(b'\\') => '\\',
+                                    Some(b'"') => '"',
+                                    Some(b'n') => '\n',
+                                    _ => return Err(at("bad escape in a label value")),
+                                });
+                                i += 2;
+                            }
+                            b'\n' => return Err(at("raw line break in a label value")),
+                            _ => {
+                                let c = inner[i..].chars().next().unwrap();
+                                value.push(c);
+                                i += c.len_utf8();
+                            }
+                        }
+                    }
+                    labels.insert(key.to_string(), value);
+                    match bytes.get(i + 1) {
+                        Some(b',') => start = i + 2,
+                        Some(b'}') => {
+                            rest = &inner[i + 2..];
+                            break;
+                        }
+                        _ => return Err(at("expected , or } after a label")),
+                    }
+                }
+            }
+            let value = rest.strip_prefix(' ').ok_or_else(|| at("no space before the value"))?;
+            let value: f64 = value.parse().map_err(|_| at("the value is not a number"))?;
+            if !value.is_finite() {
+                return Err(at("NaN and infinities are not written"));
+            }
+            if !series.insert(format!("{name}{labels:?}")) {
+                return Err(at("the same series twice"));
+            }
+            samples.push((name.to_string(), labels, value));
+        }
+    }
+    Ok(samples)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet};
-
-    /// A strict reader of the text format: what a scraper would refuse, this refuses. Returns
-    /// (family, labels, value) for every sample.
-    pub fn parse(text: &str) -> Result<Vec<(String, BTreeMap<String, String>, f64)>, String> {
-        let name_ok = |n: &str, colon: bool| !n.is_empty() && !n.as_bytes()[0].is_ascii_digit() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || (colon && b == b':'));
-        if !text.ends_with('\n') {
-            return Err("the text must end with a line break".into());
-        }
-        let (mut helps, mut types, mut done, mut series) = (BTreeSet::new(), BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
-        let (mut open, mut samples) = (None::<String>, Vec::new());
-        for (n, line) in text.lines().enumerate() {
-            let at = |e: &str| format!("line {}: {e}: {line:?}", n + 1);
-            if line.is_empty() {
-                return Err(at("empty line"));
-            }
-            if let Some(rest) = line.strip_prefix("# HELP ") {
-                let (name, help) = rest.split_once(' ').ok_or_else(|| at("HELP without text"))?;
-                if !name_ok(name, true) || !helps.insert(name.to_string()) {
-                    return Err(at("bad or repeated HELP"));
-                }
-                // Only \\ and \n are escapes in help text.
-                let mut chars = help.chars();
-                while let Some(c) = chars.next() {
-                    if c == '\\' && !matches!(chars.next(), Some('\\' | 'n')) {
-                        return Err(at("bad escape in help"));
-                    }
-                }
-            } else if let Some(rest) = line.strip_prefix("# TYPE ") {
-                let (name, kind) = rest.split_once(' ').ok_or_else(|| at("TYPE without a type"))?;
-                if !name_ok(name, true) || !["counter", "gauge", "histogram", "summary", "untyped"].contains(&kind) || types.insert(name.to_string(), kind.to_string()).is_some() {
-                    return Err(at("bad or repeated TYPE"));
-                }
-                if kind == "counter" && !name.ends_with("_total") {
-                    return Err(at("a counter's name ends in _total"));
-                }
-                if !helps.contains(name) {
-                    return Err(at("TYPE before HELP"));
-                }
-            } else if line.starts_with('#') {
-                return Err(at("a comment other than HELP and TYPE"));
-            } else {
-                let name_end = line.find(['{', ' ']).ok_or_else(|| at("no value"))?;
-                let name = &line[..name_end];
-                if !name_ok(name, true) || !types.contains_key(name) {
-                    return Err(at("a sample of a family with no TYPE"));
-                }
-                if open.as_deref() != Some(name) {
-                    if let Some(prev) = open.replace(name.to_string()) {
-                        done.insert(prev);
-                    }
-                    if done.contains(name) {
-                        return Err(at("the samples of a family are not together"));
-                    }
-                }
-                let mut labels = BTreeMap::new();
-                let mut rest = &line[name_end..];
-                if let Some(inner) = rest.strip_prefix('{') {
-                    let (bytes, mut start) = (inner.as_bytes(), 0);
-                    loop {
-                        let eq = inner[start..].find('=').ok_or_else(|| at("label without ="))? + start;
-                        let key = &inner[start..eq];
-                        if !name_ok(key, false) || key.starts_with("__") || labels.contains_key(key) {
-                            return Err(at("bad or repeated label name"));
-                        }
-                        if bytes.get(eq + 1) != Some(&b'"') {
-                            return Err(at("label value not quoted"));
-                        }
-                        let (mut value, mut i) = (String::new(), eq + 2);
-                        loop {
-                            match bytes.get(i).ok_or_else(|| at("label value not closed"))? {
-                                b'"' => break,
-                                b'\\' => {
-                                    value.push(match bytes.get(i + 1) {
-                                        Some(b'\\') => '\\',
-                                        Some(b'"') => '"',
-                                        Some(b'n') => '\n',
-                                        _ => return Err(at("bad escape in a label value")),
-                                    });
-                                    i += 2;
-                                }
-                                b'\n' => return Err(at("raw line break in a label value")),
-                                _ => {
-                                    let c = inner[i..].chars().next().unwrap();
-                                    value.push(c);
-                                    i += c.len_utf8();
-                                }
-                            }
-                        }
-                        labels.insert(key.to_string(), value);
-                        match bytes.get(i + 1) {
-                            Some(b',') => start = i + 2,
-                            Some(b'}') => {
-                                rest = &inner[i + 2..];
-                                break;
-                            }
-                            _ => return Err(at("expected , or } after a label")),
-                        }
-                    }
-                }
-                let value = rest.strip_prefix(' ').ok_or_else(|| at("no space before the value"))?;
-                let value: f64 = value.parse().map_err(|_| at("the value is not a number"))?;
-                if !value.is_finite() {
-                    return Err(at("NaN and infinities are not written"));
-                }
-                if !series.insert(format!("{name}{labels:?}")) {
-                    return Err(at("the same series twice"));
-                }
-                samples.push((name.to_string(), labels, value));
-            }
-        }
-        Ok(samples)
-    }
 
     fn running() -> Value {
         json!({
@@ -522,3 +524,7 @@ mod tests {
         assert!(parsed["panels"].as_array().is_some_and(|p| p.len() > 10) && parsed["uid"] == "pcds-server");
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../../fuzz/targets/prom.rs"]
+pub mod fuzz;

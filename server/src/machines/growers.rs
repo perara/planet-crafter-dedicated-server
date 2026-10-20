@@ -705,6 +705,10 @@ mod tests {
         game.inventories_rpc(0, "InventoriesHandler.RemoveAndDestroyAllItemsFromInventoryServerRpc", &crate::game::Args(vec![json!(second)]));
         assert!(!game.wos.contains_key(&plant));
         assert!(game.net.objects.contains_key(&net), "the game sends no destroy for it");
+        // The plant is the machine's child: it goes with the machine, or it would stand in every join
+        // for a world object that is gone.
+        game.destroy_world_object(grower, true);
+        assert!(!game.net.objects.contains_key(&net), "the machine takes its plants along");
     }
 
     #[test]

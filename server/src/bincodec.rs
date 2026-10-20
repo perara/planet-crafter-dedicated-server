@@ -884,3 +884,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/bincodec.rs"]
+pub mod fuzz;

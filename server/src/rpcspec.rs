@@ -448,6 +448,95 @@ mod tests {
         assert_eq!(args, vec![json!(1), json!("PcdsSelftest")]);
     }
 
+    /// Every RPC of the game's table, with arguments made up for each of its argument kinds (the edges of
+    /// every integer, floats, strings with characters past the first plane, lists, structs, an
+    /// absent optional): what is written reads back as it was, and a body cut anywhere reads as nothing.
+    #[test]
+    fn every_rpc_of_the_table_round_trips_random_arguments() {
+        let Some(s) = spec() else { return };
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % n.max(1)
+        };
+        fn float(next: &mut dyn FnMut(u64) -> u64) -> Value {
+            let f = match next(6) {
+                0 => 0.0f32,
+                1 => -0.0,
+                2 => (next(2_000_000) as f32 - 1_000_000.0) / 8.0,
+                3 => 1.0e-7 * next(1000) as f32,
+                4 => f32::MIN_POSITIVE,
+                _ => (next(200_000_000) as f32 - 100_000_000.0) / 3.0,
+            };
+            json!(f)
+        }
+        fn raw(ty: &str, next: &mut dyn FnMut(u64) -> u64) -> Value {
+            let edge = |next: &mut dyn FnMut(u64) -> u64, a: i64, b: i64| -> i64 { [a, b, 0, 1, -1, next(1000) as i64 - 500][next(6) as usize] };
+            match ty {
+                "bool" => json!(next(2) == 1),
+                "float" => float(next),
+                "int" => json!(edge(next, i32::MIN as i64, i32::MAX as i64).clamp(i32::MIN as i64, i32::MAX as i64)),
+                "uint" => json!([0u64, u32::MAX as u64, 1, next(100_000)][next(4) as usize]),
+                "short" => json!(edge(next, i16::MIN as i64, i16::MAX as i64).clamp(i16::MIN as i64, i16::MAX as i64)),
+                "ushort" => json!([0u64, u16::MAX as u64, 1, next(60_000)][next(4) as usize]),
+                "byte" => json!(next(256)),
+                "long" => json!(edge(next, i64::MIN, i64::MAX)),
+                "ulong" => json!([0u64, u64::MAX, 1, next(1 << 40)][next(4) as usize]),
+                "double" => json!(next(2_000_000) as f64 / 3.0 - 300_000.0),
+                "Vector2Int" => json!([edge(next, i32::MIN as i64, i32::MAX as i64).clamp(i32::MIN as i64, i32::MAX as i64), next(1000) as i64 - 500]),
+                "Vector2" => json!([float(next), float(next)]),
+                "Vector3" => json!([float(next), float(next), float(next)]),
+                "Quaternion" | "Color" => json!([float(next), float(next), float(next), float(next)]),
+                other => panic!("an unknown raw type {other}"),
+            }
+        }
+        fn one(a: &Arg, enc: &str, ty: &str, next: &mut dyn FnMut(u64) -> u64) -> Value {
+            match enc {
+                "raw" => raw(ty, next),
+                "packed" => raw(ty, next),
+                "enum" => raw(a.base.as_deref().unwrap(), next),
+                "struct" => Value::Array(a.fields.iter().flatten().filter(|f| !f.starts_with("pad")).map(|f| raw(f, next)).collect()),
+                "string" => json!(["", "x", "h\u{e9}llo", "\u{4e16}\u{754c}", "a \u{1f30d} b", "line\nbreak"][next(6) as usize]),
+                "array" => Value::Array((0..next(5)).map(|_| one(a, a.item.as_deref().unwrap(), ty.trim_end_matches("[]"), next)).collect()),
+                "extension" => {
+                    if next(3) == 0 {
+                        Value::Null
+                    } else {
+                        json!([1 + next(1 << 20) as i64, next(1000) as i64, "Instance-1", next(5) as i64, next(5) as i64, (0..next(4)).map(|_| next(1 << 20) as i64 - 500_000).collect::<Vec<i64>>()])
+                    }
+                }
+                other => panic!("an unknown encoding {other}"),
+            }
+        }
+        let mut hashes: Vec<u32> = s.by_hash.keys().copied().collect();
+        hashes.sort();
+        let (mut tried, mut skipped) = (0, 0);
+        for hash in hashes {
+            let rpc = &s.by_hash[&hash];
+            if !rpc.decodable {
+                skipped += 1;
+                continue;
+            }
+            for round in 0..40 {
+                let args: Vec<Value> = rpc.args.iter().map(|a| if a.optional && next(3) == 0 { Value::Null } else { one(a, &a.enc, &a.ty, &mut next) }).collect();
+                let (h, body) = s.encode(&rpc.name, &args);
+                assert_eq!(h, hash);
+                assert_eq!(s.decode(hash, &body).as_ref(), Some(&args), "{} round {round}", rpc.name);
+                // A body cut short anywhere never reads as the whole (and never panics).
+                for cut in 0..body.len() {
+                    if let Some(got) = s.decode(hash, &body[..cut]) {
+                        // Only an RPC whose last arguments are optional or empty may read from less.
+                        assert_eq!(got.len(), args.len(), "{}", rpc.name);
+                    }
+                }
+                tried += 1;
+            }
+        }
+        assert!(tried > 1000 && skipped < 100, "{tried} bodies, {skipped} RPCs skipped");
+    }
+
     #[test]
     fn round_trips_every_argument_kind() {
         let Some(s) = spec() else { return };

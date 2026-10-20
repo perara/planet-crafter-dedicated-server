@@ -160,6 +160,21 @@ fn layout(sections: &[&str], save: &SaveFile) -> Result<(), String> {
     Ok(())
 }
 
+/// Every entry of the lists is a record (a JSON object). `layout` looks at the first entry of each
+/// section; an entry after it that is a string, a number or an array is a file damaged or edited, and
+/// the game's code assigns fields to its entries (`p["host"] = ...` when the save is written): it would
+/// panic in the game loop at the first autosave and every one after it, with the world unsaved.
+fn records(save: &SaveFile) -> Result<(), String> {
+    let lists = [("planets", &save.planets), ("players", &save.players), ("world objects", &save.objects), ("inventories", &save.inventories), ("messages", &save.messages), ("story events", &save.story_events), ("procedural instances", &save.procedural)];
+    for (name, entries) in lists {
+        if let Some((at, bad)) = entries.iter().enumerate().find(|(_, v)| !v.is_object()) {
+            let shown: String = bad.to_string().chars().take(40).collect();
+            return Err(format!("{name}: entry {} is no record ({shown}): the file is damaged or was edited", at + 1));
+        }
+    }
+    Ok(())
+}
+
 /// A file with no game settings is no save, or one cut short (a copy still under way): read as an
 /// empty world, the next save would write over what it held. Settings of the game's older
 /// versions (a game mode, no dying consequences) are the game's to convert, which `pcds world
@@ -343,6 +358,7 @@ impl SaveFile {
             procedural: list(9)?,
         };
         layout(&sections, &save)?;
+        records(&save)?;
         Ok(save)
     }
 
@@ -582,6 +598,51 @@ mod tests {
             let real = SaveFile::load(&path).unwrap();
             assert_eq!(real.to_text(), reference_text(&real));
         }
+    }
+
+    /// An entry of a list that is no record is refused at the load, naming the list: the entries after
+    /// the first are not looked at by `layout`, and a string in `players` panicked the bank at its first
+    /// autosave (found by the loadsave fuzz target).
+    #[test]
+    fn an_entry_that_is_no_record_is_refused_not_kept_to_panic_a_save_later() {
+        let good = SaveFile::tiny_text("w");
+        assert!(SaveFile::parse(&good).is_ok());
+        let sections: Vec<&str> = good.split("\r@").collect();
+        // The players' section (the third) with a record, then a string / a number / an array / a null.
+        for bad in ["\"x\"", "5", "[1]", "null", "true"] {
+            let mut s = sections.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+            s[2] = format!("\r{{\"id\":1,\"playerPosition\":\"0,0,0\"}}|\n{bad}\r");
+            let text = s.join("\r@");
+            let e = SaveFile::parse(&text).err().unwrap_or_else(|| panic!("{bad} was taken"));
+            assert!(e.contains("players: entry 2 is no record"), "{bad}: {e}");
+        }
+    }
+
+    /// A number written to a save reads back as it was. serde_json's default float parsing is within
+    /// an ulp of the right value, not the right value: one f64 in ten did not come back as written
+    /// (the totals of the world's units, a planet's level), so every load of a save moved some of them
+    /// and a save was not a fixpoint of load and save. The `float_roundtrip` feature of serde_json is
+    /// what makes it exact.
+    #[test]
+    fn a_float_in_a_save_reads_back_as_it_was_written() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut save = SaveFile::empty();
+        save.world = json!({"terraTokens": 1});
+        save.planets = (0..2000).map(|i| json!({"planetId": "Prime", "unitOxygenLevel": (next() >> 11) as f64 / (1u64 << 53) as f64 * 10f64.powi((i % 30) - 6), "unitHeatLevel": f64::from_bits(next() >> 2 | 0x3000_0000_0000_0000)})).collect();
+        save.settings = json!({"modifierGaugeDrain": 0.800000011920929, "planetId": "Prime", "dyingConsequencesLabel": "DropSomeItems", "mode": "Standard"});
+        let back = SaveFile::parse(&save.to_text()).unwrap();
+        for (a, b) in save.planets.iter().zip(&back.planets) {
+            for key in ["unitOxygenLevel", "unitHeatLevel"] {
+                assert_eq!(a[key].as_f64().map(f64::to_bits), b[key].as_f64().map(f64::to_bits), "{key}: {} against {}", a[key], b[key]);
+            }
+        }
+        assert_eq!(back.to_text(), save.to_text(), "a save written, read and written again is the same text");
     }
 
     /// Two writers of one save at once: every write lands whole, nothing is left beside it.

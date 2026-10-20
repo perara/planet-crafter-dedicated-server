@@ -408,3 +408,7 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/oldsave.rs"]
+pub mod fuzz;

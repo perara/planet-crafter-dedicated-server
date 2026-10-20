@@ -205,7 +205,14 @@ fn send(b: &Backup, method: &str, key: &str, query: &[(&str, &str)], body: &[u8]
 fn failure(mut answer: ureq::http::Response<ureq::Body>) -> String {
     let status = answer.status().as_u16();
     let text = answer.body_mut().with_config().limit(16 << 10).read_to_string().unwrap_or_default();
-    let field = |tag: &str| text.split(&format!("<{tag}>")).nth(1).and_then(|r| r.split(&format!("</{tag}>")).next()).map(str::to_string);
+    error_text(status, &text)
+}
+
+/// "HTTP 403: AccessDenied (message)" from the status and the XML body of an error. The body is the
+/// bucket's: what it says goes to a terminal and the log as text, so control characters and
+/// direction marks are written as `?` and a field is cut at 200 characters.
+fn error_text(status: u16, text: &str) -> String {
+    let field = |tag: &str| text.split(&format!("<{tag}>")).nth(1).and_then(|r| r.split(&format!("</{tag}>")).next()).map(|v| crate::util::clean(&unescape(v)).chars().take(200).collect::<String>());
     format!("HTTP {status}{}", field("Code").map(|c| format!(": {c}{}", field("Message").map(|m| format!(" ({m})")).unwrap_or_default())).unwrap_or_default())
 }
 
@@ -247,14 +254,21 @@ pub fn list(b: &Backup, prefix: &str) -> Result<Vec<String>, String> {
             return Err(failure(answer));
         }
         let xml = answer.body_mut().with_config().limit(16 << 20).read_to_string().map_err(|e| e.to_string())?;
-        let each = |tag: &str| -> Vec<String> { xml.split(&format!("<{tag}>")).skip(1).filter_map(|r| r.split(&format!("</{tag}>")).next()).map(unescape).collect() };
-        keys.extend(each("Key"));
-        token = each("NextContinuationToken").pop().filter(|_| xml.contains("<IsTruncated>true</IsTruncated>"));
+        let (page, next) = listing(&xml);
+        keys.extend(page);
+        token = next;
         if token.is_none() {
             return Ok(keys);
         }
     }
     Err("the bucket lists more than 10,000 backups under that prefix: use a longer prefix or clear old ones".into())
+}
+
+/// One page of a ListObjectsV2 answer: the keys, and the token of the next page when the answer
+/// says it is cut.
+fn listing(xml: &str) -> (Vec<String>, Option<String>) {
+    let each = |tag: &str| -> Vec<String> { xml.split(&format!("<{tag}>")).skip(1).filter_map(|r| r.split(&format!("</{tag}>")).next()).map(unescape).collect() };
+    (each("Key"), each("NextContinuationToken").pop().filter(|_| xml.contains("<IsTruncated>true</IsTruncated>")))
 }
 
 /// The XML entities S3 uses in a key.
@@ -331,6 +345,18 @@ mod tests {
         let sent = [("host", get("host")), ("x-amz-content-sha256", get("x-amz-content-sha256")), ("x-amz-date", get("x-amz-date"))];
         let again = authorization("PUT", "/saves/pcds/world.json", "", &sent, &get("x-amz-content-sha256"), "us-east-1", "AKIAEXAMPLE", "secret", &get("x-amz-date"));
         assert_eq!(get("authorization"), again);
+    }
+
+    /// What a bucket says goes to a terminal and the log: its error text has no control character
+    /// (an escape sequence would rewrite the screen), reads its XML entities and is cut short.
+    #[test]
+    fn an_error_body_is_plain_text_and_a_listing_reads_back_its_keys() {
+        assert_eq!(error_text(403, "<Error><Code>Access&amp;Denied</Code><Message>no\x1b[31m &lt;x&gt;\r\n</Message></Error>"), "HTTP 403: Access&Denied (no?[31m <x>??)");
+        assert_eq!(error_text(500, "not xml"), "HTTP 500");
+        assert_eq!(error_text(400, &format!("<Error><Code>{}</Code></Error>", "x".repeat(900))).chars().count(), "HTTP 400: ".len() + 200);
+        let (keys, next) = listing("<ListBucketResult><IsTruncated>true</IsTruncated><Contents><Key>a&amp;lt;b</Key></Contents><Contents><Key></Key></Contents><NextContinuationToken>t&amp;1</NextContinuationToken></ListBucketResult>");
+        assert_eq!((keys, next.as_deref()), (vec!["a&lt;b".to_string(), String::new()], Some("t&1")));
+        assert_eq!(listing("<ListBucketResult><IsTruncated>false</IsTruncated><NextContinuationToken>t</NextContinuationToken></ListBucketResult>"), (vec![], None));
     }
 
     /// AWS's own example for a request with a query ("GET Bucket (List Objects)").
@@ -443,3 +469,7 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/s3resp.rs"]
+pub mod fuzz;

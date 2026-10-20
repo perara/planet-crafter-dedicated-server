@@ -1,0 +1,1 @@
+{"hello": {"enabled": true, "grant": ["chat.say"], "digest": "abababababababababababababababababababababababababababababababab", "limits": {"fuelPerEvent": 1000}, "approvedAt": 5, "signer": "k"}}

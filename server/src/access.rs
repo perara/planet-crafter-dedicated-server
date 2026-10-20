@@ -328,6 +328,52 @@ mod tests {
         assert!(a.ip_allowed("127.0.0.1") && !a.name_allowed("mallory", None) && !a.name_allowed("Eve", None));
     }
 
+    /// The range rules against a reference that compares the two addresses bit by bit: both
+    /// families, every prefix length, addresses that share a prefix with the rule up to a random
+    /// bit, IPv4 clients that arrive as mapped IPv6 addresses.
+    #[test]
+    fn ip_rules_agree_with_a_bit_by_bit_reference() {
+        fn bits(ip: IpAddr) -> Vec<bool> {
+            match ip.to_canonical() {
+                IpAddr::V4(a) => u32::from(a).to_be_bytes().iter().flat_map(|b| (0..8).rev().map(move |i| b >> i & 1 == 1)).collect(),
+                IpAddr::V6(a) => a.octets().iter().flat_map(|b| (0..8).rev().map(move |i| b >> i & 1 == 1)).collect(),
+            }
+        }
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut agreed = [0u32; 2];
+        for _ in 0..200_000 {
+            let v6 = next() % 3 == 0;
+            let raw: [u8; 16] = std::array::from_fn(|_| next() as u8);
+            let rule_ip: IpAddr = if v6 { IpAddr::from(raw) } else { IpAddr::from([raw[0], raw[1], raw[2], raw[3]]) };
+            let width = if v6 { 128 } else { 32 };
+            let prefix = (next() % (width as u64 + 1)) as usize;
+            // The client shares the rule's address up to a random bit and differs there or goes on equal.
+            let mut client = bits(rule_ip);
+            let shared = (next() % (width as u64 + 1)) as usize;
+            for bit in client.iter_mut().skip(shared) {
+                *bit = next() & 1 == 1;
+            }
+            let bytes: Vec<u8> = client.chunks(8).map(|c| c.iter().fold(0u8, |b, v| b << 1 | *v as u8)).collect();
+            let client_ip: IpAddr = if v6 { IpAddr::from(<[u8; 16]>::try_from(bytes.as_slice()).unwrap()) } else { IpAddr::from(<[u8; 4]>::try_from(bytes.as_slice()).unwrap()) };
+            // An IPv4 client may come as ::ffff:a.b.c.d.
+            let shown = match client_ip {
+                IpAddr::V4(a) if next() % 4 == 0 => format!("::ffff:{a}"),
+                other => other.to_string(),
+            };
+            let expected = bits(rule_ip)[..prefix] == bits(client_ip)[..prefix];
+            let rule_text = if prefix == width && next() % 2 == 0 { rule_ip.to_string() } else { format!("{rule_ip}/{prefix}") };
+            assert_eq!(ip_matches(&shown, &rule_text), expected, "{shown} in {rule_text}");
+            agreed[expected as usize] += 1;
+        }
+        assert!(agreed[0] > 10_000 && agreed[1] > 10_000, "both answers were met: {agreed:?}");
+    }
+
     /// A ban that cannot be written is refused, not kept in memory only (and lost at restart).
     #[test]
     fn a_ban_that_cannot_be_kept_is_refused() {

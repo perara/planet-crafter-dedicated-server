@@ -545,6 +545,12 @@ pub fn on_destroyed(game: &mut Game, wo: &WorldObject) {
     if machines.remove(&wo.id) {
         machines.listening.retain(|_, m| *m != wo.id);
     }
+    // The plants whose items were destroyed with their game objects left (objects.rs destroy_world_object)
+    // are the machine's children: they go with it.
+    let orphans: Vec<u64> = game.ext.machines.grab.iter().filter(|(item, (machine, _))| *machine == wo.id && !game.wos.contains_key(item)).map(|(_, (_, net))| *net).collect();
+    for net in orphans {
+        game.net.despawn(net);
+    }
     // ConstructibleProxy.OnDestroy: WorldObjectsHandler.onConstructibleDestroyed.
     production::constructible_destroyed(game, wo.id);
 }
@@ -601,7 +607,12 @@ pub fn inventory_changed(game: &mut Game, inventory: i32, wo: i32, added: bool) 
 impl Machines {
     /// Whether the item is a plant a grower holds for harvest (see `grabbed`).
     pub fn grabbable(&self, wo: i32) -> bool {
-        self.grab.contains_key(&wo)
+        self.grower_of(wo).is_some()
+    }
+
+    /// The grower that holds the plant.
+    pub fn grower_of(&self, wo: i32) -> Option<i32> {
+        self.grab.get(&wo).map(|(machine, _)| *machine)
     }
 }
 

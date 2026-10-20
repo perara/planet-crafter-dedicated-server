@@ -251,6 +251,20 @@ matches on `Event` fields by name. The plugin changes add nothing to the snapsho
   bearer token or a scoped token. The code did not print them; this is the net under it, with
   tests in both formats and a check on a real server's log.
 
+* **`net.http` never reaches more of the cloud services that hand out credentials.** Besides
+  169.254.169.254, 100.100.100.200 and fd00:ec2::254 it now never reaches Azure's WireServer
+  (168.63.129.16: a *public* address, so a plugin with `net.http` and no `net.http.local` could
+  reach it through any name that resolved to it), the container credentials of AWS ECS and EKS
+  (169.254.170.2, 169.254.170.23, fd00:ec2::23), Tencent's metadata (169.254.0.23) and Google's
+  IPv6 metadata server (fd20:ce::254).
+* **TLS: rustls-webpki 0.103.16 and webpki-roots 1.0.10** (RUSTSEC-2026-0382, RUSTSEC-2026-0381, of
+  19 and 20 October): the chain check accepted intermediates that the root programs distrust (emSign).
+  The updater, the S3 copies and the plugins' `net.http` use them. `cargo audit` is clean again but
+  for the known `paste` warning.
+* **The admin API's HTTP reader is stricter about the head.** A line of blanks no longer ends the
+  head (a proxy in front reads it as a folded line), and a `Content-Length` with a sign
+  (`+5`) is refused.
+
 ### Fixed
 
 * `world.tokens` accepted an amount of `i32::MIN`: `abs()` wraps in a release build, so the bound let it through. It is checked with `unsigned_abs`.
@@ -260,6 +274,40 @@ matches on `Event` fields by name. The plugin changes add nothing to the snapsho
   panic is known; 300 generated hostile modules in the tests found none.
 * A rules file's command with `cooldown_seconds` silently had no cooldown without `world.read` (the clock is the world's); the check now says the
   rules need `world.read`, and a command without a cooldown no longer asks the world for the time.
+* **The fuzz crate (`server/fuzz`) compiles again.** It had stopped building when the game tables
+  became raw JSON (a missing `raw_value` feature) and when two test-only functions were used by
+  the targets, so none of the fuzz targets could run. CI now type-checks it (`make fuzz-check`).
+  Fifteen targets are new (`docs/testing.md`), and the game targets let game time pass.
+* **A toxic area's key can no longer overflow.** The key a client registers an area under is any
+  number; `i32::MIN` matched the area at the origin and `i32::MIN + 1` the one at `i32::MAX`
+  (a build with overflow checks panicked in the tick).
+* **Numbers in a save and in the messages between the front and the banks read back as they were
+  written.** serde_json's default float parsing is an ulp off for one f64 in ten, so a load moved
+  some of the world units' totals by an ulp and a save was not a fixpoint of load and save
+  (`float_roundtrip`). The late-game bench save's fingerprint moves with it; the bench world's
+  does not.
+* **A deconstructed grower takes the network objects of its destroyed plants along.** The plants
+  of a Farm or a VegetableGrower keep their network object when the items of the machine's
+  inventory are destroyed (as the game does: they are the machine's children), but nothing
+  removed them afterwards: they stayed in every client's scene, in every join and in every
+  snapshot for a world object that was gone, for good.
+* **A save whose lists hold something that is no record is refused at the start.** A string, a
+  number or an array after the first entry of the players, world objects, messages... loaded, and
+  the game's code that sets a field of such an entry panicked at the first autosave and every one
+  after it: a world that plays and can never save.
+* **A rules file or a rules change that is a JSON array is refused.** It was read as the sections'
+  fields in order (`[[0.5]]` set `meteo.eventChance`).
+* **A Steam library file nested without end** (`"a" {` a quarter of a million times) is refused
+  with an error; it ended the process with a stack overflow.
+* **The log cannot be used to steer a terminal.** The text format wrote a message as it came: a
+  carriage return in it (a name, a bucket's error text, a release feed's message) moved the cursor
+  over the line's own time and level, an escape sequence cleared or recoloured the screen of
+  `pcds logs`, `journalctl` and `docker logs`. Control characters other than line breaks and tabs are
+  now written as `\u{..}`. The error text of an S3 request is plain text too (control characters
+  `?`, entities read, 200 characters a field).
+* `make fuzz-check` and the CI job for it; `--features portable-dispatch` for the sanitizer
+  builds (wasmi's default dispatch needs the optimizer's tail calls, which the sanitizers
+  prevent).
 
 ## [0.8.0] - 2026-10-20
 

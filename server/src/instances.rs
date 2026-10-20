@@ -873,6 +873,8 @@ mod tests {
     /// a fresh world, six wrecks one after the other at these places (scene wrecks seed themselves from
     /// the world seed and the place): how many network objects it spawned, the first two and the last.
     #[test]
+    // The game's own numbers (0.7071068 is a quaternion's component, not 1/sqrt(2) by choice).
+    #[allow(clippy::approx_constant)]
     fn wrecks_of_any_seed_come_out_as_the_game_lays_them() {
         let Some(mut g) = crate::planets::tests::game() else { return };
         let real = [

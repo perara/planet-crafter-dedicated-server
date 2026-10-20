@@ -403,6 +403,9 @@ impl Rules {
     /// Each value is checked as JSON first: a number past f32 would become infinity, which
     /// serializes as null and leaves a rules.json the server cannot load.
     pub fn patched(&self, patch: &Value) -> Result<Rules, String> {
+        if !patch.is_object() {
+            return Err("a change of the rules is a JSON object of sections".into());
+        }
         let mut v = serde_json::to_value(self).map_err(|e| e.to_string())?;
         merge(&mut v, patch);
         for knob in crate::config::KNOBS.iter().filter(|k| k.source == crate::config::Source::Rules) {
@@ -411,11 +414,21 @@ impl Rules {
         serde_json::from_value(v).map_err(|e| e.to_string())
     }
 
+    /// The rules in a JSON text: an object of sections. A struct's derived Deserialize also takes an
+    /// array, its fields in order, so `[[0.5]]` would set meteo.eventChance: a rules file that is no
+    /// object is a mistake to say, as a misspelt rule is.
+    pub fn parse(text: &str) -> Result<Rules, String> {
+        if serde_json::from_str::<Value>(text).is_ok_and(|v| !v.is_object()) {
+            return Err("not a JSON object of sections".into());
+        }
+        serde_json::from_str(text).map_err(|e| unreadable(text, &e))
+    }
+
     /// rules.json, or the defaults when there is none.
     pub fn load(path: &str) -> Result<Rules, String> {
         match std::fs::read_to_string(path) {
             Ok(text) if text.trim().is_empty() => Ok(Rules::default()),
-            Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{path}: {}", unreadable(&text, &e))),
+            Ok(text) => Rules::parse(&text).map_err(|e| format!("{path}: {e}")),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Rules::default()),
             Err(e) => Err(format!("{path}: {e}")),
         }
@@ -589,13 +602,21 @@ mod tests {
 
     #[test]
     fn a_rules_file_number_past_f32_is_refused() {
-        // Rules::load reads 1e39 as infinity; validate used to see null (unset) and accept it.
-        let r: Rules = serde_json::from_str(r#"{"chat": {"timeoutSeconds": 1e39}}"#).unwrap();
-        assert!(r.chat.timeout_seconds.is_infinite());
+        // Read exactly (serde_json's float_roundtrip), 1e39 is no f32: the file is refused, naming the rule,
+        // where the approximate parser made it infinity.
+        for text in [r#"{"chat": {"timeoutSeconds": 1e39}}"#, r#"{"speed": {"growth": -1e39}}"#, r#"{"death": {"dropChance": 1e39}}"#] {
+            let e = Rules::parse(text).unwrap_err();
+            assert!(e.contains("not a value this rule takes"), "{text}: {e}");
+        }
+        // And validate still refuses an infinity that gets in another way (a rule set in code, a snapshot).
+        let mut r = Rules::default();
+        r.chat.timeout_seconds = f32::INFINITY;
         assert!(r.finite().unwrap_err().contains("chat.timeoutSeconds"));
-        let r: Rules = serde_json::from_str(r#"{"speed": {"growth": -1e39}}"#).unwrap();
+        let mut r = Rules::default();
+        r.speed.growth = f32::NEG_INFINITY;
         assert!(r.finite().unwrap_err().contains("speed.growth"));
-        let r: Rules = serde_json::from_str(r#"{"death": {"dropChance": 1e39}}"#).unwrap();
+        let mut r = Rules::default();
+        r.death.drop_chance = Some(f32::INFINITY);
         assert!(r.finite().unwrap_err().contains("death.dropChance"));
         assert!(Rules::default().finite().is_ok());
     }
@@ -656,6 +677,61 @@ mod tests {
         let e = dlc(serde_json::json!(["Prime"])).unwrap_err();
         assert!(e.contains("\"Prime\"") && e.contains("Humble, Toxicity"), "{e}");
         assert!(dlc(serde_json::json!(["Humble", "Humble"])).unwrap_err().contains("twice"));
+    }
+
+    /// A rules file or a patch that is an array is not read as the sections' fields in order.
+    #[test]
+    fn rules_are_an_object_of_sections_never_an_array_read_by_position() {
+        for text in ["[[0.5]]", "[]", "[{}]", "5", "\"x\"", "null", "true"] {
+            assert!(Rules::parse(text).is_err(), "{text}");
+            assert!(Rules::default().patched(&serde_json::from_str(text).unwrap()).is_err(), "{text}");
+        }
+        assert!(Rules::parse("{}").unwrap() == Rules::default());
+        assert!(Rules::parse(r#"{"speed": {"growth": 2}}"#).unwrap().speed.growth == 2.0);
+        let dir = std::env::temp_dir().join(format!("pcds-rules-array-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rules.json").to_string_lossy().into_owned();
+        std::fs::write(&path, "[[0.5]]").unwrap();
+        assert!(Rules::load(&path).unwrap_err().contains("not a JSON object"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A merge patch sets what it names and a null puts the default back, for every rule there
+    /// is: whatever value is accepted, `null` for the rule or for its whole section restores the
+    /// defaults, and the result reads back from its own serialization (rules.json).
+    #[test]
+    fn a_null_puts_back_every_rule_a_patch_set() {
+        let defaults = Rules::default();
+        let json = serde_json::to_value(&defaults).unwrap();
+        let (mut accepted, mut refused) = (0, 0);
+        for (section, fields) in json.as_object().expect("sections") {
+            for (field, default) in fields.as_object().expect("rules") {
+                let mut candidates: Vec<Value> = vec![Value::Null, serde_json::json!("x"), serde_json::json!([]), serde_json::json!({})];
+                match default {
+                    Value::Bool(b) => candidates.push(Value::Bool(!b)),
+                    Value::Number(n) => {
+                        let d = n.as_f64().unwrap_or(0.0);
+                        candidates.extend([serde_json::json!(d + 1.0), serde_json::json!(d * 2.0), serde_json::json!(3), serde_json::json!(0.5), serde_json::json!(-1), serde_json::json!(1e30)]);
+                    }
+                    Value::String(_) => candidates.push(serde_json::json!("Creative")),
+                    _ => candidates.extend([serde_json::json!(["https://example.com/h"]), serde_json::json!({"Drill1": 2})]),
+                }
+                for value in candidates {
+                    let patch = serde_json::json!({ section: { field: value } });
+                    let Ok(changed) = defaults.patched(&patch) else {
+                        refused += 1;
+                        continue;
+                    };
+                    accepted += 1;
+                    let text = serde_json::to_string(&changed).unwrap();
+                    assert!(serde_json::from_str::<Rules>(&text).is_ok_and(|r| r == changed), "{patch} does not read back: {text}");
+                    for reset in [serde_json::json!({ section: { field: null } }), serde_json::json!({ section: null })] {
+                        assert!(changed.patched(&reset).unwrap() == defaults, "{patch} then {reset} is not the defaults");
+                    }
+                }
+            }
+        }
+        assert!(accepted > 100 && refused > 100, "{accepted} accepted, {refused} refused");
     }
 
     #[test]

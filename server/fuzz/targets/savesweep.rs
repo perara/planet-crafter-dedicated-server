@@ -55,7 +55,7 @@ pub fn run(_: &[u8]) {
             let mut mutated = text[..*start].to_string();
             mutated.push_str(v);
             mutated.push_str(&text[*end..]);
-            let save = SaveFile::from_text(&mutated);
+            let Ok(save) = SaveFile::parse(&mutated) else { continue };
             let tables = tables.clone();
             runs += 1;
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
@@ -63,7 +63,7 @@ pub fn run(_: &[u8]) {
                 let mut g = Game::new(n, d, s, save, scenes);
                 g.time += 1.0;
                 g.tick();
-                let _ = g.snapshot().to_text();
+                let _ = g.save_text();
             }));
         }
     }

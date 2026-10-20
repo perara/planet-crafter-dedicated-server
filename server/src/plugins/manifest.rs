@@ -607,3 +607,7 @@ mod tests {
         assert_eq!(version_triple("1.2.3.4"), None);
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../../fuzz/targets/manifest.rs"]
+pub mod fuzz;

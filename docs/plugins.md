@@ -464,8 +464,10 @@ label begins with a letter), and one that reaches the resolver anyway is judged 
 becomes. `net.http.local` (asked for in the manifest, granted by the admin as its own line in the
 approval) opens loopback, the private ranges, link-local and shared address space, for a plugin
 whose job is the local network (a bridge on the same machine); unspecified, multicast, the
-reserved ranges and the cloud metadata addresses (169.254.169.254, 100.100.100.200, fd00:ec2::254:
-they hand out the machine's credentials) stay closed.
+reserved ranges and the cloud metadata addresses (169.254.169.254, 100.100.100.200, fd00:ec2::254,
+fd20:ce::254, Azure's WireServer 168.63.129.16, the container credentials of AWS ECS and EKS at
+169.254.170.2 and 169.254.170.23 and Tencent's 169.254.0.23: they hand out the machine's credentials
+or its extensions' secrets) stay closed, with or without the capability.
 
 **Limits that need no goodwill.** One wall clock from the lookup to the last byte (so a server
 that trickles one byte a second is let go: `timeout_ms`, 10 s by default, 30 s at most); the answer

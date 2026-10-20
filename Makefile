@@ -31,7 +31,7 @@ IMAGE ?= planet-crafter-dedicated-server
 SAVE ?= run/worlds/world.json
 PLAYERS ?= 4
 
-.PHONY: build install test bench gate plugin-bench lint docker docker-test dist licenses clean
+.PHONY: build install test bench gate plugin-bench fuzz-check lint docker docker-test dist licenses clean
 
 # The program finds libsteam_api.so next to itself; copied then renamed, so a running copy keeps its own.
 build:
@@ -58,6 +58,10 @@ gate: build
 plugin-bench: build
 	LD_LIBRARY_PATH="$(STEAM_LIB_DIR)" PCDS_BENCH_SAVE=$(abspath $(SAVE)) PCDS_RNG_SEED=1 \
 	  $(LIMIT) cargo test $(MANIFEST) --release --locked plugins::cost -- --ignored --nocapture --test-threads=1
+
+# The fuzz crate (server/fuzz) compiles; CI runs this too. Fuzzing itself: docs/testing.md.
+fuzz-check:
+	cd server/fuzz && RUSTFLAGS="--cfg fuzzing" cargo check --locked --bin pcds_fuzz
 
 lint:
 	$(LIMIT) cargo clippy $(MANIFEST) --release --locked

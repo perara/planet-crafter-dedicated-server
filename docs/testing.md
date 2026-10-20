@@ -140,7 +140,19 @@ python3 fuzz/seeds.py                         # (re)writes the small seed corpus
 PCDS_FUZZ_TARGET=wire cargo fuzz run pcds_fuzz fuzz/corpus/wire
 ```
 
-Targets: `wire utp rpcspec transform ipc config chathooks updater access rules save handoff game front`.
+`make fuzz-check` (CI runs it) type-checks the fuzz crate without a nightly toolchain: it is the server's code built another way, and it
+had stopped compiling unnoticed.
+
+Targets: `wire utp rpcspec transform ipc config chathooks updater access rules save handoff game front`, and
+since round 3 ([audits.md](audits.md)) `oldsave savelayout manifest pluginnet pluginsign wasmhost bincodec adminhttp
+adminroutes names msg toxic loadsave twin tessera`, and for the operability release (`pcds doctor`, metrics, the
+structured log, `pcds backup`, the S3 reads) `prom logline s3resp backup doctor` (each is described in the header of `server/fuzz/Cargo.toml`).
+`twin` is the check of a flip's exactness: a game and the game restored from its snapshot are given the same inputs and
+the same ticks (on the game's own clock, `sim_time`), and every message they send must be the same.
+`PCDS_FUZZ_SAVE=SAVE` makes `game`, `twin` and `loadsave` start from a save of this server (a mid-game world with
+machines and drones finds more than the two-player test world; it is slower). `wasmhost` builds wasmi with
+`portable-dispatch`: the default dispatch relies on the compiler turning calls into jumps, which AddressSanitizer's
+instrumentation prevents (a loop of the module then overflows the native stack).
 The targets `rpcspec`, `handoff` and `game` read the game tables from `PCDS_FUZZ_DATA` (default:
 `run/data/2.103` of the checkout). `handoffsweep` and `savesweep` are not fuzzers: each puts awkward
 numbers and strings, one at a time, into a real snapshot or save (`PCDS_FUZZ_SWEEP_FILE`, `_STEP`, `_OFFSET`;
@@ -172,13 +184,25 @@ change to the transport, the save code or anything `unsafe`. All need a nightly 
   rpcspec parse, save text, rules, config, access) and on corpus replays (above, a few dozen files per
   target: a directory of thousands is slow under Miri). It cannot run what uses sockets (utp, ipc, front),
   `ring`, fsync, mmap or memfd. Result at v0.6.1: no undefined behaviour.
-- **AddressSanitizer** (`RUSTFLAGS=-Zsanitizer=address` with `--target x86_64-unknown-linux-gnu`) on the whole unit
-  suite and on `cli` and `hot_update`. Setting `RUSTFLAGS` drops the `-rpath $ORIGIN` that
-  `.cargo/config.toml` adds, so a bank started with a clean environment cannot find `libsteam_api.so`:
-  add `-C link-arg=-Wl,-rpath,$ORIGIN` to your flags. `hot_update` has timing assertions that a
-  sanitizer's slowdown can break (a failed craft round trip, not a memory error).
-- **ThreadSanitizer** (`-Zsanitizer=thread -Zbuild-std`) on the unit suite: the admin threads, the chat-hook
-  worker, S3 uploads and concurrent save writes. `hot_update` was not run under it.
+- **AddressSanitizer** (`RUSTFLAGS=-Zsanitizer=address` with `--target x86_64-unknown-linux-gnu`) on the whole test
+  suite: the unit tests, `cli`, `admin_golden` and `hot_update` (the front and the banks run as ASan processes).
+  Setting `RUSTFLAGS` drops the `-rpath $ORIGIN` that `.cargo/config.toml` adds, so a bank started with a clean
+  environment cannot find `libsteam_api.so`: add `-C link-arg=-Wl,-rpath,$ORIGIN` to your flags. **Add
+  `--features portable-dispatch`** (this and the next): wasmi's default dispatch needs the optimizer to turn
+  calls into jumps, which the sanitizers' instrumentation prevents, and a loop in a plugin then overflows the
+  native stack (SIGSEGV in `plugins::tests` without it). Timing assertions that a sanitizer's slowdown breaks
+  (`a_crowd_of_plugins_cannot_stretch_a_tick_and_takes_turns`, `a_hostile_unload_cannot_stop_the_unloading`,
+  `hot_update`'s craft round trips) are not memory errors.
+- **ThreadSanitizer** (`RUSTFLAGS="-Zsanitizer=thread -C link-arg=-Wl,-rpath,\$ORIGIN"`, `-Zbuild-std`, `--target
+  x86_64-unknown-linux-gnu`) on the unit suite (the admin threads, the chat-hook worker, S3 uploads, concurrent
+  save writes, the plugins' network workers, the autosave thread) and on `hot_update` (set
+  `TSAN_OPTIONS=log_path=DIR/r` to collect the reports of the front and banks it starts: they print to
+  files nobody reads otherwise). Result at v0.8.0 (round 3): no report of a data race.
+- **Overflow checks** (`CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true cargo test --release`): the release build wraps
+  (S18), so an arithmetic overflow a client could reach is silent there; with the checks on, the whole suite,
+  the late-game bench, a 3600 s soak of the late-game save and the hostile RPCs on it (`PCDS_FUZZ_SEED` 1 to 6,
+  30,000 rounds) find none at v0.8.0. The same RPCs without the checks, seeds 1 to 11 (18,900 rounds each, about
+  5 to 14 minutes a seed), hold the invariants once the grower's plants (audits.md R2) are fixed.
 
 ## Parity with the game: the sweep
 

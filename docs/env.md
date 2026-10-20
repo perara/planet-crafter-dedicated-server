@@ -90,12 +90,12 @@ Read by test builds and tools, never by an installation. Set by hand for the ben
 | `PCDS_FARM_SECONDS` | drone_farm_runs_for_hours: game seconds to run (default 3600). |
 | `PCDS_FUZZ_TARGET` | fuzz: the target a fuzz binary runs (server/fuzz/entry.rs). |
 | `PCDS_FUZZ_DATA` | fuzz: the game tables the targets that need them read. |
-| `PCDS_FUZZ_LOG` | fuzz: where the game target catalogues the sites of its panics (default panics.log). |
+| `PCDS_FUZZ_LOG` | fuzz: where the game target catalogues the sites of its panics (default panics.log); for the RPC fuzz test on a real world, a file for every RPC it sends. |
 | `PCDS_FUZZ_HISTORY` | fuzz: where the game target dumps the inputs since its last reset when a panic ends the run (default history.bin). |
 | `PCDS_FUZZ_REPLAY` | fuzz: a history file the game target runs again. |
 | `PCDS_FUZZ_TRACE` | fuzz: set: the game target prints each input it runs. |
 | `PCDS_FUZZ_RESET` | fuzz: inputs the game target runs on one game before it starts a fresh one (1 for a replay). |
-| `PCDS_FUZZ_SAVE` | fuzz: the save whose snapshot PCDS_FUZZ_SEED_OUT writes (default: the test world). |
+| `PCDS_FUZZ_SAVE` | fuzz: the save the game, twin and loadsave targets start from, and the one whose snapshot PCDS_FUZZ_SEED_OUT writes (default: the test world). |
 | `PCDS_FUZZ_SEED_OUT` | fuzz: a file the handoff target writes a snapshot of a world to, as a seed. |
 | `PCDS_FUZZ_SWEEP_FILE` | fuzz: the snapshot or save a sweep puts boundary values into, one at a time. |
 | `PCDS_FUZZ_SWEEP_OFFSET` | fuzz: the number a sweep starts at. |
@@ -106,6 +106,8 @@ Read by test builds and tools, never by an installation. Set by hand for the ben
 | `PCDS_SOAK_SECONDS` | soak_growth: game seconds to run (default 3600). |
 | `PCDS_SOAK_STEP` | soak_growth: seconds of game time per step (default 0.05). |
 | `PCDS_SOAK_REPORT` | soak_growth: seconds of game time between reports (default 900). |
+| `PCDS_SOLVER_SEEDS` | solver_time_by_seed (ignored): the seeds tried for each wreck generator (default 300). |
+| `PCDS_SOLVER_FROM` | solver_time_by_seed: the first seed (default 0). |
 | `PCDS_FUZZ_ROUNDS` | The RPC fuzz test's rounds (default 1500). |
 | `PCDS_FUZZ_SEED` | The RPC fuzz test's seed. |
 | `PCDS_IPC_ECHO` | ipc test: the child process's socket file. |
