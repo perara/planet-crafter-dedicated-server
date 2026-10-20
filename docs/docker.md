@@ -214,11 +214,13 @@ It runs in about a minute and a half (part 1 alone, about a minute) on a host wi
 
 ## Not verified
 
-- **Podman, rootless Docker, rootless Podman**: none is installed here. In rootless Docker and
-  Podman the container's root is your user on the host, so the entrypoint's default (root, giving
-  `/data` to `PUID:PGID` 1000) would make the files belong to a sub-uid; start with `--user` (and
-  Podman's `--userns=keep-id`) instead, which is the same code path as the Kubernetes runs above.
-  Not run.
+- **Podman, rootless Podman**: not installed here. In rootless Docker and Podman the container's
+  root is your user on the host, so the entrypoint's default (root, giving `/data` to `PUID:PGID`
+  1000) would make the files belong to a sub-uid; start with `--user` (and Podman's
+  `--userns=keep-id`) instead, which is the same code path as the Kubernetes runs above.
+  Rootless Docker (29.9) is verified: `docker/test.sh` passes on it, both parts, with an image of
+  the same files on a Debian base (it gives its folders to the container user with a throwaway
+  root container, as there the host user is the container's root and pcds will not run as root).
 - **cgroup v1** hosts: the memory check does nothing there, a flip that does not fit gets a bank
   killed as before.
 - **Steam in a flip**: every run had Steam off, as in the tests (the first published-image runs

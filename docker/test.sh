@@ -16,6 +16,13 @@
 # the host's network, because a local release feed is plain http on 127.0.0.1, which the updater
 # accepts from nowhere else. Needs docker, python3, tar and sha256sum; no other container is
 # touched (names start with pcds-dockertest-). Exits 0 on success, 1 on a failed check.
+#
+# Rootless Docker (and a daemon with user-namespace remapping) works too. There the container's
+# root is the user running this script and a container user 1000 is a sub-uid of it, which
+# cannot write the folders this script makes; pcds does not run as root. So a throwaway root
+# container gives each folder a one-off container writes to that user first (`given`), and
+# another gives everything back at the end (the files would be a sub-uid's, which this user
+# cannot delete).
 set -eu
 
 IMAGE="${1:-planet-crafter-dedicated-server}"
@@ -24,6 +31,8 @@ W="$(mktemp -d)"
 TAG=v999.0.0
 UID_="$(id -u)"
 GID_="$(id -g)"
+ROOTLESS=no
+case "$(docker info --format '{{.SecurityOptions}}' 2>/dev/null || true)" in *rootless* | *userns*) ROOTLESS=yes ;; esac
 FEED_PID=""
 LOAD_PID=""
 C=""
@@ -39,6 +48,9 @@ cleanup() {
   [ -z "$LOAD_PID" ] || kill "$LOAD_PID" 2>/dev/null || true
   [ -z "$FEED_PID" ] || kill "$FEED_PID" 2>/dev/null || true
   docker rm -f "$NAME" >/dev/null 2>&1 || true
+  if [ "$ROOTLESS" = yes ] && [ -d "$W" ]; then
+    docker run --rm --user 0:0 --entrypoint chown -v "$W:/w" "$IMAGE" -R 0:0 /w >/dev/null 2>&1 || true
+  fi
   rm -rf "$W"
 }
 trap cleanup EXIT
@@ -84,6 +96,12 @@ make_feed() {
   fail "the release feed did not start"
 }
 
+# Folder $1 writable by the user the one-off containers run as (only rootless Docker needs it:
+# elsewhere that user is this one and the folder is its own).
+given() {
+  [ "$ROOTLESS" = no ] || docker run --rm --user 0:0 --entrypoint chown -v "$1:/data" "$IMAGE" -R "$UID_:$GID_" /data >/dev/null || fail "could not give $1 to the containers' user"
+}
+
 # pcds in a throwaway container of the image: a read-only root, /data from $1, as this user.
 pcds_once() {
   data="$1"
@@ -101,6 +119,7 @@ health="$(docker image inspect -f '{{json .Config.Healthcheck.Test}}' "$IMAGE")"
 case "$health" in *"/api/status"*) ok "the image has its health check" ;; *) fail "no health check on the admin API in the image: $health" ;; esac
 
 mkdir -p "$W/d1"
+given "$W/d1"
 out="$(pcds_once "$W/d1" --entrypoint pcds "$IMAGE" upgrade "$TAG" 2>&1)" || fail "pcds upgrade $TAG with the server stopped, on a read-only root:
 $out"
 case "$out" in *"$TAG installed in bank"*"sha256 checked"*) ok "the updater installs $TAG into a bank on a read-only root filesystem" ;; *) fail "unexpected output of pcds upgrade:
@@ -127,7 +146,9 @@ mkdir -p "$W/game/Planet Crafter_Data/Managed" "$W/d2/data"
 echo "a made-up game build for docker/test.sh" >"$W/game/Planet Crafter_Data/Managed/Assembly-CSharp.dll"
 cp -r "$PCDS_TEST_DATA" "$W/d2/data/test"
 # The tables must be those of this game's build: its id is what pcds status says is missing.
-build="$(pcds_once "$W/d2" -e PCDS_GAME_DIR=/game -v "$W/game:/game:ro" --entrypoint pcds "$IMAGE" status 2>&1 | sed -n 's/^game build \([0-9a-f]*\) has no tables.*/\1/p')"
+mkdir "$W/d0"
+given "$W/d0"
+build="$(pcds_once "$W/d0" -e PCDS_GAME_DIR=/game -v "$W/game:/game:ro" --entrypoint pcds "$IMAGE" status 2>&1 | sed -n 's/^game build \([0-9a-f]*\) has no tables.*/\1/p')"
 [ -n "$build" ] || fail "pcds status did not name the made-up game's build"
 printf '%s' "$build" >"$W/d2/data/test/buildid"
 cat >"$W/d2/server.env" <<EOF
