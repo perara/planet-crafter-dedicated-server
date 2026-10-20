@@ -490,7 +490,15 @@ impl Game {
                 }
             }
             "InventoriesHandler.GetOrCreateNewInventoryServerRpc" => {
-                self.get_or_create(client, a.b(0), a.i(1).clamp(0, MAX_INVENTORY_SIZE), a.i(2), a.i(3), a.ints(4), a.ints(5));
+                let size = a.i(1).clamp(0, MAX_INVENTORY_SIZE);
+                // A client that is no player yet makes a bounded number (Limits::loading_create).
+                let makes = a.b(0) && !self.inventories.contains_key(&a.i(2));
+                let items = a.ints(4).map_or(0, |c| c.len().min(size as usize));
+                if makes && self.clients.get(&client).is_none_or(|c| c.ready.is_none()) && !self.limits.loading_create(client, items) {
+                    self.retrieve_inventory(Target::Only(client), None);
+                    return true;
+                }
+                self.get_or_create(client, a.b(0), size, a.i(2), a.i(3), a.ints(4), a.ints(5));
             }
             "InventoriesHandler.TransferItemServerRpc" => {
                 let ok = self.transfer(a.i(0), a.i(1), vec![a.i(2)], Some(client));
@@ -760,6 +768,47 @@ mod tests {
 
     fn saved_items(g: &mut Game, inventory: i32) -> String {
         g.snapshot().inventories.iter().find(|i| i["id"] == inventory).map(|i| i["woIds"].as_str().unwrap().to_string()).unwrap()
+    }
+
+    /// A client that is no player yet (before PlayerReady) makes a bounded number of inventories and
+    /// of the items put in them; asking for one is not limited, nor is a player's creating.
+    #[test]
+    fn a_client_that_is_no_player_yet_creates_a_bounded_number_of_inventories() {
+        let Some(mut g) = crate::game::test_game(crate::game::tests::save()) else { return };
+        let iron = hash(&g, "Iron");
+        let create = |g: &mut Game, client: u64, size: i32, content: usize| {
+            g.net.out.clear();
+            g.inventories_rpc(client, "InventoriesHandler.GetOrCreateNewInventoryServerRpc", &Args(vec![json!(true), json!(size), json!(0), json!(0), json!(vec![iron; content]), json!(null)]));
+        };
+        crate::game::tests::approve(&mut g, 7);
+        let start = g.inventories.len();
+        for _ in 0..400 {
+            create(&mut g, 7, 10, 10);
+        }
+        assert_eq!(g.inventories.len() - start, crate::handlers::MAX_LOADING_INVENTORIES as usize, "the 257th is refused");
+        // Refused: the answer is the empty inventory, the client's usual "none".
+        assert_eq!(retrieved(&mut g), vec![json!(0), json!(-1), json!([]), json!([]), json!(false)]);
+        // Asking for one that exists is not creating.
+        let existing = *g.inventories.keys().max().unwrap();
+        g.inventories_rpc(7, "InventoriesHandler.GetOrCreateNewInventoryServerRpc", &Args(vec![json!(true), json!(10), json!(existing), json!(0), json!(null), json!(null)]));
+        assert_eq!(retrieved(&mut g)[1], json!(existing));
+        // The items too: a few huge inventories use the item allowance up before the count.
+        crate::game::tests::approve(&mut g, 8);
+        let start = g.inventories.len();
+        for _ in 0..50 {
+            create(&mut g, 8, 1000, 1000);
+        }
+        assert_eq!(g.inventories.len() - start, (crate::handlers::MAX_LOADING_ITEMS / 1000) as usize);
+        // A client that left is forgotten; a player is not limited.
+        g.limits.forget(8);
+        create(&mut g, 8, 1000, 1000);
+        assert_eq!(g.inventories.len() - start, (crate::handlers::MAX_LOADING_ITEMS / 1000) as usize + 1);
+        crate::game::tests::join(&mut g, 9, "Ann");
+        let start = g.inventories.len();
+        for _ in 0..400 {
+            create(&mut g, 9, 10, 10);
+        }
+        assert_eq!(g.inventories.len() - start, 400);
     }
 
     #[test]

@@ -18,6 +18,13 @@ const CHAT_EVERY: f32 = 1.0;
 /// order, up to MAX_PENDING RPCs (more are dropped).
 const RPC_BUDGET: u32 = 32;
 const MAX_PENDING: usize = 8192;
+/// What a client may create before its PlayerReady: inventories and the items put in them as
+/// they are made. A joining game client creates its backpack and equipment (2), and the
+/// containers of the planet's scene with a display make theirs (InventoryAssociated.Start, 2 s
+/// after loading, with the loot the scene rolls: tens of items at most); a client that goes on
+/// past these is flooding (a world object per `content` entry, up to the inventory's size).
+pub(crate) const MAX_LOADING_INVENTORIES: u32 = 256;
+pub(crate) const MAX_LOADING_ITEMS: u32 = 4096;
 
 /// Transform states and variable deltas a client's objects send are passed on to every other
 /// client, so what a client may send is bounded too: MOTION_PER_SECOND units, a message costing
@@ -42,6 +49,9 @@ pub struct Limits {
     /// Clients already logged for going over a limit.
     #[serde(skip)]
     warned: HashSet<(u64, &'static str)>,
+    /// Per client before PlayerReady: the inventories it made and the items put into them.
+    #[serde(skip)]
+    loading_created: HashMap<u64, (u32, u32)>,
 }
 
 impl Limits {
@@ -97,7 +107,21 @@ impl Limits {
         false
     }
 
+    /// Whether a client that is no player yet may create an inventory with `items` initial items
+    /// (MAX_LOADING_INVENTORIES and MAX_LOADING_ITEMS in all); a refusal is logged once.
+    pub fn loading_create(&mut self, client: u64, items: usize) -> bool {
+        let (made, put) = self.loading_created.entry(client).or_default();
+        let items = items.min(u32::MAX as usize) as u32;
+        if *made >= MAX_LOADING_INVENTORIES || put.saturating_add(items) > MAX_LOADING_ITEMS {
+            self.warn(client, "inventories created before PlayerReady over the limit, refused");
+            return false;
+        }
+        (*made, *put) = (*made + 1, *put + items);
+        true
+    }
+
     pub fn forget(&mut self, client: u64) {
+        self.loading_created.remove(&client);
         self.chat.remove(&client);
         self.motion.remove(&client);
         self.warned.retain(|(c, _)| *c != client);
