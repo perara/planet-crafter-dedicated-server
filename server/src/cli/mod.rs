@@ -182,7 +182,7 @@ impl Ctx {
                 // After `make build` or in a newer release folder: the unit runs the new program.
                 if *what != "stop" {
                     self.check_settings()?;
-                    self.install_newer()?;
+                    self.install_server()?;
                     self.refresh_unit()?;
                     // A newer bank may read another tables format.
                     self.ensure_tables(None)?;

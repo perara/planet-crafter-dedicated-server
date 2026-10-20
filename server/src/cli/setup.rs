@@ -142,11 +142,6 @@ impl Ctx {
         result
     }
 
-    /// After an upgrade (a new build or release), the newer program into run/bin.
-    pub fn install_newer(&self) -> Result {
-        self.install_server()
-    }
-
     /// The server in the foreground, as the unit runs it: the front from the active bank, on
     /// the installed game's tables, the world, the settings; this process exits with the
     /// front's code once the front and its banks have ended (supervise). Returns only when it
