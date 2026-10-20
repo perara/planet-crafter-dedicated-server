@@ -172,7 +172,7 @@ impl Ctx {
         crate::config::check_env(get)?;
         // In server.env a retired setting stops the start (above); in the environment (a compose
         // file's `environment:`) it would be ignored without a word.
-        let from_file = |key: &str| settings.get(key).is_some();
+        let from_file = |key: &str| settings.contains_key(key);
         if let retired @ [_, ..] = crate::config::retired_in_env(|key| crate::env(key).filter(|_| !from_file(key))).as_slice() {
             eprintln!("pcds: ignored in the environment: {} (docs/upgrading.md)", retired.join(", "));
         }
