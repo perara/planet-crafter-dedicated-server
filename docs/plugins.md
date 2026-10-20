@@ -703,9 +703,9 @@ bearer header with less in it.
   `run/plugins/tokens.json` (0600) with the name, the scopes and the rate. The dashboard lists them
   and makes and revokes them (`GET/POST /api/plugins/tokens`, admin token only); `pcds plugin tokens`
   lists. A token is high-entropy, so a fast hash is the right one, as for an API key.
-- **What a token opens.** Five scopes, each a (method, path) of the existing API: the stream
+- **What a token opens.** Six scopes, each a (method, path) of the existing API: the stream
   (`events.read`), the chat feed (`chat.read`), saying in the chat (`chat.send`), `player.kick`,
-  `player.teleport`. They are the endpoints a bridge needs and the ones that act on one player;
+  `player.teleport`, and `metrics.read` (the numbers for a monitor, docs/monitoring.md). They are the endpoints a bridge needs and the ones that act on one player;
   the settings, the rules, the world controls, the logs, the status (which holds the access lists),
   the plugins' approvals, keys and tokens are not scoped to anything: **admin token only**,
   and a test asks each of them with a token and expects 403 (no scope covers them, so whatever scopes the token has).

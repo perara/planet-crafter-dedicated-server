@@ -155,11 +155,14 @@ fn every_route_answers_with_the_keys_it_always_did() {
     record("GET / (no token)", server.ask("GET", "/", json!({}), false));
     record("GET /api/status (no token)", server.ask("GET", "/api/status", json!({}), false));
     record("GET /api/nothing", ask("GET", "/api/nothing", json!({})));
+    // The health route needs no token and says only whether a world is served.
+    record("GET /api/health (no token)", server.ask("GET", "/api/health", json!({}), false));
 
     // The world runs: the bank answers, the front adds its part to the status.
     for (method, path, body) in [
         ("GET", "/api/status", json!({})),
         ("GET", "/api/ping", json!({})),
+        ("GET", "/api/metrics", json!({})),
         ("GET", "/api/update", json!({})),
         ("GET", "/api/rules", json!({})),
         ("POST", "/api/rules", json!({})),
@@ -217,6 +220,12 @@ fn every_route_answers_with_the_keys_it_always_did() {
     }
     record("GET /api/update (after a check)", ask("GET", "/api/update", json!({})));
 
+    // The numbers for a monitor are text in the Prometheus format, and the world is running.
+    let (_, metrics, _) = ask("GET", "/api/metrics", json!({}));
+    assert!(metrics.contains("# TYPE pcds_players_online gauge\npcds_players_online 0\n") && metrics.contains("\npcds_world_running 1\n") && metrics.contains("\npcds_tick_p99_seconds "), "{metrics}");
+    assert_eq!(server.ask("GET", "/api/metrics", json!({}), false).0, 401, "the metrics need a token");
+    assert_eq!(server.ask("GET", "/api/health", json!({}), false).1, "{\"ok\":true}");
+
     // The world controls, and the front alone while the world is stopped.
     for (method, path, body) in [
         ("POST", "/api/world/start", json!({})),
@@ -225,7 +234,10 @@ fn every_route_answers_with_the_keys_it_always_did() {
         ("POST", "/api/world/switch", json!({"world": "world"})),
         ("POST", "/api/world/stop", json!({})),
         ("POST", "/api/world/stop", json!({})),
+        // No game process: not healthy (503), but the front still answers.
+        ("GET", "/api/health", json!({})),
         ("GET", "/api/status", json!({})),
+        ("GET", "/api/metrics", json!({})),
         ("GET", "/api/worlds", json!({})),
         ("GET", "/api/update", json!({})),
         ("POST", "/api/update", json!({"check": true})),

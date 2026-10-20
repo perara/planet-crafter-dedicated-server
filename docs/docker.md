@@ -106,8 +106,9 @@ the command to the new world, in Docker with tini and as PID 1.
 
 After every one the container came back (or was started) on the bank `/data/bin/active` names, with
 the world, and the hot-updated release was still the one running. The image's health check
-(`pcds api GET /api/status`) was run 195 times in a loop through six flips under three players:
-no failure, the slowest answer 1.1 s on a loaded host, far below its 15 s timeout.
+(measured as `pcds api GET /api/status`; it is now `pcds health`, the same request without a token)
+was run 195 times in a loop through six flips under three players: no failure, the slowest answer
+1.1 s on a loaded host, far below its 15 s timeout.
 
 ## Hardened environments
 
@@ -123,8 +124,10 @@ Measured, each with a hot update and a restart:
 - **Kubernetes-style**: `--entrypoint /opt/pcds/entrypoint.sh` (no tini, `pcds container` is
   PID 1), `--user 1000:1000 --cap-drop ALL --read-only`, SIGTERM at the end: exit 0 with the
   world saved, and the restart in place works as PID 1.
-- **Health check**: the image's HEALTHCHECK and the pod's probes run `pcds api GET /api/status`.
-  It answers only once the world runs, and keeps answering through a flip.
+- **Health check**: the image's HEALTHCHECK runs `pcds health` and the pod's probes ask
+  `GET /api/health`, which needs no token. It says 200 once the world runs and keeps saying it through
+  a flip, and 503 while the world is stopped, loading, or starting again after a crash
+  ([monitoring.md](monitoring.md)).
 
 ### Memory and CPU
 
@@ -171,7 +174,7 @@ log line says the image's version runs.
 [kubernetes.yaml](kubernetes.yaml): a StatefulSet of one with a volume for `/data` (worlds, settings,
 banks), the game's files in a second volume (the server reads the game's tables from them at
 every start; copy them once with `kubectl cp`), a UDP service for 7777, the admin page on a
-ClusterIP service only (`kubectl port-forward`), exec probes that run the image's health check,
+ClusterIP service only (`kubectl port-forward`), HTTP probes on `/api/health` (no token),
 a read-only root, a non-root user with `fsGroup`, all capabilities dropped, and
 `terminationGracePeriodSeconds: 120`. It validates against the Kubernetes 1.31 schemas with
 kubeconform (`-strict`); `kubectl` was not available here, so `kubectl apply --dry-run=client`

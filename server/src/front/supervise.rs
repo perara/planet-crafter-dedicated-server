@@ -115,6 +115,7 @@ impl Front {
     /// told to join again. The Steam login and the invite code stay.
     pub(super) fn recover(&mut self, bank: &str) {
         let now = Instant::now();
+        self.totals.crashes += 1;
         if self.crashes.record(now) {
             self.give_up(bank);
         }
@@ -215,6 +216,7 @@ impl Front {
             }
             Watch::Kill(silent) => {
                 eprintln!("bank {} (pid {}) said nothing for {} s (the rule limits.bankWatchdogSeconds is {} s): it is hung; killed, and the world starts again from the last snapshot or save, as after a crash", live.name, live.child.id(), silent.as_secs(), self.watch.limit.as_secs());
+                self.totals.watchdog_kills += 1;
                 let mut b = self.live.take().expect("live bank");
                 let _ = b.child.kill();
                 // Killed, not waited for for ever: a process stuck in the disk dies when it returns.

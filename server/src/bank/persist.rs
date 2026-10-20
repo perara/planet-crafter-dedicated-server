@@ -28,6 +28,8 @@ pub struct LastSave {
 struct Writing {
     path: String,
     done: std::sync::mpsc::Receiver<Written>,
+    /// When the text was made: the save's duration is measured from here (GET /api/metrics).
+    started: std::time::Instant,
 }
 
 /// What writing a save came to: the file, and the backup made before it (Ok(false): none was due).
@@ -45,6 +47,13 @@ thread_local! {
     /// The backups' outcome, for GET /api/status and POST /api/save: when one was last made, and
     /// the last failure (cleared by the next backup made).
     static BACKUPS: std::cell::RefCell<(Option<u64>, Option<(u64, String)>)> = const { std::cell::RefCell::new((None, None)) };
+    /// How long the last save took, in milliseconds (GET /api/metrics).
+    static SAVE_MILLIS: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+/// How long the last save took, from its text being made to the file being on disk.
+pub(super) fn save_millis() -> Option<f64> {
+    SAVE_MILLIS.get()
 }
 
 /// The last save's outcome (None before the first save of this process).
@@ -99,8 +108,9 @@ fn write_save(path: &str, text: &[u8], files: &crate::rules::Save, after_panic: 
 /// What a save's end does on the game thread: the status, the log, the newest backup
 /// off-site (on a thread), when S3 is set and it is not there yet, and the plugins: they hear
 /// of it and keep their state beside the world's.
-fn saved(game: &mut Game, path: &str, written: &Written) {
+fn saved(game: &mut Game, path: &str, written: &Written, took: Duration) {
     let (at, saved) = (unix_now(), &written.saved);
+    SAVE_MILLIS.set(Some((took.as_secs_f64() * 1e4).round() / 10.0));
     note_backup(&written.backup);
     LAST_SAVE.set(Some(LastSave { ok: saved.is_ok(), at, error: saved.as_ref().err().cloned() }));
     match saved {
@@ -127,7 +137,7 @@ pub(super) fn settle(game: &mut Game, wait: bool) {
         }
     };
     let result = result.unwrap_or_else(|| Written { saved: Err(format!("{}: the thread writing it ended", w.path)), backup: Ok(false) });
-    saved(game, &w.path, &result);
+    saved(game, &w.path, &result, w.started.elapsed());
     if result.saved.is_err() {
         game.advanced = true;
     }
@@ -140,6 +150,7 @@ pub(super) fn persist_later(game: &mut Game, path: &str) -> bool {
     if WRITING.with_borrow(Option::is_some) {
         return false;
     }
+    let started = std::time::Instant::now();
     let text = game.save_text();
     let (tx, done) = std::sync::mpsc::channel();
     let (to, files, after_panic) = (path.to_string(), game.rules.save.clone(), super::panic::take_taint());
@@ -148,7 +159,7 @@ pub(super) fn persist_later(game: &mut Game, path: &str) -> bool {
         let _ = tx.send(r);
     });
     match spawned {
-        Ok(_) => WRITING.set(Some(Writing { path: path.to_string(), done })),
+        Ok(_) => WRITING.set(Some(Writing { path: path.to_string(), done, started })),
         Err(e) => {
             // No thread to write in: the world stands still for it, as it always did.
             eprintln!("save: no thread ({e}); writing here");
@@ -162,8 +173,9 @@ pub(super) fn persist_later(game: &mut Game, path: &str) -> bool {
 /// the one being written, which it must not be overtaken by.
 pub(super) fn persist(game: &mut Game, path: &str) -> Result<(), String> {
     settle(game, true);
+    let started = std::time::Instant::now();
     let written = write_save(path, game.save_text().as_bytes(), &game.rules.save.clone(), super::panic::take_taint());
-    saved(game, path, &written);
+    saved(game, path, &written, started.elapsed());
     written.saved
 }
 

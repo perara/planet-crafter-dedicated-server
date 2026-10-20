@@ -10,6 +10,22 @@ use serde_json::{json, Value};
 pub(super) static BYTES_IN: AtomicU64 = AtomicU64::new(0);
 pub(super) static BYTES_OUT: AtomicU64 = AtomicU64::new(0);
 
+/// What the front counts over its life for GET /api/metrics (a counter is what Prometheus rates).
+#[derive(Default)]
+pub(super) struct Totals {
+    /// Game processes that ended outside a hand-over (CrashWindow keeps only the last ten minutes).
+    pub crashes: u64,
+    /// Games the watchdog killed for saying nothing.
+    pub watchdog_kills: u64,
+    /// Hand-overs that failed and left the old bank running.
+    pub flips_failed: u64,
+    /// How long the world stood in the last hand-over, in milliseconds.
+    pub last_stand_ms: Option<f64>,
+    /// Players dropped for too much waiting for a bank, and the bytes that waited.
+    pub dropped_clients: u64,
+    pub dropped_bytes: u64,
+}
+
 pub(super) fn traffic() -> Value {
     json!({ "bytesIn": BYTES_IN.load(Ordering::Relaxed), "bytesOut": BYTES_OUT.load(Ordering::Relaxed) })
 }

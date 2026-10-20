@@ -316,6 +316,7 @@ impl Front {
         }
         let stood = flip.stopped.map(|t| released.duration_since(t)).unwrap_or_default();
         self.flips += 1;
+        self.totals.last_stand_ms = Some(ms(stood));
         // The crashes counted so far were another release's: the new one starts with none.
         self.crashes.clear();
         self.flipped = Some(to.clone());
@@ -368,6 +369,7 @@ impl Front {
         let phase = self.phase;
         self.enter(Phase::Idle);
         let flip = self.flip.take();
+        self.totals.flips_failed += u64::from(flip.is_some());
         let stood = flip.as_ref().and_then(|f| f.stopped).map(|t| t.elapsed());
         let message = match (&mut self.live, phase) {
             (Some(b), Phase::Snapshotting | Phase::Restoring) => {

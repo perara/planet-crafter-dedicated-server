@@ -14,6 +14,16 @@ pub(super) fn status(game: &mut Game, r: &Request) -> Reply {
     json(200, &status::build(game, r.ctx, Instant::now()))
 }
 
+/// GET /api/metrics, the bank's part: the status as it is, every plugin with its counters, and
+/// what the status does not carry. The front adds its own numbers and writes the text
+/// (front/prometheus.rs).
+pub(super) fn metrics(game: &mut Game, r: &Request) -> Reply {
+    let status = serde_json::to_value(status::build(game, r.ctx, Instant::now())).unwrap_or_default();
+    let plugins: Vec<serde_json::Value> = game.ext.plugins.host.as_ref().map(|h| h.plugins.iter().map(plugins::admin::plugin_json).collect()).unwrap_or_default();
+    let bank = serde_json::json!({"maxPlayers": game.rules.max_players(), "saveMillis": crate::bank::persist::save_millis()});
+    (200, serde_json::json!({"status": status, "plugins": plugins, "bank": bank}).to_string())
+}
+
 pub(super) fn ping(_: &mut Game, _: &Request) -> Reply {
     ok()
 }

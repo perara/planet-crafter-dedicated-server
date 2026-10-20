@@ -45,6 +45,7 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
                          replace the current world with a new one (kept in backups/)
   pcds start | stop | restart | status [--json] | logs
   pcds check-settings         read server.env as the next start will, and say what stops it (nothing is restarted)
+  pcds health                 exit 0 when the server serves a world, else 1 (no token needed; the Docker health check)
   pcds doctor [--json]        check everything the server needs (game, tables, world, settings, ports,
                          disk, clock, service, Steam, banks, update feed, plugins, memory) and say
                          how to fix each problem; exit 1 when something FAILs
@@ -90,7 +91,7 @@ PCDS_GAME_DIR, the one used last (run/game-dir), else the Steam library that lis
 /// The commands `pcds help` lists: one of these with arguments it does not take is not an unknown command.
 const COMMANDS: &[&str] = &[
     "up", "setup", "worlds", "world", "new", "start", "stop", "restart", "status", "logs", "upgrade", "install-service", "uninstall-service", "code", "players", "save", "kick", "ban", "unban", "gui", "token", "config", "api",
-    "rules", "plugin", "extract", "update", "selftest", "run", "container", "doctor",
+    "rules", "plugin", "extract", "update", "selftest", "run", "container", "doctor", "health",
 ];
 
 /// Where this installation's files are.
@@ -225,6 +226,7 @@ impl Ctx {
                 self.check_settings()?;
                 say("server.env is fine for this release");
             }
+            ["health"] => self.health()?,
             ["doctor", rest @ ..] => return self.doctor(&rest.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
             ["status"] => self.status()?,
             ["status", "--json"] => self.status_json()?,

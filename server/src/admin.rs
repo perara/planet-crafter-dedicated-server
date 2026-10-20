@@ -29,6 +29,8 @@ const DEADLINE: Duration = Duration::from_secs(10);
 /// STOP_GRACE and LOAD_DEADLINE), so a switch is answered up to 200 s after, not as failed at 10.
 const ANSWER: Duration = Duration::from_secs(10);
 const WORLD_ANSWER: Duration = Duration::from_secs(200);
+/// The health route: a loop that takes longer than this to say so is not healthy.
+const HEALTH_ANSWER: Duration = Duration::from_secs(3);
 
 /// The page's Content-Security-Policy (see `respond_with`).
 const PAGE_POLICY: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; base-uri 'none'; frame-ancestors 'none'";
@@ -222,7 +224,18 @@ impl Read for Deadline {
 
 /// How long a request's answer is waited for.
 fn answer_wait(path: &str) -> Duration {
-    if path.starts_with("/api/world/") { WORLD_ANSWER } else { ANSWER }
+    if path.starts_with("/api/world/") {
+        WORLD_ANSWER
+    } else if path == "/api/health" {
+        HEALTH_ANSWER
+    } else {
+        ANSWER
+    }
+}
+
+/// What an answer is: the metrics are text, everything else JSON.
+fn content_type(path: &str, status: u16) -> &'static str {
+    if path == "/api/metrics" && status == 200 { "text/plain; version=0.0.4; charset=utf-8" } else { "application/json" }
 }
 
 /// Equal strings, in time that does not depend on where they differ.
@@ -317,14 +330,14 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
     reader.read_exact(&mut body)?;
     // The routes this thread answers itself are in front/admin_routes.rs.
     let route = crate::front::find_http(&method, &path);
-    // The page needs no token; every other route does.
-    if route.is_some_and(|r| !r.needs_token()) {
+    // The page needs no token (it asks for it), nor does the health route; every other route does.
+    if route.is_some_and(|r| r.handler.owner == Owner::Http(Http::Page)) {
         return match web.and_then(|p| std::fs::read_to_string(p).ok()) {
             Some(html) => respond(stream, 200, "text/html; charset=utf-8", &html),
             None => respond(stream, 404, "text/plain", "no web GUI installed"),
         };
     }
-    if !same(&auth, &format!("Bearer {token}")) {
+    if !crate::front::is_open(&method, &path) && !same(&auth, &format!("Bearer {token}")) {
         // Not the admin token: a scoped token may make the requests of its scopes (tokens.rs).
         match tokens.authorize(&auth, &method, &path) {
             Ok(_) => {}
@@ -351,12 +364,13 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
         return long_poll(stream, tx, path, body, wait);
     }
     let (reply, answer) = channel();
-    let wait = answer_wait(&path);
+    let (wait, asked) = (answer_wait(&path), path.clone());
     if tx.send(Request { method, path, body, reply }).is_err() {
         return respond(stream, 500, "application/json", "{\"error\":\"server stopping\"}");
     }
     match answer.recv_timeout(wait) {
-        Ok((status, json)) => respond(stream, status, "application/json", &json),
+        Ok((status, json)) => respond(stream, status, content_type(&asked, status), &json),
+        Err(_) if asked == "/api/health" => respond(stream, 503, "application/json", "{\"ok\":false}"),
         Err(_) => respond(stream, 500, "application/json", "{\"error\":\"the game loop did not answer\"}"),
     }
 }
@@ -646,6 +660,56 @@ mod tests {
             ask(addr, wrong).starts_with("HTTP/1.1 401")
         });
         assert!(served, "slots are freed when connections end");
+    }
+
+    /// The health route needs no token and is answered by the game loop in 3 s or it is 503; the
+    /// metrics are text, need a token, and a token of the scope metrics.read is enough for them.
+    #[test]
+    fn health_needs_no_token_and_metrics_are_text_for_a_token_of_their_scope() {
+        let dir = std::env::temp_dir().join(format!("pcds-admin-metrics-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_, scoped) = crate::tokens::create(&dir, "prometheus", &["metrics.read".to_string()], None).unwrap();
+        let (_, chat) = crate::tokens::create(&dir, "relay", &["chat.send".to_string()], None).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let rx = listen_with(listener, "secret".into(), Default::default(), crate::front::Hooks::default().feed, Arc::new(Checker::new(dir.clone()))).unwrap();
+        // Healthy: no token, JSON.
+        let client = std::thread::spawn(move || ask(addr, b"GET /api/health HTTP/1.1\r\n\r\n"));
+        let request = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!((request.method.as_str(), request.path.as_str()), ("GET", "/api/health"));
+        request.reply.send((200, "{\"ok\":true}".into())).unwrap();
+        let answer = client.join().unwrap();
+        assert!(answer.starts_with("HTTP/1.1 200") && answer.contains("Content-Type: application/json") && answer.ends_with("{\"ok\":true}"), "{answer}");
+        // Not healthy: 503 from the loop; and a loop that does not answer in time is 503 too.
+        let client = std::thread::spawn(move || ask(addr, b"GET /api/health HTTP/1.1\r\n\r\n"));
+        rx.recv_timeout(Duration::from_secs(5)).unwrap().reply.send((503, "{\"ok\":false}".into())).unwrap();
+        assert!(client.join().unwrap().starts_with("HTTP/1.1 503"));
+        let started = Instant::now();
+        let client = std::thread::spawn(move || ask(addr, b"GET /api/health HTTP/1.1\r\n\r\n"));
+        let _silent = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let answer = client.join().unwrap();
+        assert!(answer.starts_with("HTTP/1.1 503") && answer.ends_with("{\"ok\":false}") && started.elapsed() < Duration::from_secs(8), "{answer}");
+        // Health is the one path other than the page that needs no token; the same path with another method does.
+        assert!(ask(addr, b"POST /api/health HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 401"));
+        // Metrics: no token is 401, a scope that is not theirs 403, the admin token or metrics.read pass and the answer is text.
+        assert!(ask(addr, b"GET /api/metrics HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 401"));
+        assert!(ask(addr, format!("GET /api/metrics HTTP/1.1\r\nAuthorization: Bearer {chat}\r\n\r\n").as_bytes()).starts_with("HTTP/1.1 403"));
+        for token in ["secret", scoped.as_str()] {
+            let request = format!("GET /api/metrics HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n");
+            let client = std::thread::spawn(move || ask(addr, request.as_bytes()));
+            rx.recv_timeout(Duration::from_secs(5)).unwrap().reply.send((200, "# HELP pcds_x x\n# TYPE pcds_x gauge\npcds_x 1\n".into())).unwrap();
+            let answer = client.join().unwrap();
+            assert!(answer.starts_with("HTTP/1.1 200") && answer.contains("Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n") && answer.ends_with("pcds_x 1\n"), "{answer}");
+        }
+        // An error from the game stays JSON.
+        let request = b"GET /api/metrics HTTP/1.1\r\nAuthorization: Bearer secret\r\n\r\n";
+        let client = std::thread::spawn(move || ask(addr, request));
+        rx.recv_timeout(Duration::from_secs(5)).unwrap().reply.send((500, "{\"error\":\"x\"}".into())).unwrap();
+        assert!(client.join().unwrap().contains("Content-Type: application/json"));
+        // A scoped token reaches nothing else.
+        assert!(ask(addr, format!("GET /api/status HTTP/1.1\r\nAuthorization: Bearer {scoped}\r\n\r\n").as_bytes()).starts_with("HTTP/1.1 403"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A head that a proxy in front of the admin port could read another way is refused, so that no

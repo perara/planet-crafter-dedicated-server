@@ -61,6 +61,7 @@ mod flip;
 mod history;
 mod metrics;
 mod ops;
+mod prometheus;
 mod queue;
 mod snapshot;
 mod status;
@@ -69,7 +70,7 @@ mod transport;
 mod updates;
 mod world_control;
 
-pub use admin_routes::{find_http, Http, Owner};
+pub use admin_routes::{find_http, is_open, Http, Owner};
 pub use chat_hooks::{api as chat_api, Feed, Hooks};
 pub use metrics::{cgroup_memory, flip_memory, process_of};
 use admin_routes::Admin;
@@ -139,6 +140,8 @@ struct Front {
     stop: Arc<AtomicBool>,
     game_version: String,
     flips: u64,
+    /// Counters for GET /api/metrics.
+    totals: metrics::Totals,
     /// The lock that makes this the one server of its world (released by a switch).
     world_lock: Option<std::fs::File>,
 }
@@ -225,6 +228,7 @@ impl Front {
             stop,
             game_version: String::new(),
             flips: 0,
+            totals: Default::default(),
             world_lock: None,
         }
     }

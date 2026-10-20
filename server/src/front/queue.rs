@@ -154,6 +154,9 @@ impl Front {
     /// A client dropped for what it has waiting: its frames not yet sent to the bank are
     /// taken back (they are the memory), then it is closed.
     fn drop_waiting(&mut self, client: u64) {
+        let waiting = self.queue.held_bytes.get(&client).copied().unwrap_or(0) + self.live.as_ref().and_then(|b| b.link.queued.get(&client).copied()).unwrap_or(0);
+        self.totals.dropped_clients += 1;
+        self.totals.dropped_bytes += waiting as u64;
         self.queue.forget(client);
         if let Some(b) = self.live.as_mut() {
             b.link.purge(client);

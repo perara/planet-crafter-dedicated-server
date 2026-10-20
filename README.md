@@ -229,8 +229,8 @@ docker exec pcds pcds players | rules | gui
 ```
 
 The admin page listens on port 7782 inside the container; publish it on 127.0.0.1 only, as
-above. The image's health check asks the admin API for the server's status (`docker ps` shows
-it healthy once the world runs), so it needs `PCDS_ADMIN` on, as it is by default.
+above. The image's health check runs `pcds health`, which asks `GET /api/health` (no token; `docker ps`
+shows it healthy once the world runs), so it needs `PCDS_ADMIN` on, as it is by default.
 `--stop-timeout 90` gives the server time to save the world at `docker stop` (Docker's default
 of 10 s would kill it during the save); Compose has `stop_grace_period: 90s`. `PUID`/`PGID` (default 1000) set who owns `data/` on the host. On the first start without
 a world, the newest save in `data/worlds/` runs, or a new world is made (the arguments of the
@@ -389,6 +389,15 @@ unban everyone): fix it or move it away.
 The admin API listens on 127.0.0.1. To reach the web page from another machine, use an SSH
 tunnel (`ssh -L 7782:127.0.0.1:7782 server`) rather than exposing it.
 Every route of the API, who answers it and what it takes: docs/admin-api.md.
+
+**Monitoring.** `GET /api/health` needs no token and says only whether the server serves a world
+(`200 {"ok":true}`, else `503`; a hot update does not turn it red), for container probes and
+uptime monitors (`pcds health` is the same for scripts). `GET /api/metrics` gives players,
+tick times, memory, saves, backups, hand-overs, crashes and the plugins in the Prometheus text
+format; a token with the scope `metrics.read` (`pcds plugin token create prometheus --scope
+metrics.read`) can read that and nothing else. [docs/monitoring.md](docs/monitoring.md) lists every
+metric, a scrape configuration, alert rules and the Grafana dashboard
+([docs/grafana/pcds.json](docs/grafana/pcds.json)).
 
 To run a second server on the same machine, give it its own folder and unit names:
 `PCDS_HOME=/srv/world2 PCDS_UNIT=pcds-world2 PCDS_LISTEN=0.0.0.0:7778 PCDS_ADMIN=127.0.0.1:7783

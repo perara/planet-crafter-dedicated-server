@@ -32,6 +32,27 @@ Every release has two parts a reader can rely on:
   size a hot update needs, and the open-files limit. With the server running it also asks the
   admin API (invite code, last save, backups, S3, crashes). It changes nothing; the exit code is 1
   when a check FAILs; `--json` is for scripts.
+* **Metrics and health for monitoring.** `GET /api/metrics` answers in the Prometheus text format
+  (checked with `promtool check metrics`, and scraped by a real Prometheus): players online and
+  the limit, tick p50, p99 and max, how busy the loop is, memory of the front and the game,
+  objects, inventories, the last save (when, whether it worked, how long it took), backups and the
+  S3 copies, hand-overs (total, failed, how long the world stood), crashes, watchdog kills, the
+  queue of player traffic and what was dropped, plugins by state and what each one costs, and
+  version and format labels. `GET /api/health` needs no token and answers `{"ok":true}` while a
+  world is served and `503` while it is stopped, loading or starting again after a crash; a hot
+  update does not turn it red. A new token scope, `metrics.read`, opens the metrics route and
+  nothing else (`pcds plugin token create prometheus --scope metrics.read`), so the scraper does
+  not hold the admin token. [docs/monitoring.md](docs/monitoring.md) has the list of metrics, a
+  scrape configuration, 17 alert rules (checked with `promtool check rules`) and the Grafana
+  dashboard [docs/grafana/pcds.json](docs/grafana/pcds.json) (all its queries run on a real
+  Prometheus). `pcds health` is the command form of the health route.
+
+### Changed
+
+* **The Docker health check and the Kubernetes probes use the health route.** The image's
+  `HEALTHCHECK` runs `pcds health` (it needed the admin token and a status request before), and
+  [docs/kubernetes.yaml](docs/kubernetes.yaml) probes `GET /api/health` over HTTP. The liveness
+  probe now waits five minutes for a world, since a crash is healed in seconds.
 
 ## [0.8.0] - 2026-10-20
 
