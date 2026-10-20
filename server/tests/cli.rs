@@ -274,9 +274,13 @@ fn an_unknown_setting_stops_the_start() {
     std::fs::write(dir.join("home/.config/systemd/user/pcds-cli-itest.service"), "").unwrap();
     let out = pcds(&dir, &fake, &["restart"]);
     assert!(text(&out).contains(&format!("unknown setting {autosave}")) && out.status.code() == Some(1), "{}", text(&out));
+    assert!(said.contains(&format!("{autosave} is the rule save.autosaveMinutes now")), "{said}");
     // Without them the start goes on, to the missing world.
     std::fs::write(dir.join("run/server.env"), "PCDS_ADMIN_TOKEN=s3cret-token\n").unwrap();
     assert!(text(&pcds(&dir, &fake, &["run"])).contains("no world at"));
+    // A retired setting in the process environment (a compose file's environment:) is no error, but is said.
+    let out = Command::new(PCDS).arg("run").env("PCDS_HOME", dir.join("run")).env("PCDS_UNIT", "pcds-cli-itest").env("HOME", dir.join("home")).env("PATH", format!("{}:{}", fake.display(), std::env::var("PATH").unwrap_or_default())).env(backups, "0").output().unwrap();
+    assert!(text(&out).contains(&format!("ignored in the environment: {backups} is the rule save.backupsKept now")) && text(&out).contains("no world at"), "{}", text(&out));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

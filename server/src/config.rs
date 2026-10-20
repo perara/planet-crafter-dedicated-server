@@ -196,10 +196,47 @@ pub fn installation_file(get: &impl Fn(&str) -> Option<String>, save_path: &str,
     .to_string()
 }
 
-/// The PCDS_ names of a server.env that are no setting: Err naming the file and each one.
+/// Settings that releases before 0.7 read from server.env or the environment and that are rules
+/// now, or gone: the name, and what took its place. server.env refuses them (`check_keys`); in the
+/// process environment (a compose `environment:`) they would be ignored without a word, so the
+/// start says so (`retired_in_env`).
+pub const RETIRED: &[(&str, &str)] = &[
+    ("PCDS_AUTOSAVE", "the rule save.autosaveMinutes"),
+    ("PCDS_BACKUPS", "the rule save.backupsKept"),
+    ("PCDS_BACKUP_MINUTES", "the rule save.backupMinutes"),
+    ("PCDS_MAX_PLAYERS", "the rule limits.maxPlayers"),
+    ("PCDS_AUTO_UPDATE", "the rule update.auto"),
+    ("PCDS_UPDATE_CHECK_HOURS", "the rule update.checkHours"),
+    ("PCDS_TRACE", "the rule log.trace"),
+    ("PCDS_TRUST_LOOPBACK", "gone (tests only: PCDS_DEV=trust-loopback)"),
+    ("PCDS_PORT", "the port in PCDS_LISTEN"),
+    ("PCDS_ADMIN_BIND", "PCDS_ADMIN"),
+    ("PCDS_RULES", "gone: rules.json in the installation folder"),
+    ("PCDS_ACCESS", "gone: access.json in the installation folder"),
+    ("PCDS_WEB", "gone"),
+    ("PCDS_NEW_WORLD", "the options of pcds container (docker command: [\"--planet\", ...])"),
+];
+
+/// The retired settings among `names`, each with what replaced it: "PCDS_AUTOSAVE is the rule ...".
+fn retired_hints<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    names.into_iter().filter_map(|k| RETIRED.iter().find(|(n, _)| *n == k).map(|(n, now)| format!("{n} is {now} now"))).collect()
+}
+
+/// The retired settings that `get` finds in the process environment: the start warns about them.
+pub fn retired_in_env(get: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    retired_hints(RETIRED.iter().map(|(n, _)| *n).filter(|n| get(n).is_some_and(|v| !v.is_empty())))
+}
+
+/// The PCDS_ names of a server.env that are no setting: Err naming the file and each one (and, for a
+/// setting an earlier release had, what replaces it).
 pub fn check_keys(file: &str, keys: impl IntoIterator<Item = String>) -> Result<(), String> {
     let unknown: Vec<String> = keys.into_iter().filter(|k| k.starts_with("PCDS_") && !knob_for(k).is_some_and(|n| n.read_only())).collect();
-    if unknown.is_empty() { Ok(()) } else { Err(format!("{file}: unknown setting {}", unknown.join(", "))) }
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let hints = retired_hints(unknown.iter().map(String::as_str));
+    let hint = if hints.is_empty() { String::new() } else { format!(" ({}; docs/upgrading.md)", hints.join(", ")) };
+    Err(format!("{file}: unknown setting {}{hint}", unknown.join(", ")))
 }
 
 pub fn knob_for(key: &str) -> Option<&'static Knob> {
@@ -452,6 +489,7 @@ mod tests {
     /// process it starts (the others).
     pub const TEST_ENV: &[(&str, &str)] = &[
         ("PCDS_TEST_DATA", "The game tables the tests run on (default run/data/2.103); none skips the tests that need them (CI)."),
+        ("PCDS_TEST_PORTS", "docker/test.sh: three ports (UDP, admin, release feed) to use instead of free ones the system picks."),
         ("PCDS_RNG_SEED", "A fixed seed for the game's random numbers: benchmarks and replays compare runs. Read by test builds only."),
         ("PCDS_BENCH_SAVE", "bench: the save the benchmark runs on (required)."),
         ("PCDS_BENCH_SECONDS", "bench: game seconds to run (default 300)."),
@@ -750,13 +788,29 @@ mod tests {
         assert_eq!(env_number("PCDS_SESSION"), 4242);
     }
 
+    /// The settings of earlier releases are named with what replaced them: no knob any more, and the
+    /// rules they name exist. In the process environment they are found, not refused.
+    #[test]
+    fn retired_settings_name_the_rule_that_replaced_them() {
+        for (name, now) in RETIRED {
+            assert!(knob_for(name).is_none(), "{name} is a setting again: remove it from RETIRED");
+            if let Some(rule) = now.strip_prefix("the rule ") {
+                assert!(KNOBS.iter().any(|k| k.key == rule), "{name}: no rule {rule}");
+            }
+        }
+        let env = |k: &str| (k == "PCDS_BACKUPS" || k == "PCDS_PORT").then(|| "x".to_string());
+        assert_eq!(retired_in_env(env), ["PCDS_BACKUPS is the rule save.backupsKept now", "PCDS_PORT is the port in PCDS_LISTEN now"]);
+        assert!(retired_in_env(|_| None).is_empty());
+    }
+
     /// A name in server.env that is no setting is one line naming the file and the key; a hook
     /// of PCDS_DEV that does not exist stops the start; the files of the installation are in
     /// PCDS_HOME, else beside the world.
     #[test]
     fn unknown_settings_and_the_installations_files() {
         let e = check_keys("/srv/run/server.env", ["PCDS_LISTEN".to_string(), "PCDS_AUTOSAVE".to_string(), "PATH".to_string(), "PCDS_HOME".to_string()]).unwrap_err();
-        assert_eq!(e, "/srv/run/server.env: unknown setting PCDS_AUTOSAVE, PCDS_HOME");
+        assert_eq!(e, "/srv/run/server.env: unknown setting PCDS_AUTOSAVE, PCDS_HOME (PCDS_AUTOSAVE is the rule save.autosaveMinutes now; docs/upgrading.md)");
+        assert_eq!(check_keys("f", ["PCDS_HOME".to_string()]).unwrap_err(), "f: unknown setting PCDS_HOME");
         check_keys("f", KNOBS.iter().filter(|k| k.read_only()).map(|k| k.key.to_string())).unwrap();
         let env = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string());
         assert_eq!(installation_file(&env(&[]), "/w/world.json", "access.json"), "/w/access.json");

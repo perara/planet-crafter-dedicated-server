@@ -93,7 +93,7 @@ impl Ctx {
             Ok(()) => format!("the server was not restarted, and bank {previous} is still the active one"),
             Err(undo) => format!("and bank {previous} could not be made the active one again ({undo}): fix run/bin/active before the server restarts"),
         };
-        Err(format!("{said}\nthe release just installed would not start with this server.env: edit it (docs/upgrading.md), then run the same command again\n{back}"))
+        Err(format!("{}\nthe release just installed would not start with this server.env: edit it (docs/upgrading.md), then run the same command again\n{back}", said.trim_start_matches("pcds: ")))
     }
 
     /// After the restart of the unit: until the world runs again. Err when the unit gave up
@@ -265,10 +265,10 @@ mod tests {
             std::fs::write(banks.join(bank).join("pcds"), format!("#!/bin/sh\n{script}\n")).unwrap();
             std::fs::set_permissions(banks.join(bank).join("pcds"), std::fs::Permissions::from_mode(0o755)).unwrap();
         };
-        put("b", "[ \"$1\" = check-settings ] && echo \"pcds: $PCDS_HOME/server.env: unknown setting PCDS_OLD\" >&2 && exit 1");
+        put("b", "[ \"$1\" = check-settings ] && echo \"pcds: $PCDS_HOME/server.env: unknown setting GONE_ONE\" >&2 && exit 1");
         updater::set_active(&banks, "b").unwrap();
         let e = ctx.settings_or_undo(&banks, "a").unwrap_err();
-        assert!(e.contains("unknown setting PCDS_OLD") && e.contains("not restarted") && e.contains("bank a is still the active one"), "{e}");
+        assert!(e.contains("unknown setting GONE_ONE") && e.contains("not restarted") && e.contains("bank a is still the active one"), "{e}");
         assert_eq!(updater::active(&banks), "a");
         // Accepted, and an older release that prints its help and no error: both go on.
         put("b", "exit 0");

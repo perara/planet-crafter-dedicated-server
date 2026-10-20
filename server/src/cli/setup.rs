@@ -170,6 +170,12 @@ impl Ctx {
         let get = |key: &str| settings.get(key).filter(|v| !v.is_empty()).cloned().or_else(|| crate::env(key));
         self.check_settings_file()?;
         crate::config::check_env(get)?;
+        // In server.env a retired setting stops the start (above); in the environment (a compose
+        // file's `environment:`) it would be ignored without a word.
+        let from_file = |key: &str| settings.get(key).is_some();
+        if let retired @ [_, ..] = crate::config::retired_in_env(|key| crate::env(key).filter(|_| !from_file(key))).as_slice() {
+            eprintln!("pcds: ignored in the environment: {} (docs/upgrading.md)", retired.join(", "));
+        }
         let world = self.world_file();
         if !world.is_file() {
             return Err(format!("no world at {}: 'pcds worlds', 'pcds world use NAME' or 'pcds world new NAME'", world.display()));

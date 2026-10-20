@@ -62,6 +62,7 @@ Read by test builds and tools, never by an installation. Set by hand for the ben
 | Variable | What |
 |---|---|
 | `PCDS_TEST_DATA` | The game tables the tests run on (default run/data/2.103); none skips the tests that need them (CI). |
+| `PCDS_TEST_PORTS` | docker/test.sh: three ports (UDP, admin, release feed) to use instead of free ones the system picks. |
 | `PCDS_RNG_SEED` | A fixed seed for the game's random numbers: benchmarks and replays compare runs. Read by test builds only. |
 | `PCDS_BENCH_SAVE` | bench: the save the benchmark runs on (required). |
 | `PCDS_BENCH_SECONDS` | bench: game seconds to run (default 300). |
