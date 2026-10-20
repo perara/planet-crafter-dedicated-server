@@ -451,9 +451,11 @@ class UnitSrv(Srv):
     def ensure_running(self):
         """What an owner (or a monitor) would do: nothing while systemd restarts the unit by itself;
         when it gave up (start limit) or ended, reset it and start it again. Returns the unit's Result when it had to."""
-        st = self.unit_state()
-        if st.get("ActiveState") in ("active", "activating", "deactivating") or st.get("SubState") == "auto-restart":
-            return None
+        for _ in range(3):  # the instant between systemd's restart job and the start looks like "inactive"
+            st = self.unit_state()
+            if st.get("ActiveState") in ("active", "activating", "deactivating") or st.get("SubState") == "auto-restart":
+                return None
+            time.sleep(1)
         why = st.get("Result", "?")
         self.sysctl("reset-failed", f"{self.unit}.service")
         if self.sysctl("restart", f"{self.unit}.service").returncode:

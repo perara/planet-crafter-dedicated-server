@@ -260,7 +260,7 @@ module plugins::data  plugins::data::tests::a_rules_file_says_what_it_needs plug
 module plugins::limits  plugins::tests::a_crowd_of_plugins_cannot_stretch_a_tick_and_takes_turns plugins::tests::memory_is_limited_and_a_module_that_asks_for_too_much_does_not_start plugins::tests::the_flip_budget_leaves_a_slow_saver_with_its_last_state
 module plugins::manifest  plugins::manifest::tests::a_good_manifest_parses_and_names_its_kinds plugins::manifest::tests::mistakes_are_refused_with_the_reason plugins::manifest::tests::ids_and_versions
 module plugins::runtime  plugins::tests::nonsense_answers_and_pointers_are_faults_not_crashes
-module plugins::state  plugins::state::tests::hex_round_trips_and_refuses_garbage plugins::state::tests::saved_state_is_text plugins::state::tests::a_state_file_keeps_its_version_and_refuses_other_files
+module plugins::state  plugins::state::tests::hex_round_trips_and_refuses_garbage plugins::state::tests::saved_state_is_text plugins::state::tests::a_state_file_keeps_its_version_and_refuses_other_files plugins::state::tests::a_state_is_not_written_into_a_plugin_folder_that_was_removed
 module plugins::stream  plugins::stream::tests::the_ring_numbers_filters_and_forgets plugins::stream::tests::consumers_register_leave_and_are_forgotten_when_silent plugins::game_tests::a_data_plugin_changes_the_rules_with_the_players_online_and_the_stream_hears_of_it
 module plugins::view  plugins::game_tests::the_example_plugins_run_in_the_game_and_their_state_goes_through_a_hot_update
 module plugins::wasm  plugins::tests::a_module_with_imports_the_server_does_not_have_is_refused_by_name plugins::tests::a_module_built_for_another_abi_does_not_run plugins::tests::only_a_plugin_that_may_veto_can_veto_an_rpc

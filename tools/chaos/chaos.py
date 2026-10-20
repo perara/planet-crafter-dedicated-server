@@ -154,20 +154,22 @@ def main():
                 t = time.time()
                 while srv.pids()["bank"] and time.time() - t < timeout:
                     time.sleep(0.5)
-                if srv.pids()["bank"]:
-                    FAIL("an orphan bank outlived its front", banks=srv.pids()["bank"])
+                now = srv.pids()  # a front that started meanwhile (the unit's restart) has banks of its own
+                if now["bank"] and not now["serve"]:
+                    FAIL("an orphan bank outlived its front", banks=now["bank"])
                     srv.kill_all()
                 why = srv.ensure_running()
                 if why:
-                    events["start_limit"] += 1
-                    L("supervisor: the unit had given up (Result=%s); reset and started" % why)
+                    events["start_limit" if why == "start-limit-hit" else "unit_ended"] = events.get("start_limit" if why == "start-limit-hit" else "unit_ended", 0) + 1
+                    L("supervisor: the unit was not running (Result=%s); reset and started" % why)
             return
         if not p["serve"]:
             t = time.time()
             while srv.pids()["bank"] and time.time() - t < timeout:
                 time.sleep(0.5)
-            if srv.pids()["bank"]:
-                FAIL("an orphan bank outlived its front", banks=srv.pids()["bank"])
+            now = srv.pids()
+            if now["bank"] and not now["serve"]:
+                FAIL("an orphan bank outlived its front", banks=now["bank"])
                 srv.kill_all()
             srv.proc = None
             srv.start(wait=90)
@@ -741,6 +743,7 @@ def main():
         r = prnd.choices(["install", "enable", "disable", "remove", "mutate_wasm", "mutate_toml", "restore", "cmd", "reload"], [3, 6, 3, 2, 3, 1, 3, 4, 1])[0]
         with pl_lock:
             pl["ops"] += 1
+            L("  plugin op", r)
             if r == "install":
                 pl_put(wasm0, toml0)
                 pl.update(present=True, pristine=True, expect=None)
@@ -755,7 +758,11 @@ def main():
                     pl["expect"] = "disabled"
                 r += f" {s}"
             elif r == "remove":
-                shutil.rmtree(PL_DIR, ignore_errors=True)
+                for _ in range(10):  # as an admin does: rm -rf again when the plugin wrote its state meanwhile
+                    shutil.rmtree(PL_DIR, ignore_errors=True)
+                    if not os.path.exists(PL_DIR):
+                        break
+                    time.sleep(0.2)
                 pl.update(present=False, expect="absent")
             elif r == "mutate_wasm" and pl["present"]:
                 w = bytearray(open(os.path.join(PL_DIR, "plugin.wasm"), "rb").read())

@@ -86,8 +86,15 @@ pub fn read(file: &Path) -> Result<Option<Blob>, String> {
 }
 
 pub fn write(file: &Path, blob: &Blob) -> Result<(), String> {
+    // Only `data/` is made, never the plugin's own folder: one the admin removed while the plugin
+    // ran must stay removed (a state written after the removal made a folder with nothing but
+    // data/ in it, which the host read as a plugin whose files were gone and kept running).
     if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        match std::fs::create_dir(dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("{}: {e}", dir.display())),
+        }
     }
     let mut out = Vec::with_capacity(12 + blob.bytes.len());
     out.extend_from_slice(MAGIC);
@@ -99,6 +106,21 @@ pub fn write(file: &Path, blob: &Blob) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_state_is_not_written_into_a_plugin_folder_that_was_removed() {
+        let dir = std::env::temp_dir().join(format!("pcds-state-removed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let blob = Blob { version: 1, bytes: vec![1] };
+        let file = path(&dir.join("hello"), "world");
+        assert!(write(&file, &blob).is_err(), "no plugin folder: nothing is written");
+        assert!(!dir.exists(), "and none is made");
+        std::fs::create_dir_all(dir.join("hello")).unwrap();
+        write(&file, &blob).unwrap();
+        write(&file, &blob).unwrap();
+        assert_eq!(read(&file).unwrap(), Some(blob));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn hex_round_trips_and_refuses_garbage() {
@@ -119,6 +141,7 @@ mod tests {
     #[test]
     fn a_state_file_keeps_its_version_and_refuses_other_files() {
         let dir = std::env::temp_dir().join(format!("pcds-state-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
         let file = path(&dir, "world");
         assert_eq!(read(&file).unwrap(), None);
         let blob = Blob { version: 7, bytes: b"counter=3".to_vec() };

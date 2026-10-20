@@ -13,7 +13,7 @@
            bank stands (it holds the players' frames), it must answer again and the players must
            be back. (This also covers what was a separate "stall" driver.)
 
-  queuecap 64 rejoining players (--cap-players) whose chat lines are 900 KB, while the bank is stopped
+  queuecap 64 rejoining players (--cap-players) whose chat lines are 450000 characters (900 KB on the wire, the most the transport takes), while the bank is stopped
            for 40 s (--cap-seconds, under the watchdog's 60): the frames wait in the front, which
            must drop the client with the most waiting once all together hold 256 MiB (the log says
            so) and keep its memory bounded (--max-cap-front-mb); then answer again.
@@ -168,7 +168,7 @@ def main():
         n = args.cap_players
         srv = fresh("st-qcap", maxp=n)
         addr = f"{lib.LOOPBACK}:{srv.port}"
-        bots = lib.Bots("rejoin", args, addr, players=n, seconds=args.cap_seconds + 240, PCDS_LOAD_CHAT_BYTES=900000)
+        bots = lib.Bots("rejoin", args, addr, players=n, seconds=args.cap_seconds + 240, PCDS_LOAD_CHAT_BYTES=450000)
         lib.wait_for(lambda: (lambda s, j: s == 200 and len(j["players"]) >= n * 0.9)(*srv.status(timeout=30)), 30 + n * 0.2, 1)
         bank, since, peak, rows = srv.bank_pid(), time.time(), 0, []
         base = lib.proc(srv.pid)["rss"] // 1024
@@ -179,14 +179,14 @@ def main():
             time.sleep(2)
             rss = lib.proc(srv.pid)["rss"] // 1024
             peak = max(peak, rss)
-            dropped = sum(1 for l in srv.logtext().splitlines() if "waiting for the game; dropped" in l or "dropped" in l and "waiting" in l)
+            dropped = sum(1 for l in srv.logtext().splitlines() if "waiting for the game" in l and "dropped" in l)
             rows.append((round(time.time() - t0), rss, dropped))
         os.kill(bank, signal.SIGCONT)
         log("queuecap: (seconds, front MB, drop lines):", rows[::3])
         t1 = time.time()
         back = lib.wait_for(lambda: srv.status(timeout=30)[0] == 200, 60)
         text = srv.logtext()
-        drops = [l for l in text.splitlines() if "dropped" in l and ("waiting" in l or "MiB" in l)]
+        drops = [l for l in text.splitlines() if "waiting for the game" in l and "dropped" in l]
         log(f"queuecap: peak front {peak} MB (base {base}); {len(drops)} drop lines, e.g. {drops[:2]}; status again after {time.time() - t1:.1f} s; players now {len(srv.status()[1]['players']) if back else '?'}; bank stands: {lib.proc(srv.bank_pid() or 0) is not None}")
         if not back:
             verdict.fail("queuecap: no status 60 s after CONT")
