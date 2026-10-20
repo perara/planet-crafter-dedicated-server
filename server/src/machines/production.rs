@@ -60,7 +60,16 @@ pub fn tick(game: &mut Game, wo: i32, now: GameTime) {
 fn in_range(game: &Game, wo: i32, range: f32) -> Vec<i32> {
     let Some(me) = game.wos.get(&wo) else { return Vec::new() };
     let (planet, position, active) = (me.planet_hash(), me.position, is_active(game, wo));
-    game.wos.values().filter(|w| (active || w.id != wo) && w.net.is_some() && w.planet_hash() == planet && dist(position, w.position) < range).map(|w| w.id).collect()
+    // Only world objects with a network object count: those few, in the order of the list of all.
+    let mut found: Vec<(usize, i32)> = game
+        .net_wos
+        .iter()
+        .filter_map(|id| game.wos.get(id))
+        .filter(|w| (active || w.id != wo) && w.net.is_some() && w.planet_hash() == planet && dist(position, w.position) < range)
+        .filter_map(|w| Some((game.wos.slot_of(&w.id)?, w.id)))
+        .collect();
+    found.sort_unstable();
+    found.into_iter().map(|(_, id)| id).collect()
 }
 
 fn by_distance(game: &Game, wo: i32, mut list: Vec<i32>) -> Vec<i32> {
@@ -299,9 +308,11 @@ fn try_to_craft(game: &mut Game, wo: i32) {
 
 /// SetItemsInRange: loose items (not growing) and what logistics-enabled buildings hold.
 fn items_in_range(game: &Game, wo: i32, range: f32) -> Vec<i32> {
+    // In the order they are first met; `seen` says whether one was (a list of thousands is no place for contains).
     let mut out: Vec<i32> = Vec::new();
-    let add = |id: i32, out: &mut Vec<i32>| {
-        if !out.contains(&id) {
+    let mut seen: crate::idmap::FxHashSet<i32> = Default::default();
+    let mut add = |id: i32, out: &mut Vec<i32>| {
+        if seen.insert(id) {
             out.push(id);
         }
     };
@@ -326,7 +337,7 @@ fn items_in_range(game: &Game, wo: i32, range: f32) -> Vec<i32> {
                 continue;
             }
             let inventory = if index < 0 { w.linked_inventory } else { w.secondary_inventories.get(index as usize).copied().unwrap_or(0) };
-            for item in items(game, inventory) {
+            for &item in game.inventories.get(&inventory).map(|i| i.items.as_slice()).unwrap_or_default() {
                 if game.wos.get(&item).is_some_and(|i| !i.is_placed() || i.growth == 100.0) {
                     add(item, &mut out);
                 }
@@ -780,6 +791,31 @@ mod tests {
         let inv = game.wos[&crafter].linked_inventory;
         assert_eq!(game.inventories[&inv].items.iter().map(|i| game.wos[i].group).collect::<Vec<_>>(), vec![target]);
         assert!(game.inventories[&chest_inv].items.is_empty());
+    }
+
+    /// The machines' view of what stands near them is the scan of every world object it replaced,
+    /// in the same order, however the slots of the world objects were freed and taken again.
+    #[test]
+    fn what_is_in_range_is_what_the_scan_of_all_world_objects_found() {
+        let Some(mut game) = game() else { return };
+        let mut ids: Vec<i32> = (0..12).map(|i| build(&mut game, "Container1", [i as f32 * 3.0, 5.0, (i % 3) as f32 * 4.0])).collect();
+        // Slots freed and taken in another order than the ids, and objects with no network object among them.
+        for i in [3, 7, 4] {
+            game.destroy_world_object(ids[i], false);
+        }
+        ids.extend((0..3).map(|i| build(&mut game, "Container1", [1.0 + i as f32, 5.0, 1.0])));
+        let loose = game.create_world_object(game.data.group("Iron").unwrap(), 0, true);
+        game.wos.get_mut(&loose).unwrap().position = [2.0, 5.0, 2.0];
+        let scan = |game: &Game, wo: i32, range: f32| -> Vec<i32> {
+            let me = &game.wos[&wo];
+            let (planet, position, active) = (me.planet_hash(), me.position, is_active(game, wo));
+            game.wos.values().filter(|w| (active || w.id != wo) && w.net.is_some() && w.planet_hash() == planet && dist(position, w.position) < range).map(|w| w.id).collect()
+        };
+        for &wo in ids.iter().filter(|id| game.wos.contains_key(id)) {
+            for range in [0.5, 3.5, 10.0, 100.0] {
+                assert_eq!(in_range(&game, wo, range), scan(&game, wo, range), "{wo} within {range}");
+            }
+        }
     }
 
     #[test]

@@ -16,6 +16,9 @@ What a tool needs (every tool takes these as options, see add_server_args):
   --port   the first of the tool's ports (UDP for players; the admin API is --port + 1). The
            defaults are in 8420-8439. Ports 7777 and 7782 (a real server's) are refused.
 
+  PCDS_TOOLS_RULES (environment, a JSON object) is merged over the rules every tool gives its server:
+           a save on a DLC planet needs '{"world": {"dlcPlanets": ["Humble"]}}'.
+
 A server the tool starts is its own: its own home (PCDS_HOME), world copy, admin token (random
 per start) and process group; the tool signals only processes whose command line is
 `<program> serve|bank DATA <its world copy>`, and ends them all when it exits. It refuses to start when its port
@@ -255,7 +258,10 @@ class Srv:
         os.makedirs(self.home, exist_ok=True)
         if fresh:
             shutil.copy(world or args.world, self.world)
-            json.dump(merge({"save": {"autosaveMinutes": 0, "backupsKept": 0}}, rules or {}), open(os.path.join(self.home, "rules.json"), "w"))
+            # PCDS_TOOLS_RULES (a JSON object) is merged over the tool's rules: a save on a DLC planet needs
+            # {"world": {"dlcPlanets": ["Humble"]}}.
+            extra = json.loads(os.environ.get("PCDS_TOOLS_RULES") or "{}")
+            json.dump(merge(merge({"save": {"autosaveMinutes": 0, "backupsKept": 0}}, rules or {}), extra), open(os.path.join(self.home, "rules.json"), "w"))
         self.env = dict(PCDS_LISTEN=self.listen, PCDS_ADMIN=f"{LOOPBACK}:{self.admin}", PCDS_ADMIN_TOKEN=self.token, PCDS_STEAM="off", PCDS_HOME=self.home,
                         PCDS_RELEASES="http://127.0.0.1:1")
         if dev:

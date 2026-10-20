@@ -96,7 +96,7 @@ pub const BOOT_FAILED: i32 = 75;
 pub const LOAD_DEADLINE: Duration = Duration::from_secs(120);
 
 /// The front's frame while it is quiet (Front::quiet): a request on the admin API waits for it.
-const IDLE_FRAME: Duration = Duration::from_millis(20);
+const IDLE_FRAME: Duration = Duration::from_millis(50);
 /// Kicked: the reason first, the connection closed this much later.
 const KICK_DELAY: Duration = Duration::from_millis(300);
 /// More crashes than this within CRASH_WINDOW and the front gives up (systemd restarts it).

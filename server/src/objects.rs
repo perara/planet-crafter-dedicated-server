@@ -251,6 +251,7 @@ impl Game {
         }
         self.change_state_index(id);
         let Some(wo) = self.wos.remove(&id) else { return };
+        self.net_wos.remove(&id);
         crate::meteo::explode::net_changed(self, wo.group, wo.net.is_some(), false);
         self.constructed.remove(&id);
         self.pickables.remove(&id);
@@ -314,6 +315,11 @@ impl Game {
         let Some(w) = self.wos.get_mut(&id) else { return };
         let (group, had) = (w.group, w.net.is_some());
         w.net = net;
+        if net.is_some() {
+            self.net_wos.insert(id);
+        } else {
+            self.net_wos.remove(&id);
+        }
         crate::meteo::explode::net_changed(self, group, had, net.is_some());
     }
 

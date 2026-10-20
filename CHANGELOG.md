@@ -125,6 +125,17 @@ matches on `Event` fields by name. The plugin changes add nothing to the snapsho
 * **A scoped token for the scraper.** The scope `metrics.read` opens `GET /api/metrics` and nothing
   else (`pcds plugin token create prometheus --scope metrics.read`), so a monitor does not hold the
   admin token.
+* **docs/performance.md**: what the server costs (instructions, allocations, bytes, wake-ups), the
+  budgets a test holds the build to, how to profile it and read the tick histogram of `/api/status`, how
+  big a machine a world and its players need, the limits of the transport, and what was tried and left out.
+* **Efficiency budgets as tests** (docs/testing.md): allocations and user instructions per tick on a
+  world anyone can build (0, 400 and 1,600 buildings, 0 and 4 players), their growth with the world, the
+  bytes per world object of a snapshot, a save and a join, the instructions of a hot update's stand,
+  the transport's allocations (needs no game tables: CI runs it) and the wake-ups of an idle server.
+* `GET /api/status` `traffic.wire`: datagrams and bytes in and out, how many datagrams only
+  acknowledged, heartbeats and resends. `bench::bench` and `bench::flipbench` print user instructions
+  (where the kernel lets the process count them); `PCDS_BENCH_ALLOC_SITES` names where a tick allocates.
+  `tools/perf/loadrun.py` prints the wire; `PCDS_TOOLS_RULES` gives the tools' servers rules (a DLC planet).
 
 * **Plugins can** (ABI 1.3): read the world in `load`; know a player by a stable `player_id`; read the wall clock (`unix_ms`);
   see who built or took apart an object (`client` on `object_placed` and `object_destroyed`); look up one player, a
@@ -169,6 +180,36 @@ matches on `Event` fields by name. The plugin changes add nothing to the snapsho
   [docs/kubernetes.yaml](docs/kubernetes.yaml) probes `GET /api/health` over HTTP. The liveness
   probe now waits five minutes for a world, since a crash is healed in seconds.
 * **The admin port waits 2 seconds, not 3,** for a request head.
+* **The world's tick costs a fraction on a big world.** The late-game save (33,000 world objects,
+  hundreds of machines, drones and logistics inventories), user instructions per simulated second:
+  idle 196 -> 24 M (8x), 4 players 203 -> 32 M, 32 players 226 -> 54 M, 100 players 329 -> 108 M, with
+  the same messages and the same save, byte for byte (the bench's fingerprints, every case). The
+  logistics search for tasks went through every supply for every demand and every dropped item; it
+  goes through the items left. The machines' walk reads a flat array of due times instead of every
+  machine. Scans of every world object (the machines' range, the autocrafters' items) look at the
+  few that have a network object, and de-duplicate by set. A message to one client is no longer looked
+  for by every client, and the drones' hiding is sets, not lists (100 players and the drones). Idle,
+  the live bank on that save used 380 M instructions a second and uses 45 M. On the bench world
+  and the grown 100k and 200k worlds the gain is 10 to 50% (they have little logistics).
+* **The hot update stands for 40% less work** (user instructions of a snapshot and its restore, all
+  threads): 385 -> 223 M at 33k objects, 1,080 -> 625 M at 100k, 2,130 -> 1,239 M at 200k. The
+  restore read the tables of every machine again, six lookups each, which was the largest part of it
+  (52 / 172 / 342 ms of the stand); it reads them once for each group. In time, in process on a loaded
+  host: 102 -> 32 ms at 33k, 276 -> 76 at 100k, 513 -> 162 at 200k (p50 of the better of two runs); with
+  the real front and two banks and no players: 105 to 118 -> 62 to 67 ms at 100k, 277 to 306 -> 95 to
+  129 ms at 200k.
+* **A start is faster**: the game from the save 341 -> 197 ms (33k), 508 -> 334 (100k), 973 -> 739
+  (200k) of CPU (the prefab components are found by an index, a group's authorized items worked out
+  once).
+* **The front costs a third at 64 players** (89 M of 266 M user instructions a second: a chunk of
+  the send queue was copied byte by byte; the sessions' timers are looked at when one can be silent,
+  not at every 5 ms frame) and wakes up 20 times a second idle, not 50 (its quiet frame is 50 ms; an
+  admin request waits up to that).
+* **`pcds load` and `pcds probe` take a batch of any size** (up to 256 MiB), as the game's client does,
+  so a world of 200,000 objects (a join of 2.4 MB) can be joined by them. The server's own limit on a
+  batch it receives is still 1 MiB. The test-only switch for it is gone.
+* **Left out, because the numbers did not support them**: the save text on several threads, a
+  two-level array for the machines' walk, delayed acknowledgements (docs/performance.md).
 
 * **A module is translated when it is read**, not when each function is first called. Translation was charged to the call as fuel,
   so the first call of an instance cost up to five times the next ones and a budget that held the steady state could fault it, again and

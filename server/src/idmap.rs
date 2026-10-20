@@ -68,6 +68,10 @@ impl<K: Copy + Eq + Hash, V> Slots<K, V> {
     pub fn contains_key(&self, k: &K) -> bool {
         self.index.contains_key(k)
     }
+    /// The place of a key in the order `iter` goes in.
+    pub fn slot_of(&self, k: &K) -> Option<usize> {
+        self.index.get(k).copied()
+    }
     /// A new key takes the most recently freed slot, or goes last; a known one keeps its slot.
     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
         if let Some(i) = self.index.get(&k) {

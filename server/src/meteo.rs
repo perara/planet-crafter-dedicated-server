@@ -381,14 +381,16 @@ fn system_terraformation(game: &Game) -> f64 {
 /// current planet's terraformation has reached.
 pub fn current_global_stage(game: &Game) -> Option<String> {
     let value = crate::units::value(game, Kind::Terraformation, 0);
-    let mut best: Option<(f64, String)> = None;
-    for key in refs(&planet_data(game)["allTerraStages"]) {
-        let start = game.data.asset(&key).and_then(|s| s["startValue"].as_f64()).unwrap_or(0.0);
+    let planet = game.data.asset(&format!("PlanetData:PlanetData-{}", game.planet_id()));
+    let mut best: Option<(f64, &str)> = None;
+    // The asset references of allTerraStages ("" for a missing entry, as `refs` has it).
+    for key in planet.into_iter().filter_map(|p| p["allTerraStages"].as_array()).flatten().map(|r| r.as_str().unwrap_or("")) {
+        let start = game.data.asset(key).and_then(|s| s["startValue"].as_f64()).unwrap_or(0.0);
         if value >= start && start >= best.as_ref().map_or(0.0, |b| b.0) {
             best = Some((start, key));
         }
     }
-    best.map(|b| b.1)
+    best.map(|b| b.1.to_string())
 }
 
 /// The current planet's terraformation stages for the admin page: each stage's key, unit and

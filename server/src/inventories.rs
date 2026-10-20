@@ -178,6 +178,7 @@ impl Game {
 
     /// The index from the inventories (after a load or a restore).
     pub fn rebuild_holders(&mut self) {
+        self.net_wos = self.wos.values().filter(|w| w.net.is_some()).map(|w| w.id).collect();
         self.holders.clear();
         let all: Vec<(i32, i32)> = self.inventories.values().flat_map(|i| i.items.iter().map(move |wo| (*wo, i.id))).collect();
         for (wo, inv) in all {

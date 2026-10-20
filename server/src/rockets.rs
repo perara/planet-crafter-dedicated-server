@@ -65,6 +65,9 @@ pub struct State {
     interplanetary: interplanetary::State,
     /// Game time of the previous tick (Time.deltaTime for MachineRocketLand).
     last_tick: GameTime,
+    /// back_and_forth::tick's list of platforms (kept to reuse its allocation).
+    #[serde(skip)]
+    ids: Vec<i32>,
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]

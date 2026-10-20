@@ -49,13 +49,80 @@ pub struct Machines {
     /// No machine has anything due before this (a lower bound; every change to a machine
     /// resets it, and tick skips its walk until then).
     next_due: GameTime,
+    /// `next_due(m)` of every machine, in list order, so that the walk reads a flat array and
+    /// looks at a machine only when it is due or changed. Valid while `dues_ok`; a machine got
+    /// through `get_mut` is in `dirty` (its place in the list) until its entry is made again.
+    /// Adding or removing a machine makes the whole array again at the next walk.
+    #[serde(skip)]
+    dues: Vec<GameTime>,
+    #[serde(skip)]
+    dues_ok: bool,
+    #[serde(skip)]
+    dirty: Vec<usize>,
+    /// Counts the machines added and removed (a walk in progress compares it).
+    #[serde(skip)]
+    structure: u64,
+    /// The authorized and unauthorized item groups of a building's inventory (and whether it is
+    /// equipment), per building group: worked out from the tables once.
+    #[serde(skip)]
+    authorized: crate::idmap::FxHashMap<usize, (Vec<usize>, Vec<usize>, bool)>,
 }
 
 impl Machines {
     /// A machine to change (its timers may move earlier: tick walks all machines again).
     fn get_mut(&mut self, wo: &i32) -> Option<&mut Machine> {
         self.next_due = GameTime::PAST;
+        if self.dues_ok {
+            self.dirty.extend(self.list.get_index_of(wo));
+        }
         self.list.get_mut(wo)
+    }
+
+    /// A machine added (at the end of the list, or in place of the one of the same world object).
+    fn insert(&mut self, wo: i32, m: Machine) {
+        self.next_due = GameTime::PAST;
+        self.structure += 1;
+        let due = (self.dues_ok).then(|| due_of(&m));
+        let (i, replaced) = self.list.insert_full(wo, m);
+        if let Some(due) = due {
+            if replaced.is_some() {
+                self.dues[i] = due;
+            } else {
+                self.dues.push(due);
+            }
+        }
+    }
+
+    /// A machine taken out; whether there was one.
+    fn remove(&mut self, wo: &i32) -> bool {
+        let Some((i, _, _)) = self.list.shift_remove_full(wo) else { return false };
+        self.structure += 1;
+        if self.dues_ok {
+            self.dues.remove(i);
+            self.dirty.retain(|d| *d != i);
+            for d in self.dirty.iter_mut().filter(|d| **d > i) {
+                *d -= 1;
+            }
+        }
+        true
+    }
+
+    /// The array of due times as the machines are now.
+    fn refresh_dues(&mut self, next_due: impl Fn(&Machine) -> GameTime) {
+        if self.dues_ok {
+            let mut dirty = std::mem::take(&mut self.dirty);
+            for i in dirty.drain(..) {
+                if let Some((_, m)) = self.list.get_index(i) {
+                    self.dues[i] = next_due(m);
+                }
+            }
+            self.dirty = dirty;
+        } else {
+            self.dirty.clear();
+            self.dues.clear();
+            self.dues.extend(self.list.values().map(next_due));
+            self.dues_ok = true;
+        }
     }
 
     pub fn with_energy(&self) -> Vec<i32> {
@@ -137,13 +204,7 @@ mod unit_names {
 /// Serialized fields of a group's prefab components of one type; `root` keeps those on the
 /// prefab's root object only (GetComponent rather than GetComponentInChildren).
 fn components<'a>(game: &'a Game, group: usize, ty: &str, root: bool) -> Vec<&'a Value> {
-    game.data.group_prefabs[&game.data.groups[group].id]["components"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|c| c["type"] == ty && (!root || c["path"] == ""))
-        .map(|c| &c["fields"])
-        .collect()
+    game.data.group_prefabs.components(&game.data.groups[group].id, ty, root)
 }
 
 /// The first such component on the prefab root.
@@ -159,27 +220,33 @@ fn root(game: &Game, group: usize, ty: &str) -> Option<Value> {
 /// (spawn_every, speed, groups) mixes both and is not refreshed.
 pub fn refresh_from_tables(game: &mut Game) {
     let machines: Vec<i32> = game.ext.machines.list.keys().copied().collect();
+    game.ext.machines.dues_ok = false;
+    // What the tables say is a function of the group: read once for each group of a machine.
+    type Roots = [Option<Value>; 6];
+    let mut roots: crate::idmap::FxHashMap<usize, Roots> = Default::default();
     for wo in machines {
         let Some(group) = game.wos.get(&wo).map(|w| w.group) else { continue };
-        let f = |ty: &str| root(game, group, ty);
-        let (harvestable, vegetation, linked, autocrafter, disintegrator, optimizer) = (f("MachineGrowerVegetationHarvestable"), f("MachineGrowerVegetationStatic"), f("MachineGrowerIfLinkedGroup"), f("MachineAutoCrafter"), f("MachineDisintegrator"), f("MachineOptimizer"));
+        let [harvestable, vegetation, linked, autocrafter, disintegrator, optimizer] = roots.entry(group).or_insert_with(|| {
+            let f = |ty: &str| root(game, group, ty);
+            [f("MachineGrowerVegetationHarvestable"), f("MachineGrowerVegetationStatic"), f("MachineGrowerIfLinkedGroup"), f("MachineAutoCrafter"), f("MachineDisintegrator"), f("MachineOptimizer")]
+        });
         let Some(m) = game.ext.machines.list.get_mut(&wo) else { continue };
-        if let (Some(h), Some(f)) = (m.harvestable.as_mut(), &harvestable) {
+        if let (Some(h), Some(f)) = (m.harvestable.as_mut(), &*harvestable) {
             h.refresh(f);
         }
-        if let (Some(v), Some(f)) = (m.vegetation.as_mut(), &vegetation) {
+        if let (Some(v), Some(f)) = (m.vegetation.as_mut(), &*vegetation) {
             v.refresh(f);
         }
-        if let (Some(l), Some(f)) = (m.linked_grower.as_mut(), &linked) {
+        if let (Some(l), Some(f)) = (m.linked_grower.as_mut(), &*linked) {
             l.refresh(f);
         }
-        if let (Some(a), Some(f)) = (m.autocrafter.as_mut(), &autocrafter) {
+        if let (Some(a), Some(f)) = (m.autocrafter.as_mut(), &*autocrafter) {
             a.refresh(f);
         }
-        if let (Some(d), Some(f)) = (m.disintegrator.as_mut(), &disintegrator) {
+        if let (Some(d), Some(f)) = (m.disintegrator.as_mut(), &*disintegrator) {
             d.refresh(f);
         }
-        if let (Some(o), Some(f)) = (m.optimizer.as_mut(), &optimizer) {
+        if let (Some(o), Some(f)) = (m.optimizer.as_mut(), &*optimizer) {
             o.refresh(f);
         }
     }
@@ -187,7 +254,7 @@ pub fn refresh_from_tables(game: &mut Game) {
 
 /// GetComponent<MachineRocketBackAndForth>() (its trade and interplanetary subclasses).
 fn is_rocket_platform(game: &Game, group: usize) -> bool {
-    crate::rockets::PLATFORM_CLASSES.iter().any(|class| root(game, group, class).is_some())
+    crate::rockets::PLATFORM_CLASSES.iter().any(|class| !components(game, group, class, true).is_empty())
 }
 
 fn f32_of(v: &Value, key: &str) -> f32 {
@@ -354,11 +421,8 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
         floater: None,
     };
     // MachineGrowerBase and its subclasses on the root, in component order (growth fuses).
-    for c in game.data.group_prefabs[&game.data.groups[group].id]["components"].as_array().into_iter().flatten() {
-        if c["path"] != "" {
-            continue;
-        }
-        match c["type"].as_str().unwrap_or("") {
+    for ty in game.data.group_prefabs.root_types(&game.data.groups[group].id) {
+        match ty {
             "MachineGrowerBase" | "MachineGrowerVegetationStatic" | "MachineGrowerVegetationHarvestable" => m.growers.push(true),
             "MachineGrowerIfLinkedGroup" | "MachineFlockSpawner" => m.growers.push(false),
             _ => {}
@@ -405,7 +469,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     if linked != 0 && game.inventories.contains_key(&linked) {
         m.linked = linked;
         if let Some(f) = root(game, group, "InventoryAuthorizedGroups") {
-            set_authorized_groups(game, linked, &f);
+            set_authorized_groups(game, linked, group, &f);
         }
         if let Some(f) = root(game, group, "MachineGenerator") {
             // TryToCastRay casts only while the machine is active: one on another planet keeps
@@ -440,7 +504,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     let wants_start = has_harvestable;
     let grows = m.growers.iter().any(|g| *g);
     game.ext.machines.next_due = GameTime::PAST;
-    game.ext.machines.list.insert(wo, m);
+    game.ext.machines.insert(wo, m);
     // Rules: growth speed, as a growth fuse would add it.
     if grows && game.rules.speed.growth != 1.0 {
         production::add_growth_speed(game, wo, game.rules.speed.growth - 1.0);
@@ -478,7 +542,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
 pub fn on_destroyed(game: &mut Game, wo: &WorldObject) {
     let machines = &mut game.ext.machines;
     machines.energy.swap_remove(&wo.id);
-    if machines.list.shift_remove(&wo.id).is_some() {
+    if machines.remove(&wo.id) {
         machines.listening.retain(|_, m| *m != wo.id);
     }
     // ConstructibleProxy.OnDestroy: WorldObjectsHandler.onConstructibleDestroyed.
@@ -580,6 +644,11 @@ pub fn planet_loaded(game: &mut Game) {
     }
 }
 
+/// The earliest time `tick` has something to do for this machine.
+fn due_of(m: &Machine) -> GameTime {
+    production::next_due(m).min(growers::next_due(m)).min(m.floater.map_or(GameTime::NEVER, |(_, due)| due))
+}
+
 pub fn tick(game: &mut Game) {
     veins::ensure(game);
     // Start / `yield return null`: the frame after instantiation.
@@ -605,15 +674,43 @@ pub fn tick(game: &mut Game) {
     if now < game.ext.machines.next_due {
         return;
     }
-    let next_due = |m: &Machine| production::next_due(m).min(growers::next_due(m)).min(m.floater.map_or(GameTime::NEVER, |(_, due)| due));
+    let next_due = due_of;
     let mut earliest = GameTime::NEVER;
     game.ext.machines.next_due = GameTime::NEVER;
     let mut ids = std::mem::take(&mut game.ext.machines.ids);
     ids.clear();
     ids.extend(game.ext.machines.list.keys());
-    for &wo in &ids {
+    game.ext.machines.refresh_dues(next_due);
+    let structure = game.ext.machines.structure;
+    let mut k = 0;
+    while k < ids.len() {
+        // Machines nothing has changed, nothing due: the array says it (the common case, in one run).
+        // (Not once a machine was added or removed in this walk: the ids are the list before.)
+        let m = &game.ext.machines;
+        if m.dues_ok && m.structure == structure && m.dirty.is_empty() {
+            let rest = &m.dues[k..];
+            let stop = rest.iter().position(|d| now >= *d).unwrap_or(rest.len());
+            earliest = rest[..stop].iter().fold(earliest, |e, d| e.min(*d));
+            k += stop;
+            if k >= ids.len() {
+                break;
+            }
+        }
+        let wo = ids[k];
         // Nothing due at its turn: the ticks below would do nothing.
-        let Some(due) = game.ext.machines.list.get(&wo).map(next_due) else { continue };
+        let due = if game.ext.machines.dues_ok && game.ext.machines.structure == structure {
+            game.ext.machines.refresh_dues(next_due);
+            game.ext.machines.dues[k]
+        } else {
+            match game.ext.machines.list.get(&wo).map(next_due) {
+                Some(due) => due,
+                None => {
+                    k += 1;
+                    continue;
+                }
+            }
+        };
+        k += 1;
         if now < due {
             earliest = earliest.min(due);
             continue;
@@ -655,22 +752,27 @@ fn float_on_water(game: &mut Game, wo: i32) {
 // ---- inventory listeners ----------------------------------------------------------------
 
 /// InventoryAssociated.SetInventory: InventoryAuthorizedGroups on the inventory.
-fn set_authorized_groups(game: &mut Game, inventory: i32, f: &Value) {
-    let groups = |categories: &str, sub_categories: &str| -> Vec<usize> {
-        let list = |k: &str| f[k].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
-        let mut out: Vec<usize> = Vec::new();
-        let items = || game.data.groups.iter().enumerate().filter(|(_, g)| !g.constructible);
-        for c in list(categories) {
-            out.extend(items().filter(|(i, g)| g.str("itemCategory") == c && !out.contains(i)).map(|(i, _)| i).collect::<Vec<_>>());
-        }
-        for c in list(sub_categories) {
-            out.extend(items().filter(|(i, g)| g.str("itemSubCategory") == c && !out.contains(i)).map(|(i, _)| i).collect::<Vec<_>>());
-        }
-        out
-    };
-    let authorized = groups("authorizedItemCategories", "authorizedItemSubCategories");
-    let unauthorized = groups("unauthorizedItemCategories", "unauthorizedItemSubCategories");
-    let equipment = authorized.first().is_some_and(|g| game.data.groups[*g].str("itemCategory") == "Equipment");
+fn set_authorized_groups(game: &mut Game, inventory: i32, group: usize, f: &Value) {
+    // The same for every building of a group: worked out once (the tables do not change).
+    if !game.ext.machines.authorized.contains_key(&group) {
+        let groups = |categories: &str, sub_categories: &str| -> Vec<usize> {
+            let list = |k: &str| f[k].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
+            let mut out: Vec<usize> = Vec::new();
+            let items = || game.data.groups.iter().enumerate().filter(|(_, g)| !g.constructible);
+            for c in list(categories) {
+                out.extend(items().filter(|(i, g)| g.str("itemCategory") == c && !out.contains(i)).map(|(i, _)| i).collect::<Vec<_>>());
+            }
+            for c in list(sub_categories) {
+                out.extend(items().filter(|(i, g)| g.str("itemSubCategory") == c && !out.contains(i)).map(|(i, _)| i).collect::<Vec<_>>());
+            }
+            out
+        };
+        let authorized = groups("authorizedItemCategories", "authorizedItemSubCategories");
+        let unauthorized = groups("unauthorizedItemCategories", "unauthorizedItemSubCategories");
+        let equipment = authorized.first().is_some_and(|g| game.data.groups[*g].str("itemCategory") == "Equipment");
+        game.ext.machines.authorized.insert(group, (authorized, unauthorized, equipment));
+    }
+    let (authorized, unauthorized, equipment) = game.ext.machines.authorized[&group].clone();
     if let Some(inv) = game.inventories.get_mut(&inventory) {
         inv.authorized = authorized;
         inv.unauthorized = unauthorized;

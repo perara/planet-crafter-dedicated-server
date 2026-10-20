@@ -223,7 +223,10 @@ pub fn landing_step(height: f32, speed: f32, dt: f32) -> Option<f32> {
 
 pub fn tick(game: &mut Game, dt: f32) {
     let now = game.time;
-    for wo in game.ext.rockets.machines.keys().copied().collect::<Vec<_>>() {
+    let mut ids = std::mem::take(&mut game.ext.rockets.ids);
+    ids.clear();
+    ids.extend(game.ext.rockets.machines.keys());
+    for &wo in &ids {
         let Some(m) = game.ext.rockets.machines.get(&wo) else { continue };
         // The GameObject went (destroyed, or despawned with its planet): its coroutines too.
         if !game.wos.get(&wo).is_some_and(|w| w.net == Some(m.net)) || !game.net.objects.contains_key(&m.net) {
@@ -255,6 +258,7 @@ pub fn tick(game: &mut Game, dt: f32) {
             update_growth(game, wo);
         }
     }
+    game.ext.rockets.ids = ids;
 }
 
 /// One wake-up of the UpdateGrowth coroutine on the server.

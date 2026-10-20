@@ -442,3 +442,185 @@ fn drone_farm_runs_for_hours() {
     }
     println!("{seconds} s of game, {stations} stations x {drones} drones, {pairs} pairs: worst tick {:.1} ms, {delivered} items delivered", all_worst * 1000.0);
 }
+
+/// The search for tasks as the port first had it (every demand through every supply and every
+/// dropped item), kept as the oracle of the one that went through the items left.
+fn reference_set_logistic_tasks(game: &mut Game) {
+    game.ext.logistics.updating = 1;
+    let pickables: Vec<i32> = game.pickables.iter().copied().collect();
+    for p in game.ext.logistics.priorities.values_mut() {
+        p.clear();
+    }
+    let mut i = 0;
+    while i < game.ext.logistics.demand.len() {
+        let d = game.ext.logistics.demand[i];
+        i += 1;
+        let Some(inv) = game.inventories.get(&d) else { continue };
+        let waiting = game.ext.logistics.entities.get(&d).map(|e| e.waiting).unwrap_or(0);
+        let mut available = (inv.size - inv.items.len() as i32 - waiting).max(0);
+        let (full, priority, groups) = (inv.is_full(), inv.logistic.priority, inv.logistic.demand.clone());
+        let planet = entity_planet(game, d);
+        if full || available == 0 || entity_wo(game, d).is_none() || !game.ext.logistics.priorities.contains_key(&planet) {
+            continue;
+        }
+        for &g in &groups {
+            let hash = game.data.groups[g].hash;
+            if game.ext.logistics.priorities[&planet].get(&hash).is_some_and(|v| priority < *v) {
+                continue;
+            }
+            for s in game.ext.logistics.supply.clone() {
+                let supplies = game.inventories.get(&s).is_some_and(|i| i.logistic.supply.contains(&g));
+                if s == d || entity_wo(game, s).is_none() || entity_planet(game, s) != planet || !supplies {
+                    continue;
+                }
+                for wo in items(game, s) {
+                    if game.wos.get(&wo).is_some_and(|w| w.group == g) && create_task(game, Some(s), d, wo, false).is_some() {
+                        available -= 1;
+                        if available == 0 {
+                            break;
+                        }
+                    }
+                }
+                if available == 0 {
+                    break;
+                }
+            }
+            if available == 0 {
+                continue;
+            }
+            for &wo in &pickables {
+                // A task for it already: create_task refuses it, so its checks can wait.
+                if game.ext.logistics.all_tasks.contains_key(&wo) {
+                    continue;
+                }
+                let ok = game.wos.get(&wo).is_some_and(|w| w.group == g && w.net.is_some() && motion::length_sq(w.position) >= 1e-10 && can_grab(game, w) && w.planet_hash() == planet);
+                if ok && create_task(game, None, d, wo, true).is_some() {
+                    available -= 1;
+                    if available == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        if available > 0 {
+            let hashes: Vec<i32> = groups.iter().map(|g| game.data.groups[*g].hash).collect();
+            if let Some(p) = game.ext.logistics.priorities.get_mut(&planet) {
+                for h in hashes {
+                    let e = p.entry(h).or_insert(priority);
+                    *e = (*e).max(priority);
+                }
+            }
+        }
+    }
+    let entries: Vec<(i32, u32)> = game.ext.logistics.all_tasks.iter().map(|(k, v)| (*k, *v)).collect();
+    let mut over = Vec::new();
+    for (wo, uid) in entries {
+        let t = &game.ext.logistics.tasks[&uid];
+        if is_full(game, t.demand) {
+            set_state(game, uid, State::Done);
+            over.push(wo);
+        } else if t.state == State::Done {
+            over.push(wo);
+        }
+    }
+    let l = &mut game.ext.logistics;
+    for wo in over {
+        l.all_tasks.remove(&wo);
+    }
+    let held: HashSet<u32> = l.all_tasks.iter().map(|(_, uid)| *uid).chain(l.drones.values().filter_map(|d| d.task)).collect();
+    l.tasks.retain(|uid, _| held.contains(uid));
+}
+
+
+/// A base of containers that supply and demand in many ways (demands of several groups, so that
+/// one group takes the last room and the next is met with none; supplies that are also in
+/// the way of their own demands; items on the ground; full inventories) from a seed.
+fn tasks_world(seed: u64) -> Option<Game> {
+    let mut game = game()?;
+    // The ids the game picks at random are the same in both worlds of a seed.
+    game.rng = crate::game::Rng::fixed(seed);
+    let mut rng = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+    let mut roll = move |n: u64| {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng % n
+    };
+    build(&mut game, "EnergyGenerator6", [40.0, 2.0, 0.0]);
+    build(&mut game, "DroneStation1", [10.0, 2.0, 10.0]);
+    let names = ["Iron", "Magnesium", "Silicon", "Aluminium", "Cobalt"];
+    let groups: Vec<usize> = names.iter().map(|n| game.data.group(n).unwrap()).collect();
+    for i in 0..30 {
+        let wo = build(&mut game, "Container1", [25.0 + (i % 6) as f32 * 3.0, 2.0, 10.0 + (i / 6) as f32 * 3.0]);
+        let inventory = game.wos[&wo].linked_inventory;
+        for _ in 0..roll(9) {
+            add(&mut game, names[roll(5) as usize], inventory);
+        }
+        let pick = |roll: &mut dyn FnMut(u64) -> u64| -> Vec<usize> { (0..roll(4)).map(|_| groups[roll(5) as usize]).collect() };
+        let (supply, demand) = (pick(&mut roll), pick(&mut roll));
+        let inv = game.inventories.get_mut(&inventory).unwrap();
+        inv.logistic.supply = supply;
+        inv.logistic.demand = demand;
+        inv.logistic.priority = roll(3) as i32;
+        set_dirty(&mut game, inventory);
+    }
+    for _ in 0..40 {
+        game.create_and_drop_on_floor(groups[roll(5) as usize], [30.0 + roll(20) as f32, 2.0, 12.0 + roll(20) as f32], 0.6, true, false, 0.0, 0);
+    }
+    Some(game)
+}
+
+/// What tasks_coroutine does before a search, for either search.
+fn ready_for_search(game: &mut Game) {
+    let ids: Vec<i32> = game.inventories.values().filter(|i| !i.logistic.demand.is_empty() || !i.logistic.supply.is_empty()).map(|i| i.id).collect();
+    for id in ids {
+        set_inventory_status(game, id);
+    }
+    let mut demand = std::mem::take(&mut game.ext.logistics.demand);
+    let priority = |i: &i32| game.inventories.get(i).map(|i| i.logistic.priority).unwrap_or(0);
+    let _ = crate::dotnet_sort::sort_by(&mut demand, |x, y| priority(y).cmp(&priority(x)));
+    game.ext.logistics.demand = demand;
+    game.ext.logistics.inventories_inited = true;
+}
+
+#[test]
+fn the_search_for_tasks_makes_the_tasks_the_first_search_made_in_the_same_order() {
+    let mut made = 0;
+    for seed in 1..=40 {
+        let (Some(mut new), Some(mut old)) = (tasks_world(seed), tasks_world(seed)) else { return };
+        for game in [&mut new, &mut old] {
+            ready_for_search(game);
+        }
+        // Several searches in a row: tasks stay between them, as they do live.
+        for round in 0..3 {
+            set_logistic_tasks(&mut new);
+            reference_set_logistic_tasks(&mut old);
+            let summary = |g: &Game| -> Vec<(i32, u32)> { g.ext.logistics.all_tasks.iter().map(|(wo, uid)| (*wo, *uid)).collect() };
+            assert_eq!(summary(&new), summary(&old), "seed {seed}, search {round}");
+            let tasks = |g: &Game| -> Vec<(u32, i32, Option<i32>, i32, bool)> {
+                let mut v: Vec<_> = g.ext.logistics.tasks.iter().map(|(uid, t)| (*uid, t.wo, t.supply, t.demand, t.spawned)).collect();
+                v.sort();
+                v
+            };
+            assert_eq!(tasks(&new), tasks(&old), "seed {seed}, search {round}");
+            let waiting = |g: &Game| -> Vec<(i32, i32)> {
+                let mut v: Vec<_> = g.ext.logistics.entities.iter().map(|(i, e)| (*i, e.waiting)).collect();
+                v.sort();
+                v
+            };
+            assert_eq!(waiting(&new), waiting(&old), "seed {seed}, search {round}");
+            assert_eq!(new.ext.logistics.next_task, old.ext.logistics.next_task);
+            made += new.ext.logistics.all_tasks.iter().count();
+            // Some deliveries between searches: items leave the supplies' stock for new ones.
+            for game in [&mut new, &mut old] {
+                let wos: Vec<i32> = game.ext.logistics.all_tasks.iter().map(|(wo, _)| *wo).step_by(3).collect();
+                for wo in wos {
+                    if let Some(uid) = game.ext.logistics.all_tasks.get(&wo).copied() {
+                        set_state(game, uid, State::Done);
+                    }
+                }
+            }
+        }
+    }
+    assert!(made > 500, "the scenarios made {made} tasks: they should exercise the search");
+}
