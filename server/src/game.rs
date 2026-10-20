@@ -240,6 +240,10 @@ pub struct Game {
     /// Clients refused a change to another player's inventory (logged once each).
     #[serde(skip)]
     pub refused_inventories: std::collections::HashSet<u64>,
+    /// A client's RPC that waited for its turn panicked in the tick and was contained (its client
+    /// kicked): the bank taints the world as it does for the panics it contains (bank/panic.rs).
+    #[serde(skip)]
+    pub panicked: bool,
     /// RPCs refused for the object they were sent to (logged once each).
     #[serde(skip)]
     misrouted: std::collections::HashSet<String>,
@@ -361,6 +365,7 @@ impl Game {
             unhandled: Default::default(),
             misrouted: Default::default(),
             refused_inventories: Default::default(),
+            panicked: false,
             save_requested: false,
             limits: Default::default(),
             load_water: None,

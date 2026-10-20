@@ -175,7 +175,14 @@ pub fn run_pending(game: &mut Game, cost: impl Fn(&Game, &[u8]) -> u32, run: imp
             game.limits.pending_bytes.remove(&client);
         }
         for rpc in due {
-            run(game, client, &rpc);
+            // These run inside the tick, which a panic ends the bank in (the world restarts from its
+            // save): a client's RPC is contained as one that ran on arrival is (bank/panic.rs guarded).
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(game, client, &rpc))).is_err() {
+                eprintln!("client {client}: the server panicked on an RPC that waited for its turn; kicked");
+                game.panicked = true;
+                game.kick(client, "Server error");
+                break;
+            }
         }
     }
 }
@@ -529,6 +536,32 @@ mod tests {
     use crate::net::{enc, Target, VarValue};
     use crate::testkit::*;
     use serde_json::{json, Value};
+
+    /// An RPC that waited for its turn runs inside the tick; one that panics there must kick its client
+    /// and go on, not end the bank (a client must not be able to restart the world by sending
+    /// something that panics: it can, if only a queued RPC does it). The others' RPCs still run.
+    #[test]
+    fn a_waiting_rpc_that_panics_kicks_its_client_and_not_the_world() {
+        let Some((mut g, _)) = world() else { return };
+        crate::game::tests::join(&mut g, 2, "Bob");
+        for client in [1, 2] {
+            g.limits.pending.insert(client, std::collections::VecDeque::from(vec![vec![1u8], vec![2u8]]));
+        }
+        let ran = std::cell::RefCell::new(Vec::new());
+        let quiet = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        super::run_pending(&mut g, |_, _| 1, |_, client, rpc| {
+            ran.borrow_mut().push((client, rpc[0]));
+            if client == 1 {
+                panic!("a handler bug");
+            }
+        });
+        std::panic::set_hook(quiet);
+        assert!(g.panicked && g.kicks.iter().any(|(c, _)| *c == 1) && !g.kicks.iter().any(|(c, _)| *c == 2));
+        let mut ran = ran.into_inner();
+        ran.sort();
+        assert_eq!(ran, [(1, 1), (2, 1), (2, 2)], "the client that panicked runs no more, the other goes on");
+    }
 
     /// The RPCs a client has waiting for the next ticks are bounded in bytes too (a count of 8192
     /// RPCs of a batch each was gigabytes); the bytes follow the queue in and out and go with the
