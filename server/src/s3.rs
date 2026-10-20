@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
-use serde_json::{json, Value};
+use serde::Serialize;
 
 use crate::rules::Backup;
 use crate::util::to_hex;
 
 /// The last upload's outcome, and the backup file it was.
-static LAST: Mutex<Option<Value>> = Mutex::new(None);
+static LAST: Mutex<Option<LastUpload>> = Mutex::new(None);
 static UPLOADED: Mutex<Option<String>> = Mutex::new(None);
 /// One upload at a time: a slow bucket must not pile up threads. A backup made meanwhile is
 /// PENDING: the uploading thread sends the newest one when it is done.
@@ -30,12 +30,32 @@ impl Drop for Upload {
     }
 }
 
+/// The last upload's outcome: whether it worked, the backup file it was, why not.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct LastUpload {
+    ok: bool,
+    file: String,
+    error: Option<String>,
+    at: u64,
+}
+
 /// What /api/status shows: off, or the bucket and the last upload.
-pub fn status(b: &Backup) -> Value {
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum Status<'a> {
+    Off { enabled: bool },
+    On { enabled: bool, bucket: &'a str, prefix: &'a str, missing: Vec<&'static str>, uploading: bool, last: Option<LastUpload> },
+}
+
+pub fn status(b: &Backup) -> Status<'_> {
     let last = LAST.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    status_of(b, last, BUSY.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+fn status_of(b: &Backup, last: Option<LastUpload>, uploading: bool) -> Status<'_> {
     match &b.s3_bucket {
-        None => json!({"enabled": false}),
-        Some(bucket) => json!({"enabled": true, "bucket": bucket, "prefix": b.s3_prefix, "missing": missing(b), "uploading": BUSY.load(std::sync::atomic::Ordering::SeqCst), "last": last}),
+        None => Status::Off { enabled: false },
+        Some(bucket) => Status::On { enabled: true, bucket, prefix: &b.s3_prefix, missing: missing(b), uploading, last },
     }
 }
 
@@ -116,7 +136,7 @@ pub fn after_backup(b: &Backup, save_path: &str, force: bool) -> Result<Option<S
 
 fn record(ok: bool, file: &str, error: &str) {
     let at = crate::util::now_secs();
-    *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some(json!({"ok": ok, "file": file, "error": (!ok).then_some(error), "at": at}));
+    *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some(LastUpload { ok, file: file.to_string(), error: (!ok).then(|| error.to_string()), at });
 }
 
 /// RFC 3986 encoding, as SigV4 wants it: unreserved characters kept, '/' kept in paths.
@@ -193,6 +213,32 @@ fn put(b: &Backup, key: &str, body: &[u8], now: SystemTime) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
+
+    /// The status before it had types: the JSON built by hand. The typed status prints the same bytes.
+    #[test]
+    fn the_status_prints_what_the_json_macro_did() {
+        let old = |b: &Backup, last: Option<Value>, uploading: bool| match &b.s3_bucket {
+            None => json!({"enabled": false}),
+            Some(bucket) => json!({"enabled": true, "bucket": bucket, "prefix": b.s3_prefix, "missing": missing(b), "uploading": uploading, "last": last}),
+        };
+        let off = Backup::default();
+        let configured = Backup { s3_bucket: Some("my-bucket".into()), s3_prefix: "pcds/\"x\"/".into(), s3_endpoint: Some("https://s3.example".into()), ..Backup::default() };
+        let complete = Backup { s3_access_key: Some("a".into()), s3_secret_key: Some("b".into()), ..configured.clone() };
+        for b in [&off, &configured, &complete] {
+            for uploading in [false, true] {
+                for (typed, hand) in [
+                    (None, None),
+                    (Some(LastUpload { ok: true, file: "w-20260101-000000".into(), error: None, at: 1_760_000_000 }), Some(json!({"ok": true, "file": "w-20260101-000000", "error": null, "at": 1_760_000_000u64}))),
+                    (Some(LastUpload { ok: false, file: "w".into(), error: Some("HTTP 403: AccessDenied".into()), at: 5 }), Some(json!({"ok": false, "file": "w", "error": "HTTP 403: AccessDenied", "at": 5}))),
+                ] {
+                    assert_eq!(serde_json::to_string(&status_of(b, typed, uploading)).unwrap(), old(b, hand, uploading).to_string());
+                }
+            }
+        }
+        assert_eq!(serde_json::to_string(&status_of(&off, None, false)).unwrap(), r#"{"enabled":false}"#);
+        assert_eq!(serde_json::to_string(&status_of(&configured, None, false)).unwrap(), r#"{"enabled":true,"bucket":"my-bucket","prefix":"pcds/\"x\"/","missing":["s3AccessKey","s3SecretKey"],"uploading":false,"last":null}"#);
+    }
 
     /// AWS's own example (Signature Version 4, "GET Object"): the same key, date, request and
     /// signature as in the S3 API reference.

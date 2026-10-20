@@ -27,13 +27,15 @@ mod forward;
 mod mail;
 mod panic;
 mod persist;
+mod status;
 pub(crate) use panic::contained;
 use panic::{guarded, taint};
 use forward::{forward_chat, forward_ops};
 pub use mail::reason_batch;
 use mail::{check_loading, post, send};
+use status::{backup_status, Ctx, TickTimes};
 use persist::{autosave, final_save, note_backup, persist, persist_later, settle};
-use crate::{access, chathooks, config, dashboard, plugins, protocol, rules, save, status, units, wire};
+use crate::{access, chathooks, config, dashboard, plugins, protocol, rules, save, wire};
 
 /// What this bank says in its HELLO, and `pcds bank-info` prints: its version, the front
 /// protocol it speaks, the snapshot format it writes and reads (only that one), and the format
@@ -250,58 +252,6 @@ struct Bank {
     save_path: String,
     build_id: Option<String>,
     data_dir: String,
-}
-
-/// The time of the game's ticks over the last minute, for GET /api/status: a ring of fixed size
-/// (one sample is a tick's start and duration), filled in place, so a tick costs one store and no
-/// allocation. The ring holds more than a minute of ticks (one every FRAME).
-pub struct TickTimes {
-    start: Instant,
-    ring: Box<[(u32, u32)]>,
-    next: usize,
-}
-
-/// How long a tick is remembered.
-const TICK_WINDOW: Duration = Duration::from_secs(60);
-/// Samples held: a minute of 5 ms ticks and a third more.
-const TICK_SAMPLES: usize = 16_384;
-
-impl Default for TickTimes {
-    fn default() -> Self {
-        TickTimes { start: Instant::now(), ring: vec![(u32::MAX, 0); TICK_SAMPLES].into_boxed_slice(), next: 0 }
-    }
-}
-
-impl TickTimes {
-    /// A tick that began at `at` and took `took`: milliseconds since this ring began and
-    /// microseconds, as u32 (49 days; 71 minutes).
-    fn record(&mut self, at: Instant, took: Duration) {
-        let ms = at.saturating_duration_since(self.start).as_millis().min(u32::MAX as u128 - 1) as u32;
-        self.ring[self.next] = (ms, took.as_micros().min(u32::MAX as u128) as u32);
-        self.next = (self.next + 1) % self.ring.len();
-    }
-
-    /// p50, p99 and the longest tick of the last TICK_WINDOW before `now`, in microseconds (null
-    /// when there is none). Made on request: it sorts a copy.
-    fn summary(&self, now: Instant) -> Value {
-        let since = now.saturating_duration_since(self.start).as_millis().saturating_sub(TICK_WINDOW.as_millis()) as u64;
-        let mut micros: Vec<u32> = self.ring.iter().filter(|(at, _)| *at != u32::MAX && u64::from(*at) >= since).map(|(_, took)| *took).collect();
-        micros.sort_unstable();
-        // The nearest-rank percentile.
-        let at = |p: usize| micros.get((micros.len() * p).div_ceil(100).saturating_sub(1)).copied();
-        json!({"windowSeconds": TICK_WINDOW.as_secs(), "samples": micros.len(), "p50Micros": at(50), "p99Micros": at(99), "maxMicros": micros.last()})
-    }
-}
-
-/// What the status shows of this bank's loop: loops in the last second, its work time and
-/// longest loop.
-struct Ctx<'a> {
-    ticks: &'a TickTimes,
-    save_path: &'a str,
-    build_id: Option<&'a str>,
-    data_dir: &'a str,
-    loop_rate: u32,
-    busy: (Duration, Duration),
 }
 
 impl Bank {
@@ -523,41 +473,7 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
     }
     match (method, path) {
         // The bank's part; the front adds its own (invite code, network, banks, traffic).
-        ("GET", "/api/status") => {
-            let mut players: Vec<Value> = game.clients.values().map(|c| dashboard::player(game, c, c.ip.clone().unwrap_or_default())).collect();
-            players.sort_by_key(|p| p["id"].as_u64());
-            let terraformation = units::value(game, units::Kind::Terraformation, 0);
-            let planet_units: serde_json::Map<String, Value> = game.units.planet(game.planet_hash()).map(|p| p.units.iter().map(|u| (u.kind.unit_type().to_string(), json!({"value": u.total, "perSecond": u.per_sec}))).collect()).unwrap_or_default();
-            let body = json!({
-                "state": "running",
-                "gameVersion": game.net_data.game_version,
-                "save": std::path::Path::new(ctx.save_path).file_stem().map(|s| s.to_string_lossy().to_string()),
-                "autosaveMinutes": game.rules.save.autosave_minutes,
-                "tickRate": game.net_data.tick_rate,
-                "rules": rules::changes(&game.rules),
-                "fps": ctx.loop_rate,
-                "busyPercent": (ctx.busy.0.as_secs_f64() * 1000.0).round() / 10.0,
-                "longestLoopMicros": ctx.busy.1.as_micros() as u64,
-                "planet": game.planet_id(),
-                "terraformation": terraformation,
-                "stages": crate::meteo::stages(game),
-                "gameTime": game.time,
-                "units": planet_units,
-                "players": players,
-                "access": game.access.lists,
-                "serverVersion": env!("CARGO_PKG_VERSION"),
-                "tables": tables_status(game, ctx),
-                "world": {"seed": game.save.settings["worldSeed"], "settings": game.save.settings},
-                "objects": {"world": game.wos.len(), "network": game.net.objects.len(), "inventories": game.inventories.len()},
-                "held": game.held,
-                "s3": crate::s3::status(&game.rules.backup),
-                "plugins": plugins::admin::summary(game),
-                "lastSave": serde_json::to_value(persist::last_save()).unwrap_or_default(),
-                "tick": ctx.ticks.summary(Instant::now()),
-                "backup": backup_status(&game.rules.save),
-            });
-            (200, body.to_string())
-        }
+        ("GET", "/api/status") => (200, serde_json::to_string(&status::build(game, ctx, Instant::now())).unwrap_or_default()),
         // The front's watchdog asks this of a bank that has been silent: any answer is a loop that runs.
         ("GET", "/api/ping") => ok(),
         // The save, and what became of its backup: a backup that failed is the answer's, too.
@@ -634,7 +550,7 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
                     },
                 };
                 match find_client(game, &named) {
-                    Ok(Some(c)) if status::teleport(game, c, t.position) => {
+                    Ok(Some(c)) if crate::status::teleport(game, c, t.position) => {
                         println!("client {c}: teleported to {:?} (admin)", t.position);
                         ok()
                     }
@@ -648,7 +564,7 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
             let mut w = dashboard::worlds(ctx.save_path);
             w["choices"] = crate::newworld::choices(&game.net_data, &game.data);
             w["backupsKept"] = game.rules.save.backups_kept.into();
-            w["s3"] = crate::s3::status(&game.rules.backup);
+            w["s3"] = serde_json::to_value(crate::s3::status(&game.rules.backup)).unwrap_or_default();
             (200, w.to_string())
         }
         ("POST", "/api/worlds/new") => match dashboard::body::<dashboard::NewWorld>(body) {
@@ -714,96 +630,10 @@ fn admin_answer(status: u16, body: String) -> String {
     json!({"status": 500, "body": error.to_string()}).to_string()
 }
 
-/// The status' "backup": whether they are on (save.backupsKept), when one was last made since
-/// this process started, and the last failure with its time.
-fn backup_status(files: &crate::rules::Save) -> Value {
-    let (ok, failed) = persist::backups();
-    json!({"enabled": files.backups_kept > 0, "lastOkAt": ok, "error": failed.as_ref().map(|(at, message)| json!({"at": at, "message": message}))})
-}
-
-/// /api/status's "tables": the version and build these tables are for, the installed game's
-/// build (PCDS_GAME_DIR, which pcds run sets), and a warning when that game has no tables of
-/// this server's format (a game update `pcds update` has not read yet).
-fn tables_status(game: &Game, ctx: &Ctx) -> Value {
-    let installed = installed_game(ctx.data_dir);
-    let warning = installed["warning"].clone();
-    json!({"version": game.net_data.game_version, "buildId": ctx.build_id, "game": installed, "warning": warning})
-}
-
-/// The installed game's build and whether it has tables; hashed again only when the game's
-/// code file changes (stat on each call). ponytail: tables read after the hash are seen at
-/// the next restart, which `pcds update` does once it has read them.
-fn installed_game(data_dir: &str) -> Value {
-    crate::env("PCDS_GAME_DIR").map_or(Value::Null, |game| game_at(std::path::Path::new(&game), data_dir))
-}
-
-fn game_at(dir: &std::path::Path, data_dir: &str) -> Value {
-    use std::sync::Mutex;
-    static SEEN: Mutex<Option<((std::time::SystemTime, u64), Value)>> = Mutex::new(None);
-    let code = dir.join("Planet Crafter_Data/Managed/Assembly-CSharp.dll");
-    let key = match std::fs::metadata(&code).and_then(|m| Ok((m.modified()?, m.len()))) {
-        Ok(key) => key,
-        Err(e) => return json!({"warning": format!("the game is gone ({}: {e}): pcds update", code.display())}),
-    };
-    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((k, v)) = seen.as_ref()
-        && *k == key
-    {
-        return v.clone();
-    }
-    let data = std::path::Path::new(data_dir).parent().unwrap_or(std::path::Path::new(data_dir));
-    let v = match crate::cli::build_id(dir) {
-        Ok(build) => {
-            let missing = crate::cli::find_tables(data, &build, crate::native::tables::TABLES_FORMAT).is_err();
-            json!({"buildId": build, "hasTables": !missing, "warning": missing.then(|| format!("game build {build} has no tables: run pcds update"))})
-        }
-        Err(e) => json!({"warning": e}),
-    };
-    *seen = Some((key, v.clone()));
-    v
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game;
-
-    /// The status' tick times: p50, p99 and the longest of the last minute, from a ring of fixed size
-    /// that a tick fills in place.
-    #[test]
-    fn tick_times_are_a_percentile_of_the_last_minute_in_a_fixed_ring() {
-        let mut t = TickTimes::default();
-        let (start, capacity) = (t.start, t.ring.len());
-        assert_eq!(t.summary(start)["samples"], 0);
-        assert!(t.summary(start)["p99Micros"].is_null());
-        // 1000 ticks of 1..=1000 us over the first 5 seconds.
-        for i in 1..=1000u64 {
-            t.record(start + Duration::from_millis(i * 5), Duration::from_micros(i));
-        }
-        let s = t.summary(start + Duration::from_secs(5));
-        assert_eq!((s["samples"].as_u64(), s["p50Micros"].as_u64(), s["p99Micros"].as_u64(), s["maxMicros"].as_u64()), (Some(1000), Some(500), Some(990), Some(1000)), "{s}");
-        // A slow tick is the maximum; p99 moves by one rank only (one tick in 1001).
-        t.record(start + Duration::from_secs(6), Duration::from_millis(80));
-        let s = t.summary(start + Duration::from_secs(6));
-        assert_eq!((s["maxMicros"].as_u64(), s["p99Micros"].as_u64()), (Some(80_000), Some(991)), "{s}");
-        // A minute on, those ticks are gone, and a single new one is the whole picture.
-        t.record(start + Duration::from_secs(70), Duration::from_micros(7));
-        let s = t.summary(start + Duration::from_secs(71));
-        assert_eq!((s["samples"].as_u64(), s["maxMicros"].as_u64(), s["p50Micros"].as_u64()), (Some(1), Some(7), Some(7)), "{s}");
-        // Past its size the ring overwrites the oldest, in the same memory.
-        for i in 0..capacity * 2 {
-            t.record(start + Duration::from_secs(80) + Duration::from_micros(i as u64), Duration::from_micros(3));
-        }
-        assert_eq!(t.ring.len(), capacity);
-        assert_eq!(t.summary(start + Duration::from_secs(81))["samples"], capacity);
-        // The API carries it.
-        let Some(mut game) = game::test_game(game::tests::save()) else { return };
-        let ctx = Ctx { ticks: &t, save_path: "", build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
-        let (_, status) = admin_request(&mut game, "GET", "/api/status", &json!({}), &ctx);
-        let status: Value = serde_json::from_str(&status).unwrap();
-        assert_eq!(status["tick"]["windowSeconds"], 60);
-        assert!(status["tick"]["p50Micros"].is_number() || status["tick"]["samples"] == 0);
-    }
 
     /// An admin API call as the bank answers it: (status, JSON answer).
     fn call(game: &mut Game, method: &str, path: &str, body: Value) -> (u16, Value) {
@@ -917,29 +747,6 @@ mod tests {
             assert!(!text.contains("t0ken") && !text.contains("s3cret") && !text.contains("k3y"), "{text}");
         }
         assert_eq!(read["rules"]["chat"]["secret"], "(set)");
-    }
-
-    /// The installed game's build, and a warning once it has no tables (a game update).
-    #[test]
-    fn status_warns_of_a_game_without_tables() {
-        let dir = std::env::temp_dir().join(format!("pcds-game-status-{}", std::process::id()));
-        let code = dir.join("game/Planet Crafter_Data/Managed/Assembly-CSharp.dll");
-        std::fs::create_dir_all(code.parent().unwrap()).unwrap();
-        std::fs::write(&code, "build 1").unwrap();
-        let build = crate::cli::build_id(&dir.join("game")).unwrap();
-        let tables = dir.join("data/2.103");
-        std::fs::create_dir_all(&tables).unwrap();
-        std::fs::write(tables.join("buildid"), &build).unwrap();
-        std::fs::write(tables.join("tables-format"), crate::native::tables::TABLES_FORMAT.to_string()).unwrap();
-        let data = tables.to_str().unwrap();
-        assert_eq!(game_at(&dir.join("game"), data), json!({"buildId": build, "hasTables": true, "warning": null}));
-        // The game updated (another size: a new hash at once).
-        std::fs::write(&code, "build 2, longer").unwrap();
-        let v = game_at(&dir.join("game"), data);
-        let build = crate::cli::build_id(&dir.join("game")).unwrap();
-        assert_eq!(v["warning"], format!("game build {build} has no tables: run pcds update"));
-        std::fs::remove_dir_all(&dir).unwrap();
-        assert!(game_at(&dir.join("game"), data)["warning"].as_str().unwrap().contains("the game is gone"));
     }
 
     #[test]
@@ -1161,5 +968,19 @@ mod tests {
         assert_eq!(serde_json::from_str::<Value>(&s).unwrap()["lastSave"]["ok"], true);
         assert_eq!(final_save(&mut game, &path), 0);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The status carries the tick times.
+    #[test]
+    fn the_status_carries_the_tick_times() {
+        let mut t = TickTimes::default();
+        let start = Instant::now();
+        t.record(start, Duration::from_micros(40));
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let ctx = Ctx { ticks: &t, save_path: "", build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
+        let (_, status) = admin_request(&mut game, "GET", "/api/status", &json!({}), &ctx);
+        let status: Value = serde_json::from_str(&status).unwrap();
+        assert_eq!(status["tick"]["windowSeconds"], 60);
+        assert!(status["tick"]["p50Micros"].is_number() || status["tick"]["samples"] == 0);
     }
 }
