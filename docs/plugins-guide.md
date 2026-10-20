@@ -216,7 +216,7 @@ Every failure says what to do. The ones you will meet:
   could be.
 - **Reading the world costs fuel.** `players()` costs about 6,000 fuel per player online, `nearby()` 8 per object in the world; `player(client)` is
   one player. A float formatted with `format!` costs 100,000 fuel or more in a module: print integers.
-- **The first call costs what the second does.** The module is translated when it is read. Budget for the steady state.
+- **The first call can cost more than the next ones.** The module is translated when it is read (that is no longer charged to a call), but the first call grows the module's heap. `pcds plugin check` shows both figures; budget for the first.
 - **A plugin runs on the game thread.** Everything it does comes out of the game's 5 ms. All plugins together get 2 ms of a tick; the
   rest wait their turn.
 - **A veto is a request the client has already sent.** The client may show a ghost for a moment (docs/plugins.md, "The one veto"). Tell the

@@ -169,10 +169,7 @@ impl ConfigKey {
         }
         if let Some(d) = &self.default {
             let text = toml_text(d);
-            let typed = match (self.kind, d) {
-                (ConfigType::String, toml::Value::String(_)) | (ConfigType::Int, toml::Value::Integer(_)) | (ConfigType::Float, toml::Value::Float(_) | toml::Value::Integer(_)) | (ConfigType::Bool, toml::Value::Boolean(_)) => true,
-                _ => false,
-            };
+            let typed = matches!((self.kind, d), (ConfigType::String, toml::Value::String(_)) | (ConfigType::Int, toml::Value::Integer(_)) | (ConfigType::Float, toml::Value::Float(_) | toml::Value::Integer(_)) | (ConfigType::Bool, toml::Value::Boolean(_)));
             if !typed {
                 return Err(format!("config key {k:?}: the default {text} is not a {}", self.kind.name()));
             }

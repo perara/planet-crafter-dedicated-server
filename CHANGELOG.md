@@ -67,8 +67,8 @@ to share a plugin as one file, and a dashboard page that shows what a plugin did
 ### Changed
 
 * **A module is translated when it is read**, not when each function is first called. Translation was charged to the call as fuel,
-  so the first call of an instance cost up to ten times the next ones and a budget that held the steady state could fault it, again and
-  again after each restart. Now the first call costs what the others do, and a reload does its translation before it starts the plugin.
+  so the first call of an instance cost up to five times the next ones and a budget that held the steady state could fault it, again and
+  again after each restart. Now translation is never charged to a call (the first call can still cost a little more, for the heap it grows), and a reload does its translation before it starts the plugin.
 * **A fault says what happened and what to do**: the event, the budget used and the knob that raises it (`chat: out of fuel: the call used all
   500000 fuel...`), a Rust panic is named as such, a capability a plugin used without having it is named once in its log, and a manifest key,
   capability or event that is misspelled names the one meant.

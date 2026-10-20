@@ -52,8 +52,9 @@ with the name of the import in the message, and a module built for a newer minor
 in the message ("built for plugin ABI 1.4; this server speaks 1.3").
 
 The module is translated when it is read, all of it, not function by function when each is first
-called: the first call of an instance costs the fuel the next ones do. Before ABI 1.3 translation
-was charged to the call, and a budget that held the steady state could fault the first call.
+called, so translating is never charged to a call. (Before ABI 1.3 it was, and a budget that held the
+steady state could fault the first call. The first call can still cost more than the next, because it
+grows the module's heap: `pcds plugin check` shows both.)
 
 ## The module's imports (module `pcds`)
 
