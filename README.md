@@ -512,7 +512,8 @@ cannot download (`--steam-user` installs) fails `pcds update`, so the hourly uni
 - `run/worlds/` holds the worlds, one save per world in the game's format. `PCDS_WORLD` in
   `server.env` names the one the server runs (default `world`).
 - `./pcds worlds` lists them; `./pcds world use NAME` switches (and restarts the server);
-  `./pcds world import SAVE.json [NAME]` adds a save, as does copying it into `run/worlds/`;
+  `./pcds world import SAVE.json [NAME]` adds a save, as does copying it into `run/worlds/`
+  (a save from the game's old layouts, from 2022 and before, has to be imported: see below);
   `./pcds world new NAME [--planet ID] [--start LOCATION] [--seed N] [--set KEY=VALUE]...` makes a
   new one with the game's Standard settings (`--set` changes any game setting, for example
   `--set modifierGaugeDrain=0.5 --set dyingConsequencesLabel=NoConsequences`);
@@ -522,6 +523,18 @@ cannot download (`--steam-user` installs) fails `pcds update`, so the hourly uni
   the newest `save.backupsKept`), named by UTC time. Each start also backs up the world as it was
   before the server touched it, at most once per 10 minutes. To restore one, stop the server and
   copy it over the world's file.
+- **Old saves.** The game's save layout was another one before it had several planets (2022:
+  nine sections, one player, no planets), and the game converts such a save when it opens
+  one. This server does not read them as they are: the start, `world use`, the admin world
+  switch, `setup --world` and the restore of a backup refuse one, naming
+  `pcds world import SAVE.json`. That converts it the way the game does: the single planet
+  becomes Prime; its units, the player, world objects, inventories, stats, messages and story
+  events are kept; the game settings are made whole as the game makes them (a game mode stands
+  for its dying consequences and gauge drain, and a world seed is drawn). A save of the current
+  layout is copied as it is, and the old file is left as it was. What the game's own conversion
+  loses is lost here too: in the oldest layout the technologies the player had unlocked (the
+  game moves them into a record that has no such field; a save from between the layouts keeps
+  them) and the colour layers.
 - A server that keeps crashing stops after 5 starts in 10 minutes, so the older backups stay.
   `./pcds logs` shows why; `systemctl --user reset-failed pcds` and `./pcds start` try again.
 - Access lists (`access.json`) and rules (`rules.json`) belong to the installation and apply to
@@ -555,6 +568,9 @@ page's World tab has both as buttons.
 ## Differences from hosting in the game
 
 - **Free planets only.** DLC planets need DLC ownership, which only the game itself has.
+- **Old saves are imported, not opened.** The game converts a save of its old layouts (2022 and
+  before) when it opens one; this server refuses such a save at every entry and
+  `pcds world import SAVE.json` converts it first (see "Worlds and backups").
 - **No physics on the server.** What a host game simulates itself (items still falling, parked
   vehicles, wild animals) is handed to the nearest player, by the game's own hand-over rules.
   Meteor impacts land where a player's game computes them.

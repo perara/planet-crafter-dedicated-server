@@ -155,3 +155,34 @@ energy: the grower's random state).
 - **Scene objects picked up** (101333311 in `worldobjects.json`) are saved at the end here; the
   game made a world object for every scene object at load, so a picked one keeps that early
   place (after the saved objects, before this session's new ones).
+
+## Old saves (`pcds world import`)
+
+What the game writes after it opens a save of the 2022 layout (9 sections, one planet), against what this server writes
+after `pcds world import` of the same file and a start and a stop (`savediff.py IMPORTED REF OURS`, the same file on the
+game under Wine). `mkold.py` makes such a save from a current one (the sweep's start save) for the two other layouts
+the game converts: the one between (`--tokens`: unit levels and terraTokens in the first section) and current sections with
+old game settings (`--settings-only`); the world state, the planet, the player and the settings of both come out as the
+game's.
+
+The same: the 5 129 distinct world objects (the file lists seven ids twice; the game and this server keep one of each,
+the same one), their fields (a field the game no longer has, `wear`, is dropped by both), 358 inventories (329 and the 29 the
+machines make), the planet's units, the world state, stats, messages, story events, the settings (the game mode becomes its dying
+consequences and gauge drain: Chill 0.8 and no consequences, Intense 1.2, Hardcore 1.6). The colour layers are read by no one.
+The player's `unlockedGroups` are lost by the game's conversion (its text patch moves them into the unit-levels record, which
+becomes the planet record, which has no such field) and by this one; a save between the layouts keeps them.
+
+Differences left, none a bug:
+
+- **The reference's host player** takes the saved player's place (`host`, `planetId`; see "The reference has a host player").
+  `modded` is true on the reference (BepInEx). `hasPlayedIntro` is set true by the reference's host; the import keeps the file's.
+- **`worldSeed`**: the game draws a new one at every load of a file without one; the import draws one, once, and the world keeps it.
+  `version` is the tables' game version (empty when the import runs before the tables exist).
+- **Algae seeds** (165 on the game and here) and the growth and rotation of the growables: the game's randomness and timing (class d).
+- **Floating buildings** (AlgaeGenerator, TreeSpreader0, WaterCollector2: the water-only ones) are 0.6094 higher on the game: it floats
+  them to the water level of today's terraformation, which is higher than the one the 2022 save was made at; no physics here
+  ("No physics on the server").
+- **Signs** get the default colour here (COMPLETENESS gap 11) and **teleporters without an order number**: the game's
+  `ActionUseTeleporter` numbers them from a client's script at the first spawn (`set`); here the first real client does.
+- `pcdsCurrentPlanet` in the first section (see "Save layout").
+
