@@ -83,7 +83,7 @@ def main():
         ap.error("--seconds must be at least 20 (8 s of joining, 4 s of leaving, the rest measured)")
     lib.check_inputs(args)
     os.makedirs(args.work, exist_ok=True)
-    srv = lib.Srv("loadrun", args, banks=True, rules={"limits": {"maxPlayers": max(16, args.players)}})
+    srv = lib.Srv("loadrun", args, banks=True, rules={"limits": {"maxPlayers": min(100, max(16, args.players))}})
     srv.start()
     time.sleep(1)
     front, bank = srv.pid, srv.bank_pid()

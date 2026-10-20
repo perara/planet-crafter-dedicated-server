@@ -74,6 +74,7 @@ def main():
     ap.add_argument("--only", default="", help="only these actions, comma-separated (names after a_ below)")
     ap.add_argument("--unit", default="", help="run the server as a transient systemd user unit of this name (must start with pcds-qa-) instead of supervising it here")
     ap.add_argument("--no-plugins", action="store_true", help="no plugin churn")
+    ap.add_argument("--no-fault", action="store_true", help="no plugin that traps in every event")
     ap.add_argument("--cpus", default="8-15", help="AllowedCPUs of the unit (default %(default)s)")
     args = ap.parse_args()
     lib.check_inputs(args)
@@ -714,6 +715,33 @@ def main():
             os.remove(old)
         return f"update {tag} {str(done)[:140]}"
 
+    # A module that traps in every event (`unreachable` in pcds_event), written as bytes: the host must count
+    # the faults, restart it, switch it off after five in a minute, and go on with everything else.
+    def leb(n):
+        out = bytearray()
+        while True:
+            b, n = n & 0x7F, n >> 7
+            out.append(b | (0x80 if n else 0))
+            if not n:
+                return bytes(out)
+
+    def sec(i, body):
+        return bytes([i]) + leb(len(body)) + body
+
+    def vec(items):
+        return leb(len(items)) + b"".join(items)
+
+    code = lambda body: leb(len(body) + 1) + b"\x00" + body  # no locals
+    FAULTY = (b"\x00asm\x01\x00\x00\x00"
+              + sec(1, vec([b"\x60\x00\x01\x7f", b"\x60\x01\x7f\x01\x7f", b"\x60\x02\x7f\x7f\x00", b"\x60\x03\x7f\x7f\x7f\x01\x7f"]))
+              + sec(3, vec([b"\x00", b"\x01", b"\x02", b"\x03"]))
+              + sec(5, vec([b"\x00\x01"]))
+              + sec(7, vec([b"\x06memory\x02\x00", b"\x08pcds_abi\x00\x00", b"\x0apcds_alloc\x00\x01", b"\x09pcds_free\x00\x02", b"\x0apcds_event\x00\x03"]))
+              + sec(10, vec([code(b"\x41" + leb(65536) + b"\x0b"), code(b"\x41" + leb(4096) + b"\x0b"), code(b"\x0b"), code(b"\x00\x0b")])))
+    FAULTY_TOML = b'[plugin]\nid = "faulty"\nname = "faulty"\nversion = "1.0.0"\nkind = "wasm"\nentry = "plugin.wasm"\nabi = 1\ncapabilities = ["event.chat"]\n\n[events]\nsubscribe = ["chat"]\n'
+    FAULTY_DIR = os.path.join(home, "plugins", "faulty")
+    fp = dict(present=False, faults=0, status=None)
+
     # ---- plugin churn: hello-stats installed, approved, disabled, removed, damaged, all the time ----
     PL_SRC = os.path.join(lib.REPO, "examples", "plugins", "hello-stats")
     PL_ID = "hello-stats"
@@ -740,7 +768,7 @@ def main():
         os.rename(stage, PL_DIR)
 
     def pl_op():
-        r = prnd.choices(["install", "enable", "disable", "remove", "mutate_wasm", "mutate_toml", "restore", "cmd", "reload"], [3, 6, 3, 2, 3, 1, 3, 4, 1])[0]
+        r = prnd.choices(["install", "enable", "disable", "remove", "mutate_wasm", "mutate_toml", "restore", "cmd", "reload", "fault"], [3, 6, 3, 2, 3, 1, 3, 4, 1, 0 if args.no_fault else 4])[0]
         with pl_lock:
             pl["ops"] += 1
             L("  plugin op", r)
@@ -781,6 +809,24 @@ def main():
                 srv.post("/api/chat", {"text": prnd.choice(["!stats", "!uses", "!stats extra", "!nosuch"])}, timeout=10)
             elif r == "reload":
                 srv.post("/api/plugins/reload", timeout=30)
+            elif r == "fault":
+                # the faulting plugin: put, approve, give it chat to trap on (or take it away again)
+                if not fp["present"] or prnd.random() < 0.15:
+                    shutil.rmtree(FAULTY_DIR, ignore_errors=True)
+                    stage = os.path.join(home, ".pl-stage-faulty")
+                    shutil.rmtree(stage, ignore_errors=True)
+                    os.makedirs(stage)
+                    open(os.path.join(stage, "plugin.wasm"), "wb").write(FAULTY)
+                    open(os.path.join(stage, "plugin.toml"), "wb").write(FAULTY_TOML)
+                    os.makedirs(os.path.dirname(FAULTY_DIR), exist_ok=True)
+                    os.rename(stage, FAULTY_DIR)
+                    fp["present"] = True
+                    time.sleep(2.5)
+                    srv.post("/api/plugins/enable", {"id": "faulty"}, timeout=30)
+                    r += " (installed)"
+                for _ in range(prnd.randint(1, 8)):
+                    srv.post("/api/chat", {"text": "trap"}, timeout=10)
+                    time.sleep(0.2)
         return r
 
     def pl_thread():
@@ -817,6 +863,14 @@ def main():
                 FAIL("a disabled plugin is not disabled", label=label, status=mine["status"])
             elif mine and mine["status"] not in ("running", "pending", "disabled", "changed", "invalid", "incompatible", "failed"):
                 FAIL("an unknown plugin status", label=label, status=mine["status"])
+            bad = next((p for p in j["plugins"] if p["id"] == "faulty"), None)
+            if bad:
+                fp["faults"] = max(fp["faults"], bad["stats"]["faults"])
+                fp["status"] = bad["status"]
+                fp["seen"] = fp.get("seen", {})
+                fp["seen"][bad["status"]] = fp["seen"].get(bad["status"], 0) + 1
+                if bad["status"] not in ("running", "failed", "pending", "disabled", "changed"):
+                    FAIL("the faulting plugin is in an unknown state", label=label, status=bad["status"], detail=bad.get("detail"))
             seen = mine["status"] if mine else "absent"
             pl["seen"][seen] = pl["seen"].get(seen, 0) + 1
             if mine:
@@ -869,7 +923,7 @@ def main():
     if srv.final_rc() != 0:
         FAIL("the final stop did not exit 0", rc=srv.final_rc())
     L("DONE actions", args.actions, "failures", len(verdict.failures))
-    verdict.exit(name=name, actions=args.actions, events=events, plugin_ops=pl["ops"], plugin_faults=pl["faults"], plugin_states_seen=pl["seen"], mode="unit " + args.unit if args.unit else "serve")
+    verdict.exit(name=name, actions=args.actions, events=events, plugin_ops=pl["ops"], plugin_faults=pl["faults"], plugin_states_seen=pl["seen"], faulty=fp, mode="unit " + args.unit if args.unit else "serve")
 
 
 if __name__ == "__main__":
