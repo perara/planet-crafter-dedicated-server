@@ -411,6 +411,54 @@ mod tests {
         assert!(find_http("GET", "/api/status").is_none() && find_http("POST", "/").is_none());
     }
 
+    /// What the web page can be checked for without a browser: every request it makes is a route of
+    /// the table, its narrow-screen grids may shrink (a grid column of `1fr` is as wide as its widest
+    /// content, which made three pages scroll sideways on a phone), and the colours of both themes
+    /// read at 4.5:1 on their backgrounds.
+    #[test]
+    fn the_web_page_asks_for_routes_that_exist_and_reads_on_every_screen() {
+        let page = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/web/index.html")).unwrap();
+        let mut calls = 0;
+        for call in page.split("api('").skip(1) {
+            let Some((method, rest)) = call.split_once("', ") else { continue };
+            let Some(path) = rest.strip_prefix(['\'', '`']) else { continue };
+            let path = path.split(['\'', '`', '?', '$']).next().unwrap();
+            calls += 1;
+            assert!(ROUTES.iter().any(|r| r.matches(method, path)), "the page calls {method} {path}: no such route");
+        }
+        assert!(calls > 30, "{calls} calls found: the scan lost the page's api() calls");
+        for query in page.lines().filter(|l| l.contains("@media (max-width")) {
+            assert!(!query.contains("grid-template-columns: 1fr"), "use minmax(0, 1fr) in a narrow-screen grid: {query}");
+        }
+        // Colour tokens by theme: the light ones in :root, the dark ones in :root[data-theme=dark].
+        let block = |start: &str| -> std::collections::HashMap<String, (u8, u8, u8)> {
+            let from = page.find(start).unwrap();
+            let body = &page[from..from + page[from..].find('}').unwrap()];
+            let mut tokens = std::collections::HashMap::new();
+            for decl in body.split(';') {
+                let Some((name, value)) = decl.rsplit_once(": ") else { continue };
+                let (name, value) = (name.split_whitespace().last().unwrap_or(""), value.trim());
+                if let Some(hex) = value.strip_prefix('#').filter(|h| h.len() == 6) {
+                    let n = u32::from_str_radix(hex, 16).unwrap();
+                    tokens.insert(name.to_string(), ((n >> 16) as u8, (n >> 8) as u8, n as u8));
+                }
+            }
+            tokens
+        };
+        let luminance = |(r, g, b): (u8, u8, u8)| {
+            let c = |v: u8| { let v = f64::from(v) / 255.0; if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) } };
+            0.2126 * c(r) + 0.7152 * c(g) + 0.0722 * c(b)
+        };
+        let ratio = |a, b| { let (x, y) = (luminance(a), luminance(b)); (x.max(y) + 0.05) / (x.min(y) + 0.05) };
+        for (theme, start) in [("light", ":root {"), ("dark", ":root[data-theme=dark] {")] {
+            let t = block(start);
+            for (fg, bg) in [("--text", "--panel"), ("--muted", "--panel"), ("--muted", "--bg"), ("--accent", "--panel"), ("--accent", "--accent-soft"), ("--accent2", "--panel"), ("--danger", "--panel"), ("--danger", "--danger-soft"), ("--warn", "--panel"), ("--warn", "--warn-soft"), ("--on-accent", "--accent"), ("--on-danger", "--danger")] {
+                let (a, b) = (t.get(fg).copied().unwrap_or_else(|| panic!("{theme}: no {fg}")), t.get(bg).copied().unwrap_or_else(|| panic!("{theme}: no {bg}")));
+                assert!(ratio(a, b) >= 4.5, "{theme}: {fg} on {bg} is {:.2}:1", ratio(a, b));
+            }
+        }
+    }
+
     /// Nothing is in the table twice, and the front's routes are not shadowed by an earlier one.
     #[test]
     fn the_table_has_each_route_once() {

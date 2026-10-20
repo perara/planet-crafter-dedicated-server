@@ -107,6 +107,12 @@ pub struct Ctx {
 }
 
 pub fn run(args: &[String]) -> ! {
+    // `pcds status | head` ends quietly (Rust ignores SIGPIPE, which turns the write error into a
+    // panic). The server itself (`run`, `container`) keeps ignoring it: a closed socket is an error there.
+    if !matches!(args.first().map(String::as_str), Some("run" | "container")) {
+        // SAFETY: restoring the default action of a signal, before any other thread exists.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
     let code = Ctx::new().and_then(|ctx| ctx.hand_over(args).and_then(|_| ctx.command(args))).unwrap_or_else(|e| {
         eprintln!("pcds: {e}");
         1
