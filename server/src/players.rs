@@ -378,6 +378,7 @@ pub fn update_saved_players(game: &mut Game) {
 /// - they never crafted anything or earned a terra token;
 /// - their equipment is empty and their backpack holds no more than the joining kit (the starter
 ///   items every new player gets, `joining_kit`), counted by item.
+///
 /// Their record and their two inventories with those items go; nothing else is touched. Returns how
 /// many were forgotten.
 pub fn forget_unseen(game: &mut Game, now: u64) -> usize {

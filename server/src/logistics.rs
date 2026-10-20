@@ -301,7 +301,8 @@ pub fn tick(game: &mut Game) {
         return;
     }
     let now = game.tick_count();
-    // ponytail: after a stall of over a second the frames in between are skipped, not replayed.
+    // A stall is at most a third of a second of ticks (Game::tick bounds a frame); were the clock to
+    // jump anyway, ponytail: past a second the frames in between are skipped, not replayed.
     let mut t = game.ext.logistics.last_tick.max(now.saturating_sub(u64::from(game.net_data.tick_rate)));
     while t < now {
         t += 1;

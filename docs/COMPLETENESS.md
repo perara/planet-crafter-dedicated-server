@@ -104,7 +104,7 @@ and every difference was classified (`SWEEP.md`).
 | load fidelity | the save loaded and written back by this server and by the real game | below |
 | dynamic parity | eight probe scripts built from the save's own objects, run on both hosts, twice on the game for its noise | below |
 | the non-functional run | start, memory, idle CPU, join, a 30 minute soak | below |
-| the tests | `cargo test --release` (636 unit, 14 cli, 24 hot update, 4 layers, 1 admin golden), bench fingerprint | all pass with the full tables, with tables without the DLC ground and with `PCDS_TEST_DATA=none PCDS_GAME_DIR=none`; fingerprint 15c299165b6b3eb0 unchanged |
+| the tests | `cargo test --release` (651 unit, 14 cli, 24 hot update, 4 layers, 1 admin golden), bench fingerprint | all pass with the full tables, with tables without the DLC ground and with `PCDS_TEST_DATA=none PCDS_GAME_DIR=none`; fingerprint 15c299165b6b3eb0 unchanged |
 
 ## Load fidelity
 
