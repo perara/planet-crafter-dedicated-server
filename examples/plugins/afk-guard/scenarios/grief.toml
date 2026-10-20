@@ -1,0 +1,68 @@
+name = "grief: strikes, a note to the operators, a hot update, !pardon"
+
+[config]
+destroy_limit = 3
+destroy_window_seconds = 60
+afk_minutes = 240
+
+[[player]]
+client = 1
+name = "Root"
+operator = true
+
+[[player]]
+client = 2
+name = "Ann"
+
+[[step]]
+destroy = { id = 1, group = "Wall", client = 2 }
+
+[[step]]
+destroy = { id = 2, group = "Wall", client = 2 }
+
+[[step]]
+destroy = { id = 3, group = "Wall", client = 2 }
+expect = [{ tell = 1, count = 0 }, { tell = 2, count = 0 }]
+
+[[step]]
+note = "the fourth inside a minute is over the limit"
+destroy = { id = 4, group = "Wall", client = 2 }
+expect = [
+  { tell = 1, equals = "Guard: Ann destroyed 4 objects in 60 s (strike 1). Action: warned." },
+  { tell = 2, contains = "Slow down" },
+  { kick = 2, count = 0 },
+]
+
+[[step]]
+note = "a meteor (client 0) is nobody's doing"
+destroy = { id = 5, group = "Wall", client = 0 }
+expect = [{ tell = 1, count = 0 }]
+
+[[step]]
+chat = { client = 1, text = "!guard" }
+expect = [{ tell = 1, equals = "Strikes: Ann 1" }]
+
+[[step]]
+note = "a hot update: the strikes go through save and load"
+flip = true
+
+[[step]]
+chat = { client = 1, text = "!guard" }
+expect = [{ tell = 1, equals = "Strikes: Ann 1" }]
+
+[[step]]
+note = "not an operator: the host answers, the plugin is not called"
+chat = { client = 2, text = "!pardon Ann" }
+expect = [{ tell = 2, contains = "is for the server's operators" }]
+
+[[step]]
+chat = { client = 1, text = "!pardon ann" }
+expect = [{ tell = 1, equals = "Pardoned Ann: 1 strike cleared." }]
+
+[[step]]
+chat = { client = 1, text = "!pardon" }
+expect = [{ tell = 1, contains = "Use: !pardon <player name>" }]
+
+[[step]]
+chat = { client = 1, text = "!guard" }
+expect = [{ tell = 1, equals = "Strikes: none." }]

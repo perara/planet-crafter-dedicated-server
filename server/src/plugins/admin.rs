@@ -9,6 +9,7 @@
 //! - `POST /api/plugins/events {"after", "types", "limit"}`: the event stream (stream.rs).
 //! - `GET /api/plugins/tokens`, `POST /api/plugins/tokens {"name", "scopes", "ratePerMinute"}` (the
 //!   token is in the answer once) and `POST /api/plugins/tokens/revoke {"id"}`: scoped tokens (tokens.rs).
+//! - `POST /api/plugins/logs {"id", "limit"}`: the plugin's last log lines.
 //! - `POST /api/plugins/config {"id", "key", "value"}`: the admin's value for a key a plugin declares
 //!   (`value` null or left out: removed). A secret's value is never in any answer.
 //! - `POST /api/plugins/trust {"publicKey", "name", "grant": [...], "force"}` and
@@ -27,7 +28,6 @@ fn error(status: u16, e: impl std::fmt::Display) -> (u16, String) {
 pub fn plugin_json(p: &Loaded) -> Value {
     let m = p.manifest.as_ref();
     let denied: Vec<&String> = p.requested.iter().filter(|c| !p.grant.has(c)).collect();
-    let calls = p.stats.calls.max(1);
     json!({
         "id": p.id,
         "name": m.map(|m| m.plugin.name.as_str()),
@@ -41,18 +41,14 @@ pub fn plugin_json(p: &Loaded) -> Value {
         "requested": p.requested,
         "granted": p.grant.names(),
         "notGranted": denied,
-        "commands": p.commands.iter().map(|c| json!({"name": c, "help": m.and_then(|m| m.commands.iter().find(|x| x.name.eq_ignore_ascii_case(c))).map(|x| x.help.as_str())})).collect::<Vec<_>>(),
+        "commands": commands_json(p),
+        "deniedCapabilities": p.denied_caps,
+        "changes": changes(p),
         "events": Kind::ALL.iter().filter(|k| p.kinds & k.bit() != 0).map(|k| k.name()).collect::<Vec<_>>(),
         "warnings": p.warnings,
         "notice": p.notice,
         "limits": {"fuelPerEvent": p.limits.fuel_per_event, "fuelPerSave": p.limits.fuel_per_save, "memoryPages": p.limits.memory_pages, "tickEveryMs": p.limits.tick_every_ms},
-        "stats": {
-            "calls": p.stats.calls, "faults": p.stats.faults, "restarts": p.stats.restarts, "slow": p.stats.slow, "shed": p.stats.shed,
-            "denied": p.stats.denied, "refused": p.stats.refused, "actions": p.stats.actions, "vetoes": p.stats.vetoes,
-            "fuel": p.stats.fuel, "averageMicros": p.stats.nanos as f64 / calls as f64 / 1000.0, "maxMicros": p.stats.max_nanos as f64 / 1000.0,
-            "lastError": p.stats.last_error, "lastFaultAt": p.stats.last_fault_unix,
-            "http": {"requests": p.stats.http_requests, "answered": p.stats.http_answered, "failed": p.stats.http_failed, "bytesOut": p.stats.http_bytes_out, "bytesIn": p.stats.http_bytes_in, "inFlight": p.net.as_ref().map_or(0, |n| n.in_flight.load(std::sync::atomic::Ordering::SeqCst))},
-        },
+        "stats": stats_json(p),
         "digest": p.digest,
         "signature": {
             "state": p.signed.state(),
@@ -73,8 +69,69 @@ pub fn plugin_json(p: &Loaded) -> Value {
             })
         }),
         // The keys the manifest declares and whether the admin set them; a secret's value is never here.
-        "config": m.map(|m| m.config.iter().map(|k| json!({"key": k.key, "description": k.description, "secret": k.secret, "set": p.config.contains_key(&k.key), "value": (!k.secret).then(|| p.config.get(&k.key)).flatten()})).collect::<Vec<_>>()),
+        "config": config_json(p),
     })
+}
+
+
+fn commands_json(p: &Loaded) -> Value {
+    let m = p.manifest.as_ref();
+    Value::Array(p.commands.iter().map(|c| {
+        let declared = m.and_then(|m| m.commands.iter().find(|x| x.name.eq_ignore_ascii_case(c)));
+        json!({"name": c, "help": declared.map(|x| x.help.as_str()), "usage": declared.map(|x| x.usage.as_str()), "minArgs": declared.and_then(|x| x.min_args), "maxArgs": declared.and_then(|x| x.max_args), "permission": declared.map(|x| if x.permission == super::manifest::Permission::Operator { "operator" } else { "everyone" })})
+    }).collect())
+}
+
+fn stats_json(p: &Loaded) -> Value {
+    let calls = p.stats.calls.max(1);
+    let by_event: Vec<Value> = Kind::ALL
+        .iter()
+        .filter(|k| p.stats.by_event[**k as usize & 15].calls > 0)
+        .map(|k| {
+            let e = p.stats.by_event[*k as usize & 15];
+            json!({"event": k.name(), "calls": e.calls, "fuel": e.fuel, "averageFuel": e.fuel / e.calls, "maxFuel": e.max_fuel, "averageMicros": e.nanos as f64 / e.calls as f64 / 1000.0, "maxMicros": e.max_nanos as f64 / 1000.0})
+        })
+        .collect();
+    let faults: Vec<Value> = p.stats.fault_log.iter().map(|f| json!({"at": f.unix, "during": f.during, "text": f.text})).collect();
+    let http = json!({"requests": p.stats.http_requests, "answered": p.stats.http_answered, "failed": p.stats.http_failed, "bytesOut": p.stats.http_bytes_out, "bytesIn": p.stats.http_bytes_in, "inFlight": p.net.as_ref().map_or(0, |n| n.in_flight.load(std::sync::atomic::Ordering::SeqCst))});
+    json!({
+        "calls": p.stats.calls, "faults": p.stats.faults, "restarts": p.stats.restarts, "slow": p.stats.slow, "shed": p.stats.shed,
+        "denied": p.stats.denied, "refused": p.stats.refused, "actions": p.stats.actions, "vetoes": p.stats.vetoes,
+        "fuel": p.stats.fuel, "averageMicros": p.stats.nanos as f64 / calls as f64 / 1000.0, "maxMicros": p.stats.max_nanos as f64 / 1000.0,
+        "lastError": p.stats.last_error, "lastFaultAt": p.stats.last_fault_unix,
+        "byEvent": by_event, "faultLog": faults, "http": http,
+    })
+}
+
+fn config_json(p: &Loaded) -> Value {
+    let Some(m) = p.manifest.as_ref() else { return Value::Null };
+    Value::Array(
+        m.config
+            .iter()
+            .map(|k| {
+                let choices = k.choices.as_ref().map(|c| c.iter().map(|v| match v { toml::Value::String(s) => s.clone(), other => format!("{other:?}") }).collect::<Vec<_>>());
+                json!({
+                    "key": k.key, "description": k.description, "secret": k.is_secret(), "set": p.config.contains_key(&k.key), "value": (!k.is_secret()).then(|| p.config.get(&k.key)).flatten(),
+                    "type": k.kind.name(), "default": k.default_text(), "min": k.min, "max": k.max, "maxLen": k.max_len, "choices": choices,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// What the version on disk asks for that the approved one did not (capabilities and hosts), if the plugin was
+/// approved before and its files differ: the admin sees what is new before approving again.
+fn changes(p: &Loaded) -> Value {
+    let Some(approval) = p.approval.as_ref().filter(|a| a.enabled) else { return Value::Null };
+    let (requested, allow, version, digest) = match &p.incoming {
+        Some(i) => (i.requested.clone(), i.allow.clone(), Some(i.version.clone()), i.digest.clone()),
+        None => (p.requested.clone(), p.manifest.as_ref().and_then(|m| m.net.as_ref()).map(|n| n.allow.clone()).unwrap_or_default(), p.manifest.as_ref().map(|m| m.plugin.version.clone()), p.digest.clone()),
+    };
+    if digest == approval.digest {
+        return Value::Null;
+    }
+    let diff = approval.diff(&requested, &allow);
+    json!({"version": version, "digest": digest, "added": diff.added, "removed": diff.removed, "addedHosts": diff.added_hosts, "removedHosts": diff.removed_hosts})
 }
 
 /// Part of /api/status: how many plugins there are, how many run, how many faults they had.
@@ -142,12 +199,15 @@ pub fn request(game: &mut Game, method: &str, path: &str, body: &Value) -> (u16,
         ("POST", "/api/plugins/config") => {
             let Some(dir) = dir else { return error(500, "the plugin host has not started") };
             let (Some(id), Some(key)) = (body["id"].as_str(), body["key"].as_str()) else { return error(400, "'id' and 'key' are required") };
-            let declared = game.ext.plugins.host.as_ref().and_then(|h| h.plugins.iter().find(|p| p.id == id)).and_then(|p| p.manifest.as_ref()).is_some_and(|m| m.config.iter().any(|k| k.key == key));
-            if !declared {
-                return error(400, format!("{id} is not an installed plugin that declares a config key {key}"));
-            }
+            let declared = game.ext.plugins.host.as_ref().and_then(|h| h.plugins.iter().find(|p| p.id == id)).and_then(|p| p.manifest.as_ref()).and_then(|m| m.config.iter().find(|k| k.key == key)).cloned();
+            let Some(declared) = declared else { return error(400, format!("{id} is not an installed plugin that declares a config key {key}")) };
             let value = body["value"].as_str().filter(|v| !v.is_empty());
-            match super::config::set(&dir, id, key, value) {
+            // The declaration decides what a good value is (a number in range, one of the choices...).
+            let value = match value.map(|v| declared.check(v)).transpose() {
+                Ok(v) => v,
+                Err(e) => return error(400, e),
+            };
+            match super::config::set(&dir, id, key, value.as_deref()) {
                 Ok(()) => reload_answer(game, id),
                 Err(e) => error(400, e),
             }
@@ -220,8 +280,24 @@ pub fn request(game: &mut Game, method: &str, path: &str, body: &Value) -> (u16,
                 Err(e) => error(400, e),
             }
         }
+        ("POST", "/api/plugins/logs") => {
+            let Ok(id) = id() else { return error(400, "'id' is required") };
+            let limit = body["limit"].as_u64().unwrap_or(100).clamp(1, super::limits::LOG_KEPT as u64) as usize;
+            let Some(p) = game.ext.plugins.host.as_ref().and_then(|h| h.plugins.iter().find(|p| p.id == id)) else { return error(404, format!("{id} is not an installed plugin")) };
+            let lines: Vec<Value> = p.logs.last(limit).iter().map(|l| json!({"seq": l.seq, "at": l.unix, "level": level_name(l.level), "text": l.text})).collect();
+            (200, json!({"id": id, "lines": lines}).to_string())
+        }
         ("POST", "/api/plugins/events") => events(game, body),
         _ => error(404, "unknown endpoint"),
+    }
+}
+
+fn level_name(level: pcds_plugin_api::Level) -> &'static str {
+    match level {
+        pcds_plugin_api::Level::Error => "error",
+        pcds_plugin_api::Level::Warn => "warn",
+        pcds_plugin_api::Level::Info => "info",
+        pcds_plugin_api::Level::Debug => "debug",
     }
 }
 

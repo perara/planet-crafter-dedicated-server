@@ -22,10 +22,12 @@ pub enum Kind {
     WorldSaved = 10,
     RuleChange = 11,
     HttpDone = 12,
+    Timer = 13,
+    Flip = 14,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 12] = [
+    pub const ALL: [Kind; 14] = [
         Kind::Tick,
         Kind::PlayerJoin,
         Kind::PlayerLeave,
@@ -38,6 +40,8 @@ impl Kind {
         Kind::WorldSaved,
         Kind::RuleChange,
         Kind::HttpDone,
+        Kind::Timer,
+        Kind::Flip,
     ];
 
     pub fn from_u32(n: u32) -> Option<Kind> {
@@ -59,6 +63,8 @@ impl Kind {
             Kind::WorldSaved => "world_saved",
             Kind::RuleChange => "rule_change",
             Kind::HttpDone => "http_done",
+            Kind::Timer => "timer",
+            Kind::Flip => "flip",
         }
     }
 
@@ -75,19 +81,27 @@ impl Kind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event<'a> {
     /// Every `tick_every_ms` of game time the plugin asked for (never while the world stands
-    /// still). `since_ms`: game time since this plugin's last tick.
-    Tick { game_ms: i64, tick: i32, players: u32, since_ms: u32 },
+    /// still). `since_ms`: game time since this plugin's last tick. `unix_ms` (ABI 1.3): the
+    /// wall clock, Unix milliseconds: the only clock a plugin has besides the game's.
+    Tick { game_ms: i64, tick: i32, players: u32, since_ms: u32, unix_ms: i64 },
     /// A player is in the game (past PlayerReady). `steam_id` is empty unless verified.
-    PlayerJoin { client: u64, name: &'a str, steam_id: &'a str },
-    PlayerLeave { client: u64, name: &'a str },
-    Chat { client: u64, name: &'a str, text: &'a str },
+    /// `player_id` (ABI 1.3) is the player's id in this world's save: the same player has the same
+    /// id on every visit, whatever the connection number (`client`) of the session. It is the
+    /// verified SteamID64 when there is one, else a number made from the name.
+    PlayerJoin { client: u64, name: &'a str, steam_id: &'a str, player_id: u64 },
+    PlayerLeave { client: u64, name: &'a str, player_id: u64 },
+    Chat { client: u64, name: &'a str, text: &'a str, player_id: u64 },
     /// A chat message that starts with the command prefix and names one of the plugin's commands.
-    Command { client: u64, name: &'a str, command: &'a str, args: Vec<&'a str>, text: &'a str },
+    Command { client: u64, name: &'a str, command: &'a str, args: Vec<&'a str>, text: &'a str, player_id: u64 },
     /// A client RPC about to run; answering `Verdict::Veto` drops it (needs `rpc.veto`).
     RpcBefore { client: u64, rpc: &'a str, object: u64, args_json: &'a str },
     RpcAfter { client: u64, rpc: &'a str, object: u64, args_json: &'a str },
-    ObjectPlaced { id: i32, group: &'a str, position: [f32; 3] },
-    ObjectDestroyed { id: i32, group: &'a str, position: [f32; 3] },
+    /// `client` (ABI 1.3): the connection that built or dropped it; 0 when none did (the server
+    /// itself, a machine, a plugin's action).
+    ObjectPlaced { id: i32, group: &'a str, position: [f32; 3], client: u64 },
+    /// `client` (ABI 1.3): the connection that deconstructed it; 0 when it went some other way (a
+    /// meteor, a machine, an item used up).
+    ObjectDestroyed { id: i32, group: &'a str, position: [f32; 3], client: u64 },
     WorldSaved { game_ms: i64, ok: bool },
     /// The server rules changed; `changes_json` holds every rule that differs from the default.
     RuleChange { changes_json: &'a str },
@@ -96,6 +110,13 @@ pub enum Event<'a> {
     /// answer: `error` then says why (it is empty when there is one). `body` is at most the
     /// manifest's `max_response_bytes`.
     HttpDone { ticket: u64, status: u32, error: &'a str, body: &'a [u8], headers: Vec<(&'a str, &'a str)> },
+    /// A timer the plugin set (`Host::set_timer`, ABI 1.3) is due. Delivered to that plugin only,
+    /// whatever it subscribed to. `late_ms`: how long after its time it is delivered (game time).
+    Timer { id: u32, game_ms: i64, late_ms: u32 },
+    /// The plugin was started by a hot update of the server (ABI 1.3): the world was handed over to
+    /// a new program and this is the first event after `Plugin::load`. `server_version` is the new
+    /// program's version.
+    Flip { game_ms: i64, server_version: &'a str },
 }
 
 impl<'a> Event<'a> {
@@ -113,36 +134,38 @@ impl<'a> Event<'a> {
             Event::WorldSaved { .. } => Kind::WorldSaved,
             Event::RuleChange { .. } => Kind::RuleChange,
             Event::HttpDone { .. } => Kind::HttpDone,
+            Event::Timer { .. } => Kind::Timer,
+            Event::Flip { .. } => Kind::Flip,
         }
     }
 
     /// The payload bytes (what `decode` takes).
     pub fn encode(&self, w: &mut Writer) {
         match self {
-            Event::Tick { game_ms, tick, players, since_ms } => {
-                w.i64(*game_ms).i32(*tick).u32(*players).u32(*since_ms);
+            Event::Tick { game_ms, tick, players, since_ms, unix_ms } => {
+                w.i64(*game_ms).i32(*tick).u32(*players).u32(*since_ms).i64(*unix_ms);
             }
-            Event::PlayerJoin { client, name, steam_id } => {
-                w.u64(*client).str(name).str(steam_id);
+            Event::PlayerJoin { client, name, steam_id, player_id } => {
+                w.u64(*client).str(name).str(steam_id).u64(*player_id);
             }
-            Event::PlayerLeave { client, name } => {
-                w.u64(*client).str(name);
+            Event::PlayerLeave { client, name, player_id } => {
+                w.u64(*client).str(name).u64(*player_id);
             }
-            Event::Chat { client, name, text } => {
-                w.u64(*client).str(name).str(text);
+            Event::Chat { client, name, text, player_id } => {
+                w.u64(*client).str(name).str(text).u64(*player_id);
             }
-            Event::Command { client, name, command, args, text } => {
+            Event::Command { client, name, command, args, text, player_id } => {
                 w.u64(*client).str(name).str(command).u32(args.len() as u32);
                 args.iter().for_each(|a| {
                     w.str(a);
                 });
-                w.str(text);
+                w.str(text).u64(*player_id);
             }
             Event::RpcBefore { client, rpc, object, args_json } | Event::RpcAfter { client, rpc, object, args_json } => {
                 w.u64(*client).str(rpc).u64(*object).str(args_json);
             }
-            Event::ObjectPlaced { id, group, position } | Event::ObjectDestroyed { id, group, position } => {
-                w.i32(*id).str(group).f32(position[0]).f32(position[1]).f32(position[2]);
+            Event::ObjectPlaced { id, group, position, client } | Event::ObjectDestroyed { id, group, position, client } => {
+                w.i32(*id).str(group).f32(position[0]).f32(position[1]).f32(position[2]).u64(*client);
             }
             Event::WorldSaved { game_ms, ok } => {
                 w.i64(*game_ms).bool(*ok);
@@ -154,6 +177,12 @@ impl<'a> Event<'a> {
                 w.u64(*ticket).u32(*status).str(error).bytes(body);
                 crate::http::encode_pairs(headers, w);
             }
+            Event::Timer { id, game_ms, late_ms } => {
+                w.u32(*id).i64(*game_ms).u32(*late_ms);
+            }
+            Event::Flip { game_ms, server_version } => {
+                w.i64(*game_ms).str(server_version);
+            }
         }
     }
 
@@ -161,10 +190,10 @@ impl<'a> Event<'a> {
         let mut r = Reader::new(bytes);
         let kind = Kind::from_u32(kind).ok_or(DecodeError::UnknownKind(kind))?;
         Ok(match kind {
-            Kind::Tick => Event::Tick { game_ms: r.i64()?, tick: r.i32()?, players: r.u32()?, since_ms: r.u32()? },
-            Kind::PlayerJoin => Event::PlayerJoin { client: r.u64()?, name: r.str()?, steam_id: r.str()? },
-            Kind::PlayerLeave => Event::PlayerLeave { client: r.u64()?, name: r.str()? },
-            Kind::Chat => Event::Chat { client: r.u64()?, name: r.str()?, text: r.str()? },
+            Kind::Tick => Event::Tick { game_ms: r.i64()?, tick: r.i32()?, players: r.u32()?, since_ms: r.u32()?, unix_ms: r.i64()? },
+            Kind::PlayerJoin => Event::PlayerJoin { client: r.u64()?, name: r.str()?, steam_id: r.str()?, player_id: r.u64()? },
+            Kind::PlayerLeave => Event::PlayerLeave { client: r.u64()?, name: r.str()?, player_id: r.u64()? },
+            Kind::Chat => Event::Chat { client: r.u64()?, name: r.str()?, text: r.str()?, player_id: r.u64()? },
             Kind::Command => {
                 let (client, name, command) = (r.u64()?, r.str()?, r.str()?);
                 let n = r.u32()? as usize;
@@ -176,15 +205,18 @@ impl<'a> Event<'a> {
                 for _ in 0..n {
                     args.push(r.str()?);
                 }
-                Event::Command { client, name, command, args, text: r.str()? }
+                let text = r.str()?;
+                Event::Command { client, name, command, args, text, player_id: r.u64()? }
             }
             Kind::RpcBefore => Event::RpcBefore { client: r.u64()?, rpc: r.str()?, object: r.u64()?, args_json: r.str()? },
             Kind::RpcAfter => Event::RpcAfter { client: r.u64()?, rpc: r.str()?, object: r.u64()?, args_json: r.str()? },
-            Kind::ObjectPlaced => Event::ObjectPlaced { id: r.i32()?, group: r.str()?, position: [r.f32()?, r.f32()?, r.f32()?] },
-            Kind::ObjectDestroyed => Event::ObjectDestroyed { id: r.i32()?, group: r.str()?, position: [r.f32()?, r.f32()?, r.f32()?] },
+            Kind::ObjectPlaced => Event::ObjectPlaced { id: r.i32()?, group: r.str()?, position: [r.f32()?, r.f32()?, r.f32()?], client: r.u64()? },
+            Kind::ObjectDestroyed => Event::ObjectDestroyed { id: r.i32()?, group: r.str()?, position: [r.f32()?, r.f32()?, r.f32()?], client: r.u64()? },
             Kind::WorldSaved => Event::WorldSaved { game_ms: r.i64()?, ok: r.bool()? },
             Kind::RuleChange => Event::RuleChange { changes_json: r.str()? },
             Kind::HttpDone => Event::HttpDone { ticket: r.u64()?, status: r.u32()?, error: r.str()?, body: r.bytes()?, headers: crate::http::decode_pairs(&mut r)? },
+            Kind::Timer => Event::Timer { id: r.u32()?, game_ms: r.i64()?, late_ms: r.u32()? },
+            Kind::Flip => Event::Flip { game_ms: r.i64()?, server_version: r.str()? },
         })
     }
 }

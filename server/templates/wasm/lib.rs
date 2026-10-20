@@ -17,7 +17,8 @@ impl Plugin for MyPlugin {
     fn event(&mut self, host: &dyn Host, event: &Event<'_>) -> Verdict {
         if let Event::Command { client, name, command: "hello", .. } = event {
             self.greeted += 1;
-            let _ = host.tell(*client, &format!("Hello {name}! I have said hello {} times.", self.greeted));
+            let greeting = host.config("greeting").unwrap_or_else(|| "Hello".to_string());
+            let _ = host.tell(*client, &format!("{greeting} {name}! I have said hello {} times.", self.greeted));
         }
         Verdict::Continue
     }
@@ -30,8 +31,26 @@ impl Plugin for MyPlugin {
     }
 
     // Optional: the last call before the plugin is switched off or removed (not at a reload; `save`
-    // is asked right after it). Nothing queued here is applied.
+    // is asked right after it).
     // fn unload(&mut self) {}
 }
 
 export!(MyPlugin);
+
+/// Your plugin is plain Rust: its tests run here, with no server and no WebAssembly (`cargo test`).
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pcds_plugin_api::testing::{Harness, MockHost};
+
+    #[test]
+    fn hello_counts_and_remembers_across_a_reload() {
+        let mut plugin = Harness::<MyPlugin>::start(MockHost::new().with_setting("greeting", "Hi"));
+        plugin.join(1, "Ann");
+        plugin.command(1, "hello", &[]);
+        assert_eq!(plugin.mock().told(), vec![(1, "Hi Ann! I have said hello 1 times.".to_string())]);
+        plugin.reload();
+        plugin.command(1, "hello", &[]);
+        assert_eq!(plugin.mock().told().last().unwrap().1, "Hi Ann! I have said hello 2 times.");
+    }
+}

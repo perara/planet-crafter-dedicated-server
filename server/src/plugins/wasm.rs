@@ -3,7 +3,7 @@
 //! The module's side of the contract is `pcds-plugin-api`; the host's side is here:
 //!
 //! - **Imports** (module `pcds`): `log`, `query`, `say`, `tell`, `kick`, `teleport`,
-//!   `rules_patch`, `http_request`, each checked against the capabilities granted (ctx.rs).
+//!   `rules_patch`, `http_request`, `give`, `tokens`, `timer_set`, `timer_cancel`, each checked against the capabilities granted (ctx.rs).
 //! - **Exports**: `memory`, `pcds_abi`, `pcds_alloc`, `pcds_event`; optional `pcds_free`,
 //!   `pcds_load`, `pcds_save`, `pcds_state_version`.
 //! - **Limits**: fuel per call (the call stops with a trap when it is spent), memory pages, one
@@ -21,7 +21,7 @@ use super::runtime::{Cost, Fault, Runtime};
 use super::state::Blob;
 
 /// The imports a module may have (names under `pcds`).
-pub(super) const IMPORTS: [&str; 8] = ["log", "query", "say", "tell", "kick", "teleport", "rules_patch", "http_request"];
+pub(super) const IMPORTS: [&str; 12] = ["log", "query", "say", "tell", "kick", "teleport", "rules_patch", "http_request", "give", "tokens", "timer_set", "timer_cancel"];
 
 /// The engine every plugin shares: fuel on, nothing a module could use to find out about the
 /// machine or to do work the host does not count.
@@ -171,20 +171,33 @@ fn linker(engine: &Engine) -> Result<Linker<Inner>, String> {
         Ok(())
     })
     .map_err(e)?;
-    l.func_wrap("pcds", "query", |mut c: Caller<'_, Inner>, kind: u32, _arg: u32, _arg_len: u32, out: u32, cap: u32| -> Result<i32, Error> {
+    l.func_wrap("pcds", "query", |mut c: Caller<'_, Inner>, kind: u32, arg: u32, arg_len: u32, out: u32, cap: u32| -> Result<i32, Error> {
         charge(&mut c, limits::HOST_CALL_FUEL)?;
+        // The argument (ABI 1.3): a few bytes at most, copied before anything else is looked at.
+        let argument = if arg_len == 0 {
+            Vec::new()
+        } else if arg_len as usize > limits::MAX_QUERY_ARG {
+            c.data_mut().ctx.refused += 1;
+            return Ok(pcds_plugin_api::host::E_BAD);
+        } else {
+            let (mem, _) = split(&mut c)?;
+            slice(mem, arg, arg_len)?.to_vec()
+        };
         let (mem, inner) = split(&mut c)?;
         // The answer is built once for a call (the world stands still during it): asking again costs the copy.
-        let answer = match inner.ctx.query(kind) {
-            Ok(a) => a,
+        let (answer_len, n) = match inner.ctx.query(kind, &argument) {
+            Ok(a) => {
+                let n = a.len().min(cap as usize);
+                let end = (out as usize).checked_add(n).filter(|e| *e <= mem.len()).ok_or_else(|| trap("the module gave the host a buffer outside its memory"))?;
+                mem[out as usize..end].copy_from_slice(&a[..n]);
+                (a.len() as i32, n)
+            }
             Err(code) => return Ok(code),
         };
-        let n = answer.len().min(cap as usize);
-        let total = answer.len() as i32;
-        let end = (out as usize).checked_add(n).filter(|e| *e <= mem.len()).ok_or_else(|| trap("the module gave the host a buffer outside its memory"))?;
-        mem[out as usize..end].copy_from_slice(&answer[..n]);
-        charge(&mut c, n as u64 * limits::FUEL_PER_BYTE)?;
-        Ok(total)
+        let extra = std::mem::take(&mut inner.ctx.extra_fuel);
+        // The copy, and the work the query itself did (the scan of Q_NEARBY): the plugin's to pay.
+        charge(&mut c, n as u64 * limits::FUEL_PER_BYTE + extra)?;
+        Ok(answer_len)
     })
     .map_err(e)?;
     l.func_wrap("pcds", "say", |mut c: Caller<'_, Inner>, ptr: u32, len: u32| -> Result<i32, Error> {
@@ -212,6 +225,32 @@ fn linker(engine: &Engine) -> Result<Linker<Inner>, String> {
         charge(&mut c, len as u64 * limits::FUEL_PER_PARSED_BYTE)?;
         let t = text(&mut c, ptr, len, limits::MAX_PATCH_BYTES)?;
         Ok(c.data_mut().ctx.rules_patch(&t))
+    })
+    .map_err(e)?;
+    // ABI 1.3.
+    l.func_wrap("pcds", "give", |mut c: Caller<'_, Inner>, client: u64, ptr: u32, len: u32, count: u32| -> Result<i32, Error> {
+        let t = text(&mut c, ptr, len, limits::MAX_ITEM_NAME_BYTES)?;
+        // A name cut at the limit would name another item: too long is refused.
+        if len as usize > limits::MAX_ITEM_NAME_BYTES {
+            c.data_mut().ctx.refused += 1;
+            return Ok(pcds_plugin_api::host::E_BAD);
+        }
+        Ok(c.data_mut().ctx.give(client, &t, count))
+    })
+    .map_err(e)?;
+    l.func_wrap("pcds", "tokens", |mut c: Caller<'_, Inner>, amount: i32| -> Result<i32, Error> {
+        charge(&mut c, limits::HOST_CALL_FUEL)?;
+        Ok(c.data_mut().ctx.tokens(amount))
+    })
+    .map_err(e)?;
+    l.func_wrap("pcds", "timer_set", |mut c: Caller<'_, Inner>, id: u32, delay: u32, repeat: u32| -> Result<i32, Error> {
+        charge(&mut c, limits::HOST_CALL_FUEL)?;
+        Ok(c.data_mut().ctx.timer_set(id, delay, repeat))
+    })
+    .map_err(e)?;
+    l.func_wrap("pcds", "timer_cancel", |mut c: Caller<'_, Inner>, id: u32| -> Result<i32, Error> {
+        charge(&mut c, limits::HOST_CALL_FUEL)?;
+        Ok(c.data_mut().ctx.timer_cancel(id))
     })
     .map_err(e)?;
     // ABI 1.2. The request is a buffer of its own size limit (a body may be a megabyte): a length over

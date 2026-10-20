@@ -41,7 +41,7 @@ const CHAT: &str = "event.chat";
 const TICK_EVERY_TICK: &str = "[events]\nsubscribe = [\"tick\"]\n[budget]\ntick_every_ms = 5";
 
 fn tick_event(ms: i64) -> Event<'static> {
-    Event::Tick { game_ms: ms, tick: 0, players: 4, since_ms: 5 }
+    Event::Tick { game_ms: ms, tick: 0, players: 4, since_ms: 5, unix_ms: 0 }
 }
 
 /// Events per second through the host alone: what a plugin costs per event, with the host's whole
@@ -51,7 +51,7 @@ fn tick_event(ms: i64) -> Event<'static> {
 #[ignore]
 fn events_per_second() {
     println!("\nplugin host: cost of one event (host only, no game), wasmi, one thread");
-    let chat = Event::Chat { client: 1, name: "Ann", text: "hello everyone" };
+    let chat = Event::Chat { client: 1, name: "Ann", text: "hello everyone", player_id: 1 };
     let n = 200_000u64;
     let report = |label: &str, host: &mut Host, event: &Event<'_>| {
         let mut world = Mock::default();
@@ -91,14 +91,14 @@ fn events_per_second() {
         install(&dir, &format!("cmd{i}"), &noop(), &[CHAT], &format!("[[command]]\nname = \"c{i}\""), None);
     }
     let mut host = boot(&dir);
-    report("10 modules with a command each, one command", &mut host, &Event::Command { client: 1, name: "Ann", command: "c3", args: vec![], text: "!c3" });
+    report("10 modules with a command each, one command", &mut host, &Event::Command { client: 1, name: "Ann", command: "c3", args: vec![], text: "!c3", player_id: 1 });
     // The rules-file kind.
     let dir = fresh_dir("cost-data");
     std::fs::create_dir_all(dir.join("rules")).unwrap();
     std::fs::write(dir.join("rules/plugin.toml"), "[plugin]\nid = \"rules\"\nname = \"r\"\nversion = \"1.0.0\"\nkind = \"data\"\nentry = \"rules.toml\"\nabi = 1\ncapabilities = [\"event.chat\", \"chat.say\"]\n").unwrap();
     std::fs::write(dir.join("rules/rules.toml"), "[[command]]\nname = \"hi\"\nreply = \"Hello {name}\"\n").unwrap();
     approve(&dir, "rules", None).unwrap();
-    report("1 rules file, a command that replies", &mut boot(&dir), &Event::Command { client: 1, name: "Ann", command: "hi", args: vec![], text: "!hi" });
+    report("1 rules file, a command that replies", &mut boot(&dir), &Event::Command { client: 1, name: "Ann", command: "hi", args: vec![], text: "!hi", player_id: 1 });
 }
 
 /// How long it takes to get a plugin going: reading and compiling its module, and starting an
@@ -169,7 +169,7 @@ fn tick_cost_on_a_real_world() {
         for (i, (_, wat, caps)) in plugins.iter().enumerate() {
             install(&dir, &format!("p{i:02}"), wat, caps, TICK_EVERY_TICK, None);
         }
-        attach(&mut g, prepare(&dir, "world"));
+        attach(&mut g, prepare(&dir, "world"), false);
         g
     };
     let ticks = 20_000u64;

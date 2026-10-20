@@ -1,0 +1,36 @@
+# Game time stands still when the world is empty and paused; the wall clock does not. A warning
+# that comes late is not said (it would tell a time that is no longer true), and tomorrow's is set.
+name = "the wall clock moves on while the world stands still"
+
+[world]
+unix_ms = 1728012600000
+
+[config]
+restart_at = "04:00"
+
+[[player]]
+client = 1
+name = "Ann"
+
+[[step]]
+note = "it is 04:30 by the wall clock, no game time has passed"
+set = { unix_ms = 1728016200000 }
+
+[[step]]
+note = "five minutes of game time: every warning of today is long over"
+advance = "6m"
+expect = [{ say = true, count = 0 }]
+
+[[step]]
+chat = { client = 1, text = "!restart" }
+expect = [{ tell = 1, equals = "Next restart in 23 hours 24 minutes (at 04:00 UTC)." }]
+
+[[step]]
+note = "it is 03:36 the next day by the wall clock: tomorrow's warnings have been set from it"
+advance = "23h"
+expect = [{ say = true, count = 0 }]
+
+[[step]]
+note = "03:45 and 03:55, on time"
+advance = "20m"
+expect = [{ say = true, equals = "Server restart in 15 minutes" }, { say = true, equals = "Server restart in 5 minutes" }]

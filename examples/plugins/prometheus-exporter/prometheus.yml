@@ -1,0 +1,14 @@
+# A scrape config for exporter.py. Put pcds.rules.yml beside it.
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s   # the exporter asks the server twice, 3 s at most each
+
+rule_files:
+  - pcds.rules.yml
+
+scrape_configs:
+  - job_name: pcds
+    static_configs:
+      - targets: ["127.0.0.1:9188"]
+        labels:
+          server: main

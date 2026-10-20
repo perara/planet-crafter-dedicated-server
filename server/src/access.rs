@@ -23,6 +23,11 @@ pub struct Lists {
     pub banned_names: Vec<String>,
     #[serde(default, rename = "bannedIPs")]
     pub banned_ips: Vec<String>,
+    /// SteamID64s of the server's operators: the players plugins let use their operator commands
+    /// (docs/plugins-api.md, `permission = "operator"`). Only a player who joined through Steam, where
+    /// the id is verified, can be one.
+    #[serde(default)]
+    pub operators: Vec<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -77,6 +82,9 @@ impl Lists {
             if let Some(bad) = entries.iter().find(|e| rule(e.trim()).is_none()) {
                 return Err(format!("{list}: {bad:?} is not an IP address or range (a.b.c.d, a.b.c.d/n, an IPv6 address or range)"));
             }
+        }
+        if let Some(bad) = self.operators.iter().find(|e| steam_id(e.trim()).is_none()) {
+            return Err(format!("operators: {bad:?} is not a SteamID64 (operators are players who joined through Steam, where the id is verified; a name could be anyone's)"));
         }
         Ok(())
     }
@@ -137,7 +145,7 @@ impl Access {
 
     pub fn set(&mut self, lists: Lists) -> Result<(), String> {
         lists.check()?;
-        self.save(Lists { allowed_ips: clean(lists.allowed_ips), whitelist: clean(lists.whitelist), banned_names: clean(lists.banned_names), banned_ips: clean(lists.banned_ips) })
+        self.save(Lists { allowed_ips: clean(lists.allowed_ips), whitelist: clean(lists.whitelist), banned_names: clean(lists.banned_names), banned_ips: clean(lists.banned_ips), operators: clean(lists.operators) })
     }
 
     pub fn ip_allowed(&self, ip: &str) -> bool {
@@ -155,6 +163,11 @@ impl Access {
             })
         };
         (self.lists.whitelist.is_empty() || listed(&self.lists.whitelist)) && !listed(&self.lists.banned_names)
+    }
+
+    /// Whether a verified SteamID is one of the operators.
+    pub fn is_operator(&self, verified_steam_id: Option<u64>) -> bool {
+        verified_steam_id.is_some_and(|id| self.lists.operators.iter().any(|e| steam_id(e) == Some(id)))
     }
 
     /// Whether a verified SteamID is banned (checked as soon as it connects).

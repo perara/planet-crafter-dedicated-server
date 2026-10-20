@@ -138,13 +138,14 @@ impl Ring {
 pub fn event_json(event: &Event<'_>) -> Option<Value> {
     let id = |s: &str| if s.is_empty() { Value::Null } else { Value::from(s) };
     Some(match event {
-        Event::Chat { client, name, text } => json!({"client": client, "name": name, "text": text}),
-        Event::PlayerJoin { client, name, steam_id } => json!({"client": client, "name": name, "steamId": id(steam_id)}),
-        Event::PlayerLeave { client, name } => json!({"client": client, "name": name}),
-        Event::ObjectPlaced { id, group, position } | Event::ObjectDestroyed { id, group, position } => json!({"object": id, "group": group, "position": position}),
+        // Ids as text: a SteamID64 is more than a JavaScript number holds exactly.
+        Event::Chat { client, name, text, player_id } => json!({"client": client, "name": name, "text": text, "playerId": player_id.to_string()}),
+        Event::PlayerJoin { client, name, steam_id, player_id } => json!({"client": client, "name": name, "steamId": id(steam_id), "playerId": player_id.to_string()}),
+        Event::PlayerLeave { client, name, player_id } => json!({"client": client, "name": name, "playerId": player_id.to_string()}),
+        Event::ObjectPlaced { id, group, position, client } | Event::ObjectDestroyed { id, group, position, client } => json!({"object": id, "group": group, "position": position, "client": (*client != 0).then_some(client)}),
         Event::WorldSaved { game_ms, ok } => json!({"gameSeconds": *game_ms as f64 / 1000.0, "ok": ok}),
         Event::RuleChange { changes_json } => json!({"changes": serde_json::from_str::<Value>(changes_json).unwrap_or(Value::Null)}),
-        Event::Tick { .. } | Event::Command { .. } | Event::RpcBefore { .. } | Event::RpcAfter { .. } | Event::HttpDone { .. } => return None,
+        Event::Tick { .. } | Event::Command { .. } | Event::RpcBefore { .. } | Event::RpcAfter { .. } | Event::HttpDone { .. } | Event::Timer { .. } | Event::Flip { .. } => return None,
     })
 }
 
@@ -158,9 +159,9 @@ mod tests {
         assert_eq!(ring.wanted(), 0);
         ring.ask("a", Kind::Chat.bit() | Kind::Tick.bit(), 0);
         assert_eq!(ring.wanted(), Kind::Chat.bit(), "per-tick events cannot be streamed");
-        ring.push(&Event::Chat { client: 3, name: "Ann", text: "hi" });
-        ring.push(&Event::PlayerJoin { client: 4, name: "Bo", steam_id: "" });
-        ring.push(&Event::Tick { game_ms: 0, tick: 0, players: 0, since_ms: 0 });
+        ring.push(&Event::Chat { client: 3, name: "Ann", text: "hi", player_id: 9 });
+        ring.push(&Event::PlayerJoin { client: 4, name: "Bo", steam_id: "", player_id: 10 });
+        ring.push(&Event::Tick { game_ms: 0, tick: 0, players: 0, since_ms: 0, unix_ms: 0 });
         let all = ring.read(0, DEFAULT_KINDS, 100);
         assert_eq!((all["events"].as_array().unwrap().len(), all["last"].as_u64()), (2, Some(2)));
         assert_eq!(all["events"][1]["steamId"], Value::Null);
@@ -169,7 +170,7 @@ mod tests {
         assert_eq!(chat["events"][0]["text"], "hi");
         assert_eq!(ring.read(1, DEFAULT_KINDS, 100)["events"][0]["type"], "player_join");
         for _ in 0..KEPT + 5 {
-            ring.push(&Event::Chat { client: 1, name: "x", text: "y" });
+            ring.push(&Event::Chat { client: 1, name: "x", text: "y", player_id: 1 });
         }
         let r = ring.read(0, DEFAULT_KINDS, usize::MAX);
         assert_eq!((r["events"].as_array().unwrap().len(), r["dropped"].as_u64()), (KEPT, Some(7)));
@@ -193,7 +194,7 @@ mod tests {
         ring.consumers.get_mut("metrics").unwrap().last = Instant::now() - KEEP_ASKING - Duration::from_secs(1);
         assert_eq!(ring.wanted(), 0);
         assert!(ring.consumers_json().is_empty());
-        ring.push(&Event::Chat { client: 1, name: "x", text: "y" });
+        ring.push(&Event::Chat { client: 1, name: "x", text: "y", player_id: 1 });
         // The ring still numbers what was pushed (it is cheap), but nothing asks for it.
         assert_eq!(ring.read(0, DEFAULT_KINDS, 10)["last"], 1);
     }

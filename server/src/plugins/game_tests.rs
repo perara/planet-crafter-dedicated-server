@@ -28,7 +28,7 @@ fn install_example(dir: &Path, name: &str, grant: Option<Vec<String>>) {
 }
 
 fn start(g: &mut Game, dir: &Path) {
-    attach(g, prepare(dir, "world"));
+    attach(g, prepare(dir, "world"), false);
 }
 
 /// What the server sent as chat messages since `g.net.out` was cleared: (to, text).
@@ -310,7 +310,7 @@ fn the_plugin_set_after_a_flip_is_the_folders_at_that_moment() {
     let prepared = prepare(&dir, "world");
     // ...and while the world is being handed over the admin switches one off.
     disable(&dir, "welcome-rules").unwrap();
-    attach(&mut g, prepared);
+    attach(&mut g, prepared, false);
     let host = g.ext.plugins.host.as_ref().unwrap();
     let by = |id: &str| host.plugins.iter().find(|p| p.id == id).unwrap().status.name();
     assert_eq!((by("hello-stats"), by("welcome-rules")), ("running", "disabled"), "the folder's set, at once, not the compile's");

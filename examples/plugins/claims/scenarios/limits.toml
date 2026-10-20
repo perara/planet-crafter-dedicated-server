@@ -1,0 +1,33 @@
+# The admin's settings: one claim of at most 30 metres each.
+name = "radius and claim limits from the settings"
+
+[config]
+max_radius = 30
+max_claims = 1
+
+[[player]]
+client = 1
+name = "Ann"
+
+[[step]]
+chat = { client = 1, text = "!claim 31" }
+expect = [{ tell = 1, equals = "The radius must be from 5 to 30 metres." }]
+
+[[step]]
+chat = { client = 1, text = "!claim 4" }
+expect = [{ tell = 1, equals = "The radius must be from 5 to 30 metres." }]
+
+[[step]]
+chat = { client = 1, text = "!claim 30" }
+expect = [{ tell = 1, contains = "Claimed radius 30 around (0, 0, 0)." }]
+
+[[step]]
+set = { position = [1, [500.0, 0.0, 0.0]] }
+
+[[step]]
+chat = { client = 1, text = "!claim 10" }
+expect = [{ tell = 1, equals = "You have 1 claim, the most is 1. Stand in one and use !unclaim to give it up." }]
+
+[[step]]
+chat = { client = 1, text = "!claims" }
+expect = [{ tell = 1, equals = "Your claims (1 of 1): #1 at (0, 0, 0) radius 30;" }]

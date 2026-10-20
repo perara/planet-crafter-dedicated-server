@@ -32,7 +32,7 @@ fn trust(dir: &Path, public: &[u8], grant: &[&str]) {
 }
 
 fn chat() -> Event<'static> {
-    Event::Chat { client: 1, name: "Ann", text: "hi" }
+    Event::Chat { client: 1, name: "Ann", text: "hi", player_id: 1 }
 }
 
 fn the(host: &Host) -> &Loaded {
@@ -206,7 +206,7 @@ fn the_standing_of_a_plugin_is_the_approval_the_signature_and_the_keys_together(
     use approvals::{Approval, Standing, standing};
     let key = |grant: &[&str]| sign::TrustedKey { id: "k1".into(), public_key: String::new(), name: "Acme".into(), grant: grant.iter().map(|g| g.to_string()).collect(), added_at: 0 };
     let req: Vec<String> = ["event.chat", "chat.say", "player.kick"].iter().map(|s| s.to_string()).collect();
-    let approval = |enabled: bool, digest: &str, grant: &[&str], signer: Option<&str>| Approval { enabled, grant: grant.iter().map(|g| g.to_string()).collect(), digest: digest.into(), limits: Default::default(), approved_at: 0, signer: signer.map(str::to_string) };
+    let approval = |enabled: bool, digest: &str, grant: &[&str], signer: Option<&str>| Approval { enabled, grant: grant.iter().map(|g| g.to_string()).collect(), digest: digest.into(), limits: Default::default(), approved_at: 0, signer: signer.map(str::to_string), asked: Vec::new(), allow: Vec::new() };
     let names = |g: Vec<String>| g.iter().map(String::as_str).collect::<Vec<_>>().join(",");
     let none = Signed::No;
     // Digest pinning: no approval, pending; a match, running; another digest, changed.

@@ -1,0 +1,59 @@
+# A restart at 04:00 UTC. The world starts at 03:30 UTC (Unix ms 1,728,000,000,000 is midnight UTC).
+name = "daily restart at 04:00"
+
+[world]
+unix_ms = 1728012600000
+
+[config]
+restart_at = "04:00"
+announce_saves = true
+
+[[player]]
+client = 1
+name = "Ann"
+
+[[step]]
+note = "14 minutes in: nothing yet"
+advance = "14m"
+expect = [{ say = true, count = 0 }]
+
+[[step]]
+note = "03:45: the first warning"
+advance = "1m"
+expect = [{ say = true, equals = "Server restart in 15 minutes" }]
+
+[[step]]
+chat = { client = 1, text = "!restart" }
+expect = [{ tell = 1, equals = "Next restart in 15 minutes (at 04:00 UTC)." }]
+
+[[step]]
+note = "saves: told because announce_saves is on; a failed one always"
+world_saved = true
+expect = [{ say = true, equals = "World saved." }]
+
+[[step]]
+world_saved = false
+expect = [{ say = true, equals = "The world could not be saved, tell an admin." }]
+
+[[step]]
+note = "a reload drops the timers; the new instance sets them again from the wall clock"
+reload = true
+
+[[step]]
+note = "03:55: the 5-minute warning comes once, at its time"
+advance = "10m"
+expect = [{ say = true, equals = "Server restart in 5 minutes", count = 1 }]
+
+[[step]]
+note = "a hot update: told, and the timers survive it"
+flip = true
+expect = [{ say = true, contains = "without a restart" }]
+
+[[step]]
+advance = "4m"
+expect = [{ say = true, equals = "Server restart in 1 minute" }]
+
+[[step]]
+note = "04:00"
+advance = "1m"
+expect = [{ say = true, equals = "The server restarts now" }]

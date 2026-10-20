@@ -1,0 +1,27 @@
+# No restart_at: no timers and no warnings. Saves and updates are still told.
+name = "no scheduled restart, and a malformed one"
+
+[[player]]
+client = 1
+name = "Ann"
+
+[[step]]
+chat = { client = 1, text = "!restart" }
+expect = [{ tell = 1, equals = "No restart is scheduled." }]
+
+[[step]]
+advance = "2h"
+expect = [{ say = true, count = 0 }]
+
+[[step]]
+note = "a good save is silent by default"
+world_saved = true
+expect = [{ say = true, count = 0 }]
+
+[[step]]
+world_saved = false
+expect = [{ say = true, contains = "could not be saved" }]
+
+[[step]]
+flip = true
+expect = [{ say = true, contains = "The server was updated to version" }]

@@ -95,7 +95,7 @@ pub(super) fn boot(dir: &Path) -> Host {
 }
 
 fn chat(text: &str) -> Event<'_> {
-    Event::Chat { client: 1, name: "Ann", text }
+    Event::Chat { client: 1, name: "Ann", text, player_id: 1 }
 }
 
 fn plugin<'a>(host: &'a Host, id: &str) -> &'a Loaded {
@@ -206,7 +206,7 @@ fn a_module_with_imports_the_server_does_not_have_is_refused_by_name() {
 fn a_module_built_for_another_abi_does_not_run() {
     let dir = fresh_dir("abi");
     install(&dir, "future", &module("(i32.const 0)", "").replace("(i32.const 65536)", "(i32.const 131072)"), &CHAT_SAY, SUBSCRIBE_CHAT, None);
-    install(&dir, "newer-minor", &module("(i32.const 0)", "").replace("(i32.const 65536)", "(i32.const 65539)"), &CHAT_SAY, SUBSCRIBE_CHAT, None);
+    install(&dir, "newer-minor", &module("(i32.const 0)", "").replace("(i32.const 65536)", "(i32.const 65540)"), &CHAT_SAY, SUBSCRIBE_CHAT, None);
     let host = boot(&dir);
     for id in ["future", "newer-minor"] {
         assert!(matches!(&plugin(&host, id).status, Status::Failed(why) if why.contains("plugin ABI")), "{id}: {:?}", plugin(&host, id).status);
@@ -312,7 +312,7 @@ fn a_crowd_of_plugins_cannot_stretch_a_tick_and_takes_turns() {
     }
     let mut host = boot(&dir);
     let mut world = Mock::default();
-    let tick = |ms: i64| Event::Tick { game_ms: ms, tick: 0, players: 0, since_ms: 0 };
+    let tick = |ms: i64| Event::Tick { game_ms: ms, tick: 0, players: 0, since_ms: 0, unix_ms: 0 };
     let t = Instant::now();
     host.run(&mut world, &tick(1000), 1000);
     let spent = t.elapsed();
@@ -335,7 +335,7 @@ fn commands_go_to_their_owner_only_and_a_second_claim_is_told() {
     let mut host = boot(&dir);
     assert!(plugin(&host, "bbb").warnings.iter().any(|w| w.contains("belongs to aaa")));
     let mut world = Mock::default();
-    let command = |c| Event::Command { client: 1, name: "Ann", command: c, args: vec![], text: "!x" };
+    let command = |c| Event::Command { client: 1, name: "Ann", command: c, args: vec![], text: "!x", player_id: 1 };
     host.run(&mut world, &command("stats"), 0);
     host.run(&mut world, &command("Other"), 0);
     host.run(&mut world, &command("nope"), 0);
@@ -716,7 +716,7 @@ fn a_hundred_loads_and_unloads_leave_nothing_and_cost_no_tick_time() {
     let mut host = boot(&dir);
     let mut saved = Saved::default();
     let mut world = Mock::default();
-    let tick = |ms: i64| Event::Tick { game_ms: ms, tick: 0, players: 0, since_ms: 5 };
+    let tick = |ms: i64| Event::Tick { game_ms: ms, tick: 0, players: 0, since_ms: 5, unix_ms: 0 };
     let mut clock = 0i64;
     let measure = |host: &mut Host, world: &mut Mock, clock: &mut i64| {
         let t = Instant::now();

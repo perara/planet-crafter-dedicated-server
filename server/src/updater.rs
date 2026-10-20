@@ -78,6 +78,21 @@ fn get(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, String> {
     answer.body_mut().with_config().limit(MAX_DOWNLOAD).read_to_vec().map_err(|e| said(e.to_string()))
 }
 
+/// A file over https (plain http only for 127.0.0.1, a test's server), at most `max` bytes: what
+/// `pcds plugin install URL` reads. Nothing is run or unpacked here.
+pub fn fetch(url: &str, max: u64) -> Result<Vec<u8>, String> {
+    let shown = shown_url(url);
+    if !url.starts_with("https://") && !local(url) {
+        return Err(format!("{shown}: only https addresses are fetched"));
+    }
+    let said = |e: String| format!("{shown}: {}", e.replace(url, &shown));
+    let mut answer = agent(local(url)).get(url).call().map_err(|e| said(e.to_string()))?;
+    if !answer.status().is_success() {
+        return Err(format!("{shown}: HTTP {}", answer.status().as_u16()));
+    }
+    answer.body_mut().with_config().limit(max).read_to_vec().map_err(|e| said(e.to_string()))
+}
+
 /// "0.6.0" and "v0.6.0" are the tag v0.6.0.
 pub fn tag(version: &str) -> String {
     if version.starts_with('v') { version.to_string() } else { format!("v{version}") }

@@ -1,0 +1,16 @@
+name = "hello from C"
+
+[[player]]
+client = 1
+name = "Ann"
+
+[[step]]
+chat = { client = 1, text = "!hello" }
+expect = [{ tell = 1, contains = "Hello Ann from C" }]
+
+[[step]]
+flip = true
+
+[[step]]
+chat = { client = 1, text = "!hello" }
+expect = [{ tell = 1, contains = "2 times" }]

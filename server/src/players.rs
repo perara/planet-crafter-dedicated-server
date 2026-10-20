@@ -202,7 +202,7 @@ impl Game {
             self.saved_players.retain(|p| p["id"].as_u64() != Some(state.id));
             self.saved_players.push(entry);
             self.net.rpc_scene(Target::Except(c.id), "ChatHandler.ReceiveServicePlayerLeftMessageClientRpc", &[json!(state.name)]);
-            crate::events::player_left(self, c.id, &state.name);
+            crate::events::player_left(self, c.id, &state.name, state.id);
         }
         if let Some(object) = c.player {
             self.net.despawn(object);

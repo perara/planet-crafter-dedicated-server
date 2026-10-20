@@ -1,5 +1,6 @@
-//! `pcds plugin list | check | install | enable | disable | reload | new | config | keygen | sign |
-//! trust | untrust | keys` (docs/plugins-guide.md).
+//! `pcds plugin list | check | test | install | enable | disable | reload | new | config | keygen | sign |
+//! trust | untrust | keys | token | logs | stats | watch | pack | search` (docs/plugins-guide.md). The
+//! commands around a plugin's files and its life are in plugin_dev.rs.
 //! Plugins live in run/plugins/<id>/; what the admin approved is run/plugins/approved.json. The
 //! commands change those files, and ask the running server (if there is one) to read them again.
 
@@ -12,16 +13,28 @@ use serde_json::Value;
 use super::{Ctx, Result};
 use crate::plugins::{self, approvals, config, manifest, sign};
 
-const USAGE: &str = "\
+pub(super) const USAGE: &str = "\
 pcds plugin list                      the plugins, their state, what they asked for and what they cost
-pcds plugin check PATH_OR_ID          check a plugin folder (or an installed plugin) and run it on sample events
-pcds plugin install PATH [--force]    copy a plugin folder into run/plugins/ (it waits for approval)
+pcds plugin check PATH_OR_ID          check a plugin folder (or an installed plugin), run it on sample events, and show what each costs
+pcds plugin test PATH [--scenario FILE]...
+                                      run the plugin in the real host against a made-up world, as scenarios/*.toml say (no game needed)
+pcds plugin install SOURCE [--force] [--yes] [--sha256 HEX] [--index URL_OR_FILE]
+                                      copy a plugin into run/plugins/ (it waits for approval). SOURCE: a folder, a .pcdsplugin file,
+                                      an https address of one (--sha256 pins it), or a plugin's id in an index (--index)
+pcds plugin search [TERM] --index URL_OR_FILE
+                                      what an index (a community's plugins-index.json) lists
+pcds plugin pack DIR [--out FILE]     make the .pcdsplugin package of a plugin folder, and print its sha256
+pcds plugin watch DIR [--approve] [--once]
+                                      install DIR over the installed plugin each time its build changes (the state is kept);
+                                      --approve approves it again if it asks for nothing new
+pcds plugin logs ID [-n LINES] [-f]   the last log lines of a plugin of the running server (-f follows)
+pcds plugin stats [ID]                what each plugin costs, by kind of event, and its faults
 pcds plugin enable ID [--grant CAP,CAP] [--yes]
                                       approve a plugin: what it asks for is shown first; --grant allows only some
 pcds plugin disable ID                switch an approved plugin off
 pcds plugin reload                    make the running server read run/plugins/ again
-pcds plugin new ID [--kind wasm|data] [--api-path DIR]
-                                      a folder for a new plugin, from a template
+pcds plugin new ID [--kind wasm|data] [--lang rust|c] [--api-path DIR]
+                                      a folder for a new plugin, from a template (rust: the default for wasm; c: the same ABI from C)
 pcds plugin keygen NAME               make a signing key pair: NAME.key (keep it secret) and NAME.pub (give it to admins)
 pcds plugin sign --key NAME.key DIR   sign the plugin in DIR: writes DIR/plugin.sig (the files must not change after)
 pcds plugin trust KEY [--name NAME] [--grant CAP,CAP] [--force]
@@ -38,7 +51,7 @@ pcds plugin config unset ID KEY       remove a value";
 
 impl Ctx {
     fn plugins_dir(&self) -> PathBuf {
-        self.run.join("plugins")
+        self.plugins_path()
     }
 
     pub fn plugin(&self, args: &[String]) -> Result {
@@ -46,7 +59,14 @@ impl Ctx {
         match a.as_slice() {
             ["list"] => self.plugin_list(),
             ["check", target] => self.plugin_check(target),
-            ["install", path, rest @ ..] => self.plugin_install(path, rest),
+            ["install", source, rest @ ..] => self.plugin_install(source, rest),
+            ["test", path, rest @ ..] => self.plugin_test(path, rest),
+            ["logs", id, rest @ ..] => self.plugin_logs(id, rest),
+            ["stats"] => self.plugin_stats(None),
+            ["stats", id] => self.plugin_stats(Some(id)),
+            ["watch", dir, rest @ ..] => self.plugin_watch(dir, rest),
+            ["pack", dir, rest @ ..] => self.plugin_pack(dir, rest),
+            ["search", rest @ ..] => self.plugin_search(rest),
             ["enable", id, rest @ ..] => self.plugin_enable(id, rest),
             ["disable", id] => {
                 plugins::disable(&self.plugins_dir(), id)?;
@@ -80,7 +100,7 @@ impl Ctx {
     }
 
     /// Tells a running server to read the plugin folder again; says so when there is none.
-    fn plugin_reload_running(&self) {
+    pub(super) fn plugin_reload_running(&self) {
         match self.api("POST", "/api/plugins/reload", None) {
             Ok(_) => println!("pcds: the running server has read the change"),
             Err(_) => println!("pcds: the server is not running (or has no admin API): the change takes effect when it starts"),
@@ -166,48 +186,6 @@ impl Ctx {
         }
     }
 
-    fn plugin_install(&self, path: &str, rest: &[&str]) -> Result {
-        let force = rest.contains(&"--force");
-        if let Some(bad) = rest.iter().find(|r| **r != "--force") {
-            return Err(format!("unknown option {bad}\n{USAGE}"));
-        }
-        let from = Path::new(path);
-        let report = plugins::check::check_folder(from, Some(&self.plugins_dir()));
-        report.errors.iter().for_each(|e| println!("  ERROR: {}", plugins::clean(e)));
-        report.warnings.iter().for_each(|w| println!("  warning: {}", plugins::clean(w)));
-        if !report.errors.is_empty() {
-            return Err(format!("{path} does not pass pcds plugin check: not installed"));
-        }
-        let found = plugins::read_folder(from);
-        let m = found.manifest.ok_or("no manifest")?;
-        let to = self.plugins_dir().join(m.id());
-        if to.exists() && !force {
-            return Err(format!("{} is installed already; --force installs this one over it (its saved state stays, its approval must be given again)", m.id()));
-        }
-        // The manifest and the entry only: nothing else of the folder (a target/ with a build in it) is copied.
-        for name in [manifest::FILE, m.plugin.entry.as_str()] {
-            let bytes = plugins::read_regular(&from.join(name), plugins::limits::MAX_MODULE_BYTES).map_err(|e| format!("{}: {e}", from.join(name).display()))?;
-            let target = to.join(name);
-            super::mkdir(target.parent().unwrap_or(&to))?;
-            crate::util::replace_file(&target, &bytes, 0o644)?;
-        }
-        // A signature goes with the files it was made for; one that no longer holds is not copied.
-        let sig = from.join(sign::FILE);
-        if sig.is_file() {
-            let bytes = fs::read(&sig).map_err(|e| format!("{}: {e}", sig.display()))?;
-            crate::util::replace_file(&to.join(sign::FILE), &bytes, 0o644)?;
-        } else {
-            let _ = fs::remove_file(to.join(sign::FILE));
-        }
-        println!("pcds: installed {} {} in {}", m.plugin.name, m.plugin.version, to.display());
-        for c in &m.plugin.capabilities {
-            println!("  asks for {c}");
-        }
-        println!("pcds: it does nothing until you approve it: pcds plugin enable {}", m.id());
-        self.plugin_reload_running();
-        Ok(())
-    }
-
     fn plugin_enable(&self, id: &str, rest: &[&str]) -> Result {
         let (mut grant, mut yes) = (None, false);
         let mut it = rest.iter();
@@ -241,7 +219,7 @@ impl Ctx {
             }
         }
         for k in m.config.iter().filter(|k| plugins::config::Configs::load(&dir).ok().is_none_or(|c| c.0.get(id).is_none_or(|v| !v.contains_key(&k.key)))) {
-            println!("  needs a value you set: pcds plugin config set {id} {}   ({}{})", k.key, k.description, if k.secret { "; a secret" } else { "" });
+            println!("  needs a value you set: pcds plugin config set {id} {}   ({}{})", k.key, k.description, if k.is_secret() { "; a secret" } else { "" });
         }
         println!("  digest {}", found.digest);
         if !yes {
@@ -359,7 +337,7 @@ impl Ctx {
                 for id in ids {
                     for k in declared(&id)? {
                         let value = all.0.get(&id).and_then(|v| v.get(&k.key));
-                        let shown = match (value, k.secret) {
+                        let shown = match (value, k.is_secret()) {
                             (None, _) => "not set".to_string(),
                             (Some(_), true) => "set (a secret: not shown)".to_string(),
                             (Some(v), false) => v.clone(),
@@ -372,13 +350,14 @@ impl Ctx {
             ["set", id, key, rest @ ..] => {
                 let keys = declared(id)?;
                 let k = keys.iter().find(|k| k.key == *key).ok_or_else(|| format!("{id} declares no config key {key} (it declares: {})", keys.iter().map(|k| k.key.as_str()).collect::<Vec<_>>().join(", ")))?;
-                let value = match (rest, k.secret) {
+                let value = match (rest, k.is_secret()) {
                     ([v], false) => v.to_string(),
-                    ([], _) => read_line_hidden(&format!("{id} {key}: "), k.secret)?,
+                    ([], _) => read_line_hidden(&format!("{id} {key}: "), k.is_secret())?,
                     (_, true) => return Err(format!("{key} is a secret: leave the value off; it is read from the terminal (or standard input), so it stays out of the shell history and the process list")),
                     _ => return Err(USAGE.to_string()),
                 };
-                config::set(&dir, id, key, Some(value.trim_end_matches(['\r', '\n'])))?;
+                let value = k.check(value.trim_end_matches(['\r', '\n']))?;
+                config::set(&dir, id, key, Some(&value))?;
                 println!("pcds: {id} {key} is set");
                 self.plugin_reload_running();
                 Ok(())
@@ -394,14 +373,18 @@ impl Ctx {
     }
 
     fn plugin_new(&self, id: &str, rest: &[&str]) -> Result {
-        let (mut kind, mut api_path) = ("wasm", None);
+        let (mut kind, mut lang, mut api_path) = ("wasm", None::<&str>, None);
         let mut it = rest.iter();
         while let Some(o) = it.next() {
             match *o {
                 "--kind" => kind = it.next().copied().filter(|k| ["wasm", "data"].contains(k)).ok_or("--kind wasm|data")?,
+                "--lang" => lang = Some(it.next().copied().filter(|k| ["rust", "c"].contains(k)).ok_or("--lang rust|c")?),
                 "--api-path" => api_path = Some(PathBuf::from(it.next().ok_or("--api-path DIR")?)),
                 other => return Err(format!("unknown option {other}\n{USAGE}")),
             }
+        }
+        if kind == "data" && lang.is_some() {
+            return Err("--lang is for a WebAssembly plugin; a data plugin is a rules file".into());
         }
         if !manifest::valid_id(id) {
             return Err(format!("{id:?} is not a plugin id: a lowercase letter, then lowercase letters, digits and dashes, 32 at most"));
@@ -410,32 +393,50 @@ impl Ctx {
         if dir.exists() {
             return Err(format!("{id} exists already"));
         }
-        let crate_name = id.replace('-', "_");
         let api = match &api_path {
             Some(p) => format!("path = \"{}\"", fs::canonicalize(p).map_err(|e| format!("{}: {e}", p.display()))?.display()),
             None => format!("git = \"https://github.com/perara/planet-crafter-dedicated-server\", tag = \"v{}\"", env!("CARGO_PKG_VERSION")),
         };
-        let fill = |t: &str| t.replace("{id}", id).replace("{crate}", &crate_name).replace("{api}", &api).replace("{version}", env!("CARGO_PKG_VERSION"));
-        let files: &[(&str, &str)] = if kind == "wasm" {
-            &[
-                ("plugin.toml", include_str!("../../templates/wasm/plugin.toml")),
-                ("Cargo.toml", include_str!("../../templates/wasm/Cargo.toml")),
-                ("src/lib.rs", include_str!("../../templates/wasm/lib.rs")),
-                (".cargo/config.toml", include_str!("../../templates/wasm/cargo-config.toml")),
-                (".gitignore", "/target\n"),
-                ("README.md", include_str!("../../templates/wasm/README.md")),
-            ]
-        } else {
-            &[("plugin.toml", include_str!("../../templates/data/plugin.toml")), ("rules.toml", include_str!("../../templates/data/rules.toml")), ("README.md", include_str!("../../templates/data/README.md"))]
-        };
+        let files = template(kind, lang.unwrap_or("rust"));
         for (name, text) in files {
             let path = dir.join(name);
             super::mkdir(path.parent().unwrap_or(&dir))?;
-            fs::write(&path, fill(text)).map_err(|e| format!("{}: {e}", path.display()))?;
+            fs::write(&path, fill_template(text, id, &api)).map_err(|e| format!("{}: {e}", path.display()))?;
         }
-        println!("pcds: made {id}/ ({kind} plugin); next steps are in {id}/README.md");
+        let what = if kind == "data" { "data".to_string() } else { format!("{} wasm", lang.unwrap_or("rust")) };
+        println!("pcds: made {id}/ ({what} plugin); next steps are in {id}/README.md");
         Ok(())
     }
+}
+
+/// The files of a new plugin: (path in the folder, template text).
+pub(super) fn template(kind: &str, lang: &str) -> &'static [(&'static str, &'static str)] {
+    match (kind, lang) {
+        ("data", _) => &[("plugin.toml", include_str!("../../templates/data/plugin.toml")), ("rules.toml", include_str!("../../templates/data/rules.toml")), ("scenarios/basic.toml", include_str!("../../templates/data/scenarios/basic.toml")), ("README.md", include_str!("../../templates/data/README.md"))],
+        (_, "c") => &[
+            ("plugin.toml", include_str!("../../templates/c/plugin.toml")),
+            ("plugin.c", include_str!("../../templates/c/plugin.c")),
+            ("pcds.h", include_str!("../../templates/c/pcds.h")),
+            ("Makefile", include_str!("../../templates/c/Makefile")),
+            ("scenarios/basic.toml", include_str!("../../templates/c/scenarios/basic.toml")),
+            (".gitignore", include_str!("../../templates/c/gitignore")),
+            ("README.md", include_str!("../../templates/c/README.md")),
+        ],
+        _ => &[
+            ("plugin.toml", include_str!("../../templates/wasm/plugin.toml")),
+            ("Cargo.toml", include_str!("../../templates/wasm/Cargo.toml")),
+            ("src/lib.rs", include_str!("../../templates/wasm/lib.rs")),
+            ("Makefile", include_str!("../../templates/wasm/Makefile")),
+            ("justfile", include_str!("../../templates/wasm/justfile")),
+            ("scenarios/basic.toml", include_str!("../../templates/wasm/scenarios/basic.toml")),
+            (".gitignore", include_str!("../../templates/wasm/gitignore")),
+            ("README.md", include_str!("../../templates/wasm/README.md")),
+        ],
+    }
+}
+
+pub(super) fn fill_template(text: &str, id: &str, api: &str) -> String {
+    text.replace("{id}", id).replace("{crate}", &id.replace('-', "_")).replace("{api}", api).replace("{version}", env!("CARGO_PKG_VERSION"))
 }
 
 /// One line from the terminal, not echoed when `hidden` (a secret), or from standard input.

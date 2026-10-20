@@ -206,7 +206,7 @@ mod tests {
     }
 
     fn tick() -> Event<'static> {
-        Event::Tick { game_ms: 5000, tick: 1, players: 1, since_ms: 5000 }
+        Event::Tick { game_ms: 5000, tick: 1, players: 1, since_ms: 5000, unix_ms: 0 }
     }
 
     fn done(ticket: u64, status: u32, error: &'static str) -> Event<'static> {
@@ -217,9 +217,9 @@ mod tests {
     fn lines_are_batched_into_one_request_and_dropped_when_delivered() {
         let host = Mock::new();
         let mut p = Notify::load(&host, None);
-        p.event(&host, &Event::PlayerJoin { client: 1, name: "Ann \"the\" Bo", steam_id: "" });
-        p.event(&host, &Event::PlayerLeave { client: 1, name: "Ann" });
-        p.event(&host, &Event::Command { client: 1, name: "Ann", command: "report", args: vec!["door"], text: "!report the door\nis stuck" });
+        p.event(&host, &Event::PlayerJoin { client: 1, name: "Ann \"the\" Bo", steam_id: "", player_id: 1 });
+        p.event(&host, &Event::PlayerLeave { client: 1, name: "Ann", player_id: 1 });
+        p.event(&host, &Event::Command { client: 1, name: "Ann", command: "report", args: vec!["door"], text: "!report the door\nis stuck", player_id: 1 });
         assert_eq!(host.told.borrow()[0], "Thanks, the admins have it.");
         assert!(host.requests.borrow().is_empty(), "nothing is sent until the tick");
         p.event(&host, &tick());
@@ -231,7 +231,7 @@ mod tests {
         // While the request is out, another tick sends nothing; the answer drops the lines it carried.
         p.event(&host, &tick());
         assert_eq!(host.requests.borrow().len(), 1);
-        p.event(&host, &Event::PlayerJoin { client: 2, name: "Bo", steam_id: "" });
+        p.event(&host, &Event::PlayerJoin { client: 2, name: "Bo", steam_id: "", player_id: 1 });
         p.event(&host, &done(7, 204, ""));
         assert_eq!(p.lines, vec!["**Bo** joined the game".to_string()]);
         // An answer for another ticket changes nothing.
@@ -243,7 +243,7 @@ mod tests {
     fn a_request_that_failed_is_tried_again_at_the_next_tick_and_a_restart_loses_nothing() {
         let host = Mock::new();
         let mut p = Notify::load(&host, None);
-        p.event(&host, &Event::PlayerJoin { client: 1, name: "Ann", steam_id: "" });
+        p.event(&host, &Event::PlayerJoin { client: 1, name: "Ann", steam_id: "", player_id: 1 });
         p.event(&host, &tick());
         p.event(&host, &done(7, 500, ""));
         assert_eq!(p.lines.len(), 1);
@@ -288,7 +288,7 @@ mod tests {
         q.event(&host, &done(7, 204, ""));
         assert_eq!(q.lines.len(), 50 - n, "the rest waits for the next tick");
         // `!report` with nothing to report says how.
-        q.event(&host, &Event::Command { client: 3, name: "Cy", command: "report", args: vec![], text: "!report" });
+        q.event(&host, &Event::Command { client: 3, name: "Cy", command: "report", args: vec![], text: "!report", player_id: 1 });
         assert!(host.told.borrow()[0].starts_with("Say what to report"));
     }
 }

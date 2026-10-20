@@ -8,7 +8,9 @@ use crate::codec::DecodeError;
 #[cfg(target_arch = "wasm32")]
 use crate::codec::Writer;
 use crate::http::HttpRequest;
-use crate::query::{PlayerInfo, WorldInfo};
+#[cfg(target_arch = "wasm32")]
+use crate::query::{self, NearbyArgs};
+use crate::query::{InventoryInfo, Nearby, ObjectInfo, ObjectRef, PlayerInfo, WorldInfo};
 
 /// Return codes of the host functions (negative: it did not happen).
 pub const OK: i32 = 0;
@@ -23,6 +25,8 @@ pub const E_FULL: i32 = -3;
 pub const E_UNSUPPORTED: i32 = -4;
 /// (ABI 1.2) The request's host is not one the manifest lists, or the URL is no URL the host takes.
 pub const E_NOT_ALLOWED: i32 = -5;
+/// (ABI 1.3) The player or object asked about is not there (a player left; an object was destroyed).
+pub const E_NOT_FOUND: i32 = -6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -31,6 +35,7 @@ pub enum Error {
     Full,
     Unsupported,
     NotAllowed,
+    NotFound,
     Decode(DecodeError),
 }
 
@@ -41,6 +46,7 @@ impl Error {
             E_FULL => Error::Full,
             E_UNSUPPORTED => Error::Unsupported,
             E_NOT_ALLOWED => Error::NotAllowed,
+            E_NOT_FOUND => Error::NotFound,
             _ => Error::Bad,
         }
     }
@@ -85,6 +91,53 @@ pub trait Host {
     /// once are returned (`NotAllowed`: the host is not on the manifest's list; `Full`: too many
     /// requests in flight or this second); the rest (DNS, connection, timeout, size) come in the event.
     fn http_request(&self, request: &HttpRequest<'_>) -> Result<u64, Error>;
+
+    // ---- ABI 1.3. A host older than the plugin answers `Unsupported`; so do these defaults, which
+    // ---- keep a `Host` written for 1.2 (a test double) compiling.
+
+    /// `world.read` (ABI 1.3): what a player carries. `NotFound` if they are not online.
+    fn inventory(&self, _client: u64) -> Result<InventoryInfo, Error> {
+        Err(Error::Unsupported)
+    }
+    /// `world.read` (ABI 1.3): the world objects within `radius` of `center`, closest first, at most
+    /// `max` (and `query::MAX_NEARBY`). The scan is paid for in fuel by the number of objects in the world.
+    fn nearby(&self, _center: [f32; 3], _radius: f32, _max: u32) -> Result<Vec<Nearby>, Error> {
+        Err(Error::Unsupported)
+    }
+    /// `world.read` (ABI 1.3): one world object, or `None` if there is no such object (any more).
+    fn object(&self, _which: ObjectRef) -> Result<Option<ObjectInfo>, Error> {
+        Err(Error::Unsupported)
+    }
+    /// ABI 1.3, no capability: this plugin's own settings, the `[[config]]` keys of its manifest that
+    /// are not secrets, as the admin set them or as their defaults say. A key nobody set and with no
+    /// default is not in the list.
+    fn settings(&self) -> Result<Vec<(String, String)>, Error> {
+        Err(Error::Unsupported)
+    }
+    /// One setting (`settings` and a search): `None` if it is not set and has no default.
+    fn config(&self, key: &str) -> Option<String> {
+        self.settings().ok()?.into_iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+    /// `player.give` (ABI 1.3): puts `count` of the item `group` into a player's backpack. Queued;
+    /// done after the call if the player is still there and the backpack has room.
+    fn give(&self, _client: u64, _group: &str, _count: u32) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+    /// `world.tokens` (ABI 1.3): adds Terra tokens to the world's count, or takes them away (a
+    /// negative amount; the count does not go below zero). Queued.
+    fn tokens(&self, _amount: i32) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+    /// `event.timer` (ABI 1.3): calls this plugin with `Event::Timer { id, .. }` after `delay_ms` of
+    /// game time, and then every `repeat_ms` if that is not 0. Setting an id again replaces it. Timers
+    /// belong to the running instance: set them in `load`, they are gone after a reload or a restart.
+    fn set_timer(&self, _id: u32, _delay_ms: u32, _repeat_ms: u32) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+    /// `event.timer` (ABI 1.3): cancels a timer. Cancelling one that is not set is not an error.
+    fn cancel_timer(&self, _id: u32) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -99,6 +152,10 @@ mod sys {
         pub fn teleport(client: u64, x: f32, y: f32, z: f32) -> i32;
         pub fn rules_patch(ptr: *const u8, len: usize) -> i32;
         pub fn http_request(ptr: *const u8, len: usize) -> i64;
+        pub fn give(client: u64, group: *const u8, group_len: usize, count: u32) -> i32;
+        pub fn tokens(amount: i32) -> i32;
+        pub fn timer_set(id: u32, delay_ms: u32, repeat_ms: u32) -> i32;
+        pub fn timer_cancel(id: u32) -> i32;
     }
 }
 
@@ -109,10 +166,13 @@ pub struct Wasm;
 #[cfg(target_arch = "wasm32")]
 impl Wasm {
     fn ask(kind: u32) -> Result<Vec<u8>, Error> {
+        Wasm::ask_with(kind, &[])
+    }
+    fn ask_with(kind: u32, arg: &[u8]) -> Result<Vec<u8>, Error> {
         let mut out = alloc::vec![0u8; 512];
         loop {
             // SAFETY: the pointers are valid for the lengths given; the host writes at most out_cap bytes.
-            let n = unsafe { sys::query(kind, core::ptr::null(), 0, out.as_mut_ptr(), out.len()) };
+            let n = unsafe { sys::query(kind, arg.as_ptr(), arg.len(), out.as_mut_ptr(), out.len()) };
             if n < 0 {
                 return Err(Error::from_code(n));
             }
@@ -169,5 +229,39 @@ impl Host for Wasm {
         // SAFETY: a valid byte slice.
         let ticket = unsafe { sys::http_request(w.0.as_ptr(), w.0.len()) };
         if ticket > 0 { Ok(ticket as u64) } else { Err(Error::from_code(ticket as i32)) }
+    }
+    fn inventory(&self, client: u64) -> Result<InventoryInfo, Error> {
+        Ok(InventoryInfo::decode(&Wasm::ask_with(query::Q_INVENTORY, &client.to_le_bytes())?)?)
+    }
+    fn nearby(&self, center: [f32; 3], radius: f32, max: u32) -> Result<Vec<Nearby>, Error> {
+        let mut w = Writer::new();
+        NearbyArgs { center, radius, max }.encode(&mut w);
+        Ok(query::decode_nearby(&Wasm::ask_with(query::Q_NEARBY, &w.0)?)?)
+    }
+    fn object(&self, which: ObjectRef) -> Result<Option<ObjectInfo>, Error> {
+        let mut w = Writer::new();
+        which.encode(&mut w);
+        let answer = Wasm::ask_with(query::Q_OBJECT, &w.0)?;
+        let mut r = crate::codec::Reader::new(&answer);
+        Ok(if r.bool()? { Some(ObjectInfo::decode(&mut r)?) } else { None })
+    }
+    fn settings(&self) -> Result<Vec<(String, String)>, Error> {
+        Ok(query::decode_settings(&Wasm::ask(query::Q_CONFIG)?)?)
+    }
+    fn give(&self, client: u64, group: &str, count: u32) -> Result<(), Error> {
+        // SAFETY: a valid string slice.
+        Wasm::code(unsafe { sys::give(client, group.as_ptr(), group.len(), count) })
+    }
+    fn tokens(&self, amount: i32) -> Result<(), Error> {
+        // SAFETY: a plain number.
+        Wasm::code(unsafe { sys::tokens(amount) })
+    }
+    fn set_timer(&self, id: u32, delay_ms: u32, repeat_ms: u32) -> Result<(), Error> {
+        // SAFETY: plain numbers.
+        Wasm::code(unsafe { sys::timer_set(id, delay_ms, repeat_ms) })
+    }
+    fn cancel_timer(&self, id: u32) -> Result<(), Error> {
+        // SAFETY: a plain number.
+        Wasm::code(unsafe { sys::timer_cancel(id) })
     }
 }

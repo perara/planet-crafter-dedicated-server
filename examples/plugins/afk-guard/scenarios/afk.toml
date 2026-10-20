@@ -1,0 +1,54 @@
+name = "afk: warned, then kicked; a player who moves and an operator are spared"
+
+[config]
+afk_minutes = 1
+afk_warn_seconds = 20
+
+[[player]]
+client = 1
+name = "Root"
+operator = true
+
+[[player]]
+client = 2
+name = "Ann"
+position = [10.0, 0.0, 0.0]
+
+[[player]]
+client = 3
+name = "Bo"
+
+[[step]]
+note = "30 s in: nobody is warned yet (the warning comes in the last 20 s of the minute)"
+advance = "30s"
+expect = [{ tell = 2, count = 0 }, { tell = 3, count = 0 }]
+
+[[step]]
+note = "45 s in: Ann and Bo are warned, the operator is not"
+advance = "15s"
+expect = [
+  { tell = 2, contains = "Move within", count = 1 },
+  { tell = 3, contains = "Move within", count = 1 },
+  { tell = 1, count = 0 },
+]
+
+[[step]]
+note = "Bo walks away from where he stood"
+set = { position = [3, [5.0, 0.0, 0.0]] }
+
+[[step]]
+note = "75 s in: Ann stood still for a minute and is kicked; Bo and the operator are still here"
+advance = "30s"
+expect = [
+  { kick = 2, contains = "away from the keyboard", count = 1 },
+  { kick = 3, count = 0 },
+  { kick = 1, count = 0 },
+]
+
+[[step]]
+chat = { client = 1, text = "!guard" }
+expect = [
+  { tell = 1, contains = "Guard: away after 1 min (warning 20 s before)" },
+  { tell = 1, contains = "Idle:" },
+  { tell = 1, equals = "Strikes: none." },
+]

@@ -1,0 +1,39 @@
+name = "a full backpack: the tokens come, the items wait until there is room"
+
+[[player]]
+client = 2
+name = "Ann"
+inventory = { Cobalt = 30 }
+
+[[step]]
+note = "30 items fill the sim's 30 slots"
+place = { id = 1, group = "Wall", client = 2 }
+expect = [
+  { give = 2, count = 0 },
+  { tokens = true, equals = "100" },
+  { tell = 2, count = 0 },
+]
+
+[[step]]
+chat = { client = 2, text = "!rewards" }
+expect = [{ tell = 2, contains = "1 reward is waiting" }]
+
+[[step]]
+advance = "20s"
+expect = [{ give = 2, count = 0 }]
+
+[[step]]
+note = "she empties her backpack"
+set = { inventory = [2, {}] }
+
+[[step]]
+advance = "6s"
+expect = [
+  { give = 2, equals = "10 Iron", count = 1 },
+  { tokens = true, count = 0 },
+  { tell = 2, equals = "Quest reward for your first building: +10 Iron, +100 Terra tokens." },
+]
+
+[[step]]
+advance = "30s"
+expect = [{ give = 2, count = 0 }, { tell = 2, count = 0 }]

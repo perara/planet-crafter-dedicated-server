@@ -1,0 +1,38 @@
+# Alerts for a Planet Crafter dedicated server, on the metrics of exporter.py.
+groups:
+  - name: pcds
+    rules:
+      # The exporter is gone, or it cannot reach the server's admin API.
+      - alert: PcdsDown
+        expr: up{job="pcds"} == 0 or pcds_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The server (or its exporter) has not answered for 2 minutes"
+
+      # A plugin faulted (a trap, a fuel or memory limit, an error). Five faults in a minute switch it off.
+      - alert: PcdsPluginFaults
+        expr: increase(pcds_plugin_faults_total[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Plugin {{ $labels.plugin }} faulted {{ $value | printf \"%.0f\" }} times in 10 minutes"
+
+      # A plugin is not running because something is wrong with it (not because an admin disabled it).
+      - alert: PcdsPluginOff
+        expr: pcds_plugin_status{status=~"failed|invalid|incompatible"} == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Plugin {{ $labels.plugin }} is {{ $labels.status }}"
+
+      # The world could not be saved.
+      - alert: PcdsSaveFailing
+        expr: pcds_last_save_success == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The last world save failed"

@@ -29,7 +29,7 @@ struct Canned {
 
 impl World for Canned {
     fn info(&self) -> WorldInfo {
-        WorldInfo { game_ms: 3_725_000, planet: "Prime".into(), players: 2, world_objects: 900, network_objects: 1200, terraformation: 1234.5, standing_still: false }
+        WorldInfo { game_ms: 3_725_000, planet: "Prime".into(), players: 2, world_objects: 900, network_objects: 1200, terraformation: 1234.5, standing_still: false, unix_ms: 1_760_000_000_000 }
     }
     fn players(&self) -> Vec<PlayerInfo> {
         vec![PlayerInfo { client: 1, name: "Ann".into(), position: [10.0, 2.0, 30.0], gauges: [100.0, 80.0, 90.0, 0.0], ..Default::default() }, PlayerInfo { client: 2, name: "Bo".into(), ..Default::default() }]
@@ -64,18 +64,20 @@ fn import_cap(import: &str) -> Option<&'static str> {
 
 fn sample(kind: Kind, command: Option<&str>, rpc: Option<&str>) -> Event<'static> {
     match kind {
-        Kind::Tick => Event::Tick { game_ms: 3_725_000, tick: 744_000, players: 2, since_ms: 1000 },
-        Kind::PlayerJoin => Event::PlayerJoin { client: 1, name: "Ann", steam_id: "76561198000000000" },
-        Kind::PlayerLeave => Event::PlayerLeave { client: 1, name: "Ann" },
-        Kind::Chat => Event::Chat { client: 1, name: "Ann", text: "hello everyone" },
-        Kind::Command => Event::Command { client: 1, name: "Ann", command: Box::leak(command.unwrap_or("help").to_string().into_boxed_str()), args: vec!["one", "two"], text: "!command one two" },
+        Kind::Tick => Event::Tick { game_ms: 3_725_000, tick: 744_000, players: 2, since_ms: 1000, unix_ms: 1_760_000_000_000 },
+        Kind::PlayerJoin => Event::PlayerJoin { client: 1, name: "Ann", steam_id: "76561198000000000", player_id: 76561198000000000 },
+        Kind::PlayerLeave => Event::PlayerLeave { client: 1, name: "Ann", player_id: 76561198000000000 },
+        Kind::Chat => Event::Chat { client: 1, name: "Ann", text: "hello everyone", player_id: 76561198000000000 },
+        Kind::Command => Event::Command { client: 1, name: "Ann", command: Box::leak(command.unwrap_or("help").to_string().into_boxed_str()), args: vec!["one", "two"], text: "!command one two", player_id: 76561198000000000 },
         Kind::RpcBefore => Event::RpcBefore { client: 1, rpc: Box::leak(rpc.unwrap_or("Some.Rpc").to_string().into_boxed_str()), object: 42, args_json: "[1,2,3]" },
         Kind::RpcAfter => Event::RpcAfter { client: 1, rpc: Box::leak(rpc.unwrap_or("Some.Rpc").to_string().into_boxed_str()), object: 42, args_json: "[1,2,3]" },
-        Kind::ObjectPlaced => Event::ObjectPlaced { id: 100, group: "Drill1", position: [1.0, 2.0, 3.0] },
-        Kind::ObjectDestroyed => Event::ObjectDestroyed { id: 100, group: "Drill1", position: [1.0, 2.0, 3.0] },
+        Kind::ObjectPlaced => Event::ObjectPlaced { id: 100, group: "Drill1", position: [1.0, 2.0, 3.0], client: 1 },
+        Kind::ObjectDestroyed => Event::ObjectDestroyed { id: 100, group: "Drill1", position: [1.0, 2.0, 3.0], client: 1 },
         Kind::WorldSaved => Event::WorldSaved { game_ms: 3_725_000, ok: true },
         Kind::RuleChange => Event::RuleChange { changes_json: "{\"speed.growth\":2.0}" },
         Kind::HttpDone => Event::HttpDone { ticket: 1, status: 200, error: "", body: b"{}", headers: vec![("content-type", "application/json")] },
+        Kind::Timer => Event::Timer { id: 1, game_ms: 3_725_000, late_ms: 0 },
+        Kind::Flip => Event::Flip { game_ms: 3_725_000, server_version: "0.0.0" },
     }
 }
 
@@ -110,7 +112,7 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
         }
     }
     for k in &m.config {
-        report.facts.push(format!("config {}: {}{}", k.key, if k.description.is_empty() { "(no description)" } else { &k.description }, if k.secret { " (a secret)" } else { "" }));
+        report.facts.push(format!("config {}: {}{}", k.key, if k.description.is_empty() { "(no description)" } else { &k.description }, if k.is_secret() { " (a secret)" } else { "" }));
     }
     match &found.signed {
         super::sign::Signed::No => report.facts.push("unsigned".into()),
@@ -206,7 +208,7 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
                         let event = sample(*kind, command, rpc);
                         let mut payload = pcds_plugin_api::Writer::new();
                         event.encode(&mut payload);
-                        rt.ctx().begin(&world);
+                        rt.ctx().begin(&world, 3_725_000);
                         let result = rt.event(&event, &payload.0);
                         let (queued, denied) = {
                             let c = rt.ctx();
@@ -233,7 +235,7 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
                     for (what, event) in answers {
                         let mut payload = pcds_plugin_api::Writer::new();
                         event.encode(&mut payload);
-                        rt.ctx().begin(&world);
+                        rt.ctx().begin(&world, 3_725_000);
                         let result = rt.event(&event, &payload.0);
                         let (queued, denied) = {
                             let c = rt.ctx();

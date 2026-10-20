@@ -781,6 +781,8 @@ impl Game {
         if crate::events::rpc_before(self, client, object, name, &a.0) {
             return true;
         }
+        // Whatever this request builds or destroys is its client's doing (events::object_placed).
+        self.ext.plugins.actor = client;
         let handled = self.world_objects_rpc(client, name, &a)
             || self.inventories_rpc(client, name, &a)
             || self.players_rpc(client, name, &a)
@@ -788,6 +790,7 @@ impl Game {
             || crate::unlocks::rpc(self, client, name, &a)
             || crate::handlers::rpc(self, client, object, behaviour, name, &a)
             || crate::hooks::rpc(self, client, object, behaviour, name, &a);
+        self.ext.plugins.actor = 0;
         if handled {
             crate::events::rpc_after(self, client, object, name, &a.0);
         }

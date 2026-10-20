@@ -140,6 +140,7 @@ pub const ROUTES: &[Route] = &[
     route("GET", "/api/plugins/tokens", Owner::Bank, "", "The scoped tokens (never the token itself), the scopes there are and the rate limits."),
     route("POST", "/api/plugins/tokens", Owner::Bank, "`{\"name\", \"scopes\": [...], \"ratePerMinute\"?}`", "Makes a scoped token for an out-of-process plugin; the answer's `token` is shown this once."),
     route("POST", "/api/plugins/tokens/revoke", Owner::Bank, "`{\"id\"}` (the id or the name)", "Revokes a scoped token at once."),
+    route("POST", "/api/plugins/logs", Owner::Bank, "`{\"id\", \"limit\"?: N}`", "The last log lines of one plugin (its own and the host's about it), newest last; at most 200 are kept."),
     route("POST", "/api/plugins/events", Owner::Bank, "`{\"after\"?, \"types\"?, \"limit\"?, \"consumer\"?, \"unregister\"?, \"wait\"?: SECONDS}`", "The plugin event stream; with `wait` (at most 25 s; at most 8 polls wait at once) the front holds the request until an event comes or the wait is over. At most 16 consumer names are registered at once (429 for a new one beyond)."),
 ];
 

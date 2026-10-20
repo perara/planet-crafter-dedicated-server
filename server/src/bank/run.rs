@@ -40,6 +40,7 @@ pub fn run(args: &[String]) {
     let prepared = plugins_glue::prepare(save_path);
     hello(&mut link, &net_data.game_version);
     let mut took = Restore::default();
+    let mut flipped = false;
     let mut game = match link.recv() {
         Some(f) if f.kind == ipc::START => start::load(dir, save_path, net_data, data, spec, scenes),
         Some(f) if f.kind == ipc::RESTORE => {
@@ -50,11 +51,12 @@ pub fn run(args: &[String]) {
             }
             let (restored, checked) = start::restore(&f, net_data, data, spec, scenes, save_path);
             (took.verified, took.verify_ms) = (checked.verified, checked.ms);
+            flipped = true;
             restored
         }
         _ => return,
     };
-    plugins_glue::attach(&mut game, prepared);
+    plugins_glue::attach(&mut game, prepared, flipped);
     // What the start freed (the save's JSON, a snapshot's text, the tables' text) goes back to
     // the system, not to sit in the process.
     // SAFETY: malloc_trim only returns free memory to the system.

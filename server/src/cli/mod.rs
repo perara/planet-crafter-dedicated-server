@@ -6,6 +6,7 @@ mod api;
 mod env;
 mod extract;
 mod plugin;
+mod plugin_dev;
 mod setup;
 mod steam;
 mod systemd;

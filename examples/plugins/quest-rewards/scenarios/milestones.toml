@@ -1,0 +1,98 @@
+name = "quests: buildings, a hot update, the world milestone, an hour of play"
+
+[config]
+world_milestones = "500,5000"
+
+[[player]]
+client = 1
+name = "Root"
+operator = true
+
+[[player]]
+client = 2
+name = "Ann"
+
+[[step]]
+note = "the first building pays items and tokens, and tells the player"
+place = { id = 1, group = "Wall", client = 2 }
+expect = [
+  { give = 2, equals = "10 Iron" },
+  { tokens = true, equals = "100" },
+  { tell = 2, contains = "your first building" },
+]
+
+[[step]]
+place = { id = 2, group = "Wall", client = 2 }
+
+[[step]]
+place = { id = 3, group = "Wall", client = 2 }
+
+[[step]]
+place = { id = 4, group = "Wall", client = 2 }
+
+[[step]]
+place = { id = 5, group = "Wall", client = 2 }
+
+[[step]]
+place = { id = 6, group = "Wall", client = 2 }
+
+[[step]]
+place = { id = 7, group = "Wall", client = 2 }
+
+[[step]]
+place = { id = 8, group = "Wall", client = 2 }
+
+[[step]]
+place = { id = 9, group = "Wall", client = 2 }
+expect = [{ give = 2, count = 0 }, { tokens = true, count = 0 }]
+
+[[step]]
+note = "a building nobody placed (client 0, a machine) does not count"
+place = { id = 50, group = "Drill1", client = 0 }
+expect = [{ give = 2, count = 0 }]
+
+[[step]]
+note = "the tenth building"
+place = { id = 10, group = "Wall", client = 2 }
+expect = [{ give = 2, equals = "10 Iron" }, { tell = 2, contains = "10 buildings placed" }]
+
+[[step]]
+note = "a hot update: what was given is remembered"
+flip = true
+
+[[step]]
+place = { id = 11, group = "Wall", client = 2 }
+expect = [{ give = 2, count = 0 }, { tokens = true, count = 0 }]
+
+[[step]]
+note = "the sim's terraformation is 1000: the world milestone 500 is passed at the first look (every 30 s), 5000 is not"
+advance = "31s"
+expect = [
+  { say = true, equals = "World milestone: terraformation passed 500! The colony receives 500 Terra tokens.", count = 1 },
+  { tokens = true, equals = "500", count = 1 },
+]
+
+# The host allows 2 token changes a second, counted on the wall clock; a scenario runs in a flash, so
+# this restart starts a fresh count. (In a real game an hour is an hour.)
+[[step]]
+note = "a restart: nothing given is forgotten"
+reload = true
+
+[[step]]
+note = "an hour of play: both players earn it"
+advance = "1h"
+expect = [
+  { give = 1, equals = "10 Iron", count = 1 },
+  { give = 2, equals = "10 Iron", count = 1 },
+  { tell = 2, contains = "1 hour of play", count = 1 },
+  { say = true, count = 0 },
+]
+
+[[step]]
+chat = { client = 2, text = "!rewards" }
+expect = [
+  { tell = 2, contains = "You have placed 11 buildings" },
+  { tell = 2, contains = "Milestones done: 3 of 6." },
+  { tell = 2, contains = "Next: 50 buildings placed (39 more), 10 hours of play" },
+  { tell = 2, equals = "World: terraformation 1000; the next milestone is 5000." },
+]

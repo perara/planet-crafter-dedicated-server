@@ -1,0 +1,37 @@
+[plugin]
+id = "playtime-board"
+name = "Playtime board"
+version = "0.2.0"
+description = "A playtime leaderboard kept in the plugin's state: !top and !playtime. State version 2; it migrates version 1"
+authors = ["Planet Crafter dedicated server contributors"]
+license = "MIT"
+kind = "wasm"
+entry = "plugin.wasm"
+abi = 1
+capabilities = ["event.tick", "event.player", "event.chat", "world.read", "chat.say"]
+
+[budget]
+fuel_per_event = 1500000
+tick_every_ms = 5000
+
+[events]
+subscribe = ["player_join", "player_leave", "tick"]
+
+[[command]]
+name = "top"
+help = "the players with the most time on the server"
+usage = "[number from 1 to 10]"
+max_args = 1
+
+[[command]]
+name = "playtime"
+help = "how long you, or the named player, have played"
+usage = "[player name]"
+
+[[config]]
+key = "board_size"
+description = "the most players the board keeps; when it is full the one with the least time who is not online is dropped"
+type = "int"
+default = 200
+min = 10
+max = 2000

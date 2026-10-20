@@ -1,0 +1,69 @@
+[plugin]
+id = "chat-bridge"
+name = "Chat bridge"
+version = "0.1.0"
+description = "Sends the game's chat, joins and leaves to a Discord or Slack webhook, a few seconds at a time"
+authors = ["Planet Crafter dedicated server contributors"]
+license = "MIT"
+kind = "wasm"
+entry = "plugin.wasm"
+abi = 1
+# net.http is the way out of the sandbox: only to the hosts under [net], approved by you.
+# world.read is NOT needed at run time: settings (Host::settings) need no capability. It is here
+# only because `pcds plugin check` counts every `query` import as world.read and calls the plugin
+# an error without it (a bug of the checker; remove this line when it is fixed).
+capabilities = ["event.chat", "event.player", "event.tick", "net.http", "world.read"]
+
+[budget]
+tick_every_ms = 1000
+
+[events]
+subscribe = ["chat", "player_join", "player_leave", "tick"]
+
+[net]
+allow = ["https://discord.com", "https://hooks.slack.com"]
+timeout_ms = 10000
+max_response_bytes = 4096
+
+# The webhook is a secret: you set it (pcds plugin config set chat-bridge webhook), the server
+# puts it in the request, and the plugin never sees it.
+[[config]]
+key = "webhook"
+description = "the end of the webhook URL: ID/TOKEN for Discord, T../B../xxxx for Slack (what follows /webhooks/ or /services/)"
+secret = true
+
+[[config]]
+key = "style"
+description = "discord or slack: the shape of the message and the host it goes to"
+type = "string"
+secret = false
+default = "discord"
+choices = ["discord", "slack"]
+
+[[config]]
+key = "flush_seconds"
+description = "most often one request is sent, in seconds of game time; lines in between go together"
+type = "int"
+default = 3
+min = 1
+max = 60
+
+[[config]]
+key = "send_chat"
+description = "send what players say"
+type = "bool"
+default = true
+
+[[config]]
+key = "send_joins"
+description = "send joins and leaves"
+type = "bool"
+default = true
+
+[[config]]
+key = "command_prefix"
+description = "messages that start with this are commands and are not sent (the chat.commandPrefix rule)"
+type = "string"
+secret = false
+default = "!"
+max_len = 4

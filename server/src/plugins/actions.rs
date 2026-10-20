@@ -58,6 +58,12 @@ pub fn apply(game: &mut Game, plugin: &str, actions: Vec<Action>) -> Applied {
                 there
             }
             Action::Teleport(client, position) => crate::status::teleport(game, client, position),
+            Action::Give(client, group, count) => give(game, plugin, client, &group, count),
+            Action::Tokens(amount) => {
+                crate::handlers::gain_tokens(game, amount);
+                println!("plugin {plugin}: {} Terra tokens {}", amount.unsigned_abs(), if amount > 0 { "added" } else { "taken away" });
+                true
+            }
             Action::RulesPatch(patch) => match game.rules.patched(&patch).and_then(|new| if new == game.rules { Ok(false) } else { crate::rules::set(game, new).map(|()| true) }) {
                 // A patch that changes nothing (a plugin that puts a rule back to a value it has) writes no file.
                 Ok(changed) => {
@@ -82,6 +88,27 @@ pub fn apply(game: &mut Game, plugin: &str, actions: Vec<Action>) -> Applied {
         }
     }
     out
+}
+
+/// `count` of the item `group` into the player's backpack, as the game's own add (the clients are told
+/// as for any item that arrives). False: the player is gone, the item is not one the game knows or one
+/// that may not be given, or the backpack had no room for all of them (the ones that fit were put in).
+fn give(game: &mut Game, plugin: &str, client: u64, group: &str, count: u32) -> bool {
+    let Some(inventory) = game.clients.get(&client).and_then(|c| c.ready.as_ref()).map(|s| s.inventory) else { return false };
+    let Some(index) = game.data.group(group) else {
+        eprintln!("plugin {plugin}: it gave {group}, which is not an item of this game");
+        return false;
+    };
+    // Keys and quest items cannot be destroyed: they are not for handing out either.
+    if game.data.groups[index].bool("cantBeDestroyed") {
+        eprintln!("plugin {plugin}: it gave {group}, which cannot be given");
+        return false;
+    }
+    let mut all = true;
+    for _ in 0..count {
+        all &= game.add_new_item(index, inventory, client).0;
+    }
+    all
 }
 
 #[cfg(test)]

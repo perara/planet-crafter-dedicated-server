@@ -1,0 +1,21 @@
+name = "stats and uses"
+
+[world]
+planet = "Prime"
+game_ms = 3725000
+
+[[player]]
+client = 1
+name = "Ann"
+
+[[step]]
+chat = { client = 1, text = "!stats" }
+expect = [{ tell = 1, contains = "Prime: 1 players" }]
+
+[[step]]
+note = "a hot update: the counters go through save and load"
+flip = true
+
+[[step]]
+chat = { client = 1, text = "!uses" }
+expect = [{ tell = 1, equals = "!stats was used 1 times, !uses 1 times on this world" }]

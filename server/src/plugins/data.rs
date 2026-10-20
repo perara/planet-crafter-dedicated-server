@@ -360,7 +360,7 @@ impl Runtime for Data {
                     self.ctx.say(&render(t, &vars));
                 }
             }
-            Event::PlayerJoin { client, name, .. } | Event::PlayerLeave { client, name } => {
+            Event::PlayerJoin { client, name, .. } | Event::PlayerLeave { client, name, .. } => {
                 let joined = matches!(event, Event::PlayerJoin { .. });
                 let entries = if joined { self.rules.on_join.clone() } else { self.rules.on_leave.clone() };
                 for s in entries {
@@ -460,7 +460,7 @@ mod tests {
         let world = Fixed(players);
         let mut out = Vec::new();
         for e in events {
-            d.ctx.begin(&world);
+            d.ctx.begin(&world, 0);
             d.event(e, &[]).unwrap();
             out.extend(d.ctx.end());
         }
@@ -478,9 +478,9 @@ mod tests {
     #[test]
     fn commands_joins_announcements_and_rule_changes_act() {
         let r = Rules::parse(FILE).unwrap();
-        let cmd = |t: &str| Event::Command { client: 7, name: "Ann", command: "RULES", args: vec!["a", "b"], text: t.to_string().leak() };
-        let tick = |ms, players| Event::Tick { game_ms: ms, tick: 0, players, since_ms: 1000 };
-        let actions = run(&r, 5, &[cmd("!rules a b"), cmd("!rules a b"), Event::PlayerJoin { client: 7, name: "Ann", steam_id: "" }, tick(1000, 5), tick(30_000, 5), tick(61_000, 2), tick(62_000, 2)]);
+        let cmd = |t: &str| Event::Command { client: 7, name: "Ann", command: "RULES", args: vec!["a", "b"], text: t.to_string().leak(), player_id: 1 };
+        let tick = |ms, players| Event::Tick { game_ms: ms, tick: 0, players, since_ms: 1000, unix_ms: 0 };
+        let actions = run(&r, 5, &[cmd("!rules a b"), cmd("!rules a b"), Event::PlayerJoin { client: 7, name: "Ann", steam_id: "", player_id: 1 }, tick(1000, 5), tick(30_000, 5), tick(61_000, 2), tick(62_000, 2)]);
         let [Action::Tell(7, reply), Action::Say(welcome), Action::Tell(7, tell), Action::RulesPatch(up), Action::Say(announce), Action::RulesPatch(down)] = &actions[..] else { panic!("{actions:?}") };
         assert_eq!(reply, "Be kind, Ann. discord.gg/x (5 on Prime, 1h 02m) args=a b first=a", "the second !rules within 10 s is not answered");
         assert_eq!((welcome.as_str(), tell.as_str()), ("Welcome Ann", "Try !rules {braces}"));

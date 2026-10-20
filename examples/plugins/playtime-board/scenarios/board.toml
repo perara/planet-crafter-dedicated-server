@@ -1,0 +1,74 @@
+name = "playtime: counting, !top, !playtime, a hot update"
+
+[[player]]
+client = 1
+name = "Ann"
+
+[[player]]
+client = 2
+name = "Bo"
+
+[[player]]
+client = 3
+name = "Cy"
+
+# Ticks come every 5 s of game time, the first one at once; the times below (30 min and 1 s, ...) are
+# chosen so that a tick falls on the minute and the times come out round.
+[[step]]
+advance = "1801s"
+
+[[step]]
+note = "Cy leaves after 30 minutes"
+leave = 3
+
+[[step]]
+advance = "5400s"
+
+[[step]]
+note = "Bo leaves after two hours"
+leave = 2
+
+[[step]]
+advance = "3600s"
+
+[[step]]
+chat = { client = 1, text = "!top" }
+expect = [
+  { tell = 1, equals = "1. Ann 3h 00m" },
+  { tell = 1, equals = "2. Bo 2h 00m" },
+  { tell = 1, equals = "3. Cy 0h 30m" },
+  { tell = 1, count = 3 },
+]
+
+[[step]]
+chat = { client = 1, text = "!top 2" }
+expect = [{ tell = 1, count = 2 }]
+
+[[step]]
+chat = { client = 1, text = "!playtime" }
+expect = [{ tell = 1, equals = "You have played 3h 00m (rank 1 of 3)." }]
+
+[[step]]
+note = "a hot update: the board goes through save and load (version 2)"
+flip = true
+
+[[step]]
+chat = { client = 1, text = "!playtime bo" }
+expect = [{ tell = 1, equals = "Bo: 2h 00m played, last seen 1h ago." }]
+
+[[step]]
+chat = { client = 1, text = "!playtime Ann" }
+expect = [{ tell = 1, equals = "Ann: 3h 00m played (online now)." }]
+
+[[step]]
+chat = { client = 1, text = "!playtime nobody" }
+expect = [{ tell = 1, equals = "No player named nobody is online or on the board." }]
+
+[[step]]
+note = "the host refuses a second argument for !top; the plugin is not called"
+chat = { client = 1, text = "!top 1 2" }
+expect = [{ tell = 1, equals = "Use: !top [number from 1 to 10]" }]
+
+[[step]]
+chat = { client = 1, text = "!top lots" }
+expect = [{ tell = 1, equals = "Use: !top [number from 1 to 10]" }]

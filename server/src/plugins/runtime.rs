@@ -21,7 +21,7 @@ pub enum Fault {
 impl std::fmt::Display for Fault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Fault::OutOfFuel => f.write_str("out of fuel (the call did more than its budget)"),
+            Fault::OutOfFuel => f.write_str("out of fuel (the call did more work than its budget allows)"),
             Fault::Trap(t) => write!(f, "trap: {t}"),
             Fault::Bad(t) => write!(f, "bad answer: {t}"),
         }

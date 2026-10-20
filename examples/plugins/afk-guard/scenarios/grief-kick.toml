@@ -1,0 +1,36 @@
+name = "grief with grief_action = kick"
+
+[config]
+destroy_limit = 2
+grief_action = "kick"
+afk_minutes = 240
+
+[[player]]
+client = 1
+name = "Root"
+operator = true
+
+[[player]]
+client = 2
+name = "Ann"
+
+[[step]]
+destroy = { id = 1, group = "Wall", client = 2 }
+
+[[step]]
+destroy = { id = 2, group = "Wall", client = 2 }
+
+[[step]]
+destroy = { id = 3, group = "Wall", client = 2 }
+expect = [
+  { kick = 2, equals = "Removed by the grief guard: 3 objects destroyed within 60 seconds." },
+  { tell = 1, contains = "Action: kicked." },
+]
+
+[[step]]
+note = "she is gone and rejoins: the strike is still there"
+join = { client = 4, name = "Ann", player_id = 1002 }
+
+[[step]]
+chat = { client = 1, text = "!guard" }
+expect = [{ tell = 1, equals = "Strikes: Ann 1" }]

@@ -27,8 +27,8 @@ pub(super) fn prepare(save_path: &str) -> plugins::Host {
 }
 
 /// Starts the prepared plugins in the restored or loaded game.
-pub(super) fn attach(game: &mut Game, prepared: plugins::Host) {
-    plugins::attach(game, prepared);
+pub(super) fn attach(game: &mut Game, prepared: plugins::Host, flipped: bool) {
+    plugins::attach(game, prepared, flipped);
 }
 
 /// Plugins appear, change and go while the world runs: the folder is looked at between ticks.

@@ -1,0 +1,15 @@
+[plugin]
+id = "{id}"
+name = "{id}"
+version = "0.1.0"
+description = "What this plugin does, in one sentence"
+authors = ["You"]
+license = "MIT"
+kind = "wasm"
+entry = "plugin.wasm"
+abi = 1
+capabilities = ["event.chat", "chat.say"]
+
+[[command]]
+name = "hello"
+help = "says hello"

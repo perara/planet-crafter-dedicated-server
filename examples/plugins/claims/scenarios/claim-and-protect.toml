@@ -1,0 +1,133 @@
+# Ann claims ground; Cy cannot build or take apart there, Bo (trusted) and Dee (an operator) can.
+name = "claim, trust, protect, give up"
+
+[[player]]
+client = 1
+name = "Ann"
+
+[[player]]
+client = 2
+name = "Bo"
+
+[[player]]
+client = 3
+name = "Cy"
+position = [5.0, 0.0, 0.0]
+
+[[player]]
+client = 4
+name = "Dee"
+operator = true
+position = [50.0, 0.0, 0.0]
+
+# A container inside the claim-to-be, with its network id.
+[[object]]
+id = 5
+group = "Container1"
+position = [3.0, 0.0, 0.0]
+net = 905
+
+[[step]]
+note = "garbage after !claim gets the usage"
+chat = { client = 1, text = "!claim abc" }
+expect = [{ tell = 1, contains = "Use: !claim [radius]." }]
+
+[[step]]
+chat = { client = 1, text = "!claim 20" }
+expect = [{ tell = 1, equals = "Claimed radius 20 around (0, 0, 0). Only you and the players you !trust can build or take apart here." }]
+
+[[step]]
+note = "Cy stands 5 metres from Ann: a claim of 10 would overlap hers"
+chat = { client = 3, text = "!claim 10" }
+expect = [{ tell = 3, equals = "That overlaps the claim of Ann. Move away from it or ask for a smaller radius." }]
+
+[[step]]
+chat = { client = 1, text = "!trust Bo" }
+expect = [{ tell = 1, equals = "Bo can now build and take apart in your claims." }]
+
+[[step]]
+note = "Cy takes a container apart inside the claim: refused, and told why"
+rpc = { client = 3, name = "GroupNetworkBase.DeconstructServerRpc", object = 905, args = "[]" }
+expect = [{ veto = true }, { tell = 3, equals = "This ground is claimed by Ann. You cannot take this apart here." }]
+
+[[step]]
+note = "three seconds on, Cy tries to build inside the claim"
+advance = "3s"
+
+[[step]]
+rpc = { client = 3, name = "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc", args = "[-12345,[1.5,2.0,-3.25],[0.0,0.5,0.0,1.0],true,false,true,false]" }
+expect = [{ veto = true }, { tell = 3, equals = "This ground is claimed by Ann. You cannot build here." }]
+
+[[step]]
+note = "pressing again at once: still refused, not told again"
+rpc = { client = 3, name = "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc", args = "[-12345,[1.5,2.0,-3.25],[0.0,0.5,0.0,1.0],true,false,true,false]" }
+expect = [{ veto = true }, { tell = 3, count = 0 }]
+
+[[step]]
+note = "the owner, the trusted player and an operator pass"
+rpc = { client = 1, name = "GroupNetworkBase.DeconstructServerRpc", object = 905 }
+expect = [{ veto = true, count = 0 }]
+
+[[step]]
+rpc = { client = 2, name = "GroupNetworkBase.DeconstructServerRpc", object = 905 }
+expect = [{ veto = true, count = 0 }]
+
+[[step]]
+rpc = { client = 4, name = "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc", args = "[-1,[1.0,1.0,1.0],[0,0,0,1],true]" }
+expect = [{ veto = true, count = 0 }]
+
+[[step]]
+note = "outside the claim anybody builds"
+rpc = { client = 3, name = "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc", args = "[-12345,[500.0,2.0,-3.25],[0.0,0.5,0.0,1.0],true,false,true,false]" }
+expect = [{ veto = true, count = 0 }]
+
+[[step]]
+note = "an argument list the plugin cannot read is let through, and logged once"
+rpc = { client = 3, name = "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc", args = "[nonsense" }
+expect = [{ veto = true, count = 0 }, { log = true, contains = "letting it through", count = 1 }]
+
+[[step]]
+note = "a hot update: claims and trust come back with the new instance"
+flip = true
+
+[[step]]
+advance = "5s"
+
+[[step]]
+rpc = { client = 3, name = "GroupNetworkBase.DeconstructServerRpc", object = 905 }
+expect = [{ veto = true }]
+
+[[step]]
+rpc = { client = 2, name = "GroupNetworkBase.DeconstructServerRpc", object = 905 }
+expect = [{ veto = true, count = 0 }]
+
+[[step]]
+chat = { client = 1, text = "!claims" }
+expect = [{ tell = 1, equals = "Your claims (1 of 3): #1 at (0, 0, 0) radius 20, trusted: Bo;" }]
+
+[[step]]
+chat = { client = 1, text = "!untrust Bo" }
+expect = [{ tell = 1, equals = "Bo can no longer build or take apart in your claims." }]
+
+[[step]]
+advance = "5s"
+
+[[step]]
+rpc = { client = 2, name = "GroupNetworkBase.DeconstructServerRpc", object = 905 }
+expect = [{ veto = true }]
+
+[[step]]
+note = "Cy cannot give up Ann's claim; Ann can"
+set = { position = [3, [5.0, 0.0, 0.0]] }
+
+[[step]]
+chat = { client = 3, text = "!unclaim" }
+expect = [{ tell = 3, equals = "This ground is claimed by Ann, not by you." }]
+
+[[step]]
+chat = { client = 1, text = "!unclaim" }
+expect = [{ tell = 1, equals = "Removed your claim at (0, 0, 0), radius 20." }]
+
+[[step]]
+rpc = { client = 3, name = "GroupNetworkBase.DeconstructServerRpc", object = 905 }
+expect = [{ veto = true, count = 0 }]
