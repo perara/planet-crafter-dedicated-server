@@ -65,7 +65,7 @@ See [Docker](#docker) for the data folder, managing worlds and Compose.
 
 **No Wine.** The server is native Linux code, and so is reading the game: once per game version
 `pcds` reads the tables the server needs (network registrations, items, buildings, every
-planet's scene, the wrecks' layouts) straight from the game's files, in under a minute.
+planet's scene, the wrecks' tile sets) straight from the game's files, in under a minute.
 
 Tested with game version 2.103.
 
@@ -566,11 +566,16 @@ page's World tab has both as buttons.
 - **Every player sees every animal,** where the game shows them only to players nearby.
 - **Endings do not restart the session:** after a player's ending the server keeps running.
 - **New worlds start from the Standard settings.** Other modes are a matter of `--set`.
-- **Procedural wrecks come in 64 layouts per size.** The game lays wrecks out from a random
-  seed with a solver (Tessera); `pcds extract` lays out 64 seeds of each wreck size with a
-  port of it, and the server gives its wrecks those. What a wreck then holds (safes,
-  containers, locked doors, generators, loot) is picked from its seed as in the game. Wrecks a
-  world from the game had already generated keep what they hold.
+- **Procedural wrecks are laid out a moment after a player enters them.** The game lays a wreck
+  out from its seed with a solver (Tessera). The server runs a port of it on the wreck's own seed,
+  with the tile sets `pcds extract` read from the game's files, so a seed gives the layout the
+  game gives. The solve takes about 0.07 s for a small wreck, 0.1 s for a medium one and about a
+  second for a large one (up to four on a busy host). It runs on a thread of its own, and the
+  wrecks wait their turn one at a time, as in the game, so the tick is never held. What a wreck
+  then holds (safes, containers, locked doors, generators) is picked from its seed as in the
+  game; the loot in its containers is rolled at random, as there. A flip of the server in the
+  middle of a solve starts that wreck again in the new process. A world from an older version of
+  the game's generator loses its wrecks, as in the game.
 - **Sleeping does not skip the night:** the game sends the server no signal for it.
 
 Where the server has to approximate what the game's physics would decide (positions on a
