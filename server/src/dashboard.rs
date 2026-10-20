@@ -22,10 +22,9 @@ const MAP_POINTS: usize = 4000;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Teleport {
-    /// The client id; or the player's name (any case), as "name" or the plugin API's "player".
+    /// The client id; or the player's name (any case).
     pub id: Option<u64>,
     pub name: Option<String>,
-    pub player: Option<String>,
     pub position: [f32; 3],
 }
 

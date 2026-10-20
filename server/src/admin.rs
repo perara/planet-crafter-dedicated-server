@@ -1,7 +1,6 @@
-//! Admin API and web GUI over HTTP on 127.0.0.1, the same endpoints as the plugin server's
-//! (so its web GUI works unchanged): GET /api/status, POST /api/save, /api/stop, /api/kick,
-//! /api/ban, /api/unban, /api/access, /api/settings; and this server's own: GET and POST
-//! /api/rules and /api/config, POST /api/chat and /api/teleport, GET /api/chat/events,
+//! Admin API and web GUI over HTTP on 127.0.0.1: GET /api/status, POST /api/save, /api/stop,
+//! /api/kick, /api/ban, /api/unban, GET and POST /api/rules and /api/config (every setting,
+//! the access lists among them), POST /api/chat and /api/teleport, GET /api/chat/events,
 //! /api/worlds, /api/map and /api/logs, GET and POST /api/update (see admin_request in bank.rs
 //! and front.rs). Every /api call needs "Authorization: Bearer <token>". A thread in the front
 //! serves HTTP; the front's loop answers requests or passes them to the bank, but for the logs

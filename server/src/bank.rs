@@ -475,8 +475,8 @@ fn send(link: &mut Link, mail: &mut crate::idmap::FxHashMap<u64, wire::Batch>, c
     link.drain();
 }
 
-/// Who an API call names: {"id": N} is that client id exactly; {"name": S} (or the plugin
-/// API's {"player": S}) a player's name in any case.
+/// Who an API call names: {"id": N} is that client id exactly; {"name": S} a player's name in
+/// any case.
 enum Who {
     Id(u64),
     Name(String),
@@ -486,7 +486,7 @@ fn who(body: &Value) -> Result<Who, (u16, String)> {
     if let Some(id) = body.get("id").filter(|v| !v.is_null()) {
         return id.as_u64().map(Who::Id).ok_or_else(|| (400, "{\"error\":\"'id': a client id\"}".into()));
     }
-    let name = ["name", "player"].iter().find_map(|k| body[*k].as_str().map(str::trim).filter(|s| !s.is_empty()));
+    let name = body["name"].as_str().map(str::trim).filter(|s| !s.is_empty());
     name.map(|n| Who::Name(n.to_string())).ok_or_else(|| (400, "{\"error\":\"'id' or 'name' is required\"}".into()))
 }
 
@@ -620,45 +620,12 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
             },
             None => (400, "{\"error\":\"'value' is required\"}".into()),
         },
-        ("POST", "/api/access") => {
-            // The lists given replace those; the others stay. A misspelt list or an entry that
-            // is not a string is refused, never dropped.
-            let mut lists = serde_json::to_value(&game.access.lists).unwrap_or_default();
-            match body.as_object() {
-                Some(given) => {
-                    for (k, v) in given {
-                        lists[k] = v.clone();
-                    }
-                }
-                None => return (400, "{\"error\":\"a JSON object of lists\"}".into()),
-            }
-            let lists = match serde_json::from_value::<access::Lists>(lists).map_err(|e| e.to_string()).and_then(|l| l.check().map(|_| l)) {
-                Ok(l) => l,
-                Err(e) => return (400, json!({"error": e}).to_string()),
-            };
-            if let Err(e) = game.access.set(lists) {
-                return (500, json!({"error": e}).to_string());
-            }
-            enforce(game);
-            ok()
-        }
         // chat.webhooks, chat.secret and chat.exec only as "(set)": they may hold tokens.
         ("GET", "/api/rules") => (200, json!({"rules": rules::shown(&game.rules), "defaults": rules::Rules::default()}).to_string()),
         // A JSON merge patch of the rules: {"speed": {"growth": 2}}; null resets a rule.
         ("POST", "/api/rules") => match game.rules.patched(body).and_then(|new| rules::set(game, new)) {
             Ok(()) => (200, json!({"rules": rules::shown(&game.rules)}).to_string()),
             Err(e) => (400, json!({"error": e}).to_string()),
-        },
-        // The old name of the rule save.autosaveMinutes. Another key (the plugin API's own) is
-        // not this server's to refuse; a given autosaveMinutes that is no whole number must not
-        // be taken as done.
-        ("POST", "/api/settings") => match body.get("autosaveMinutes").map(|m| m.as_u64()) {
-            Some(None) => (400, "{\"error\":\"'autosaveMinutes': a whole number of minutes\"}".into()),
-            Some(Some(m)) => match game.rules.patched(&json!({"save": {"autosaveMinutes": m.min(crate::MAX_AUTOSAVE)}})).and_then(|new| rules::set(game, new)) {
-                Ok(()) => ok(),
-                Err(e) => (400, json!({"error": e}).to_string()),
-            },
-            None => ok(),
         },
         // Every setting with its schema entry and value; a change of any, {"speed.growth": 2}.
         ("GET", "/api/config") => (200, config::get(game).to_string()),
@@ -671,7 +638,7 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
             Ok(t) => {
                 let named = match t.id {
                     Some(id) => Who::Id(id),
-                    None => match t.name.or(t.player) {
+                    None => match t.name {
                         Some(n) => Who::Name(n),
                         None => return (400, "{\"error\":\"'id' or 'name' is required\"}".into()),
                     },
@@ -1431,16 +1398,16 @@ mod tests {
     }
 
     #[test]
-    fn autosave_minutes_are_clamped() {
+    fn autosave_minutes_stay_within_their_range() {
         let Some(mut game) = game::test_game(game::tests::save()) else { return };
-        call(&mut game, "POST", "/api/settings", json!({"autosaveMinutes": 160_000_000_000_000_000u64}));
-        assert_eq!(game.rules.save.autosave_minutes, crate::MAX_AUTOSAVE as u32);
-        // Not a whole number: refused, and the interval stays.
-        for bad in [json!(2.5), json!(-1), json!("5"), json!(null)] {
-            let (status, answer) = call(&mut game, "POST", "/api/settings", json!({"autosaveMinutes": bad}));
-            assert!(status == 400 && answer["error"].as_str().unwrap().contains("whole number"), "{bad}: {status} {answer}");
+        let (status, _) = call(&mut game, "POST", "/api/config", json!({"save.autosaveMinutes": 7}));
+        assert_eq!((status, game.rules.save.autosave_minutes), (200, 7));
+        // Out of range or not a whole number: refused, and the interval stays.
+        for bad in [json!(160_000_000_000_000_000u64), json!(2.5), json!(-1), json!("5")] {
+            let (status, answer) = call(&mut game, "POST", "/api/config", json!({"save.autosaveMinutes": bad}));
+            assert_eq!(status, 400, "{bad}: {answer}");
         }
-        assert_eq!(game.rules.save.autosave_minutes, crate::MAX_AUTOSAVE as u32);
+        assert_eq!(game.rules.save.autosave_minutes, 7);
     }
 
     #[test]
@@ -1524,7 +1491,7 @@ mod tests {
         }
         // Teleport: the game's respawn move, to that player only.
         let before = game.net.out.len();
-        assert_eq!(call(&mut game, "POST", "/api/teleport", json!({"player": "ann", "position": [10.0, 20.5, -30.0]})).0, 200);
+        assert_eq!(call(&mut game, "POST", "/api/teleport", json!({"name": "ann", "position": [10.0, 20.5, -30.0]})).0, 200);
         let sent: Vec<_> = game.net.out[before..].iter().filter(|(_, kind, _)| *kind == protocol::CLIENT_RPC).collect();
         assert_eq!(sent.len(), 1);
         let (to, _, body) = sent[0];
@@ -1536,7 +1503,7 @@ mod tests {
         assert_eq!(game.net.spec.get(method).unwrap().name, "PlayerStatus.DieAndRespawnClientRpc");
         assert_eq!(game.net.spec.decode(method, r.rest()).unwrap(), vec![json!(false), json!(0), json!([10.0, 20.5, -30.0])]);
         assert_eq!(call(&mut game, "POST", "/api/teleport", json!({"id": 1, "position": [1, 2, 3]})).0, 200);
-        for bad in [json!({"id": 2, "position": [0, 0, 0]}), json!({"player": "Bob", "position": [0, 0, 0]}), json!({"player": "Ann"}), json!({"player": "Ann", "position": [0, 0]}), json!({"player": "Ann", "position": [0, 0, 0], "x": 1})] {
+        for bad in [json!({"id": 2, "position": [0, 0, 0]}), json!({"name": "Bob", "position": [0, 0, 0]}), json!({"name": "Ann"}), json!({"name": "Ann", "position": [0, 0]}), json!({"name": "Ann", "position": [0, 0, 0], "x": 1})] {
             assert_eq!(call(&mut game, "POST", "/api/teleport", bad.clone()).0, 400, "{bad}");
         }
         // The map: this planet's buildings.
