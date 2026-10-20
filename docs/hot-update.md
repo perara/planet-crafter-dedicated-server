@@ -381,7 +381,7 @@ at 200k; with a real front, two banks and no players 105 to 118 -> 62 to 67 ms a
 129 ms at 200k. What is left, by CPU: reading the world objects (53 ms of CPU at 200k), the network objects
 (25), the machines (18), the slot indexes (14 to 25, one thread) and the holders (9). The new bank's peak
 memory is the old bank's (198 MiB at 200k, snapshot 23 MiB: 2.2 times the bank and the front in all).
-A save of the same world takes the game thread 10 / 28 / 53 ms; a join 2 / 6 / 12 ms.
+With 16 `pcds load` players joined (a build before this one cannot: its bots take no join over 1 MiB), the stand of the real front and banks was p50 / p95 36.5 / 42.3 ms at 100k and 63.3 / 76.4 ms at 200k in one run of ten flips; the same build without players stood 62 and 102 ms p50 in the next run, so on a host this busy a live stand is known to a factor of two, and the instruction counts above are the figure to compare. A save of the same world takes the game thread 10 / 28 / 53 ms; a join 2 / 6 / 12 ms.
 
 **Pre-copy** (the old bank streams a full snapshot while it runs, only the changes follow at the
 stand) was evaluated, not built. `bench::dirtybench`, 8 players acting every 200 ms: in 0.25 s 1
