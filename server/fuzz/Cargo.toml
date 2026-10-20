@@ -35,6 +35,7 @@ ring = "0.17"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 steamworks = "0.13.1"
+unicode-normalization = { version = "0.1.25", default-features = false, features = ["std"] }
 toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 wasmi = { version = "2.0.0", default-features = false, features = ["std", "validate"] }

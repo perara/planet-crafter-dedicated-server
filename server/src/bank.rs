@@ -496,7 +496,7 @@ fn find_client(game: &Game, who: &Who) -> Result<Option<u64>, (u16, String)> {
     match who {
         Who::Id(id) => Ok(game.clients.contains_key(id).then_some(*id)),
         Who::Name(name) => {
-            let found: Vec<u64> = game.clients.values().filter(|c| c.ready.as_ref().is_some_and(|s| s.name.eq_ignore_ascii_case(name))).map(|c| c.id).collect();
+            let found: Vec<u64> = game.clients.values().filter(|c| c.ready.as_ref().is_some_and(|s| crate::access::same_name(&s.name, name))).map(|c| c.id).collect();
             match found[..] {
                 [] => Ok(None),
                 [one] => Ok(Some(one)),

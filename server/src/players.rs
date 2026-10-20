@@ -277,7 +277,7 @@ impl Game {
                 // One session per player: a second one would take the same character (or one
                 // by the same name). A reconnecting player gets in once the old session is gone.
                 let id = self.player_id(client, claimed, &player_name);
-                let online = self.clients.values().filter(|o| o.id != client).filter_map(|o| o.ready.as_ref()).any(|s| Some(s.id) == id || s.name.eq_ignore_ascii_case(&player_name));
+                let online = self.clients.values().filter(|o| o.id != client).filter_map(|o| o.ready.as_ref()).any(|s| Some(s.id) == id || crate::access::same_name(&s.name, &player_name));
                 if online {
                     println!("client {client}: refused ({player_name:?} is already online)");
                     self.kick(client, "Already connected");

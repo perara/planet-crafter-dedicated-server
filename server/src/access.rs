@@ -6,6 +6,7 @@
 use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
 
 pub const REFUSED: &str = "You are not allowed on this server";
 
@@ -79,6 +80,28 @@ impl Lists {
     }
 }
 
+/// Characters that show nothing and change no letter: a soft hyphen, zero-width spaces and
+/// joiners, direction marks, a byte order mark, variation selectors. A name with one in it must
+/// not be another name than without.
+fn invisible(c: char) -> bool {
+    matches!(c, '\u{ad}' | '\u{34f}' | '\u{61c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{feff}' | '\u{fe00}'..='\u{fe0f}' | '\u{e0100}'..='\u{e01ef}')
+}
+
+/// A name as the access lists compare it: NFKC (fullwidth and circled letters, ligatures and
+/// the like become the letters they stand for), the invisible characters dropped, and full
+/// case folding (upper case, then lower: ß is ss, a final sigma is sigma, the long s is s).
+/// ponytail: no confusables table (a Cyrillic a is still not a Latin a); add one when bans are
+/// met by lookalike letters.
+pub fn fold_name(name: &str) -> String {
+    let normal: String = name.nfkc().filter(|c| !invisible(*c)).collect();
+    normal.to_uppercase().nfkc().collect::<String>().to_lowercase()
+}
+
+/// Whether two names are the same name to the access lists and to the players online.
+pub fn same_name(a: &str, b: &str) -> bool {
+    fold_name(a) == fold_name(b)
+}
+
 fn clean(values: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for v in values.into_iter().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
@@ -118,13 +141,13 @@ impl Access {
         (l.allowed_ips.is_empty() || l.allowed_ips.iter().any(|r| ip_matches(ip, r))) && !l.banned_ips.iter().any(|r| ip_matches(ip, r))
     }
 
-    /// Names compare without case; SteamIDs only for verified (Steam) players.
+    /// Names compare as fold_name() folds them; SteamIDs only for verified (Steam) players.
     pub fn name_allowed(&self, name: &str, verified_steam_id: Option<u64>) -> bool {
         // A SteamID entry matches only a verified SteamID, never a name that looks like one.
         let listed = |list: &[String]| {
             list.iter().any(|v| match steam_id(v) {
                 Some(entry) => verified_steam_id == Some(entry),
-                None => v.eq_ignore_ascii_case(name),
+                None => same_name(v, name),
             })
         };
         (self.lists.whitelist.is_empty() || listed(&self.lists.whitelist)) && !listed(&self.lists.banned_names)
@@ -158,7 +181,7 @@ impl Access {
     /// written when there was not).
     pub fn unban(&mut self, value: &str) -> Result<bool, String> {
         let mut lists = self.lists.clone();
-        lists.banned_names.retain(|n| !n.eq_ignore_ascii_case(value));
+        lists.banned_names.retain(|n| !same_name(n, value));
         lists.banned_ips.retain(|ip| ip != value);
         let found = lists.banned_names.len() + lists.banned_ips.len() < self.lists.banned_names.len() + self.lists.banned_ips.len();
         if found {
@@ -198,6 +221,36 @@ mod tests {
         assert!(a.unban("Alice").unwrap() && a.unban("10.1.2.3").unwrap());
         assert!(!a.unban("Alice").unwrap(), "nothing left to remove");
         assert!(a.name_allowed("Alice", None) && a.ip_allowed("10.1.2.3"));
+    }
+
+    /// Names are compared by their letters, not their bytes: case in every script, fullwidth and
+    /// other compatibility forms, composed or not composed accents, and characters that show nothing.
+    #[test]
+    fn names_compare_by_unicode_case_folding_and_normalisation() {
+        let mut a = Access { lists: Lists::default(), path: None };
+        a.ban("Mallory", None, None).unwrap();
+        a.ban("Straße", None, None).unwrap();
+        a.ban("Zoë", None, None).unwrap();
+        a.ban("ΟΔΥΣΣΕΥΣ", None, None).unwrap();
+        a.ban("İstanbul", None, None).unwrap();
+        for name in [
+            "MALLORY", "mallory", "ＭＡＬＬＯＲＹ", "Ⓜallory", "Mal\u{200b}lory", "Mal\u{ad}lory", "M\u{feff}allory", "\u{202e}Mallory", "mALLORy",
+            "STRASSE", "strasse", "Straße", "ſtraſſe",
+            "Zoë", "Zoe\u{308}", "ZOË", "zoe\u{308}",
+            "οδυσσευς", "Οδυσσευσ",
+            "İSTANBUL", "i\u{307}stanbul",
+        ] {
+            assert!(!a.name_allowed(name, None), "{name:?} is a banned name");
+        }
+        // Other names stay allowed; a lookalike letter of another script is another letter.
+        for name in ["Mallory2", "Mallo", "Zoe", "Strasse1", "Мallory"] {
+            assert!(a.name_allowed(name, None), "{name:?}");
+        }
+        // The whitelist and the unban fold the same way; a SteamID entry still needs a verified id.
+        a.set(Lists { whitelist: vec!["Ｂｏｂ".into()], banned_names: vec!["Eve".into()], ..Default::default() }).unwrap();
+        assert!(a.name_allowed("BOB", None) && a.name_allowed("bob\u{200b}", None) && !a.name_allowed("Alice", None));
+        assert!(a.unban("ＥＶＥ").unwrap() && a.lists.banned_names.is_empty());
+        assert!(same_name("Ａｎｎ", "ann") && !same_name("Ann", "Anna") && fold_name("").is_empty());
     }
 
     /// The lists are kept in their file and read back at the next start; a Steam player's ban
