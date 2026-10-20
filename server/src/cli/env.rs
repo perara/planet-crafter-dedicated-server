@@ -152,16 +152,16 @@ PCDS_WORLD=world
 
     /// The program that runs the server and reads its tables: the active bank's, else (no
     /// bank installed yet) this one.
-    pub fn program(&self) -> PathBuf {
+    pub fn program(&self) -> Result<PathBuf> {
         let banks = self.banks();
-        let program = banks.join(updater::active(&banks)).join("pcds");
-        if program.is_file() { program } else { self.exe.clone() }
+        let program = banks.join(updater::active(&banks)?).join("pcds");
+        Ok(if program.is_file() { program } else { self.exe.clone() })
     }
 
     /// The format of the game tables program() reads and writes (its bank.json says).
     pub fn tables_format(&self) -> Result<u32> {
         let banks = self.banks();
-        let active = updater::active(&banks);
+        let active = updater::active(&banks)?;
         if !banks.join(&active).join("pcds").is_file() {
             return Ok(crate::native::tables::TABLES_FORMAT);
         }
@@ -289,7 +289,7 @@ mod tests {
         fs::create_dir_all(&bank).unwrap();
         fs::write(bank.join("pcds"), "").unwrap();
         updater::write_info(&bank, &crate::msg::BankInfo { tables_format: Some(u64::from(ours) + 1), ..crate::msg::BankInfo::new("9.0.0", 0, 0, 0) }).unwrap();
-        assert_eq!(ctx.program(), bank.join("pcds"));
+        assert_eq!(ctx.program().unwrap(), bank.join("pcds"));
         assert!(ctx.tables("b1").unwrap_err().contains(&format!("the server reads format {}", ours + 1)));
         updater::write_info(&bank, &crate::msg::BankInfo { version: Some("9.0.0".into()), ..Default::default() }).unwrap();
         assert!(ctx.tables("b1").unwrap_err().contains("does not say which game tables it reads"));

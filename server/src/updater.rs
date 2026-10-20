@@ -431,10 +431,15 @@ pub fn info(banks: &Path, bank: &str) -> Option<BankInfo> {
     serde_json::from_str(&text).ok().filter(|_| banks.join(bank).join("pcds").is_file())
 }
 
-/// The bank the front starts: run/bin/active ("a" when there is none yet).
-pub fn active(banks: &Path) -> String {
-    let text = std::fs::read_to_string(banks.join("active")).unwrap_or_default();
-    BANKS.iter().find(|b| **b == text.trim()).unwrap_or(&"a").to_string()
+/// The bank the front starts: run/bin/active. No file yet is a fresh installation, which starts
+/// from bank a; a file that says anything but a or b is an error saying what to do, never bank a.
+pub fn active(banks: &Path) -> Result<String, String> {
+    let path = banks.join("active");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => BANKS.iter().find(|b| **b == text.trim()).map(|b| b.to_string()).ok_or_else(|| format!("{}: it holds {:?}, and must say a or b, the bank the server runs from. Write a or b in it (the other bank is the standby), or delete the file to start from bank a", path.display(), text.trim())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("a".into()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
 }
 
 /// Points run/bin/active at a bank: written beside, flushed, and moved over (under the banks'
@@ -510,7 +515,7 @@ pub fn note_fallback(banks: &Path, from: &str, to: &str, reason: &str) -> Result
 /// The fallback note, while the bank it started is the active one.
 pub fn fallback(banks: &Path) -> Option<Fallback> {
     let text = std::fs::read_to_string(banks.join("fallback")).ok()?;
-    serde_json::from_str(&text).ok().filter(|f: &Fallback| f.to == active(banks))
+    serde_json::from_str(&text).ok().filter(|f: &Fallback| active(banks).is_ok_and(|a| f.to == a))
 }
 
 pub fn clear_fallback(banks: &Path) -> Result<(), String> {
@@ -576,7 +581,12 @@ fn version_key(v: &str) -> (Vec<u64>, bool, Vec<Part<'_>>) {
 /// The admin API's view of the banks.
 pub fn describe(banks: &Path) -> Value {
     let installed: Vec<Value> = BANKS.iter().map(|b| json!({"bank": b, "info": info(banks, b)})).collect();
-    json!({"dir": banks, "active": active(banks), "installed": installed, "fallback": fallback(banks), "rolledBack": rolled_back(banks)})
+    let active = active(banks);
+    let mut v = json!({"dir": banks, "active": active.as_ref().ok(), "installed": installed, "fallback": fallback(banks), "rolledBack": rolled_back(banks)});
+    if let Err(e) = active {
+        v["error"] = json!(e);
+    }
+    v
 }
 
 #[cfg(test)]
@@ -1020,12 +1030,34 @@ pub mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// banks/active says a or b. A fresh installation has no file and starts from bank a; a file
+    /// that says anything else is an error that says what to do, not bank a, and the status shows it.
+    #[test]
+    fn an_active_file_that_says_neither_bank_is_an_error_and_not_bank_a() {
+        let dir = test_dir("active-garbage");
+        for garbage in ["", "c\n", "bank b", "\u{0}\u{0}"] {
+            std::fs::write(dir.join("active"), garbage).unwrap();
+            let e = active(&dir).unwrap_err();
+            assert!(e.contains("active") && e.contains("must say a or b") && e.contains("delete the file"), "{garbage:?}: {e}");
+            assert_eq!(describe(&dir)["error"], json!(e));
+            assert_eq!(describe(&dir)["active"], Value::Null);
+        }
+        // Spaces around the name do not matter; a directory in its place is an error too.
+        std::fs::write(dir.join("active"), " b \n").unwrap();
+        assert_eq!(active(&dir).unwrap(), "b");
+        assert!(describe(&dir).get("error").is_none());
+        std::fs::remove_file(dir.join("active")).unwrap();
+        std::fs::create_dir(dir.join("active")).unwrap();
+        assert!(active(&dir).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn the_active_bank_and_versions() {
         let dir = test_dir("active");
-        assert_eq!(active(&dir), "a");
+        assert_eq!(active(&dir).unwrap(), "a");
         set_active(&dir, "b").unwrap();
-        assert_eq!((active(&dir), other("b"), other("a")), ("b".to_string(), "a", "b"));
+        assert_eq!((active(&dir).unwrap(), other("b"), other("a")), ("b".to_string(), "a", "b"));
         assert!(newer("v0.6.0", "0.5.0") && newer("v0.10.0", "0.9.9") && !newer("v0.5.0", "0.5.0") && !newer("v0.4.9", "0.5.0"));
         // Semantic version order: a pre-release before its release, its parts one by one.
         let order = ["0.9.9", "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0", "v1.0.1", "1.1"];

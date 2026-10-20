@@ -156,7 +156,7 @@ impl Ctx {
     /// update or `pcds upgrade` moves all of them at once. Any other copy of pcds (a release
     /// folder, a checkout's build) runs as itself, and installs itself into a bank when newer.
     fn hand_over(&self, args: &[String]) -> Result {
-        let program = self.program();
+        let program = self.program()?;
         if !same_file(&self.exe, &self.installed()) || same_file(&program, &self.exe) {
             return Ok(());
         }

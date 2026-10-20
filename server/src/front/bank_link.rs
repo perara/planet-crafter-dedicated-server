@@ -167,7 +167,11 @@ impl Front {
                 Err(e) => eprintln!("banks: {e}"),
             }
         }
-        let first = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
+        let first = self.banks.as_deref().map(updater::active).transpose().unwrap_or_else(|e| {
+            eprintln!("banks: {e}");
+            std::process::exit(1)
+        });
+        let first = first.unwrap_or_else(|| "a".into());
         let mut kept = self.kept_snapshot().unwrap_or_else(|e| {
             eprintln!("{e}");
             std::process::exit(1)

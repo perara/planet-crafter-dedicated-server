@@ -129,7 +129,7 @@ impl Front {
 
     /// The world of `self.save` booted in the active bank: Idle.
     fn start_bank(&mut self) -> Result<String, String> {
-        let bank = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
+        let bank = self.banks.as_deref().map(updater::active).transpose()?.unwrap_or_else(|| "a".into());
         let mut kept = self.kept_snapshot()?;
         let snapshot = kept.as_ref().map(|(fd, _)| fd.try_clone()).transpose().map_err(|e| e.to_string())?;
         let b = self.boot_bank(&bank, snapshot, &mut kept)?;

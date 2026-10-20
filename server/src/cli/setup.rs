@@ -85,7 +85,10 @@ impl Ctx {
     ///   lifts the note), as an explicit `pcds upgrade` or the next rollback do;
     /// - never the bank that runs the world.
     fn bank_for(&self, banks: &Path, live: Option<&str>) -> Result<std::result::Result<String, Option<String>>> {
-        let active = live.map_or_else(|| updater::active(banks), str::to_string);
+        let active = match live {
+            Some(live) => live.to_string(),
+            None => updater::active(banks)?,
+        };
         let program = |b: &str| banks.join(b).join("pcds");
         for b in updater::BANKS {
             if program(b).is_file() && program_equal(&self.exe, &program(b))? {
@@ -187,7 +190,7 @@ impl Ctx {
         if install
             && let Err(e) = self.install_beside(None)
         {
-            eprintln!("pcds: {} was not put into a bank ({e}); starting the server from bank {}", self.exe.display(), updater::active(&self.banks()));
+            eprintln!("pcds: {} was not put into a bank ({e}); starting the server from the banks as they are", self.exe.display());
         }
         // The tables of the bank that runs (installing may have changed which one).
         let game = self.game_dir(None)?;
@@ -204,7 +207,7 @@ impl Ctx {
             server.env("PCDS_GAME_DIR", &game);
             server
         };
-        let first = updater::active(&banks);
+        let first = updater::active(&banks)?;
         let mut code = supervise(front(&first), self.container).map_err(|e| format!("{}: {e}", banks.join(&first).display()))?;
         // The release of the active bank cannot run the world (its front tried both banks, and
         // the other is of another front protocol, or it fell over): the other bank's own front,
@@ -408,12 +411,12 @@ impl Ctx {
         super::write(&script, r#"{"name":"PcdsSelftest","ready":false,"steps":[{"wait":2000}]}"#)?;
         let out = fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
         let err = out.try_clone().map_err(|e| e.to_string())?;
-        let probe = Command::new(self.program()).arg("probe").arg(&address).arg(&data).arg(&script).stdin(Stdio::null()).stdout(out).stderr(err).spawn();
+        let probe = Command::new(self.program()?).arg("probe").arg(&address).arg(&data).arg(&script).stdin(Stdio::null()).stdout(out).stderr(err).spawn();
         match probe {
             Ok(mut probe) => {
                 wait_for(&mut probe, Duration::from_secs(60));
             }
-            Err(e) => say(format!("the scripted player did not start: {}: {e}", self.program().display())),
+            Err(e) => say(format!("the scripted player did not start: {e}")),
         }
         let said = fs::read_to_string(&log).unwrap_or_default();
         let _ = fs::remove_file(&script);
@@ -726,7 +729,7 @@ mod tests {
             fs::write(dir.join("build/pcds"), text).unwrap();
         };
         ctx.install_beside(None).unwrap();
-        assert_eq!((updater::active(&banks), program("a"), program("b")), ("a".into(), Some("build 1".into()), None));
+        assert_eq!((updater::active(&banks).unwrap(), program("a"), program("b")), ("a".into(), Some("build 1".into()), None));
         assert_eq!(updater::info(&banks, "a").unwrap().protocol, Some(crate::ipc::PROTOCOL));
         assert!(banks.join("a/libsteam_api.so").is_file() && banks.join("a/web/index.html").is_file() && ctx.installed().is_file());
         ctx.install_beside(None).unwrap();
@@ -738,32 +741,32 @@ mod tests {
         // A later build.
         build("build 2");
         ctx.install_beside(None).unwrap();
-        assert_eq!((updater::active(&banks), program("a"), program("b")), ("b".into(), Some("build 1".into()), Some("build 2".into())));
+        assert_eq!((updater::active(&banks).unwrap(), program("a"), program("b")), ("b".into(), Some("build 1".into()), Some("build 2".into())));
         // Rolled back to a: neither the build in b nor the launcher go over a or b again.
         updater::set_active(&banks, "a").unwrap();
         updater::set_rolled_back(&banks, "b").unwrap();
         ctx.install_beside(None).unwrap();
         launcher.install_beside(None).unwrap();
-        assert_eq!((updater::active(&banks), program("a"), program("b")), ("a".into(), Some("build 1".into()), Some("build 2".into())));
+        assert_eq!((updater::active(&banks).unwrap(), program("a"), program("b")), ("a".into(), Some("build 1".into()), Some("build 2".into())));
         // A later build still leaves alone the bank rolled back from.
         build("build 3");
         ctx.install_beside(None).unwrap();
-        assert_eq!((updater::active(&banks), program("b")), ("a".into(), Some("build 2".into())));
+        assert_eq!((updater::active(&banks).unwrap(), program("b")), ("a".into(), Some("build 2".into())));
         // A later version than the release rolled back from does go there, and ends the note
         // (a newer release folder's pcds start, as an upgrade from it).
         updater::write_info(&banks.join("b"), &BankInfo::new("0.0.1", crate::ipc::PROTOCOL, 0, 0)).unwrap();
         ctx.install_beside(None).unwrap();
-        assert_eq!((updater::active(&banks), program("b")), ("b".into(), Some("build 3".into())));
+        assert_eq!((updater::active(&banks).unwrap(), program("b")), ("b".into(), Some("build 3".into())));
         assert!(updater::rolled_back(&banks).is_none());
         updater::clear_rolled_back(&banks).unwrap();
         ctx.install_beside(None).unwrap();
-        assert_eq!((updater::active(&banks), program("b")), ("b".into(), Some("build 3".into())));
+        assert_eq!((updater::active(&banks).unwrap(), program("b")), ("b".into(), Some("build 3".into())));
         // A release of a later version in the standby bank (pcds upgrade): an older build never
         // goes over it, however new its file.
         updater::write_info(&banks.join("a"), &BankInfo { tag: Some("v99.0.0".into()), ..BankInfo::new("99.0.0", crate::ipc::PROTOCOL, 0, 0) }).unwrap();
         build("build 4");
         ctx.install_beside(None).unwrap();
-        assert_eq!((updater::active(&banks), program("a"), program("b")), ("b".into(), Some("build 1".into()), Some("build 3".into())));
+        assert_eq!((updater::active(&banks).unwrap(), program("a"), program("b")), ("b".into(), Some("build 1".into()), Some("build 3".into())));
         // That downgrade is said, with how to make it.
         let why = ctx.bank_for(&banks, None).unwrap().unwrap_err().unwrap();
         assert!(why.contains("bank a holds pcds 99.0.0, which is newer") && why.contains(&format!("pcds upgrade v{} --restart", env!("CARGO_PKG_VERSION"))), "{why}");

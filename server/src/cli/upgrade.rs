@@ -44,7 +44,10 @@ impl Ctx {
         }
         // Stopped, or a restart: the release into the bank the server does not run from.
         let live = if running { self.live_bank() } else { None };
-        let active = live.unwrap_or_else(|| updater::active(&banks));
+        let active = match live {
+            Some(live) => live,
+            None => updater::active(&banks)?,
+        };
         let target = updater::other(&active).to_string();
         if rollback {
             let info = updater::info(&banks, &target).ok_or_else(|| format!("bank {target} holds no release to go back to"))?;
@@ -97,7 +100,7 @@ impl Ctx {
             return None;
         }
         let banks = self.banks();
-        let bank = running.map_or_else(|| updater::active(&banks), str::to_string);
+        let bank = running.map(str::to_string).map_or_else(|| updater::active(&banks).ok(), Some)?;
         let held = updater::info(&banks, &bank)?;
         let (image, held) = (env!("CARGO_PKG_VERSION"), held.version().to_string());
         let how = if held == image { "the image's version".to_string() } else if updater::newer(&held, image) {
@@ -142,7 +145,10 @@ impl Ctx {
     /// The banks' lines of `pcds status`; `live`: the running front's view of them.
     pub fn print_banks(&self, live: Option<&Value>) {
         let banks = self.banks();
-        let active = updater::active(&banks);
+        let active = updater::active(&banks).unwrap_or_else(|e| {
+            println!("{e}");
+            String::new()
+        });
         for bank in updater::BANKS {
             let mut marks = Vec::new();
             if bank == active {
@@ -205,7 +211,7 @@ mod tests {
         updater::set_active(&banks, "b").unwrap();
         let e = ctx.tables_or_undo(Some(&dir.join("no-game-here")), &banks, "a").unwrap_err();
         assert!(e.contains("is still the active one") && e.contains("not restarted"), "{e}");
-        assert_eq!(updater::active(&banks), "a");
+        assert_eq!(updater::active(&banks).unwrap(), "a");
         assert!(describe(&serde_json::from_value(json!({"version": "0.6.0", "tag": "v0.6.0", "protocol": 2, "format": 1})).unwrap()).starts_with("pcds 0.6.0 (v0.6.0), front protocol 2, snapshot format 1"));
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -59,7 +59,7 @@ impl Ctx {
         }
         // Hidden until complete: tables() only picks finished versions.
         let out = Unfinished(self.run.join(format!("data/.new-{}", std::process::id())));
-        let program = self.program();
+        let program = self.program()?;
         say(format!("reading the game tables from {} with {}", game.display(), program.display()));
         super::check(Command::new(&program).arg("read-game").arg(&game).arg(&out.0).stdout(Stdio::null()))?;
         let netdata = out.0.join("netdata.json");
