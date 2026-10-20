@@ -62,9 +62,7 @@ fn agent(local: bool) -> ureq::Agent {
 /// host only. PCDS_RELEASES can be a private mirror with a token in its user:password@, path or
 /// query.
 pub fn shown_url(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else { return "(not a URL)".into() };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    format!("{scheme}://{}", authority.rsplit_once('@').map_or(authority, |(_, host)| host))
+    crate::util::shown_url(url)
 }
 
 fn get(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, String> {

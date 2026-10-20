@@ -971,6 +971,52 @@ program that nobody asks for any of it pays: once a frame, `plugins::poll` tests
 out (one load of a counter when a host exists, one test of `None` when none does), and once a loop the
 bank compares two numbers for the stream's bell.
 
+## The performance budget (ABI 1.3)
+
+What a plugin costs, measured on the development machine (32 cores, a load of about 90 for the whole session). Since wall time on such a
+host mostly measures the queue, every figure below is **CPU time of the measuring thread**, the best of 3 to 5 rounds; the noise that is left (cache
+and hyper-thread neighbours) is about 40 microseconds on a tick, and the table says when a figure is under it. `make plugin-bench` prints all of
+this (`PCDS_BENCH_SAVE=world.json PCDS_BENCH_PLAYERS=16`, with the game tables).
+
+*One event through the host alone* (no game; a mock world):
+
+| Delivered to | time | per second |
+|---|---|---|
+| 1 module that does nothing | 0.40 us | 2.5 million |
+| 1 module that says a line (an action) | 0.54 us | 1.9 million |
+| 1 module that reads the world | 0.57 us | 1.7 million |
+| 10 modules, all wanting the event | 3.1 us | 0.32 million |
+| 10 modules, a tick each | 4.1 us | 0.25 million |
+| a command, with 10 modules owning one each | 0.51 us | 2.0 million |
+| 1 rules file, a command that replies | 0.75 us | 1.3 million |
+
+*The tick on a late-game world* (a save of a long game, 16 players; the game's own tick is 215 to 245 us there, 4 to 5 % of the 5 ms), with plugins called at
+**every** tick, which is the most a plugin can ask for:
+
+| Plugins | tick | added |
+|---|---|---|
+| 0 | 244 us | the reference |
+| 1 or 10 that do nothing | 226 and 225 us | under the noise (-18 and -20 us) |
+| 1 or 10 that read the world | 206 and 206 us | under the noise |
+| 50 that do nothing | 251 us | +6 us (0.13 % of the tick) |
+| 50 that read the world | 286 us | +42 us (0.83 % of the tick) |
+
+*The example plugins on that world*, each on its own interval (1 to 5 s): none of them, one of them, or all eight WebAssembly ones together change the tick by
+less than the noise (-31 to +13 us). A chat message that is a command (`!top`) with all eight installed costs 10.6 us in all; a deconstruct request that `claims`
+looks at, with no claim made, 1.5 us. `pcds plugin check` prints each example's fuel per event as a share of its budget; the dearest ordinary events are
+a tick of `afk-guard` or `quest-rewards` with 16 players online (100,000 to 230,000 fuel, 15 to 30 % of the budget they ask for) and `!claim` (110,000 fuel, 36 % of 300,000).
+
+*Nobody listening*: `events::tick` 0.50 ns a call against an empty loop's 0.33 ns; `events::rpc_before` 2.0 ns. The bench's fingerprint and the handoff comparison are equal with the plugin
+code compiled in and no plugin (below).
+
+*Starting a plugin*: reading, validating and translating a 44 KB module takes 1.8 ms (the whole module is translated when it is read, since ABI 1.3; the
+new bank does it before the world stops), a new instance 53 us. The idle scan of a folder of 10 plugins: 50 us every 2 s.
+
+*What this means for a server*: the cost of a plugin is its events. A call is about 0.4 us plus what the plugin does. Asking for the player list costs about
+6,000 fuel (2 us) for each player online, so ask for one player (`Host::player`) when you need one. All plugins together may spend 2 ms of a 5 ms tick; at most
+64 plugins are loaded, so do-nothing plugins (64 times 0.4 us) are nowhere near it, and the budget is for the plugin that does real work in every tick
+(`shed` counts the ticks it had to leave for the next).
+
 **Reproducing.** `make plugin-bench` prints the host's numbers (`PCDS_BENCH_SAVE=...` adds the tick
 cost on a world). The fingerprint and the handoff comparison are `make bench`. The engine
 comparison is `tools/plugin-engine-bench/` (two small programs; not part of the server's build,

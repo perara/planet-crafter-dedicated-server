@@ -493,13 +493,12 @@ fn the_wasm_template_builds_against_the_api_crate() {
     let out = plugin(&dir, &work, &["new", "my-plugin", "--api-path", api.to_str().unwrap()]);
     assert!(out.status.success(), "{}", text(&out));
     let made = work.join("my-plugin");
-    for f in ["Cargo.toml", "plugin.toml", "src/lib.rs", ".cargo/config.toml", "README.md"] {
+    for f in ["Cargo.toml", "plugin.toml", "src/lib.rs", "Makefile", "scenarios/basic.toml", "README.md"] {
         assert!(made.join(f).is_file(), "{f}");
     }
     let toml = std::fs::read_to_string(made.join("Cargo.toml")).unwrap();
     assert!(toml.contains("name = \"my_plugin\"") && toml.contains("pcds-plugin-api = { path = "), "{toml}");
     // The template compiles (for this machine: the wasm target is not needed to know it is right).
-    std::fs::remove_dir_all(made.join(".cargo")).unwrap();
     let check = Command::new("cargo").args(["check", "--offline", "--manifest-path"]).arg(made.join("Cargo.toml")).env("CARGO_TARGET_DIR", dir.join("target")).output().unwrap();
     assert!(check.status.success(), "{}", text(&check));
     // The id must be one.

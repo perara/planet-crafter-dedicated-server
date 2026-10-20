@@ -123,3 +123,11 @@ mod tests {
         assert!(modified(Path::new(env!("CARGO_MANIFEST_DIR"))) > UNIX_EPOCH);
     }
 }
+
+/// An address as it may be shown (a log, an error, a listing): scheme and host only. A URL can carry a token in its
+/// user:password@, path or query.
+pub fn shown_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else { return "(not a URL)".into() };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    format!("{scheme}://{}", authority.rsplit_once('@').map_or(authority, |(_, host)| host))
+}

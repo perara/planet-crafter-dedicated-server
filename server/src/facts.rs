@@ -16,6 +16,8 @@ pub const REQUIRED_GROUPS: &[&str] = &[
     // animals/spawn.rs: the animals' DNA, and the traits on it
     "DNASequence",
     crate::genetics::TRAIT_GROUP,
+    // plugins/cookbook_tests.rs: fills a backpack
+    "Cobalt",
     // machines/veins.rs
     "GenerationGroupVein",
     // instances.rs

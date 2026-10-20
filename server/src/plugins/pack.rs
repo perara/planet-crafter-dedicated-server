@@ -259,7 +259,7 @@ pub fn resolve(index_location: &str, url: &str) -> Result<String, String> {
         return Ok(url.to_string());
     }
     if url.contains("://") {
-        return Err(format!("{}: a package comes over https", crate::updater::shown_url(url)));
+        return Err(format!("{}: a package comes over https", crate::util::shown_url(url)));
     }
     let base = index_location.rsplit_once('/').map(|(b, _)| b).filter(|_| index_location.contains("://")).ok_or_else(|| format!("the url {url:?} is relative, and the index is a file: its package urls must be https addresses"))?;
     Ok(format!("{base}/{}", url.trim_start_matches("./")))
