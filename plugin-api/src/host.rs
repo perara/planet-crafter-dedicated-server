@@ -5,6 +5,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::codec::DecodeError;
+#[cfg(target_arch = "wasm32")]
+use crate::codec::Writer;
+use crate::http::HttpRequest;
 use crate::query::{PlayerInfo, WorldInfo};
 
 /// Return codes of the host functions (negative: it did not happen).
@@ -18,6 +21,8 @@ pub const E_BAD: i32 = -2;
 pub const E_FULL: i32 = -3;
 /// The host does not have this function (a server older than the plugin).
 pub const E_UNSUPPORTED: i32 = -4;
+/// (ABI 1.2) The request's host is not one the manifest lists, or the URL is no URL the host takes.
+pub const E_NOT_ALLOWED: i32 = -5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -25,6 +30,7 @@ pub enum Error {
     Bad,
     Full,
     Unsupported,
+    NotAllowed,
     Decode(DecodeError),
 }
 
@@ -34,6 +40,7 @@ impl Error {
             E_DENIED => Error::Denied,
             E_FULL => Error::Full,
             E_UNSUPPORTED => Error::Unsupported,
+            E_NOT_ALLOWED => Error::NotAllowed,
             _ => Error::Bad,
         }
     }
@@ -73,6 +80,11 @@ pub trait Host {
     fn teleport(&self, client: u64, position: [f32; 3]) -> Result<(), Error>;
     /// `rules.write`: a JSON merge patch, as `pcds rules set` sends it.
     fn rules_patch(&self, json: &str) -> Result<(), Error>;
+    /// `net.http` (ABI 1.2): starts an HTTP request and returns its ticket. The answer arrives
+    /// later, in a later call, as `Event::HttpDone` with the same ticket. Errors that can be told at
+    /// once are returned (`NotAllowed`: the host is not on the manifest's list; `Full`: too many
+    /// requests in flight or this second); the rest (DNS, connection, timeout, size) come in the event.
+    fn http_request(&self, request: &HttpRequest<'_>) -> Result<u64, Error>;
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -86,6 +98,7 @@ mod sys {
         pub fn kick(client: u64, ptr: *const u8, len: usize) -> i32;
         pub fn teleport(client: u64, x: f32, y: f32, z: f32) -> i32;
         pub fn rules_patch(ptr: *const u8, len: usize) -> i32;
+        pub fn http_request(ptr: *const u8, len: usize) -> i64;
     }
 }
 
@@ -149,5 +162,12 @@ impl Host for Wasm {
     fn rules_patch(&self, json: &str) -> Result<(), Error> {
         // SAFETY: a valid string slice.
         Wasm::code(unsafe { sys::rules_patch(json.as_ptr(), json.len()) })
+    }
+    fn http_request(&self, request: &HttpRequest<'_>) -> Result<u64, Error> {
+        let mut w = Writer::new();
+        request.encode(&mut w);
+        // SAFETY: a valid byte slice.
+        let ticket = unsafe { sys::http_request(w.0.as_ptr(), w.0.len()) };
+        if ticket > 0 { Ok(ticket as u64) } else { Err(Error::from_code(ticket as i32)) }
     }
 }

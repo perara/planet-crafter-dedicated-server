@@ -36,11 +36,13 @@ pub mod caps;
 pub mod codec;
 pub mod event;
 pub mod host;
+pub mod http;
 pub mod query;
 
 pub use codec::{DecodeError, Reader, Writer};
 pub use event::{Event, Kind, Verdict};
 pub use host::{Error, Host, Level};
+pub use http::HttpRequest;
 pub use query::{PlayerInfo, WorldInfo};
 
 #[cfg(target_arch = "wasm32")]
@@ -51,7 +53,7 @@ pub use host::Wasm;
 /// the server's own. Additive changes (a new event kind, a new host function, a field at the end
 /// of an event) raise the minor; anything else raises the major.
 pub const ABI_MAJOR: u32 = 1;
-pub const ABI_MINOR: u32 = 1;
+pub const ABI_MINOR: u32 = 2;
 pub const ABI: u32 = ABI_MAJOR << 16 | ABI_MINOR;
 
 /// What a plugin keeps across a restart, a reload and a hot update: opaque bytes the server
@@ -94,6 +96,12 @@ pub struct Slot<T>(core::cell::UnsafeCell<Option<T>>);
 
 // SAFETY: WebAssembly modules without threads run one call at a time.
 unsafe impl<T> Sync for Slot<T> {}
+
+impl<T> Default for Slot<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl<T> Slot<T> {
     pub const fn new() -> Self {
@@ -234,6 +242,7 @@ mod host_unavailable {
     use alloc::vec::Vec;
 
     use crate::host::{Error, Host, Level};
+    use crate::http::HttpRequest;
     use crate::query::{PlayerInfo, WorldInfo};
 
     /// What `export!` hands a plugin on a PC: every call is refused.
@@ -265,6 +274,9 @@ mod host_unavailable {
         fn rules_patch(&self, _: &str) -> Result<(), Error> {
             Err(Error::Unsupported)
         }
+        fn http_request(&self, _: &HttpRequest<'_>) -> Result<u64, Error> {
+            Err(Error::Unsupported)
+        }
     }
 }
 
@@ -291,6 +303,9 @@ mod tests {
             Event::ObjectDestroyed { id: 5, group: "Drill1", position: [0.0, 0.0, 0.0] },
             Event::WorldSaved { game_ms: 99, ok: true },
             Event::RuleChange { changes_json: "{\"speed.growth\":2}" },
+            Event::HttpDone { ticket: 41, status: 204, error: "", body: &[], headers: vec![] },
+            Event::HttpDone { ticket: 42, status: 200, error: "", body: b"{\"ok\":true}", headers: vec![("content-type", "application/json"), ("etag", "\"x\"")] },
+            Event::HttpDone { ticket: 43, status: 0, error: "timed out", body: &[0, 255, 7], headers: vec![] },
         ]
     }
 
@@ -336,7 +351,7 @@ mod tests {
             x ^= x << 17;
             let len = (x % 48) as usize;
             let bytes: alloc::vec::Vec<u8> = (0..len).map(|i| (x >> (i % 8 * 8)) as u8).collect();
-            for k in 0..14 {
+            for k in 0..16 {
                 let _ = Event::decode(k, &bytes);
             }
         }
@@ -353,6 +368,29 @@ mod tests {
         query::encode_players(&players, &mut w);
         assert_eq!(query::decode_players(&w.0).unwrap(), players);
         assert!(query::decode_players(&[255, 255, 255, 255]).is_err());
+    }
+
+    #[test]
+    fn a_request_round_trips_and_a_bad_one_is_an_error_never_a_panic() {
+        let request = HttpRequest { method: "POST", url: "https://discord.com/api/webhooks/${secret.hook}", headers: vec![("Content-Type", "application/json"), ("X-Empty", "")], body: b"{\"content\":\"hi\"}" };
+        let mut w = Writer::new();
+        request.encode(&mut w);
+        assert_eq!(HttpRequest::decode(&w.0).unwrap(), request);
+        for cut in 0..w.0.len() {
+            assert!(HttpRequest::decode(&w.0[..cut]).is_err(), "a request cut at {cut} is no request");
+        }
+        // A header count the bytes cannot hold.
+        let mut w = Writer::new();
+        w.str("GET").str("https://a.example/").u32(u32::MAX);
+        assert_eq!(HttpRequest::decode(&w.0), Err(DecodeError::Short));
+        let mut x = 0x2545F4914F6CDD1Du64;
+        for _ in 0..20_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let bytes: alloc::vec::Vec<u8> = (0..(x % 64) as usize).map(|i| (x >> (i % 8 * 8)) as u8).collect();
+            let _ = HttpRequest::decode(&bytes);
+        }
     }
 
     #[test]

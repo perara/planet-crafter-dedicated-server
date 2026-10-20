@@ -21,10 +21,11 @@ pub enum Kind {
     ObjectDestroyed = 9,
     WorldSaved = 10,
     RuleChange = 11,
+    HttpDone = 12,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 11] = [
+    pub const ALL: [Kind; 12] = [
         Kind::Tick,
         Kind::PlayerJoin,
         Kind::PlayerLeave,
@@ -36,6 +37,7 @@ impl Kind {
         Kind::ObjectDestroyed,
         Kind::WorldSaved,
         Kind::RuleChange,
+        Kind::HttpDone,
     ];
 
     pub fn from_u32(n: u32) -> Option<Kind> {
@@ -56,6 +58,7 @@ impl Kind {
             Kind::ObjectDestroyed => "object_destroyed",
             Kind::WorldSaved => "world_saved",
             Kind::RuleChange => "rule_change",
+            Kind::HttpDone => "http_done",
         }
     }
 
@@ -88,6 +91,11 @@ pub enum Event<'a> {
     WorldSaved { game_ms: i64, ok: bool },
     /// The server rules changed; `changes_json` holds every rule that differs from the default.
     RuleChange { changes_json: &'a str },
+    /// An HTTP request the plugin made (`Host::http_request`, ABI 1.2) is over. Delivered to that
+    /// plugin only, whatever it subscribed to. `status` is the HTTP status, or 0 when there was no
+    /// answer: `error` then says why (it is empty when there is one). `body` is at most the
+    /// manifest's `max_response_bytes`.
+    HttpDone { ticket: u64, status: u32, error: &'a str, body: &'a [u8], headers: Vec<(&'a str, &'a str)> },
 }
 
 impl<'a> Event<'a> {
@@ -104,6 +112,7 @@ impl<'a> Event<'a> {
             Event::ObjectDestroyed { .. } => Kind::ObjectDestroyed,
             Event::WorldSaved { .. } => Kind::WorldSaved,
             Event::RuleChange { .. } => Kind::RuleChange,
+            Event::HttpDone { .. } => Kind::HttpDone,
         }
     }
 
@@ -141,6 +150,10 @@ impl<'a> Event<'a> {
             Event::RuleChange { changes_json } => {
                 w.str(changes_json);
             }
+            Event::HttpDone { ticket, status, error, body, headers } => {
+                w.u64(*ticket).u32(*status).str(error).bytes(body);
+                crate::http::encode_pairs(headers, w);
+            }
         }
     }
 
@@ -171,6 +184,7 @@ impl<'a> Event<'a> {
             Kind::ObjectDestroyed => Event::ObjectDestroyed { id: r.i32()?, group: r.str()?, position: [r.f32()?, r.f32()?, r.f32()?] },
             Kind::WorldSaved => Event::WorldSaved { game_ms: r.i64()?, ok: r.bool()? },
             Kind::RuleChange => Event::RuleChange { changes_json: r.str()? },
+            Kind::HttpDone => Event::HttpDone { ticket: r.u64()?, status: r.u32()?, error: r.str()?, body: r.bytes()?, headers: crate::http::decode_pairs(&mut r)? },
         })
     }
 }

@@ -15,9 +15,11 @@ pub const CHAT_SAY: &str = "chat.say";
 pub const PLAYER_KICK: &str = "player.kick";
 pub const PLAYER_TELEPORT: &str = "player.teleport";
 pub const RULES_WRITE: &str = "rules.write";
+pub const NET_HTTP: &str = "net.http";
+pub const NET_HTTP_LOCAL: &str = "net.http.local";
 
 /// Every capability, with what it allows, for `pcds plugin check` and the dashboard.
-pub const ALL: [(&str, &str); 12] = [
+pub const ALL: [(&str, &str); 14] = [
     (EVENT_TICK, "be called every few seconds of game time"),
     (EVENT_PLAYER, "hear when players join and leave"),
     (EVENT_CHAT, "read chat messages and chat commands"),
@@ -30,6 +32,8 @@ pub const ALL: [(&str, &str); 12] = [
     (PLAYER_KICK, "kick players"),
     (PLAYER_TELEPORT, "move players"),
     (RULES_WRITE, "change the server rules"),
+    (NET_HTTP, "send HTTP requests to the hosts its manifest lists"),
+    (NET_HTTP_LOCAL, "let those requests reach this machine and the local network"),
 ];
 
 pub fn known(name: &str) -> bool {
@@ -45,5 +49,6 @@ pub fn for_event(kind: Kind) -> &'static str {
         Kind::RpcBefore | Kind::RpcAfter => EVENT_RPC,
         Kind::ObjectPlaced | Kind::ObjectDestroyed => EVENT_OBJECT,
         Kind::WorldSaved | Kind::RuleChange => EVENT_WORLD,
+        Kind::HttpDone => NET_HTTP,
     }
 }
