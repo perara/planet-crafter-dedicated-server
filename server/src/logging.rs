@@ -204,7 +204,9 @@ fn render(json: bool, tagged: bool, level: Level, component: &str, message: &str
         fields.iter().for_each(|(k, v)| {
             f.insert((*k).into(), v.clone());
         });
-        let line = json!({"timestamp": when, "level": level.name(), "component": component, "message": message, "fields": f}).to_string();
+        // JSON leaves U+0085, U+2028 and U+2029 as they are, and readers that split lines by Unicode
+        // (Python's splitlines, many shippers) would cut the one line of an event in two.
+        let line = json!({"timestamp": when, "level": level.name(), "component": component, "message": message, "fields": f}).to_string().replace('\u{85}', "\\u0085").replace('\u{2028}', "\\u2028").replace('\u{2029}', "\\u2029");
         return if tagged { format!("<{}>{line}", level.priority()) } else { line };
     }
     // The text says it all in words; the fields are for the machine that reads JSON.
@@ -343,13 +345,13 @@ mod tests {
     /// line breaks and tabs are written out, in text; JSON escapes them in its own way.
     #[test]
     fn a_message_cannot_steer_a_terminal_through_the_log() {
-        let hostile = "name\r2026-10-20T00:00:00.000Z INFO  front: forged\x1b[2J\u{85}\x07 end\r\nsecond\tline";
+        let hostile = "name\r2026-10-20T00:00:00.000Z INFO  front: forged\x1b[2J\u{85}\x07 end\u{2028}\r\nsecond\tline";
         let text = render(false, false, Level::Warn, "front", hostile, &[], at(), 1, "front");
         assert!(text.chars().all(|c| !c.is_control() || c == '\n' || c == '\t'), "{text:?}");
         assert_eq!(text.lines().count(), 2, "a CRLF is one line break, a lone CR is none: {text:?}");
         assert!(text.contains("name\\u{d}2026") && text.contains("\\u{1b}[2J") && text.contains("second\tline"), "{text:?}");
         let json = render(true, false, Level::Warn, "front", hostile, &[], at(), 1, "front");
-        assert!(json.chars().all(|c| !c.is_control()), "{json:?}");
+        assert!(json.chars().all(|c| !c.is_control() && !matches!(c, '\u{2028}' | '\u{2029}')), "{json:?}");
         assert_eq!(serde_json::from_str::<Value>(&json).unwrap()["message"], hostile);
     }
 

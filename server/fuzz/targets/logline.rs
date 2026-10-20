@@ -34,7 +34,7 @@ pub fn run(data: &[u8]) {
     let line = render(flags & 1 == 1, flags & 2 == 2, level, "front", &redacted, &fields, SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(u64::from(flags) * 1_234_567_891), 7, "front");
     if flags & 1 == 1 {
         let body = line.strip_prefix(&format!("<{}>", level.priority())).filter(|_| flags & 2 == 2).unwrap_or(&line);
-        assert!(!body.contains('\n') && !body.contains('\r'), "one line: {line:?}");
+        assert!(!body.contains(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}']), "one line: {line:?}");
         let v: Value = serde_json::from_str(body).unwrap_or_else(|e| panic!("{e}: {line:?}"));
         assert_eq!(v["message"], redacted.as_str());
         assert_eq!(v["level"], level.name());
