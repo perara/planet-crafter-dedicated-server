@@ -202,6 +202,9 @@ WantedBy=timers.target
         if self.container {
             say("restart the container for it to take effect (docker restart CONTAINER)");
         } else if self.active()? {
+            // systemd counts every start toward the unit's limit (5 in 10 minutes): an upgrade, a
+            // rollback and an upgrade again must not leave the server failed and down.
+            quiet(&mut self.systemctl(&["reset-failed", &self.unit()]));
             check(&mut self.systemctl(&["restart", &self.unit()]))?;
             say("server restarted");
         }

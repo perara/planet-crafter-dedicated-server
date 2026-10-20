@@ -190,6 +190,8 @@ impl Ctx {
                     self.refresh_unit()?;
                     // A newer bank may read another tables format.
                     self.ensure_tables(None)?;
+                    // Start requests count toward the unit's start limit (5 in 10 minutes).
+                    quiet(&mut self.systemctl(&["reset-failed", &self.unit()]));
                 }
                 return passthrough(&mut self.systemctl(&[what, &self.unit()]));
             }

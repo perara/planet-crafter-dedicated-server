@@ -220,6 +220,26 @@ fn a_start_falls_back_to_the_other_bank() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// systemd counts every start toward the unit's limit (5 in 10 minutes), so `pcds restart` clears
+/// the count first: an upgrade, a rollback and an upgrade again must not leave the unit failed.
+#[test]
+fn a_restart_clears_the_units_start_count_first() {
+    let dir = test_dir("reset-failed");
+    let log = dir.join("systemctl.log");
+    let fake = fake_systemctl(&dir, &format!("echo \"$*\" >> {}; echo inactive", log.display()));
+    let game = with_reader(&dir, 1);
+    assert!(pcds(&dir, &fake, &["extract", "--game", game.to_str().unwrap()]).status.success());
+    std::fs::create_dir_all(dir.join("run/worlds")).unwrap();
+    std::fs::write(dir.join("run/worlds/world.json"), "{\"saveDisplayName\":\"w\"}").unwrap();
+    std::fs::create_dir_all(dir.join("home/.config/systemd/user")).unwrap();
+    std::fs::write(dir.join("home/.config/systemd/user/pcds-cli-itest.service"), "").unwrap();
+    let out = pcds(&dir, &fake, &["restart"]);
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let (reset, restart) = (calls.find("reset-failed pcds-cli-itest.service"), calls.find("restart pcds-cli-itest.service"));
+    assert!(reset.is_some() && restart.is_some() && reset < restart, "{calls}\n{}", text(&out));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// A second server on a world another one runs is refused before it touches anything.
 #[test]
 fn one_server_per_world() {
