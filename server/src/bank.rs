@@ -248,9 +248,51 @@ struct Bank {
     data_dir: String,
 }
 
+/// The time of the game's ticks over the last minute, for GET /api/status: a ring of fixed size
+/// (one sample is a tick's start and duration), filled in place, so a tick costs one store and no
+/// allocation. The ring holds more than a minute of ticks (one every FRAME).
+pub struct TickTimes {
+    start: Instant,
+    ring: Box<[(u32, u32)]>,
+    next: usize,
+}
+
+/// How long a tick is remembered.
+const TICK_WINDOW: Duration = Duration::from_secs(60);
+/// Samples held: a minute of 5 ms ticks and a third more.
+const TICK_SAMPLES: usize = 16_384;
+
+impl Default for TickTimes {
+    fn default() -> Self {
+        TickTimes { start: Instant::now(), ring: vec![(u32::MAX, 0); TICK_SAMPLES].into_boxed_slice(), next: 0 }
+    }
+}
+
+impl TickTimes {
+    /// A tick that began at `at` and took `took`: milliseconds since this ring began and
+    /// microseconds, as u32 (49 days; 71 minutes).
+    fn record(&mut self, at: Instant, took: Duration) {
+        let ms = at.saturating_duration_since(self.start).as_millis().min(u32::MAX as u128 - 1) as u32;
+        self.ring[self.next] = (ms, took.as_micros().min(u32::MAX as u128) as u32);
+        self.next = (self.next + 1) % self.ring.len();
+    }
+
+    /// p50, p99 and the longest tick of the last TICK_WINDOW before `now`, in microseconds (null
+    /// when there is none). Made on request: it sorts a copy.
+    fn summary(&self, now: Instant) -> Value {
+        let since = now.saturating_duration_since(self.start).as_millis().saturating_sub(TICK_WINDOW.as_millis()) as u64;
+        let mut micros: Vec<u32> = self.ring.iter().filter(|(at, _)| *at != u32::MAX && u64::from(*at) >= since).map(|(_, took)| *took).collect();
+        micros.sort_unstable();
+        // The nearest-rank percentile.
+        let at = |p: usize| micros.get((micros.len() * p).div_ceil(100).saturating_sub(1)).copied();
+        json!({"windowSeconds": TICK_WINDOW.as_secs(), "samples": micros.len(), "p50Micros": at(50), "p99Micros": at(99), "maxMicros": micros.last()})
+    }
+}
+
 /// What the status shows of this bank's loop: loops in the last second, its work time and
 /// longest loop.
 struct Ctx<'a> {
+    ticks: &'a TickTimes,
     save_path: &'a str,
     build_id: Option<&'a str>,
     data_dir: &'a str,
@@ -272,6 +314,7 @@ impl Bank {
         let (mut next_frame, mut movement_sent) = (Instant::now(), Instant::now());
         let mut loops = (0u32, Instant::now(), 0u32);
         let (mut busy, mut busy_last) = ((Duration::ZERO, Duration::ZERO), (Duration::ZERO, Duration::ZERO));
+        let mut ticks = TickTimes::default();
         // The hooks' settings, once at the start (a restored game's too).
         game.ext.chat.changed = true;
         let mut last_ops = Value::Null;
@@ -310,7 +353,7 @@ impl Bank {
                     }
                     ipc::ADMIN => {
                         let r: Value = serde_json::from_slice(&f.body).unwrap_or_default();
-                        let ctx = Ctx { save_path: &self.save_path, build_id: self.build_id.as_deref(), data_dir: &self.data_dir, loop_rate: loops.2, busy: busy_last };
+                        let ctx = Ctx { ticks: &ticks, save_path: &self.save_path, build_id: self.build_id.as_deref(), data_dir: &self.data_dir, loop_rate: loops.2, busy: busy_last };
                         let request = || admin_request(game, r["method"].as_str().unwrap_or(""), r["path"].as_str().unwrap_or(""), &r["body"], &ctx);
                         let (status, body) = contained("an admin request", request).unwrap_or_else(|| (500, "{\"error\":\"the server failed on this request\"}".to_string()));
                         self.link.send(ipc::ANSWER, f.n, admin_answer(status, body).as_bytes());
@@ -353,7 +396,12 @@ impl Bank {
                     _ => {}
                 }
             }
-            if frame && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| game.tick())).is_err() {
+            let tick_started = Instant::now();
+            let ticked = !frame || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| game.tick())).is_ok();
+            if frame {
+                ticks.record(tick_started, tick_started.elapsed());
+            }
+            if !ticked {
                 // The whole world may be half-updated: keep what there is; the front starts the
                 // bank again from the save.
                 eprintln!("the game tick panicked: saving and stopping");
@@ -569,6 +617,7 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
                 "s3": crate::s3::status(&game.rules.backup),
                 "plugins": plugins::admin::summary(game),
                 "lastSave": LAST_SAVE.with_borrow(Value::clone),
+                "tick": ctx.ticks.summary(Instant::now()),
                 "backup": backup_status(&game.rules.save),
             });
             (200, body.to_string())
@@ -1077,7 +1126,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("world.json").to_string_lossy().to_string();
-        let ctx = Ctx { save_path: &path, build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
+        let ctx = Ctx { ticks: &Default::default(), save_path: &path, build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
         std::fs::write(&path, "{}").unwrap();
         // backups/ is a file: no backup can be made.
         std::fs::write(dir.join("backups"), "in the way").unwrap();
@@ -1098,6 +1147,43 @@ mod tests {
         assert!(saved["backup"]["error"].is_null() && saved["backup"]["lastOkAt"].as_u64() > Some(0), "{saved}");
         assert_eq!(std::fs::read_dir(dir.join("backups")).unwrap().count(), 1);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The status' tick times: p50, p99 and the longest of the last minute, from a ring of fixed size
+    /// that a tick fills in place.
+    #[test]
+    fn tick_times_are_a_percentile_of_the_last_minute_in_a_fixed_ring() {
+        let mut t = TickTimes::default();
+        let (start, capacity) = (t.start, t.ring.len());
+        assert_eq!(t.summary(start)["samples"], 0);
+        assert!(t.summary(start)["p99Micros"].is_null());
+        // 1000 ticks of 1..=1000 us over the first 5 seconds.
+        for i in 1..=1000u64 {
+            t.record(start + Duration::from_millis(i * 5), Duration::from_micros(i));
+        }
+        let s = t.summary(start + Duration::from_secs(5));
+        assert_eq!((s["samples"].as_u64(), s["p50Micros"].as_u64(), s["p99Micros"].as_u64(), s["maxMicros"].as_u64()), (Some(1000), Some(500), Some(990), Some(1000)), "{s}");
+        // A slow tick is the maximum; p99 moves by one rank only (one tick in 1001).
+        t.record(start + Duration::from_secs(6), Duration::from_millis(80));
+        let s = t.summary(start + Duration::from_secs(6));
+        assert_eq!((s["maxMicros"].as_u64(), s["p99Micros"].as_u64()), (Some(80_000), Some(991)), "{s}");
+        // A minute on, those ticks are gone, and a single new one is the whole picture.
+        t.record(start + Duration::from_secs(70), Duration::from_micros(7));
+        let s = t.summary(start + Duration::from_secs(71));
+        assert_eq!((s["samples"].as_u64(), s["maxMicros"].as_u64(), s["p50Micros"].as_u64()), (Some(1), Some(7), Some(7)), "{s}");
+        // Past its size the ring overwrites the oldest, in the same memory.
+        for i in 0..capacity * 2 {
+            t.record(start + Duration::from_secs(80) + Duration::from_micros(i as u64), Duration::from_micros(3));
+        }
+        assert_eq!(t.ring.len(), capacity);
+        assert_eq!(t.summary(start + Duration::from_secs(81))["samples"], capacity);
+        // The API carries it.
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let ctx = Ctx { ticks: &t, save_path: "", build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
+        let (_, status) = admin_request(&mut game, "GET", "/api/status", &json!({}), &ctx);
+        let status: Value = serde_json::from_str(&status).unwrap();
+        assert_eq!(status["tick"]["windowSeconds"], 60);
+        assert!(status["tick"]["p50Micros"].is_number() || status["tick"]["samples"] == 0);
     }
 
     /// A panic in one client's work kicks it and saves; the next loop goes on.
@@ -1208,7 +1294,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("world.json")).unwrap();
         let path = dir.join("world.json").to_string_lossy().to_string();
-        let ctx = Ctx { save_path: &path, build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
+        let ctx = Ctx { ticks: &Default::default(), save_path: &path, build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
         let (status, answer) = admin_request(&mut game, "POST", "/api/save", &json!({}), &ctx);
         assert!(status == 500 && answer.contains("world.json"), "{status} {answer}");
         let (_, s) = admin_request(&mut game, "GET", "/api/status", &json!({}), &ctx);
@@ -1364,7 +1450,7 @@ mod tests {
 
     /// An admin API call as the bank answers it: (status, JSON answer).
     fn call(game: &mut Game, method: &str, path: &str, body: Value) -> (u16, Value) {
-        let ctx = Ctx { save_path: "", build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
+        let ctx = Ctx { ticks: &Default::default(), save_path: "", build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
         let (status, answer) = admin_request(game, method, path, &body, &ctx);
         (status, serde_json::from_str(&answer).unwrap())
     }
@@ -1379,7 +1465,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let save_path = dir.join("world.json").to_string_lossy().to_string();
         game.snapshot().write(&save_path).unwrap();
-        let ctx = Ctx { save_path: &save_path, build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
+        let ctx = Ctx { ticks: &Default::default(), save_path: &save_path, build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
         let call = |game: &mut Game, method: &str, path: &str, body: Value| {
             let (status, answer) = admin_request(game, method, path, &body, &ctx);
             (status, serde_json::from_str::<Value>(&answer).unwrap())
