@@ -25,7 +25,7 @@ installed with `pcds upgrade --restart`, which disconnects every player).
                    other bank's front when this one cannot start the world)
  run/bin/fallback  the last start that fell back to the other bank, and why (pcds status)
  run/bin/a/, b/    the banks: pcds, libsteam_api.so, web/, and bank.json (version, front
-                   protocol, snapshot formats, the release tag and its sha256)
+                   protocol, snapshot format, the release tag and its sha256)
  run/bin/active    "a" or "b": the bank the front starts (written beside, renamed over)
 ```
 
@@ -717,9 +717,8 @@ is what it would take, read from `front.rs` and `utp.rs`.
 4. Taking over a live bank: quiescing the link at a frame boundary, the ATTACH/HELLO exchange,
    the bank's side of it (a bank that is running must answer a new front, which no bank does
    today), and the protocol rule for a new front that speaks a different front protocol than the
-   running bank (today it cannot take over the world and says so). The new front would have to
-   speak the previous protocol for one flip, as snapshots are read in the previous format, or a
-   protocol change keeps needing the restart.
+   running bank (today it cannot take over the world and says so). There is no shim for the
+   previous protocol: a protocol change keeps needing the restart.
 5. Steam: refuse the handover while Steam players are connected, or kick them with a reason,
    then log in again in the new front; a message to the admin saying what it did to them.
 6. The handover command and its place in the CLI and admin page (`pcds upgrade --front`?), the
@@ -750,7 +749,7 @@ Front (`front.rs`, new, from `main.rs`):
 Shared (`ipc.rs`, new): the frame format and kinds, `Link`, `wait`, `PROTOCOL`.
 
 State module (planned as `state/`, not built: the types stay where they are and `handoff.rs` holds the format): the types in the table under (c), moved out of
-the logic modules with their derives; `handoff.rs` (the head, `FORMAT`, `migrate`, `snapshot`,
+the logic modules with their derives; `handoff.rs` (the head, `FORMAT`, `snapshot`,
 `restore`, the encodings for clocks, infinities, tuple-keyed maps and static names); the
 autosave countdown and setting from `main.rs`. The logic keeps `impl` blocks and functions
 over these types, so moving a type is a change of its path, not of its code.
