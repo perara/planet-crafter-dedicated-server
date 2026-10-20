@@ -51,6 +51,11 @@ pub(crate) const LOADING_RPCS: &[&str] = &[
     "ProceduralInstancesHandler.LoadInstanceFromSceneServerRpc",
 ];
 
+/// The most of an animator message the server passes on: it is relayed undecoded to every other
+/// client, and the game's (the parameters of an animator and the states of its layers) are a few
+/// hundred bytes.
+const MAX_ANIMATOR_MESSAGE: usize = 8 << 10;
+
 /// The server RPCs the game declares `[Rpc(SendTo.Server)]` without `InvokePermission =
 /// Everyone`: Netcode drops one whose sender does not own the object it is sent to
 /// (RpcMessageHelpers.Handle).
@@ -736,7 +741,7 @@ impl Game {
             eprintln!("rpc {name}: no {client_rpc} to pass it on");
             return true;
         };
-        if self.net.objects.get(&object).is_some_and(|o| o.owner == client) {
+        if self.net.objects.get(&object).is_some_and(|o| o.owner == client) && body.len() <= MAX_ANIMATOR_MESSAGE {
             let mut w = Writer::new();
             w.packed_u64(object).packed_u16(behaviour).packed_u32(hash).bytes(body);
             self.out_to(Target::Except(client), (protocol::CLIENT_RPC, w.0));
@@ -1044,17 +1049,20 @@ pub mod tests {
         let ann = join(&mut g, 1, "Ann");
         join(&mut g, 2, "Bob");
         let message = vec![3, 1, 4, 1, 5];
-        let send = |g: &mut Game, client: u64| {
+        let send = |g: &mut Game, client: u64, message: &[u8]| {
             let mut w = Writer::new();
-            w.packed_u64(client).packed_u64(ann).packed_u16(7).packed_u32(g.net.spec.hash("NetworkAnimator.SendAnimTriggerServerRpc").unwrap()).bytes(&message);
+            w.packed_u64(client).packed_u64(ann).packed_u16(7).packed_u32(g.net.spec.hash("NetworkAnimator.SendAnimTriggerServerRpc").unwrap()).bytes(message);
             g.net.out.clear();
             g.receive(client, &wire::batch(&[(protocol::RPC, w.0)]));
             g.net.out.iter().filter(|m| m.1 == protocol::CLIENT_RPC).map(|(to, _, body)| (*to, body.clone())).collect::<Vec<_>>()
         };
         let mut w = Writer::new();
         w.packed_u64(ann).packed_u16(7).packed_u32(g.net.spec.hash("NetworkAnimator.SendAnimTriggerClientRpc").unwrap()).bytes(&message);
-        assert!(matches!(&send(&mut g, 1)[..], [(Target::Except(1), body)] if *body == w.0));
-        assert!(send(&mut g, 2).is_empty(), "not the owner");
+        assert!(matches!(&send(&mut g, 1, &message)[..], [(Target::Except(1), body)] if *body == w.0));
+        assert!(send(&mut g, 2, &message).is_empty(), "not the owner");
+        // What goes to everyone else is an animator's message, not a megabyte of anything.
+        assert_eq!(send(&mut g, 1, &vec![7u8; MAX_ANIMATOR_MESSAGE]).len(), 1, "up to the limit");
+        assert!(send(&mut g, 1, &vec![7u8; MAX_ANIMATOR_MESSAGE + 1]).is_empty(), "past it");
     }
 
     fn transform_message(object: u64, flags: u32, floats: &[f32]) -> Vec<u8> {
