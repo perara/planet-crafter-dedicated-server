@@ -5,8 +5,8 @@
 //! them first: it rolls the loot and sends it with GetOrCreateNewInventoryServerRpc, which the
 //! core handles.
 
-use serde_json::Value;
 
+use crate::doc::Doc;
 use crate::game::Game;
 use crate::net::VarValue;
 
@@ -15,15 +15,15 @@ const TIERS: [(&str, f32); 4] = [("ultraRareItems", 2.5), ("veryRareItems", 8.0)
 const BOOSTED_MULTIPLIER: i32 = 9;
 const MAX_INSTANCE_LOOT: i32 = 3;
 
-fn components<'a>(game: &'a Game, group: &str, ty: &str) -> Vec<&'a Value> {
+fn components<'a>(game: &'a Game, group: &str, ty: &str) -> Vec<&'a Doc> {
     game.data.group_prefabs[group]["components"].as_array().into_iter().flatten().filter(|c| c["type"] == ty).collect()
 }
 
-fn int(v: &Value) -> i32 {
+fn int(v: &Doc) -> i32 {
     v.as_i64().unwrap_or(0) as i32
 }
 
-fn groups(game: &Game, refs: &Value) -> Vec<usize> {
+fn groups(game: &Game, refs: &Doc) -> Vec<usize> {
     refs.as_array().into_iter().flatten().filter_map(|r| game.data.group_of_ref(r.as_str()?)).collect()
 }
 
@@ -54,7 +54,7 @@ fn quantity(game: &mut Game, group: usize) -> i32 {
 }
 
 /// InventoryFromScene.GetGeneratedGroups.
-pub fn generated_groups(game: &mut Game, f: &Value, settings: Option<&Value>) -> Vec<usize> {
+pub fn generated_groups(game: &mut Game, f: &Doc, settings: Option<&Doc>) -> Vec<usize> {
     let boosted = f["boostedLoot"].as_bool().unwrap_or(false);
     let mut list = Vec::new();
     for g in groups(game, &f["everyTimeGroups"]) {
@@ -163,7 +163,7 @@ fn terra_stage_loot(game: &mut Game, boosted: bool) -> Option<usize> {
     }
     let value = system_terraformation(game);
     let mut reached = None;
-    for s in game.data.singletons["InventoryLootHandler"]["lootTerraStages"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+    for s in game.data.singletons["InventoryLootHandler"]["lootTerraStages"].as_array().into_iter().flatten().filter_map(Doc::as_str) {
         let start = game.data.asset(s).and_then(|l| l["terraStage"].as_str()).and_then(|t| game.data.asset(t)).and_then(|t| t["startValue"].as_f64());
         if !(value < 0.0 || start.is_none_or(|v| value >= v)) {
             break;
@@ -181,9 +181,9 @@ mod tests {
     #[test]
     fn scene_loot_keeps_the_sure_items_and_fits_the_container() {
         let Some(mut g) = crate::planets::tests::game() else { return };
-        let f = json!({"size": 3, "everyTimeGroups": ["GroupDataItem:PulsarQuartz", "GroupDataItem:PulsarQuartz"], "chanceForEachGroup": 100,
+        let f: Doc = json!({"size": 3, "everyTimeGroups": ["GroupDataItem:PulsarQuartz", "GroupDataItem:PulsarQuartz"], "chanceForEachGroup": 100,
                        "someTimesGroups": ["GroupDataItem:Minable-Iron"], "terraStageLootAdded": 30, "boostedLoot": true, "additiveLootTable": null,
-                       "additiveLootNumber": 0, "hasWorldInstanceLoot": false});
+                       "additiveLootNumber": 0, "hasWorldInstanceLoot": false}).into();
         let quartz = g.data.group("PulsarQuartz").unwrap();
         for _ in 0..20 {
             let loot = generated_groups(&mut g, &f, None);

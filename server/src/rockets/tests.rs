@@ -192,10 +192,11 @@ fn rocket_sent_to_space_multiplies_oxygen() {
 fn only_the_rocket_exactly_on_the_craft_spawn_is_sent() {
     let (platform, near, on) = (210_000_010, 210_000_011, 210_000_012);
     let Some(mut g) = game(vec![placed(platform, "LaunchPlatform", "200,10,200", "Prime", json!({})), placed(near, "RocketOxygen1", "200,11.5,200.5", "Prime", json!({}))], vec![]) else { return };
-    let prefabs = std::sync::Arc::make_mut(&mut g.data.group_prefabs);
-    let send = prefabs["LaunchPlatform"]["components"].as_array_mut().unwrap().iter_mut().find(|c| c["type"] == "ActionSendInSpace").unwrap();
-    send["poses"] = json!({"locationGameObject": {"position": [-3.0, 5.556, -15.957706], "rotation": [0.0, 0.0, 0.0, 1.0]}});
-    send["pose"] = json!({"position": [7.229, 31.407, -15.701], "rotation": [0.0, 0.0, 0.0, 1.0]});
+    std::sync::Arc::make_mut(&mut g.data.group_prefabs).edit("LaunchPlatform", |prefab| {
+        let send = prefab["components"].as_array_mut().unwrap().iter_mut().find(|c| c["type"] == "ActionSendInSpace").unwrap();
+        send["poses"] = json!({"locationGameObject": {"position": [-3.0, 5.556, -15.957706], "rotation": [0.0, 0.0, 0.0, 1.0]}});
+        send["pose"] = json!({"position": [7.229, 31.407, -15.701], "rotation": [0.0, 0.0, 0.0, 1.0]});
+    });
     let before = g.net.out.len();
     rpc(&mut g, platform, "ConstructibleProxy.SendInSpaceServerRpc");
     assert!(g.wos[&near].is_placed(), "off the spawn: stays");

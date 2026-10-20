@@ -2,9 +2,10 @@
 //! manipulator, incubator), MachineGrowerVegetationStatic (vegetubes, spreaders, planters) and
 //! MachineGrowerVegetationHarvestable (vegetable growers, farms, algae).
 
-use serde_json::{json, Value};
+use serde_json::json;
 
 use super::{f32_of, group_of_game_object, group_ref, has_energy, is_active, is_full, items, net_has, remove_item, Game};
+use crate::doc::Doc;
 use crate::clock::GameTime;
 use crate::compact::Sym;
 use crate::geometry::MathRandom;
@@ -167,12 +168,12 @@ pub struct LinkedGrower {
 const LINKED_UPDATE_EVERY: f32 = 2.0;
 
 impl LinkedGrower {
-    pub fn refresh(&mut self, f: &Value) {
+    pub fn refresh(&mut self, f: &Doc) {
         self.rate = LinkedGrower::new(f, GameTime::ZERO).rate;
     }
 
     /// Awake: the update loop starts once the local player has (on the server: at once).
-    pub fn new(f: &Value, now: GameTime) -> LinkedGrower {
+    pub fn new(f: &Doc, now: GameTime) -> LinkedGrower {
         let time_to_grow = f32_of(f, "timeToGrow");
         LinkedGrower { next: now, rate: 100.0 / (time_to_grow * 60.0 / LINKED_UPDATE_EVERY) }
     }
@@ -243,15 +244,15 @@ pub struct Vegetation {
 impl Vegetation {
     /// The table's values, set again after a restore (machines::refresh_from_tables); what the
     /// seeds inside make it grow (things), the random sequence and the coroutine are state.
-    pub fn refresh(&mut self, f: &Value) {
+    pub fn refresh(&mut self, f: &Doc) {
         let fresh = Vegetation::new(f, 0, GameTime::ZERO);
         (self.original, self.grow_speed, self.interval, self.min_growth) = (fresh.original, fresh.grow_speed, fresh.interval, fresh.min_growth);
     }
 
     /// SetWorldObjectForGrower: the random sequence seeded by the world object id, the growth
     /// from the world object, then the first LaunchGrowingProcess (wait 2 s for init).
-    pub fn new(f: &Value, wo: i32, now: GameTime) -> Vegetation {
-        let things: Vec<Sym> = f["thingsToGrow"].as_array().into_iter().flatten().filter_map(Value::as_str).map(Sym::new).collect();
+    pub fn new(f: &Doc, wo: i32, now: GameTime) -> Vegetation {
+        let things: Vec<Sym> = f["thingsToGrow"].as_array().into_iter().flatten().filter_map(Doc::as_str).map(Sym::new).collect();
         Vegetation {
             random: MathRandom::new(wo as u32),
             original: things.clone(),
@@ -361,20 +362,20 @@ pub struct Harvestable {
 }
 
 impl Harvestable {
-    fn water_only_of(f: &Value) -> bool {
+    fn water_only_of(f: &Doc) -> bool {
         f["allowedLayers"].as_i64() == Some(1 << 4)
     }
 
     /// What comes from the tables, set again after a restore (machines::refresh_from_tables):
     /// the flag a snapshot does not have, and the values it has from the release that wrote it,
     /// which this release may read differently. What is state (growings, next) stays.
-    pub fn refresh(&mut self, f: &Value) {
+    pub fn refresh(&mut self, f: &Doc) {
         let state = (self.second, std::mem::take(&mut self.growings), self.next);
         *self = Harvestable::new(f);
         (self.second, self.growings, self.next) = state;
     }
 
-    pub fn new(f: &Value) -> Harvestable {
+    pub fn new(f: &Doc) -> Harvestable {
         Harvestable {
             second: None,
             growings: Vec::new(),
@@ -387,7 +388,7 @@ impl Harvestable {
             spawn_on_this: f["spawnOnThis"].is_string(),
             down_value: f32_of(f, "downValue"),
             water_only: Self::water_only_of(f),
-            things: f["thingsToGrow"].as_array().into_iter().flatten().filter_map(Value::as_str).map(Sym::new).collect(),
+            things: f["thingsToGrow"].as_array().into_iter().flatten().filter_map(Doc::as_str).map(Sym::new).collect(),
             model_to_override: f["modelToOverride"].as_str().map(Sym::new),
         }
     }

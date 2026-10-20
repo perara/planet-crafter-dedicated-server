@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Value};
 
+use crate::doc::Doc;
 use crate::clock::GameTime;
 use crate::data::stable_hash;
 use crate::game::{Args, Game};
@@ -353,7 +354,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     let Some(w) = game.wos.get(&wo) else { return };
     let id = game.data.groups[w.group].id.clone();
     if let Some(c) = game.data.prefab_components(&id, "Drone").first().map(|c| (*c).clone()) {
-        let vis = game.data.prefab_components(&id, "DroneNetworkVibility").first().map(|c| (*c).clone()).unwrap_or(Value::Null);
+        let vis = game.data.prefab_components(&id, "DroneNetworkVibility").first().map(|c| (*c).clone()).unwrap_or(Doc::Null);
         awake_drone(game, wo, &c, &vis);
     }
     if let Some(c) = game.data.prefab_components(&id, "MachineDroneStation").first() {
@@ -1079,8 +1080,8 @@ fn respawn_drone(game: &mut Game, d: i32) -> bool {
 // ---- Drone ------------------------------------------------------------------------------------
 
 /// Drone.Awake: the drone's container just spawned. CheckBusy runs next frame.
-fn awake_drone(game: &mut Game, wo: i32, c: &Value, vis: &Value) {
-    let f = |v: &Value, k: &str, default: f32| v[k].as_f64().map(|x| x as f32).unwrap_or(default);
+fn awake_drone(game: &mut Game, wo: i32, c: &Doc, vis: &Doc) {
+    let f = |v: &Doc, k: &str, default: f32| v[k].as_f64().map(|x| x as f32).unwrap_or(default);
     let Some(net) = game.wos.get(&wo).and_then(|w| w.net) else { return };
     let Some(o) = game.net.objects.get(&net) else { return };
     let behaviour = o.behaviours().find(|b| b.class == "ClientNetworkTransform").map(|b| b.index).unwrap_or(0);

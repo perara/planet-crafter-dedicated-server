@@ -3,9 +3,10 @@
 //! fuses, MachineDestructInventoryIfFull, MachineGetInRange and ConstructibleProxy's
 //! RecycleContentServerRpc.
 
-use serde_json::{json, Value};
+use serde_json::json;
 
 use super::{add_new, components, dist, f32_of, force_reset, has_energy, is_active, is_full, items, remove_item, Game};
+use crate::doc::Doc;
 use crate::clock::GameTime;
 use crate::compact::Sym;
 use crate::net::Target;
@@ -103,7 +104,7 @@ pub struct Generator {
 impl Generator {
     /// SetGeneratorInventory: TryToGenerate every spawnEveryXSec, and TryToCastRay. `cast`: the
     /// rays were cast already (veins::cast, for a machine on the current planet).
-    pub fn new(game: &Game, f: &Value, wo: i32, now: GameTime, cast: bool) -> Generator {
+    pub fn new(game: &Game, f: &Doc, wo: i32, now: GameTime, cast: bool) -> Generator {
         let refs = |k: &str| f[k].as_array().into_iter().flatten().filter_map(|r| game.data.group_of_ref(r.as_str()?)).collect::<Vec<usize>>();
         let spawn_every = f["spawnEveryXSec"].as_f64().unwrap_or(0.0) as f32;
         let mut g = Generator {
@@ -283,12 +284,12 @@ pub struct AutoCrafter {
 
 impl AutoCrafter {
     /// The table's values, set again after a restore (machines::refresh_from_tables).
-    pub fn refresh(&mut self, f: &Value) {
+    pub fn refresh(&mut self, f: &Doc) {
         (self.period, self.range) = (f32_of(f, "craftEveryXSec"), f32_of(f, "range"));
     }
 
     /// Awake: TryToCraft waits (instance count % 50) / 10 s before its loop.
-    pub fn new(f: &Value, now: GameTime, instanced: i32) -> AutoCrafter {
+    pub fn new(f: &Doc, now: GameTime, instanced: i32) -> AutoCrafter {
         AutoCrafter { next: now + (instanced % 50) as f32 / 10.0, period: f32_of(f, "craftEveryXSec"), range: f32_of(f, "range") }
     }
 }
@@ -387,14 +388,14 @@ pub struct Disintegrator {
 }
 
 impl Disintegrator {
-    pub fn refresh(&mut self, f: &Value) {
+    pub fn refresh(&mut self, f: &Doc) {
         let fresh = Disintegrator::new(f, GameTime::ZERO);
         (self.period, self.give) = (fresh.period, fresh.give);
     }
 
     /// SetDisintegratorInventory: the loop starts once the second inventory is known (the frame
     /// after the spawn), then breaks an object every breakEveryXSec.
-    pub fn new(f: &Value, now: GameTime) -> Disintegrator {
+    pub fn new(f: &Doc, now: GameTime) -> Disintegrator {
         let period = f["breakEveryXSec"].as_f64().unwrap_or(0.0) as f32;
         Disintegrator { next: now + period, period, give: f["giveXIngredientsBack"].as_i64().unwrap_or(0) as i32 }
     }
@@ -442,12 +443,12 @@ pub struct Optimizer {
 }
 
 impl Optimizer {
-    pub fn refresh(&mut self, f: &Value) {
+    pub fn refresh(&mut self, f: &Doc) {
         let fresh = Optimizer::new(f);
         (self.range, self.max) = (fresh.range, fresh.max);
     }
 
-    pub fn new(f: &Value) -> Optimizer {
+    pub fn new(f: &Doc) -> Optimizer {
         Optimizer { range: f32_of(f, "range"), max: f["maxWorldObjectPerFuse"].as_i64().unwrap_or(0).max(0) as usize, modified: Vec::new() }
     }
 }

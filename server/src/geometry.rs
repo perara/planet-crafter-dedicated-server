@@ -40,14 +40,31 @@ pub fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
+/// A dumped document whose elements can be read as numbers: a table's `Doc`, a scene's `Value`.
+pub trait Elements: std::ops::Index<usize, Output = Self> {
+    fn number(&self) -> Option<f64>;
+}
+
+impl Elements for serde_json::Value {
+    fn number(&self) -> Option<f64> {
+        self.as_f64()
+    }
+}
+
+impl Elements for crate::doc::Doc {
+    fn number(&self) -> Option<f64> {
+        self.as_f64()
+    }
+}
+
 /// A dumped Vector3 ([x, y, z]).
-pub fn v3(v: &serde_json::Value) -> [f32; 3] {
-    [0, 1, 2].map(|i| v[i].as_f64().unwrap_or(0.0) as f32)
+pub fn v3<T: Elements>(v: &T) -> [f32; 3] {
+    [0, 1, 2].map(|i| v[i].number().unwrap_or(0.0) as f32)
 }
 
 /// A dumped Quaternion ([x, y, z, w]).
-pub fn q(v: &serde_json::Value) -> [f32; 4] {
-    [0, 1, 2, 3].map(|i| v[i].as_f64().unwrap_or(if i == 3 { 1.0 } else { 0.0 }) as f32)
+pub fn q<T: Elements>(v: &T) -> [f32; 4] {
+    [0, 1, 2, 3].map(|i| v[i].number().unwrap_or(if i == 3 { 1.0 } else { 0.0 }) as f32)
 }
 
 /// Unity.Mathematics.Random (xorshift32), the deterministic generator the game seeds itself.

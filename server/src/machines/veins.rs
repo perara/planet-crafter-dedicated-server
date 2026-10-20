@@ -3,25 +3,25 @@
 //! extractor's mining ray (MachineGenerator.SetMiningRayGeneration) finds the veins below it.
 //! The veins come from the planet's scene dump (scenes/<planet>.json "oreVeins").
 
-use serde_json::Value;
 
+use crate::doc::Doc;
 use crate::clock::GameTime;
 use crate::game::Game;
-use crate::geometry::{conj, rotate, sub};
+use crate::geometry::{conj, q, rotate, sub, v3};
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Vein {
     id: i32,
     groups: Vec<usize>,
-    #[serde(with = "crate::bincodec::json_value")]
-    identifier: Value,
+    #[serde(with = "crate::doc::json")]
+    identifier: Doc,
     count: i32,
     /// The colliders on the vein's object, as boxes in world space: center, half size, rotation.
     boxes: Vec<([f32; 3], [f32; 3], [f32; 4])>,
     /// Shown when the scene loaded (HideDependingOnTerraStage on it or its parents).
     shown_at_load: bool,
-    #[serde(with = "crate::bincodec::json_value")]
-    activators: Value,
+    #[serde(with = "crate::doc::json")]
+    activators: Doc,
     /// Its Start ran (on its first activation).
     started: bool,
 }
@@ -40,14 +40,6 @@ impl Vein {
     fn active(&self, game: &Game) -> bool {
         self.shown_at_load && !crate::water::hidden_by_positioning(game, &self.activators)
     }
-}
-
-fn v3(v: &Value) -> [f32; 3] {
-    [0, 1, 2].map(|i| v[i].as_f64().unwrap_or(0.0) as f32)
-}
-
-fn q(v: &Value) -> [f32; 4] {
-    [0, 1, 2, 3].map(|i| v[i].as_f64().unwrap_or(if i == 3 { 1.0 } else { 0.0 }) as f32)
 }
 
 /// The current planet's veins; None on a planet without a scene dump.
@@ -141,7 +133,7 @@ fn hit_down(origin: [f32; 3], (center, half, rotation): &([f32; 3], [f32; 3], [f
 /// vein data the save's linked groups stay.
 /// ponytail: veins sorted by distance, where PhysX returns them in its own order (it matters
 /// only under two veins at once).
-pub fn cast(game: &mut Game, wo: i32, f: &Value) {
+pub fn cast(game: &mut Game, wo: i32, f: &Doc) {
     let rays = f["miningRays"].as_i64().unwrap_or(0);
     if rays <= 0 {
         return;
@@ -150,7 +142,7 @@ pub fn cast(game: &mut Game, wo: i32, f: &Value) {
     let Some(veins) = game.ext.machines.veins.as_ref().and_then(|s| s.veins.clone()) else { return };
     let Some(p) = game.wos.get(&wo).map(|w| w.position) else { return };
     let origin = [p[0], p[1] + 25.0, p[2]];
-    let allowed = f["oreAllowedToMine"].as_array().cloned().unwrap_or_default();
+    let allowed = f["oreAllowedToMine"].as_array().unwrap_or_default();
     let mut hits: Vec<(f32, &Vein)> = veins.iter().filter(|v| allowed.contains(&v.identifier) && v.active(game)).filter_map(|v| v.boxes.iter().filter_map(|b| hit_down(origin, b)).reduce(f32::min).map(|d| (d, v))).collect();
     hits.sort_by(|a, b| a.0.total_cmp(&b.0));
     if f["onlyUseFirstVeinDetected"].as_bool() == Some(true) {
@@ -208,13 +200,13 @@ mod tests {
         let Some(mut game) = crate::machines::tests::game() else { return };
         let tier1 = game.scenes.planets["Prime"].ore_veins.iter().find(|v| v["fields"]["oreVeinIdentifer"] == "tier1").expect("a tier 1 vein").clone();
         let vein = |id: i64, count: i64, at: [f64; 3]| {
-            let mut v = tier1.clone();
+            let mut v = tier1.to_value();
             v["id"] = json!(id);
             v["active"] = json!(true);
             v["activators"] = json!([]);
             v["fields"]["oreVeinContentCount"] = json!(count);
             v["colliders"][0]["box"] = json!({"center": [0.0, 0.0, 0.0], "size": [100.0, 5.0, 100.0], "position": at, "rotation": [0.0, 0.0, 0.0, 1.0], "scale": [1.0, 1.0, 1.0]});
-            v
+            Doc::from(v)
         };
         let mut scene = game.scenes.planets["Prime"].clone();
         scene.water_volumes.clear();
@@ -245,7 +237,7 @@ mod tests {
     fn the_dlc_planets_veins_read_from_an_install_hold_together() {
         let Some(game) = crate::machines::tests::game() else { return };
         let grounds = crate::testkit::dlc_grounds(&game, "the_dlc_planets_veins_read_from_an_install_hold_together");
-        let free: Vec<f64> = game.scenes.planets.iter().filter(|(id, _)| !grounds.iter().any(|(g, _)| g == *id)).flat_map(|(_, s)| s.ore_veins.iter().flat_map(|v| v["colliders"].as_array().into_iter().flatten().flat_map(|c| c["boundsCenter"].as_array().cloned().unwrap_or_default())).filter_map(|c| c.as_f64())).collect();
+        let free: Vec<f64> = game.scenes.planets.iter().filter(|(id, _)| !grounds.iter().any(|(g, _)| g == *id)).flat_map(|(_, s)| s.ore_veins.iter().flat_map(|v| v["colliders"].as_array().into_iter().flatten().flat_map(|c| c["boundsCenter"].as_array().unwrap_or_default())).filter_map(|c| c.as_f64())).collect();
         let span = free.iter().fold(0.0f64, |m, c| m.max(c.abs())) * 2.0;
         assert!(span > 1000.0, "the free planets' span: {span}");
         for (planet, scene) in grounds {

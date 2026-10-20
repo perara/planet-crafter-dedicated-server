@@ -761,7 +761,7 @@ mod tests {
             g.planet = g.net_data.planet_index(&planet).unwrap();
             let listed: Vec<String> = {
                 let data = g.data.asset(&format!("PlanetData:PlanetData-{planet}")).unwrap();
-                let names = g.data.asset(data["instanceScenesData"].as_str().unwrap()).unwrap()["instanceSceneNames"].as_array().unwrap().clone();
+                let names = g.data.asset(data["instanceScenesData"].as_str().unwrap()).unwrap()["instanceSceneNames"].as_array().unwrap();
                 names.iter().map(|n| n.as_str().unwrap().to_string()).collect()
             };
             assert_eq!(listed.iter().filter(|n| !scene.instance_scenes.contains_key(*n)).count(), 0, "{planet}: a listed scene is not in the dump");

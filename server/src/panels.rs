@@ -2,8 +2,7 @@
 //! the group whose recipe it costs, and Panel.GetContingousPanels opens compartments built side
 //! by side into each other (and closes them again when one is taken apart).
 
-use serde_json::Value;
-
+use crate::doc::Doc;
 use crate::game::Game;
 use crate::geometry::{conj, mul, q, rotate, sub, v3};
 use crate::handlers::change_panel;
@@ -21,7 +20,7 @@ pub fn panel_group(game: &Game, sub_type: i32) -> Option<usize> {
     let name = SUB_TYPES.get(sub_type as usize)?;
     let r = &game.data.singletons["PanelsResources"];
     let i = r["panelsSubtypes"].as_array()?.iter().position(|s| s.as_str() == Some(name))?;
-    game.data.group_of_ref(r["panelsGroupItems"].get(i)?.as_str()?)
+    game.data.group_of_ref(r["panelsGroupItems"][i].as_str()?)
 }
 
 /// One Panel of a building, in the world.
@@ -30,7 +29,7 @@ struct WorldPanel<'a> {
     object: u64,
     index: u16,
     /// The dumped panel: panel type, transform in the building, box colliders.
-    data: &'a Value,
+    data: &'a Doc,
     position: [f32; 3],
     rotation: [f32; 4],
     sub_type: i32,
@@ -70,7 +69,7 @@ fn placed_panels(game: &Game, planet: i32) -> Vec<WorldPanel<'_>> {
 /// BoundsHelper.GetBoundsOfChildren (`of_panel` false) or Panel.GetBoundsOfPanel of a panel:
 /// the bounds of its look, as [min, max] in the world.
 fn bounds(game: &Game, p: &WorldPanel, of_panel: bool) -> Option<[[f32; 3]; 2]> {
-    let look = &game.data.panels["looks"][SUB_TYPES.get(p.sub_type as usize)?];
+    let look = &game.data.panels["looks"][*SUB_TYPES.get(p.sub_type as usize)?];
     let look = if p.position[1] < UNDERGROUND && look["underground"].is_object() { &look["underground"] } else { look };
     let b = look.get(if of_panel { "panelBounds" } else { "bounds" })?;
     let (min, max) = (v3(&b[0]), v3(&b[1]));

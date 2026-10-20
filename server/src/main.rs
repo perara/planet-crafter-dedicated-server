@@ -90,6 +90,7 @@ mod testkit;
 mod config;
 mod dashboard;
 mod data;
+mod doc;
 mod deconstruct;
 mod dotnet_sort;
 mod energy;
@@ -292,10 +293,10 @@ impl std::ops::Index<&str> for Planets {
 /// The parts of scenes/<planet>.json the server reads.
 #[derive(Clone)]
 pub struct PlanetScene {
-    pub water_volumes: Vec<serde_json::Value>,
-    pub ore_veins: Vec<serde_json::Value>,
+    pub water_volumes: Vec<doc::Doc>,
+    pub ore_veins: Vec<doc::Doc>,
     /// ToxicArea components (Toxicity only; empty elsewhere).
-    pub toxic_areas: Vec<serde_json::Value>,
+    pub toxic_areas: Vec<doc::Doc>,
     pub instance_scenes: HashMap<String, Arc<instances::generate::InstanceScene>>,
 }
 
@@ -304,10 +305,10 @@ fn read_dump(text: &str) -> Result<PlanetScene, serde_json::Error> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Dump {
-        water_volumes: Vec<serde_json::Value>,
-        ore_veins: Vec<serde_json::Value>,
+        water_volumes: Vec<doc::Doc>,
+        ore_veins: Vec<doc::Doc>,
         #[serde(default)]
-        toxic_areas: Vec<serde_json::Value>,
+        toxic_areas: Vec<doc::Doc>,
         instance_scenes: HashMap<String, instances::generate::InstanceScene>,
     }
     let dump: Dump = serde_json::from_str(text)?;
@@ -324,7 +325,7 @@ fn planet_scene(dir: &str, planet: &str, data: &GameData) -> Result<Dump, String
     let planet_data = data.asset(&asset).ok_or(format!("gamedata.json: no {asset}"))?;
     // A planet without portals has no instance data (null); one with it lists its scenes.
     let names: Vec<&str> = match &planet_data["instanceScenesData"] {
-        serde_json::Value::Null => Vec::new(),
+        doc::Doc::Null => Vec::new(),
         r => {
             let names = r.as_str().and_then(|r| data.asset(r)).and_then(|d| d["instanceSceneNames"].as_array());
             let names = names.ok_or(format!("gamedata.json: {asset}.instanceScenesData {r} has no instanceSceneNames"))?;
@@ -362,7 +363,7 @@ fn try_scene_tables(dir: &str, net: &NetData, data: &GameData) -> Result<Scenes,
 /// What water.rs, veins.rs and toxic.rs read from a scene dump is complete: story interpolations
 /// with their world object, offset and easing; ore vein groups that name groups; toxic areas
 /// with a place, a time and scene objects of known groups.
-fn check_scene(water: &[serde_json::Value], veins: &[serde_json::Value], toxic: &[serde_json::Value], data: &GameData) -> Result<(), String> {
+fn check_scene(water: &[doc::Doc], veins: &[doc::Doc], toxic: &[doc::Doc], data: &GameData) -> Result<(), String> {
     for (i, v) in water.iter().enumerate() {
         let s = &v["storyInterpolation"];
         let offset = s["offset"].as_array().is_some_and(|o| o.len() == 3 && o.iter().all(|x| x.is_number()));

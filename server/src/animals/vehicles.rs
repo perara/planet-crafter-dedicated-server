@@ -6,9 +6,10 @@
 use std::collections::HashMap;
 
 use indexmap::IndexMap;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use super::{distance2, nearest, player_distance2};
+use crate::doc::Doc;
 use crate::clock::GameTime;
 use crate::game::{Args, Game};
 use crate::model::WorldObject;
@@ -82,7 +83,7 @@ struct Seated {
     own: ([f32; 3], [f32; 4]),
 }
 
-fn component<'a>(game: &'a Game, wo: &WorldObject, ty: &str) -> Vec<&'a Value> {
+fn component<'a>(game: &'a Game, wo: &WorldObject, ty: &str) -> Vec<&'a Doc> {
     game.data.prefab_components(&game.data.groups[wo.group].id, ty)
 }
 
@@ -488,6 +489,7 @@ fn euler_angles(q: [f32; 4]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use crate::testkit::{client_rpcs, send_rpc};
 
     #[test]

@@ -2,10 +2,11 @@
 //! (terraformation stage, chance, prerequisite events and buildings), the ones clients launch,
 //! and what each brings: a message, a meteo event, an unlock. The save keeps the triggered list.
 
-use serde_json::{json, Value};
+use serde_json::json;
 
 use super::{between_stages, planet_data, refs, reference, singleton};
 use crate::clock::GameTime;
+use crate::doc::Doc;
 use crate::data::stable_hash;
 use crate::game::Game;
 use crate::net::{enc, ListEvent, Target};
@@ -35,11 +36,12 @@ fn init_story_events(game: &mut Game) {
     let planet = planet_data(game);
     let shared = planet["sharedManualEvents"].as_str().and_then(|k| game.data.asset(k)).map(|l| refs(&l["storyEventDatas"])).unwrap_or_default();
     let next_try = game.time + period(game);
+    let (available, manual) = (refs(&planet["availableStoryEvents"]), refs(&planet["manualStoryEvents"]));
     let s = &mut game.ext.meteo.story;
     s.planet = Some(game.planet);
-    s.current_planet = refs(&planet["availableStoryEvents"]);
+    s.current_planet = available;
     s.available.extend(s.current_planet.iter().cloned());
-    s.manual.extend(refs(&planet["manualStoryEvents"]));
+    s.manual.extend(manual);
     s.manual.extend(shared);
     s.next_try = next_try;
 }
@@ -51,10 +53,11 @@ pub fn init(game: &mut Game) {
     let current = game.planet_id().to_string();
     for planet in game.save.planets.clone() {
         let Some(id) = planet["planetId"].as_str().filter(|id| *id != current) else { continue };
-        let Some(p) = game.data.asset(&format!("PlanetData:PlanetData-{id}")).cloned() else { continue };
+        let Some(p) = game.data.asset(&format!("PlanetData:PlanetData-{id}")) else { continue };
+        let (available, manual) = (refs(&p["availableStoryEvents"]), refs(&p["manualStoryEvents"]));
         let s = &mut game.ext.meteo.story;
-        s.available.extend(refs(&p["availableStoryEvents"]));
-        s.manual.extend(refs(&p["manualStoryEvents"]));
+        s.available.extend(available);
+        s.manual.extend(manual);
     }
     let ids: Vec<String> = game.save.story_events.iter().filter_map(|e| e["stringId"].as_str()).filter(|id| by_id(game, id).is_some()).map(str::to_string).collect();
     game.ext.meteo.story.triggered = ids.iter().map(|id| stable_hash(id)).collect();
@@ -76,7 +79,7 @@ pub fn tick(game: &mut Game) {
     }
 }
 
-fn event<'a>(game: &'a Game, key: &str) -> Option<&'a Value> {
+fn event<'a>(game: &'a Game, key: &str) -> Option<&'a Doc> {
     game.data.asset(key)
 }
 

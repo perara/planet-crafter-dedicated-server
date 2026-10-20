@@ -3,6 +3,7 @@
 
 use serde_json::Value;
 
+use crate::doc::Doc;
 use crate::game::Game;
 use crate::model::WorldObject;
 
@@ -31,12 +32,12 @@ pub fn trait_value(_game: &Game, w: &WorldObject) -> i32 {
 
 /// GetRandomGeneticTraitWithRarity, applied to a new trait object.
 pub fn randomize_trait(game: &mut Game, wo: &mut WorldObject) {
-    let lootable: Vec<Value> = game.data.assets.iter().filter(|(k, v)| k.starts_with("GeneticTraitData:") && v["canBeLooted"].as_bool() == Some(true)).map(|(_, v)| (**v).clone()).collect();
+    let lootable: Vec<&Doc> = game.data.assets.iter().filter(|(k, v)| k.starts_with("GeneticTraitData:") && v["canBeLooted"].as_bool() == Some(true)).map(|(_, v)| &**v).collect();
     if lootable.is_empty() {
         return;
     }
     for _ in 0..1000 {
-        let t = &lootable[game.rng.range(0, lootable.len() as i32) as usize];
+        let t = lootable[game.rng.range(0, lootable.len() as i32) as usize];
         if game.rng.range(0, 100) as i64 >= t["lootChance"].as_i64().unwrap_or(0) {
             set_trait(wo, t);
             return;
@@ -45,7 +46,7 @@ pub fn randomize_trait(game: &mut Game, wo: &mut WorldObject) {
 }
 
 /// SetWorldObjectValuesForAGivenGeneticTrait from a GeneticTraitData asset.
-pub fn set_trait(wo: &mut WorldObject, t: &Value) {
+pub fn set_trait(wo: &mut WorldObject, t: &Doc) {
     wo.trait_type = trait_type(t["traitType"].as_str().unwrap_or("Null"));
     let c = &t["traitColor"];
     wo.color = [0, 1, 2, 3].map(|i| c[i].as_f64().unwrap_or(0.0) as f32);
@@ -77,7 +78,7 @@ mod tests {
         let mut w = g.wos[&id].clone();
         set_trait_serialized(&mut w, &json!([trait_type("ColorA"), [1.0, 0.5, 0.0, 1.0], 9]));
         assert_eq!(trait_value(&g, &w), i32::from_le_bytes([255, 128, 0, 255]));
-        set_trait(&mut w, &json!({"traitType": "Size", "traitColor": [0, 0, 0, 0], "traitValue": 4}));
+        set_trait(&mut w, &json!({"traitType": "Size", "traitColor": [0, 0, 0, 0], "traitValue": 4}).into());
         assert_eq!((w.trait_type, trait_value(&g, &w)), (trait_type("Size"), 4));
         assert_eq!(trait_type("NoSuchTrait"), 0);
     }

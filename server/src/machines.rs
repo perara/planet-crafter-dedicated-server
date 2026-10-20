@@ -16,9 +16,10 @@ mod veins;
 
 use std::collections::HashMap;
 
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::clock::GameTime;
+use crate::doc::Doc;
 use crate::game::{Args, Game};
 use crate::model::WorldObject;
 use crate::net::Target;
@@ -366,12 +367,12 @@ mod unit_names {
 
 /// Serialized fields of a group's prefab components of one type; `root` keeps those on the
 /// prefab's root object only (GetComponent rather than GetComponentInChildren).
-fn components<'a>(game: &'a Game, group: usize, ty: &str, root: bool) -> Vec<&'a Value> {
+fn components<'a>(game: &'a Game, group: usize, ty: &str, root: bool) -> Vec<&'a Doc> {
     game.data.group_prefabs.components(&game.data.groups[group].id, ty, root)
 }
 
 /// The first such component on the prefab root.
-fn root(game: &Game, group: usize, ty: &str) -> Option<Value> {
+fn root(game: &Game, group: usize, ty: &str) -> Option<Doc> {
     components(game, group, ty, true).first().map(|v| (*v).clone())
 }
 
@@ -385,7 +386,7 @@ pub fn refresh_from_tables(game: &mut Game) {
     let machines: Vec<i32> = game.ext.machines.list.keys().copied().collect();
     game.ext.machines.dues_ok = false;
     // What the tables say is a function of the group: read once for each group of a machine.
-    type Roots = [Option<Value>; 6];
+    type Roots = [Option<Doc>; 6];
     let mut roots: crate::idmap::FxHashMap<usize, Roots> = Default::default();
     for wo in machines {
         let Some(group) = game.wos.get(&wo).map(|w| w.group) else { continue };
@@ -420,7 +421,7 @@ fn is_rocket_platform(game: &Game, group: usize) -> bool {
     crate::rockets::PLATFORM_CLASSES.iter().any(|class| !components(game, group, class, true).is_empty())
 }
 
-fn f32_of(v: &Value, key: &str) -> f32 {
+fn f32_of(v: &Doc, key: &str) -> f32 {
     v[key].as_f64().unwrap_or(0.0) as f32
 }
 
@@ -903,11 +904,11 @@ fn float_on_water(game: &mut Game, wo: i32) {
 // ---- inventory listeners ----------------------------------------------------------------
 
 /// InventoryAssociated.SetInventory: InventoryAuthorizedGroups on the inventory.
-fn set_authorized_groups(game: &mut Game, inventory: i32, group: usize, f: &Value) {
+fn set_authorized_groups(game: &mut Game, inventory: i32, group: usize, f: &Doc) {
     // The same for every building of a group: worked out once (the tables do not change).
     if !game.ext.machines.authorized.contains_key(&group) {
         let groups = |categories: &str, sub_categories: &str| -> Vec<usize> {
-            let list = |k: &str| f[k].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
+            let list = |k: &str| f[k].as_array().into_iter().flatten().filter_map(Doc::as_str).map(str::to_string).collect::<Vec<_>>();
             let mut out: Vec<usize> = Vec::new();
             let items = || game.data.groups.iter().enumerate().filter(|(_, g)| !g.constructible);
             for c in list(categories) {
@@ -1002,7 +1003,7 @@ pub fn deconstruct_status(game: &Game, wo: i32) -> i32 {
 
 /// CheckSomethingInsideIfNeeded: no other building (but base building parts) inside the
 /// detection collider, and no underground panels other than plain walls and floors.
-fn something_inside_check(game: &Game, w: &WorldObject, action: &Value) -> bool {
+fn something_inside_check(game: &Game, w: &WorldObject, action: &Doc) -> bool {
     let mut result = true;
     if action["checkInsideBeforeDeconstruction"].as_bool() == Some(true) {
         if let Some(bounds) = inside_bounds(game, w) {
@@ -1090,6 +1091,7 @@ fn inside_bounds(game: &Game, w: &WorldObject) -> Option<Bounds> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use serde_json::Value;
 
     /// A server on an empty Prime save, with every placed object's machines wired.
     pub fn game() -> Option<Game> {
