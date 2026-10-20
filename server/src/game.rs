@@ -408,6 +408,12 @@ impl Game {
         self.sim_time.unwrap_or_else(|| self.started.elapsed().as_secs_f64())
     }
 
+    /// The planet the world started on (settings.planetId), which `world_planet` has seen to be a
+    /// planet of the tables when the world was loaded.
+    pub fn started_planet(&self) -> &str {
+        self.save.settings["planetId"].as_str().expect("settings.planetId: checked by world_planet when the world loaded")
+    }
+
     /// Network ticks since the game started, in 64 bits: nothing that counts them stops.
     pub fn tick_count(&self) -> u64 {
         ((self.clock() - self.paused) * self.net_data.tick_rate as f64) as u64
@@ -417,12 +423,6 @@ impl Game {
     /// a second), then the low 32 bits, wrapping as an unchecked int does. The game's own
     /// `(int)double` there is out of range and stays at one value for good; here the clients'
     /// time sync (a hard reset when the server time jumps by 0.2 s) takes the wrap as a jump.
-    /// The planet the world started on (settings.planetId), which `world_planet` has seen to be a
-    /// planet of the tables when the world was loaded.
-    pub fn started_planet(&self) -> &str {
-        self.save.settings["planetId"].as_str().expect("settings.planetId: checked by world_planet when the world loaded")
-    }
-
     pub fn tick_number(&self) -> i32 {
         self.tick_count() as i32
     }
@@ -793,15 +793,24 @@ impl Game {
 
     /// One tick of the simulation, then the variable deltas.
     pub fn tick(&mut self) {
-        section!("rpcs", crate::handlers::run_pending(self, |g, rpc| g.rpc_cost(rpc), |g, client, rpc| g.run_rpc(client, rpc)));
         let clock = self.clock();
         let last = std::mem::replace(&mut self.last_clock, clock);
+        // Time.maximumDeltaTime: the game's time goes on by one frame at most across a stall (a
+        // stopped process, a long save, a busy host), as Unity's does. What is over is the world
+        // standing still, like a pause: no timer is due for it, no gauge drains for it. Before the
+        // RPCs: they read the network tick, which must not jump and fall back.
+        let stall = (clock - last - crate::clock::MAX_FRAME).max(0.0);
+        if stall >= 1.0 {
+            println!("world: the game loop was away {:.1} s (a stopped process, a long save or a busy host): the world's time went on by {:.2} s only, as a game's does across a hitch", stall + crate::clock::MAX_FRAME, crate::clock::MAX_FRAME);
+        }
+        self.paused += stall;
+        section!("rpcs", crate::handlers::run_pending(self, |g, rpc| g.rpc_cost(rpc), |g, client, rpc| g.run_rpc(client, rpc)));
         let empty = self.rules.world.pause_when_empty && !self.clients.values().any(|c| c.ready.is_some());
         if empty || self.held {
             // Nobody in the game, or paused by the admin: the clock (game time and network ticks)
             // holds, and every timer with it; it goes on from here. Clients still hear it each
             // second; players in a paused world still get the chat.
-            self.paused += clock - last;
+            self.paused += clock - last - stall;
             if empty {
                 crate::chathooks::drop_replies(self);
             } else {
@@ -824,6 +833,14 @@ impl Game {
             section!("every_second", self.every_second());
         }
         section!("flush", self.net.flush());
+    }
+
+    /// The new bank of a flip failed and this one goes on: the time it stood since its last tick is
+    /// not the world's, whatever its length.
+    pub fn resume_after_stand(&mut self) {
+        let clock = self.clock();
+        self.paused += clock - self.last_clock;
+        self.last_clock = clock;
     }
 
     fn every_second(&mut self) {
@@ -992,6 +1009,80 @@ pub mod tests {
         game.players_rpc(client, "PlayerMainController.PlayerReadyServerRpc", &Args(vec![json!(0), json!(name)]));
         assert!(game.clients[&client].ready.is_some());
         object
+    }
+
+    /// A stall (SIGSTOP, a long save, a GC-like gap of the loop) is not game time past one frame, as
+    /// in Unity (Time.maximumDeltaTime): after a gap of any length the world is exactly where one
+    /// third of a second after the last tick leaves it: the same game time, network tick, player
+    /// gauges and terraformation, no fast-forward and no 40x drain while the gauges catch up.
+    #[test]
+    fn a_stall_of_the_loop_is_not_game_time_past_one_frame() {
+        let setup = || {
+            let mut g = test_game(save())?;
+            let ann = join(&mut g, 1, "Ann");
+            // Two seconds of the game in frames of 50 ms.
+            for i in 1..=40 {
+                g.sim_time = Some(f64::from(i) * 0.05);
+                g.tick();
+            }
+            Some((g, ann))
+        };
+        let Some((control, ann)) = setup() else { return };
+        let after = |gap: f64, later: &dyn Fn(&mut Game)| {
+            let (mut g, _) = setup().unwrap();
+            g.sim_time = Some(2.0 + gap);
+            g.tick();
+            later(&mut g);
+            g
+        };
+        let more = |g: &mut Game| {
+            // (Not on a whole tick of the network: the stalled clocks differ from the control's by
+            // a rounding that a tick boundary would show.)
+            for _ in 0..40 {
+                g.sim_time = Some(g.sim_time.unwrap() + 0.0501);
+                g.tick();
+            }
+        };
+        let seen = |g: &Game| (g.time, g.tick_number(), crate::gauges::values(g, ann), crate::units::value(g, crate::units::Kind::Terraformation, 0));
+        // The reference: one frame of exactly the longest a frame may be.
+        let one_frame = after(crate::clock::MAX_FRAME, &more);
+        assert!((one_frame.time.secs() - (2.0 + crate::clock::MAX_FRAME + 2.004)).abs() < 1e-3, "{}", one_frame.time);
+        for gap in [0.34, 1.5, 10.0, 600.0, 86_400.0] {
+            let g = after(gap, &more);
+            assert_eq!(seen(&g), seen(&one_frame), "a gap of {gap} s");
+        }
+        // A frame shorter than the limit counts whole; the world is not slowed otherwise.
+        let short = after(0.3, &more);
+        assert!((short.time.secs() - (2.0 + 0.3 + 2.004)).abs() < 1e-3, "{}", short.time);
+        let before = seen(&control);
+        assert!((before.0.secs() - 2.0).abs() < 1e-3);
+    }
+
+    /// The new bank of a flip failed and the old one goes on: the time it stood is not the world's,
+    /// whatever its length, and the network tick does not jump.
+    #[test]
+    fn the_stand_of_a_failed_flip_is_not_game_time() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        for i in 1..=20 {
+            g.sim_time = Some(f64::from(i) * 0.05);
+            g.tick();
+        }
+        let (time, tick) = (g.time, g.tick_count());
+        // The snapshot is taken and the front decides: 0.3 s later (under a frame) the old bank resumes.
+        g.sim_time = Some(1.3);
+        g.resume_after_stand();
+        assert_eq!((g.time, g.tick_count()), (time, tick), "the clock of the tick stands as it was");
+        g.sim_time = Some(1.35);
+        g.tick();
+        assert!((g.time.secs() - (time.secs() + 0.05)).abs() < 1e-3, "the first frame after is a normal one: {}", g.time);
+        // And again after a stand much longer than a frame.
+        let time = g.time;
+        g.sim_time = Some(31.35);
+        g.resume_after_stand();
+        g.sim_time = Some(31.40);
+        g.tick();
+        assert!((g.time.secs() - (time.secs() + 0.05)).abs() < 1e-3, "{}", g.time);
     }
 
     /// ConnectionRequest: another game version, another session's invite code, a refused

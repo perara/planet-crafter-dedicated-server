@@ -194,7 +194,7 @@ Experiments that found nothing (kept for the record, no finding):
   recover; 3 million garbage datagrams: no panic, no growth.
 * **Stress**: 16,000 RPC/s and 40 players on 16 places: loops under 10 ms. A drone farm of 200
   drones for one game hour: flat memory, worst tick 15 ms.
-* **Time**: UTC stamps for 400 years, the bank stopped for 30, 120 and 600 s: game time catches up.
+* **Time**: UTC stamps for 400 years, the bank stopped for 30, 120 and 600 s: game time caught up (changed after 0.7.0: a stall is a third of a second of game time at most, as in the game; see clock.md).
 
 Not covered: the Steam transport and invite codes, a real Unity client for D5, the hourly update
 check against a real service, and S3 against a real bucket (a fake endpoint answered).

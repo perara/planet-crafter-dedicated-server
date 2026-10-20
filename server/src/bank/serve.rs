@@ -156,7 +156,10 @@ impl Bank {
                 self.link.send_fd(ipc::SNAPSHOT, n, &msg::body(&head), Some(fd));
                 // The world stays in memory until the new bank runs.
                 match self.link.recv() {
-                    Some(f) if f.kind == ipc::RESUME => println!("bank: resumed, the new bank failed"),
+                    Some(f) if f.kind == ipc::RESUME => {
+                        game.resume_after_stand();
+                        println!("bank: resumed, the new bank failed")
+                    }
                     Some(f) if f.kind == ipc::EXIT => {
                         settle(game, true);
                         std::process::exit(0)

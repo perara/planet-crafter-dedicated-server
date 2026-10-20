@@ -216,12 +216,20 @@ hour are those of the parent: 15c299165b6b3eb0 (walking) and 4e119fd2aacba604 (a
   is the +14% one for as long as a session lasts; here it is so for the first hour of a run and nominal
   after. If an operator would rather have the nominal rate from the first tick, `add_young` is the one place that
   says otherwise (the first hour's fingerprints would change with it).
-* **A jump of the clock is caught up, not dropped.** A bank stopped for ten minutes (SIGSTOP) gets ten minutes
-  of game time at its next tick: the units take their steps at once (in one sum), every other timer
-  fires once and sets its next due time from now, the gauges take their 0.2 s steps one per tick until
-  they have caught up (the game's coroutine does the same, and Unity bounds the jump to 0.33 s a frame, which this
-  server does not). Dropping a stall is a decision about the world's rules (a paused server would not drain a
-  player's oxygen), not about the clock; `world.pauseWhenEmpty` and the admin's pause are the tools for it.
+* **A stall is not game time past one frame, as in the game.** Unity bounds a frame to
+  `Time.maximumDeltaTime` (a third of a second): across a hitch the game's time goes on by that much and no more.
+  So does this server's (`clock::MAX_FRAME`, applied in `Game::tick`): a bank stopped for ten seconds or ten minutes
+  (SIGSTOP, a long save, a busy host) gets a third of a second of game time at its next tick, the rest stands like a
+  pause (`Game::paused`). Nothing fast-forwards, no timer is due for it, and the gauges do not drain 40 times as
+  fast while they catch up. Measured by `game::tests::a_stall_of_the_loop_is_not_game_time_past_one_frame` (the world
+  after a gap of 0.34 s, 1.5 s, 10 s, 10 min or a day is the world after a frame of a third of a second: the same
+  game time, network tick, oxygen and water); before, a gap of 10 s was 10 s of game time, 420 network ticks and 11
+  points of oxygen gone in the two seconds after, and 10 min was 604 s. A loop gap of a second or more is logged.
+  A hot flip's stand is not game time either: the new bank takes the clock as it stood when the snapshot was made
+  (`started` is written as an age), and the old bank that is told to go on after a failed flip takes the time it
+  stood off the clock (`Game::resume_after_stand`). The first hour's floats, the bench fingerprints and the
+  handoff proof are untouched (the bench steps its clock by 5 ms; the limit is never reached). `world.pauseWhenEmpty`
+  and the admin's pause are the world's rules for standing still on purpose.
 * **Network ticks past 828 days** wrap on the wire (above). A client that has been connected through the wrap
   re-syncs its time once (0.2 s hard reset); transforms sent by the server with a tick that goes back by 2^32
   are what the game's own clients would receive if the game's tick wrapped. Not tested with a real client.

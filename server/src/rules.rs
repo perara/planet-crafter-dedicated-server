@@ -782,7 +782,7 @@ mod tests {
         // Off again while empty: the world goes on.
         g.disconnect(2);
         g.rules.world.pause_when_empty = false;
-        run(&mut g, 1.0, 0.5);
+        run(&mut g, 1.0, 0.25);
         assert!((g.time.secs() - (held.secs() + 32.0)).abs() < 1e-3, "{}", g.time);
     }
 
