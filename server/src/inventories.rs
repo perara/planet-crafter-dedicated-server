@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 
 use serde_json::json;
 
+use crate::clock::GameTime;
 use crate::game::{Args, Game};
 use crate::model::Inventory;
 use crate::net::Target;
@@ -56,7 +57,7 @@ impl Game {
             if reset_position {
                 w.reset_position();
             }
-            w.lock_time = 0.0;
+            w.lock_time = GameTime::ZERO;
         }
         true
     }
@@ -630,7 +631,7 @@ impl Game {
                 for wo in self.inventories.get(&inv).map(|i| i.items.clone()).unwrap_or_default() {
                     if let Some(w) = self.wos.get_mut(&wo) {
                         if !locked || !w.is_locked_in_inventory(time) {
-                            w.lock_time = if locked { until } else { 0.0 };
+                            w.lock_time = if locked { until } else { GameTime::ZERO };
                         }
                     }
                 }

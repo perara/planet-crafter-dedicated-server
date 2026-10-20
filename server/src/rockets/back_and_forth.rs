@@ -6,6 +6,7 @@
 
 use serde_json::json;
 
+use crate::clock::GameTime;
 use crate::game::{Args, Game};
 use crate::net::{enc, Target, VarValue};
 
@@ -34,14 +35,14 @@ pub struct Machine {
     speed_multiplier: f32,
     /// The running UpdateGrowth coroutine: its wait (fixed when it starts) and next wake-up.
     period: f32,
-    next_update: Option<f32>,
+    next_update: Option<GameTime>,
     removed_from_logistics: bool,
     /// MachineRocketLand while it runs: the rocket's height above its landing spot.
     landing: Option<f32>,
     /// The GameObject is active (its world object is on the current planet).
     active: bool,
     /// RelaunchRocket coroutine (exchange).
-    relaunch_at: Option<f32>,
+    relaunch_at: Option<GameTime>,
 }
 
 fn kind_of(game: &Game, group: usize) -> Option<(Kind, f32)> {

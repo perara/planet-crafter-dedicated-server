@@ -4,6 +4,7 @@
 
 use serde_json::{json, Value};
 
+use crate::clock::{add_young, GameTime};
 use crate::data::stable_hash;
 use crate::game::Game;
 use crate::net::enc;
@@ -73,7 +74,9 @@ impl Kind {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Unit {
     pub kind: Kind,
-    pub total: f32,
+    /// The game's `_currentTotalValue` is a float; here an f64 that holds the float's values while
+    /// the clock is young (clock::add_young), so that a total of millions goes on growing after.
+    pub total: f64,
     pub per_sec: f32,
     pub increase: f32,
     pub decrease: f32,
@@ -85,11 +88,11 @@ pub struct Unit {
 
 impl Unit {
     fn new(kind: Kind, total: f32) -> Unit {
-        Unit { kind, total, per_sec: 0.0, increase: 0.0, decrease: 0.0, label: 0, previous_index: 0, force_reset: false, dirty: true }
+        Unit { kind, total: f64::from(total), per_sec: 0.0, increase: 0.0, decrease: 0.0, label: 0, previous_index: 0, force_reset: false, dirty: true }
     }
 
     fn bytes(&self) -> Vec<u8> {
-        [self.total.to_le_bytes(), self.per_sec.to_le_bytes(), self.increase.to_le_bytes(), self.decrease.to_le_bytes(), self.label.to_le_bytes()].concat()
+        [(self.total as f32).to_le_bytes(), self.per_sec.to_le_bytes(), self.increase.to_le_bytes(), self.decrease.to_le_bytes(), self.label.to_le_bytes()].concat()
     }
 
     fn set_label(&mut self, value: f64) {
@@ -117,13 +120,24 @@ impl Unit {
         }
     }
 
-    fn compute(&mut self, dt: f32, factor: f32) {
-        let previous = self.total;
-        self.total += self.per_sec * dt * factor;
-        if (previous - self.total).abs() > f32::EPSILON {
+    /// `steps` calls of the game's Compute(dt, factor) at game time `now`. Each is a float sum
+    /// while the clock is young; from then on the total is an f64 and the steps, which all add the
+    /// same, are one sum.
+    fn compute(&mut self, steps: u64, dt: f32, factor: f32, now: GameTime) {
+        let previous = self.total as f32;
+        let delta = self.per_sec * dt * factor;
+        if now.secs() < crate::clock::EXACT_AFTER {
+            for _ in 0..steps {
+                self.total = add_young(self.total, delta, now);
+            }
+        } else {
+            self.total += steps as f64 * f64::from(delta);
+        }
+        // Dirty when the float the clients get moved: a total of millions moves in its steps.
+        if (previous - self.total as f32).abs() > f32::EPSILON {
             self.dirty = true;
         }
-        self.set_label(self.total as f64);
+        self.set_label(self.total);
     }
 
     fn is_increasing(&self) -> bool {
@@ -152,13 +166,10 @@ pub struct Units {
     /// The game's is a float, which stops counting at 2^24 changes (the units would then never
     /// be recounted); a u64 does not.
     pub constructed_index: u64,
-    next_compute: f32,
-    next_define: f32,
-    /// The same due times in f64 once the game clock is past EXACT_AFTER (see `advance`).
-    late_compute: Option<f64>,
-    late_define: Option<f64>,
+    next_compute: GameTime,
+    next_define: GameTime,
     /// The terraformation totals _unitSysTerraformation was last made from (bits).
-    sys_from: Option<Vec<u32>>,
+    sys_from: Option<Vec<u64>>,
 }
 
 impl Units {
@@ -207,6 +218,9 @@ pub fn create(game: &mut Game, planet_id: &str, state: Option<&Value>) {
 }
 
 pub fn init(game: &mut Game) {
+    // The steps begin where the clock stands (a game that starts late, as the time-travel tests').
+    game.units.next_define = game.time;
+    game.units.next_compute = game.time;
     for planet in game.save.planets.clone() {
         if let Some(id) = planet["planetId"].as_str() {
             create(game, id, Some(&planet));
@@ -342,43 +356,27 @@ fn multiplayer_factor(game: &Game, kind: Kind) -> f32 {
     1.0 / (1.0 + (players as f32 - 1.0) * modifier)
 }
 
-/// After this many game seconds a fixed-step due time (every 0.1 s, every 1 s) is kept in f64.
-/// In f32 the sum next + 0.1 rounds to a multiple of the clock's resolution: from 6 days of
-/// uptime a 0.1 s step is really 0.125 s (the world runs at 80% speed), and from 2^21 s (24
-/// days) it adds nothing, so a catch-up loop `while now >= next` never ends and the bank hangs.
-/// Below it the f32 arithmetic is kept exactly (the bench fingerprints depend on it).
-pub const EXACT_AFTER: f32 = 3600.0;
-
-/// Whether the due time `next` (and its f64 form `late`, once the clock is old) has come.
-pub fn is_due(next: f32, late: Option<f64>, now: f32) -> bool {
-    late.map_or(now >= next, |l| now as f64 >= l)
-}
-
-/// The due time after one more `step`: f32 while the clock is young, f64 after.
-pub fn advance(next: &mut f32, late: &mut Option<f64>, now: f32, step: f64) {
-    if late.is_none() && now < EXACT_AFTER {
-        *next += step as f32;
-    } else {
-        *late = Some(late.unwrap_or(*next as f64) + step);
-    }
-}
+/// The passes of define that change anything: Oxygen, Heat and Pressure read the energy of the
+/// previous pass, Terraformation reads Biomass and Purification of it, and everything else settles
+/// in the first, so a third pass is the second. A jump of the clock (days with the bank stopped)
+/// runs these and not a pass per second of the jump.
+const DEFINE_PASSES: u64 = 3;
 
 pub fn tick(game: &mut Game) {
     let now = game.time;
-    while is_due(game.units.next_define, game.units.late_define, now) {
-        let u = &mut game.units;
-        advance(&mut u.next_define, &mut u.late_define, now, 1.0);
+    let defines = game.units.next_define.take_due(now, 1.0);
+    for _ in 0..defines.min(DEFINE_PASSES) {
         for i in 0..game.units.planets.len() {
             define(game, i);
         }
     }
-    while is_due(game.units.next_compute, game.units.late_compute, now) {
-        let u = &mut game.units;
-        advance(&mut u.next_compute, &mut u.late_compute, now, 0.1);
-        for i in 0..game.units.planets.len() {
-            for k in 0..KINDS.len() {
-                let factor = multiplayer_factor(game, KINDS[k]);
-                game.units.planets[i].units[k].compute(0.1, factor);
+    let computes = game.units.next_compute.take_due(now, 0.1);
+    if computes > 0 {
+        // The same for all steps of the tick: nothing changes between them.
+        let factors: Vec<f32> = KINDS.iter().map(|k| multiplayer_factor(game, *k)).collect();
+        for p in game.units.planets.iter_mut() {
+            for (u, factor) in p.units.iter_mut().zip(&factors) {
+                u.compute(computes, 0.1, *factor, now);
             }
         }
     }
@@ -408,7 +406,7 @@ pub fn tick(game: &mut Game) {
 pub fn system_terraformation(game: &Game) -> Vec<u8> {
     let mut total = 0.0f64;
     for p in &game.units.planets {
-        let v = p.get(Kind::Terraformation).total as f64;
+        let v = p.get(Kind::Terraformation).total;
         total = if total < f64::EPSILON { v } else { total * v.max(1.0) };
     }
     let label = if total > 0.0 { (total.log(1000.0).floor() as i32).clamp(0, 36) } else { 0 };
@@ -418,7 +416,7 @@ pub fn system_terraformation(game: &Game) -> Vec<u8> {
 /// A unit's value on a planet (0 = current planet).
 pub fn value(game: &Game, kind: Kind, planet: i32) -> f64 {
     let planet = if planet == 0 { game.planet_hash() } else { planet };
-    game.units.planet(planet).map(|p| p.get(kind).total as f64).unwrap_or(0.0)
+    game.units.planet(planet).map(|p| p.get(kind).total).unwrap_or(0.0)
 }
 
 /// SetAndGetPlanetStateValues: one JsonablePlanetState per unlocked planet.
@@ -427,7 +425,7 @@ pub fn planet_states(game: &Game) -> Vec<Value> {
         .planets
         .iter()
         .map(|p| {
-            let v = |k: Kind| crate::model::JsonFloat(p.get(k).total);
+            let v = |k: Kind| crate::model::JsonFloat(p.get(k).total as f32);
             json!({
                 "planetId": p.id,
                 "unitOxygenLevel": v(Kind::Oxygen),
@@ -467,7 +465,7 @@ mod tests {
         join(&mut g, 1, "Ann");
         place(&mut g, "Heater1", [570.0, 3.0, 500.0]);
         place(&mut g, "EnergyGenerator1", [575.0, 3.0, 500.0]);
-        let heater = g.data.groups[g.data.group("Heater1").unwrap()].unit("Heat");
+        let heater = f64::from(g.data.groups[g.data.group("Heater1").unwrap()].unit("Heat"));
         let run = |g: &mut Game, seconds: f32| {
             let end = g.time + seconds;
             while g.time < end {
@@ -476,14 +474,14 @@ mod tests {
             }
         };
         run(&mut g, 1.2);
-        assert!((unit(&g, Kind::Heat).per_sec - heater).abs() < 1e-6, "{} per s", unit(&g, Kind::Heat).per_sec);
+        assert!((f64::from(unit(&g, Kind::Heat).per_sec) - heater).abs() < 1e-6, "{} per s", unit(&g, Kind::Heat).per_sec);
         assert!(unit(&g, Kind::Energy).is_increasing());
         let before = unit(&g, Kind::Heat).total;
         run(&mut g, 10.0);
         let alone = unit(&g, Kind::Heat).total - before;
         assert!((alone - 10.0 * heater).abs() < 0.2 * heater, "{alone}");
         let t = unit(&g, Kind::Terraformation);
-        assert!(t.total >= unit(&g, Kind::Heat).total && t.per_sec >= heater);
+        assert!(t.total >= unit(&g, Kind::Heat).total && f64::from(t.per_sec) >= heater);
         // Two players: 1 / (1 + 0.5) as fast. Energy is not scaled.
         join(&mut g, 2, "Bob");
         let before = unit(&g, Kind::Heat).total;
@@ -495,47 +493,11 @@ mod tests {
         let object = g.units.planet(g.planet_hash()).unwrap().object;
         assert_eq!(var(&g, object, "WorldUnitsPlanet", "_unitHeat"), unit(&g, Kind::Heat).bytes());
         let level = g.snapshot().planets.into_iter().find(|p| p["planetId"] == "Prime").unwrap()["unitHeatLevel"].as_f64().unwrap();
-        assert!((level as f32 - unit(&g, Kind::Heat).total).abs() < 1e-3);
+        assert!((f64::from(level as f32) - unit(&g, Kind::Heat).total).abs() < 1e-3);
         let (handler, _) = g.net.find_class("WorldUnitsHandler").unwrap();
         assert_eq!(var(&g, handler, "WorldUnitsHandler", "_unitSysTerraformation"), system_terraformation(&g));
         // As the real host sends it: no value, only the label of the product.
         assert_eq!(system_terraformation(&g)[..16], [0; 16]);
-    }
-
-    /// After weeks of uptime the clock is still counted in steps of 0.1 s: an f32 "next due" that
-    /// adds 0.1 stops moving at 2^21 s (24 days), and tick then looped for ever.
-    #[test]
-    fn units_keep_growing_at_their_rate_after_a_month_of_uptime() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        // A thread: with the bug tick never returns, and this test must fail, not hang. The game
-        // is made inside it (it holds the plugin runtimes, which are not Send).
-        std::thread::spawn(move || {
-            let Some(mut g) = crate::game::test_game(save()) else { return };
-            join(&mut g, 1, "Ann");
-            place(&mut g, "Heater1", [570.0, 3.0, 500.0]);
-            place(&mut g, "EnergyGenerator1", [575.0, 3.0, 500.0]);
-            let heater = g.data.groups[g.data.group("Heater1").unwrap()].unit("Heat");
-            let start = 2_600_000.0f32;
-            g.time = start;
-            g.units.next_define = start as _;
-            g.units.next_compute = start as _;
-            for _ in 0..100 {
-                g.time += 0.5;
-                tick(&mut g);
-            }
-            let before = unit(&g, Kind::Heat).total;
-            for _ in 0..400 {
-                g.time += 0.5;
-                tick(&mut g);
-            }
-            let _ = tx.send((unit(&g, Kind::Heat).total - before, heater));
-        });
-        // Without tables the thread ends having sent nothing.
-        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
-            Ok((grown, heater)) => assert!((grown - 200.0 * heater).abs() < 0.02 * 200.0 * heater, "{grown} in 200 s at {heater} per s"),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
-            Err(e) => panic!("tick did not return: {e}"),
-        }
     }
 
     /// Unpowered, oxygen, heat and pressure stop; a planet's levels load from the save, with
@@ -555,89 +517,99 @@ mod tests {
         assert_eq!(unit(&g, Kind::Energy).per_sec, unit(&g, Kind::Energy).decrease, "the heater only uses energy");
     }
 
-    /// The 0.1 s and 1 s due times keep their pace for as long as the server runs: in f32 a 0.1 s
-    /// step was 0.125 s from 6 days of uptime (the world at 80% speed) and nothing at all from
-    /// 2^21 s (24 days), where `while now >= next` never ended and the bank hung.
+    /// A world with Ann, a heater and a generator, at game time `start`, its first define done.
+    fn heated_at(start: f64) -> Option<(Game, f32)> {
+        let mut g = crate::game::test_game(save())?;
+        join(&mut g, 1, "Ann");
+        place(&mut g, "Heater1", [570.0, 3.0, 500.0]);
+        place(&mut g, "EnergyGenerator1", [575.0, 3.0, 500.0]);
+        let heater = g.data.groups[g.data.group("Heater1").unwrap()].unit("Heat");
+        g.time = GameTime::at(start);
+        g.units.next_define = g.time;
+        g.units.next_compute = g.time;
+        tick(&mut g);
+        Some((g, heater))
+    }
+
+    fn run(g: &mut Game, seconds: f64, step: f64) {
+        let end = g.time.secs() + seconds;
+        while g.time.secs() < end {
+            g.time = GameTime::at(g.time.secs() + step);
+            tick(g);
+        }
+    }
+
+    /// The totals grow at the buildings' rate however long the server has run: in the game's
+    /// float the 0.1 s step was 0.125 s from 6 days of uptime (the world at 80% speed) and nothing
+    /// from 2^21 s (24 days), where the catch-up loop never ended and the bank hung; and a total
+    /// of millions stops growing at all (at 17.5 a second: 36 days).
     #[test]
-    fn fixed_step_timers_keep_their_pace_after_weeks_of_uptime() {
-        for days in [0.0f64, 0.04, 2.0, 7.0, 13.0, 30.0, 60.0, 150.0, 220.0] {
-            let base = days * 86_400.0;
-            let (mut next, mut late) = (base as f32, None);
-            let mut steps = 0i64;
-            // 600 s of game time in 5 ms frames of the f32 clock, as tick() sees it.
-            for frame in 1..=120_000u64 {
-                let now = (base + frame as f64 * 0.005) as f32;
-                let mut catching_up = 0;
-                while is_due(next, late, now) {
-                    advance(&mut next, &mut late, now, 0.1);
-                    steps += 1;
-                    catching_up += 1;
-                    assert!(catching_up < 10_000, "stuck at {days} days");
+    fn units_grow_at_their_rate_whatever_the_uptime() {
+        for days in [0.0, 0.04, 1.0, 3.0, 7.0, 25.0, 60.0, 200.0, 400.0] {
+            let Some((mut g, heater)) = heated_at(days * 86_400.0) else { return };
+            run(&mut g, 2.0, 0.07);
+            let before = unit(&g, Kind::Heat).total;
+            run(&mut g, 60.0, 0.07);
+            let grown = unit(&g, Kind::Heat).total - before;
+            // The tenth of a second in progress at either end is all the slack there is.
+            assert!((grown - 60.0 * f64::from(heater)).abs() <= 0.1 * f64::from(heater) + 1e-3, "{days} days: {grown} in 60 s at {heater} per s");
+        }
+    }
+
+    /// A planet whose total is in the millions keeps growing by its steps (the float's step there
+    /// is bigger than twice one), however long the server has run or since it was started.
+    #[test]
+    fn a_total_of_millions_keeps_growing() {
+        for start in [10.0, 7200.0, 30.0 * 86_400.0] {
+            let Some((mut g, heater)) = heated_at(start) else { return };
+            // The float's step at 40 million is 4: a tenth of a second of the heater's rate is far under half of it.
+            let planet = g.planet_hash();
+            g.units.planet_mut(planet).unwrap().units.iter_mut().filter(|u| u.kind == Kind::Heat).for_each(|u| u.total = 40_000_000.0);
+            run(&mut g, 60.0, 0.07);
+            let grown = unit(&g, Kind::Heat).total - 40_000_000.0;
+            assert!((grown - 60.0 * f64::from(heater)).abs() <= 0.1 * f64::from(heater) + 1e-6, "starting at {start} s: {grown} in 60 s at {heater} a second");
+        }
+    }
+
+    /// A jump of the clock (a stopped process, a stall) costs a few passes, not a pass per tenth
+    /// of a second of the jump (it was 14 CPU minutes for 3 days), and the totals have grown by the
+    /// whole jump.
+    #[test]
+    fn a_jump_of_the_clock_is_one_catch_up() {
+        for start in [100.0, 4000.0, 30.0 * 86_400.0] {
+            let Some((mut g, heater)) = heated_at(start) else { return };
+            run(&mut g, 2.0, 0.07);
+            let before = unit(&g, Kind::Heat).total;
+            let jump = if start < 1000.0 { 600.0 } else { 3.0 * 86_400.0 };
+            let began = std::time::Instant::now();
+            g.time = GameTime::at(g.time.secs() + jump);
+            tick(&mut g);
+            let grown = unit(&g, Kind::Heat).total - before;
+            if start >= 1000.0 {
+                assert!(began.elapsed() < std::time::Duration::from_secs(1), "{:?} for a jump of {jump} s", began.elapsed());
+                assert!((grown - jump * f64::from(heater)).abs() <= 0.1 * f64::from(heater) + 1e-6 * jump * f64::from(heater), "{grown} in {jump} s at {heater}");
+            }
+        }
+    }
+
+    /// The passes `tick` makes for a jump are all that change anything: more of them leave the
+    /// units as they are (the rates of every unit, whatever order they read each other in).
+    #[test]
+    fn three_define_passes_are_all_there_are() {
+        let mut states = Vec::new();
+        for passes in 1..=6 {
+            let Some((mut g, _)) = heated_at(10.0) else { return };
+            // A building came and the free-craft setting changed: every kind has something to redo.
+            place(&mut g, "Heater1", [580.0, 3.0, 500.0]);
+            place(&mut g, "Beehive1", [585.0, 3.0, 500.0]);
+            g.save.settings["freeCraft"] = json!(true);
+            for _ in 0..passes {
+                for i in 0..g.units.planets.len() {
+                    define(&mut g, i);
                 }
             }
-            // 6000 steps, less what the clock's resolution still hides at the end.
-            let resolution = f64::from(libm_spacing(base as f32)) / 0.1;
-            assert!((steps - 6000).abs() as f64 <= resolution + 2.0, "{days} days: {steps} steps in 600 s");
+            states.push(crate::bincodec::to_vec(&g.units).unwrap());
         }
-    }
-
-    /// The first hour is the game's own f32 sum, step by step (the bench's fingerprint depends on it).
-    #[test]
-    fn the_first_hour_adds_in_f32_as_the_game_does() {
-        let (mut next, mut late, mut f32_next) = (0.0f32, None, 0.0f32);
-        for i in 1..4000 {
-            let now = i as f32 * 0.05;
-            let mut by_hand = 0;
-            while now >= f32_next {
-                f32_next += 0.1;
-                by_hand += 1;
-            }
-            let mut ours = 0;
-            while is_due(next, late, now) {
-                advance(&mut next, &mut late, now, 0.1);
-                ours += 1;
-            }
-            assert_eq!(ours, by_hand, "at {now}");
-        }
-    }
-
-    fn libm_spacing(x: f32) -> f32 {
-        f32::from_bits(x.to_bits() + 1) - x
-    }
-
-    /// The same in the game: the totals grow at the buildings' rate 30 days in, and tick returns.
-    #[test]
-    fn units_grow_at_their_rate_after_a_month_of_uptime() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let outcome = std::panic::catch_unwind(|| {
-                let Some(mut g) = crate::game::test_game(save()) else { return None };
-                join(&mut g, 1, "Ann");
-                place(&mut g, "Heater1", [570.0, 3.0, 500.0]);
-                place(&mut g, "EnergyGenerator1", [575.0, 3.0, 500.0]);
-                let heater = g.data.groups[g.data.group("Heater1").unwrap()].unit("Heat");
-                let start = 30.0 * 86_400.0f32;
-                g.time = start;
-                g.units.next_compute = start;
-                g.units.next_define = start;
-                let run = |g: &mut Game, seconds: f32| {
-                    let end = g.time + seconds;
-                    while g.time < end {
-                        g.time += 0.5;
-                        tick(g);
-                    }
-                };
-                run(&mut g, 2.0);
-                let before = unit(&g, Kind::Heat).total;
-                run(&mut g, 60.0);
-                Some((unit(&g, Kind::Heat).total - before, heater))
-            });
-            let _ = tx.send(outcome);
-        });
-        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
-            Ok(Ok(Some((grown, heater)))) => assert!((grown - 60.0 * heater).abs() < 0.05 * 60.0 * heater, "{grown} in 60 s at {heater}/s"),
-            Ok(Ok(None)) => {}
-            other => panic!("units::tick did not finish 30 days into the game: {other:?}"),
-        }
+        assert!(states[2..].iter().all(|s| *s == states[2]), "more than three passes changed the units");
     }
 }

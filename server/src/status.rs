@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
+use crate::clock::GameTime;
 use crate::game::Game;
 use crate::net::{enc, Target, VarValue};
 
@@ -15,7 +16,7 @@ const LOSE_CHANCE: f32 = 50.0;
 
 /// When each dying player started dying.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
-pub struct Status(pub HashMap<u64, f32>);
+pub struct Status(pub HashMap<u64, GameTime>);
 
 fn var(game: &Game, object: u64, name: &str) -> bool {
     matches!(game.net.get(object, CLASS, name), Some(VarValue::Plain(b)) if b.first() == Some(&1))

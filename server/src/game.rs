@@ -194,8 +194,8 @@ pub struct Game {
     pub all_time_tokens: HashMap<u64, u64>,
     /// Index of the current planet in net_data.planets.
     pub planet: usize,
-    /// Seconds since start (the game's Time.time).
-    pub time: f32,
+    /// Seconds since start (the game's Time.time; clock.rs: its float below an hour, exact after).
+    pub time: crate::clock::GameTime,
     #[serde(with = "crate::handoff::instant")]
     pub started: std::time::Instant,
     /// A fixed clock (seconds since start) for benchmarks; None: the real one.
@@ -228,7 +228,7 @@ pub struct Game {
     pub rules_path: Option<String>,
     /// The invite code's last 4 digits (SavedDataHandler.sessionId).
     pub session_number: u32,
-    next_time_sync: f32,
+    next_time_sync: crate::clock::GameTime,
     #[serde(skip)]
     unhandled: std::collections::HashSet<String>,
     /// Clients refused a change to another player's inventory (logged once each).
@@ -333,7 +333,7 @@ impl Game {
             total_crafted: HashMap::new(),
             all_time_tokens: HashMap::new(),
             planet,
-            time: 0.0,
+            time: crate::clock::GameTime::ZERO,
             started: std::time::Instant::now(),
             sim_time: None,
             paused: 0.0,
@@ -351,7 +351,7 @@ impl Game {
             rules: Default::default(),
             rules_path: None,
             session_number: 4242,
-            next_time_sync: 0.0,
+            next_time_sync: crate::clock::GameTime::ZERO,
             unhandled: Default::default(),
             misrouted: Default::default(),
             refused_inventories: Default::default(),
@@ -360,6 +360,9 @@ impl Game {
             load_water: None,
         };
         game.sim_time = sim_time;
+        // A clock that starts late (the time-travel tests' old worlds): the world begins at it.
+        game.last_clock = sim_time.unwrap_or(0.0);
+        game.time = crate::clock::GameTime::at(game.last_clock);
         game.change_generation_for_groups();
         game.crafted_total = game.save.stats["craftedObjects"].as_u64().unwrap_or(0);
         game.load();
@@ -379,8 +382,17 @@ impl Game {
         self.sim_time.unwrap_or_else(|| self.started.elapsed().as_secs_f64())
     }
 
+    /// Network ticks since the game started, in 64 bits: nothing that counts them stops.
+    pub fn tick_count(&self) -> u64 {
+        ((self.clock() - self.paused) * self.net_data.tick_rate as f64) as u64
+    }
+
+    /// The tick as the game's int (NetworkTime.Tick): the same up to 2^31 ticks (828 days at 30
+    /// a second), then the low 32 bits, wrapping as an unchecked int does. The game's own
+    /// `(int)double` there is out of range and stays at one value for good; here the clients'
+    /// time sync (a hard reset when the server time jumps by 0.2 s) takes the wrap as a jump.
     pub fn tick_number(&self) -> i32 {
-        ((self.clock() - self.paused) * self.net_data.tick_rate as f64) as i32
+        self.tick_count() as i32
     }
 
     /// SavedDataHandler.LoadSavedData: world objects, inventories, planets, players; then the
@@ -772,7 +784,7 @@ impl Game {
             self.net.flush();
             return;
         }
-        self.time = (clock - self.paused) as f32;
+        self.time = crate::clock::GameTime::at(clock - self.paused);
         self.advanced = true;
         section!("scene", crate::scene::tick(self));
         if self.time >= self.next_time_sync {

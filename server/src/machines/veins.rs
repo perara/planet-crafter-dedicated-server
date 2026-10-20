@@ -5,6 +5,7 @@
 
 use serde_json::Value;
 
+use crate::clock::GameTime;
 use crate::game::Game;
 use crate::geometry::{conj, rotate, sub};
 
@@ -31,7 +32,7 @@ pub struct State {
     planet: usize,
     /// None: the planet has no scene dump (a DLC planet), or a test without veins.
     veins: Option<Vec<Vein>>,
-    next_check: f32,
+    next_check: GameTime,
 }
 
 impl Vein {
@@ -78,7 +79,7 @@ fn load(game: &Game) -> Option<Vec<Vein>> {
 pub fn ensure(game: &mut Game) {
     if game.ext.machines.veins.as_ref().map(|v| v.planet) != Some(game.planet) {
         let veins = load(game);
-        game.ext.machines.veins = Some(State { planet: game.planet, veins, next_check: 0.0 });
+        game.ext.machines.veins = Some(State { planet: game.planet, veins, next_check: GameTime::ZERO });
     }
     let s = game.ext.machines.veins.as_ref().unwrap();
     if game.time >= s.next_check {
@@ -180,7 +181,7 @@ pub fn cast(game: &mut Game, wo: i32, f: &Value) {
 /// For tests of the rays' bookkeeping: the planet without veins.
 #[cfg(test)]
 pub fn without_veins(game: &mut Game) {
-    game.ext.machines.veins = Some(State { planet: game.planet, veins: None, next_check: f32::MAX });
+    game.ext.machines.veins = Some(State { planet: game.planet, veins: None, next_check: GameTime::NEVER });
 }
 
 #[cfg(test)]

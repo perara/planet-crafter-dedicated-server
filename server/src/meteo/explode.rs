@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::clock::GameTime;
 use crate::game::Game;
 use crate::idmap::{FxHashMap, FxHashSet};
 
@@ -25,8 +26,8 @@ pub struct Explode {
     exploded: HashSet<i32>,
     /// Explode._explodedSet: what any blast already reached.
     hit: HashSet<i32>,
-    pending: Vec<(f32, Step)>,
-    next_scan: f32,
+    pending: Vec<(GameTime, Step)>,
+    next_scan: GameTime,
 }
 
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -80,7 +81,7 @@ pub fn init(game: &mut Game) {
 }
 
 /// Restarts an explosive's countdown (StopAllCoroutines, StartCoroutine(ProcessExplosion)).
-fn arm(e: &mut Explode, wo: i32, net: u64, due: f32) {
+fn arm(e: &mut Explode, wo: i32, net: u64, due: GameTime) {
     e.pending.retain(|(_, s)| !matches!(s, Step::GoOff(w, _) if *w == wo));
     e.pending.push((due, Step::GoOff(wo, net)));
 }
@@ -198,7 +199,7 @@ mod tests {
         let far = place(&mut g, rock, [30.0, 0.0, 10.0]);
         let bomb_net = g.wos[&bomb].net.unwrap();
         let at = |g: &mut crate::game::Game, t: f32| {
-            g.time = t;
+            g.time = crate::clock::GameTime::at(f64::from(t));
             super::tick(g);
         };
         at(&mut g, 1.0);

@@ -557,7 +557,7 @@ acceptance test passed):
 
 ### The snapshot format and its versions
 
-A snapshot is a head line `{"format":5,"game_version":"2.103"}` and the state in the binary
+A snapshot is a head line `{"format":6,"game_version":"2.103"}` and the state in the binary
 codec of `bincodec.rs` (serde's data model with no names and no tags: a struct is its fields back
 to back; integers of two bytes and more, lengths and variants are LEB128, zigzag when signed;
 floats and bytes are fixed width; a float array that is all zeros is one byte; a `Value` is its

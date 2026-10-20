@@ -1,6 +1,7 @@
 //! SpaceCraft.RequireEnergyHandler, server side: whether each planet produces more energy than
 //! it uses decides whether its machines run; checked every 2 s and on every energy change.
 
+use crate::clock::GameTime;
 use crate::game::Game;
 use crate::units::Kind;
 
@@ -8,7 +9,7 @@ const CHECK_EVERY: f32 = 2.0;
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Energy {
-    next_check: f32,
+    next_check: GameTime,
 }
 
 /// Is a planet's energy balance positive (Energy unit increasing)?

@@ -149,7 +149,7 @@ fn stage_loot(game: &mut Game, stage: &str, multiplier: i32) -> Option<usize> {
 fn system_terraformation(game: &Game) -> f64 {
     let mut total = 0.0f64;
     for p in &game.units.planets {
-        let v = p.get(crate::units::Kind::Terraformation).total as f64;
+        let v = p.get(crate::units::Kind::Terraformation).total;
         total = if total < f64::EPSILON { v } else { total * v.max(1.0) };
     }
     total

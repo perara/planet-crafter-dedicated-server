@@ -606,7 +606,7 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
                 "planet": game.planet_id(),
                 "terraformation": terraformation,
                 "stages": crate::meteo::stages(game),
-                "gameTime": game.time,
+                "gameTime": game.time.secs(),
                 "units": planet_units,
                 "players": players,
                 "access": game.access.lists,

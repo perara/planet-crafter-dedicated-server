@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use crate::clock::GameTime;
 use crate::game::{Args, Game};
 use crate::net::{enc, VarValue};
 
@@ -15,9 +16,8 @@ const TICK: f32 = 0.2;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct State {
     pub client: u64,
-    pub next_tick: f32,
-    /// `next_tick` in f64 once the game clock is old (units::advance).
-    pub late_tick: Option<f64>,
+    /// When the next 0.2 s drain is due.
+    pub next_tick: GameTime,
     pub rebreather: bool,
     pub outside_oxygen: f32,
 }
@@ -95,7 +95,7 @@ pub fn start(game: &mut Game, client: u64, object: u64, gauges: [f32; 4], equipm
         }
     }
     let outside = -1.9 * drain(game) * game.rules.gauges.oxygen_drain;
-    game.ext.gauges.0.insert(object, State { client, next_tick: game.time, late_tick: None, rebreather, outside_oxygen: outside });
+    game.ext.gauges.0.insert(object, State { client, next_tick: game.time, rebreather, outside_oxygen: outside });
 }
 
 fn add(game: &mut Game, object: u64, var: &str, max: &str, delta: f32) {
@@ -147,13 +147,13 @@ fn outside_oxygen(game: &mut Game, object: u64, rebreather: bool) -> f32 {
 
 /// GaugesTick for every player due.
 pub fn tick(game: &mut Game) {
-    let due: Vec<(u64, State)> = game.ext.gauges.0.iter().filter(|(_, s)| crate::units::is_due(s.next_tick, s.late_tick, game.time)).map(|(o, s)| (*o, s.clone())).collect();
+    let due: Vec<(u64, State)> = game.ext.gauges.0.iter().filter(|(_, s)| game.time >= s.next_tick).map(|(o, s)| (*o, s.clone())).collect();
     for (object, mut s) in due {
         if !game.net.objects.contains_key(&object) {
             game.ext.gauges.0.remove(&object);
             continue;
         }
-        crate::units::advance(&mut s.next_tick, &mut s.late_tick, game.time, 0.2);
+        s.next_tick.advance(0.2);
         if !get_b(game, object, "_pauseConsumption") {
             s.outside_oxygen = outside_oxygen(game, object, s.rebreather);
             // PlayerEffects only live on the client that ate the food: no effect here.
@@ -298,8 +298,8 @@ mod tests {
     fn gauges_keep_their_rate_after_weeks_of_uptime() {
         let Some((mut g, ann)) = world() else { return };
         set(&mut g, ann, [100.0, 100.0, 100.0, 0.0]);
-        g.time = 5_000_000.0;
-        g.ext.gauges.0.get_mut(&ann).unwrap().next_tick = g.time as _;
+        g.time = crate::clock::GameTime::at(5_000_000.0);
+        g.ext.gauges.0.get_mut(&ann).unwrap().next_tick = g.time;
         for _ in 0..20 {
             g.time += 0.5;
             for _ in 0..15 {
@@ -336,7 +336,7 @@ mod tests {
         let stage = stage_value(&g, "noNeedForOxygenStage");
         let planet = g.planet_hash();
         let units = &mut g.units.planet_mut(planet).unwrap().units;
-        units.iter_mut().find(|u| u.kind == crate::units::Kind::Terraformation).unwrap().total = stage as f32 * 2.0;
+        units.iter_mut().find(|u| u.kind == crate::units::Kind::Terraformation).unwrap().total = stage * 2.0;
         g.net.set(ann, CLASS, "_playerIsUnderWater", enc::bool(true));
         let before = values(&g, ann)[0];
         let after = step(&mut g)[0];
@@ -356,21 +356,18 @@ mod tests {
     #[test]
     fn gauges_drain_at_their_pace_after_weeks_of_uptime() {
         let Some((mut g, ann)) = world() else { return };
-        for days in [0.0f64, 3.0, 8.0, 20.0, 30.0, 60.0, 200.0] {
+        for days in [0.0f64, 3.0, 8.0, 20.0, 30.0, 60.0, 200.0, 400.0] {
             let base = days * 86_400.0;
-            g.time = base as f32;
-            let s = g.ext.gauges.0.get_mut(&ann).unwrap();
-            s.next_tick = base as f32;
-            s.late_tick = None;
+            g.time = crate::clock::GameTime::at(base);
+            g.ext.gauges.0.get_mut(&ann).unwrap().next_tick = g.time;
             set(&mut g, ann, [100.0, 100.0, 100.0, 0.0]);
-            // 10 s in 5 ms frames of the f32 clock: 1.9 oxygen a second outside.
+            // 10 s in 5 ms frames: 1.9 oxygen a second outside.
             for frame in 1..=2000u64 {
-                g.time = (base + frame as f64 * 0.005) as f32;
+                g.time = crate::clock::GameTime::at(base + frame as f64 * 0.005);
                 tick(&mut g);
             }
             let drained = 100.0 - values(&g, ann)[0];
-            let resolution = f32::from_bits((base as f32).to_bits() + 1) - base as f32;
-            assert!((drained - 19.0).abs() <= 1.9 * resolution + 0.5, "{days} days: {drained} oxygen gone in 10 s, 19 expected");
+            assert!((drained - 19.0).abs() <= 1.9 * TICK + 1e-3, "{days} days: {drained} oxygen gone in 10 s, 19 expected");
         }
     }
 }

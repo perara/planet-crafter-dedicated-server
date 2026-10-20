@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Value};
 
+use crate::clock::GameTime;
 use crate::data::stable_hash;
 use crate::game::{Args, Game};
 use crate::idmap::Slots;
@@ -115,8 +116,8 @@ pub struct Logistics {
     paused: bool,
     enabled: bool,
     station_group: Option<usize>,
-    last_tick: i32,
-    next_tasks: f32,
+    last_tick: u64,
+    next_tasks: GameTime,
     inventories_inited: bool,
     /// SetLogisticTasks frames still to come: 1 assigns idle drones, 2 releases drones.
     updating: u8,
@@ -147,6 +148,13 @@ pub struct Logistics {
 
 fn tick_seconds(game: &Game) -> f32 {
     1.0 / game.net_data.tick_rate as f32
+}
+
+/// The game time of a network tick (the frame's `Time.time`): the float product of the tick and
+/// its length while the clock is young (the game's), the exact quotient after.
+fn tick_time(game: &Game, tick: u64) -> GameTime {
+    let young = tick as f32 * tick_seconds(game);
+    if f64::from(young) < crate::clock::EXACT_AFTER { GameTime::at(f64::from(young)) } else { GameTime::at(tick as f64 / game.net_data.tick_rate as f64) }
 }
 
 /// The GameObject's position, for a world object that has one.
@@ -278,8 +286,8 @@ pub fn init_late(game: &mut Game) {
         let demand = inv.logistic.demand.clone();
         inv.logistic.supply.retain(|g| !demand.contains(g));
     }
-    let tick = game.tick_number();
-    let now = tick as f32 * tick_seconds(game);
+    let tick = game.tick_count();
+    let now = tick_time(game, tick);
     let l = &mut game.ext.logistics;
     l.station_group = station_group;
     l.priorities = planets.into_iter().map(|p| (p, HashMap::new())).collect();
@@ -292,9 +300,9 @@ pub fn tick(game: &mut Game) {
     if !game.ext.logistics.started {
         return;
     }
-    let now = game.tick_number();
+    let now = game.tick_count();
     // ponytail: after a stall of over a second the frames in between are skipped, not replayed.
-    let mut t = game.ext.logistics.last_tick.max(now - game.net_data.tick_rate as i32);
+    let mut t = game.ext.logistics.last_tick.max(now.saturating_sub(u64::from(game.net_data.tick_rate)));
     while t < now {
         t += 1;
         game.ext.logistics.last_tick = t;
@@ -417,8 +425,9 @@ fn remove_first(list: &mut Vec<i32>, v: i32) {
 
 // ---- one frame ------------------------------------------------------------------------------
 
-fn frame(game: &mut Game, tick: i32) {
-    send_transforms(game, tick);
+fn frame(game: &mut Game, tick: u64) {
+    // The wire has the game's int tick (Game::tick_number).
+    send_transforms(game, tick as i32);
     update(game);
     for d in std::mem::take(&mut game.ext.logistics.check_busy) {
         check_busy(game, d);
@@ -428,7 +437,7 @@ fn frame(game: &mut Game, tick: i32) {
         2 => release_drones(game),
         _ => {}
     }
-    let now = tick as f32 * tick_seconds(game);
+    let now = tick_time(game, tick);
     if now >= game.ext.logistics.next_tasks {
         game.ext.logistics.next_tasks = now + TASKS_EVERY;
         tasks_coroutine(game);

@@ -3,6 +3,7 @@
 
 use serde_json::{json, Value};
 
+use crate::clock::GameTime;
 use crate::gamedata::{GameData, UNIT_TYPES};
 
 /// World objects with ids below this come with a planet's scene (WorldObjectsIdHandler).
@@ -32,11 +33,11 @@ pub struct WorldObject {
     pub trait_type: i32,
     pub trait_value: i32,
     pub hunger: f32,
-    pub pet_time: f32,
+    pub pet_time: GameTime,
     pub count: [i32; 2],
     pub linked_wo: i32,
     pub dont_save: bool,
-    pub lock_time: f32,
+    pub lock_time: GameTime,
     pub energy: f32,
     pub from_db: bool,
     pub planet: i32,
@@ -68,11 +69,11 @@ impl WorldObject {
             trait_type: 0,
             trait_value: 0,
             hunger: 0.0,
-            pet_time: 0.0,
+            pet_time: GameTime::ZERO,
             count: [0, 0],
             linked_wo: 0,
             dont_save: false,
-            lock_time: 0.0,
+            lock_time: GameTime::ZERO,
             energy: 1.0,
             from_db: false,
             planet: 0,
@@ -97,8 +98,8 @@ impl WorldObject {
         self.rotation = [0.0; 4];
     }
 
-    pub fn is_locked_in_inventory(&self, time: f32) -> bool {
-        time > self.lock_time && self.lock_time > 0.0
+    pub fn is_locked_in_inventory(&self, time: GameTime) -> bool {
+        time > self.lock_time && self.lock_time > GameTime::ZERO
     }
 
     pub fn unit_generation(&self, unit: usize) -> f32 {

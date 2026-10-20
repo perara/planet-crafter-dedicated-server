@@ -8,7 +8,7 @@ use crate::game::Game;
 impl World for Game {
     fn info(&self) -> WorldInfo {
         WorldInfo {
-            game_ms: (self.time as f64 * 1000.0) as i64,
+            game_ms: (self.time.secs() * 1000.0) as i64,
             planet: self.planet_id().to_string(),
             players: self.clients.values().filter(|c| c.ready.is_some()).count() as u32,
             world_objects: self.wos.len() as u32,

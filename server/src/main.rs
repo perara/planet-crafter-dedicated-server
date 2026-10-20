@@ -72,6 +72,7 @@ mod access;
 mod admin;
 mod bank;
 mod bincodec;
+mod clock;
 mod chathooks;
 mod cli;
 #[cfg(test)]

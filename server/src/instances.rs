@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Value};
 
+use crate::clock::GameTime;
 use crate::data::BehaviourDef;
 use crate::game::{Args, Game, PlayerState};
 use crate::gamedata::Layout;
@@ -76,9 +77,9 @@ pub struct State {
     /// _currentChoices: (seed, time left) per choice.
     pub choices: Vec<(i32, i32)>,
     /// ReduceTimeOpenedWorldInstance: when the time left next goes down.
-    next_second: f32,
+    next_second: GameTime,
     /// Generators to despawn: (game time, network object).
-    despawns: Vec<(f32, u64)>,
+    despawns: Vec<(GameTime, u64)>,
     /// RandomizePropData.ignore of the wreck props (the game keeps it on the prefabs).
     ignored: HashSet<(String, usize)>,
     /// The opened instance scene's PreventBuilding collider.

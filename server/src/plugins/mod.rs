@@ -947,7 +947,7 @@ pub fn dispatch(game: &mut crate::game::Game, event: &Event<'_>) -> Verdict {
         game.ext.plugins.refresh();
         return verdict;
     };
-    let game_ms = (game.time as f64 * 1000.0) as i64;
+    let game_ms = (game.time.secs() * 1000.0) as i64;
     verdict = host.run(game, event, game_ms);
     if let Event::Chat { client, name, text } = event
         && host.interest & Kind::Command.bit() != 0
