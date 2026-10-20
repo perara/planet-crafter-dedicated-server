@@ -16,8 +16,8 @@ Run:  tools/chaos/soak.py --world run/worlds/world.json [--seconds 7500] [--play
 
 A pass: exit status 0 and a last JSON line {"pass": true, ...}. That means: the server answered
 the status for the whole run; the bank's and the front's memory in the last fifth of the run is
-within --max-rss-growth-pct of the second fifth's (the first fifth is warm-up); threads and
-file descriptors did not grow; no timed save took longer than --max-save-ms; the final stop
+within --max-rss-growth-pct of the second fifth's (the first fifth is warm-up); the median
+number of threads and of file descriptors did not grow; no timed save took longer than --max-save-ms; the final stop
 exited 0; and the server log has no panic. samples.csv has the numbers behind it.
 """
 import argparse
@@ -122,8 +122,11 @@ def main():
         verdict.fail("the status did not answer", failed=win["fails"], of=win["calls"])
     fifth = max(1, len(rows) // 5)
     for k in ("b_rss", "f_rss", "b_thr", "f_thr", "b_fds", "f_fds"):
-        early = statistics.mean(r[k] for r in rows[fifth:2 * fifth]) if len(rows) >= 2 * fifth else None
-        late = statistics.mean(r[k] for r in rows[-fifth:]) if rows else None
+        # Memory by the mean; threads and descriptors by the median: an admin connection or a worker thread that happens to
+        # be there at a sample (a stalled host piles them up for a while) is no growth, a level that stays higher is.
+        mid = statistics.mean if k.endswith("rss") else statistics.median
+        early = mid(r[k] for r in rows[fifth:2 * fifth]) if len(rows) >= 2 * fifth else None
+        late = mid(r[k] for r in rows[-fifth:]) if rows else None
         if early and late and early > 0:
             growth = 100 * (late - early) / early
             limit = args.max_rss_growth_pct if k.endswith("rss") else 0.0
