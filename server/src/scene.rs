@@ -62,7 +62,7 @@ pub fn init(game: &mut Game) {
     }
     let save = &game.save;
     let index = |id: &str| game.net_data.planet_index(id).map(|i| i as i16);
-    let starting = index(save.settings["planetId"].as_str().unwrap_or("Prime")).unwrap_or(0);
+    let starting = index(game.started_planet()).expect("the started planet is a planet of the tables (world_planet)");
     let current = game.planet as i16;
     let available: Vec<Vec<u8>> = available_planets(game).into_iter().map(|i| enc::short(i as i16)).collect();
     let story = list_i32(save.story_events.iter().filter_map(|e| e["stringId"].as_str()).map(stable_hash));
@@ -177,7 +177,7 @@ pub fn fill_save(game: &Game, save: &mut crate::save::SaveFile) {
 }
 
 pub fn starting_pod_group(game: &Game) -> Option<usize> {
-    pod_group(&game.data, game.save.settings["planetId"].as_str().unwrap_or("Prime"))
+    pod_group(&game.data, game.started_planet())
 }
 
 /// GroupsHandler.GetStartingPodGroup: EscapePod<planet>, else EscapePod.

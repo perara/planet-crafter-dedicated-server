@@ -22,7 +22,7 @@ pub(super) fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, d
         }
         std::process::exit(1)
     });
-    if let Err(e) = crate::game::check_save_content(&save, &data) {
+    if let Err(e) = crate::game::check_save_content(&save, &data, &net_data) {
         eprintln!("{save_path}: {e}");
         std::process::exit(1);
     }
@@ -42,7 +42,6 @@ pub(super) fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, d
     // The save as it was before this server touched it (as every backup: none with save.backupsKept 0).
     // At most one per 10 minutes: a crash loop must not push the hourly backups out.
     note_backup(&save::backup(save_path, Duration::from_secs(600), loaded_rules.save.backups_kept as usize).map_err(|e| format!("{save_path}: {e}")));
-    let session_number = config::env_number("PCDS_SESSION") as u32;
     let version = net_data.game_version.clone();
     let mut game = Game::new(net_data, data, spec, save, scenes);
     // A world on a DLC planet needs that planet's ground in the tables: not silently empty.
@@ -57,7 +56,6 @@ pub(super) fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, d
     }
     rules::start(&mut game, loaded_rules, rules_path);
     game.access = loaded_access;
-    game.session_number = session_number;
     println!("world: {} world objects, {} network objects, planet {}, game {version}", game.wos.len(), game.net.objects.len(), game.planet_id());
     game
 }

@@ -282,12 +282,32 @@ fn connection_data(body: &[u8]) -> Option<String> {
 /// World objects the tables cannot place are dropped when the world loads, and gone from the
 /// next save: a save from a newer game than these tables (or with mods), or an entry edited by
 /// hand. The start stops instead, saying which.
-pub fn check_save_content(save: &SaveFile, data: &GameData) -> Result<(), String> {
+pub fn check_save_content(save: &SaveFile, data: &GameData, net_data: &NetData) -> Result<(), String> {
+    world_planet(save, net_data)?;
     let unknown: Vec<&str> = save.objects.iter().filter(|o| WorldObject::from_json(o, data, 0).is_none()).map(|o| o["gId"].as_str().unwrap_or("(no group)")).collect();
     match unknown.first() {
         None => Ok(()),
         Some(first) => Err(format!("{} world objects of groups these game tables do not know (the first: {first}): a save from a newer game version, or edited? Update the server or its game data (`pcds update`), then try again", unknown.len())),
     }
+}
+
+/// The planet the world is on when it starts, and its place in the tables. SavedDataHandler.
+/// InitSavedData loads the host's planet; this server has no host, so it keeps the planet it
+/// travelled to in the world state (pcdsCurrentPlanet; the game ignores unknown fields) and marks a
+/// saved player host for the game (mark_host). A save that names no planet (settings.planetId is
+/// what the game starts a world with), or one these tables do not have, is an error saying so:
+/// there is no planet to start a world on instead.
+pub fn world_planet(save: &SaveFile, net_data: &NetData) -> Result<(String, usize), String> {
+    let known = |what: &str, id: &str| net_data.planet_index(id).ok_or_else(|| format!("{what} is {id:?}, a planet these game tables do not have: a save from a newer game version, or edited? Update the server or its game data (`pcds update`), then try again"));
+    let started = save.settings["planetId"].as_str().ok_or("settings.planetId is missing: it is the planet the world started on, and every save of the game has it. Not a save of this game, or edited?")?;
+    known("settings.planetId", started)?;
+    let host = save.players.iter().find(|p| p["host"].as_bool() == Some(true)).and_then(|p| p["planetId"].as_str()).filter(|p| !p.is_empty());
+    let (what, id) = match (save.world["pcdsCurrentPlanet"].as_str(), host) {
+        (Some(current), _) => ("world.pcdsCurrentPlanet", current),
+        (None, Some(host)) => ("the host player's planetId", host),
+        (None, None) => ("settings.planetId", started),
+    };
+    Ok((id.to_string(), known(what, id)?))
 }
 
 /// A game on a save with the test tables; None (the test skips) without them.
@@ -320,12 +340,7 @@ impl Game {
     /// A game whose clock is `sim_time` from the start (the bench's fixed clock): what the load
     /// spawns gets the same ticks in every run, not the real time the load took.
     pub fn with_clock(net_data: NetData, data: GameData, spec: Spec, save: SaveFile, scenes: crate::Scenes, sim_time: Option<f64>) -> Game {
-        // SavedDataHandler.InitSavedData loads the host's planet. This server has no host, so it
-        // keeps the planet it travelled to in the world state (pcdsCurrentPlanet; the game
-        // ignores unknown fields) and marks a saved player host for the game (mark_host).
-        let host_planet = save.players.iter().find(|p| p["host"].as_bool() == Some(true)).and_then(|p| p["planetId"].as_str()).filter(|p| !p.is_empty());
-        let planet_id = save.world["pcdsCurrentPlanet"].as_str().or(host_planet).or(save.settings["planetId"].as_str()).unwrap_or("Prime").to_string();
-        let planet = net_data.planet_index(&planet_id).unwrap_or(0);
+        let (_, planet) = world_planet(&save, &net_data).unwrap_or_else(|e| panic!("a save the start would have refused (check_save_content): {e}"));
         let mut game = Game {
             data,
             net_data,
@@ -361,7 +376,7 @@ impl Game {
             access: crate::access::Access::load(None),
             rules: Default::default(),
             rules_path: None,
-            session_number: 4242,
+            session_number: crate::config::env_number("PCDS_SESSION") as u32,
             next_time_sync: crate::clock::GameTime::ZERO,
             unhandled: Default::default(),
             misrouted: Default::default(),
@@ -402,6 +417,12 @@ impl Game {
     /// a second), then the low 32 bits, wrapping as an unchecked int does. The game's own
     /// `(int)double` there is out of range and stays at one value for good; here the clients'
     /// time sync (a hard reset when the server time jumps by 0.2 s) takes the wrap as a jump.
+    /// The planet the world started on (settings.planetId), which `world_planet` has seen to be a
+    /// planet of the tables when the world was loaded.
+    pub fn started_planet(&self) -> &str {
+        self.save.settings["planetId"].as_str().expect("settings.planetId: checked by world_planet when the world loaded")
+    }
+
     pub fn tick_number(&self) -> i32 {
         self.tick_count() as i32
     }
@@ -409,7 +430,7 @@ impl Game {
     /// SavedDataHandler.LoadSavedData: world objects, inventories, planets, players; then the
     /// scene's network objects and every placed world object of the current planet.
     fn load(&mut self) {
-        let default_planet = stable_hash(self.save.settings["planetId"].as_str().unwrap_or("Prime"));
+        let default_planet = stable_hash(self.started_planet());
         for o in std::mem::take(&mut self.save.objects) {
             if let Some(wo) = WorldObject::from_json(&o, &self.data, default_planet) {
                 self.wos.insert(wo.id, wo);
@@ -1400,11 +1421,39 @@ pub mod tests {
     fn a_save_with_objects_the_tables_do_not_know_is_refused() {
         let Some(g) = test_game(save()) else { return };
         let mut s = save();
-        assert!(check_save_content(&s, &g.data).is_ok());
+        assert!(check_save_content(&s, &g.data, &g.net_data).is_ok());
         s.objects.push(json!({"id": 205_000_001, "gId": "NoSuchThingInThisGame"}));
         s.objects.push(json!({"gId": "Iron"}));
-        let err = check_save_content(&s, &g.data).unwrap_err();
+        let err = check_save_content(&s, &g.data, &g.net_data).unwrap_err();
         assert!(err.contains("2 world objects") && err.contains("NoSuchThingInThisGame"), "{err}");
+    }
+
+    /// A save that names no planet to start on, or one these tables do not have, is refused with
+    /// what is wrong; no planet is made up (Prime was, and an unknown one read as the first).
+    #[test]
+    fn a_save_without_a_known_planet_is_refused() {
+        let Some(g) = test_game(save()) else { return };
+        let check = |s: &SaveFile| check_save_content(s, &g.data, &g.net_data);
+        assert!(check(&save()).is_ok());
+        let mut s = save();
+        s.settings.as_object_mut().unwrap().remove("planetId");
+        let e = check(&s).unwrap_err();
+        assert!(e.starts_with("settings.planetId is missing"), "{e}");
+        let mut s = save();
+        s.settings["planetId"] = json!("Nowhere");
+        let e = check(&s).unwrap_err();
+        assert!(e.contains("settings.planetId is \"Nowhere\"") && e.contains("pcds update"), "{e}");
+        // The planet the world travelled to, and the host's, must be known too.
+        let mut s = save();
+        s.world["pcdsCurrentPlanet"] = json!("Elsewhere");
+        assert!(check(&s).unwrap_err().contains("world.pcdsCurrentPlanet is \"Elsewhere\""));
+        let mut s = save();
+        s.players = vec![json!({"id": 5, "name": "Old", "host": true, "planetId": "Elsewhere"})];
+        assert!(check(&s).unwrap_err().contains("host player's planetId is \"Elsewhere\""));
+        assert_eq!(world_planet(&save(), &g.net_data).unwrap().0, "Prime");
+        let mut s = save();
+        s.world["pcdsCurrentPlanet"] = json!("Selenea");
+        assert_eq!(world_planet(&s, &g.net_data).unwrap().0, "Selenea");
     }
 
     /// Hostile input from joined clients never crashes the server: every server RPC with

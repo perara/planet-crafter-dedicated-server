@@ -130,7 +130,7 @@ impl Game {
     fn setup_player(&mut self, client: u64, mut state: PlayerState) {
         let Some(object) = self.player_object(client) else { return };
         if state.planet.is_empty() {
-            state.planet = self.save.settings["planetId"].as_str().unwrap_or("Prime").to_string();
+            state.planet = self.started_planet().to_string();
         }
         if state.planet != self.planet_id() {
             // Saved on another planet: PlayerStatus.GetRespawnPosition (the first livable
