@@ -120,7 +120,11 @@ Measured, each with a hot update and a restart:
   writable by that user already (an arbitrary uid 4242 on a world-writable folder worked; in
   Kubernetes `fsGroup` does it). The entrypoint says what to do when it is not.
 - **Dropped capabilities**: with `--user`, `--cap-drop ALL --security-opt no-new-privileges` needs
-  nothing more. Started as root (PUID/PGID), keep `CHOWN SETUID SETGID DAC_OVERRIDE FOWNER`.
+  nothing more. Started as root (PUID/PGID), keep `CHOWN SETUID SETGID DAC_OVERRIDE FOWNER`. The
+  entrypoint then runs the server with `setpriv --no-new-privs`, so nothing the server starts (a
+  chat hook program) can gain rights even where the container itself is not run with
+  `no-new-privileges`. [compose.yaml](../compose.yaml) turns all of this on, and `docker/test.sh` runs
+  its hot update in a container with exactly these flags (see [hardening.md](hardening.md)).
 - **Kubernetes-style**: `--entrypoint /opt/pcds/entrypoint.sh` (no tini, `pcds container` is
   PID 1), `--user 1000:1000 --cap-drop ALL --read-only`, SIGTERM at the end: exit 0 with the
   world saved, and the restart in place works as PID 1.

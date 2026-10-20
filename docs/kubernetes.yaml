@@ -59,6 +59,8 @@ spec:
     metadata:
       labels: { app: pcds }
     spec:
+      # The server never talks to the Kubernetes API: no token in the pod.
+      automountServiceAccountToken: false
       # The server saves at SIGTERM: its front gives the bank 30 s twice, then 20 s for what
       # is left (80 s); 120 s leaves room for a slow disk.
       terminationGracePeriodSeconds: 120

@@ -1,7 +1,11 @@
 # The dedicated server. Everything it keeps is in /data: worlds/, server.env, rules.json,
 # access.json, the game tables (read from the game's files) and backups. Mount your game folder at /game (read-only), or start once with
 # -it -e STEAM_USER=yourname to download it. See README "Docker".
-FROM rust:1-trixie AS build
+# The base images are pinned by digest (the tag stays for the reader): a build today is the build of
+# tomorrow, and a changed base is a reviewed change. Dependabot's `docker` entry
+# (.github/dependabot.yml) proposes the new digest when the tag moves; to do it by hand:
+# `docker pull rust:1-trixie` and `docker image inspect --format '{{index .RepoDigests 0}}' rust:1-trixie`.
+FROM rust:1-trixie@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a AS build
 WORKDIR /src/server
 # .cargo/config.toml: the binary finds libsteam_api.so next to itself.
 COPY .cargo/ /src/.cargo/
@@ -11,7 +15,7 @@ COPY server/ ./
 RUN cargo build --release --locked \
   && cp "$(ls -t target/release/build/steamworks-sys-*/out/libsteam_api.so | head -1)" target/release/
 
-FROM debian:trixie-slim
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 LABEL org.opencontainers.image.source="https://github.com/perara/planet-crafter-dedicated-server" \
       org.opencontainers.image.description="The Planet Crafter dedicated server: hot updates inside the container (docs/docker.md)" \
       org.opencontainers.image.licenses="GPL-3.0-or-later"

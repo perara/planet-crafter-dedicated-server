@@ -314,6 +314,12 @@ file and the name.
 
 `run/server.env` holds the admin token and is readable by your user only.
 
+The systemd unit `pcds setup` writes runs the server in a sandbox (no new privileges, no
+capabilities, everything but `run/` read-only, a private `/tmp`, a system call filter), and the
+Docker image drops privileges the same way: [docs/hardening.md](docs/hardening.md) says what is
+on, what is left off because it breaks `steamcmd` or hook programs written in Node or Java, and how
+to change it.
+
 ## Administration
 
 ```bash

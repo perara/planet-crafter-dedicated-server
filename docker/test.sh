@@ -167,6 +167,7 @@ echo '{"save": {"backupsKept": 0}}' >"$W/d2/rules.json"
 
 C="$NAME"
 docker run -d --name "$C" --network host --read-only --tmpfs /tmp --restart unless-stopped --stop-timeout 90 \
+  --security-opt no-new-privileges:true --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_OVERRIDE --cap-add FOWNER --pids-limit 1024 \
   -e "PUID=$UID_" -e "PGID=$GID_" -v "$W/d2:/data" -v "$W/game:/game:ro" "$IMAGE" >/dev/null
 
 # Healthy: the health check's own command answers.

@@ -188,14 +188,9 @@ impl Ctx {
         if !world.is_file() {
             return Err(format!("no world at {}: 'pcds worlds', 'pcds world use NAME' or 'pcds world new NAME'", world.display()));
         }
-        // A unit this release would write differently (another program path, a changed stop
-        // timeout) is written again; systemd takes the new text at the next start.
-        if !self.container
-            && self.unit_dir.join(self.unit()).is_file()
-            && let Err(e) = self.refresh_unit()
-        {
-            warn!("the systemd units could not be written again ({e}); 'pcds restart' or 'pcds install-service', run in a terminal, writes them");
-        }
+        // The unit is written by `pcds start`, `pcds restart`, `pcds install-service` and `pcds
+        // upgrade --restart`, in your terminal: its sandbox makes the home folder read-only to the
+        // server, which therefore cannot rewrite the unit that limits it.
         // A newer build into a bank is not what the start needs: when it fails (a full disk),
         // the server starts from the banks as they are.
         if install

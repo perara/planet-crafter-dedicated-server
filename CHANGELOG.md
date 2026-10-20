@@ -58,8 +58,31 @@ Every release has two parts a reader can rely on:
   [docs/monitoring.md](docs/monitoring.md) says how long journald, Docker and Kubernetes keep it
   and how to set that; [compose.yaml](compose.yaml) now rotates the container's log.
 
+* **The systemd unit is sandboxed** ([docs/hardening.md](docs/hardening.md)): no new privileges,
+  no capabilities, everything but `run/` read-only (your home readable, not writable), a private
+  `/tmp`, no devices, no writing of `/proc/sys`, `/sys` or the cgroups, only the socket families a
+  server uses, a system call filter, files private to your user, and limits on open files and
+  tasks. `systemd-analyze --user security` scores the unit 2.1 (OK) where the 0.8 unit scored 9.4
+  (UNSAFE). Each option was tried with the real server: Steam login and invite code, players,
+  saves and backups, a hot update, S3 copies, a signed webhook, hook programs (shell with curl,
+  Python, Node, Java), a plugin with `net.http`, and `steamcmd`. Left out because they break
+  something the server starts: `MemoryDenyWriteExecute` (Node and Java hooks, `steamcmd`) and
+  `SystemCallArchitectures=native` (`steamcmd` is 32-bit); the document says how to add them. A
+  machine that does not let a user service have a mount namespace gets the options that need
+  none, and `pcds install-service` and `pcds doctor` say so. The update check's unit gets the
+  options that need no mount. `pcds doctor` has a `sandbox` line.
+* **Docker**: the entrypoint runs the server with `setpriv --no-new-privs`; `compose.yaml` turns on
+  `read_only`, `no-new-privileges`, dropped capabilities (with the five the entrypoint needs
+  to give `/data` away) and a process limit; `docker/test.sh` runs its hot update with the same
+  flags. The base images are pinned by digest (Dependabot's `docker` entry proposes new ones).
+  The Kubernetes example mounts no service account token.
+
 ### Changed
 
+* **The unit is written by the command line only.** The server can no longer rewrite its own unit
+  at start (its home is read-only to it, which is the point); `pcds start`, `pcds restart`,
+  `pcds install-service` and `pcds upgrade --restart` write it when a release changes it. After
+  the update that brings the sandbox, run `pcds restart` once (`pcds upgrade --restart` does it).
 * **Every line of the log starts with its time, level and component** (`2026-10-20T18:07:37.354Z
   INFO  front: client 1: connected from ...`), also in `pcds logs`, where journald's own time is
   not shown. Warnings and errors still go to standard error and the rest to standard output.

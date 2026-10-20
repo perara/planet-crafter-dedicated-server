@@ -23,6 +23,9 @@ fn fake_systemctl(dir: &Path, script: &str) -> PathBuf {
     let path = fake.join("systemctl");
     std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // The test unit that asks whether this machine can sandbox a user service: it can.
+    std::fs::write(fake.join("systemd-run"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(fake.join("systemd-run"), std::fs::Permissions::from_mode(0o755)).unwrap();
     fake
 }
 
@@ -202,7 +205,8 @@ fn a_start_falls_back_to_the_other_bank() {
     for f in ["format", "build"] {
         std::fs::copy(dir.join("run/bin/a").join(f), dir.join("run/bin/b").join(f)).unwrap();
     }
-    // A unit that differs from this release's (a shorter stop timeout): pcds run writes this release's in its place.
+    // A unit that differs from this release's (a shorter stop timeout): the server never writes its own
+    // unit (its sandbox makes the home folder read-only to it); pcds restart writes this release's.
     let units = dir.join("home/.config/systemd/user");
     std::fs::create_dir_all(&units).unwrap();
     let old = format!("[Service]\nEnvironmentFile={}\nExecStart=\"{}/pcds\" run\nTimeoutStopSec=60\n", dir.join("run/server.env").display(), dir.display());
@@ -211,7 +215,10 @@ fn a_start_falls_back_to_the_other_bank() {
     let said = text(&out);
     assert_eq!(out.status.code(), Some(0), "{said}");
     let unit = std::fs::read_to_string(units.join("pcds-cli-itest.service")).unwrap();
-    assert!(unit.contains("KillMode=mixed") && unit.contains("TimeoutStopSec=90") && said.contains("written again"), "{unit}\n{said}");
+    assert!(unit.contains("TimeoutStopSec=60") && !unit.contains("KillMode") && !said.contains("written again"), "{unit}\n{said}");
+    let restarted = pcds(&dir, &fake, &["restart"]);
+    let unit = std::fs::read_to_string(units.join("pcds-cli-itest.service")).unwrap();
+    assert!(unit.contains("KillMode=mixed") && unit.contains("TimeoutStopSec=90") && unit.contains("\nNoNewPrivileges=yes\n") && unit.contains("\nProtectSystem=strict\n") && text(&restarted).contains("written again"), "{unit}\n{}", text(&restarted));
     assert!(said.contains("bank a could not start the world: its front (pcds 9.0.0) ended without running it (exit 75") && said.contains("Starting bank b"), "{said}");
     assert!(said.contains(&format!("bank b runs {}", dir.join("run/worlds/world.json").display())), "{said}");
     assert_eq!(std::fs::read_to_string(dir.join("run/bin/active")).unwrap().trim(), "b");

@@ -465,6 +465,15 @@ impl Ctx {
         } else {
             r.pass("service", detail);
         }
+        if let Err(why) = self.sandbox_check() {
+            r.warn(
+                "sandbox",
+                format!("this machine does not let a user service have its own file system view ({why}), so the unit has no read-only file system, no private /tmp and no protected kernel settings; the other options of the sandbox hold"),
+                "docs/hardening.md says how to allow it (a kernel setting) or how to run the server as a system service instead",
+            );
+        } else if !stale {
+            r.pass("sandbox", "the unit runs the server with no new privileges, no capabilities, a read-only file system outside run/, a private /tmp and a system call filter (docs/hardening.md)");
+        }
         let user = crate::env("USER").unwrap_or_default();
         match output(std::process::Command::new("loginctl").args(["show-user", &user, "-p", "Linger", "--value"])).as_deref() {
             Some("yes") => r.pass("linger", format!("{user} stays logged in, so the server runs after logout and starts with the machine")),

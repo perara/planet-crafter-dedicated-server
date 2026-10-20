@@ -352,8 +352,8 @@ mod tests {
         assert!(heads[0].starts_with("GET /api/health HTTP/1.1\r\n") && heads.iter().all(|h| h.contains("Bearer \r\n")), "{heads:?}");
         std::fs::write(&ctx.env_file, "PCDS_ADMIN=off\n").unwrap();
         assert!(ctx.health().unwrap_err().contains("the admin API is off"));
-        // Nothing listens there any more.
-        std::fs::write(&ctx.env_file, format!("PCDS_ADMIN={addr}\n")).unwrap();
+        // Nothing listens there (port 1).
+        std::fs::write(&ctx.env_file, "PCDS_ADMIN=127.0.0.1:1\n").unwrap();
         assert!(ctx.health().unwrap_err().contains("does not answer"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
