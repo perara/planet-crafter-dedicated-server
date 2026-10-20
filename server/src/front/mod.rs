@@ -22,8 +22,8 @@
 //!                       access.json in it, the banks in bin/ (a/, b/, active); without it both
 //!                       banks are this program (a checkout build), and there is nothing to update
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::collections::{HashMap, VecDeque};
+use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -35,37 +35,20 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
-use steamworks::networking_sockets::{ListenSocket, NetConnection};
-use steamworks::networking_types::{AppNetConnectionEnd, ListenSocketEvent, NetConnectionEnd, NetworkingConfigEntry, NetworkingConfigValue, SendFlags};
-use steamworks::{Server, ServerMode, SteamServersConnected};
 
 use crate::admin;
 use crate::chathooks::Hooks;
-use crate::dashboard::{BYTES_IN, BYTES_OUT};
 use crate::ipc::{self, Frame, Link};
 use crate::updater;
-use crate::utp::{self, Utp};
+use crate::utp::Utp;
 
-const APP_ID: &str = "1284190";
-/// The game's Steam transport splits messages above this size (see GameServerSockets.cs).
-const CHUNK: usize = 524_288;
-/// The game's Steam transport's receive buffer (SteamNetworkingSocketsTransport: 2621440).
-const MAX_STEAM_MESSAGE: usize = 5 * CHUNK;
-/// Steam's send buffer per connection: several joins' worth.
-const SEND_BUFFER: i32 = 32 << 20;
-/// The most a client's "Split" message may add up to (two of the game's chunks).
-const MAX_SPLIT: usize = 1 << 20;
-/// A client's frames waiting for the bank (a stalled or flipping world) past this: the client
-/// is dropped, not the world.
-const MAX_CLIENT_QUEUE: usize = 16 << 20;
-/// All clients' frames waiting for the bank together (held while the world stands for a flip,
-/// or queued to a bank that does not read): past this the client with the most waiting, the one
-/// the stall hurts most, is dropped, until the new frame fits. 128 clients at MAX_CLIENT_QUEUE
-/// each would hold two gigabytes.
-const MAX_TOTAL_QUEUE: usize = 256 << 20;
-/// A stall that had this much waiting, once over, gives the memory back to the system (the
-/// allocator keeps freed memory of that size in the process).
-const TRIM_AFTER: usize = 8 << 20;
+mod clients;
+mod queue;
+mod transport;
+
+use queue::Queue;
+use transport::Transport;
+
 /// At a stop, the live bank gets this long to take STOP and save, then as long again to end,
 /// before it is killed: 60 s in all, under the supervisor's 20 s for orphans (cli/setup.rs
 /// BANKS_GRACE) and systemd's TimeoutStopSec=90 (and Docker's --stop-timeout 90), so
@@ -108,12 +91,6 @@ const RESTARTED: &str = "The server restarted after an error: join again";
 const STOPPED: &str = "The world is stopped: join again later";
 /// What an update or a rollback asked for while the world is stopped is told.
 const STOPPED_UPDATE: &str = "the world is stopped, so no bank runs a world to hand over: start the world first (the dashboard's Start button, POST /api/world/start) and update then, or run pcds upgrade VERSION --restart, which installs the release and restarts the server";
-
-enum Conn {
-    /// Steam networking: the connection carries the verified SteamID.
-    Steam { connection: NetConnection, split: Option<(Vec<u8>, usize)>, steam_id: u64 },
-    Ip(utp::Token),
-}
 
 struct Bank {
     /// "a" or "b".
@@ -193,28 +170,14 @@ struct Front {
     dir: String,
     save: String,
     banks: Option<PathBuf>,
-    utp: Option<Utp>,
-    steam: Option<(Server, ListenSocket)>,
-    invite_code: Option<String>,
-    port: u16,
-    conns: HashMap<u64, Conn>,
-    ip_clients: HashMap<utp::Token, u64>,
-    next_client: u64,
-    pending_drop: Vec<(u64, Instant)>,
-    /// Kicked or dropped: nothing more from it reaches the bank.
-    kicked: HashSet<u64>,
+    /// The clients' connections.
+    net: Transport,
     live: Option<Bank>,
     next: Option<Bank>,
     phase: Phase,
     flip: Option<Flip>,
-    /// Frames for the bank while the world stands (and their bytes per client).
-    held: Vec<(u8, u64, Vec<u8>, u64)>,
-    held_bytes: HashMap<u64, usize>,
-    /// The sum of held_bytes; the most that waited since the last time the memory was given back.
-    held_total: usize,
-    waiting_peak: usize,
-    /// MAX_TOTAL_QUEUE (a field for the tests).
-    queue_cap: usize,
+    /// Frames for the bank while the world stands, and the budgets of what waits for it.
+    queue: Queue,
     /// The last snapshot a flip carried: a crashed bank starts from it when it is newer than
     /// the save.
     last_snapshot: Option<(OwnedFd, SystemTime)>,
@@ -225,8 +188,6 @@ struct Front {
     /// when the live bank is the one the front started with. A release that ends the game over
     /// and over is given up (give_up) only when it came by a flip.
     flipped: Option<String>,
-    /// Who may connect over Steam (the caps of the UDP side).
-    steam_gate: SteamGate,
     /// The rule limits.bankWatchdogSeconds (ipc::OPS), and when the live bank was last pinged.
     watchdog: Duration,
     pinged: Option<Instant>,
@@ -280,7 +241,7 @@ pub fn run(args: &[String]) {
         std::process::exit(1)
     });
     // SAFETY: set before any other thread exists; the Steam API reads it during init.
-    unsafe { std::env::set_var("SteamAppId", APP_ID) };
+    unsafe { std::env::set_var("SteamAppId", transport::steam::APP_ID) };
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
     ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst)).expect("signal handler");
@@ -315,29 +276,16 @@ impl Front {
             dir: dir.to_string(),
             save: save.to_string(),
             banks,
-            utp,
-            steam: None,
-            invite_code: None,
-            port,
-            conns: HashMap::new(),
-            ip_clients: HashMap::new(),
-            next_client: 1,
-            pending_drop: Vec::new(),
-            kicked: HashSet::new(),
+            net: Transport::new(utp, port),
             live: None,
             next: None,
             phase: Phase::Idle,
             flip: None,
-            held: Vec::new(),
-            held_bytes: HashMap::new(),
-            held_total: 0,
-            waiting_peak: 0,
-            queue_cap: MAX_TOTAL_QUEUE,
+            queue: Queue::new(),
             last_snapshot: None,
             recover_from: None,
             crashes: VecDeque::new(),
             flipped: None,
-            steam_gate: SteamGate::default(),
             watchdog: Duration::from_secs(u64::from(rules.limits.bank_watchdog_seconds)),
             pinged: None,
             exiting: Vec::new(),
@@ -556,38 +504,17 @@ impl Front {
         }
     }
 
-    /// Logs in as a Steam game server (anonymously, or with a login token for a fixed SteamID)
-    /// and opens the P2P socket invite codes point to.
     fn start_steam(&mut self) {
-        if crate::env("PCDS_STEAM").as_deref() == Some("off") {
-            return;
-        }
-        let session = crate::config::env_number("PCDS_SESSION") as u32;
-        match steam_login(&self.game_version, session) {
-            Ok((steam, listen, code)) => {
-                self.invite_code = Some(code);
-                self.steam = Some((steam, listen));
-            }
-            Err(e) if self.utp.is_some() => eprintln!("steam: {e}; continuing with direct IP only"),
-            Err(e) => {
-                eprintln!("{e}");
-                self.shutdown(1);
-            }
-        }
-    }
-
-    fn network(&self) -> &'static str {
-        match (self.steam.is_some(), self.utp.is_some()) {
-            (true, true) => "both",
-            (true, false) => "steam",
-            _ => "ip",
+        if let Err(e) = self.net.start_steam(&self.game_version) {
+            eprintln!("{e}");
+            self.shutdown(1);
         }
     }
 
     /// Nobody connected and nothing under way: only a new connection, a bank frame or an admin
     /// request can come, and none of them needs the 5 ms frame.
     fn quiet(&self) -> bool {
-        self.conns.is_empty() && self.next.is_none() && self.exiting.is_empty() && self.pending_drop.is_empty() && self.held.is_empty() && matches!(self.phase, Phase::Idle | Phase::Stopped)
+        self.net.conns.is_empty() && self.next.is_none() && self.exiting.is_empty() && self.net.pending_drop.is_empty() && self.queue.held.is_empty() && matches!(self.phase, Phase::Idle | Phase::Stopped)
     }
 
     fn serve(&mut self) {
@@ -621,13 +548,11 @@ impl Front {
             {
                 flip.at[2] = ipc::now_ns();
             }
-            if let Some(utp) = self.utp.as_mut().filter(|_| frame || sent) {
-                utp.flush();
-            }
+            self.net.flush(frame || sent);
             let mut fds = Vec::new();
             let mut out = Vec::new();
-            if let Some(u) = &self.utp {
-                fds.push(u.fd());
+            if let Some(fd) = self.net.fd() {
+                fds.push(fd);
                 out.push(false);
             }
             for b in [&self.live, &self.next].into_iter().flatten() {
@@ -640,291 +565,7 @@ impl Front {
         self.shutdown(0);
     }
 
-    // ---- clients ------------------------------------------------------------------------
-
-    fn poll_steam(&mut self) {
-        let Some((steam, listen)) = &self.steam else { return };
-        steam.run_callbacks();
-        let (mut joined, mut gone, mut incoming, mut accepted) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        while let Some(event) = listen.try_receive_event() {
-            match event {
-                ListenSocketEvent::Connecting(request) => {
-                    let steam_id = request.remote().steam_id().map(|id| id.raw()).unwrap_or(0);
-                    let open: Vec<u64> = self.conns.values().filter_map(|c| if let Conn::Steam { steam_id, .. } = c { Some(*steam_id) } else { None }).chain(joined.iter().map(|(_, s, _)| *s)).chain(accepted.iter().copied()).collect();
-                    match self.steam_gate.admit(steam_id, Instant::now(), &open) {
-                        Ok(()) => {
-                            accepted.push(steam_id);
-                            let _ = request.accept();
-                        }
-                        Err(why) => {
-                            println!("{steam_id}: Steam connection refused ({why})");
-                            request.reject(NetConnectionEnd::App(AppNetConnectionEnd::generic_normal()), Some("the server cannot take this connection now"));
-                        }
-                    }
-                }
-                ListenSocketEvent::Connected(event) => {
-                    let steam_id = event.remote().steam_id().map(|id| id.raw()).unwrap_or(0);
-                    let client = self.next_client;
-                    self.next_client += 1;
-                    // Its disconnect names the connection by this (not by SteamID: the same
-                    // player may have an old connection still closing).
-                    let connection = event.take_connection();
-                    let _ = connection.set_connection_user_data(client as i64);
-                    joined.push((client, steam_id, connection));
-                }
-                ListenSocketEvent::Disconnected(event) => {
-                    let peer = event.remote().steam_id().map(|id| id.raw()).unwrap_or(0);
-                    println!("{peer}: disconnected ({:?})", event.end_reason());
-                    let fresh: Vec<(u64, u64)> = joined.iter().map(|(c, s, _)| (*c, *s)).collect();
-                    gone.extend(disconnected(event.user_data(), peer, &fresh));
-                }
-            }
-        }
-        for (client, steam_id, connection) in joined {
-            println!("client {client}: connected over Steam as {steam_id}");
-            self.conns.insert(client, Conn::Steam { connection, split: None, steam_id });
-            self.to_bank(ipc::CONNECTED, client, json!({"steamId": steam_id, "trusted": false}).to_string().as_bytes(), 0);
-        }
-        for (client, conn) in self.conns.iter_mut() {
-            if let Conn::Steam { connection, split, .. } = conn {
-                for message in connection.receive_messages(64).unwrap_or_default() {
-                    match reassemble(split, message.data()) {
-                        Ok(batch) => incoming.extend(batch.map(|b| (*client, b))),
-                        Err(e) => {
-                            println!("client {client}: dropped ({e})");
-                            gone.push(*client);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        for client in gone {
-            self.left(client);
-        }
-        for (client, batch) in incoming {
-            self.from_client(client, batch);
-        }
-    }
-
-    /// Whether anything went out to a client.
-    fn poll_utp(&mut self) -> bool {
-        let Some(utp) = self.utp.as_mut() else { return false };
-        let events = utp.poll();
-        // A handshake or a disconnect answers at the next flush.
-        let any = !events.is_empty();
-        for event in events {
-            match event {
-                utp::Event::Connected(token, addr) => {
-                    let client = self.next_client;
-                    self.next_client += 1;
-                    println!("client {client}: connected from {addr}");
-                    self.ip_clients.insert(token, client);
-                    self.conns.insert(client, Conn::Ip(token));
-                    let c = json!({"ip": addr.ip().to_string(), "trusted": trusted(addr.ip(), crate::config::dev("trust-loopback").is_some())});
-                    self.to_bank(ipc::CONNECTED, client, c.to_string().as_bytes(), 0);
-                }
-                utp::Event::Data(token, batch) => {
-                    if let Some(c) = self.ip_clients.get(&token).copied() {
-                        self.from_client(c, batch);
-                    }
-                }
-                utp::Event::Disconnected(token) => {
-                    if let Some(c) = self.ip_clients.remove(&token) {
-                        self.left(c);
-                    }
-                }
-            }
-        }
-        any
-    }
-
-    fn from_client(&mut self, client: u64, batch: Vec<u8>) {
-        // Gone or kicked: nothing more from it reaches the game (the reason still goes out).
-        if !self.conns.contains_key(&client) || self.kicked.contains(&client) {
-            return;
-        }
-        BYTES_IN.fetch_add(batch.len() as u64, Ordering::Relaxed);
-        self.to_bank(ipc::DATA, client, &batch, client);
-    }
-
-    /// The connection ended from the client's side (or was dropped).
-    fn left(&mut self, client: u64) {
-        if self.conns.remove(&client).is_some() {
-            println!("client {client}: left");
-            self.ip_clients.retain(|_, c| *c != client);
-            self.kicked.remove(&client);
-            self.pending_drop.retain(|(c, _)| *c != client);
-            self.to_bank(ipc::GONE, client, &[], 0);
-        }
-    }
-
-    /// Closes a connection from this side.
-    fn close(&mut self, client: u64) {
-        match self.conns.remove(&client) {
-            // Lingering: what was sent (a kick's reason) is delivered before the close.
-            Some(Conn::Steam { connection, .. }) => {
-                connection.close(NetConnectionEnd::App(AppNetConnectionEnd::generic_normal()), Some("closed by the server"), true);
-            }
-            Some(Conn::Ip(token)) => {
-                self.ip_clients.remove(&token);
-                if let Some(utp) = self.utp.as_mut() {
-                    utp.close(&token);
-                }
-            }
-            None => return,
-        }
-        self.kicked.remove(&client);
-        self.to_bank(ipc::GONE, client, &[], 0);
-    }
-
-    fn to_client(&mut self, client: u64, batch: &[u8]) -> bool {
-        BYTES_OUT.fetch_add(batch.len() as u64, Ordering::Relaxed);
-        match self.conns.get(&client) {
-            Some(Conn::Steam { connection, .. }) => {
-                // A batch it got only part of would be garbage to it: the client goes, loudly.
-                if let Err(e) = send(connection, batch) {
-                    eprintln!("client {client}: {e}; dropped");
-                    self.kicked.insert(client);
-                    self.close(client);
-                }
-                false
-            }
-            Some(Conn::Ip(token)) => {
-                if let Some(utp) = self.utp.as_mut() {
-                    utp.send(token, batch);
-                }
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Kicked clients whose reason has had its moment: closed. Whether any was.
-    fn drops(&mut self) -> bool {
-        let now = Instant::now();
-        let due: Vec<u64> = self.pending_drop.iter().filter(|(_, at)| *at <= now).map(|(c, _)| *c).collect();
-        self.pending_drop.retain(|(_, at)| *at > now);
-        for c in &due {
-            self.close(*c);
-        }
-        !due.is_empty() || !self.pending_drop.is_empty()
-    }
-
     // ---- the banks ------------------------------------------------------------------------
-
-    /// A frame for the live bank, or held while the world stands. `client`: a client's own
-    /// frame, counted against its bound.
-    fn to_bank(&mut self, kind: u8, n: u64, body: &[u8], client: u64) {
-        // No world: a joining player is told so and let go; nothing else has a game to go to.
-        if self.phase == Phase::Stopped {
-            if kind == ipc::CONNECTED {
-                self.to_client(n, &crate::bank::reason_batch(STOPPED));
-                if self.kicked.insert(n) {
-                    self.pending_drop.push((n, Instant::now() + KICK_DELAY));
-                }
-            }
-            return;
-        }
-        let holding = matches!(self.phase, Phase::Snapshotting | Phase::Restoring | Phase::Recovering);
-        let queued = if client == 0 {
-            0
-        } else {
-            self.held_bytes.get(&client).copied().unwrap_or(0) + self.live.as_ref().and_then(|b| b.link.queued.get(&client).copied()).unwrap_or(0)
-        };
-        if client != 0 && queued + body.len() > MAX_CLIENT_QUEUE {
-            eprintln!("client {client}: over {} MiB waiting for the game; dropped", MAX_CLIENT_QUEUE >> 20);
-            self.drop_waiting(client);
-            return;
-        }
-        if client != 0 && !self.make_room(client, body.len() + 13) {
-            return;
-        }
-        match (&mut self.live, holding) {
-            (Some(b), false) => b.link.queue(kind, n, body, None, client),
-            _ => {
-                if client != 0 {
-                    *self.held_bytes.entry(client).or_default() += body.len() + 13;
-                    self.held_total += body.len() + 13;
-                }
-                self.held.push((kind, n, body.to_vec(), client));
-            }
-        }
-    }
-
-    /// What all clients have waiting for the bank.
-    fn waiting_total(&self) -> usize {
-        self.held_total + self.live.as_ref().map_or(0, |b| b.link.queued_total)
-    }
-
-    /// The client with the most bytes waiting (held and queued), and how many.
-    fn slowest_waiting(&self) -> Option<(u64, usize)> {
-        let mut per: HashMap<u64, usize> = self.held_bytes.clone();
-        for (client, bytes) in self.live.iter().flat_map(|b| b.link.queued.iter()) {
-            *per.entry(*client).or_default() += bytes;
-        }
-        per.into_iter().max_by_key(|(client, bytes)| (*bytes, *client)).filter(|(_, bytes)| *bytes > 0)
-    }
-
-    /// Room for `need` more bytes among all clients' waiting frames: the client with the most
-    /// waiting is dropped, again and again, until it fits. False when that was `client` itself.
-    fn make_room(&mut self, client: u64, need: usize) -> bool {
-        while self.waiting_total() + need > self.queue_cap {
-            let Some((slowest, bytes)) = self.slowest_waiting() else { break };
-            eprintln!(
-                "client {slowest}: {} MiB waiting for the game, the most of the {} MiB all clients have waiting (at most {} MiB): dropped",
-                bytes >> 20,
-                self.waiting_total() >> 20,
-                self.queue_cap >> 20
-            );
-            self.drop_waiting(slowest);
-            if slowest == client {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// A client dropped for what it has waiting: its frames not yet sent to the bank are
-    /// taken back (they are the memory), then it is closed.
-    fn drop_waiting(&mut self, client: u64) {
-        if let Some(bytes) = self.held_bytes.remove(&client) {
-            self.held_total = self.held_total.saturating_sub(bytes);
-            self.held.retain(|h| h.3 != client);
-        }
-        if let Some(b) = self.live.as_mut() {
-            b.link.purge(client);
-        }
-        self.kicked.insert(client);
-        self.close(client);
-    }
-
-    /// After a stall that held a lot of memory, once it is over: the freed memory goes back to
-    /// the system (glibc keeps what a burst of large frames freed).
-    fn release_memory(&mut self) {
-        let waiting = self.waiting_total();
-        self.waiting_peak = self.waiting_peak.max(waiting);
-        if self.waiting_peak >= TRIM_AFTER && waiting < TRIM_AFTER / 64 {
-            println!("memory: {} MiB waited for the game at most; given back to the system", self.waiting_peak >> 20);
-            self.waiting_peak = 0;
-            // SAFETY: malloc_trim only returns free memory to the system.
-            unsafe { libc::malloc_trim(0) };
-        }
-    }
-
-    /// The held frames to the live bank.
-    fn release_held(&mut self) -> usize {
-        let held = std::mem::take(&mut self.held);
-        self.held_bytes.clear();
-        self.held_total = 0;
-        let n = held.len();
-        if let Some(b) = self.live.as_mut() {
-            for (kind, num, body, client) in held {
-                b.link.queue(kind, num, &body, None, client);
-            }
-        }
-        n
-    }
 
     /// What the banks' sockets take now (a bank that is gone shows at the next read).
     fn flush_banks(&mut self) {
@@ -977,9 +618,7 @@ impl Front {
         match f.kind {
             ipc::DATA => return self.to_client(f.n, &f.body),
             ipc::KICK => {
-                if self.conns.contains_key(&f.n) && self.kicked.insert(f.n) {
-                    self.pending_drop.push((f.n, Instant::now() + KICK_DELAY));
-                }
+                self.net.kick(f.n, Instant::now() + KICK_DELAY);
             }
             ipc::ANSWER => self.answer(f.n, &f.body),
             ipc::CHAT => match serde_json::from_slice(&f.body) {
@@ -1267,17 +906,8 @@ impl Front {
         if self.crashes.len() > MAX_CRASHES {
             self.give_up(bank);
         }
-        let clients: Vec<u64> = self.conns.keys().copied().collect();
-        let reason = crate::bank::reason_batch(RESTARTED);
-        for c in &clients {
-            self.to_client(*c, &reason);
-            if self.kicked.insert(*c) {
-                self.pending_drop.push((*c, now + KICK_DELAY));
-            }
-        }
-        self.held.clear();
-        self.held_bytes.clear();
-        self.held_total = 0;
+        let told = self.dismiss_all(&crate::bank::reason_batch(RESTARTED), now);
+        self.queue.clear();
         self.answers.clear();
         // The snapshot stays held: should this bank die too before it saves, the next one
         // starts from it again.
@@ -1295,7 +925,7 @@ impl Front {
         };
         match self.spawn(bank, None) {
             Ok(b) => {
-                eprintln!("restarting bank {bank} (pid {}) from {from}; {} players were told to join again", b.child.id(), clients.len());
+                eprintln!("restarting bank {bank} (pid {}) from {from}; {} players were told to join again", b.child.id(), told);
                 self.next = Some(b);
                 self.phase = Phase::Recovering;
             }
@@ -1520,7 +1150,7 @@ impl Front {
 
     /// The front's part of GET /api/status.
     fn overlay(&self, s: &mut Value) {
-        let steam: HashSet<u64> = self.conns.iter().filter(|(_, c)| matches!(c, Conn::Steam { .. })).map(|(c, _)| *c).collect();
+        let steam = self.net.steam_clients();
         for p in s["players"].as_array_mut().into_iter().flatten() {
             if p["id"].as_u64().is_some_and(|id| steam.contains(&id)) {
                 p["ip"] = "steam".into();
@@ -1536,10 +1166,10 @@ impl Front {
             cpu += c;
             memory += m;
         }
-        s["network"] = self.network().into();
-        s["inviteCode"] = self.invite_code.clone().into();
-        s["steam"] = self.invite_code.is_some().into();
-        s["port"] = self.port.into();
+        s["network"] = self.net.network().into();
+        s["inviteCode"] = self.net.invite_code.clone().into();
+        s["steam"] = self.net.invite_code.is_some().into();
+        s["port"] = self.net.port.into();
         s["uptimeSeconds"] = self.started.elapsed().as_secs().into();
         s["autosaveMinutes"] = self.autosave_minutes.into();
         s["process"] = json!({"cpuSeconds": cpu, "memoryBytes": memory});
@@ -1792,19 +1422,9 @@ impl Front {
             return Err(format!("the world cannot stop now ({})", if self.live.is_none() { "it is not running".to_string() } else { format!("{:?}", self.phase).to_lowercase() }));
         }
         let reason = crate::bank::reason_batch(why);
-        let now = Instant::now();
-        for c in self.conns.keys().copied().collect::<Vec<_>>() {
-            self.to_client(c, &reason);
-            if self.kicked.insert(c) {
-                self.pending_drop.push((c, now + KICK_DELAY));
-            }
-        }
-        if let Some(utp) = self.utp.as_mut() {
-            utp.flush();
-        }
-        self.held.clear();
-        self.held_bytes.clear();
-        self.held_total = 0;
+        self.dismiss_all(&reason, Instant::now());
+        self.net.flush(true);
+        self.queue.clear();
         for (_, (reply, _)) in self.answers.drain() {
             let _ = reply.send((503, "{\"error\":\"the world stopped\"}".into()));
         }
@@ -1910,50 +1530,8 @@ impl Front {
         for t in self.persisting.drain(..) {
             let _ = t.join();
         }
-        if let Some(utp) = &mut self.utp {
-            utp.tokens().iter().for_each(|t| utp.disconnect(t));
-        }
+        self.net.disconnect_all();
         std::process::exit(code)
-    }
-}
-
-/// Steam connections the server takes at once, and from one SteamID: the UDP side's caps
-/// (utp::MAX_CONNECTIONS; a player has one connection, a few more while an old one closes).
-const MAX_PER_STEAM_ID: usize = 4;
-
-/// Whether a Steam connection request is accepted: the caps direct-IP sessions have (utp.rs):
-/// connections in all, connections of one SteamID, and new connections of one SteamID within
-/// a window. Steam gives every request a verified identity but no address, so the SteamID
-/// stands where the IP does there.
-#[derive(Default)]
-struct SteamGate {
-    handshakes: HashMap<u64, (Instant, u32)>,
-}
-
-impl SteamGate {
-    /// `open`: the SteamIDs of the connections there are (and the ones accepted just now).
-    /// Err says which cap.
-    fn admit(&mut self, steam_id: u64, now: Instant, open: &[u64]) -> Result<(), String> {
-        if open.len() >= utp::MAX_CONNECTIONS {
-            return Err(format!("{} connections already", open.len()));
-        }
-        let same = open.iter().filter(|s| **s == steam_id).count();
-        if same >= MAX_PER_STEAM_ID {
-            return Err(format!("{same} connections of this SteamID already"));
-        }
-        let (since, n) = self.handshakes.entry(steam_id).or_insert((now, 0));
-        if now.saturating_duration_since(*since) > utp::HANDSHAKE_WINDOW {
-            (*since, *n) = (now, 0);
-        }
-        if *n >= utp::MAX_HANDSHAKES {
-            return Err(format!("more than {} new connections in {} s", utp::MAX_HANDSHAKES, utp::HANDSHAKE_WINDOW.as_secs()));
-        }
-        *n += 1;
-        // Connections are capped, so this holds the SteamIDs of the last window and little more.
-        if self.handshakes.len() > 4 * utp::MAX_CONNECTIONS {
-            self.handshakes.retain(|_, (t, _)| now.saturating_duration_since(*t) <= utp::HANDSHAKE_WINDOW);
-        }
-        Ok(())
     }
 }
 
@@ -1998,23 +1576,6 @@ fn watch_verdict(phase: Phase, silent: Duration, watchdog: Duration, saving: boo
         return Watch::Ping;
     }
     Watch::Fine
-}
-
-/// The client a Steam disconnect is about: the one whose connection carries its id; one that
-/// closed before its id was set (connected and gone within one poll) is the one of that
-/// SteamID that connected in this poll.
-fn disconnected(user_data: i64, peer: u64, joined_now: &[(u64, u64)]) -> Vec<u64> {
-    match u64::try_from(user_data).ok().filter(|c| *c > 0) {
-        Some(client) => vec![client],
-        None => joined_now.iter().filter(|(_, s)| *s == peer).map(|(c, _)| *c).collect(),
-    }
-}
-
-/// Whether the SteamID a direct-IP client reports is believed: only from this machine, and
-/// only when asked (PCDS_DEV=trust-loopback: tests, the load and probe tools). Behind a UDP
-/// relay (playit.gg, frp, ssh -R) every player comes from 127.0.0.1.
-fn trusted(ip: std::net::IpAddr, opted_in: bool) -> bool {
-    opted_in && utp::is_loopback(ip)
 }
 
 /// An update's work on a thread of its own, whose outcome always comes: a panic in it is a
@@ -2113,119 +1674,19 @@ fn wait_frame(b: &mut Bank, deadline: Instant) -> Option<Frame> {
     }
 }
 
-fn steam_login(version: &str, session_number: u32) -> Result<(Server, ListenSocket, String), String> {
-    let (steam, client) = Server::init(Ipv4Addr::UNSPECIFIED, 0, 0xFFFF, ServerMode::NoAuthentication, version)
-        .map_err(|e| format!("Steam game server init failed ({e}); is steamclient.so in ~/.steam/sdk64?"))?;
-    steam.set_product(APP_ID);
-    steam.set_mod_dir("Planet Crafter");
-    steam.set_game_description("Planet Crafter standalone server");
-    steam.set_dedicated_server(true);
-    let connected = Arc::new(AtomicBool::new(false));
-    let logon = connected.clone();
-    let _logon = steam.register_callback(move |_: SteamServersConnected| logon.store(true, Ordering::SeqCst));
-    match crate::env("PCDS_STEAM_TOKEN") {
-        Some(token) => steam.log_on(&token),
-        None => steam.log_on_anonymous(),
-    }
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !connected.load(Ordering::SeqCst) {
-        if Instant::now() > deadline {
-            return Err("Steam game server logon timed out".into());
-        }
-        steam.run_callbacks();
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    drop(client);
-    // Room for the largest join queued at once (the default is 512 KiB); connections take it
-    // from the listen socket.
-    let buffer = NetworkingConfigEntry::new_int32(NetworkingConfigValue::SendBufferSize, SEND_BUFFER);
-    let listen = steam.networking_sockets().create_listen_socket_p2p(0, [buffer]).map_err(|_| "P2P listen socket failed")?;
-    let steam_id = steam.steam_id().raw();
-    let code = format!("{}{:04}", crate::protocol::invite_code(steam_id), session_number);
-    println!("steam: game server {steam_id}, invite code {code}");
-    Ok((steam, listen, code))
-}
-
-/// The game's Steam transport frames batches over 512 KiB as "Split<n>" plus n chunks. Its
-/// receive buffer holds MAX_STEAM_MESSAGE, and it reads n as one digit: bigger batches go as
-/// several, split between messages. Err when Steam refuses a send (the client then has part
-/// of a batch) or one message is too big for the game.
-fn send(connection: &NetConnection, batch: &[u8]) -> Result<(), String> {
-    for part in steam_parts(batch)? {
-        let refused = |e| format!("Steam refused a send of {} bytes ({e:?})", part.len());
-        if part.len() <= CHUNK {
-            connection.send_message(&part, SendFlags::RELIABLE).map_err(refused)?;
-            continue;
-        }
-        let chunks: Vec<&[u8]> = part.chunks(CHUNK).collect();
-        connection.send_message(format!("Split{}", chunks.len()).as_bytes(), SendFlags::RELIABLE).map_err(refused)?;
-        for c in chunks {
-            connection.send_message(c, SendFlags::RELIABLE).map_err(refused)?;
-        }
-    }
-    Ok(())
-}
-
-/// A batch as batches the game's Steam transport takes (each at most MAX_STEAM_MESSAGE).
-fn steam_parts(batch: &[u8]) -> Result<Vec<Vec<u8>>, String> {
-    if batch.len() <= MAX_STEAM_MESSAGE {
-        return Ok(vec![batch.to_vec()]);
-    }
-    let (mut parts, mut part, mut size) = (Vec::new(), crate::wire::Batch::default(), 16);
-    for (kind, body) in crate::wire::messages(batch) {
-        // The message's kind and length are at most 5 bytes each.
-        let n = body.len() + 10;
-        if 16 + n > MAX_STEAM_MESSAGE {
-            return Err(format!("a message of {} bytes (type {kind}), and the game's Steam transport takes at most {MAX_STEAM_MESSAGE} at once: this world can be joined over direct IP only", body.len()));
-        }
-        if size + n > MAX_STEAM_MESSAGE {
-            parts.push(std::mem::take(&mut part).finish());
-            size = 16;
-        }
-        part.push(kind, body);
-        size += n;
-    }
-    if !part.is_empty() {
-        parts.push(part.finish());
-    }
-    Ok(parts)
-}
-
-/// A client's messages back into batches. Err for a split the game never sends (a count other
-/// than 1..=9, or over MAX_SPLIT in all): the caller drops the client.
-fn reassemble(split: &mut Option<(Vec<u8>, usize)>, data: &[u8]) -> Result<Option<Vec<u8>>, &'static str> {
-    if let Some((buffer, left)) = split {
-        if buffer.len() + data.len() > MAX_SPLIT {
-            return Err("split message over 1 MiB");
-        }
-        buffer.extend_from_slice(data);
-        *left -= 1;
-        if *left == 0 {
-            return Ok(split.take().map(|(buffer, _)| buffer));
-        }
-        return Ok(None);
-    }
-    if data.len() == 6 && &data[..5] == b"Split" {
-        let n = char::from(data[5]).to_digit(10).filter(|n| (1..=9).contains(n)).ok_or("bad split count")?;
-        *split = Some((Vec::new(), n as usize));
-        return Ok(None);
-    }
-    Ok(Some(data.to_vec()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// A bank on one end of a socket pair (a sleeping process stands in for its program).
-    fn fake_bank(name: &str) -> (Bank, Link) {
+    pub(super) fn fake_bank(name: &str) -> (Bank, Link) {
         let (ours, theirs) = UnixStream::pair().unwrap();
         ours.set_nonblocking(true).unwrap();
         let child = Command::new("sleep").arg("30").spawn().unwrap();
         (Bank { name: name.into(), child, link: Link::new(ours), hello: Value::Null, started: Instant::now(), heard: Instant::now() }, Link::new(theirs))
     }
 
-    fn test_front() -> Front {
+    pub(super) fn test_front() -> Front {
         Front::new("data", "/nonexistent/world.json", None, None, 0, Arc::new(AtomicBool::new(false)))
     }
 
@@ -2320,41 +1781,6 @@ mod tests {
         }
     }
 
-    /// Steam connections have the caps direct-IP sessions have: in all, per SteamID, and how often a
-    /// SteamID may connect. (The event loop that asks it needs a Steam login and is not run by the tests.)
-    #[test]
-    fn steam_connections_have_the_udp_caps() {
-        let now = Instant::now();
-        let mut gate = SteamGate::default();
-        // One SteamID: four at once (a reconnect while the old one closes), the fifth refused.
-        let mut open: Vec<u64> = Vec::new();
-        for _ in 0..MAX_PER_STEAM_ID {
-            gate.admit(7, now, &open).unwrap();
-            open.push(7);
-        }
-        assert!(gate.admit(7, now, &open).unwrap_err().contains("4 connections of this SteamID"));
-        // Others are not held back by it.
-        gate.admit(8, now, &open).unwrap();
-        // The total: 128, whoever asks.
-        let full: Vec<u64> = (0..utp::MAX_CONNECTIONS as u64).map(|i| 1000 + i).collect();
-        assert!(gate.admit(9, now, &full).unwrap_err().contains("128 connections already"));
-        assert!(gate.admit(9, now, &full[1..]).is_ok());
-        // The rate: four new connections within the window, whatever became of them.
-        let mut gate = SteamGate::default();
-        for i in 0..utp::MAX_HANDSHAKES {
-            gate.admit(5, now + Duration::from_secs(u64::from(i)), &[]).unwrap();
-        }
-        assert!(gate.admit(5, now + Duration::from_secs(5), &[]).unwrap_err().contains("new connections in 10 s"));
-        assert!(gate.admit(6, now + Duration::from_secs(5), &[]).is_ok());
-        assert!(gate.admit(5, now + utp::HANDSHAKE_WINDOW + Duration::from_secs(1), &[]).is_ok(), "the window moves on");
-        // Many SteamIDs asking once each do not make the table grow without end.
-        let mut gate = SteamGate::default();
-        for i in 0..2000u64 {
-            gate.admit(i, now + Duration::from_secs(i / 10), &[]).unwrap();
-        }
-        assert!(gate.handshakes.len() <= 4 * utp::MAX_CONNECTIONS + 1);
-    }
-
     /// A world that does not start leaves the server stopped on the world it stopped, with its
     /// lock, and server.env naming that world (a restart would fail on the other).
     #[test]
@@ -2417,15 +1843,15 @@ mod tests {
     fn the_front_is_quiet_only_with_nobody_connected_and_nothing_under_way() {
         let mut front = test_front();
         assert!(front.quiet());
-        front.conns.insert(1, Conn::Ip([0; 8]));
+        front.net.conns.insert(1, transport::Conn::Ip([0; 8]));
         assert!(!front.quiet());
-        front.conns.clear();
-        front.pending_drop.push((1, Instant::now()));
+        front.net.conns.clear();
+        front.net.pending_drop.push((1, Instant::now()));
         assert!(!front.quiet());
-        front.pending_drop.clear();
-        front.held.push((ipc::DATA, 1, vec![], 1));
+        front.net.pending_drop.clear();
+        front.queue.held.push((ipc::DATA, 1, vec![], 1));
         assert!(!front.quiet());
-        front.held.clear();
+        front.queue.held.clear();
         for phase in [Phase::Starting, Phase::Snapshotting, Phase::Restoring, Phase::Recovering] {
             front.phase = phase;
             assert!(!front.quiet());
@@ -2494,119 +1920,6 @@ mod tests {
         }
     }
 
-    /// All the clients' frames waiting for the bank have a total cap: past it the client with the most
-    /// waiting is dropped (its frames taken back), whether it is the sender or another, and the
-    /// accounting follows the frames in and out.
-    #[test]
-    fn what_all_clients_have_waiting_for_the_bank_is_capped_by_dropping_the_slowest() {
-        let mut front = test_front();
-        front.queue_cap = 4 << 20;
-        let (live, _bank) = fake_bank("a");
-        front.live = Some(live);
-        // Three clients (their connections are only entries here).
-        for client in 1..=3u64 {
-            front.conns.insert(client, Conn::Ip([client as u8; 8]));
-        }
-        let mib = vec![7u8; (1 << 20) - 13];
-        // The bank is not reading: frames pile up in the link's queue. 2 MiB, 1 MiB, 0.
-        for (client, count) in [(1u64, 2), (2, 1)] {
-            for _ in 0..count {
-                front.to_bank(ipc::DATA, client, &mib, client);
-            }
-        }
-        assert_eq!(front.waiting_total(), 3 << 20);
-        assert_eq!(front.slowest_waiting(), Some((1, 2 << 20)));
-        // 1 MiB more from client 3 does not fit beside the 3: client 1 has the most and goes.
-        front.to_bank(ipc::DATA, 3, &mib, 3);
-        front.to_bank(ipc::DATA, 3, &mib, 3);
-        assert!(!front.conns.contains_key(&1) && front.conns.contains_key(&2) && front.conns.contains_key(&3), "client 1 was dropped");
-        assert_eq!(front.live.as_ref().unwrap().link.queued.get(&1), None, "its frames were taken back");
-        assert_eq!(front.waiting_total(), 3 << 20, "client 2's and client 3's: {:?}", front.live.as_ref().unwrap().link.queued);
-        // Held while the world stands (a flip): the same, from the held frames.
-        front.phase = Phase::Snapshotting;
-        front.live.as_mut().unwrap().link.purge(2);
-        front.live.as_mut().unwrap().link.purge(3);
-        assert_eq!(front.waiting_total(), 0);
-        for _ in 0..3 {
-            front.to_bank(ipc::DATA, 2, &mib, 2);
-        }
-        front.to_bank(ipc::DATA, 3, &mib, 3);
-        assert_eq!((front.held_total, front.held_bytes.len()), (4 << 20, 2));
-        // Client 3 asks for more: 2 has the most, 2 goes (held frames removed, total follows).
-        front.to_bank(ipc::DATA, 3, &mib, 3);
-        assert!(!front.conns.contains_key(&2) && front.conns.contains_key(&3));
-        assert_eq!((front.held_total, front.held.iter().filter(|h| h.3 == 2).count()), (2 << 20, 0));
-        // A client alone that is over the cap itself is dropped, the frame not kept.
-        for _ in 0..3 {
-            front.to_bank(ipc::DATA, 3, &mib, 3);
-        }
-        assert!(!front.conns.contains_key(&3));
-        assert_eq!(front.held_total, 0);
-        // Released: only the GONE frames of the two clients that were dropped in the hold are left, and nothing is counted as waiting.
-        assert_eq!(front.release_held(), 2);
-        assert_eq!(front.waiting_total(), 0);
-        for mut child in [front.live.take()].into_iter().flatten().map(|b| b.child) {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-
-    /// A measurement, not a check (run by hand: cargo test --release front::tests::measure_ -- --ignored
-    /// --nocapture --test-threads=1): a stall that holds 192 MiB of client frames (12000 of 16 KiB
-    /// from 64 clients), released into a bank that reads again, and the resident memory of the
-    /// process before, at the peak, after the queue drained, and after release_memory().
-    #[test]
-    #[ignore]
-    fn measure_memory_after_a_stall() {
-        let rss = || std::fs::read_to_string("/proc/self/statm").unwrap().split_whitespace().nth(1).unwrap().parse::<usize>().unwrap() * 4096 >> 20;
-        let mut front = test_front();
-        front.queue_cap = usize::MAX;
-        let (live, mut peer) = fake_bank("a");
-        front.live = Some(live);
-        front.phase = Phase::Snapshotting;
-        let reader = std::thread::spawn(move || {
-            let mut seen = 0usize;
-            // The bank reads again once the front lets the frames go.
-            while peer.fill(usize::MAX) {
-                while peer.next().is_some() {
-                    seen += 1;
-                }
-            }
-            seen
-        });
-        let before = rss();
-        let body = vec![5u8; 16 << 10];
-        let mut small = Vec::new();
-        for i in 0..12_000u64 {
-            front.to_bank(ipc::DATA, 1 + i % 64, &body, 1 + i % 64);
-            // What the front allocates meanwhile and keeps (connections, log lines, tables): the heap
-            // cannot shrink from its end past it.
-            if i % 8 == 0 {
-                small.push(vec![1u8; 200]);
-            }
-        }
-        let peak = rss();
-        assert_eq!(front.held_total >> 20, 12_000 * (16 << 10) >> 20);
-        front.phase = Phase::Idle;
-        front.release_held();
-        while front.live.as_ref().unwrap().link.pending() {
-            front.flush_banks();
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        let drained = rss();
-        front.waiting_peak = front.waiting_peak.max(TRIM_AFTER);
-        front.release_memory();
-        let trimmed = rss();
-        println!("resident memory of the front: {before} MiB before, {peak} MiB holding 192 MiB of frames, {drained} MiB after the queue drained, {trimmed} MiB after release_memory()");
-        drop(small);
-        let live = front.live.take().unwrap();
-        drop(live.link);
-        let mut child = live.child;
-        let _ = child.kill();
-        let _ = child.wait();
-        assert_eq!(reader.join().unwrap(), 12_000);
-    }
-
     /// What the live bank says of the rules the front acts on (OPS) sets the autosave timer and
     /// the updater, and a value out of range is clamped, not trusted.
     #[test]
@@ -2648,53 +1961,6 @@ mod tests {
         assert_eq!(chat_config(b"{\"secret\": \"t0psecret").unwrap_err(), "chat config unreadable (not JSON)");
     }
 
-    #[test]
-    fn a_steam_disconnect_names_its_connection_not_the_steam_id() {
-        // Client 3 is the same player's new connection: the old one's close is client 2's.
-        assert_eq!(disconnected(2, 76561198000000042, &[(3, 76561198000000042)]), [2]);
-        assert_eq!(disconnected(-1, 76561198000000042, &[(3, 76561198000000042), (4, 1)]), [3]);
-        assert!(disconnected(-1, 5, &[]).is_empty());
-    }
-
-    #[test]
-    fn loopback_is_trusted_only_when_asked() {
-        let local = "127.0.0.1".parse().unwrap();
-        assert!(!trusted(local, false), "a relay's players all come from 127.0.0.1");
-        assert!(trusted(local, true) && trusted("::ffff:127.0.0.1".parse().unwrap(), true));
-        assert!(!trusted("10.0.0.2".parse().unwrap(), true));
-    }
-
-    /// Batches past the game's 2.5 MiB go as several, split between messages, so "Split" never
-    /// needs two digits; one message over it is an error, not garbage.
-    #[test]
-    fn steam_batches_fit_the_games_transport() {
-        let small = crate::wire::batch(&[(1, vec![7; 100])]);
-        assert_eq!(steam_parts(&small).unwrap(), [small.clone()]);
-        let big = crate::wire::batch(&[(1, vec![1; 1 << 20]), (2, vec![2; 1 << 20]), (3, vec![3; 1 << 20]), (4, vec![4; 10])]);
-        let parts = steam_parts(&big).unwrap();
-        assert_eq!(parts.len(), 2);
-        assert!(parts.iter().all(|p| p.len() <= MAX_STEAM_MESSAGE && p.len().div_ceil(CHUNK) <= 9));
-        let back: Vec<(u32, Vec<u8>)> = parts.iter().flat_map(|p| crate::wire::messages(p).into_iter().map(|(k, b)| (k, b.to_vec())).collect::<Vec<_>>()).collect();
-        assert_eq!(back, crate::wire::messages(&big).into_iter().map(|(k, b)| (k, b.to_vec())).collect::<Vec<_>>());
-        let world = crate::wire::batch(&[(1, vec![0; 3 << 20])]);
-        assert!(steam_parts(&world).unwrap_err().contains("direct IP"));
-    }
-
-    #[test]
-    fn steam_splits_are_bounded() {
-        let mut split = None;
-        assert_eq!(reassemble(&mut split, b"batch"), Ok(Some(b"batch".to_vec())));
-        for bad in [b"Split0", b"Split/", b"Split:"] {
-            assert!(reassemble(&mut None, bad).is_err());
-        }
-        assert_eq!(reassemble(&mut split, b"Split2"), Ok(None));
-        assert_eq!(reassemble(&mut split, b"ab"), Ok(None));
-        assert_eq!(reassemble(&mut split, b"cd"), Ok(Some(b"abcd".to_vec())));
-        assert!(split.is_none());
-        reassemble(&mut split, b"Split3").unwrap();
-        reassemble(&mut split, &vec![0; MAX_SPLIT]).unwrap();
-        assert!(reassemble(&mut split, b"x").is_err());
-    }
 }
 
 #[cfg(any(fuzzing, pcds_corpus))]

@@ -1,5 +1,6 @@
 //! The front's parsers of bytes from outside: the Steam transport's Split<n> reassembly, the
 //! chat config a bank sends, the head of a kept snapshot.
+use super::transport::steam::{disconnected, parts, reassemble, MAX_SPLIT};
 use super::*;
 
 pub fn run(data: &[u8]) {
@@ -13,7 +14,7 @@ pub fn run(data: &[u8]) {
             Err(_) => split = None,
         }
     }
-    let _ = steam_parts(data);
+    let _ = parts(data);
     let _ = chat_config(data);
     let hello = serde_json::from_slice::<Value>(data).unwrap_or(Value::Null);
     let _ = never_runs(data, &hello);
