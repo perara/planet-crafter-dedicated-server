@@ -41,7 +41,7 @@ impl Ctx {
 
     /// A property of the server's unit (systemctl show); Err with what systemctl said when it
     /// fails.
-    fn show(&self, property: &str) -> Result<String> {
+    pub(super) fn show(&self, property: &str) -> Result<String> {
         let mut cmd = self.systemctl(&["show", "-p", property, "--value", &self.unit()]);
         let out = cmd.stdin(std::process::Stdio::null()).output().map_err(|e| format!("{}: {e}", super::describe(&cmd)))?;
         if !out.status.success() {

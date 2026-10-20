@@ -62,14 +62,55 @@ impl Ctx {
             say(format!("{} installed in bank {target} (sha256 checked), the active one now: {}", release.tag, describe(&info)));
         }
         if running {
-            // The release now active may read another tables format (a stopped server gets
-            // them at 'pcds start').
+            // The release now active reads server.env its own way (a setting it retired stops its
+            // start), and may read another tables format (a stopped server gets them at 'pcds
+            // start'). Both are looked at while the server still runs.
+            self.settings_or_undo(&banks, &active)?;
             self.tables_or_undo(None, &banks, &active)?;
             say("restarting the server: every player is disconnected and reconnects");
-            return if self.container { self.restart_in_place() } else { self.restart_if_running() };
+            if self.container {
+                return self.restart_in_place();
+            }
+            self.restart_if_running()?;
+            return self.wait_until_back();
         }
         say("the server runs it from its next start ('pcds start')");
         Ok(())
+    }
+
+    /// Whether the now-active bank's release accepts server.env (its `pcds check-settings`: it,
+    /// not the release that runs, knows which settings it has retired). When it does not, `active`
+    /// goes back to `previous` and nothing is restarted. A release that has no such command
+    /// (it prints its help and no error) is not asked.
+    fn settings_or_undo(&self, banks: &std::path::Path, previous: &str) -> Result {
+        let now = updater::active(banks);
+        let out = std::process::Command::new(banks.join(&now).join("pcds")).arg("check-settings").env("PCDS_HOME", &self.run).stdin(std::process::Stdio::null()).output().map_err(|e| format!("bank {now}: {e}"))?;
+        let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if out.status.success() || said.is_empty() {
+            return Ok(());
+        }
+        let back = match updater::set_active(banks, previous) {
+            Ok(()) => format!("the server was not restarted, and bank {previous} is still the active one"),
+            Err(undo) => format!("and bank {previous} could not be made the active one again ({undo}): fix run/bin/active before the server restarts"),
+        };
+        Err(format!("{said}\nthe release just installed would not start with this server.env: edit it (docs/upgrading.md), then run the same command again\n{back}"))
+    }
+
+    /// After the restart of the unit: until the world runs again. Err when the unit gave up
+    /// (a start that fails is retried by systemd, 15 s apart, and then left failed).
+    fn wait_until_back(&self) -> Result {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(300) {
+            std::thread::sleep(Duration::from_secs(1));
+            if self.api_json("GET", "/api/status").is_ok_and(|s| s["state"] == "running") {
+                say(format!("the server is back after {} s", started.elapsed().as_secs()));
+                return Ok(());
+            }
+            if let Ok(state) = self.show("SubState") && matches!(state.as_str(), "auto-restart" | "failed") {
+                return Err(format!("the server did not start again (the unit is {state}): 'pcds logs' says why, and 'pcds upgrade --rollback --restart' goes back to the other release"));
+            }
+        }
+        Err("the world did not run again within 5 minutes ('pcds logs')".into())
     }
 
     /// The tables the now-active bank's release reads, read if there are none (`ensure_tables`).
@@ -207,6 +248,35 @@ mod tests {
         assert!(e.contains("is still the active one") && e.contains("not restarted"), "{e}");
         assert_eq!(updater::active(&banks), "a");
         assert!(describe(&serde_json::from_value(json!({"version": "0.6.0", "tag": "v0.6.0", "protocol": 2, "format": 1})).unwrap()).starts_with("pcds 0.6.0 (v0.6.0), front protocol 2, snapshot format 1"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A release that refuses server.env is not made the active one by an upgrade that restarts
+    /// a running server: the bank that runs stays active, and the message says what to edit.
+    /// A release that has no such command is not asked.
+    #[test]
+    fn an_upgrade_that_would_not_start_with_server_env_changes_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = super::super::test_dir("upgrade-settings");
+        let ctx = super::super::test_ctx(&dir);
+        let banks = ctx.banks();
+        let put = |bank: &str, script: &str| {
+            std::fs::create_dir_all(banks.join(bank)).unwrap();
+            std::fs::write(banks.join(bank).join("pcds"), format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(banks.join(bank).join("pcds"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        put("b", "[ \"$1\" = check-settings ] && echo \"pcds: $PCDS_HOME/server.env: unknown setting PCDS_OLD\" >&2 && exit 1");
+        updater::set_active(&banks, "b").unwrap();
+        let e = ctx.settings_or_undo(&banks, "a").unwrap_err();
+        assert!(e.contains("unknown setting PCDS_OLD") && e.contains("not restarted") && e.contains("bank a is still the active one"), "{e}");
+        assert_eq!(updater::active(&banks), "a");
+        // Accepted, and an older release that prints its help and no error: both go on.
+        put("b", "exit 0");
+        updater::set_active(&banks, "b").unwrap();
+        ctx.settings_or_undo(&banks, "a").unwrap();
+        put("b", "echo 'pcds: install and run a Planet Crafter dedicated server'; exit 1");
+        ctx.settings_or_undo(&banks, "a").unwrap();
+        assert_eq!(updater::active(&banks), "b");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
