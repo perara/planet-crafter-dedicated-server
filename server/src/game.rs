@@ -667,7 +667,7 @@ impl Game {
     /// The work of an RPC (handlers::rpc_cost).
     fn rpc_cost(&self, body: &[u8]) -> u32 {
         let name = rpc_method(body).and_then(|m| self.net.spec.get(m)).map(|r| r.name.as_str());
-        crate::handlers::rpc_cost(name.unwrap_or(""), self.wos.len())
+        crate::handlers::rpc_cost(name.unwrap_or(""), self.wos.len(), body.len())
     }
 
     fn run_rpc(&mut self, client: u64, body: &[u8]) {
@@ -677,7 +677,10 @@ impl Game {
             return;
         }
         let Some(args) = self.net.spec.decode(method, r.rest()) else {
-            eprintln!("client {client}: undecodable RPC {method}");
+            // Logged once for each RPC, not for each message: a client can send them by the thousand.
+            if self.unhandled.insert(format!("undecodable {method}")) {
+                eprintln!("client {client}: undecodable RPC {method} (logged once)");
+            }
             return;
         };
         let Some(name) = self.net.spec.get(method).map(|r| r.name.clone()) else { return };
@@ -1256,7 +1259,9 @@ pub mod tests {
             run(&mut g);
             assert_eq!(answers(&mut g), n);
         }
-        assert_eq!(crate::handlers::rpc_cost("WorldObjectsHandler.HasWorldObjectAtPositionServerRpc", 50_000), 49);
+        assert_eq!(crate::handlers::rpc_cost("WorldObjectsHandler.HasWorldObjectAtPositionServerRpc", 50_000, 40), 49);
+        // An RPC costs one more for each KiB it carries (at most the budget), so a list of thousands of items is not one RPC's work.
+        assert_eq!((crate::handlers::rpc_cost("A.B", 0, 200), crate::handlers::rpc_cost("A.B", 0, 5000), crate::handlers::rpc_cost("A.B", 0, 1 << 20)), (1, 5, 33));
     }
 
     /// A whitelist of SteamIDs only: who is not on it never gets the world.

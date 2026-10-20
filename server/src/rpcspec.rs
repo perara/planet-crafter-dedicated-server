@@ -71,6 +71,11 @@ fn check(a: &Arg) -> Result<bool, String> {
 /// which no snapshot can hold (hot updates refused) and the save writes as "NaN".
 pub const SANE_FLOAT: f64 = 1.0e9;
 
+/// The most items an RPC's array may hold; a longer one is no RPC of the game's and is not decoded.
+/// The game's lists are an inventory's items (at most 1000), groups (about 730) and a handful of
+/// traits; a megabyte of them was tens of milliseconds of a handler's time, at the cost of one RPC.
+pub const MAX_ARRAY_ITEMS: i32 = 4096;
+
 /// Whether an argument holds a float (not an integer) past SANE_FLOAT.
 fn huge(v: &Value) -> bool {
     match v {
@@ -253,6 +258,9 @@ fn read_value(r: &mut Reader, a: &Arg, enc: &str, ty: &str) -> Option<Value> {
         "string" => json!(r.string()?),
         "array" => {
             let n = r.i32()?;
+            if n > MAX_ARRAY_ITEMS {
+                return None;
+            }
             let item_ty = ty.trim_end_matches("[]");
             let mut items = Vec::new();
             for _ in 0..n.max(0) {
@@ -404,6 +412,20 @@ mod tests {
         let (hash, bytes) = s.encode("A.BRpc", &[json!(200), json!([-2, 3])]);
         assert_eq!(bytes, [200, 1, 2, 0, 0, 0, 0xfe, 0xff, 3, 0]);
         assert_eq!(s.decode(hash, &bytes).unwrap(), vec![json!(200), json!([-2, 3])]);
+    }
+
+    /// A list longer than the game's lists is no RPC of the game's: it is not decoded (the handlers
+    /// would each spend their time on a megabyte of it, at the budget cost of one RPC).
+    #[test]
+    fn an_array_longer_than_the_games_lists_is_not_decoded() {
+        let s = Spec::parse(r#"{"1": {"name": "A.BRpc", "args": [{"name": "f", "type": "F[]", "enc": "array", "item": "enum", "base": "short", "optional": false}]}}"#).unwrap();
+        let list = |n: i32| (0..n).collect::<Vec<i32>>();
+        let (hash, ok) = s.encode("A.BRpc", &[json!(list(MAX_ARRAY_ITEMS))]);
+        assert_eq!(s.decode(hash, &ok).unwrap()[0].as_array().map(Vec::len), Some(MAX_ARRAY_ITEMS as usize));
+        let (hash, too_many) = s.encode("A.BRpc", &[json!(list(MAX_ARRAY_ITEMS + 1))]);
+        assert!(s.decode(hash, &too_many).is_none());
+        let (hash, huge) = s.encode("A.BRpc", &[json!(list(60_000))]);
+        assert!(s.decode(hash, &huge).is_none());
     }
 
     #[test]

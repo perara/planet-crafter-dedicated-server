@@ -140,11 +140,14 @@ impl Limits {
     }
 }
 
-/// The work an RPC makes: HasWorldObjectAtPosition looks at every world object, as the game's.
-pub fn rpc_cost(name: &str, world_objects: usize) -> u32 {
+/// The work an RPC makes: HasWorldObjectAtPosition looks at every world object, as the game's, and
+/// the rest one each and one more for every KiB it carries (a game client's RPCs are tens of bytes;
+/// a list of thousands of items is that many times the handler's work).
+pub fn rpc_cost(name: &str, world_objects: usize, bytes: usize) -> u32 {
+    let size = (bytes / 1024).min(RPC_BUDGET as usize) as u32;
     match name {
-        "WorldObjectsHandler.HasWorldObjectAtPositionServerRpc" => 1 + (world_objects / 1024) as u32,
-        _ => 1,
+        "WorldObjectsHandler.HasWorldObjectAtPositionServerRpc" => 1 + (world_objects / 1024) as u32 + size,
+        _ => 1 + size,
     }
 }
 
