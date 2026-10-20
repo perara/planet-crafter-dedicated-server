@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use super::env::build_id;
+use crate::tables::build_id;
 use crate::config::parse_env;
 use super::{need, say, sleep, wait_for, Ctx, Result};
 #[cfg(test)]

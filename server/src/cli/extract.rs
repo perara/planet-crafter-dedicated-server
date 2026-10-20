@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use super::env::build_id;
+use crate::tables::build_id;
 use super::{say, Ctx, Result};
 
 /// The tables being made: removed unless they were finished (moved into place).

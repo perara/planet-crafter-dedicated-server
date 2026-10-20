@@ -495,7 +495,7 @@ fn encode(asm: &Assemblies, ty: &TypeSig, v: &Val) -> Result<Option<Vec<u8>>, St
                 other => return Err(format!("{other:?} for a {}", t.name)),
             };
             let capacity: usize = t.name.trim_start_matches("FixedString").trim_end_matches("Bytes").parse().map_err(|_| t.name.clone())?;
-            crate::net::enc::fixed_string(&s, capacity)
+            crate::wire::fixed_string(&s, capacity)
         }
         ValueType(t) => match asm.enum_base(t) {
             Some(base) => {

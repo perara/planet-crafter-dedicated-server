@@ -155,7 +155,7 @@ impl Ctx {
     /// A line for `pcds status` when the installed game has no tables for the server (a game
     /// update that pcds update has not read yet), or cannot be found.
     fn game_line(&self) -> Option<String> {
-        match self.game_dir(None).and_then(|game| super::build_id(&game)) {
+        match self.game_dir(None).and_then(|game| crate::tables::build_id(&game)) {
             Err(e) => Some(format!("game: {e}")),
             Ok(build) => self.tables(&build).err().map(|e| format!("game build {build} has no tables: {e}")),
         }

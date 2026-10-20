@@ -361,7 +361,7 @@ pub fn read_game(game: &Path, out: &Path) -> Result<String, String> {
     request.u64(config_hash).i32(data.len() as i32).bytes(data.as_bytes());
     let request: String = request.0.iter().map(|b| format!("{b:02x}")).collect();
     // The build these tables are for: the game code's hash, as `pcds` checks it.
-    let build = crate::cli::build_id(game)?;
+    let build = crate::tables::build_id(game)?;
     let layouts = ctx.world_object_layouts(&assets, &group_prefabs).map_err(|e| format!("layouts: {e}"))?;
     let prime = assets.get("PlanetData:PlanetData-Prime").and_then(|p| p["sceneName"].as_str()).ok_or("no PlanetData-Prime scene")?.to_string();
     let singletons = ctx.singletons(&prime, player_root).map_err(|e| format!("singletons: {e}"))?;

@@ -187,7 +187,7 @@ impl Game {
         let colored = wo.color[0] > 0.0 || wo.color[1] > 0.0 || wo.color[2] > 0.0;
         o.init("ColorProxy", "_color", enc::color(if colored { [wo.color[0], wo.color[1], wo.color[2], 1.0] } else { [0.0; 4] }));
         o.init("SettingProxy", "_setting", enc::int(wo.setting));
-        o.init("TextProxy", "_text", enc::fixed_string(&wo.text, 128));
+        o.init("TextProxy", "_text", crate::wire::fixed_string(&wo.text, 128));
         let linked: Vec<Vec<u8>> = wo.linked_groups.iter().flatten().map(|g| enc::int(self.data.groups[*g].hash)).collect();
         o.init_list("LinkedGroupsProxy", "_linkedGroupsHash", linked);
         o.init("LinkedPlanetProxy", "_linkedPlanet", enc::int(wo.planet_linked));

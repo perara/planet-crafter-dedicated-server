@@ -58,19 +58,6 @@ pub mod enc {
     pub fn color(c: [f32; 4]) -> Vec<u8> {
         c.iter().flat_map(|v| v.to_le_bytes()).collect()
     }
-    /// FixedStringNBytes: i32 length, UTF-8 (capacity N - 3 bytes).
-    pub fn fixed_string(s: &str, capacity: usize) -> Vec<u8> {
-        let mut bytes = s.as_bytes().to_vec();
-        while bytes.len() > capacity - 3 {
-            bytes.pop();
-            while !bytes.is_empty() && std::str::from_utf8(&bytes).is_err() {
-                bytes.pop();
-            }
-        }
-        let mut out = (bytes.len() as i32).to_le_bytes().to_vec();
-        out.extend(bytes);
-        out
-    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -764,7 +751,7 @@ mod tests {
             .expect("a FixedString variable");
         g.net.flush();
         g.net.out.clear();
-        g.net.set(object, &class, &var, enc::fixed_string("hi", 128));
+        g.net.set(object, &class, &var, crate::wire::fixed_string("hi", 128));
         g.net.flush();
         let (_, kind, body) = g.net.out.last().unwrap();
         assert_eq!(*kind, NETWORK_VARIABLE_DELTA);
@@ -780,11 +767,5 @@ mod tests {
         assert!(!finite(ty, &v3(1.0, 1.0e30, 3.0)), "finite, but past what the server's arithmetic holds");
         assert!(!finite("NetworkVariable<Double>", &1.0e300f64.to_le_bytes()));
         assert!(finite("NetworkVariable<Int32>", &i32::MAX.to_le_bytes()), "other types are not floats");
-    }
-
-    #[test]
-    fn fixed_strings_cut_at_capacity() {
-        assert_eq!(enc::fixed_string("abc", 128), vec![3, 0, 0, 0, b'a', b'b', b'c']);
-        assert_eq!(enc::fixed_string(&"x".repeat(200), 128).len(), 4 + 125);
     }
 }

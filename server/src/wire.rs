@@ -224,6 +224,20 @@ pub fn messages(batch: &[u8]) -> Vec<(u32, &[u8])> {
     out
 }
 
+/// FixedStringNBytes: i32 length, UTF-8 (capacity N - 3 bytes).
+pub fn fixed_string(s: &str, capacity: usize) -> Vec<u8> {
+    let mut bytes = s.as_bytes().to_vec();
+    while bytes.len() > capacity - 3 {
+        bytes.pop();
+        while !bytes.is_empty() && std::str::from_utf8(&bytes).is_err() {
+            bytes.pop();
+        }
+    }
+    let mut out = (bytes.len() as i32).to_le_bytes().to_vec();
+    out.extend(bytes);
+    out
+}
+
 /// One batch holding the given messages.
 pub fn batch(messages: &[(u32, Vec<u8>)]) -> Vec<u8> {
     batch_of(messages.iter().map(|(kind, data)| (*kind, data.as_slice())))
@@ -315,6 +329,14 @@ mod tests {
             let w = Writer::new().packed_u16(v).0.clone();
             assert_eq!(Reader::new(&w).packed_u16(), Some(v), "u16 {v}");
         }
+    }
+
+    #[test]
+    fn fixed_strings_cut_at_capacity() {
+        assert_eq!(fixed_string("abc", 128), vec![3, 0, 0, 0, b'a', b'b', b'c']);
+        assert_eq!(fixed_string(&"x".repeat(200), 128).len(), 4 + 125);
+        // Cut at a character, never inside one.
+        assert_eq!(fixed_string(&"\u{e5}".repeat(100), 128).len(), 4 + 124);
     }
 
     #[test]

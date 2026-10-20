@@ -1,19 +1,12 @@
 //! The settings (run/server.env), the world names, and which game tables go with the game.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::{say, Ctx, Result, APP_ID};
 use crate::config::{parse_env, set_env_text};
+use crate::tables::{build_id, find_tables};
 use crate::updater;
-
-/// The game build: a hash of the game's code, which changes with every game update. One way
-/// for every installation (Steam, steamcmd or a copied folder).
-pub fn build_id(game: &Path) -> Result<String> {
-    let path = game.join("Planet Crafter_Data/Managed/Assembly-CSharp.dll");
-    let code = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(format!("{:016x}", xxhash_rust::xxh64::xxh64(&code, 0)))
-}
 
 impl Ctx {
     /// A setting from server.env (the last line for it); None when empty or missing.
@@ -133,34 +126,6 @@ PCDS_WORLD=world
     }
 }
 
-/// The tables in `data` (run/data) for a game build in a tables format. Folders whose name
-/// starts with "." are extractions not finished yet.
-pub fn find_tables(data: &Path, build: &str, format: u32) -> Result<PathBuf> {
-    let (mut any, mut other_format) = (false, None);
-    for entry in fs::read_dir(data).into_iter().flatten().flatten() {
-        let dir = entry.path();
-        if entry.file_name().to_string_lossy().starts_with('.') || !dir.is_dir() {
-            continue;
-        }
-        any = true;
-        if !fs::read_to_string(dir.join("buildid")).is_ok_and(|id| id.trim() == build) {
-            continue;
-        }
-        let theirs = fs::read_to_string(dir.join("tables-format")).map_or_else(|_| "none".to_string(), |f| f.trim().to_string());
-        if theirs == format.to_string() {
-            return Ok(dir);
-        }
-        other_format = Some((dir, theirs));
-    }
-    if let Some((dir, theirs)) = other_format {
-        return Err(format!("the tables in {} are of tables format {theirs}, the server reads format {format}: run `pcds update`, which reads them again", dir.display()));
-    }
-    if !any {
-        return Err(format!("no game tables in {}: run `pcds update` (see README)", data.display()));
-    }
-    Err(format!("the game changed: run `pcds update` (no tables in {} for game build {build})", data.display()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,15 +217,4 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[test]
-    fn the_build_id_is_a_hash_of_the_game_code() {
-        let dir = std::env::temp_dir().join(format!("pcds-build-id-{}", std::process::id()));
-        fs::create_dir_all(dir.join("Planet Crafter_Data/Managed")).unwrap();
-        fs::write(dir.join("Planet Crafter_Data/Managed/Assembly-CSharp.dll"), b"code").unwrap();
-        let id = build_id(&dir).unwrap();
-        assert_eq!(id, format!("{:016x}", xxhash_rust::xxh64::xxh64(b"code", 0)));
-        assert_eq!(id.len(), 16);
-        fs::remove_dir_all(&dir).unwrap();
-        assert!(build_id(&dir).is_err());
-    }
 }

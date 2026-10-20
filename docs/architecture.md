@@ -39,7 +39,7 @@ paid (so the list only gets shorter). `scripts/check-layers` runs that test alon
 
 | Layer | Modules | May use | What it is |
 |---|---|---|---|
-| base | `wire` `idmap` `geometry` `world` `save` `oldsave` `data` `protocol` `rpcspec` `transform` `gamedata` `model` `ipc` `msg` `worlds` `utp` `routes` `bincodec` `util` `dotnet_sort` `tessera` `tokens` `clock` | base | Bytes, ids, the game's tables as data, the framing of the transports, the typed bodies of the frames between the front and the banks (`msg`), the world files' names and places (`worlds`), the lookup of a route table (`routes`: the bank's admin requests and the front's use one type), the game's algorithms that need no game (the .NET sort, the Tessera solver), the store of scoped tokens (`tokens`). No game, no process, no sockets of their own. |
+| base | `tables` `wire` `idmap` `geometry` `world` `save` `oldsave` `data` `protocol` `rpcspec` `transform` `gamedata` `model` `ipc` `msg` `worlds` `utp` `routes` `bincodec` `util` `dotnet_sort` `tessera` `tokens` `clock` | base | Bytes, ids, the game's tables as data, the framing of the transports, the typed bodies of the frames between the front and the banks (`msg`), the world files' names and places (`worlds`), the lookup of a route table (`routes`: the bank's admin requests and the front's use one type), the game's algorithms that need no game (the .NET sort, the Tessera solver), the store of scoped tokens (`tokens`). No game, no process, no sockets of their own. |
 | world | `net` | base | The game's network state: objects, variables, RPC messages. |
 | core | `game` `handlers` `hooks` `ext` `scene` `status` `gauges` `units` `energy` `water` `machines` `logistics` `meteo` `rockets` `planets` `animals` `genetics` `players` `inventories` `instances` `objects` `panels` `deconstruct` `equipment` `toxic` `unlocks` `access` `rules` `config` `chathooks` `handoff` | base, world, core, extension | The game logic, ported class by class, with no I/O: files and sockets are not in it, and the only thread is the wreck solver's (`instances`: a pure function of the tables and a seed, answered between ticks). A subsystem is free functions over `&mut Game`, reached through `hooks.rs`. |
 | extension | `events` `plugins` | base, world, core, extension | What the world tells the outside (`events`) and the host of the plugins that listen (`plugins`). |
@@ -62,7 +62,6 @@ the work" that removes it.
 
 | Edge | Why it is there | Step |
 |---|---|---|
-| `bank → cli`, `native → cli`, `native → net` | the tables folder's contract (build id, finding tables, an encoder) is defined in `cli` and `net`; the bank asks it in `bank/status.rs` (the installed game) | 7 |
 | `front → config`, `front → rules` | settings read by name; the chat rules' struct | 8 |
 
 ## The front
@@ -312,7 +311,7 @@ the audit's list (the ones not done here are another agent's or later).
 | 4 | small relocations: `DISCONNECT_REASON` and `reason_batch` into `protocol.rs`; `snapshot_path` into `worlds.rs`; `enforce` into `access.rs`. Not done: the serde helpers of `handoff` into a neutral module; `hex` and friends once | done for the three relocations | removed the debts `front → bank`, `bank → front`, `config → bank` (`tests/layers.rs` fails on a debt that is gone, so they are out of `layers.txt`); `protocol::tests::the_disconnect_reason_is_one_message_of_type_8_with_the_text_in_utf16` |
 | 5 | typed messages between front and bank (`Hello`, `Ready`, `BankInfo`, ...) | done for the frames, bank.json and the banks' folder's notes (`msg.rs`); the API's requests and answers are not typed | `tests/hot_update.rs`, `msg::tests`, `tests/admin_golden.rs` |
 | 6 | split `front.rs`, `bank.rs`, `chathooks.rs` by concern, moving code only | `front/`, `bank/` and `chathooks/` done (the modules above and in "The bank, module by module") | `cargo test`; removed `admin → chathooks`, `front → chathooks`, `front → dashboard` |
-| 7 | a `tables` module that owns the tables folder's contract | later | `pcds read-game` then `pcds tables-diff`; removes `bank → cli`, `native → cli`, `native → net` |
+| 7 | a `tables` module that owns the tables folder's contract | done: `tables.rs` (`build_id`, `find_tables`); the encoder the reader used (`fixed_string`) is in `wire.rs` | removed `bank → cli`, `native → cli`, `native → net`; `tables::tests`, `tests/layers.rs` |
 | 8 | typed settings accessor | later | removes `front → config`, `front → rules` |
 | 9 | one worlds module | done for the names, the paths and the listing (`worlds.rs`) | `worlds::tests`, `tests/cli.rs`, `tests/admin_golden.rs` |
 | 11 | one admin route table | done: the table, `docs/admin-api.md`, the test against the source, the golden test; not done: typed requests and answers, one timeout table, dropping routes | `front::admin_routes::tests`, `tests/admin_golden.rs` |

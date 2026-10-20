@@ -231,9 +231,9 @@ fn game_at(dir: &std::path::Path, data_dir: &str) -> Value {
         return v.clone();
     }
     let data = std::path::Path::new(data_dir).parent().unwrap_or(std::path::Path::new(data_dir));
-    let v = match crate::cli::build_id(dir) {
+    let v = match crate::tables::build_id(dir) {
         Ok(build) => {
-            let missing = crate::cli::find_tables(data, &build, crate::native::tables::TABLES_FORMAT).is_err();
+            let missing = crate::tables::find_tables(data, &build, crate::native::tables::TABLES_FORMAT).is_err();
             json!({"buildId": build, "hasTables": !missing, "warning": missing.then(|| format!("game build {build} has no tables: run pcds update"))})
         }
         Err(e) => json!({"warning": e}),
@@ -417,7 +417,7 @@ mod tests {
         let code = dir.join("game/Planet Crafter_Data/Managed/Assembly-CSharp.dll");
         std::fs::create_dir_all(code.parent().unwrap()).unwrap();
         std::fs::write(&code, "build 1").unwrap();
-        let build = crate::cli::build_id(&dir.join("game")).unwrap();
+        let build = crate::tables::build_id(&dir.join("game")).unwrap();
         let tables = dir.join("data/2.103");
         std::fs::create_dir_all(&tables).unwrap();
         std::fs::write(tables.join("buildid"), &build).unwrap();
@@ -427,7 +427,7 @@ mod tests {
         // The game updated (another size: a new hash at once).
         std::fs::write(&code, "build 2, longer").unwrap();
         let v = game_at(&dir.join("game"), data);
-        let build = crate::cli::build_id(&dir.join("game")).unwrap();
+        let build = crate::tables::build_id(&dir.join("game")).unwrap();
         assert_eq!(v["warning"], format!("game build {build} has no tables: run pcds update"));
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(game_at(&dir.join("game"), data)["warning"].as_str().unwrap().contains("the game is gone"));

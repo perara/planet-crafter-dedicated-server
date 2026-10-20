@@ -129,6 +129,7 @@ mod rockets;
 mod routes;
 mod rpcspec;
 mod save;
+mod tables;
 mod scene;
 mod status;
 mod tessera;
