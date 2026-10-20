@@ -693,7 +693,7 @@ bearer header with less in it.
   `player.teleport`. They are the endpoints a bridge needs and the ones that act on one player;
   the settings, the rules, the world controls, the logs, the status (which holds the access lists),
   the plugins' approvals, keys and tokens are not scoped to anything: **admin token only**,
-  and a test asks every one of them with a token that has every scope and expects 403.
+  and a test asks each of them with a token and expects 403 (no scope covers them, so whatever scopes the token has).
 - **Checks.** The front's admin thread looks at `tokens.json` for each request (one `stat`; the file is
   read again when it changed), so a revocation is effective at the token's next request, from the
   command line, the dashboard or an editor. A file that does not read makes no token valid. The
