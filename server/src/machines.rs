@@ -223,27 +223,32 @@ fn root(game: &Game, group: usize, ty: &str) -> Option<Value> {
 pub fn refresh_from_tables(game: &mut Game) {
     let machines: Vec<i32> = game.ext.machines.list.keys().copied().collect();
     game.ext.machines.dues_ok = false;
+    // What the tables say is a function of the group: read once for each group of a machine.
+    type Roots = [Option<Value>; 6];
+    let mut roots: crate::idmap::FxHashMap<usize, Roots> = Default::default();
     for wo in machines {
         let Some(group) = game.wos.get(&wo).map(|w| w.group) else { continue };
-        let f = |ty: &str| root(game, group, ty);
-        let (harvestable, vegetation, linked, autocrafter, disintegrator, optimizer) = (f("MachineGrowerVegetationHarvestable"), f("MachineGrowerVegetationStatic"), f("MachineGrowerIfLinkedGroup"), f("MachineAutoCrafter"), f("MachineDisintegrator"), f("MachineOptimizer"));
+        let [harvestable, vegetation, linked, autocrafter, disintegrator, optimizer] = roots.entry(group).or_insert_with(|| {
+            let f = |ty: &str| root(game, group, ty);
+            [f("MachineGrowerVegetationHarvestable"), f("MachineGrowerVegetationStatic"), f("MachineGrowerIfLinkedGroup"), f("MachineAutoCrafter"), f("MachineDisintegrator"), f("MachineOptimizer")]
+        });
         let Some(m) = game.ext.machines.list.get_mut(&wo) else { continue };
-        if let (Some(h), Some(f)) = (m.harvestable.as_mut(), &harvestable) {
+        if let (Some(h), Some(f)) = (m.harvestable.as_mut(), &*harvestable) {
             h.refresh(f);
         }
-        if let (Some(v), Some(f)) = (m.vegetation.as_mut(), &vegetation) {
+        if let (Some(v), Some(f)) = (m.vegetation.as_mut(), &*vegetation) {
             v.refresh(f);
         }
-        if let (Some(l), Some(f)) = (m.linked_grower.as_mut(), &linked) {
+        if let (Some(l), Some(f)) = (m.linked_grower.as_mut(), &*linked) {
             l.refresh(f);
         }
-        if let (Some(a), Some(f)) = (m.autocrafter.as_mut(), &autocrafter) {
+        if let (Some(a), Some(f)) = (m.autocrafter.as_mut(), &*autocrafter) {
             a.refresh(f);
         }
-        if let (Some(d), Some(f)) = (m.disintegrator.as_mut(), &disintegrator) {
+        if let (Some(d), Some(f)) = (m.disintegrator.as_mut(), &*disintegrator) {
             d.refresh(f);
         }
-        if let (Some(o), Some(f)) = (m.optimizer.as_mut(), &optimizer) {
+        if let (Some(o), Some(f)) = (m.optimizer.as_mut(), &*optimizer) {
             o.refresh(f);
         }
     }

@@ -40,14 +40,36 @@ use crate::protocol::{NETWORK_TRANSFORM, RPC};
 use crate::save::SaveFile;
 use crate::wire::Writer;
 
-/// Counts this thread's allocations (calls, bytes), for the bench's "allocations per tick".
+/// Counts this thread's allocations (calls, bytes), for the bench's "allocations per tick". With
+/// PCDS_BENCH_ALLOC_SITES=N it also looks at every Nth allocation of the ticks: the frame of the
+/// server's code it comes from (see `alloc_sites`).
 struct Counting;
 thread_local!(static ALLOCS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) });
+thread_local!(static SAMPLING: std::cell::Cell<(u64, u64, bool)> = const { std::cell::Cell::new((0, 0, false)) });
+thread_local!(static SITES: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new()));
+
+fn sample_site() {
+    // The backtrace allocates: not looked at again while it is made.
+    SAMPLING.set((SAMPLING.get().0, SAMPLING.get().1, true));
+    let trace = std::backtrace::Backtrace::force_capture().to_string();
+    let site = trace.lines().filter(|l| l.contains("pcds::") && !l.contains("pcds::bench::")).map(str::trim).take(3).collect::<Vec<_>>().join(" < ");
+    SITES.with(|m| *m.borrow_mut().entry(site).or_default() += 1);
+    SAMPLING.set((SAMPLING.get().0, SAMPLING.get().1, false));
+}
 
 // SAFETY: every call goes to the system allocator; the counters are plain thread-local cells.
 unsafe impl std::alloc::GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
         let _ = ALLOCS.try_with(|a| a.set((a.get().0 + 1, a.get().1 + l.size() as u64)));
+        let _ = SAMPLING.try_with(|s| {
+            let (every, n, busy) = s.get();
+            if every > 0 && !busy {
+                s.set((every, n + 1, busy));
+                if (n + 1) % every == 0 {
+                    sample_site();
+                }
+            }
+        });
         unsafe { std::alloc::System.alloc(l) }
     }
     unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
@@ -211,6 +233,7 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
     let mut tick_ns = Vec::with_capacity((e.seconds / step) as usize + 1);
     let (mut ticks, mut dumped) = (Vec::new(), Vec::new());
     let mut worst: Vec<(usize, u32, Vec<(&'static str, Duration)>)> = Vec::new();
+    let sample_every: u64 = std::env::var("PCDS_BENCH_ALLOC_SITES").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     let mut file = e.dump.as_ref().map(|p| std::io::BufWriter::new(std::fs::File::create(p).unwrap()));
     if let Some(f) = &mut file {
         use std::io::Write;
@@ -242,7 +265,9 @@ fn run(mut g: Game, e: &Env, swap_every: f64, mut swap: impl FnMut(Game) -> Game
                 section!("act", act(&mut g, i as u64 + 1, *object, &mut players[i], seq));
             }
         }
+        SAMPLING.set((sample_every, SAMPLING.get().1, false));
         section!("tick", g.tick());
+        SAMPLING.set((0, SAMPLING.get().1, false));
         busy += started.elapsed();
         let this_tick = started.elapsed().as_nanos().min(u32::MAX as u128) as u32;
         tick_ns.push(this_tick);
@@ -338,6 +363,12 @@ fn bench() {
     println!("bench: per tick p50 {:.2} us, p99 {:.2} us, p99.9 {:.2} us, max {:.2} us", at(0.5), at(0.99), at(0.999), at(1.0));
     let mut times: Vec<_> = TIMES.with(|m| m.borrow().iter().map(|(k, v)| (*k, *v)).collect());
     times.sort_by_key(|t| std::cmp::Reverse(t.1));
+    let mut sites: Vec<(String, u64)> = SITES.with(|m| m.borrow().iter().map(|(k, v)| (k.clone(), *v)).collect());
+    sites.sort_by_key(|s| std::cmp::Reverse(s.1));
+    let every: u64 = std::env::var("PCDS_BENCH_ALLOC_SITES").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    for (site, n) in sites.iter().take(25) {
+        println!("bench: allocs {:7.2} per tick: {site}", (*n * every) as f64 / r.ticks.len() as f64);
+    }
     for (index, ns, parts) in &r.worst {
         println!("bench: slow tick {index} ({:.2} ms): {}", *ns as f64 / 1e6, parts.iter().map(|(k, d)| format!("{k} {:.2}", d.as_secs_f64() * 1e3)).collect::<Vec<_>>().join(", "));
     }

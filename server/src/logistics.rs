@@ -461,8 +461,16 @@ fn update(game: &mut Game) {
     if game.ext.logistics.fleet.is_empty() {
         return;
     }
-    let planets: HashSet<i32> = game.ext.logistics.access_data.iter().map(|a| a.planet).collect();
-    let powered: HashSet<i32> = planets.into_iter().filter(|p| *p != 0 && crate::energy::has_enough(game, *p)).collect();
+    // The planets drones fly on (a few), and which of them have the energy.
+    let mut powered: Vec<i32> = Vec::new();
+    let mut unpowered: Vec<i32> = Vec::new();
+    for a in &game.ext.logistics.access_data {
+        let p = a.planet;
+        if p != 0 && !powered.contains(&p) && !unpowered.contains(&p) {
+            let list = if crate::energy::has_enough(game, p) { &mut powered } else { &mut unpowered };
+            list.push(p);
+        }
+    }
     let dt = tick_seconds(game);
     let l = &mut game.ext.logistics;
     for i in 0..l.access.len() {
@@ -605,8 +613,13 @@ fn set_logistic_tasks(game: &mut Game) {
         }
     }
     // The supplies that supply a group, with their planet (nothing the loop does changes either).
-    let wanted: crate::idmap::FxHashSet<usize> = game.ext.logistics.demand.iter().filter_map(|d| game.inventories.get(d)).flat_map(|i| i.logistic.demand.iter().copied()).collect();
-    let mut suppliers: Option<crate::idmap::FxHashMap<usize, Vec<(i32, i32)>>> = None;
+    let mut wanted = vec![false; game.data.groups.len()];
+    for i in game.ext.logistics.demand.iter().filter_map(|d| game.inventories.get(d)) {
+        for &g in &i.logistic.demand {
+            wanted[g] = true;
+        }
+    }
+    let mut suppliers: Option<Vec<Vec<(i32, i32, usize)>>> = None;
     for p in game.ext.logistics.priorities.values_mut() {
         p.clear();
     }
@@ -628,26 +641,29 @@ fn set_logistic_tasks(game: &mut Game) {
                 continue;
             }
             let suppliers_of_g = suppliers.get_or_insert_with(|| {
-                let mut by_group: crate::idmap::FxHashMap<usize, Vec<(i32, i32)>> = Default::default();
-                for &s in &game.ext.logistics.supply {
+                // Per wanted group, in the order of `supply`: (inventory, its planet, its place in `supply`).
+                let mut by_group: Vec<Vec<(i32, i32, usize)>> = vec![Vec::new(); wanted.len()];
+                for (place, &s) in game.ext.logistics.supply.iter().enumerate() {
                     let (Some(inv), Some(_)) = (game.inventories.get(&s), entity_wo(game, s)) else { continue };
                     let planet = entity_planet(game, s);
-                    for (n, &g) in inv.logistic.supply.iter().enumerate() {
+                    for &g in &inv.logistic.supply {
                         // A group listed twice by one inventory is one supplier.
-                        if wanted.contains(&g) && !inv.logistic.supply[..n].contains(&g) {
-                            by_group.entry(g).or_default().push((s, planet));
+                        if wanted[g] && by_group[g].last().is_none_or(|e| e.2 != place) {
+                            by_group[g].push((s, planet, place));
                         }
                     }
                 }
                 by_group
             });
-            for i in 0..suppliers_of_g.get(&g).map_or(0, Vec::len) {
-                let (s, supply_planet) = suppliers_of_g[&g][i];
+            for i in 0..suppliers_of_g[g].len() {
+                let (s, supply_planet, _) = suppliers_of_g[g][i];
                 if s == d || supply_planet != planet {
                     continue;
                 }
-                for wo in items(game, s) {
-                    if game.wos.get(&wo).is_some_and(|w| w.group == g) && create_task(game, Some(s), d, wo, false).is_some() {
+                // The supply's items of the group (nothing the tasks do changes an inventory or a group).
+                let of_group: Vec<i32> = game.inventories.get(&s).map(|i| i.items.iter().copied().filter(|wo| game.wos.get(wo).is_some_and(|w| w.group == g)).collect()).unwrap_or_default();
+                for wo in of_group {
+                    if create_task(game, Some(s), d, wo, false).is_some() {
                         available -= 1;
                         if available == 0 {
                             break;

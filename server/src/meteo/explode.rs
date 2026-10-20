@@ -321,6 +321,8 @@ mod tests {
                 _ => {}
             }
             assert_eq!(g.ext.meteo.explode.live, found(&g), "after step {step}");
+            // The set a scan of what stands in the scene looks at holds every world object that has a network object.
+            assert!(g.wos.values().filter(|w| w.net.is_some()).all(|w| g.net_wos.contains(&w.id)), "net_wos after step {step}");
         }
         assert!(restored >= 3 && g.ext.meteo.explode.live <= g.wos.len());
     }

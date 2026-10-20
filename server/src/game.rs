@@ -190,6 +190,10 @@ pub struct Game {
     /// WorldObjectsHandler._constructedWorldObjects / _itemsPickablesWorldObjects.
     pub constructed: SlotSet<i32>,
     pub pickables: SlotSet<i32>,
+    /// Every world object that has a network object, and perhaps some that had (set_wo_net keeps
+    /// it; a scan for what stands in the scene looks at these, not at every world object).
+    #[serde(skip)]
+    pub net_wos: crate::idmap::FxHashSet<i32>,
     /// World object -> (the inventory holding it, in how many inventories it is): the
     /// inventories' content indexed (inventories.rs hold/release), rebuilt from them on load.
     #[serde(skip)]
@@ -359,6 +363,7 @@ impl Game {
             inventories: Slots::default(),
             constructed: SlotSet::default(),
             pickables: SlotSet::default(),
+            net_wos: Default::default(),
             holders: Default::default(),
             watchers: HashMap::new(),
             tmp_inventory_id: -2,

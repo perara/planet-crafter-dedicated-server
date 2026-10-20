@@ -255,7 +255,10 @@ class Srv:
         os.makedirs(self.home, exist_ok=True)
         if fresh:
             shutil.copy(world or args.world, self.world)
-            json.dump(merge({"save": {"autosaveMinutes": 0, "backupsKept": 0}}, rules or {}), open(os.path.join(self.home, "rules.json"), "w"))
+            # PCDS_TOOLS_RULES (a JSON object) is merged over the tool's rules: a save on a DLC planet needs
+            # {"world": {"dlcPlanets": ["Humble"]}}.
+            extra = json.loads(os.environ.get("PCDS_TOOLS_RULES") or "{}")
+            json.dump(merge(merge({"save": {"autosaveMinutes": 0, "backupsKept": 0}}, rules or {}), extra), open(os.path.join(self.home, "rules.json"), "w"))
         self.env = dict(PCDS_LISTEN=self.listen, PCDS_ADMIN=f"{LOOPBACK}:{self.admin}", PCDS_ADMIN_TOKEN=self.token, PCDS_STEAM="off", PCDS_HOME=self.home,
                         PCDS_RELEASES="http://127.0.0.1:1")
         if dev:
