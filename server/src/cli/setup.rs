@@ -61,7 +61,7 @@ impl Ctx {
         };
         self.install_bank(&target, &lib)?;
         // A later version than the one rolled back from: the rollback note is done with.
-        if updater::rolled_back(&banks).is_some_and(|r| r["bank"] == target.as_str()) {
+        if updater::rolled_back(&banks).is_some_and(|r| r.bank == target) {
             updater::clear_rolled_back(&banks)?;
         }
         updater::set_active(&banks, &target)?;
@@ -112,7 +112,7 @@ impl Ctx {
         // The standby bank, or the active one while it is empty (never the live one, which
         // holds the world and so is not empty).
         let target = if updater::info(banks, &active).is_none() && live.is_none() { active } else { updater::other(&active).to_string() };
-        let rolled_from = updater::rolled_back(banks).filter(|r| r["bank"] == target.as_str()).and_then(|_| held_of(&target));
+        let rolled_from = updater::rolled_back(banks).filter(|r| r.bank == target).and_then(|_| held_of(&target));
         if let Some(held) = rolled_from.filter(|held| !updater::newer(version, held)) {
             return Ok(Err(Some(format!("pcds {version} is not installed: bank {target} holds pcds {}, the release the server was rolled back from, and is kept ('pcds upgrade' installs a release there)", held.trim_start_matches('v')))));
         }
@@ -498,7 +498,7 @@ fn fallback_bank(banks: &Path, failed: &str) -> std::result::Result<String, Stri
     if updater::info(banks, other).is_none() {
         return Err("holds no release to fall back to".into());
     }
-    if updater::rolled_back(banks).is_some_and(|r| r["bank"] == other) {
+    if updater::rolled_back(banks).is_some_and(|r| r.bank == other) {
         return Err("is the one the server was rolled back from: it is not started (pcds upgrade --rollback goes back to it)".into());
     }
     Ok(other.to_string())

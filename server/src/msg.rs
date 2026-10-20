@@ -17,6 +17,7 @@
 //! | OPS | [`Ops`] | bank -> front |
 //! | CHAT | [`ChatEvent`] | bank -> front |
 //! | `pcds bank-info`, bank.json | [`BankInfo`] | a bank's program, the banks' folder |
+//! | banks/rolled-back, banks/fallback | [`RolledBack`], [`Fallback`] | the front and `pcds` write them, `pcds status` and the status read them |
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -181,6 +182,30 @@ pub struct Ops {
     pub bank_watchdog_seconds: Option<u64>,
 }
 
+/// banks/rolled-back, and the status' `banks.rolledBack`: the bank the server went back from and
+/// the release it held. `reason` and `at` (Unix seconds) only when the front did it by itself,
+/// for a release that kept ending the game.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RolledBack {
+    pub bank: String,
+    pub tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<u64>,
+}
+
+/// banks/fallback, and the status' `banks.fallback`: a start that ran bank `to` because bank
+/// `from` could not start the world.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Fallback {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub reason: String,
+    pub at: Option<u64>,
+}
+
 /// Replies waiting for the next tick (the bank's queue and the front's); more are refused.
 pub const CHAT_REPLIES: usize = 64;
 /// The longest reply, in characters.
@@ -235,6 +260,21 @@ mod tests {
         let ops = Ops { autosave_minutes: Some(5), auto_update: Some(false), update_check_hours: Some(24), bank_watchdog_seconds: Some(60) };
         assert_eq!(text(&ops), r#"{"autosaveMinutes":5,"autoUpdate":false,"updateCheckHours":24,"bankWatchdogSeconds":60}"#);
         assert_eq!(text(&SnapshotHead { format: 5, game_version: "2.103".into() }), r#"{"format":5,"game_version":"2.103"}"#);
+    }
+
+    /// The notes in the banks' folder keep the keys they were written with, and an owner's rollback
+    /// has no reason.
+    #[test]
+    fn the_notes_of_the_banks_folder_are_the_json_they_always_were() {
+        let owner = RolledBack { bank: "b".into(), tag: Some("v0.7.0".into()), reason: None, at: None };
+        assert_eq!(text(&owner), r#"{"bank":"b","tag":"v0.7.0"}"#);
+        assert_eq!(text(&RolledBack { tag: None, ..owner.clone() }), r#"{"bank":"b","tag":null}"#);
+        let crashes = RolledBack { reason: Some("ended 6 times".into()), at: Some(7), ..owner };
+        assert_eq!(text(&crashes), r#"{"bank":"b","tag":"v0.7.0","reason":"ended 6 times","at":7}"#);
+        assert_eq!(parse::<RolledBack>(text(&crashes).as_bytes()).unwrap(), crashes);
+        assert!(parse::<RolledBack>(br#"{"tag":"v1"}"#).is_err(), "a note of no bank is no note");
+        let fallback = Fallback { from: "b".into(), to: "a".into(), reason: "could not load".into(), at: Some(9) };
+        assert_eq!(text(&fallback), r#"{"from":"b","to":"a","reason":"could not load","at":9}"#);
     }
 
     /// A bank of another release: keys missing are None, keys not known are written back, and

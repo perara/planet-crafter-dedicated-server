@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::{say, Ctx, Result};
-use crate::msg::BankInfo;
+use crate::msg::{BankInfo, Fallback, RolledBack};
 use crate::updater;
 
 const USAGE: &str = "pcds upgrade [VERSION] [--restart] | --rollback | --check";
@@ -161,14 +161,14 @@ impl Ctx {
             println!("{note}");
         }
         // The running front's view, else the note on disk.
-        let fallback = live.map(|l| l["fallback"].clone()).filter(|f| !f.is_null()).or_else(|| updater::fallback(&banks));
+        let fallback = live.and_then(|l| serde_json::from_value::<Fallback>(l["fallback"].clone()).ok()).or_else(|| updater::fallback(&banks));
         if let Some(f) = fallback {
-            println!("started from bank {} because bank {} {}", text(&f["to"]), text(&f["from"]), text(&f["reason"]));
+            println!("started from bank {} because bank {} {}", f.to, f.from, f.reason);
         }
         // The running front's view, else the note on disk: a release given up for crashes.
-        let given_up = live.map(|l| l["rolledBack"].clone()).filter(|r| !r.is_null()).or_else(|| updater::rolled_back(&banks));
-        if let Some(r) = given_up.filter(|r| r["reason"].is_string()) {
-            println!("the release in bank {} ({}) was rolled back from automatically: {}", text(&r["bank"]), text(&r["tag"]), text(&r["reason"]));
+        let given_up = live.and_then(|l| serde_json::from_value::<RolledBack>(l["rolledBack"].clone()).ok()).or_else(|| updater::rolled_back(&banks));
+        if let Some(r) = given_up.filter(|r| r.reason.is_some()) {
+            println!("the release in bank {} ({}) was rolled back from automatically: {}", r.bank, r.tag.as_deref().unwrap_or("null"), r.reason.as_deref().unwrap_or_default());
         }
     }
 }
@@ -177,10 +177,6 @@ impl Ctx {
 /// whole.
 fn api_error(e: String) -> String {
     e.find("{\"error\"").and_then(|i| serde_json::from_str::<Value>(&e[i..]).ok()).and_then(|v| v["error"].as_str().map(str::to_string)).unwrap_or(e)
-}
-
-fn text(v: &Value) -> String {
-    v.as_str().map_or_else(|| v.to_string(), str::to_string)
 }
 
 /// "pcds 0.6.0 (v0.6.0), front protocol 2, snapshot format 1, installed 2026-10-18 15:00".

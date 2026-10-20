@@ -150,10 +150,9 @@ impl Front {
     /// A rollback the previous front made for crashes is in the history of this one (the note
     /// outlives it: banks/rolled-back, until a later release or an update clears it).
     fn note_rollback_of_the_last_life(&mut self) {
-        if let Some(r) = self.banks.as_deref().and_then(updater::rolled_back).filter(|r| r["reason"].is_string()) {
-            let message = format!("the release in bank {} ({}) was given up: {}; the server went back to bank {}", r["bank"].as_str().unwrap_or("?"), r["tag"].as_str().unwrap_or("?"), r["reason"].as_str().unwrap_or(""), updater::other(r["bank"].as_str().unwrap_or("")));
-            let text = |k: &str| r[k].as_str().map(str::to_string);
-            self.updates.history.push_back(super::history::History::rolled_back(message, r["at"].as_u64(), text("bank"), text("tag")));
+        if let Some(r) = self.banks.as_deref().and_then(updater::rolled_back).filter(|r| r.reason.is_some()) {
+            let message = format!("the release in bank {} ({}) was given up: {}; the server went back to bank {}", r.bank, r.tag.as_deref().unwrap_or("?"), r.reason.as_deref().unwrap_or(""), updater::other(&r.bank));
+            self.updates.history.push_back(super::history::History::rolled_back(message, r.at, Some(r.bank), r.tag));
         }
     }
 

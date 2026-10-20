@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
-use crate::msg::{json as show, BankInfo};
+use crate::msg::{json as show, BankInfo, Fallback, RolledBack};
 
 /// The releases of this project (PCDS_RELEASES points elsewhere: a mirror, or a test).
 pub const RELEASES: &str = "https://api.github.com/repos/perara/planet-crafter-dedicated-server/releases";
@@ -409,9 +409,9 @@ pub fn set_active(banks: &Path, bank: &str) -> Result<(), String> {
 /// The automatic update does not install that tag again, and `pcds run` installs nothing over
 /// that bank; a later release, an explicit update (`pcds upgrade`, POST /api/update with a
 /// version or the latest) or the next rollback replaces or clears it.
-pub fn rolled_back(banks: &Path) -> Option<Value> {
+pub fn rolled_back(banks: &Path) -> Option<RolledBack> {
     let text = std::fs::read_to_string(banks.join("rolled-back")).ok()?;
-    serde_json::from_str(&text).ok().filter(|v: &Value| v["bank"].is_string())
+    serde_json::from_str(&text).ok()
 }
 
 /// A rollback away from `bank`: it is noted with the release it holds.
@@ -429,13 +429,9 @@ pub fn set_rolled_back_by_crashes(banks: &Path, bank: &str, why: &str) -> Result
 fn note_rolled_back(banks: &Path, bank: &str, why: Option<&str>) -> Result<(), String> {
     let held = info(banks, bank).unwrap_or_default();
     let tag = held.tag.or_else(|| held.version.as_deref().map(tag));
-    let mut note = json!({"bank": bank, "tag": tag});
-    if let Some(why) = why {
-        note["reason"] = why.into();
-        note["at"] = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).into();
-    }
+    let note = RolledBack { bank: bank.to_string(), tag, reason: why.map(str::to_string), at: why.map(|_| SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)) };
     let _lock = lock(banks)?;
-    crate::cli::replace_file(&banks.join("rolled-back"), (note.to_string() + "\n").as_bytes(), 0o644)
+    crate::cli::replace_file(&banks.join("rolled-back"), (crate::msg::text(&note) + "\n").as_bytes(), 0o644)
 }
 
 /// The bank a release that keeps ending the game is given up for: the other one. Err (why not):
@@ -446,7 +442,7 @@ pub fn crash_rollback_target(banks: &Path, bad: &str) -> Result<&'static str, St
     if info(banks, to).is_none() {
         return Err(format!("bank {to} holds no release to go back to"));
     }
-    if rolled_back(banks).is_some_and(|r| r["bank"] == to) {
+    if rolled_back(banks).is_some_and(|r| r.bank == to) {
         return Err(format!("bank {to} is the one the server was rolled back from"));
     }
     Ok(to)
@@ -467,15 +463,15 @@ pub fn clear_rolled_back(banks: &Path) -> Result<(), String> {
 /// bank; `pcds upgrade` clears it.
 pub fn note_fallback(banks: &Path, from: &str, to: &str, reason: &str) -> Result<(), String> {
     let at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let note = json!({"from": from, "to": to, "reason": reason, "at": at});
+    let note = Fallback { from: from.to_string(), to: to.to_string(), reason: reason.to_string(), at: Some(at) };
     let _lock = lock(banks)?;
-    crate::cli::replace_file(&banks.join("fallback"), (note.to_string() + "\n").as_bytes(), 0o644)
+    crate::cli::replace_file(&banks.join("fallback"), (crate::msg::text(&note) + "\n").as_bytes(), 0o644)
 }
 
 /// The fallback note, while the bank it started is the active one.
-pub fn fallback(banks: &Path) -> Option<Value> {
+pub fn fallback(banks: &Path) -> Option<Fallback> {
     let text = std::fs::read_to_string(banks.join("fallback")).ok()?;
-    serde_json::from_str(&text).ok().filter(|v: &Value| v["to"] == active(banks).as_str())
+    serde_json::from_str(&text).ok().filter(|f: &Fallback| f.to == active(banks))
 }
 
 pub fn clear_fallback(banks: &Path) -> Result<(), String> {
@@ -490,7 +486,7 @@ pub fn clear_fallback(banks: &Path) -> Result<(), String> {
 /// What the automatic update does with the latest release `tag` after a rollback: skip it
 /// (Some: why) when it is the release rolled back from; a later one clears the note.
 pub fn auto_skips(banks: &Path, tag: &str) -> Result<Option<String>, String> {
-    let Some(from) = rolled_back(banks).and_then(|r| r["tag"].as_str().map(str::to_string)) else { return Ok(None) };
+    let Some(from) = rolled_back(banks).and_then(|r| r.tag) else { return Ok(None) };
     if from == tag {
         return Ok(Some(format!("{tag} is the release the server was rolled back from: the automatic update leaves it out (pcds upgrade {tag} installs it)")));
     }
@@ -848,7 +844,7 @@ pub mod tests {
         write_info(&dir.join("b"), &bi(json!({"version": "0.7.0", "tag": "v0.7.0"}))).unwrap();
         assert_eq!(auto_skips(&dir, "v0.7.0").unwrap(), None, "no rollback: nothing left out");
         set_rolled_back(&dir, "b").unwrap();
-        assert_eq!(rolled_back(&dir).unwrap(), json!({"bank": "b", "tag": "v0.7.0"}));
+        assert_eq!(rolled_back(&dir).unwrap(), RolledBack { bank: "b".into(), tag: Some("v0.7.0".into()), reason: None, at: None });
         assert!(auto_skips(&dir, "v0.7.0").unwrap().unwrap().contains("rolled back from"));
         assert!(rolled_back(&dir).is_some(), "an older or the same release keeps the note");
         assert_eq!(auto_skips(&dir, "v0.6.5").unwrap(), None);
@@ -859,7 +855,7 @@ pub mod tests {
         // A bank of a local build is noted by its version.
         write_info(&dir.join("b"), &bi(json!({"version": "0.7.1"}))).unwrap();
         set_rolled_back(&dir, "b").unwrap();
-        assert_eq!(rolled_back(&dir).unwrap()["tag"], "v0.7.1");
+        assert_eq!(rolled_back(&dir).unwrap().tag.as_deref(), Some("v0.7.1"));
         clear_rolled_back(&dir).unwrap();
         clear_rolled_back(&dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
@@ -881,9 +877,9 @@ pub mod tests {
         assert_eq!(crash_rollback_target(&dir, "b").unwrap(), "a");
         set_rolled_back_by_crashes(&dir, "b", "ended the game 6 times").unwrap();
         let note = rolled_back(&dir).unwrap();
-        assert_eq!((note["bank"].as_str(), note["tag"].as_str(), note["reason"].as_str()), (Some("b"), Some("v0.7.0"), Some("ended the game 6 times")));
-        assert!(note["at"].as_u64().unwrap() > 0);
-        assert_eq!(describe(&dir)["rolledBack"], note, "shown in the banks of /api/status");
+        assert_eq!((note.bank.as_str(), note.tag.as_deref(), note.reason.as_deref()), ("b", Some("v0.7.0"), Some("ended the game 6 times")));
+        assert!(note.at.unwrap() > 0);
+        assert_eq!(describe(&dir)["rolledBack"], serde_json::to_value(&note).unwrap(), "shown in the banks of /api/status");
         // The automatic update leaves that release out, like any rollback.
         assert!(auto_skips(&dir, "v0.7.0").unwrap().unwrap().contains("rolled back from"));
         // And a bank that was rolled back from is not the target of the next give-up.

@@ -106,11 +106,12 @@ the status and the shape (keys, their order, types) of every route's answer in b
 **Typed messages**: `msg.rs` (base layer) has one struct for each body that crosses between the
 front and a bank, or between the programs and the banks' folder: `BankInfo` (also `pcds
 bank-info` and bank.json), `Hello`, `Restore`, `Ready`, `SnapshotNote`, `SnapshotHead`,
-`Connected`, `AdminCall`, `AdminAnswer`, `Ops`, `ChatEvent`. Both ends use the same definition; the
+`Connected`, `AdminCall`, `AdminAnswer`, `Ops`, `ChatEvent`, and the notes of the banks' folder
+(`RolledBack`, `Fallback`). Both ends use the same definition; the
 bytes are the JSON they always were (a test pins each), and a message of another release is read
 leniently (keys missing are `None`, keys not known are kept when `BankInfo` is written back). Not
-typed yet: the notes in the banks' folder (`rolled-back`, `fallback`) and the answers of the
-admin API (shapes are pinned by the golden test instead).
+typed: the bodies of the admin API's requests and answers (the table says what they take, the
+golden test pins the answers' shapes).
 
 **World files** (`worlds.rs`, base layer): the name rule, where a world's save, backups and
 kept copies are, and the listing of a folder, for `pcds world`, the admin API and the front.
@@ -214,7 +215,7 @@ the audit's list (the ones not done here are another agent's or later).
 | 0 | `layers.txt` and its test; the `events` module; the plugin host | done with the plugin system | `scripts/check-layers`; zero behaviour change: the bench fingerprint and the handoff comparison are equal |
 | 1-3 | single source of truth for settings and rules, delete dead code | the refactor1 branch | its own |
 | 4 | small relocations: `DISCONNECT_REASON` and `reason_batch` into `protocol.rs`; `enforce` into `access.rs`; the serde helpers of `handoff` into a neutral module; `now_secs`, `hex` and friends once | next | removes the debts `front → bank`, `bank → front`, `config → bank` |
-| 5 | typed messages between front and bank (`Hello`, `Ready`, `BankInfo`, ...) | done for the frames and bank.json (`msg.rs`); the notes of the banks' folder and the API's answers are not typed | `tests/hot_update.rs`, `msg::tests`, `tests/admin_golden.rs` |
+| 5 | typed messages between front and bank (`Hello`, `Ready`, `BankInfo`, ...) | done for the frames, bank.json and the banks' folder's notes (`msg.rs`); the API's requests and answers are not typed | `tests/hot_update.rs`, `msg::tests`, `tests/admin_golden.rs` |
 | 6 | split `front.rs`, `bank.rs`, `chathooks.rs` by concern, moving code only | `front/` and `chathooks.rs` done (the front's modules above); `bank.rs` is the split-bank branch | `cargo test`; removed `admin → chathooks`, `front → chathooks`, `front → dashboard` |
 | 7 | a `tables` module that owns the tables folder's contract | later | `pcds read-game` then `pcds tables-diff`; removes `bank → cli`, `native → cli`, `native → net` |
 | 8 | typed settings accessor | later | removes `front → config`, `front → rules` |
