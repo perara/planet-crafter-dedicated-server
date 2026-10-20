@@ -43,6 +43,10 @@ const DESPAWN_DELAY: f32 = 0.17;
 /// for a hundred (each one a few seconds of solver) would keep a core busy for minutes. Players
 /// in range of a wreck are the only ones to ask, so this is more than a server ever sees.
 const MAX_QUEUE: usize = 32;
+/// How many scene wrecks (owner 0) the world may hold. A planet's scene has a few dozen at most (a
+/// late-game Prime save: 8); a client may ask for any number of them, before PlayerReady too, and
+/// each is a network object for everyone, a world object and a line of the save.
+const MAX_SCENE_WRECKS: usize = 256;
 /// The player's CharacterController height, for what drops from a player dying in an instance.
 const PLAYER_HEIGHT: f32 = 2.0;
 
@@ -260,12 +264,17 @@ pub fn load_instance(game: &mut Game, owner: i32, position: [f32; 3], rotation: 
 
 /// LoadInstanceFromSceneServerRpc: a planet's scene wreck (ProceduralSceneInstance) asks for
 /// its generator the first time; the world seed and its position make the seed.
-fn load_instance_from_scene(game: &mut Game, id: i32, position: [f32; 3], rotation: [f32; 4], difficulty: i32) {
-    // Scene world objects have positive ids; 0 would make a fresh one.
-    if id <= 0 {
+fn load_instance_from_scene(game: &mut Game, client: u64, id: i32, position: [f32; 3], rotation: [f32; 4], difficulty: i32) {
+    // Scene world objects have positive ids below the players' (FIRST_PLAYER_MADE_ID: the ones from
+    // there on are handed out as things are made); 0 would make a fresh one.
+    if id <= 0 || !crate::model::is_from_scene(id) {
         return;
     }
     if game.wos.get(&id).is_some_and(|w| !w.dont_save) {
+        return;
+    }
+    if state(game).instances.get(&0).is_some_and(|l| l.len() >= MAX_SCENE_WRECKS) {
+        game.limits.warn(client, "more scene wrecks than a planet has asked for, ignored");
         return;
     }
     let world_seed = game.save.settings["worldSeed"].as_u64().unwrap_or(0) as u32;
@@ -688,7 +697,7 @@ pub fn tick(game: &mut Game) {
     }
 }
 
-pub fn rpc(game: &mut Game, _client: u64, object: u64, name: &str, a: &Args) -> bool {
+pub fn rpc(game: &mut Game, client: u64, object: u64, name: &str, a: &Args) -> bool {
     match name {
         "WorldInstanceHandler.UpdateChoicesServerRpc" => {
             // The portal window asks for 3 (UiWindowPortalGenerator._numberOfInstancesToShow); a
@@ -700,7 +709,7 @@ pub fn rpc(game: &mut Game, _client: u64, object: u64, name: &str, a: &Args) -> 
         }
         "WorldInstanceHandler.SetAndOpenWorldInstanceSceneServerRpc" => open_from_rpc(game, a),
         "WorldInstanceHandler.UnloadInstanceServerRpc" => unload_world_instance(game),
-        "ProceduralInstancesHandler.LoadInstanceFromSceneServerRpc" => load_instance_from_scene(game, a.i(0), a.v3(1), a.q(2), a.i(3)),
+        "ProceduralInstancesHandler.LoadInstanceFromSceneServerRpc" => load_instance_from_scene(game, client, a.i(0), a.v3(1), a.q(2), a.i(3)),
         "GenerateOnTrigger.GenerateNetworkObjectsServerRpc" => generate_network_objects(game, object),
         _ => return false,
     }
@@ -948,6 +957,23 @@ mod tests {
             rpc(&mut g, 1, net, "GenerateOnTrigger.GenerateNetworkObjectsServerRpc", &Args(vec![]));
         }
         assert_eq!(g.ext.planets.instances.queue.len(), MAX_QUEUE);
+    }
+
+    /// A client (before PlayerReady too) that names wreck after wreck of the scene cannot fill the
+    /// world with generators (each a network object for everyone, a world object and a line of the
+    /// save), nor name ones from the players' id range.
+    #[test]
+    fn a_client_cannot_make_scene_wrecks_without_end() {
+        let Some(mut g) = crate::planets::tests::game() else { return };
+        for id in [200_000_000, 300_000_000, i32::MAX, -5] {
+            rpc(&mut g, 1, 0, "ProceduralInstancesHandler.LoadInstanceFromSceneServerRpc", &Args(vec![json!(id), json!([300.0, 10.0, 400.0]), json!([0.0, 0.0, 0.0, 1.0]), json!(0)]));
+        }
+        assert!(g.ext.planets.instances.instances.get(&0).is_none_or(Vec::is_empty), "ids from the players' range are not the scene's");
+        for i in 0..MAX_SCENE_WRECKS + 50 {
+            rpc(&mut g, 1, 0, "ProceduralInstancesHandler.LoadInstanceFromSceneServerRpc", &Args(vec![json!(101_000_000 + i as i32), json!([100.0 + i as f64, 10.0, 400.0]), json!([0.0, 0.0, 0.0, 1.0]), json!(0)]));
+        }
+        assert_eq!(g.ext.planets.instances.instances[&0].len(), MAX_SCENE_WRECKS);
+        assert_eq!(g.save.procedural.len(), MAX_SCENE_WRECKS);
     }
 
     #[test]
