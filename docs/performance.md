@@ -125,19 +125,51 @@ reading each machine's tables again after the restore: 52 / 172 / 342 ms at 33k 
 
 ### Memory
 
-| | RSS of the bank (MiB) | per world object |
-|---|---|---|
-| tables only, bench world (2.7k objects) | 43 | |
-| late (33k) | 75 | 0.97 KiB |
-| 100k | 121 | 0.80 KiB |
-| 200k | 198 | 0.79 KiB |
+The resident memory of the bank (from `/proc/PID/smaps_rollup`, five seconds after it says running, on the
+same four worlds), the peak of its start (`VmHWM`), and what a hot update holds at its largest (the old
+bank at rest, the new bank at its peak, the snapshot, the front). 0.8.0 is the build this work started from.
 
-Unchanged by this release (the changes were in time, not in space). Where the bytes are (the bank's heap, 200k): world objects 82 MiB (420 bytes each), network objects 50 (1.7 KB each, 29,700 of them), the rest of the game 36, inventories 6. The start peaks 1.5 times higher (295 MiB at 200k, while the save's text is parsed) and returns 100 MiB to the system when it is up. Per player: a few KiB (an inventory, an equipment, a player object). The front: 8 MiB, 20 MiB after a 2.4 MB join has been sent (the queue's room is kept until the next).
+| World | Bank at rest, 0.8.0 -> now | Beyond the bench world, per world object | Start peak | Hot update's peak (old bank + new bank's peak + snapshot + front) |
+|---|---|---|---|---|
+| bench world (2.7k objects) | 43.8 -> 21.5 MiB (-51%) | | 44 -> 25 MiB | 96 -> 57 MiB |
+| late (33k) | 77.2 -> 32.6 MiB (-58%) | 1.11 -> 0.37 KiB | 79 -> 35 MiB | 154 -> 74 MiB |
+| 100k | 122.0 -> 43.1 MiB (-65%) | 0.83 -> 0.23 KiB | 166 -> 52 MiB | 264 -> 114 MiB |
+| 200k | 198.8 -> 66.3 MiB (-67%) | 0.81 -> 0.23 KiB | 298 -> 87 MiB | 437 -> 179 MiB |
+
+(Sum for the hot update, 200k: old bank 65.8, new bank 80.5, snapshot 23.3, front 9.6 MiB; the new bank's
+peak is where it has the snapshot mapped and its world half built.) The front is 9 MiB, of which 8.3 are
+the program's own file pages, shared with the bank and reclaimable; its anonymous memory is 0.7 MiB.
+
+Where the bytes are, the bank's heap by part (`bench::scale`, MiB), and what each part became:
+
+| | late (33k), 0.8.0 -> now | 200k, 0.8.0 -> now | How |
+|---|---|---|---|
+| world objects | 20.6 -> 3.7 | 82.5 -> 16.1 | 24 bytes for the nine in ten that hold only an id and a group (a placed one boxes its fields, 304 bytes before for each); 32-bit slot indexes |
+| network objects | 5.5 -> 1.3 | 50.0 -> 15.5 | words (class, variable name, type) interned and the shape of an object shared; values 24 bytes inline |
+| machines | 2.3 -> 0.6 | 34.1 -> 5.5 | 48 bytes for the nine in ten that have no component (584 before) |
+| inventories | 1.2 -> 1.2 | 6.1 -> 5.9 | |
+| holders, constructed, pickables, network index | 0.5 -> 0.5 | 2.7 -> 2.4 | |
+| rockets, water, the rest of the game | 1.0 -> 0.8 | 2.0 -> 1.5 | |
+| tables: layouts | 3.0 -> 1.8 | 3.0 -> 1.7 | words interned |
+| tables: assets, groups, panels | 9.6 -> 1.8 | 9.7 -> 1.8 | `Doc`, a quarter of a `Value` |
+| tables: prefabs (text, and parsed as the world has buildings) | 17.4 -> 4.6 | 8.2 -> 2.7 | compact text, `Doc` |
+| tables: scene dumps | 8.8 -> 1.9 | 8.8 -> 2.1 | compact text, parsed when a planet needs it |
+| **heap in use** (the parts above and what is not counted in them) | **71.6 -> 20.3** | **213.6 -> 62.2** | |
+| RSS after the load and a trim | 79 -> 36 | 200 -> 74 | the program's own pages (10) and malloc's free space are the rest |
+
+**Per player** (`pcds load` players on a live server, RSS 20 seconds after they joined): on the late save
+the bank keeps 6 KB (an inventory, an equipment and a player object; 25 to 30 KB before) and the front 35 to 50 KB
+(55 to 60). On the 200k world a join is 2.4 MB: the first 16 players leave the bank 4 to 6 MiB bigger (9 before) and the
+next 32 nothing; the front is 10.5 MiB with 16 players, 1.4 of it anonymous (21.5 and 13.2 before). The front's room
+for a world sent (a session's send queue, the link's inbox) goes back to the system when it is empty, and so do
+the frames, which are mappings of their own past 128 KiB (`util::fix_malloc_threshold`).
+
+The memory is held by budgets (next section): `bench::budget::the_memory_of_the_world_stays_within_its_budget`.
 
 ## The budgets
 
 A change that makes the server dearer should fail a test, not wait for a player to notice. These tests
-hold the build to budgets of about one and a half times what it measures, in things that do not
+hold the build to budgets of about one and a half times what it measures (a third above it for the memory ones), in things that do not
 depend on the machine's load (allocations, bytes, user instructions); they need the game tables, like
 every game test, so CI (which has none) skips them, except the first, which needs none.
 
@@ -147,7 +179,8 @@ every game test, so CI (which has none) skips them, except the first, which need
 | `bench::budget::the_tick_stays_within_its_budget` | allocations and user instructions per tick on the guard world (a test base of 0, 400 and 1,600 buildings: containers that supply and demand, water collectors, autocrafters, a drone station), with 0 and 4 players | see below | see below |
 | `bench::budget::a_tick_costs_about_the_same_per_building_at_four_times_the_size` | instructions per tick and world object at 1,600 buildings against 400 | 0.84 (10.6 against 12.7) | at most 2 |
 | `bench::budget::the_snapshot_the_save_and_the_join_stay_within_their_budget` | bytes per world object: a hot update's snapshot, the save text, the join | 230, 75, 17.6 | 300, 100, 24 |
-| `bench::budget::the_stand_of_a_hot_update_stays_within_its_budget` | user instructions per world object of a snapshot and its restore, all threads | 9,600 | 14,000 |
+| `bench::budget::the_stand_of_a_hot_update_stays_within_its_budget` | user instructions per world object of a snapshot and its restore, all threads | 9,500 | 14,000 |
+| `bench::budget::the_memory_of_the_world_stays_within_its_budget` | bytes malloc holds for a world object, a network object, a machine and an inventory (what each frees when it is dropped, counted by the test allocator), on the guard world with 1,600 buildings | 134, 839, 391, 262 | 175, 1,100, 510, 340 |
 | `an_idle_server_wakes_up_within_its_budget` (`tests/hot_update.rs`) | wake-ups a second of an idle front and bank | 20 and 190 | 40 and 260 |
 
 The tick budgets, per tick (the guard world has 7, 1,607 and 6,407 world objects):
@@ -238,23 +271,26 @@ players this server allows (100); a third makes a flip faster. The costs, per co
 
 ### Memory
 
-The bank holds the game's tables (38 MiB) and the world: **about 0.8 to 1.3 KiB per world object** (the
-smaller figure on the bigger worlds, where the tables are a smaller part) and a few KiB a player. The front
-is 8 to 20 MiB. A hot update holds two banks and the snapshot at once. **Size a container at three
-times the bank plus the front** (the front refuses a hot update that would not fit and says how much to
-give):
+The bank holds the game's tables (8 MiB) and the world: **about 0.2 to 0.4 KiB per world object** (the smaller
+figure on the bigger worlds, where the items in inventories are most of the objects) and a few KB a player. The
+front is 9 MiB, nearly all of it the program's own file pages. A hot update holds two banks and the snapshot at
+once. **Size a container at three times the bank plus the front** (the front refuses a hot update that would not
+fit and says how much to give):
 
-| World | Bank at rest | A hot update's peak (both banks, the snapshot, the front; 2.2 times the bank, measured at 100,000 and 200,000) | Container to give |
-|---|---|---|---|
-| 2,700 objects | 43 MiB | about 105 MiB | 256 MiB |
-| 33,000 | 75 MiB | about 175 MiB | 512 MiB |
-| 100,000 | 121 MiB | 267 MiB (measured) | 512 MiB |
-| 200,000 | 198 MiB | 436 MiB (measured) | 1 GiB |
+| World | Bank at rest | The start's peak | A hot update's peak (old bank, new bank at its peak, snapshot, front: measured) | Container to give | Without hot updates |
+|---|---|---|---|---|---|
+| 2,700 objects | 21 MiB | 25 MiB | 57 MiB | 128 MiB | 64 MiB |
+| 33,000 | 33 MiB | 35 MiB | 74 MiB | 256 MiB | 64 MiB |
+| 100,000 | 43 MiB | 52 MiB | 114 MiB | 256 MiB | 128 MiB |
+| 200,000 | 66 MiB | 87 MiB | 179 MiB | 512 MiB | 128 MiB |
 
-A flip holds the old bank, the new bank (which peaks about where the old one stands) and the snapshot (12 MiB
-at 100,000 objects, 23 at 200,000): 2.2 times the bank and the front. The start itself peaks 1.5 times
-higher than the bank at rest, while the save is parsed. The server refuses a hot update that would
-not fit and says how much to give (docs/docker.md); a restart needs no more than the start.
+A flip holds the old bank, the new bank (which peaks above where it ends by about the snapshot, which it has mapped while
+it restores) and the snapshot (12 MiB at 100,000 objects, 23 at 200,000): 2.3 to 2.7 times the bank, with the front.
+The snapshot did not shrink with the bank (it is the same bytes as in 0.8.0), so the factor is no smaller than it was
+(2.2 times a bank that was three times as big). The start peaks 1.2 to 1.3 times above the bank at rest. Page cache
+(the program, the game's tables, the save) counts against a container's limit but is given back when it is needed.
+The server refuses a hot update that would not fit and says how much to give (docs/docker.md); a restart needs
+no more than the start.
 
 ### Bandwidth
 
@@ -323,10 +359,21 @@ Each was measured before it was left out.
 * **Slower ticks while nobody is in the world.** The world's timers are set from the tick that fires
   them: a 20 ms tick instead of 5 changes what the world is a minute later. `world.pauseWhenEmpty` is the
   switch for a world that should wait.
-* **Compact network objects** (names and types as shared strings: about 600 of their 1,700 bytes, 50
-  to 32 MiB at 200,000 objects, 6% of the bank) and **compact world objects** (the two unit arrays only
-  where a building has them: 65 of 336 bytes): both touch the snapshot codec and nearly every access
-  to the world; not done. They are the next memory.
+* **A different allocator.** glibc's malloc against jemalloc and tcmalloc (`LD_PRELOAD`, the same build, 200,000
+  objects, RSS five seconds after the start and the bank's peak): glibc 72 / 97 MiB, glibc with the mmap threshold
+  fixed (what the server does now) 66 / 86, jemalloc 92 / 99 (the front 23), tcmalloc 95 / 95 (the front 15). None is in the tree, they are C libraries, and
+  none beats the setting of one number. `MALLOC_ARENA_MAX=1` changed nothing the threshold had not.
+* **Madvise on the program's own pages.** 8.3 of the front's 9 MiB (and 10 of the bank's) are the program's file
+  pages, which the kernel maps around every fault and keeps in the page cache for both processes; dropping them
+  from the process (`MADV_DONTNEED` on the text) would lower the number `ps` shows and not what the container
+  holds. Not done.
+* **Tables shared by the two banks of a hot update** through a mapped, packed file: 8 MiB a bank now (26 before),
+  3% of a flip at 200,000 objects. Not built.
+* **Another encoding of the snapshot** (the names of each network object once, 24 -> 17 MiB at 200,000 objects):
+  a new snapshot format, for 4% of a hot update's peak. The snapshot is the same bytes as in 0.8.0.
+* **Compact inventories** (the four lists and the logistics fields only where an inventory has them: 144 -> 48
+  bytes, 2 MiB at 200,000 objects, 3%) and **24-byte variable values** (1 MiB): not done; they are the next
+  memory after the 16 MiB of world objects and the 15.5 of network objects below.
 * **Pre-copy for the hot update, a persistent thread pool and a pre-faulted heap** for the new bank:
   evaluated in docs/hot-update.md ("Flip speed"); with the stand now 30 to 160 ms the case is weaker
   and none was built.

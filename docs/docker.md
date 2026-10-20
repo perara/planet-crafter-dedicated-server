@@ -135,7 +135,7 @@ Measured, each with a hot update and a restart:
 
 ### Memory and CPU
 
-(Measured again for 0.8.x: a bank of 100,000 objects is 121 MiB, of 200,000 198 MiB; a flip holds 2.2 times the bank and the front in all (267 MiB and 436 MiB); the table below is of 0.6.2's JSON snapshot. docs/performance.md has the sizes.)
+(Measured again for the memory work after 0.8.0: a bank of 100,000 objects is 43 MiB, of 200,000 66 MiB, of a small world 21 MiB; a flip holds 2.3 to 2.7 times the bank, with the snapshot and the front, in all (114 MiB at 100,000 objects, 179 MiB at 200,000); the table below is of 0.6.2's JSON snapshot and a bank three times as big. docs/performance.md has the sizes.)
 
 A hot update holds the old bank, the world's snapshot (a memfd, which counts against the
 container's memory) and the new bank, which peaks above the old one while it restores. Measured
@@ -154,8 +154,8 @@ refuses unless about twice the running bank's memory is free, saying how much to
 least 860 MB ... or restart instead (pcds upgrade --restart VERSION)`). A restart needs no extra
 memory. Without a cgroup v2 limit (a host, cgroup v1) nothing is checked. The small world flips
 inside `--memory 512m --cpus 1` (two or three flips in a row, world stood 100 to 350 ms on a busy
-host). Size the limit as about three times the running bank plus the front: 256 MiB for a small
-world, 1.2 GB for 100000 objects.
+host). Size the limit as about three times the running bank plus the front: 128 MiB for a small
+world (the bank is 21 MiB), 256 MiB for 100000 objects (43 MiB), 512 MiB for 200000 (66 MiB).
 
 ## Compose
 

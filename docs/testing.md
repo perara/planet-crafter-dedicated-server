@@ -241,7 +241,7 @@ PCDS_BENCH_SAVE=run/worlds/world.json PCDS_RNG_SEED=1 \
 | `bench::bench` (`make bench SAVE=... PLAYERS=4`) | The tick on a real save with a fixed clock and seed, 4 scripted players by default: microseconds per tick (mean, p50, p99), user instructions per tick (where the kernel lets the process count them), allocations per tick, and a **fingerprint** of every message the server sends and every byte it saves. | `PCDS_BENCH_SECONDS` (300), `PCDS_BENCH_PLAYERS`, `PCDS_BENCH_ACTION_MS` (players act that often; default they only walk), `PCDS_BENCH_START_DAYS` (the game's clock starts that many days in: the save hash must not depend on it), `PCDS_BENCH_DUMP` (every message and the final save, to a file, to compare two runs), `PCDS_BENCH_SECTIONS=1` (time per part of the tick, and the sections of the slowest ticks), `PCDS_BENCH_ALLOC_SITES=N` (the places in the code that allocate in the tick) |
 | `bench::handoff` | The same run straight, and with the game snapshotted and rebuilt from the snapshot every N seconds (what a hot update does). The two fingerprints must be `EQUAL`. | the same, and `PCDS_BENCH_HANDOFF` |
 | `bench::restart` | An idle world run straight and with the process restarted from its save at half time (the clock starts at 0 again); prints the units' levels of both. What differs is what the save does not hold. | the same |
-| `bench::scale` | Load, save and memory of a world of any size: the time of each step of a start and of an autosave. | `PCDS_BENCH_SAVE` |
+| `bench::scale` | Load, save and memory of a world of any size: the time of each step of a start and of an autosave, and the byte accounting of docs/performance.md: the heap by part of the game (world objects, network objects, machines, inventories...) and of the tables, how many world objects hold only an id and a group, the machines' census, the process's peak, the anonymous part of its RSS after a trim and what malloc holds free. | `PCDS_BENCH_SAVE` |
 | `bench::tables_memory` | The memory each of the game tables takes. | `PCDS_TEST_DATA` |
 | `bench::flipbench` | The stand of a hot-update flip on worlds of several sizes, phase by phase (p50, p95, max). | `PCDS_FLIPBENCH_SAVES=a.json,b.json`, `PCDS_FLIPBENCH_N`, `PCDS_FLIPBENCH_PLAYERS`. `tools/grow-world.py SAVE OUT N` grows a save to about N world objects. |
 | `bench::dirtybench` | How much of a big world changes while a pre-copy would run (entries and 2048-entry chunks that differ after 0.25, 1 and 5 s). | `PCDS_FLIPBENCH_*` |
@@ -285,8 +285,9 @@ instruction budgets say so and are skipped, the allocation and byte budgets stil
 - `bench::budget::*`: a world of about 0, 400 and 1,600 buildings that anyone can build (containers
   that supply and demand, water collectors, autocrafters, a drone station) with 0 and 4 players:
   allocations and instructions per tick, the growth of the tick with the world, the bytes per world
-  object of a hot update's snapshot, the save and a join, and the instructions of a snapshot and its
-  restore. `cargo test --release bench::budget::numbers -- --ignored --nocapture` prints the
+  object of a hot update's snapshot, the save and a join, the instructions of a snapshot and its
+  restore, and the memory the world's parts keep (a world object, a network object, a machine, an
+  inventory: the bytes malloc holds for each, counted by the test allocator). `cargo test --release bench::budget::numbers -- --ignored --nocapture` prints the
   measured numbers to set a budget from.
 - `utp::tests::polling_idle_sessions_and_sending_a_batch_allocate_a_bounded_number_of_times`:
   allocations of the transport; needs no tables, CI runs it.
