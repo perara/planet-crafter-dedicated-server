@@ -547,6 +547,12 @@ impl Game {
             self.kick(client, "MULTIPLAYER_Game_Session_Full");
             return;
         }
+        // The world is sent to a session at the rate a forged address could make the server reflect it.
+        if self.clients.get(&client).and_then(|c| c.ip.clone()).is_some_and(|ip| !ip.parse().is_ok_and(crate::utp::is_loopback)) && !self.limits.join(std::time::Instant::now(), max) {
+            println!("client {client}: refused (worlds are being sent to new sessions as fast as they are allowed)");
+            self.kick(client, "Many players are joining at once: try again in a moment");
+            return;
+        }
         let mut o = NetObj::from_layout(&self.net_data.prefabs["Player"].layout(self.tick_number()));
         o.owner = client;
         let object = self.net.spawn(o);
@@ -1097,6 +1103,39 @@ pub mod tests {
         let r = request(&g);
         g.approve(8, &r);
         assert!(g.clients[&8].approved, "Ann is in: one joining from her address");
+    }
+
+    /// Sessions from other machines get the world at a bounded rate (a forged address makes the
+    /// server reflect it): a burst, then one a second; sessions from this machine, and Steam's
+    /// (no address), are not held.
+    #[test]
+    fn worlds_go_to_sessions_from_other_machines_at_a_bounded_rate() {
+        let Some(mut g) = test_game(save()) else { return };
+        let request = |g: &Game| {
+            let data = format!("{}|0", g.net_data.game_version);
+            let mut w = Writer::new();
+            w.packed_i32(0).u64(0).i32(data.len() as i32).bytes(data.as_bytes());
+            w.0
+        };
+        let mut told = 0;
+        for client in 1..=60u64 {
+            g.connect(client, None, false, Some(format!("203.0.113.{client}")));
+            let r = request(&g);
+            g.approve(client, &r);
+            told += g.net.out.iter().filter(|(to, kind, _)| *to == Target::Only(client) && *kind == CONNECTION_APPROVED).count();
+            g.net.out.clear();
+            g.disconnect(client);
+        }
+        assert!((16..=18).contains(&told), "the burst, and not much more within a few milliseconds: {told}");
+        assert!(g.kicks.iter().all(|(_, why)| why.contains("joining at once")) && g.kicks.len() == 60 - told);
+        // From this machine (a relay's players, the tests') and over Steam: no limit.
+        for client in 100..160u64 {
+            g.connect(client, None, false, Some("127.0.0.1".into()));
+            let r = request(&g);
+            g.approve(client, &r);
+            assert!(g.clients[&client].approved, "{client}");
+            g.disconnect(client);
+        }
     }
 
     /// A dropped item's owner sends NaN: nothing changes, nothing is passed on, and the

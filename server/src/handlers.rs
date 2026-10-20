@@ -58,7 +58,19 @@ pub struct Limits {
     /// Per client before PlayerReady: the inventories it made and the items put into them.
     #[serde(skip)]
     loading_created: HashMap<u64, (u32, u32)>,
+    /// The worlds sent to addresses that could be forged: when the allowance was last counted, and
+    /// how many joins are left in it.
+    #[serde(skip)]
+    joins: Option<(std::time::Instant, f64)>,
 }
+
+/// New sessions from other machines get the world (megabytes) at this rate in all, after a burst of
+/// the players the server holds (at least JOIN_BURST). A UDP session needs no answer from its
+/// address to be sent the world and to be told, blind, how fast to take it (utp.rs): a forged
+/// source address makes the server a reflector from a few hundred bytes to the whole world. This
+/// bounds what it can reflect (a join takes seconds, so players never meet it).
+const JOINS_PER_SECOND: f64 = 1.0;
+const JOIN_BURST: usize = 16;
 
 impl Limits {
     /// `what` logged once for this client (forgotten with it: the table holds the clients there are).
@@ -114,6 +126,20 @@ impl Limits {
         self.pending_bytes.insert(client, bytes + rpc.len());
         self.warn(client, "RPCs over the budget of a tick, queued");
         false
+    }
+
+    /// Whether a session from an address other than this machine's gets the world now (see
+    /// JOINS_PER_SECOND); `players`: the most the server holds.
+    pub fn join(&mut self, now: std::time::Instant, players: usize) -> bool {
+        let burst = players.max(JOIN_BURST) as f64;
+        let (last, left) = self.joins.get_or_insert((now, burst));
+        *left = (*left + now.saturating_duration_since(*last).as_secs_f64() * JOINS_PER_SECOND).min(burst);
+        *last = now;
+        if *left < 1.0 {
+            return false;
+        }
+        *left -= 1.0;
+        true
     }
 
     /// Whether a client that is no player yet may create an inventory with `items` initial items
@@ -536,6 +562,22 @@ mod tests {
     use crate::net::{enc, Target, VarValue};
     use crate::testkit::*;
     use serde_json::{json, Value};
+
+    /// New sessions from other machines are let in at JOINS_PER_SECOND after a burst.
+    #[test]
+    fn joins_have_a_burst_and_a_rate() {
+        let mut l = super::Limits::default();
+        let t0 = std::time::Instant::now();
+        assert!((0..16).all(|_| l.join(t0, 16)));
+        assert!(!l.join(t0, 16), "the burst is spent");
+        assert!(!l.join(t0 + std::time::Duration::from_millis(900), 16));
+        assert!(l.join(t0 + std::time::Duration::from_millis(1000), 16) && !l.join(t0 + std::time::Duration::from_millis(1000), 16), "one a second");
+        // A long quiet gives the burst back, not more; a server of more players has a bigger one.
+        let later = t0 + std::time::Duration::from_secs(3600);
+        assert!((0..16).all(|_| l.join(later, 16)) && !l.join(later, 16));
+        let mut big = super::Limits::default();
+        assert!((0..64).all(|_| big.join(t0, 64)) && !big.join(t0, 64));
+    }
 
     /// An RPC that waited for its turn runs inside the tick; one that panics there must kick its client
     /// and go on, not end the bank (a client must not be able to restart the world by sending
