@@ -268,7 +268,12 @@ fn decode(body: &[u8], phases: &mut Vec<(&'static str, f64)>) -> Result<Game, St
         let entry = body.get(4 + i * 13..4 + i * 13 + 13).ok_or_else(short)?;
         let entries = u32::from_le_bytes(entry[1..5].try_into().unwrap()) as usize;
         let len = u64::from_le_bytes(entry[5..].try_into().unwrap()) as usize;
-        parts.push((entry[0], entries, body.get(at..at.checked_add(len).ok_or_else(short)?).ok_or("a part ends beyond the snapshot")?));
+        let bytes = body.get(at..at.checked_add(len).ok_or_else(short)?).ok_or("a part ends beyond the snapshot")?;
+        // Every entry takes a byte at least: a count beyond that would ask for a Vec of gigabytes below.
+        if entries > bytes.len() {
+            return Err(format!("a part claims {entries} entries in {} bytes", bytes.len()));
+        }
+        parts.push((entry[0], entries, bytes));
         at += len;
     }
     if at != body.len() {
@@ -486,6 +491,21 @@ mod tests {
         assert!(serde_json::from_str::<Clock>("1e300").is_err());
         assert!(serde_json::from_str::<Clock>("12.5").is_ok());
         assert!(serde_json::from_str::<Clock>("-3.0").is_ok(), "a clock before its start counts as now");
+    }
+
+    /// A directory that claims four billion world objects in a part of no bytes asked for a Vec of
+    /// that many (a terabyte: the allocation failed and the process aborted) before any chunk was
+    /// read. A damaged kept snapshot is an error, as every other damage to one is.
+    #[test]
+    fn a_directory_that_claims_more_entries_than_bytes_is_an_error_not_an_abort() {
+        for kind in [super::WOS, super::INVENTORIES] {
+            let mut body = 1u32.to_le_bytes().to_vec();
+            body.push(kind);
+            body.extend_from_slice(&u32::MAX.to_le_bytes());
+            body.extend_from_slice(&0u64.to_le_bytes());
+            let e = super::decode(&body, &mut Vec::new()).err().expect("an error");
+            assert!(e.contains("entries"), "{e}");
+        }
     }
 
     /// A snapshot with its head line's text changed.
