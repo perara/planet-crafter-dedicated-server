@@ -131,64 +131,55 @@ update or the next rollback clears or replaces the note.
 
 **Rollback.** The other bank's release takes the world only if it passes the same check as an
 update (front protocol, tables format, and that it reads the running world's snapshot format).
-0.6.0 reads formats 1 and 2 and 0.6.1 writes 3, so after a live update from 0.6.0 to 0.6.1 the
-way back is `pcds upgrade --rollback --restart` (the server saves as it stops and 0.6.0 loads
-that save; every player joins again): `--rollback` alone answers with that, changes nothing, and
-the dashboard says so in the Updates section and when Roll back is clicked. While the world is
-stopped (`POST /api/world/stop`) no bank runs it: an update or a rollback is answered 409 "the
-world is stopped" (start it first, or use `--restart`), and the dashboard's buttons are off.
+Across a change of any of them the way back is `pcds upgrade --rollback --restart` (the server
+saves as it stops and the other release loads that save; every player joins again): `--rollback`
+alone answers with that, changes nothing, and the dashboard says so in the Updates section and
+when Roll back is clicked. While the world is stopped (`POST /api/world/stop`) no bank runs it:
+an update or a rollback is answered 409 "the world is stopped" (start it first, or use
+`--restart`), and the dashboard's buttons are off.
 
-**State and the release before.** A snapshot is the whole serialized `Game`. The release that
-restores it is another program than the one that wrote it, so every change to what is
-serialized is a change to what the next release must read. The rules:
-- A new field in serialized state needs `#[serde(default)]` (or a default of its own type) when
-  an older snapshot lacks it; without it the restore of the release before's snapshot fails with
-  "missing field": that is the failure the first real update (0.6.0 to 0.6.1, `water_only`) had.
+**State and the next release.** A snapshot is the whole serialized `Game`. The release that
+restores it is another program than the one that wrote it. There is no legacy support: a
+snapshot is read in full by the format it was written in, or refused. The rules:
+- Any change to what is serialized (a field added, removed, renamed or retyped, a different
+  encoding) bumps `handoff::FORMAT`. There are no `#[serde(default)]`s to keep an older snapshot
+  readable, no `migrate` and no list of older formats: `reads` in `pcds bank-info` (and
+  bank.json) is `[FORMAT]`, an exact match. The front checks it before a flip
+  (`updater::compatible`), so a release of another format is a restart install
+  (`pcds upgrade --restart`; the world saves as the server stops and the new release loads the
+  save), and so is the way back across it.
 - What the tables give is not state. Do not store it, or store it and set it again after a
   restore: `machines::refresh_from_tables` (called by `handoff::restore_bytes`) sets again every
   table value a machine part keeps beside its state (Harvestable, Vegetation, LinkedGrower,
-  AutoCrafter, Disintegrator, Optimizer); the flag a snapshot lacks, and a value the release that
-  wrote it derived differently, are then this release's. A part that mixes both and is not
-  refreshed (Generator: spawn_every, speed, groups) must be added there when its table values are
-  read differently. State (timers, what is growing, a random sequence, what the rays found) stays
+  AutoCrafter, Disintegrator, Optimizer). A part that mixes both and is not refreshed
+  (Generator: spawn_every, speed, groups) must be added there when its table values are read
+  differently. State (timers, what is growing, a random sequence, what the rays found) stays
   the snapshot's.
-- A field renamed, removed or meaning something else bumps `handoff::FORMAT` and adds the step
-  from the previous format to `migrate` (a new field alone does not). Each build reads its own
-  format and the one before (`reads` in `pcds bank-info`, bank.json): that list is all the front
-  checks before a flip (`updater::compatible`), so a field added with a default is invisible to
-  it, and a release before cannot restore what a later one wrote if the later one added a
-  field without which it fails. That is the case of the way back from 0.6.2 to 0.6.1: 0.6.1
-  needs `water_only`, which 0.6.2 no longer writes, so the live rollback is accepted by the front
-  and fails at the restore (the new bank ends, the running one goes on, nobody is disconnected).
-  The gate prints that as its last line; `--rollback --restart` always works (the stop saves and
-  the world loads from the save).
-- `rules` are `deny_unknown_fields`: a rule a later release added makes the release before
-  refuse a snapshot that has it, at the restore (the old bank then goes on).
+- `rules` are in the snapshot and are `deny_unknown_fields`: a new rule is a change of state,
+  so it bumps `FORMAT` like any other.
 
-Two checks stand for these rules, both of the release before and not of this build against itself:
-- **Fixtures** (`server/tests/fixtures/snapshot-<release>.json.gz`): the snapshot each release
-  since the first with snapshots wrote for a world with one of every building the game has (277
-  groups, 6 machines that grow, floaters, generators, autocrafters...) and 4 players, made with
-  that release's own program on a new save with the buildings added (nothing of a real world).
-  `handoff::tests::the_snapshot_of_every_release_restores` restores each in this build, runs it
-  for a minute of game time and writes and reads it again. Make the fixture of a new release,
-  once, when it is out: `PCDS_TEST_DATA=... PCDS_FIXTURE_RELEASE=<its folder> PCDS_FIXTURE_OUT=
-  server/tests/fixtures/snapshot-vX.Y.Z.json.gz cargo test --release --test hot_update
-  make_the_snapshot_fixture_of_a_release -- --ignored`. A release that no longer reads a
-  fixture's format (FORMAT bumped twice) must have the test say so: it does for a format
-  older than the previous one. With `water_only` taken out again, it fails on the 0.6.0 fixture
-  with "missing field `water_only`".
-- **The gate** (`make gate`, `tools/flip-gate.sh`): the last published release that is not this
-  version runs a front and a bank on that world with 6 players, and this build's bank takes the
-  world over live (`hot_update::a_hot_update_from_the_release_before_works`, ignored by default
-  because it needs the download). It fails when the flip fails after the front accepted it, or a
-  player drops, or a building is lost; a release that declares it cannot (front protocol, tables
-  format, snapshot formats) is a restart by design and is printed. The last line says whether
-  the way back works live. The release workflow runs it before the tag's tarball is built
-  (`flip-gate` job): it needs game tables, which are not in the repository, as the secret
-  `PCDS_TEST_TABLES_URL` (a .tar.gz of a tables folder); without it the job and the release
-  fail, unless the repository variable `PCDS_FLIP_GATE` is `off`, which only warns. Run
-  `make gate` by hand before tagging either way.
+**The flip gate.** Every flip in `tests/hot_update.rs` is between banks of this build. The one
+thing they cannot show is a flip from the program of the last release, which is another binary.
+`make gate` (`tools/flip-gate.sh`) fetches the last published release that is not this
+version and compares its `bank-info` with this build's (`format`, `protocol`, `tablesFormat`).
+When they differ it prints "format changed: ... is not hot-update compatible" between rows of
+`#` and exits 0 without testing: that release is a restart install by design (the release notes
+say so). When they are equal that release runs a front and a bank on a world with one of every
+building the game has and 6 players, and this build's bank takes the world over live
+(`hot_update::a_hot_update_from_the_release_before_works`, ignored by default because it needs
+the download). It fails when the flip fails after the front accepted it, a player drops, a
+building is lost, the world does not save from the new bank, or the way back (a rollback of the
+update just made) does not work live. It needs the game's tables (`PCDS_TEST_DATA`), which no
+CI has: it is part of the release checklist below, not a CI job.
+
+**Release checklist** (by hand, before tagging):
+1. `server/Cargo.toml`'s version is the tag's (the release workflow checks).
+2. If the serialized state, the front protocol (`ipc::PROTOCOL`) or the tables format changed,
+   `FORMAT`, `PROTOCOL` or `TABLES_FORMAT` is bumped, and the release notes say the update is
+   `pcds upgrade --restart`.
+3. `make test` with game tables, and `make docker-test`.
+4. `make gate`. Read its output: "SKIPPED - format changed" is expected after a bump in step 2
+   and nothing else; anything else must pass.
 
 **The CLI.** `pcds upgrade [VERSION] [--restart] | --rollback | --check`. Running: through the
 admin API (`POST /api/update`, then `GET /api/update` until its outcome). `--restart` installs
@@ -326,9 +317,6 @@ front spawns it (tables and scenes: 66 MiB resident; the live bank with the 99.5
 181 MiB). The 120 s load deadline is not near. A standby bank kept ready would save those 70 ms
 of an update that takes seconds and cost 66 MiB all the time: not worth it.
 
-**Deleted** (owner rule: no legacy support): `migrate` and its steps for formats 1 and 2, the
-JSON reading path of format 3, `snapshot_json`, the format-1 test; `reads` is `[FORMAT]`.
-
 ### Not verified
 
 - **Steam.** Steam connections, their `Split<n>` handling and the invite code live in the
@@ -341,20 +329,11 @@ JSON reading path of format 3, `snapshot_json`, the format-1 test; `reads` is `[
   admin API and the rule `update.auto`, with load players; GitHub's redirect to the asset storage
   works). What is not driven: GitHub's rate limit (a 403 or 429 is an error with its status, tried
   again within the hour) and a mirror that serves a release without `.sha256`.
-- **Across releases**: the first real update failed on a snapshot field the release before did
-  not write (see "State and the release before"). The gate and the fixtures now restore the
-  release before's world on every release; a release before 0.6.0 has no `bank-info` and no
-  fixture.
-- **Front restarts.** Updating the front is a restart (`pcds upgrade --restart`): every player
-  reconnects. Keeping the UDP socket and the sessions across it (see (d)) is not built.
-
-- **A real GitHub release.** The updater ran only against the release server on 127.0.0.1
-  (the same JSON fields and asset names as GitHub's API and `make dist`); GitHub was not
-  contacted. Its redirects to the asset storage go through ureq's default redirect handling,
-  untested here.
-- **Across releases.** A flip between two releases of the same format is the same as one between
-  two banks of one build. Nothing is migrated: a release of another format needs
-  `pcds upgrade --restart`.
+- **Across releases.** The first real update (0.6.0 to 0.6.1) failed on a snapshot field the
+  release before did not write. Since then there is no cross-release reading at all: a flip is
+  between releases of one snapshot format (anything else is a restart install), and `make gate`
+  flips the last release of the same format into the build before every tag (see "The flip
+  gate" above).
 - **Front restarts.** Updating the front is a restart (`pcds upgrade --restart`; in a container
   also in place, see docs/docker.md): every player reconnects. Keeping the UDP socket and the
   sessions across it is not built; the design note below ("Updating the front without dropping
@@ -809,8 +788,6 @@ Tools, unchanged, in the same binary: `load.rs`, `probe.rs` (both use `utp.rs` a
   chatting, sorting). Drones in flight, meteor events, animals, rockets, world instances and
   deconstructions are serialized by the same derives but were not seen to matter in a run. A
   bench world with them running would close that.
-- **Across releases.** Both sides of every flip ran the same build; there is no migration (a
-  release of another format is installed with a restart).
 - **Banks on disk.** The bank directories, the active pointer and the updater were not built;
   the spike's front starts its own binary. The download and the sha256 check are
   `install.sh`'s, not rerun against GitHub.

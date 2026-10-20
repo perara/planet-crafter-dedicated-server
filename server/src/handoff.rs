@@ -556,51 +556,6 @@ mod tests {
         assert_eq!(h.wos[&pod].rotation[0], f32::INFINITY);
     }
 
-    /// A snapshot as a release wrote it (tests/fixtures/snapshot-<release>.json.gz: a world with
-    /// one of every building and 4 players, made by tests/hot_update.rs
-    /// make_the_snapshot_fixture_of_a_release with that release's program). This build reads its
-    /// own format only: a fixture of another format is refused with the formats said (the update
-    /// is then `pcds upgrade --restart`, the world loading from the save), one of this format
-    /// restores, goes on for a minute of game time, and is written and read again.
-    #[test]
-    fn the_snapshot_of_every_release_restores_or_is_refused_by_its_format() {
-        let Some((net_data, data, spec, scenes)) = crate::game::test_tables() else { return };
-        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-        let mut fixtures: Vec<_> = std::fs::read_dir(&folder).unwrap().flatten().map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("snapshot-") && n.to_string_lossy().ends_with(".json.gz"))).collect();
-        fixtures.sort();
-        assert!(fixtures.len() >= 2, "a fixture per release since snapshots: {fixtures:?}");
-        for path in fixtures {
-            let name = path.file_name().unwrap().to_string_lossy().to_string();
-            let unzipped = std::process::Command::new("gzip").arg("-dc").arg(&path).output().unwrap();
-            assert!(unzipped.status.success(), "{name}");
-            let (head, _) = super::split(&unzipped.stdout).unwrap();
-            let restored = super::restore_bytes(net_data.clone(), data.clone(), spec.clone(), &unzipped.stdout, scenes.clone());
-            if head.format != super::FORMAT {
-                let e = restored.map(|_| ()).unwrap_err();
-                assert!(e.contains(&format!("format {}", head.format)) && e.contains(&format!("format {}", super::FORMAT)), "{name}: {e}");
-                continue;
-            }
-            let mut game = restored.unwrap_or_else(|e| panic!("{name}: the release before's world does not restore in this build: {e}"));
-            // Every building the game has was in it (the fixture is regenerated with a release
-            // that has more of them, never with fewer).
-            let placed: std::collections::HashSet<&str> = game.wos.values().map(|w| game.data.groups[w.group].id.as_str()).collect();
-            // (A world does not keep an instance generator: it is the game's own object, made when a portal opens.)
-            let missing: Vec<&str> = game.data.groups.iter().filter(|g| g.constructible && g.id != "ProceduralInstanceGenerator" && !placed.contains(g.id.as_str())).map(|g| g.id.as_str()).collect();
-            assert!(missing.is_empty(), "{name}: no {missing:?} in the fixture");
-            assert!(crate::machines::machine_count(&game) > 250 && game.clients.len() >= 4, "{name}: {} machines, {} clients", crate::machines::machine_count(&game), game.clients.len());
-            // It goes on: a minute of game time on the clock of the snapshot.
-            let start = f64::from(game.time);
-            for second in 1..=60 {
-                game.sim_time = Some(start + f64::from(second));
-                game.tick();
-            }
-            // And is written and read again, as the next flip would.
-            let again = super::snapshot(&mut game).unwrap();
-            let back = super::restore_bytes(net_data.clone(), data.clone(), spec.clone(), &again, scenes.clone()).unwrap_or_else(|e| panic!("{name}: after a minute: {e}"));
-            super::verify(&back, &again).unwrap_or_else(|e| panic!("{name}: {e}"));
-        }
-    }
-
     /// The parts run on several threads and come back in order.
     #[test]
     fn work_in_parallel_comes_back_in_order() {

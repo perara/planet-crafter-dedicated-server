@@ -186,12 +186,6 @@ pub fn refresh_from_tables(game: &mut Game) {
     }
 }
 
-/// How many world objects have a machine's state (the snapshot fixtures' check).
-#[cfg(test)]
-pub fn machine_count(game: &Game) -> usize {
-    game.ext.machines.list.len()
-}
-
 /// GetComponent<MachineRocketBackAndForth>() (its trade and interplanetary subclasses).
 fn is_rocket_platform(game: &Game, group: usize) -> bool {
     crate::rockets::PLATFORM_CLASSES.iter().any(|class| root(game, group, class).is_some())

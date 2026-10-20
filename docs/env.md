@@ -89,10 +89,7 @@ Read by test builds and tools, never by an installation. Set by hand for the ben
 | `PCDS_FUZZ_SWEEP_STEP` | fuzz: a sweep tries every this many numbers. |
 | `PCDS_CORPUS` | fuzz: the corpus folder `replay_corpus` runs (cfg pcds_corpus). |
 | `PCDS_CORPUS_LIMIT` | fuzz: at most this many corpus files. |
-| `PCDS_PREVIOUS_RELEASE` | The flip gate (make gate): the folder of the release before, its pcds in it. |
-| `PCDS_GATE_CANDIDATE` | The flip gate: another program to hand the release before's world to (to see the gate fail). |
-| `PCDS_FIXTURE_RELEASE` | The cross-release snapshot fixture: the folder of a release, to write its fixture with. |
-| `PCDS_FIXTURE_OUT` | The cross-release snapshot fixture: where the release's fixture is written. |
+| `PCDS_PREVIOUS_RELEASE` | The flip gate (make gate): the folder of the last release, its pcds in it. |
 | `PCDS_SOAK_SECONDS` | soak_growth: game seconds to run (default 3600). |
 | `PCDS_SOAK_STEP` | soak_growth: seconds of game time per step (default 0.05). |
 | `PCDS_SOAK_REPORT` | soak_growth: seconds of game time between reports (default 900). |

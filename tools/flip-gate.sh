@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # The flip gate: the last release's world taken over, live, by this build (docs/hot-update.md,
-# "The release before"). It fetches the last published release that is not this build's version,
-# runs it on a world with one of every building and players, and has this build's bank take the
-# world over. The first hot update (0.6.0 to 0.6.1) failed on a snapshot field the release
-# before did not write; only this shows that. Run before every tag (the release workflow does).
+# "The flip gate"). It fetches the last published release that is not this build's version, runs
+# it on a world with one of every building and players, and has this build's bank take the
+# world over. Run by hand before every tag (`make gate`): it needs the game's tables, which no
+# CI has.
+#
+# A release whose snapshot format, front protocol or tables format differs from this build's
+# cannot be hot-updated into it: that is a restart install by design (no legacy support), and
+# the gate says so loudly and skips. It tests a flip only between releases of one format.
 #
 #   tools/flip-gate.sh [TAG]      TAG: the release to flip from (default: the last one before this version)
 #   needs PCDS_TEST_DATA: a game tables folder (the gate runs a real world on them)
@@ -30,13 +34,27 @@ curl -fsSL -o "$work/$name.tar.gz.sha256" "https://github.com/$repo/releases/dow
 (cd "$work" && sha256sum -c "$name.tar.gz.sha256")
 tar -xzf "$work/$name.tar.gz" -C "$work"
 
-# The fixtures of every release restore, and the live flip from the release before works.
-export PCDS_PREVIOUS_RELEASE="$work/$name"
-cd server
 # The program finds libsteam_api.so next to itself in a release; in the build tree it is in the
 # steamworks crate's output.
+cd server
 cargo build --release --locked
 lib=$(dirname "$(ls -t target/release/build/steamworks-sys-*/out/libsteam_api.so | head -1)")
 export LD_LIBRARY_PATH="$PWD/$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-cargo test --release --locked --bin pcds the_snapshot_of_every_release_restores
+
+# What each side says it is: the fields that decide whether the front accepts a flip.
+shape() { "$1" bank-info | grep -o '"\(format\|protocol\|tablesFormat\)":[0-9]*' | sort | tr '\n' ' '; }
+before=$(shape "$work/$name/pcds")
+now=$(shape target/release/pcds)
+if [ "$before" != "$now" ]; then
+  echo "################################################################"
+  echo "flip gate SKIPPED - format changed: $tag is not hot-update compatible with v$version"
+  echo "  $tag: $before"
+  echo "  v$version: $now"
+  echo "Install with 'pcds upgrade --restart' (the world is saved and loads from the save);"
+  echo "say so in the release notes. Nothing was tested."
+  echo "################################################################"
+  exit 0
+fi
+
+export PCDS_PREVIOUS_RELEASE="$work/$name"
 cargo test --release --locked --test hot_update a_hot_update_from_the_release_before_works -- --ignored --nocapture
