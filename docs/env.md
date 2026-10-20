@@ -71,10 +71,8 @@ Read by test builds and tools, never by an installation. Set by hand for the ben
 | `PCDS_BENCH_HANDOFF` | bench handoff: seconds between handoffs (default half the run). |
 | `PCDS_BENCH_SECTIONS` | bench: 1 also prints the time per subsystem of the tick (the section! names). |
 | `PCDS_FLIPBENCH_SAVES` | flipbench: the worlds (comma-separated save files) whose flip it times (required). |
-| `PCDS_FLIPBENCH_N` | flipbench: flips (or runs, with PCDS_FLIPBENCH_OLD) per world (default 15 in tests/hot_update.rs, 20 in bench::flipbench). |
+| `PCDS_FLIPBENCH_N` | flipbench: flips per world (default 15 in tests/hot_update.rs, 20 in bench::flipbench). |
 | `PCDS_FLIPBENCH_PLAYERS` | flipbench: scripted players playing during the flips (default 8). |
-| `PCDS_FLIPBENCH_OLD` | flipbench: an unpacked older release as the first bank: each run starts on it and flips once into this build. |
-| `PCDS_FLIPBENCH_FROM` | flipbench (bench::flipbench): a snapshot file restored every round instead of one made from the save. |
 | `PCDS_FUZZ_TARGET` | fuzz: the target a fuzz binary runs (server/fuzz/entry.rs). |
 | `PCDS_FUZZ_DATA` | fuzz: the game tables the targets that need them read. |
 | `PCDS_FUZZ_LOG` | fuzz: where the game target catalogues the sites of its panics (default panics.log). |
