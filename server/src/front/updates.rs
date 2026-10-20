@@ -189,48 +189,58 @@ impl Front {
         answer_on_thread(tx, seq, move || updater::lookup(&updater::releases_url(), None).map(|release| Done::Checked { seq, newer: updater::newer(&release.tag, &live), tag: release.tag }));
     }
 
+    /// What the threads of the updates have done, and the schedule of the automatic check.
     pub(super) fn updates(&mut self) {
         while let Ok(done) = self.updates.rx.try_recv() {
-            if let Done::Flipped { seq, message, note } = done {
-                self.record(History::flipped(seq, message, note));
-                continue;
+            self.on_done(done);
+        }
+        self.check_on_schedule();
+    }
+
+    /// One outcome of an update's thread: recorded, and a downloaded release flipped to.
+    fn on_done(&mut self, done: Done) {
+        if let Done::Flipped { seq, message, note } = done {
+            return self.record(History::flipped(seq, message, note));
+        }
+        self.updates.checked = Some(crate::util::now_secs());
+        match done {
+            Done::Flipped { .. } => {}
+            Done::Installed { seq, bank, info } => {
+                let tag = info.tag.as_deref().unwrap_or("?").to_string();
+                self.updates.latest = Some(tag.clone());
+                self.updates.newer = false;
+                println!("update: {tag} installed in bank {bank} (sha256 {} checked)", info.sha256.as_deref().unwrap_or(""));
+                if let Err(e) = self.flip_to(&bank, &format!("update to {tag}"), seq, None) {
+                    self.record(History::new(seq, false, format!("{tag} is in bank {bank}, but the flip did not start: {e}")));
+                }
             }
-            self.updates.checked = Some(crate::util::now_secs());
-            match done {
-                Done::Flipped { .. } => {}
-                Done::Installed { seq, bank, info } => {
-                    let tag = info.tag.as_deref().unwrap_or("?").to_string();
-                    self.updates.latest = Some(tag.clone());
-                    self.updates.newer = false;
-                    println!("update: {tag} installed in bank {bank} (sha256 {} checked)", info.sha256.as_deref().unwrap_or(""));
-                    if let Err(e) = self.flip_to(&bank, &format!("update to {tag}"), seq, None) {
-                        self.record(History::new(seq, false, format!("{tag} is in bank {bank}, but the flip did not start: {e}")));
-                    }
+            Done::Failed { seq, message } => {
+                eprintln!("update: {message}");
+                if self.updates.auto_seq == Some(seq) {
+                    self.updates.next_check = Instant::now() + CHECK_RETRY.min(self.updates.every);
                 }
-                Done::Failed { seq, message } => {
-                    eprintln!("update: {message}");
-                    if self.updates.auto_seq == Some(seq) {
-                        self.updates.next_check = Instant::now() + CHECK_RETRY.min(self.updates.every);
-                    }
-                    self.record(History::new(seq, false, message));
-                }
-                Done::UpToDate { seq, tag } => {
-                    self.updates.latest = Some(tag.clone());
-                    self.updates.newer = false;
-                    self.record(History::new(seq, true, format!("up to date ({tag} is the latest release)")));
-                }
-                Done::Skipped { seq, message } => {
-                    println!("update: {message}");
-                    self.record(History::new(seq, true, message));
-                }
-                Done::Checked { seq, tag, newer } => {
-                    self.updates.latest = Some(tag.clone());
-                    self.updates.newer = newer;
-                    let message = if newer { format!("{tag} is available") } else { format!("up to date ({tag} is the latest release)") };
-                    self.record(History::checked(seq, message));
-                }
+                self.record(History::new(seq, false, message));
+            }
+            Done::UpToDate { seq, tag } => {
+                self.updates.latest = Some(tag.clone());
+                self.updates.newer = false;
+                self.record(History::new(seq, true, format!("up to date ({tag} is the latest release)")));
+            }
+            Done::Skipped { seq, message } => {
+                println!("update: {message}");
+                self.record(History::new(seq, true, message));
+            }
+            Done::Checked { seq, tag, newer } => {
+                self.updates.latest = Some(tag.clone());
+                self.updates.newer = newer;
+                let message = if newer { format!("{tag} is available") } else { format!("up to date ({tag} is the latest release)") };
+                self.record(History::checked(seq, message));
             }
         }
+    }
+
+    /// The automatic check, when the rule update.auto is on and its time has come.
+    fn check_on_schedule(&mut self) {
         if self.updates.auto && Instant::now() >= self.updates.next_check {
             self.updates.next_check = Instant::now() + self.updates.every;
             if let (Some(dir), Some(live), None, Phase::Idle) = (self.banks.clone(), &self.live, &self.updates.busy, self.phase) {

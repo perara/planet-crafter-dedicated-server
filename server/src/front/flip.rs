@@ -23,7 +23,7 @@
 //! milliseconds). Recovering is the same hand-over without an old bank: the live one died.
 
 use std::os::fd::OwnedFd;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use super::bank_link::{hello_of, Bank};
 use super::history::{FlipNote, History, Timeline};
@@ -101,6 +101,68 @@ impl Flip {
 /// The milliseconds between two moments of the monotonic clock (0: one of them was not noted).
 fn gap(from: u64, to: u64) -> f64 {
     if from == 0 || to == 0 { 0.0 } else { (to.saturating_sub(from) as f64 / 1e4).round() / 100.0 }
+}
+
+/// What the front knows of a flip that its banks do not tell.
+struct Handover {
+    from: String,
+    to: String,
+    /// Client frames held while the world stood.
+    held: usize,
+    /// How long it stood.
+    stood: Duration,
+    /// The new bank's version.
+    version: Option<String>,
+    /// READY handled, and the held frames released, on the monotonic clock.
+    ready_at: u64,
+    released_at: u64,
+}
+
+/// What a finished flip says of itself: the line for the log and the history, and the numbers.
+/// The timeline is where the stand went, on the monotonic clock all three processes read: the
+/// HANDOFF to the old bank, its snapshot, the SNAPSHOT to the front, the front's relay of the
+/// memfd, the RESTORE to the new bank, its restore, the READY to the front, the held frames out.
+fn outcome(flip: &Flip, ready: &Ready, h: Handover) -> (String, FlipNote) {
+    let verified = match ready.verified {
+        Some(true) => format!("; the restored state is the snapshot's, checked in {:.1} ms (in the stand)", ready.verify_ms.unwrap_or(0.0)),
+        _ => String::new(),
+    };
+    let message = format!(
+        "flip {} -> {} ({}): the world stood {:.1} ms (snapshot {} bytes written in {:.1} ms, restored in {:.1} ms; {} client frames held){verified}",
+        h.from,
+        h.to,
+        flip.reason,
+        ms(h.stood),
+        msg::json(&flip.snapshot.bytes),
+        flip.snapshot.ms.unwrap_or(0.0),
+        ready.restore_ms.unwrap_or(0.0),
+        h.held
+    );
+    let (old, new) = (&flip.snapshot, ready);
+    let timeline = Timeline {
+        handoff_ms: gap(flip.handoff_at, old.got_at),
+        snapshot_ms: gap(old.got_at, old.done_at),
+        snapshot_to_front_ms: gap(old.done_at, flip.snapshot_at),
+        relay_ms: gap(flip.snapshot_at, flip.relay_at),
+        restore_to_bank_ms: gap(flip.relay_at, new.got_at),
+        restore_ms: gap(new.got_at, new.ready_at),
+        ready_to_front_ms: gap(new.ready_at, h.ready_at),
+        release_ms: gap(h.ready_at, h.released_at),
+    };
+    let note = FlipNote {
+        from: h.from,
+        to: h.to,
+        stood_ms: ms(h.stood),
+        snapshot_bytes: flip.snapshot.bytes,
+        snapshot_ms: flip.snapshot.ms,
+        restore_ms: ready.restore_ms,
+        held: h.held,
+        verified: ready.verified,
+        version: h.version,
+        timeline,
+        restore_faults: ready.faults,
+    };
+    (message, note)
 }
 
 impl Front {
@@ -257,48 +319,10 @@ impl Front {
         // The crashes counted so far were another release's: the new one starts with none.
         self.crashes.clear();
         self.flipped = Some(to.clone());
-        let verified = match ready.verified {
-            Some(true) => format!("; the restored state is the snapshot's, checked in {:.1} ms (in the stand)", ready.verify_ms.unwrap_or(0.0)),
-            _ => String::new(),
-        };
-        let message = format!(
-            "flip {from} -> {to} ({}): the world stood {:.1} ms (snapshot {} bytes written in {:.1} ms, restored in {:.1} ms; {held} client frames held){verified}",
-            flip.reason,
-            ms(stood),
-            msg::json(&flip.snapshot.bytes),
-            flip.snapshot.ms.unwrap_or(0.0),
-            ready.restore_ms.unwrap_or(0.0)
-        );
-        println!("{message}");
         let version = self.live.as_ref().and_then(|b| b.version().map(str::to_string));
-        // Where the stand went, on the monotonic clock all three processes read: the HANDOFF to
-        // the old bank, its snapshot, the SNAPSHOT to the front, the front's relay of the memfd,
-        // the RESTORE to the new bank, its restore, the READY to the front, the held frames out.
-        let (old, new) = (&flip.snapshot, &ready);
-        let timeline = Timeline {
-            handoff_ms: gap(flip.handoff_at, old.got_at),
-            snapshot_ms: gap(old.got_at, old.done_at),
-            snapshot_to_front_ms: gap(old.done_at, flip.snapshot_at),
-            relay_ms: gap(flip.snapshot_at, flip.relay_at),
-            restore_to_bank_ms: gap(flip.relay_at, new.got_at),
-            restore_ms: gap(new.got_at, new.ready_at),
-            ready_to_front_ms: gap(new.ready_at, ready_at),
-            release_ms: gap(ready_at, released_at),
-        };
-        println!("flip timeline (ms): {}", msg::json(&timeline));
-        let note = FlipNote {
-            from,
-            to: to.clone(),
-            stood_ms: ms(stood),
-            snapshot_bytes: flip.snapshot.bytes,
-            snapshot_ms: flip.snapshot.ms,
-            restore_ms: ready.restore_ms,
-            held,
-            verified: ready.verified,
-            version,
-            timeline,
-            restore_faults: ready.faults,
-        };
+        let (message, note) = outcome(&flip, &ready, Handover { from, to: to.clone(), held, stood, version, ready_at, released_at });
+        println!("{message}");
+        println!("flip timeline (ms): {}", msg::json(&note.timeline));
         self.persist_flip(&to, rolled_back, Some((flip.seq, message, note)));
     }
 
@@ -421,6 +445,24 @@ mod tests {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+
+    /// The log line and the history's numbers of a flip, from what the banks and the front measured.
+    #[test]
+    fn a_flip_says_what_it_cost() {
+        let mut flip = Flip::new(4, "update to v1");
+        flip.snapshot = SnapshotNote { bytes: Some(2048), ms: Some(1.5), got_at: 2_000_000, done_at: 3_000_000 };
+        (flip.handoff_at, flip.snapshot_at, flip.relay_at) = (1_000_000, 3_500_000, 4_000_000);
+        let ready = Ready { restore_ms: Some(2.25), verify_ms: Some(0.5), verified: Some(true), got_at: 5_000_000, ready_at: 6_000_000, faults: Some(9) };
+        let (message, note) = outcome(&flip, &ready, Handover { from: "a".into(), to: "b".into(), held: 3, stood: Duration::from_millis(12), version: Some("0.7.0".into()), ready_at: 6_500_000, released_at: 7_000_000 });
+        assert_eq!(message, "flip a -> b (update to v1): the world stood 12.0 ms (snapshot 2048 bytes written in 1.5 ms, restored in 2.2 ms; 3 client frames held); the restored state is the snapshot's, checked in 0.5 ms (in the stand)");
+        assert_eq!((note.stood_ms, note.held, note.snapshot_bytes, note.restore_faults, note.version.as_deref()), (12.0, 3, Some(2048), Some(9), Some("0.7.0")));
+        // 1 ms is 1_000_000 ns: the gaps between the marks, in ms.
+        assert_eq!(note.timeline, Timeline { handoff_ms: 1.0, snapshot_ms: 1.0, snapshot_to_front_ms: 0.5, relay_ms: 0.5, restore_to_bank_ms: 1.0, restore_ms: 1.0, ready_to_front_ms: 0.5, release_ms: 0.5 });
+        // A bank that did not say: nulls, and no gaps.
+        let (message, note) = outcome(&Flip::new(5, "rollback"), &Ready::default(), Handover { from: "b".into(), to: "a".into(), held: 0, stood: Duration::ZERO, version: None, ready_at: 1, released_at: 2 });
+        assert!(message.contains("snapshot null bytes written in 0.0 ms, restored in 0.0 ms") && !message.contains("checked in"), "{message}");
+        assert_eq!((note.snapshot_bytes, note.verified, note.timeline), (None, None, Timeline::default()));
     }
 
     /// A bank that loaded for a minute and a half is not "silent for a minute and a half" the
