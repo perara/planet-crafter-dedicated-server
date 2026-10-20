@@ -725,5 +725,5 @@ pub mod tests {
 }
 
 #[cfg(any(fuzzing, pcds_corpus))]
-#[path = "../fuzz/targets/chathooks.rs"]
+#[path = "../../fuzz/targets/chathooks.rs"]
 pub mod fuzz;
