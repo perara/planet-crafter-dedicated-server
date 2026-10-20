@@ -145,6 +145,12 @@ impl Rng {
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
         Rng(seed | 1)
     }
+    /// A fixed sequence, for the tests whose outcome must not depend on the ids a clock picked
+    /// (a vegetube's growth is a sequence seeded by its id).
+    #[cfg(test)]
+    pub fn fixed(seed: u64) -> Rng {
+        Rng(seed | 1)
+    }
     pub fn next(&mut self) -> u64 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;

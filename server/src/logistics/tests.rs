@@ -329,6 +329,8 @@ fn drones_fly_at_the_same_pace_at_any_age_of_the_server() {
         save.planets = vec![json!({"planetId": "Prime"})];
         let start = days * 86_400.0;
         let mut game = Game::with_clock(net_data, data, spec, save, scenes, Some(start));
+        // The ids of the drone and the containers come from the generator: the same at every age.
+        game.rng = crate::game::Rng::fixed(1);
         build(&mut game, "EnergyGenerator6", [40.0, 2.0, 0.0]);
         let station = build(&mut game, "DroneStation1", [10.0, 2.0, 10.0]);
         let supply = build(&mut game, "Container1", [25.0, 2.0, 10.0]);

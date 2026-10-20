@@ -49,6 +49,8 @@ fn play(days: f64) -> Option<Report> {
     let (net_data, data, spec, scenes) = crate::game::test_tables()?;
     let start = days * 86_400.0;
     let mut g = Game::with_clock(net_data, data, spec, save(), scenes, Some(start));
+    // The ids of the machines seed their random draws (a vegetube's growth): the same at every age.
+    g.rng = crate::game::Rng::fixed(1);
     let ann = join(&mut g, 1, "Ann");
     place(&mut g, "Heater1", [570.0, 3.0, 500.0]);
     place(&mut g, "EnergyGenerator6", [575.0, 3.0, 500.0]);
