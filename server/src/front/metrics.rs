@@ -11,7 +11,13 @@ pub(super) static BYTES_IN: AtomicU64 = AtomicU64::new(0);
 pub(super) static BYTES_OUT: AtomicU64 = AtomicU64::new(0);
 
 pub(super) fn traffic() -> Value {
-    json!({ "bytesIn": BYTES_IN.load(Ordering::Relaxed), "bytesOut": BYTES_OUT.load(Ordering::Relaxed) })
+    let w = &crate::utp::WIRE;
+    let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
+    json!({
+        "bytesIn": BYTES_IN.load(Ordering::Relaxed),
+        "bytesOut": BYTES_OUT.load(Ordering::Relaxed),
+        "wire": { "datagramsIn": get(&w.datagrams_in), "bytesIn": get(&w.bytes_in), "datagramsOut": get(&w.datagrams_out), "bytesOut": get(&w.bytes_out), "ackOnlyOut": get(&w.acks_out), "heartbeatsOut": get(&w.heartbeats_out), "resendsOut": get(&w.resends_out) },
+    })
 }
 
 /// CPU time used so far and memory held now, asked of the kernel when the page asks (no
