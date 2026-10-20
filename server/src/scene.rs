@@ -149,8 +149,9 @@ pub fn tick(game: &mut Game) {
             Timer::FinalDeconstruct(wo, client) => crate::deconstruct::finish(game, wo, client),
         }
     }
-    section!("gauges", crate::gauges::tick(game));
+    // The areas are read (after a start or a flip) before a gauge looks for the player's.
     section!("toxic", crate::toxic::tick(game));
+    section!("gauges", crate::gauges::tick(game));
     section!("units", crate::units::tick(game));
     section!("energy", crate::energy::tick(game));
     crate::hooks::tick(game);

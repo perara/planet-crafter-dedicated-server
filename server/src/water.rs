@@ -36,7 +36,8 @@ pub struct Water {
     planets: HashMap<String, Vec<Volume>>,
 }
 
-/// A planet's water volumes, from its scene dump (none on a DLC planet, which has no dump).
+/// A planet's water volumes, from its scene dump (none for a planet without one: no world starts on a
+/// DLC planet whose dump is missing, planets::ground_missing).
 fn load(game: &Game, planet: &str) -> Vec<Volume> {
     let mut out = Vec::new();
     for v in game.scenes.planets.get(planet).into_iter().flat_map(|s| &s.water_volumes) {

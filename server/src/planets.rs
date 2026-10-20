@@ -37,14 +37,15 @@ fn interplanetary_pod(game: &Game) -> Option<usize> {
     singleton_group(game, "PlanetNetworkLoader", "_interplanetaryPodGroup")
 }
 
-/// A DLC planet whose ground the tables do not hold: its ore veins, water and toxic areas are in
-/// scenes/<planet>.json, which `pcds extract` reads from the game folder (tables from before the
-/// server knew the DLC planets have none). A world there would run on an empty ground.
+/// A DLC planet whose ground the tables do not hold: its ore veins, water, toxic areas and world
+/// instances are in scenes/<planet>.json, which `pcds extract` reads from the game folder (tables
+/// from before the server knew the DLC planets have none). A world there would run on an empty
+/// ground, so it does not start; the text says what to do.
 pub fn ground_missing(game: &Game, index: usize) -> Option<String> {
     let planet = &game.net_data.planets[index];
     (planet.steam_app_id != 0 && !game.scenes.planets.contains_key(&planet.id)).then(|| {
         format!(
-            "{0} is a DLC planet and the game tables have no ground for it (no scenes/{0}.json: ore veins, water, toxic areas, world instances); without it the planet would run empty. Run `pcds extract`, which reads them from the game folder",
+            "{0} is a DLC planet and the game tables have no ground for it (no scenes/{0}.json): its ore veins, water, toxic areas and world instances would be missing and the planet would run empty. Run `pcds extract` to read them from the game folder (or `pcds update`)",
             planet.id
         )
     })

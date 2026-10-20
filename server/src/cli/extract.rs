@@ -1,5 +1,5 @@
 //! Reading the game tables into run/data/<game version>/, straight from the game's files
-//! (native/): network tables, game data, every free planet's scenes and the wreck layouts. The
+//! (native/): network tables, game data, every planet's scenes (the DLC planets' too) and the wreck layouts. The
 //! reader is the program that runs the server (the active bank's `pcds read-game`), so the
 //! tables are always in the format the server loads.
 

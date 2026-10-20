@@ -30,7 +30,7 @@ pub struct Vein {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct State {
     planet: usize,
-    /// None: the planet has no scene dump (a DLC planet), or a test without veins.
+    /// None: the planet has no scene dump (no world starts on a DLC planet without one), or a test without veins.
     veins: Option<Vec<Vein>>,
     next_check: GameTime,
 }
@@ -50,7 +50,7 @@ fn q(v: &Value) -> [f32; 4] {
     [0, 1, 2, 3].map(|i| v[i].as_f64().unwrap_or(if i == 3 { 1.0 } else { 0.0 }) as f32)
 }
 
-/// The current planet's veins; None on a planet without a scene dump (a DLC planet).
+/// The current planet's veins; None on a planet without a scene dump.
 fn load(game: &Game) -> Option<Vec<Vein>> {
     let veins = game.scenes.planets.get(game.planet_id())?.ore_veins.iter().map(|v| {
         let f = &v["fields"];

@@ -47,7 +47,7 @@ pub(super) fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, d
     let mut game = Game::new(net_data, data, spec, save, scenes);
     // A world on a DLC planet needs that planet's ground in the tables: not silently empty.
     if let Some(why) = crate::planets::ground_missing(&game, game.planet) {
-        eprintln!("{save_path}: the world is on {why}");
+        eprintln!("{save_path}: the world cannot start: {why}");
         std::process::exit(1);
     }
     rules::start(&mut game, loaded_rules, rules_path);

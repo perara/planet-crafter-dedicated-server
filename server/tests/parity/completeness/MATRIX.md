@@ -39,7 +39,7 @@ Columns:
 - rpc_families_fully_unit_tested: 45
 - rpc_families_fully_parity_checked: 43
 - client_rpcs: 84
-- client_rpcs_sent_by_name: 68
+- client_rpcs_sent_by_name: 70
 
 ## Groups the late-game save never has
 
@@ -878,11 +878,11 @@ items (200): Algae1Growable, Amber, AnimalBones, AntiToxinsExplosive1, AntiToxin
 | StoryEventsHandler.LaunchSpecificStoryEventEventServerRpc | yes | 1 | 4 | 0 | meteo |
 | TextProxy.SetTextServerRpc | yes | 1 | 1 | 11 | handlers |
 | TokensHandler.GainTokensServerRpc | yes | 2 | 2 | 4 | handlers scenario |
-| ToxicAreaHandler.GetCurrentPlanetToxicProgressServerRpc | yes | 1 | 0 | 2 | toxic |
-| ToxicAreaHandler.RegisterToAreaToxicFinishedServerRpc | yes | 1 | 0 | 2 | game toxic |
-| ToxicAreaHandler.RegisterToAreaToxicProgressServerRpc | yes | 1 | 0 | 2 | game toxic |
+| ToxicAreaHandler.GetCurrentPlanetToxicProgressServerRpc | yes | 2 | 0 | 2 | toxic |
+| ToxicAreaHandler.RegisterToAreaToxicFinishedServerRpc | yes | 2 | 0 | 2 | game toxic |
+| ToxicAreaHandler.RegisterToAreaToxicProgressServerRpc | yes | 2 | 0 | 2 | game toxic |
 | ToxicAreaHandler.UnregisterToAreaToxicFinishedServerRpc | yes | 1 | 0 | 2 | toxic |
-| ToxicAreaHandler.UnregisterToAreaToxicProgressServerRpc | yes | 1 | 0 | 2 | toxic |
+| ToxicAreaHandler.UnregisterToAreaToxicProgressServerRpc | yes | 2 | 0 | 2 | toxic |
 | UnlockedGroupsHandler.DecodeBlueprintServerRpc | yes | 1 | 2 | 0 | unlocks |
 | UnlockedGroupsHandler.UnlockGroupGloballyServerRpc | yes | 1 | 3 | 0 | unlocks |
 | UpdateNetworkRigidBodyState.SetVehicleControllerEnabledServerRpc | yes | 1 | 2 | 4 | animals::vehicles |
@@ -980,8 +980,8 @@ items (200): Algae1Growable, Amber, AnimalBones, AntiToxinsExplosive1, AntiToxin
 | TokensHandler.GainTokensClientRpc | sent | handlers |
 | TokensHandler.SetAllTimeTokensNumberClientRpc | sent | players |
 | ToxicAreaHandler.GetCurrentPlanetToxicProgressClientRpc | sent | toxic |
-| ToxicAreaHandler.UpdateAreaToxicFinishedClientRpc | not sent by name |  |
-| ToxicAreaHandler.UpdateAreaToxicProgressClientRpc | not sent by name |  |
+| ToxicAreaHandler.UpdateAreaToxicFinishedClientRpc | sent | toxic |
+| ToxicAreaHandler.UpdateAreaToxicProgressClientRpc | sent | toxic |
 | UnlockedGroupsHandler.NoMoreChipToUnlockClientRpc | sent | unlocks |
 | UnlockedGroupsHandler.PlayAudioOnDecodeClientRpc | sent | unlocks |
 | UnlockedGroupsHandler.UnlockGroupGloballyClientRpc | sent | unlocks |
