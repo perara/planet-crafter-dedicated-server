@@ -165,8 +165,8 @@ planets removed** (`nodlc.py`); the full save is run once for the record.
 | travel between planets | `planets.rs` | 5 | `scripts/travel_chat.json`; lg_travel | 5 planets | done for free planets; DLC planets refused |
 | **DLC planets (Humble, Toxicity)** | `scene.rs`, `machines/veins.rs`, `toxic.rs` | 3 | none possible (the reference owns no DLC) | 10 554 objects | **partly**, see gap 3 |
 | save, load, backups | `save.rs`, `load.rs` | 9 | load fidelity above | whole | done (fix in this branch) |
-| hot update | `handoff.rs`, `front.rs`, `bank.rs` | 25 + 4 | bench handoff EQUAL | whole | done |
-| access, admin, chat hooks, S3 | `access.rs`, `admin.rs`, `chathooks.rs`, `s3.rs` | 16 | not comparable (no game equivalent) | n/a | done; Steam not checked |
+| hot update | `handoff.rs`, `front/`, `bank.rs` | 25 + 4 | bench handoff EQUAL | whole | done |
+| access, admin, chat hooks, S3 | `access.rs`, `admin.rs`, `chathooks.rs`, `front/chat_hooks.rs`, `s3.rs` | 16 | not comparable (no game equivalent) | n/a | done; Steam not checked |
 
 ## Non-functional acceptance (this server on the save)
 

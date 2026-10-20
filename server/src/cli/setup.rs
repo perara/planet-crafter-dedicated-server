@@ -479,7 +479,7 @@ impl Ctx {
 }
 
 /// How long the banks of a front that ended get to save and end before they are killed. A
-/// stop gives the front 60 s (front.rs STOP_GRACE twice), then this: 80 s, under the unit's
+/// stop gives the front 60 s (front/mod.rs STOP_GRACE twice), then this: 80 s, under the unit's
 /// TimeoutStopSec=90.
 const BANKS_GRACE: Duration = Duration::from_secs(20);
 

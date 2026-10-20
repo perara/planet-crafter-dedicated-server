@@ -24,7 +24,7 @@ const MAX_REQUEST: u64 = 64 << 10;
 const HEAD: Duration = Duration::from_secs(3);
 const DEADLINE: Duration = Duration::from_secs(10);
 /// How long the game loop may take to answer: 10 s, but the world controls stop and start the
-/// bank inside that loop (a save and a stop of up to 60 s, a load of up to 120 s: front.rs
+/// bank inside that loop (a save and a stop of up to 60 s, a load of up to 120 s: front/mod.rs
 /// STOP_GRACE and LOAD_DEADLINE), so a switch is answered up to 200 s after, not as failed at 10.
 const ANSWER: Duration = Duration::from_secs(10);
 const WORLD_ANSWER: Duration = Duration::from_secs(200);
