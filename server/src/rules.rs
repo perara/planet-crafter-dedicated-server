@@ -567,13 +567,21 @@ mod tests {
 
     #[test]
     fn a_rules_file_number_past_f32_is_refused() {
-        // Rules::load reads 1e39 as infinity; validate used to see null (unset) and accept it.
-        let r: Rules = serde_json::from_str(r#"{"chat": {"timeoutSeconds": 1e39}}"#).unwrap();
-        assert!(r.chat.timeout_seconds.is_infinite());
+        // Read exactly (serde_json's float_roundtrip), 1e39 is no f32: the file is refused, naming the rule,
+        // where the approximate parser made it infinity.
+        for text in [r#"{"chat": {"timeoutSeconds": 1e39}}"#, r#"{"speed": {"growth": -1e39}}"#, r#"{"death": {"dropChance": 1e39}}"#] {
+            let e = Rules::parse(text).unwrap_err();
+            assert!(e.contains("not a value this rule takes"), "{text}: {e}");
+        }
+        // And validate still refuses an infinity that gets in another way (a rule set in code, a snapshot).
+        let mut r = Rules::default();
+        r.chat.timeout_seconds = f32::INFINITY;
         assert!(r.finite().unwrap_err().contains("chat.timeoutSeconds"));
-        let r: Rules = serde_json::from_str(r#"{"speed": {"growth": -1e39}}"#).unwrap();
+        let mut r = Rules::default();
+        r.speed.growth = f32::NEG_INFINITY;
         assert!(r.finite().unwrap_err().contains("speed.growth"));
-        let r: Rules = serde_json::from_str(r#"{"death": {"dropChance": 1e39}}"#).unwrap();
+        let mut r = Rules::default();
+        r.death.drop_chance = Some(f32::INFINITY);
         assert!(r.finite().unwrap_err().contains("death.dropChance"));
         assert!(Rules::default().finite().is_ok());
     }
