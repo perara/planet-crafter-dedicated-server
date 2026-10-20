@@ -688,8 +688,9 @@ impl Game {
             return;
         }
         let Some(args) = self.net.spec.decode(method, r.rest()) else {
-            // Logged once for each RPC, not for each message: a client can send them by the thousand.
-            if self.unhandled.insert(format!("undecodable {method}")) {
+            // Logged once for each RPC of the game's, not for each message (a client can send them by
+            // the thousand) and not at all for a number that is none of them (nor kept: there are 2^32).
+            if self.net.spec.get(method).is_some() && self.unhandled.insert(format!("undecodable {method}")) {
                 eprintln!("client {client}: undecodable RPC {method} (logged once)");
             }
             return;
@@ -1136,6 +1137,22 @@ pub mod tests {
             assert!(g.clients[&client].approved, "{client}");
             g.disconnect(client);
         }
+    }
+
+    /// What the server remembers of RPCs it could not run is bounded by the RPCs there are, not by
+    /// the numbers a client sends.
+    #[test]
+    fn rpc_numbers_that_are_none_are_not_remembered() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        let object = *g.net.objects.keys().next().unwrap();
+        let before = g.unhandled.len();
+        for method in 1..5000u32 {
+            let mut w = Writer::new();
+            w.packed_u64(1).packed_u64(object).packed_u16(0).packed_u32(method.wrapping_mul(2_654_435_761)).bytes(&[1, 2, 3]);
+            g.run_rpc(1, &w.0);
+        }
+        assert_eq!(g.unhandled.len(), before);
     }
 
     /// A dropped item's owner sends NaN: nothing changes, nothing is passed on, and the
