@@ -16,7 +16,7 @@ use pcds_plugin_api::{Event, HttpRequest, Verdict, Writer};
 
 use super::net::{Done, Dns, Fetch, Net, Policy};
 use super::runtime::{Cost, Fault};
-use super::tests::{Mock, boot, fresh_dir, install, module};
+use super::tests::{Mock, boot, fresh_dir, install, module, write_plugin};
 use super::*;
 
 // ---- servers on the loopback ----------------------------------------------------------------------
@@ -730,4 +730,28 @@ fn the_discord_example_batches_its_lines_retries_a_failure_and_keeps_the_webhook
     // The webhook is in no listing.
     let listing = admin::plugin_json(&host.plugins[0]).to_string();
     assert!(!listing.contains("SECRET-TOKEN") && listing.contains("\"webhook\""), "{listing}");
+}
+
+#[test]
+fn check_says_where_a_plugin_may_reach_runs_it_on_answers_and_sends_nothing() {
+    let report = check::check_folder(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins/discord-notify"), None);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let facts = report.facts.join("\n");
+    for expected in ["may send HTTP requests to: https://discord.com", "config webhook: the end of the webhook's URL", "(a secret)", "signed by the key d6d9b10b298c53f9fe73f4c9d8570e69, which you do not trust", "http_done sample (an answer of 200): ok", "http_done sample (an answer of 500): ok", "http_done sample (a request that failed): ok"] {
+        assert!(facts.contains(expected), "{expected:?} not in\n{facts}");
+    }
+    // A module that calls http_request without asking for it is an error; one that asks for it and never calls is a warning.
+    let dir = fresh_dir("net-check");
+    let imports = "(import \"pcds\" \"http_request\" (func $http (param i32 i32) (result i64)))";
+    write_plugin(&dir, "caller", &module("(drop (call $http (i32.const 0) (i32.const 0))) (i32.const 0)", "").replacen("(module", &format!("(module {imports}"), 1), &["event.chat"], "[events]\nsubscribe = [\"chat\"]");
+    let report = check::check_folder(&dir.join("caller"), None);
+    assert!(report.errors.iter().any(|e| e.contains("needs net.http, which the manifest does not ask for")), "{:?}", report.errors);
+    write_plugin(&dir, "idle", &module("(i32.const 0)", ""), &["event.chat", "net.http", "chat.say", "player.kick", "rules.write", "world.read"], "[events]\nsubscribe = [\"chat\"]\n[net]\nallow = [\"https://*.example.org\", \"http://plain.example.org\"]");
+    let report = check::check_folder(&dir.join("idle"), None);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let warnings = report.warnings.join("\n");
+    assert!(warnings.contains("asks for net.http, but the module imports nothing that needs it") && warnings.contains("a wildcard") && warnings.contains("plain http://"), "{warnings}");
+    // `http_done` is not something to subscribe to.
+    write_plugin(&dir, "sub", &module("(i32.const 0)", ""), &["net.http"], "[events]\nsubscribe = [\"http_done\"]\n[net]\nallow = [\"https://discord.com\"]");
+    assert!(check::check_folder(&dir.join("sub"), None).errors.iter().any(|e| e.contains("not an event to subscribe to")));
 }

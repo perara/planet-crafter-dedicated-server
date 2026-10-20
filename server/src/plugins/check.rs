@@ -21,7 +21,11 @@ pub struct Report {
 }
 
 /// A world of two players on Prime, for the smoke test.
-struct Canned;
+#[derive(Default)]
+struct Canned {
+    /// HTTP requests the samples made the plugin ask for (none is sent).
+    http_asked: u32,
+}
 
 impl World for Canned {
     fn info(&self) -> WorldInfo {
@@ -37,6 +41,7 @@ impl World for Canned {
 
 impl Sink for Canned {
     fn apply(&mut self, _: &str, actions: Vec<Action>) -> Applied {
+        self.http_asked += actions.iter().filter(|a| matches!(a, Action::Http(_))).count() as u32;
         Applied { done: actions.len() as u32, refused: 0 }
     }
     fn command_prefix(&self) -> String {
@@ -185,7 +190,7 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
         match rt.start(None) {
             Err(f) => report.errors.push(format!("start: {f}")),
             Ok(()) => {
-                let mut world = Canned;
+                let mut world = Canned::default();
                 for kind in &kinds {
                     if !grant.has(caps::for_event(*kind)) {
                         continue;
@@ -214,6 +219,38 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
                             report.warnings.push(format!("{} sample: {denied} calls were refused for a missing capability", kind.name()));
                         }
                         let _ = world.apply(&p.id, queued);
+                    }
+                }
+                // A plugin that may send requests is shown answers of each sort (it hears them in the host
+                // whatever it subscribed to); what it asks for in return is not sent from here.
+                if grant.has(caps::NET_HTTP) {
+                    let answers: [(&str, Event<'static>); 3] = [
+                        ("an answer of 200", Event::HttpDone { ticket: 1, status: 200, error: "", body: b"{}", headers: vec![("content-type", "application/json")] }),
+                        ("an answer of 500", Event::HttpDone { ticket: 1, status: 500, error: "", body: b"oops", headers: vec![] }),
+                        ("a request that failed", Event::HttpDone { ticket: 1, status: 0, error: "timed out", body: &[], headers: vec![] }),
+                    ];
+                    for (what, event) in answers {
+                        let mut payload = pcds_plugin_api::Writer::new();
+                        event.encode(&mut payload);
+                        rt.ctx().begin(&world);
+                        let result = rt.event(&event, &payload.0);
+                        let (queued, denied) = {
+                            let c = rt.ctx();
+                            (c.end(), std::mem::take(&mut c.denied))
+                        };
+                        let asked = queued.iter().filter(|a| matches!(a, Action::Http(_))).count();
+                        world.http_asked += asked as u32;
+                        match result {
+                            Ok((_, cost)) => report.facts.push(format!("http_done sample ({what}): ok, {} fuel, {asked} requests asked (check sends none)", cost.fuel)),
+                            Err(f) => report.errors.push(format!("http_done sample ({what}): {f}")),
+                        }
+                        if denied > 0 {
+                            report.warnings.push(format!("http_done sample: {denied} calls were refused for a missing capability"));
+                        }
+                    }
+                    let asked = world.http_asked;
+                    if asked > 0 {
+                        report.facts.push(format!("the samples made it ask for {asked} HTTP requests; check sends none (a request is sent only by a running server, to the hosts it lists)"));
                     }
                 }
                 match rt.save() {

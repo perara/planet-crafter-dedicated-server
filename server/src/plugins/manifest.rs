@@ -178,7 +178,7 @@ impl Manifest {
         }
         let wants = |cap: &str| p.capabilities.iter().any(|c| c == cap);
         for name in &self.events.subscribe {
-            let kind = Kind::from_name(name).filter(|k| *k != Kind::Command).ok_or_else(|| format!("events.subscribe: {name:?} is not an event (known: {}; commands come from [[command]])", names_without_command()))?;
+            let kind = Kind::from_name(name).filter(|k| *k != Kind::Command && *k != Kind::HttpDone).ok_or_else(|| format!("events.subscribe: {name:?} is not an event to subscribe to (known: {}; commands come from [[command]], and http_done is delivered for the requests the plugin made)", names_without_command()))?;
             if !wants(caps::for_event(kind)) {
                 return Err(format!("events.subscribe has {name:?}, which needs the capability {}: add it to plugin.capabilities", caps::for_event(kind)));
             }
@@ -273,7 +273,7 @@ impl Manifest {
 }
 
 fn names_without_command() -> String {
-    Kind::ALL.iter().filter(|k| **k != Kind::Command).map(|k| k.name()).collect::<Vec<_>>().join(", ")
+    Kind::ALL.iter().filter(|k| **k != Kind::Command && **k != Kind::HttpDone).map(|k| k.name()).collect::<Vec<_>>().join(", ")
 }
 
 #[cfg(test)]
@@ -313,6 +313,7 @@ mod tests {
         assert!(bad("\"event.chat\", ", "").contains("needs the capability event.chat"));
         assert!(bad("\"world.read\"", "\"world.write\"").contains("not a capability"));
         assert!(bad("[\"tick\"]", "[\"tock\"]").contains("not an event"));
+        assert!(bad("[\"tick\"]", "[\"http_done\"]").contains("not an event to subscribe to"));
         assert!(bad("plugin.wasm", "../plugin.wasm").contains("plugin.entry"));
         assert!(bad("name = \"stats\"", "name = \"two words\"").contains("command name"));
         assert!(bad("abi = 1", "abi = 1\nsurprise = 2").contains("unknown field"));
