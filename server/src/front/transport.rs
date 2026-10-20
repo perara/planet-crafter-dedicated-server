@@ -209,6 +209,11 @@ impl Transport {
         if let Some(utp) = &mut self.utp {
             utp.tokens().iter().for_each(|t| utp.disconnect(t));
         }
+        // The process is about to exit. Valve's library asserts when it is shut down with a socket
+        // of its own still open, and the exit then crashes (status 139: systemd restarts the unit
+        // after a stop from the admin page): close the connections, the listen socket and the login.
+        self.conns.clear();
+        self.steam = None;
     }
 }
 

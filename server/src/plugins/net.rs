@@ -669,7 +669,8 @@ impl InFlight {
 
 impl Drop for InFlight {
     fn drop(&mut self) {
-        let _ = self.0.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1));
+        // Only InFlight::new counts up, once per value, so this never goes below zero.
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
