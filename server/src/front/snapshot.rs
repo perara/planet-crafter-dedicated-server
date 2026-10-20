@@ -10,10 +10,7 @@ use super::Front;
 use crate::ipc;
 use crate::msg::{self, Hello, SnapshotHead};
 
-/// Where the front keeps the last flip's snapshot when it stops with the world in no bank.
-pub fn snapshot_path(save: &str) -> String {
-    format!("{save}.snapshot")
-}
+use crate::worlds::snapshot_path;
 
 /// Why a snapshot can never run on the bank of this HELLO: it is on another game's tables, in
 /// a format the bank does not read, or no snapshot at all. None: it may (any other error is the

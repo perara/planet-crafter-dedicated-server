@@ -75,7 +75,6 @@ use admin_routes::Admin;
 use bank_link::Bank;
 use flip::{Flip, Phase};
 use ops::Autosave;
-pub use snapshot::snapshot_path;
 use queue::Queue;
 use supervise::{CrashWindow, Watchdog};
 use transport::Transport;

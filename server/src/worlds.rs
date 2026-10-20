@@ -66,6 +66,12 @@ pub fn backups(save_path: &str) -> PathBuf {
     dir(save_path).join(BACKUPS)
 }
 
+/// Where the front keeps the last flip's snapshot of the world at `save_path` when it stops with
+/// the world in no bank (`<save>.snapshot`); the bank looks there too.
+pub fn snapshot_path(save_path: &str) -> String {
+    format!("{save_path}.snapshot")
+}
+
 /// What a world is kept as in backups/ (without `.json`) when it is replaced or removed:
 /// `<name>-<why>-<time>`.
 pub fn kept_stem(name: &str, why: &str, at: SystemTime) -> String {

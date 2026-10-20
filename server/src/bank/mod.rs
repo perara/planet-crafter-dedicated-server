@@ -29,11 +29,9 @@ mod serve;
 mod start;
 mod status;
 
-pub use mail::reason_batch;
 #[cfg(test)]
 pub(crate) use panic::contained;
 pub use run::run;
-pub use start::enforce;
 
 use crate::ipc;
 use crate::msg::BankInfo;

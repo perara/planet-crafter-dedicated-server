@@ -14,6 +14,19 @@ pub const NETWORK_TRANSFORM: u32 = 12;
 pub const RPC: u32 = 16;
 pub const NETWORK_VARIABLE_DELTA: u32 = 13;
 pub const TIME_SYNC: u32 = 21;
+/// DisconnectReasonMessage: shown to a kicked or refused player.
+pub const DISCONNECT_REASON: u32 = 8;
+
+/// DisconnectReasonMessage: the batch that tells a kicked or refused player why.
+pub fn reason_batch(reason: &str) -> Vec<u8> {
+    let units: Vec<u16> = reason.encode_utf16().collect();
+    let mut w = Writer::new();
+    w.packed_i32(0).u32(units.len() as u32);
+    units.iter().for_each(|u| {
+        w.u16(*u);
+    });
+    crate::wire::batch(&[(DISCONNECT_REASON, w.0)])
+}
 
 /// NetworkObject.SceneObject flag bits.
 pub const HAS_PARENT: u16 = 1 << 1;
@@ -110,5 +123,16 @@ mod tests {
     fn invite_code_matches_the_game() {
         // The plugin logged "invite code pr2rqesRqVB4242" for game server 90295105288932371.
         assert_eq!(super::invite_code(90295105288932371), "pr2rqesRqVB");
+    }
+
+    /// What a kicked player is shown: one DisconnectReasonMessage (type 8), a packed i32 0 (as the
+    /// bytes always were), then the text's UTF-16 length and units.
+    #[test]
+    fn the_disconnect_reason_is_one_message_of_type_8_with_the_text_in_utf16() {
+        let batch = super::reason_batch("Hi\u{e5}");
+        let messages = crate::wire::messages(&batch);
+        assert_eq!(messages.len(), 1);
+        assert_eq!((messages[0].0, messages[0].1), (super::DISCONNECT_REASON, &[1u8, 3, 0, 0, 0, b'H', 0, b'i', 0, 0xe5, 0][..]));
+        assert_eq!(super::DISCONNECT_REASON, 8);
     }
 }

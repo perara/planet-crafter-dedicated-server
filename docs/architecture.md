@@ -64,8 +64,6 @@ the work" that removes it.
 |---|---|---|
 | `bank → cli`, `native → cli`, `native → net` | the tables folder's contract (build id, finding tables, an encoder) is defined in `cli` and `net`; the bank asks it in `bank/status.rs` (the installed game) | 7 |
 | `front → cli`, `updater → cli` | file primitives (`hold`, `replace_file`, `set_env_file`) live in `cli` | 13 |
-| `front → bank`, `bank → front` | the kick batch is built in `bank/mail.rs` (`reason_batch`); the snapshot's path (`snapshot_path`, used by `bank/persist.rs`) is in `front/snapshot.rs` | 4 |
-| `config → bank` | `bank::enforce` (an access policy, in `bank/start.rs`) is called from the settings code | 4 |
 | `front → config`, `front → rules` | settings read by name; the chat rules' struct | 8 |
 
 ## The front
@@ -187,7 +185,7 @@ for anything but the log lines the server already prints, an environment variabl
 ## The bank, module by module
 
 `bank/` is a directory module; each file has one job, and nothing outside it is reached except through
-`mod.rs` (`run`, `info`, `reason_batch`, `contained`, `enforce`).
+`mod.rs` (`run`, `info`, `contained`).
 
 | File | What it owns |
 |---|---|
@@ -312,7 +310,7 @@ the audit's list (the ones not done here are another agent's or later).
 |---|---|---|---|
 | 0 | `layers.txt` and its test; the `events` module; the plugin host | done with the plugin system | `scripts/check-layers`; zero behaviour change: the bench fingerprint and the handoff comparison are equal |
 | 1-3 | single source of truth for settings and rules, delete dead code | the refactor1 branch | its own |
-| 4 | small relocations: `DISCONNECT_REASON` and `reason_batch` into `protocol.rs`; `enforce` into `access.rs`; the serde helpers of `handoff` into a neutral module; `now_secs`, `hex` and friends once | next | removes the debts `front → bank`, `bank → front`, `config → bank` |
+| 4 | small relocations: `DISCONNECT_REASON` and `reason_batch` into `protocol.rs`; `snapshot_path` into `worlds.rs`; `enforce` into `access.rs`. Not done: the serde helpers of `handoff` into a neutral module; `hex` and friends once | done for the three relocations | removed the debts `front → bank`, `bank → front`, `config → bank` (`tests/layers.rs` fails on a debt that is gone, so they are out of `layers.txt`); `protocol::tests::the_disconnect_reason_is_one_message_of_type_8_with_the_text_in_utf16` |
 | 5 | typed messages between front and bank (`Hello`, `Ready`, `BankInfo`, ...) | done for the frames, bank.json and the banks' folder's notes (`msg.rs`); the API's requests and answers are not typed | `tests/hot_update.rs`, `msg::tests`, `tests/admin_golden.rs` |
 | 6 | split `front.rs`, `bank.rs`, `chathooks.rs` by concern, moving code only | `front/`, `bank/` and `chathooks/` done (the modules above and in "The bank, module by module") | `cargo test`; removed `admin → chathooks`, `front → chathooks`, `front → dashboard` |
 | 7 | a `tables` module that owns the tables folder's contract | later | `pcds read-game` then `pcds tables-diff`; removes `bank → cli`, `native → cli`, `native → net` |

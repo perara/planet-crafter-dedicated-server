@@ -69,7 +69,7 @@ impl Front {
         if self.phase != Phase::Idle || self.live.is_none() {
             return Err(format!("the world cannot stop now ({})", if self.live.is_none() { "it is not running".to_string() } else { self.phase.label().to_string() }));
         }
-        let reason = crate::bank::reason_batch(why);
+        let reason = crate::protocol::reason_batch(why);
         self.dismiss_all(&reason, Instant::now());
         self.net.flush(true);
         self.queue.clear();

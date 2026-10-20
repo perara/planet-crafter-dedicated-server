@@ -1,5 +1,5 @@
 //! Who an API call names, and what it does to them: kick, ban, unban, teleport. The access policy
-//! (`enforce`, who the lists refuse) is in the bank's start.rs, not here.
+//! (`enforce`, who the lists refuse) is `access::enforce`, not here.
 
 use super::{error, field, kept, ok, Reply, Request};
 use crate::dashboard;

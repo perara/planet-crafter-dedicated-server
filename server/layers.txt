@@ -58,12 +58,6 @@ debt native -> net
 # file primitives).
 debt front -> cli
 debt updater -> cli
-# The kick batch (DISCONNECT_REASON) is built by bank/mail.rs, and the front asks it (4: into protocol.rs);
-# bank/persist.rs asks front/snapshot.rs for the snapshot's path (4: next to the other paths).
-debt front -> bank
-debt bank -> front
-# The access policy `enforce` sits in bank/start.rs and config.rs calls it (4: into access.rs).
-debt config -> bank
 # The front reads settings and rules by name (8: typed settings).
 debt front -> config
 debt front -> rules

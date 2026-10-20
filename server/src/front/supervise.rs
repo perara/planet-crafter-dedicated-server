@@ -118,7 +118,7 @@ impl Front {
         if self.crashes.record(now) {
             self.give_up(bank);
         }
-        let told = self.dismiss_all(&crate::bank::reason_batch(RESTARTED), now);
+        let told = self.dismiss_all(&crate::protocol::reason_batch(RESTARTED), now);
         self.queue.clear();
         self.admin.forget_answers();
         // The snapshot stays held: should this bank die too before it saves, the next one

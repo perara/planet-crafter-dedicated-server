@@ -439,7 +439,7 @@ pub fn set(game: &mut Game, body: &Value) -> Result<(), Value> {
         return Err(rule_error(e));
     }
     if access_changed {
-        crate::bank::enforce(game);
+        crate::access::enforce(game);
     }
     Ok(())
 }
