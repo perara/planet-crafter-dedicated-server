@@ -167,7 +167,7 @@ pub(super) fn build<'a>(game: &'a Game, ctx: &Ctx<'a>, now: Instant) -> Status<'
     let mut players: Vec<Value> = game.clients.values().map(|c| dashboard::player(game, c, c.ip.clone().unwrap_or_default())).collect();
     players.sort_by_key(|p| p["id"].as_u64());
     // The game's own f32 values go out as the f64 they widen to, as the JSON values always did.
-    let planet_units = game.units.planet(game.planet_hash()).map(|p| p.units.iter().map(|u| (u.kind.unit_type().to_string(), UnitValue { value: f64::from(u.total), per_second: f64::from(u.per_sec) })).collect()).unwrap_or_default();
+    let planet_units = game.units.planet(game.planet_hash()).map(|p| p.units.iter().map(|u| (u.kind.unit_type().to_string(), UnitValue { value: f64::from(u.total as f32), per_second: f64::from(u.per_sec) })).collect()).unwrap_or_default();
     Status {
         state: "running",
         game_version: &game.net_data.game_version,
