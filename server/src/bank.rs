@@ -441,6 +441,10 @@ impl Bank {
                 self.link.send(ipc::KICK, client, &[]);
             }
             forward_chat(game, &mut self.link);
+            // The plugin event stream's doorbell, for the front's long polls (ipc::STREAM).
+            if let Some(bell) = plugins::stream_bell(game) {
+                self.link.send(ipc::STREAM, 0, bell.as_bytes());
+            }
             forward_ops(game, &mut self.link, &mut last_ops);
             let work = woke.elapsed();
             busy = (busy.0 + work, busy.1.max(work));
