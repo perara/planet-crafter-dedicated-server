@@ -937,3 +937,7 @@ mod tests {
         assert_eq!(join("https://a.example:8443/x", "//b.example/q").as_deref(), Some("https://b.example/q"));
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../../fuzz/targets/pluginnet.rs"]
+pub mod fuzz;

@@ -303,3 +303,7 @@ mod tests {
         assert_eq!(json(&parse::<SnapshotNote>(b"{}").unwrap().bytes), "null");
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/msg.rs"]
+pub mod fuzz;

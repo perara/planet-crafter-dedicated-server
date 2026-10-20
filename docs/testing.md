@@ -142,7 +142,15 @@ PCDS_FUZZ_TARGET=wire cargo fuzz run pcds_fuzz fuzz/corpus/wire
 `make fuzz-check` (CI runs it) type-checks the fuzz crate without a nightly toolchain: it is the server's code built another way, and it
 had stopped compiling unnoticed.
 
-Targets: `wire utp rpcspec transform ipc config chathooks updater access rules save handoff game front`.
+Targets: `wire utp rpcspec transform ipc config chathooks updater access rules save handoff game front`, and
+since round 3 ([audits.md](audits.md)) `oldsave savelayout manifest pluginnet pluginsign wasmhost bincodec adminhttp
+adminroutes names msg toxic loadsave twin tessera` (each is described in the header of `server/fuzz/Cargo.toml`).
+`twin` is the check of a flip's exactness: a game and the game restored from its snapshot are given the same inputs and
+the same ticks (on the game's own clock, `sim_time`), and every message they send must be the same.
+`PCDS_FUZZ_SAVE=SAVE` makes `game`, `twin` and `loadsave` start from a save of this server (a mid-game world with
+machines and drones finds more than the two-player test world; it is slower). `wasmhost` builds wasmi with
+`portable-dispatch`: the default dispatch relies on the compiler turning calls into jumps, which AddressSanitizer's
+instrumentation prevents (a loop of the module then overflows the native stack).
 The targets `rpcspec`, `handoff` and `game` read the game tables from `PCDS_FUZZ_DATA` (default:
 `run/data/2.103` of the checkout). `handoffsweep` and `savesweep` are not fuzzers: each puts awkward
 numbers and strings, one at a time, into a real snapshot or save (`PCDS_FUZZ_SWEEP_FILE`, `_STEP`, `_OFFSET`;

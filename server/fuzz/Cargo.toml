@@ -8,7 +8,19 @@
 #   cd server
 #   PCDS_FUZZ_TARGET=wire cargo fuzz run pcds_fuzz fuzz/corpus/wire
 #
-# Targets: wire utp rpcspec transform ipc config chathooks updater access rules save handoff game front.
+# Targets: wire utp rpcspec transform ipc config chathooks updater access rules save handoff game front,
+# and (round 3, docs/audits.md) oldsave savelayout manifest pluginnet pluginsign wasmhost bincodec
+# adminhttp adminroutes names msg toxic loadsave twin tessera.
+# oldsave: an old-layout save through the import. savelayout: the loader's layout checks and the
+# writer. manifest: plugin.toml, a data plugin's rules and the JSON files beside the plugins (first byte
+# picks). pluginnet: allow-list patterns, URLs, redirects, the request a plugin encodes, and which
+# addresses may be dialled (against a reference). pluginsign: plugin.sig and the keys. wasmhost: a module
+# made from the input calls every host function with edge pointers. bincodec: the snapshot codec on
+# its own. adminhttp: the HTTP reader on a socket. adminroutes: the bank's admin routes with hostile
+# bodies on a game with the example plugins. names: world names. msg: the front/bank messages. toxic:
+# the toxic areas' keys. loadsave: a save damaged one field at a time, loaded. twin: a game and the
+# game restored from its snapshot given the same inputs for 1000 ticks send the same bytes. tessera:
+# the wreck solver on seeds (PCDS_FUZZ_SAVE=a save of this server is the base of game, twin, loadsave).
 # Sweeps (one run each, no libFuzzer input): handoffsweep and savesweep put awkward numbers and strings
 # in a real snapshot / save, one value at a time (PCDS_FUZZ_SWEEP_FILE, _STEP, _OFFSET; pass -timeout=0).
 # game runs 40 inputs on one Game, takes a snapshot and restores it every 20 (a NaN fails there), and
@@ -38,7 +50,10 @@ steamworks = "0.13.1"
 unicode-normalization = { version = "0.1.25", default-features = false, features = ["std"] }
 toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 ureq = { version = "3.4", default-features = false, features = ["rustls"] }
-wasmi = { version = "2.0.0", default-features = false, features = ["std", "validate"] }
+wat = "1"
+# portable-dispatch: the default dispatch relies on the compiler turning calls into jumps, which
+# AddressSanitizer's instrumentation prevents (a loop of the module overflows the native stack).
+wasmi = { version = "2.0.0", default-features = false, features = ["std", "validate", "portable-dispatch"] }
 xxhash-rust = { version = "0.8.19", features = ["xxh32", "xxh64"] }
 
 [[bin]]

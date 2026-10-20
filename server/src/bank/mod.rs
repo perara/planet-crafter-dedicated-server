@@ -43,3 +43,7 @@ pub fn info() -> BankInfo {
     BankInfo::new(env!("CARGO_PKG_VERSION"), ipc::PROTOCOL, crate::handoff::FORMAT.into(), crate::native::tables::TABLES_FORMAT.into())
 }
 
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../../fuzz/targets/adminroutes.rs"]
+pub mod fuzz_admin;

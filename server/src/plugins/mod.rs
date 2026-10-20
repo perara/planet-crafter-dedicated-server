@@ -1313,3 +1313,7 @@ pub fn disable(dir: &Path, id: &str) -> Result<(), String> {
 pub fn wants_rpc(game: &crate::game::Game, name: &str) -> bool {
     game.ext.plugins.host.as_ref().is_some_and(|h| h.plugins.iter().any(|p| p.running() && p.rpc.contains(name)))
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../../fuzz/targets/wasmhost.rs"]
+pub mod fuzz_wasm;

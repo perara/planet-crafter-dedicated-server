@@ -395,3 +395,7 @@ mod tests {
         assert_eq!(Keys::load(&dir("sign-keys2")).unwrap(), Keys::default());
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../../fuzz/targets/pluginsign.rs"]
+pub mod fuzz;

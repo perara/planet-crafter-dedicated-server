@@ -514,6 +514,35 @@ mod tests {
         assert!(serde_json::from_value::<Shape>(no_size).is_err());
     }
 
+    /// How long one seed takes the solver, for each generator: the distribution and the worst of
+    /// PCDS_SOLVER_SEEDS seeds (default 300) from PCDS_SOLVER_FROM. The solve runs on a thread of its own
+    /// and up to MAX_TRIES seeds follow a failing one, so the worst seed is how long a wreck can be late.
+    /// `cargo test --release solver_time_by_seed -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn solver_time_by_seed() {
+        let Some(g) = crate::planets::tests::game() else { return };
+        let w = wrecks(&g);
+        let env = |name: &str, default: u32| crate::env(name).and_then(|v| v.parse().ok()).unwrap_or(default);
+        let (count, from) = (env("PCDS_SOLVER_SEEDS", 300), env("PCDS_SOLVER_FROM", 0));
+        for index in 0..super::super::GENERATORS.len() {
+            let model = w.model(index).unwrap();
+            let mut times = Vec::new();
+            let mut failed = 0;
+            for seed in from..from + count {
+                let Some(p) = prepare(&g, index, seed, [0.0; 3], [0.0, 0.0, 0.0, 1.0], HashSet::new()) else { continue };
+                let t = std::time::Instant::now();
+                if tessera::generate(&model, &p.scene, seed as i32).unwrap().is_none() {
+                    failed += 1;
+                }
+                times.push((t.elapsed().as_secs_f64(), seed));
+            }
+            times.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let at = |q: f64| times[((times.len() - 1) as f64 * q) as usize];
+            println!("generator {index}: {} seeds, {failed} fail; p50 {:.3} s, p99 {:.3} s, worst {:.3} s (seed {})", times.len(), at(0.5).0, at(0.99).0, at(1.0).0, at(1.0).1);
+        }
+    }
+
     /// Tessera is deterministic in the seed, and a seed whose retries all contradict goes on to
     /// the next, as GenerateOnTrigger.Generate does (read-game measured seed 14 of the small
     /// wreck: every retry fails).
@@ -534,3 +563,7 @@ mod tests {
         assert_ne!(solve(&w, 0, 16, &other.scene).unwrap(), moved);
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../../fuzz/targets/tessera.rs"]
+pub mod fuzz;

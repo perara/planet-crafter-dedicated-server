@@ -600,3 +600,7 @@ mod tests {
         let _ = ann;
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/toxic.rs"]
+pub mod fuzz;

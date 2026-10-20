@@ -709,3 +709,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/adminhttp.rs"]
+pub mod fuzz;
