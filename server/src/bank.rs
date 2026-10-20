@@ -182,9 +182,7 @@ fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, data: crate:
     save::sweep(&folder.join("backups"));
     // The save as it was before this server touched it (as every backup: none with save.backupsKept 0).
     // At most one per 10 minutes: a crash loop must not push the hourly backups out.
-    if let Err(e) = save::backup(save_path, Duration::from_secs(600), loaded_rules.save.backups_kept as usize) {
-        eprintln!("backup failed: {e}");
-    }
+    note_backup(&save::backup(save_path, Duration::from_secs(600), loaded_rules.save.backups_kept as usize).map_err(|e| format!("{save_path}: {e}")));
     let session_number = config::env_number("PCDS_SESSION") as u32;
     let version = net_data.game_version.clone();
     let mut game = Game::new(net_data, data, spec, save, scenes);
@@ -571,12 +569,17 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
                 "s3": crate::s3::status(&game.rules.backup),
                 "plugins": plugins::admin::summary(game),
                 "lastSave": LAST_SAVE.with_borrow(Value::clone),
+                "backup": backup_status(&game.rules.save),
             });
             (200, body.to_string())
         }
         // The front's watchdog asks this of a bank that has been silent: any answer is a loop that runs.
         ("GET", "/api/ping") => ok(),
-        ("POST", "/api/save") => kept(persist(game, ctx.save_path)),
+        // The save, and what became of its backup: a backup that failed is the answer's, too.
+        ("POST", "/api/save") => match persist(game, ctx.save_path) {
+            Ok(()) => (200, json!({"ok": true, "backup": backup_status(&game.rules.save)}).to_string()),
+            Err(e) => (500, json!({"error": e}).to_string()),
+        },
         (_, p) if p.starts_with("/api/plugins") => plugins::admin::request(game, method, path, body),
         ("POST", "/api/kick") => match who(body).and_then(|w| find_client(game, &w)) {
             Ok(Some(c)) => {
@@ -720,7 +723,9 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
             if let Err(e) = save::write_atomic(ctx.save_path, game.save_text().as_bytes()) {
                 return (500, json!({"error": format!("save failed: {e}")}).to_string());
             }
-            if let Err(e) = save::backup(ctx.save_path, Duration::ZERO, game.rules.save.backups_kept as usize) {
+            let made = save::backup(ctx.save_path, Duration::ZERO, game.rules.save.backups_kept as usize).map_err(|e| format!("{}: {e}", ctx.save_path));
+            note_backup(&made);
+            if let Err(e) = made {
                 return (500, json!({"error": format!("backup failed: {e}")}).to_string());
             }
             let made = crate::s3::newest_backup(ctx.save_path).and_then(|p| p.file_stem().map(|f| f.to_string_lossy().to_string()));
@@ -827,7 +832,13 @@ pub(crate) fn contained<T>(what: &str, work: impl FnOnce() -> T) -> Option<T> {
 /// the world does not stand still for the disk.
 struct Writing {
     path: String,
-    done: std::sync::mpsc::Receiver<Result<(), String>>,
+    done: std::sync::mpsc::Receiver<Written>,
+}
+
+/// What writing a save came to: the file, and the backup made before it (Ok(false): none was due).
+struct Written {
+    saved: Result<(), String>,
+    backup: Result<bool, String>,
 }
 
 thread_local! {
@@ -836,6 +847,31 @@ thread_local! {
     static LAST_SAVE: std::cell::RefCell<Value> = const { std::cell::RefCell::new(Value::Null) };
     /// The autosave being written, if any (at most one: a save never overtakes an older one).
     static WRITING: std::cell::RefCell<Option<Writing>> = const { std::cell::RefCell::new(None) };
+    /// The backups' outcome, for GET /api/status and POST /api/save: when one was last made, and
+    /// the last failure (cleared by the next backup made).
+    static BACKUPS: std::cell::RefCell<(Option<u64>, Option<(u64, String)>)> = const { std::cell::RefCell::new((None, None)) };
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// A backup attempt's outcome kept for the status (and logged when it failed).
+fn note_backup(result: &Result<bool, String>) {
+    match result {
+        Ok(true) => BACKUPS.set((Some(unix_now()), None)),
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("backup failed: {e}");
+            BACKUPS.with_borrow_mut(|b| b.1 = Some((unix_now(), e.clone())));
+        }
+    }
+}
+
+/// The status' "backup": whether they are on (save.backupsKept), when one was last made since
+/// this process started, and the last failure with its time.
+fn backup_status(files: &crate::rules::Save) -> Value {
+    BACKUPS.with_borrow(|(ok, failed)| json!({"enabled": files.backups_kept > 0, "lastOkAt": ok, "error": failed.as_ref().map(|(at, message)| json!({"at": at, "message": message}))}))
 }
 
 /// How long a test's save writes take (a slow disk).
@@ -844,20 +880,19 @@ pub static WRITE_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 
 /// The backup and the write of a save's text (what persist does, in its order); `files` are the
 /// rules of the backups.
-fn write_save(path: &str, text: &[u8], files: &crate::rules::Save) -> Result<(), String> {
+fn write_save(path: &str, text: &[u8], files: &crate::rules::Save) -> Written {
     #[cfg(test)]
     std::thread::sleep(Duration::from_millis(WRITE_DELAY_MS.load(std::sync::atomic::Ordering::SeqCst)));
-    if let Err(e) = save::backup(path, Duration::from_secs(u64::from(files.backup_minutes) * 60), files.backups_kept as usize) {
-        eprintln!("backup failed: {e}");
-    }
-    save::write_atomic(path, text).map_err(|e| format!("{path}: {e}"))
+    let backup = save::backup(path, Duration::from_secs(u64::from(files.backup_minutes) * 60), files.backups_kept as usize).map_err(|e| format!("{path}: {e}"));
+    Written { saved: save::write_atomic(path, text).map_err(|e| format!("{path}: {e}")), backup }
 }
 
 /// What a save's end does on the game thread: the status, the log, the newest backup
 /// off-site (on a thread), when S3 is set and it is not there yet, and the plugins: they hear
 /// of it and keep their state beside the world's.
-fn saved(game: &mut Game, path: &str, saved: &Result<(), String>) {
-    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+fn saved(game: &mut Game, path: &str, written: &Written) {
+    let (at, saved) = (unix_now(), &written.saved);
+    note_backup(&written.backup);
     LAST_SAVE.set(json!({"ok": saved.is_ok(), "at": at, "error": saved.as_ref().err()}));
     match saved {
         Ok(()) => println!("saved {path}"),
@@ -885,9 +920,9 @@ fn settle(game: &mut Game, wait: bool) {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
         }
     };
-    let result = result.unwrap_or_else(|| Err(format!("{}: the thread writing it ended", w.path)));
+    let result = result.unwrap_or_else(|| Written { saved: Err(format!("{}: the thread writing it ended", w.path)), backup: Ok(false) });
     saved(game, &w.path, &result);
-    if result.is_err() {
+    if result.saved.is_err() {
         game.advanced = true;
     }
 }
@@ -903,7 +938,7 @@ fn persist_later(game: &mut Game, path: &str) -> bool {
     let (tx, done) = std::sync::mpsc::channel();
     let (to, files) = (path.to_string(), game.rules.save.clone());
     let spawned = std::thread::Builder::new().name("pcds-save".into()).spawn(move || {
-        let r = std::panic::catch_unwind(|| write_save(&to, text.as_bytes(), &files)).unwrap_or_else(|_| Err(format!("{to}: the write panicked")));
+        let r = std::panic::catch_unwind(|| write_save(&to, text.as_bytes(), &files)).unwrap_or_else(|_| Written { saved: Err(format!("{to}: the write panicked")), backup: Ok(false) });
         let _ = tx.send(r);
     });
     match spawned {
@@ -921,9 +956,9 @@ fn persist_later(game: &mut Game, path: &str) -> bool {
 /// the one being written, which it must not be overtaken by.
 fn persist(game: &mut Game, path: &str) -> Result<(), String> {
     settle(game, true);
-    let result = write_save(path, game.save_text().as_bytes(), &game.rules.save.clone());
-    saved(game, path, &result);
-    result
+    let written = write_save(path, game.save_text().as_bytes(), &game.rules.save.clone());
+    saved(game, path, &written);
+    written.saved
 }
 
 /// The front's autosave. A world that stood still since the last one (rules:
@@ -1032,6 +1067,38 @@ fn post_in_order(game: &mut Game, approved: &mut HashSet<u64>, mail: &mut crate:
 mod tests {
     use super::*;
     use crate::game;
+
+    /// A backup that fails is no secret kept in the log: /api/status and the answer of POST /api/save
+    /// say so (the save itself still goes through), until a backup is made.
+    #[test]
+    fn a_backup_that_fails_is_in_the_status_and_in_the_answer_of_a_save() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        let dir = std::env::temp_dir().join(format!("pcds-backup-status-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("world.json").to_string_lossy().to_string();
+        let ctx = Ctx { save_path: &path, build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() };
+        std::fs::write(&path, "{}").unwrap();
+        // backups/ is a file: no backup can be made.
+        std::fs::write(dir.join("backups"), "in the way").unwrap();
+        let ask = |game: &mut Game, method: &str, path: &str| {
+            let (status, answer) = admin_request(game, method, path, &json!({}), &ctx);
+            (status, serde_json::from_str::<Value>(&answer).unwrap())
+        };
+        let (status, saved) = ask(&mut game, "POST", "/api/save");
+        assert_eq!(status, 200, "the save itself went through: {saved}");
+        assert!(saved["backup"]["error"]["message"].as_str().is_some_and(|m| m.contains("world.json")) && saved["backup"]["error"]["at"].as_u64() > Some(0) && saved["backup"]["lastOkAt"].is_null(), "{saved}");
+        assert_eq!(SaveFile::load(&path).map(|s| !s.objects.is_empty()).ok(), Some(true));
+        let (_, status) = ask(&mut game, "GET", "/api/status");
+        assert_eq!(status["backup"], saved["backup"]);
+        assert_eq!(status["backup"]["enabled"], true);
+        // Mended: the next save makes the backup, and the failure is gone.
+        std::fs::remove_file(dir.join("backups")).unwrap();
+        let (_, saved) = ask(&mut game, "POST", "/api/save");
+        assert!(saved["backup"]["error"].is_null() && saved["backup"]["lastOkAt"].as_u64() > Some(0), "{saved}");
+        assert_eq!(std::fs::read_dir(dir.join("backups")).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     /// A panic in one client's work kicks it and saves; the next loop goes on.
     #[test]
