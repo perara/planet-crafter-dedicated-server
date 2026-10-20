@@ -163,6 +163,10 @@ dashboard [grafana/pcds.json](docs/grafana/pcds.json).
   reach it through any name that resolved to it), the container credentials of AWS ECS and EKS
   (169.254.170.2, 169.254.170.23, fd00:ec2::23), Tencent's metadata (169.254.0.23) and Google's
   IPv6 metadata server (fd20:ce::254).
+* **TLS: rustls-webpki 0.103.16 and webpki-roots 1.0.10** (RUSTSEC-2026-0382, RUSTSEC-2026-0381, of
+  19 and 20 October): the chain check accepted intermediates that the root programs distrust (emSign).
+  The updater, the S3 copies and the plugins' `net.http` use them. `cargo audit` is clean again but
+  for the known `paste` warning.
 * **The admin API's HTTP reader is stricter about the head.** A line of blanks no longer ends the
   head (a proxy in front reads it as a folded line), and a `Content-Length` with a sign
   (`+5`) is refused.
@@ -194,6 +198,12 @@ dashboard [grafana/pcds.json](docs/grafana/pcds.json).
   fields in order (`[[0.5]]` set `meteo.eventChance`).
 * **A Steam library file nested without end** (`"a" {` a quarter of a million times) is refused
   with an error; it ended the process with a stack overflow.
+* **The log cannot be used to steer a terminal.** The text format wrote a message as it came: a
+  carriage return in it (a name, a bucket's error text, a release feed's message) moved the cursor
+  over the line's own time and level, an escape sequence cleared or recoloured the screen of
+  `pcds logs`, `journalctl` and `docker logs`. Control characters other than line breaks and tabs are
+  now written as `\u{..}`. The error text of an S3 request is plain text too (control characters
+  `?`, entities read, 200 characters a field).
 * `make fuzz-check` and the CI job for it; `--features portable-dispatch` for the sanitizer
   builds (wasmi's default dispatch needs the optimizer's tail calls, which the sanitizers
   prevent).
