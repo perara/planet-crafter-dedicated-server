@@ -18,7 +18,7 @@
 use pcds_plugin_api::{Kind, caps};
 use serde_json::{Value, json};
 
-use super::{Loaded, stream};
+use super::{Loaded, manifest, stream};
 use crate::game::Game;
 
 fn error(status: u16, e: impl std::fmt::Display) -> (u16, String) {
@@ -109,7 +109,7 @@ fn config_json(p: &Loaded) -> Value {
         m.config
             .iter()
             .map(|k| {
-                let choices = k.choices.as_ref().map(|c| c.iter().map(|v| match v { toml::Value::String(s) => s.clone(), other => format!("{other:?}") }).collect::<Vec<_>>());
+                let choices = k.choices.as_ref().map(|c| c.iter().map(manifest::toml_text).collect::<Vec<_>>());
                 json!({
                     "key": k.key, "description": k.description, "secret": k.is_secret(), "set": p.config.contains_key(&k.key), "value": (!k.is_secret()).then(|| p.config.get(&k.key)).flatten(),
                     "type": k.kind.name(), "default": k.default_text(), "min": k.min, "max": k.max, "maxLen": k.max_len, "choices": choices,
@@ -131,7 +131,7 @@ fn changes(p: &Loaded) -> Value {
         return Value::Null;
     }
     let diff = approval.diff(&requested, &allow);
-    json!({"version": version, "digest": digest, "added": diff.added, "removed": diff.removed, "addedHosts": diff.added_hosts, "removedHosts": diff.removed_hosts})
+    json!({"version": version, "digest": digest, "requested": requested, "allow": allow, "added": diff.added, "removed": diff.removed, "addedHosts": diff.added_hosts, "removedHosts": diff.removed_hosts})
 }
 
 /// Part of /api/status: how many plugins there are, how many run, how many faults they had.
@@ -162,6 +162,7 @@ pub fn request(game: &mut Game, method: &str, path: &str, body: &Value) -> (u16,
                 "revokedKeys": keys.as_ref().map(|k| &k.revoked),
                 "keysError": host.and_then(|h| h.keys_error.clone()),
                 "capabilities": caps::ALL.iter().map(|(n, d)| json!({"name": n, "allows": d})).collect::<Vec<_>>(),
+                "commandPrefix": game.rules.chat.command_prefix.clone().filter(|p| !p.is_empty()).unwrap_or_else(|| "!".into()),
                 "abi": {"major": pcds_plugin_api::ABI_MAJOR, "minor": pcds_plugin_api::ABI_MINOR},
                 "stream": {"epoch": game.ext.plugins.saved.stream.epoch, "consumers": game.ext.plugins.saved.stream.consumers_json()},
                 "scanEverySeconds": super::POLL_EVERY.as_secs(),

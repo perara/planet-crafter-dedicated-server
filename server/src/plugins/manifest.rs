@@ -183,7 +183,7 @@ impl ConfigKey {
 }
 
 /// A TOML value as the text a plugin reads it as.
-fn toml_text(v: &toml::Value) -> String {
+pub fn toml_text(v: &toml::Value) -> String {
     match v {
         toml::Value::String(s) => s.clone(),
         toml::Value::Integer(n) => n.to_string(),

@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pcds_plugin_api::host::{E_BAD, E_DENIED, E_FULL, E_NOT_ALLOWED, E_NOT_FOUND, E_UNSUPPORTED, OK};
 use pcds_plugin_api::query::{self, InventoryInfo, Nearby, NearbyArgs, ObjectInfo, ObjectRef, PlayerInfo, WorldInfo};
@@ -43,6 +43,10 @@ pub trait World {
     fn players(&self) -> Vec<PlayerInfo>;
     /// The rules that differ from the defaults, as JSON text.
     fn rules(&self) -> String;
+    /// One online player; None if they are not online.
+    fn player(&self, client: u64) -> Option<PlayerInfo> {
+        self.players().into_iter().find(|p| p.client == client)
+    }
     /// What a player carries; None if they are not online.
     fn inventory(&self, _client: u64) -> Option<InventoryInfo> {
         None
@@ -118,6 +122,8 @@ pub struct Ctx {
     /// The capabilities this plugin used without having them, in the order it first did; the host
     /// says each once in the log and the listing keeps them.
     pub denied_caps: Vec<&'static str>,
+    /// Time added to the wall clock the rate limits read: a test that moves game time by hours does not wait for the seconds.
+    pub skew: Duration,
     pub logs: Arc<LogRing>,
     gives_second: (Instant, u32),
     tokens_second: (Instant, u32),
@@ -143,7 +149,7 @@ pub struct Ctx {
 impl Ctx {
     pub fn new(id: &str, grant: Grant) -> Ctx {
         let now = Instant::now();
-        Ctx { id: id.to_string(), grant, settings: Arc::default(), timers: Vec::new(), now_ms: None, extra_fuel: 0, denied_caps: Vec::new(), logs: Arc::default(), gives_second: (now, 0), tokens_second: (now, 0), world: None, actions: Vec::new(), denied: 0, refused: 0, second: (now, 0), rules_second: (now, 0), log_second: (now, 0), log_dropped: 0, net: None, http_second: (now, 0), answers: Vec::new() }
+        Ctx { id: id.to_string(), grant, settings: Arc::default(), timers: Vec::new(), now_ms: None, extra_fuel: 0, denied_caps: Vec::new(), skew: Duration::ZERO, logs: Arc::default(), gives_second: (now, 0), tokens_second: (now, 0), world: None, actions: Vec::new(), denied: 0, refused: 0, second: (now, 0), rules_second: (now, 0), log_second: (now, 0), log_dropped: 0, net: None, http_second: (now, 0), answers: Vec::new() }
     }
 
     /// A fresh context for the same plugin (a restart after a fault): same id, grant and network access.
@@ -153,7 +159,16 @@ impl Ctx {
         c.settings = self.settings.clone();
         c.logs = self.logs.clone();
         c.denied_caps = self.denied_caps.clone();
+        c.skew = self.skew;
         c
+    }
+
+    fn now(&self) -> Instant {
+        Instant::now() + self.skew
+    }
+
+    fn since(&self, t: Instant) -> Duration {
+        self.now().saturating_duration_since(t)
     }
 
     /// Starts a call: the plugin may read `world` until `end`. `now_ms` is the game time.
@@ -194,8 +209,8 @@ impl Ctx {
     }
 
     fn queue(&mut self, action: Action) -> i32 {
-        if self.second.0.elapsed().as_secs() >= 1 {
-            self.second = (Instant::now(), 0);
+        if self.since(self.second.0).as_secs() >= 1 {
+            self.second = (self.now(), 0);
         }
         if self.actions.len() >= limits::ACTIONS_PER_CALL || self.second.1 >= limits::ACTIONS_PER_SECOND {
             self.refused += 1;
@@ -209,12 +224,12 @@ impl Ctx {
     /// `log`: one line in the server's log, prefixed with the plugin's id. Control characters
     /// become spaces (a plugin cannot forge log lines), the rate and the length are bounded.
     pub fn log(&mut self, level: Level, message: &str) {
-        if self.log_second.0.elapsed().as_secs() >= 1 {
+        if self.since(self.log_second.0).as_secs() >= 1 {
             if self.log_dropped > 0 {
                 eprintln!("plugin {}: {} log lines dropped (over {} a second)", self.id, self.log_dropped, limits::LOG_LINES_PER_SECOND);
                 self.log_dropped = 0;
             }
-            self.log_second = (Instant::now(), 0);
+            self.log_second = (self.now(), 0);
         }
         if self.log_second.1 >= limits::LOG_LINES_PER_SECOND {
             self.log_dropped += 1;
@@ -239,7 +254,7 @@ impl Ctx {
             query::encode_settings(&self.settings, &mut w);
             return self.answer(kind, w.0);
         }
-        if !(query::Q_WORLD..=query::Q_OBJECT).contains(&kind) {
+        if !(query::Q_WORLD..=query::Q_OBJECT).contains(&kind) && kind != query::Q_PLAYER {
             return Err(E_UNSUPPORTED);
         }
         if !self.allowed(caps::WORLD_READ) {
@@ -258,6 +273,11 @@ impl Ctx {
             query::Q_PLAYERS => query::encode_players(&world.players(), &mut w),
             query::Q_RULES => {
                 w.0.extend_from_slice(world.rules().as_bytes());
+            }
+            query::Q_PLAYER => {
+                let Ok(client) = <[u8; 8]>::try_from(arg).map(u64::from_le_bytes) else { return Err(E_BAD) };
+                let Some(player) = world.player(client) else { return Err(E_NOT_FOUND) };
+                player.encode(&mut w);
             }
             query::Q_INVENTORY => {
                 let Ok(client) = <[u8; 8]>::try_from(arg).map(u64::from_le_bytes) else { return Err(E_BAD) };
@@ -356,8 +376,8 @@ impl Ctx {
         if !name_ok || count == 0 || count > limits::MAX_GIVE_COUNT {
             return E_BAD;
         }
-        if self.gives_second.0.elapsed().as_secs() >= 1 {
-            self.gives_second = (Instant::now(), 0);
+        if self.since(self.gives_second.0).as_secs() >= 1 {
+            self.gives_second = (self.now(), 0);
         }
         if self.gives_second.1 >= limits::GIVES_PER_SECOND {
             self.refused += 1;
@@ -378,8 +398,8 @@ impl Ctx {
         if amount == 0 || amount.abs() > limits::MAX_TOKENS_PER_ACTION {
             return E_BAD;
         }
-        if self.tokens_second.0.elapsed().as_secs() >= 1 {
-            self.tokens_second = (Instant::now(), 0);
+        if self.since(self.tokens_second.0).as_secs() >= 1 {
+            self.tokens_second = (self.now(), 0);
         }
         if self.tokens_second.1 >= limits::TOKEN_CHANGES_PER_SECOND {
             self.refused += 1;
@@ -476,8 +496,8 @@ impl Ctx {
                 return E_NOT_ALLOWED as i64;
             }
         };
-        if self.http_second.0.elapsed().as_secs() >= 1 {
-            self.http_second = (Instant::now(), 0);
+        if self.since(self.http_second.0).as_secs() >= 1 {
+            self.http_second = (self.now(), 0);
         }
         let waiting = self.actions.iter().filter(|a| matches!(a, Action::Http(_))).count() as u32;
         if self.http_second.1 >= limits::HTTP_PER_SECOND || net.in_flight.load(Ordering::SeqCst) + waiting >= limits::HTTP_IN_FLIGHT {
@@ -507,8 +527,8 @@ impl Ctx {
             self.refused += 1;
             return E_DENIED;
         }
-        if self.rules_second.0.elapsed().as_secs() >= 1 {
-            self.rules_second = (Instant::now(), 0);
+        if self.since(self.rules_second.0).as_secs() >= 1 {
+            self.rules_second = (self.now(), 0);
         }
         if self.rules_second.1 >= limits::RULE_CHANGES_PER_SECOND {
             self.refused += 1;

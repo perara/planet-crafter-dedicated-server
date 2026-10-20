@@ -29,13 +29,29 @@
 //! expect = [{ tell = 1, contains = "1." }]
 //! ```
 //!
-//! A step does one thing: `join`, `leave`, `chat`, `advance`, `place`, `destroy`, `rpc`,
-//! `world_saved`, `http_done`, `reload` (the state goes through the plugin's `save` and a new instance
-//! `load`s it: timers are gone), `flip` (a reload that also tells the plugin it was hot-updated),
-//! `set` (change the stand-in world: positions, backpacks, the clock). `expect` entries name a kind
-//! (`say`, `tell = CLIENT`, `kick = CLIENT`, `teleport = CLIENT`, `give = CLIENT`, `tokens`,
-//! `rules_patch`, `http`, `veto`, `log`) and, optionally, `contains`, `equals`, `count` (how many
-//! times; 0 means never; the default is at least once).
+//! A step does one thing:
+//!
+//! | step | what it does |
+//! |---|---|
+//! | `join = { client, name, player_id?, steam_id?, position?, operator?, inventory? }` | a player joins (as `[[player]]` says it) |
+//! | `leave = CLIENT` | a player leaves |
+//! | `chat = { client, text }` | a chat message; one that begins with `!` and names the plugin's command is that command (the host checks the manifest's `permission`, `min_args`, `max_args` as the server does) |
+//! | `advance = "10m"` | game time passes: ticks (every 50 ms of game time here) and timers; the rate limits see the time pass too |
+//! | `place = { id, group, position, client? }` / `destroy = { id, client? }` | an object is placed or destroyed (by `client`; 0: nobody) |
+//! | `rpc = { client, name, object?, args? }` | a client RPC is about to run: `expect = [{ veto = true }]` says whether the plugin refused it |
+//! | `world_saved = true` | a save ended (`false`: it failed) |
+//! | `http_done = { ticket, status?, body?, error?, headers? }` | the answer to the plugin's Nth request of this scenario (1 is the first) |
+//! | `save = true` | the plugin is asked for its state (`pcds_save`), as at a world save; its size and version are shown |
+//! | `reload = true` | the state goes through `pcds_save` and a new instance `load`s it; timers are gone |
+//! | `flip = true` | a reload that also tells the plugin it was hot-updated |
+//! | `set = { ... }` | change the stand-in world: `position = { client, to }`, `inventory = { client, items }`, `operator = { client, value }`, `object = { id, group, position }`, `remove_object = ID`, `terraformation = N`, `standing_still = BOOL`, `unix_ms = N` |
+//!
+//! `[[object]]` entries (`id`, `group`, `position`, `net?`) are the objects there from the start. `[world]`
+//! sets `planet`, `unix_ms`, `game_ms`, `backpack_slots` and `rules`. `expect` entries name a kind (`say`,
+//! `tell = CLIENT`, `kick = CLIENT`, `teleport = CLIENT`, `give = CLIENT`, `tokens`, `rules_patch`, `http`
+//! (the text is `METHOD URL HEADERS BODY`, the URL with a secret setting written back as `${config.KEY}`),
+//! `veto`, `log`) and, optionally, `contains`, `equals` and `count` (how many; 0 means never; the default is
+//! at least once). Every plugin ticket in a scenario counts from 1.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -86,11 +102,15 @@ pub struct WorldSpec {
     /// The rules that differ from the defaults, as `Host::rules()` shows them.
     #[serde(default)]
     pub rules: BTreeMap<String, toml::Value>,
+    #[serde(default = "terraformation")]
+    pub terraformation: f64,
+    #[serde(default)]
+    pub standing_still: bool,
 }
 
 impl Default for WorldSpec {
     fn default() -> Self {
-        WorldSpec { planet: prime(), unix_ms: epoch(), game_ms: 0, backpack_slots: slots(), rules: BTreeMap::new() }
+        WorldSpec { planet: prime(), unix_ms: epoch(), game_ms: 0, backpack_slots: slots(), rules: BTreeMap::new(), terraformation: terraformation(), standing_still: false }
     }
 }
 
@@ -102,6 +122,9 @@ fn epoch() -> i64 {
 }
 fn slots() -> u32 {
     30
+}
+fn terraformation() -> f64 {
+    1000.0
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -146,6 +169,7 @@ pub struct Step {
     pub destroy: Option<ObjectEvent>,
     pub rpc: Option<RpcSpec>,
     pub world_saved: Option<bool>,
+    pub save: Option<bool>,
     pub http_done: Option<HttpDoneSpec>,
     pub reload: Option<bool>,
     pub flip: Option<bool>,
@@ -201,6 +225,9 @@ pub struct HttpDoneSpec {
     pub body: String,
     #[serde(default)]
     pub error: String,
+    /// Header names in lower case.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
 }
 
 fn ok_status() -> u32 {
@@ -211,13 +238,34 @@ fn ok_status() -> u32 {
 #[serde(deny_unknown_fields)]
 pub struct SetSpec {
     pub unix_ms: Option<i64>,
-    /// Move a player: client number and position.
-    pub position: Option<(u64, [f32; 3])>,
-    /// Set what a player carries: client number and group to count.
-    pub inventory: Option<(u64, BTreeMap<String, u32>)>,
-    pub operator: Option<(u64, bool)>,
+    pub position: Option<MoveSpec>,
+    pub inventory: Option<CarrySpec>,
+    pub operator: Option<OperatorSpec>,
     pub object: Option<ObjectSpec>,
     pub remove_object: Option<i32>,
+    pub terraformation: Option<f64>,
+    pub standing_still: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MoveSpec {
+    pub client: u64,
+    pub to: [f32; 3],
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CarrySpec {
+    pub client: u64,
+    pub items: BTreeMap<String, u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorSpec {
+    pub client: u64,
+    pub value: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -242,7 +290,7 @@ impl Scenario {
     pub fn parse(text: &str) -> Result<Scenario, String> {
         let s: Scenario = toml::from_str(text).map_err(|e| super::clean(&manifest::improve(e.to_string())))?;
         for (i, step) in s.steps.iter().enumerate() {
-            let n = [step.join.is_some(), step.leave.is_some(), step.chat.is_some(), step.advance.is_some(), step.place.is_some(), step.destroy.is_some(), step.rpc.is_some(), step.world_saved.is_some(), step.http_done.is_some(), step.reload.is_some(), step.flip.is_some(), step.set.is_some()].iter().filter(|b| **b).count();
+            let n = [step.join.is_some(), step.leave.is_some(), step.chat.is_some(), step.advance.is_some(), step.place.is_some(), step.destroy.is_some(), step.rpc.is_some(), step.world_saved.is_some(), step.save.is_some(), step.http_done.is_some(), step.reload.is_some(), step.flip.is_some(), step.set.is_some()].iter().filter(|b| **b).count();
             if n != 1 {
                 return Err(format!("step {}: a step does exactly one thing (join, leave, chat, advance, place, destroy, rpc, world_saved, http_done, reload, flip or set); this one has {n}", i + 1));
             }
@@ -265,21 +313,34 @@ impl Expect {
     }
 }
 
-/// "500ms", "90s", "10m", "2h", "1d" as milliseconds.
+/// "500ms", "90s", "10m", "2h", "1d", or several: "10m30s", as milliseconds.
 pub fn duration_ms(text: &str) -> Result<i64, String> {
-    let t = text.trim();
-    let split = t.find(|c: char| !c.is_ascii_digit()).ok_or_else(|| format!("{text:?}: a time needs its unit (ms, s, m, h, d), as 90s"))?;
-    let (n, unit) = t.split_at(split);
-    let n: i64 = n.parse().map_err(|_| format!("{text:?}: not a time (as 90s, 10m, 2h)"))?;
-    let per = match unit {
-        "ms" => 1,
-        "s" => 1000,
-        "m" => 60_000,
-        "h" => 3_600_000,
-        "d" => 86_400_000,
-        _ => return Err(format!("{text:?}: the unit is ms, s, m, h or d")),
-    };
-    n.checked_mul(per).filter(|ms| *ms <= 30 * 86_400_000).ok_or_else(|| format!("{text:?}: at most 30 days"))
+    let mut rest = text.trim();
+    let mut total: i64 = 0;
+    if rest.is_empty() {
+        return Err(format!("{text:?}: a time needs its unit (ms, s, m, h, d), as 90s"));
+    }
+    while !rest.is_empty() {
+        let digits = rest.find(|c: char| !c.is_ascii_digit()).ok_or_else(|| format!("{text:?}: a time needs its unit (ms, s, m, h, d), as 90s"))?;
+        let (n, tail) = rest.split_at(digits);
+        let n: i64 = n.parse().map_err(|_| format!("{text:?}: not a time (as 90s, 10m, 2h)"))?;
+        let unit_len = tail.find(|c: char| c.is_ascii_digit()).unwrap_or(tail.len());
+        let (unit, next) = tail.split_at(unit_len);
+        let per = match unit {
+            "ms" => 1,
+            "s" => 1000,
+            "m" => 60_000,
+            "h" => 3_600_000,
+            "d" => 86_400_000,
+            _ => return Err(format!("{text:?}: the unit is ms, s, m, h or d")),
+        };
+        total = n.checked_mul(per).and_then(|v| total.checked_add(v)).ok_or_else(|| format!("{text:?}: too long"))?;
+        rest = next;
+    }
+    if total > 30 * 86_400_000 {
+        return Err(format!("{text:?}: at most 30 days"));
+    }
+    Ok(total)
 }
 
 // ---- the stand-in world --------------------------------------------------------------------------
@@ -315,6 +376,8 @@ pub struct Sim {
     players: Vec<SimPlayer>,
     objects: Vec<ObjectSpec>,
     pub tokens: i64,
+    terraformation: f64,
+    standing_still: bool,
     rules: serde_json::Map<String, Value>,
     pub done: Vec<Done>,
     /// Players the plugin kicked: they leave after the call, as in the game.
@@ -327,7 +390,7 @@ impl Sim {
         for (k, v) in &s.world.rules {
             rules.insert(k.clone(), serde_json::to_value(v).unwrap_or(Value::Null));
         }
-        let mut sim = Sim { planet: s.world.planet.clone(), game_ms: s.world.game_ms, unix_start: s.world.unix_ms, slots: s.world.backpack_slots, players: Vec::new(), objects: s.objects.clone(), tokens: 0, rules, done: Vec::new(), left: Vec::new() };
+        let mut sim = Sim { planet: s.world.planet.clone(), game_ms: s.world.game_ms, unix_start: s.world.unix_ms, slots: s.world.backpack_slots, players: Vec::new(), objects: s.objects.clone(), tokens: 0, terraformation: s.world.terraformation, standing_still: s.world.standing_still, rules, done: Vec::new(), left: Vec::new() };
         for p in &s.players {
             sim.add_player(p);
         }
@@ -350,7 +413,7 @@ impl Sim {
 
 impl World for Sim {
     fn info(&self) -> WorldInfo {
-        WorldInfo { game_ms: self.game_ms, planet: self.planet.clone(), players: self.players.len() as u32, world_objects: self.objects.len() as u32, network_objects: self.objects.len() as u32 + self.players.len() as u32, terraformation: 1000.0, standing_still: false, unix_ms: self.unix_ms() }
+        WorldInfo { game_ms: self.game_ms, planet: self.planet.clone(), players: self.players.len() as u32, world_objects: self.objects.len() as u32, network_objects: self.objects.len() as u32 + self.players.len() as u32, terraformation: self.terraformation, standing_still: self.standing_still, unix_ms: self.unix_ms(), command_prefix: "!".into() }
     }
     fn players(&self) -> Vec<PlayerInfo> {
         self.players.iter().map(|p| PlayerInfo { client: p.client, name: p.name.clone(), steam_id: p.steam_id.clone(), position: p.position, gauges: [100.0, 100.0, 100.0, 0.0], player_id: p.player_id, operator: p.operator }).collect()
@@ -495,6 +558,10 @@ pub struct Rig {
     dir: PathBuf,
     pub host: Host,
     saved: Saved,
+    /// The settings that are secret, to write a request's URL back with the placeholder.
+    secrets: Vec<(String, String)>,
+    /// The ticket of the first request in this run: a scenario counts its tickets from 1.
+    ticket_base: Option<u64>,
 }
 
 impl Drop for Rig {
@@ -505,7 +572,8 @@ impl Drop for Rig {
 
 impl Rig {
     /// `folder` is a plugin folder as `pcds plugin install` takes it. `settings`: the values to give its
-    /// `[[config]]` keys, checked against their declarations.
+    /// `[[config]]` keys, checked against their declarations. The plugin is installed and approved but not
+    /// started: `start` does that, in a world.
     pub fn new(folder: &Path, settings: &BTreeMap<String, toml::Value>) -> Result<Rig, String> {
         let found = super::read_folder(folder);
         let Some(m) = found.manifest.clone() else { return Err(found.status.detail().unwrap_or("no plugin.toml").to_string()) };
@@ -523,7 +591,7 @@ impl Rig {
             }
             std::fs::write(&target, bytes).map_err(|e| format!("{}: {e}", target.display()))?;
         }
-        let rig = Rig { dir: dir.clone(), host: Host::empty(&dir, "test"), saved: Saved::default() };
+        let mut rig = Rig { dir: dir.clone(), host: Host::empty(&dir, "test"), saved: Saved::default(), secrets: Vec::new(), ticket_base: None };
         for (key, value) in settings {
             let declared = m.config.iter().find(|k| &k.key == key).ok_or_else(|| format!("[config] {key}: the plugin declares no such setting{} (it declares: {})", manifest::hint(key, m.config.iter().map(|k| k.key.as_str())), m.config.iter().map(|k| k.key.as_str()).collect::<Vec<_>>().join(", ")))?;
             let text = match value {
@@ -535,21 +603,24 @@ impl Rig {
             };
             let text = declared.check(&text)?;
             super::config::set(&dir, m.id(), key, Some(&text))?;
+            if declared.is_secret() {
+                rig.secrets.push((key.clone(), text));
+            }
         }
         super::approve_digest(&dir, m.id(), None, None)?;
-        let mut rig = rig;
-        rig.boot()?;
         Ok(rig)
     }
 
-    fn boot(&mut self) -> Result<(), String> {
+    /// Reads the folder and starts the plugin, with the world there for its `load` to read.
+    pub fn start(&mut self, sim: &mut Sim) -> Result<(), String> {
         let mut host = super::prepare(&self.dir, "test");
         host.offline = Some(Vec::new());
-        host.start_all(&self.saved);
+        host.start_all_in(&self.saved, &*sim, sim.game_ms);
         let p = host.plugins.first().ok_or("the plugin was not found after installing it")?;
         if !p.running() {
             return Err(format!("the plugin did not start: {}", p.status.detail().unwrap_or(p.status.name())));
         }
+        host.flush_boot(sim);
         self.host = host;
         Ok(())
     }
@@ -559,16 +630,32 @@ impl Rig {
     }
 
     /// The state through the plugin's `save`, then a new instance that `load`s it.
-    pub fn reload(&mut self) -> Result<(), String> {
+    pub fn reload(&mut self, sim: &mut Sim) -> Result<(), String> {
         self.host.checkpoint(&mut self.saved, None);
         // The counters and the log are the plugin's history, not the instance's: they go on.
-        let (stats, logs) = self.host.plugins.first_mut().map(|p| (std::mem::take(&mut p.stats), p.logs.clone())).unwrap_or_default();
-        self.boot()?;
+        let (stats, logs, denied) = self.host.plugins.first_mut().map(|p| (std::mem::take(&mut p.stats), p.logs.clone(), p.denied_caps.clone())).unwrap_or_default();
+        self.start(sim)?;
         if let Some(p) = self.host.plugins.first_mut() {
             p.stats = stats;
             p.logs = logs;
+            p.denied_caps = denied;
         }
         Ok(())
+    }
+
+    /// The requests made since the last call, in a form to show and to match: `METHOD URL HEADERS BODY`, the
+    /// URL with the secret settings written back as `${config.KEY}`; and each one's ticket as the scenario counts it.
+    fn take_requests(&mut self) -> Vec<(u64, String, String)> {
+        let fetches = self.host.offline.as_mut().map(std::mem::take).unwrap_or_default();
+        fetches
+            .into_iter()
+            .map(|f| {
+                let base = *self.ticket_base.get_or_insert(f.ticket);
+                let mask = |t: &str| self.secrets.iter().fold(t.to_string(), |t, (k, v)| t.replace(v.as_str(), &format!("${{config.{k}}}")));
+                let headers: Vec<String> = f.headers.iter().map(|(k, v)| format!("{k}: {}", mask(v))).collect();
+                (f.ticket - base + 1, format!("{} {}", f.method, mask(&f.url)), format!("{} {}", headers.join("; "), String::from_utf8_lossy(&f.body)))
+            })
+            .collect()
     }
 }
 
@@ -578,15 +665,21 @@ pub fn run(rig: &mut Rig, scenario: &Scenario) -> Outcome {
     let mut sim = Sim::new(scenario);
     let prefix = if scenario.name.is_empty() { String::new() } else { format!("{}: ", scenario.name) };
     out.lines.push(format!("{prefix}{} steps", scenario.steps.len()));
+    if let Err(e) = rig.start(&mut sim) {
+        out.failures.push(e);
+        return out;
+    }
+    sim.done.clear();
     let mut log_seen = 0u64;
+    // What the plugin logged while it loaded is shown with the first step.
+    let _ = &mut log_seen;
     for (n, step) in scenario.steps.iter().enumerate() {
         sim.done.clear();
         let before = (rig.plugin().stats.calls, rig.plugin().stats.fuel, rig.plugin().stats.faults);
         let heading = format!("step {}{}", n + 1, step.note.as_ref().map(|t| format!(" ({t})")).unwrap_or_default());
         let mut verdict = Verdict::Continue;
-        let said = describe(step);
-        out.lines.push(format!("{heading}: {said}"));
-        let asked_before = rig.host.offline.as_ref().map_or(0, Vec::len);
+        out.lines.push(format!("{heading}: {}", describe(step)));
+        let mut requests: Vec<(u64, String, String)> = Vec::new();
         if let Some(p) = &step.join {
             sim.add_player(p);
             let (name, id) = (p.name.clone(), sim.player(p.client).map_or(0, |q| q.player_id));
@@ -617,8 +710,15 @@ pub fn run(rig: &mut Rig, scenario: &Scenario) -> Outcome {
                 let now = step_ms.min(left);
                 sim.game_ms += now;
                 left -= now;
+                if let Some(rt) = rig.host.plugins.first_mut().and_then(|p| p.rt.as_mut()) {
+                    rt.ctx().skew += std::time::Duration::from_millis(now as u64);
+                }
+                if sim.standing_still {
+                    continue;
+                }
                 let event = Event::Tick { game_ms: sim.game_ms, tick: (sim.game_ms / 5) as i32, players: sim.players.len() as u32, since_ms: 0, unix_ms: sim.unix_ms() };
                 deliver_tick(rig, &mut sim, &event);
+                requests.extend(rig.take_requests());
             }
         } else if let Some(o) = &step.place {
             sim.objects.retain(|x| x.id != o.id);
@@ -640,12 +740,26 @@ pub fn run(rig: &mut Rig, scenario: &Scenario) -> Outcome {
         } else if let Some(ok) = step.world_saved {
             let event = Event::WorldSaved { game_ms: sim.game_ms, ok };
             deliver(rig, &mut sim, &event);
+        } else if step.save.is_some() {
+            match rig.host.plugins.first_mut().and_then(|p| p.rt.as_mut()).map(|rt| rt.save()) {
+                Some(Ok(Some(b))) => out.lines.push(format!("  its state: {} bytes, version {}", b.bytes.len(), b.version)),
+                Some(Ok(None)) => out.lines.push("  it keeps no state".into()),
+                Some(Err(f)) => out.failures.push(format!("{heading}: saving its state: {f}")),
+                None => {}
+            }
         } else if let Some(h) = &step.http_done {
-            let body = h.body.clone().into_bytes();
-            let event = Event::HttpDone { ticket: h.ticket, status: h.status, error: &h.error, body: &body, headers: vec![] };
-            deliver_http(rig, &mut sim, &event);
+            requests.extend(rig.take_requests());
+            match rig.ticket_base {
+                None => out.failures.push(format!("{heading}: the plugin has made no request yet, so there is none to answer")),
+                Some(base) => {
+                    let body = h.body.clone().into_bytes();
+                    let headers: Vec<(&str, &str)> = h.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+                    let event = Event::HttpDone { ticket: base + h.ticket.saturating_sub(1), status: h.status, error: &h.error, body: &body, headers };
+                    deliver_http(rig, &mut sim, &event);
+                }
+            }
         } else if step.reload.is_some() || step.flip.is_some() {
-            match rig.reload() {
+            match rig.reload(&mut sim) {
                 Ok(()) => {
                     out.lines.push("  the plugin saved its state and a new instance loaded it".into());
                     if step.flip.is_some() {
@@ -659,20 +773,20 @@ pub fn run(rig: &mut Rig, scenario: &Scenario) -> Outcome {
             if let Some(u) = s.unix_ms {
                 sim.unix_start = u - sim.game_ms;
             }
-            if let Some((c, pos)) = s.position {
-                if let Some(p) = sim.players.iter_mut().find(|p| p.client == c) {
-                    p.position = pos;
-                }
+            if let Some(m) = &s.position
+                && let Some(p) = sim.players.iter_mut().find(|p| p.client == m.client)
+            {
+                p.position = m.to;
             }
-            if let Some((c, inv)) = &s.inventory {
-                if let Some(p) = sim.players.iter_mut().find(|p| p.client == *c) {
-                    p.inventory = inv.clone();
-                }
+            if let Some(c) = &s.inventory
+                && let Some(p) = sim.players.iter_mut().find(|p| p.client == c.client)
+            {
+                p.inventory = c.items.clone();
             }
-            if let Some((c, op)) = s.operator {
-                if let Some(p) = sim.players.iter_mut().find(|p| p.client == c) {
-                    p.operator = op;
-                }
+            if let Some(o) = &s.operator
+                && let Some(p) = sim.players.iter_mut().find(|p| p.client == o.client)
+            {
+                p.operator = o.value;
             }
             if let Some(o) = &s.object {
                 sim.objects.retain(|x| x.id != o.id);
@@ -680,6 +794,12 @@ pub fn run(rig: &mut Rig, scenario: &Scenario) -> Outcome {
             }
             if let Some(id) = s.remove_object {
                 sim.objects.retain(|x| x.id != id);
+            }
+            if let Some(t) = s.terraformation {
+                sim.terraformation = t;
+            }
+            if let Some(b) = s.standing_still {
+                sim.standing_still = b;
             }
         }
         // Players the plugin kicked leave now, and the plugin hears of it.
@@ -693,14 +813,13 @@ pub fn run(rig: &mut Rig, scenario: &Scenario) -> Outcome {
                 deliver(rig, &mut sim, &event);
             }
         }
+        requests.extend(rig.take_requests());
         // The transcript: what the plugin did.
         for d in &sim.done {
             out.lines.push(format!("  {}", show(d)));
         }
-        if let Some(asked) = rig.host.offline.as_ref().map(|v| &v[asked_before..]) {
-            for f in asked {
-                out.lines.push(format!("  http {} {} (not sent; ticket {}){}", f.method, f.shown, f.ticket, if f.body.is_empty() { String::new() } else { format!(" body {}", short(&String::from_utf8_lossy(&f.body))) }));
-            }
+        for (ticket, head, rest) in &requests {
+            out.lines.push(format!("  http {head} (not sent; request {ticket}){}", if rest.trim().is_empty() { String::new() } else { format!(" {}", short(rest.trim())) }));
         }
         let p = rig.plugin();
         let logs = p.logs.after(log_seen);
@@ -708,8 +827,8 @@ pub fn run(rig: &mut Rig, scenario: &Scenario) -> Outcome {
         for l in &logs {
             out.lines.push(format!("  log {}: {}", level_name(l.level), l.text));
         }
-        let (calls, fuel, faults) = (p.stats.calls - before.0, p.stats.fuel - before.1, p.stats.faults - before.2);
-        if calls > 0 && !matches!(step.advance, Some(_)) {
+        let (calls, fuel, faults) = (p.stats.calls.saturating_sub(before.0), p.stats.fuel.saturating_sub(before.1), p.stats.faults.saturating_sub(before.2));
+        if calls > 0 && step.advance.is_none() {
             out.lines.push(format!("  ({calls} call{}, {fuel} fuel)", if calls == 1 { "" } else { "s" }));
         }
         if faults > 0 {
@@ -721,7 +840,7 @@ pub fn run(rig: &mut Rig, scenario: &Scenario) -> Outcome {
         }
         // The expectations.
         for e in &step.expect {
-            let all: Vec<String> = matching(e, &sim.done, rig.host.offline.as_deref().map_or(&[], |v| &v[asked_before..]), &logs, verdict);
+            let all: Vec<String> = matching(e, &sim.done, &requests, &logs, verdict);
             let hits = all.iter().filter(|text| e.contains.as_ref().is_none_or(|c| text.contains(c.as_str())) && e.equals.as_ref().is_none_or(|q| *text == q)).count();
             let ok = match e.count {
                 Some(n) => hits == n,
@@ -767,12 +886,11 @@ fn deliver_tick(rig: &mut Rig, sim: &mut Sim, event: &Event<'_>) {
     settle(rig);
 }
 
-fn deliver_http(rig: &mut Rig, sim: &mut Sim, event: &Event<'_>) -> Verdict {
+fn deliver_http(rig: &mut Rig, sim: &mut Sim, event: &Event<'_>) {
     // A plugin hears the answer of its own request whatever it subscribed to: straight into the call.
     let game_ms = sim.game_ms;
     rig.host.send(0, sim, event, game_ms);
     settle(rig);
-    Verdict::Continue
 }
 
 fn settle(rig: &mut Rig) {
@@ -827,6 +945,8 @@ fn describe(step: &Step) -> String {
         format!("the world is saved ({})", if ok { "ok" } else { "failed" })
     } else if let Some(h) = &step.http_done {
         format!("the answer to request {} arrives: status {}", h.ticket, h.status)
+    } else if step.save.is_some() {
+        "the plugin is asked to save its state".into()
     } else if step.flip.is_some() {
         "hot update".into()
     } else if step.reload.is_some() {
@@ -867,7 +987,7 @@ fn describe_expect(e: &Expect) -> String {
 }
 
 /// The texts of the things of the kind `e` names that the step made happen.
-fn matching(e: &Expect, done: &[Done], http: &[super::net::Fetch], logs: &[super::history::LogLine], verdict: Verdict) -> Vec<String> {
+fn matching(e: &Expect, done: &[Done], http: &[(u64, String, String)], logs: &[super::history::LogLine], verdict: Verdict) -> Vec<String> {
     let mut texts = Vec::new();
     for d in done {
         match (d, e) {
@@ -882,7 +1002,7 @@ fn matching(e: &Expect, done: &[Done], http: &[super::net::Fetch], logs: &[super
         }
     }
     if e.http.is_some() {
-        texts.extend(http.iter().map(|f| format!("{} {} {}", f.method, f.shown, String::from_utf8_lossy(&f.body))));
+        texts.extend(http.iter().map(|(_, head, rest)| format!("{head} {rest}")));
     }
     if e.veto.is_some() && verdict == Verdict::Veto {
         texts.push("veto".into());

@@ -1,5 +1,6 @@
 //! What a plugin calls: the `Host` trait, and the WebAssembly implementation that calls the
-//! server's imports. Write a plugin against `Host` and test it on a PC with your own mock.
+//! server's imports. Write a plugin against `Host`; the `testing` feature has a mock of it to test
+//! the plugin on a PC.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -28,18 +29,45 @@ pub const E_NOT_ALLOWED: i32 = -5;
 /// (ABI 1.3) The player or object asked about is not there (a player left; an object was destroyed).
 pub const E_NOT_FOUND: i32 = -6;
 
+/// Why a host call did not do what it was asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
+    /// The capability is not granted.
     Denied,
+    /// The arguments are no good.
     Bad,
+    /// Too many actions in this call or this second, too many timers, or too many requests.
     Full,
+    /// The host does not have this function (a server older than the plugin), or there is no
+    /// world to read now.
     Unsupported,
+    /// (ABI 1.2) The request's host is not on the manifest's list, or the URL is not one the host takes.
     NotAllowed,
+    /// (ABI 1.3) The player or object asked about is not there.
     NotFound,
+    /// The host's answer could not be read.
     Decode(DecodeError),
 }
 
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Error::Denied => f.write_str("denied: the capability is not granted"),
+            Error::Bad => f.write_str("bad arguments"),
+            Error::Full => f.write_str("full: too many actions, timers or requests"),
+            Error::Unsupported => f.write_str("unsupported: the server does not have this function, or there is no world to read now"),
+            Error::NotAllowed => f.write_str("not allowed: the host is not on the manifest's list"),
+            Error::NotFound => f.write_str("not found: the player or object is not there"),
+            Error::Decode(e) => write!(f, "the host's answer could not be read: {e}"),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for Error {}
+
 impl Error {
+    /// The error for a negative return code of a host function. An unknown code is `Bad`.
     pub fn from_code(code: i32) -> Error {
         match code {
             E_DENIED => Error::Denied,
@@ -58,15 +86,22 @@ impl From<DecodeError> for Error {
     }
 }
 
+/// How serious a log line is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum Level {
+    /// Something failed.
     Error = 0,
+    /// Something is off but the plugin goes on.
     Warn = 1,
+    /// Something worth a line in the log.
     Info = 2,
+    /// For the plugin's author.
     Debug = 3,
 }
 
+/// What a plugin calls: queries (read-only) and actions (queued, applied after the call). Each
+/// method says the capability it needs; without it the call returns `Error::Denied`.
 pub trait Host {
     /// A line in the server's log, prefixed with the plugin's id. Rate limited.
     fn log(&self, level: Level, message: &str);
@@ -95,6 +130,10 @@ pub trait Host {
     // ---- ABI 1.3. A host older than the plugin answers `Unsupported`; so do these defaults, which
     // ---- keep a `Host` written for 1.2 (a test double) compiling.
 
+    /// `world.read` (ABI 1.3): one online player. `NotFound` if they are not online. Cheaper than `players`.
+    fn player(&self, _client: u64) -> Result<PlayerInfo, Error> {
+        Err(Error::Unsupported)
+    }
     /// `world.read` (ABI 1.3): what a player carries. `NotFound` if they are not online.
     fn inventory(&self, _client: u64) -> Result<InventoryInfo, Error> {
         Err(Error::Unsupported)
@@ -117,6 +156,18 @@ pub trait Host {
     /// One setting (`settings` and a search): `None` if it is not set and has no default.
     fn config(&self, key: &str) -> Option<String> {
         self.settings().ok()?.into_iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+    /// A setting as a whole number: `None` if it is not set, has no default, or is not a number.
+    fn config_i64(&self, key: &str) -> Option<i64> {
+        self.config(key)?.trim().parse().ok()
+    }
+    /// A setting as a yes/no (the host stores `true` or `false`).
+    fn config_bool(&self, key: &str) -> Option<bool> {
+        self.config(key).and_then(|v| match v.as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        })
     }
     /// `player.give` (ABI 1.3): puts `count` of the item `group` into a player's backpack. Queued;
     /// done after the call if the player is still there and the backpack has room.
@@ -169,7 +220,8 @@ impl Wasm {
         Wasm::ask_with(kind, &[])
     }
     fn ask_with(kind: u32, arg: &[u8]) -> Result<Vec<u8>, Error> {
-        let mut out = alloc::vec![0u8; 512];
+        // Big enough for a handful of players in one call; a bigger answer is asked for again, from the host's copy.
+        let mut out = alloc::vec![0u8; 2048];
         loop {
             // SAFETY: the pointers are valid for the lengths given; the host writes at most out_cap bytes.
             let n = unsafe { sys::query(kind, arg.as_ptr(), arg.len(), out.as_mut_ptr(), out.len()) };
@@ -229,6 +281,9 @@ impl Host for Wasm {
         // SAFETY: a valid byte slice.
         let ticket = unsafe { sys::http_request(w.0.as_ptr(), w.0.len()) };
         if ticket > 0 { Ok(ticket as u64) } else { Err(Error::from_code(ticket as i32)) }
+    }
+    fn player(&self, client: u64) -> Result<PlayerInfo, Error> {
+        Ok(PlayerInfo::decode(&mut crate::codec::Reader::new(&Wasm::ask_with(query::Q_PLAYER, &client.to_le_bytes())?))?)
     }
     fn inventory(&self, client: u64) -> Result<InventoryInfo, Error> {
         Ok(InventoryInfo::decode(&Wasm::ask_with(query::Q_INVENTORY, &client.to_le_bytes())?)?)

@@ -248,6 +248,36 @@
   pre.log .e { color: var(--danger); }
   pre.log .w { color: var(--warn); }
 
+  /* ---- plugins ---- */
+  .plug { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; background: var(--panel); min-width: 0; }
+  .plug + .plug { margin-top: 12px; }
+  .plug-head { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; }
+  .plug-info { flex: 1 1 340px; min-width: 0; }
+  .plug-info > * + * { margin-top: 5px; }
+  .plug-acts { display: inline-flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .plug-body { margin-top: 12px; border-top: 1px solid var(--line); }
+  .plug-sec { padding: 12px 0; border-bottom: 1px solid var(--line); }
+  .plug-sec:last-child { border-bottom: 0; padding-bottom: 0; }
+  .plug-sec > h3 { margin-bottom: 8px; }
+  .plug-sec .row > h3 { margin: 0; }
+  .plug .note { background: var(--warn-soft); color: var(--warn); border-radius: 8px; padding: 6px 10px; font-size: 13px; overflow-wrap: anywhere; }
+  .plug .note.bad { background: var(--danger-soft); color: var(--danger); }
+  .plug .diff { border-left: 4px solid var(--line); background: var(--panel2); border-radius: 8px; padding: 8px 10px; font-size: 13px; overflow-wrap: anywhere; }
+  .plug .diff.more { border-left-color: var(--warn); background: var(--warn-soft); }
+  .plug .diff .add { color: var(--warn); }
+  .chip.wrap { white-space: normal; }
+  .plug td.w { overflow-wrap: anywhere; }
+  .plug .meter { display: flex; align-items: center; gap: 8px; min-width: 110px; }
+  .plug .bar { flex: 1; height: 8px; }
+  .plug .bar > i::after { display: none; }
+  .plug .bar.warm > i { background: var(--warn); }
+  .plug .bar.hot > i { background: var(--danger); }
+  .set { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 4px 16px; padding: 8px 0; border-top: 1px solid var(--line); }
+  .set:first-of-type { border-top: 0; }
+  pre.log.plog { min-height: 120px; max-height: 240px; }
+  pre.log .d { color: var(--muted); }
+  @media (max-width: 700px) { .set { grid-template-columns: minmax(0, 1fr); } }
+
   /* ---- banner, toasts, dialog, login ---- */
   .banner { margin: 16px 24px 0; padding: 10px 14px; border-radius: 10px; background: var(--warn-soft); color: var(--warn); font-weight: 500; display: flex; gap: 10px; align-items: center; }
   .banner.down { background: var(--danger-soft); color: var(--danger); }
@@ -522,7 +552,8 @@
           <div class="head"><h2>Plugins</h2><div class="right"><button id="pluginsReload">Read the folder again</button></div></div>
           <p class="sub">Plugins add commands, rules and reactions to the server without changing it. They live in the server's <code id="pluginsFolder">plugins</code> folder; add one with <code>pcds plugin install PATH</code>. A plugin does nothing until you approve what it asks for; a folder put there is found within a few seconds, and a plugin can be approved, switched off and replaced while the world runs. A plugin that misbehaves is stopped and restarted, and switched off after five faults in a minute.</p>
           <p class="sub" id="pluginsNote"></p>
-          <div class="tw" id="pluginsTable"></div>
+          <div id="pluginsList"></div>
+          <div class="empty" id="pluginsEmpty" hidden>No plugins installed. pcds plugin new ID makes one; the guide is docs/plugins-guide.md.</div>
         </div>
         <div class="card">
           <div class="head"><h2>Trusted publishers</h2></div>
@@ -1795,12 +1826,6 @@ $('unbanForm').onsubmit = e => { e.preventDefault(); const v = $('modUnban').val
 
 // ---- plugins ----
 let pluginData = null, tokenData = null;
-async function loadPlugins() {
-  try { pluginData = await api('GET', '/api/plugins'); drawPlugins(); }
-  catch (e) { if (!e.auth) $('pluginsNote').textContent = e.message; }
-  try { tokenData = await api('GET', '/api/plugins/tokens'); $('scopedNote').textContent = ''; drawTokens(); }
-  catch (e) { if (!e.auth) $('scopedNote').textContent = e.message; }
-}
 const STATE_CHIP = { running: 'ok', disabled: '', pending: 'warn', changed: 'warn', unloading: 'warn', invalid: 'bad', incompatible: 'bad', failed: 'bad' };
 // What a capability can do that its name does not say, shown where the admin decides.
 const CAP_CARE = {
@@ -1810,7 +1835,7 @@ const CAP_CARE = {
   'player.kick': 'It can remove players.',
   'rpc.veto': 'It can refuse what players do.'
 };
-const checkRow = (name, label, checked, note) => h('label', { style: 'display:flex;gap:8px;align-items:flex-start;margin:4px 0' }, h('input', { type: 'checkbox', name, checked: !!checked, style: 'margin-top:3px' }), h('span', {}, label, note ? h('div', { class: 'muted', style: 'font-size:12px' }, note) : null));
+const checkRow = (name, label, checked, note) => h('label', { style: 'display:flex;gap:8px;align-items:flex-start;margin:4px 0' }, h('input', { type: 'checkbox', name, checked: !!checked, style: 'margin-top:3px;flex:none' }), h('span', {}, label, note ? h('div', { class: 'muted', style: 'font-size:12px' }, note) : null));
 const checked = root => [...root.querySelectorAll('input[type=checkbox]')].filter(x => x.checked).map(x => x.name);
 function reaches(p) {
   const n = p.net; if (!n) return null;
@@ -1825,16 +1850,219 @@ function signatureLine(p) {
   if (g.state === 'invalid') return h('div', { style: 'margin-top:4px' }, h('span', { class: 'chip warn' }, 'signature does not hold'), h('span', { class: 'muted', style: 'font-size:12px' }, ` ${g.detail || ''}`));
   return null;
 }
-function configLine(p) {
-  const keys = p.config || []; if (!keys.length) return null;
-  return h('div', { style: 'margin-top:6px' }, keys.map(k => h('div', { class: 'row', style: 'gap:6px;margin:2px 0;align-items:center' },
-    h('span', { class: 'chip ' + (k.set ? 'ok' : 'warn') }, k.key), h('span', { class: 'muted', style: 'font-size:12px' }, `${k.description || ''} ${k.secret ? '(a secret' + (k.set ? ', set' : ', not set') + ')' : k.set ? `= ${k.value}` : '(not set)'}`),
-    h('button', { class: 'small', onclick: () => setConfig(p, k) }, k.set ? 'Change…' : 'Set…'), k.set ? h('button', { class: 'small', onclick: e => act(`${p.id} ${k.key} removed`, () => api('POST', '/api/plugins/config', { id: p.id, key: k.key }).then(loadPlugins), e.currentTarget) }, 'Remove') : null)));
+// What this version of a plugin asks for beyond what the admin approved, as a block for the row. Every string is text.
+function changesNode(p, what) {
+  const c = p.changes; if (!c) return null;
+  const add = c.added || [], addH = c.addedHosts || [], gone = c.removed || [], goneH = c.removedHosts || [];
+  const more = add.length || addH.length;
+  return h('div', { class: 'diff' + (more ? ' more' : ''), role: 'group', 'aria-label': 'Changes in the version on disk' },
+    h('b', {}, more ? `Version ${c.version || '?'} asks for more than you approved:` : `Version ${c.version || '?'} asks for nothing new.`),
+    add.map(x => h('div', { class: 'add' }, h('b', {}, `+ ${x}`), what[x] ? `: may ${what[x]}` : '')),
+    addH.map(x => h('div', { class: 'add' }, h('b', {}, '+ may now reach '), h('span', { class: 'mono' }, x))),
+    gone.length ? h('div', { class: 'muted' }, `No longer asks for: ${gone.join(', ')}`) : null,
+    goneH.length ? h('div', { class: 'muted' }, `No longer reaches: ${goneH.join(', ')}`) : null,
+    h('div', { class: 'muted' }, p.status === 'running' ? 'The version you approved keeps running until you approve this one.' : 'It does not run until you approve it.'));
 }
-async function setConfig(p, k) {
-  const input = h('input', { type: k.secret ? 'password' : 'text', autocomplete: 'off', placeholder: k.secret ? 'the value (shown nowhere afterwards)' : 'the value', style: 'width:100%' });
-  const body = [h('p', { style: 'margin:0 0 8px' }, k.description || k.key), input, h('p', { class: 'muted', style: 'margin:8px 0 0;font-size:12px' }, k.secret ? 'A secret: the server puts it in the plugin\'s requests; the plugin never sees it and no list or log shows it. Over this plain-HTTP page it travels as everything here does; the command line (pcds plugin config set) reads it from the terminal instead.' : 'One line.')];
-  if (await ask({ title: `${p.id}: ${k.key}`, body, ok: 'Save' }) && input.value.trim()) act(`${p.id} ${k.key} set`, () => api('POST', '/api/plugins/config', { id: p.id, key: k.key, value: input.value.trim() }).then(loadPlugins));
+const configNeeded = p => (p.config || []).filter(k => !k.set && k.default == null);
+const stamp = unix => Date.now() / 1000 - unix < 43200 ? new Date(unix * 1000).toLocaleTimeString() : when(unix);
+const nf = n => Math.round(n || 0).toLocaleString();
+const section = (title, ...kids) => [h('h3', {}, title), ...kids.flat()];
+
+// ---- one plugin: a block with a head that is always shown and a body that opens ----
+const plugs = new Map();   // plugin id -> its block and the last data it was drawn from (the id is a key here, never markup)
+let plugSeq = 0;
+// Replaces what `el` holds when `sig` is new; a poll that changed nothing leaves the DOM, and the focus in it, alone.
+// `keep` says the block must not be touched now (a field in it is being typed in).
+function put(el, sig, build, keep) {
+  if (el.dataset.sig === sig || (keep && keep())) return;
+  el.dataset.sig = sig;
+  el.replaceChildren(...[].concat(build()).filter(Boolean));
+}
+function plugBlock(id) {
+  let e = plugs.get(id); if (e) return e;
+  const n = ++plugSeq;
+  e = { id, n, open: false, log: null, logErr: '', logBusy: false };
+  e.info = h('div', { class: 'plug-info' });
+  e.acts = h('span', { class: 'plug-acts' });
+  e.use = h('div', { class: 'muted', style: 'margin-top:8px;font-size:13px' });
+  e.toggle = h('button', { class: 'small', 'aria-expanded': 'false', 'aria-controls': 'plug-body-' + n, onclick: () => setOpen(e, !e.open) }, 'Details');
+  e.secs = {};
+  for (const s of ['about', 'commands', 'settings', 'cost', 'faults', 'log']) e.secs[s] = h('section', { class: 'plug-sec' });
+  e.logNote = h('span', { class: 'muted', style: 'font-size:12px' });
+  e.logPre = h('pre', { class: 'log plog', tabIndex: 0, role: 'region', 'aria-label': 'Log of the plugin' });
+  e.secs.log.append(h('div', { class: 'row', style: 'margin-bottom:8px' }, h('h3', {}, 'Log'), h('button', { class: 'small', onclick: () => loadLog(e, true) }, 'Refresh'), e.logNote), e.logPre);
+  e.body = h('div', { class: 'plug-body', id: 'plug-body-' + n, hidden: true }, Object.values(e.secs));
+  e.root = h('div', { class: 'plug' }, h('div', { class: 'plug-head' }, e.info, h('span', { class: 'plug-acts' }, e.toggle, e.acts)), e.use, e.body);
+  plugs.set(id, e);
+  return e;
+}
+function setOpen(e, open) {
+  e.open = open;
+  e.body.hidden = !open;
+  e.toggle.setAttribute('aria-expanded', String(open));
+  e.toggle.textContent = open ? 'Hide details' : 'Details';
+  if (open) { drawDetail(e); loadLog(e, true); }
+}
+// The log of one plugin: the last lines the host kept for it. Asked only while its block is open and the tab is shown.
+async function loadLog(e, force) {
+  if (!e.open || e.logBusy || (document.hidden && !force)) return;
+  e.logBusy = true;
+  try { e.log = (await api('POST', '/api/plugins/logs', { id: e.id, limit: 100 })).lines || []; e.logErr = ''; }
+  catch (x) { if (x.auth) return; e.logErr = x.message; }
+  finally { e.logBusy = false; }
+  drawLog(e);
+}
+function drawLog(e) {
+  const pre = e.logPre, last = e.log && e.log.length ? e.log[e.log.length - 1].seq : '';
+  e.logNote.textContent = e.logErr ? `The log cannot be read: ${e.logErr}` : 'The last 100 lines, newest at the bottom. It refreshes every few seconds while this is open.';
+  if (e.logErr || e.log === null) { if (e.log === null) pre.replaceChildren(h('span', { class: 'muted' }, e.logErr ? 'No log to show.' : 'Loading…')); return; }
+  const sig = `${e.log.length}:${last}`;
+  if (pre.dataset.sig === sig) return;
+  const stick = !pre.dataset.sig || pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+  pre.dataset.sig = sig;
+  if (!e.log.length) { pre.replaceChildren(h('span', { class: 'muted' }, 'This plugin has written nothing to its log.')); return; }
+  const cls = { error: 'e', warn: 'w', debug: 'd' };
+  pre.replaceChildren(...e.log.map(l => h('span', { class: cls[l.level] || '' }, `${stamp(l.at)} ${String(l.level).padEnd(5)} ${l.text}\n`)));
+  if (stick) pre.scrollTop = pre.scrollHeight;
+}
+
+function drawPlug(e, p, what) {
+  e.p = p; e.what = what;
+  const s = p.stats || {}, c = p.changes, run = p.status === 'running';
+  e.toggle.setAttribute('aria-label', `${e.open ? 'Hide' : 'Show'} the details of ${p.name || p.id}`);
+  const needed = configNeeded(p), denied = p.deniedCapabilities || [];
+  const bad = ['failed', 'invalid', 'incompatible'].includes(p.status);
+  put(e.info, JSON.stringify({ ...p, stats: null }), () => [
+    h('div', {}, h('b', {}, p.name || p.id), ' ', h('span', { class: 'chip ' + (STATE_CHIP[p.status] || '') }, p.status)),
+    h('div', { class: 'muted mono' }, `${p.id} ${p.version || ''} · ${p.kind || '?'}${p.license ? ' · ' + p.license : ''}`),
+    p.description ? h('div', { class: 'muted' }, p.description) : null,
+    signatureLine(p),
+    h('div', {}, h('span', { class: 'muted', style: 'font-size:12px' }, (p.requested || []).length ? 'Asks for (green: granted): ' : 'Asks for no capability. '),
+      (p.requested || []).flatMap(x => [h('span', { class: 'chip ' + ((p.granted || []).includes(x) ? 'ok' : 'warn'), title: what[x] || '' }, x), ' ']), reaches(p)),
+    denied.length ? h('div', {}, h('span', { class: 'chip warn wrap', title: 'The plugin called something its grant does not cover; the host refused the call.' }, `used without being granted: ${denied.join(', ')}`)) : null,
+    needed.length ? h('div', {}, h('span', { class: 'chip warn wrap' }, `Settings with no value: ${needed.map(k => k.key).join(', ')}. Open the details to set them.`)) : null,
+    changesNode(p, what),
+    p.detail ? h('div', { class: 'note' + (bad ? ' bad' : '') }, p.detail) : null,
+    p.notice ? h('div', { class: 'note' }, p.notice) : null,
+    ...(p.warnings || []).map(t => h('div', { class: 'muted', style: 'font-size:12px' }, t))
+  ]);
+  put(e.acts, JSON.stringify([p.id, p.status, c && c.digest, c && c.version]), () => [
+    run ? h('button', { class: 'small', onclick: ev => act(`${p.id} switched off`, () => api('POST', '/api/plugins/disable', { id: p.id }).then(loadPlugins), ev.currentTarget) }, 'Disable')
+      : ['invalid', 'incompatible'].includes(p.status) ? null
+      : h('button', { class: 'small primary', onclick: ev => approvePlugin(e.p, e.what, ev.currentTarget) }, c ? 'Approve new version…' : p.status === 'pending' ? 'Approve…' : 'Enable…'),
+    run && c ? h('button', { class: 'small primary', onclick: ev => approvePlugin(e.p, e.what, ev.currentTarget) }, 'Approve new version…') : null,
+    h('button', { class: 'small', title: 'Reads the plugin folder again. Every plugin whose files changed is reloaded, not only this one.', onclick: ev => reloadPlugins(p.id, p.status === 'failed' ? 'started again' : null, ev.currentTarget) }, p.status === 'failed' ? 'Start again' : 'Reload')
+  ]);
+  const http = s.http && s.http.requests ? ` · ${s.http.requests} requests (${s.http.answered} answered, ${s.http.failed} failed, ${bytes(s.http.bytesOut)} out, ${bytes(s.http.bytesIn)} in)` : '';
+  put(e.use, JSON.stringify([s.calls, s.averageMicros, s.maxMicros, s.faults, s.actions, s.denied, s.lastError, s.http]), () => [
+    s.calls ? `${nf(s.calls)} calls, ${nf(s.averageMicros)} µs each, slowest ${nf(s.maxMicros)} µs` : 'no calls yet',
+    ` · ${s.faults || 0} faults · ${s.actions || 0} actions${s.denied ? ` · ${s.denied} refused calls` : ''}${http}`,
+    s.lastError ? h('div', { style: 'font-size:12px' }, `last fault: ${s.lastError}`) : null
+  ]);
+  if (e.open) drawDetail(e);
+}
+function reloadPlugins(id, label, btn) {
+  return act(r => (label ? `${id} ${label}` : (r && r.message) || 'The plugin folder is read again'), () => api('POST', '/api/plugins/reload').then(r => loadPlugins().then(() => r)), btn);
+}
+function drawDetail(e) {
+  const p = e.p, s = p.stats || {}, what = e.what || {};
+  put(e.secs.about, JSON.stringify({ ...p, stats: null, config: null, commands: null }), () => aboutSec(p, what));
+  put(e.secs.commands, JSON.stringify(p.commands), () => commandsSec(p));
+  put(e.secs.settings, JSON.stringify(p.config), () => settingsSec(e, p), () => { const a = document.activeElement; return e.secs.settings.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName); });
+  put(e.secs.cost, JSON.stringify([s, p.limits]), () => costSec(p));
+  put(e.secs.faults, JSON.stringify([s.faults, s.lastFaultAt, s.faultLog, p.status, p.detail]), () => faultsSec(e, p));
+  drawLog(e);
+}
+function aboutSec(p, what) {
+  const g = p.granted || [], asked = p.requested || [];
+  return section('About',
+    h('dl', { class: 'info' }, ...pairs([
+      ['Version', p.version || '–'], ['Kind', p.kind || '–'], ['Licence', p.license || '–'],
+      ['Authors', (p.authors || []).join(', ') || '–'],
+      ['Files', h('span', { class: 'mono', title: p.digest || '' }, (p.digest || '–').slice(0, 16))],
+      ['Events', (p.events || []).join(', ') || 'none']])),
+    h('div', { style: 'margin-top:10px' }, asked.length ? asked.map(x => h('div', { style: 'margin:3px 0' },
+      h('span', { class: 'chip ' + (g.includes(x) ? 'ok' : 'warn') }, g.includes(x) ? 'granted' : 'not granted'), ' ', h('b', {}, x), h('span', { class: 'muted' }, what[x] ? `: may ${what[x]}` : ''))) : h('span', { class: 'muted' }, 'It asks for no capability: it can read nothing and change nothing.')),
+    reaches(p));
+}
+function commandsSec(p) {
+  const cmds = p.commands || [];
+  const args = c => c.minArgs == null && c.maxArgs == null ? '' : c.minArgs === c.maxArgs ? `${c.minArgs} argument${c.minArgs === 1 ? '' : 's'}` : `${c.minArgs ?? 0} to ${c.maxArgs ?? 'any number of'} arguments`;
+  return section('Commands',
+    cmds.length ? h('p', { class: 'sub', style: 'margin:0 0 6px' }, 'Typed in the chat after the server\'s command prefix.') : null,
+    h('div', { class: 'tw' }, table(['Command', 'What it does', 'Who'], cmds.map(c => [
+      h('td', { class: 'w' }, h('b', {}, c.name), c.usage ? h('span', { class: 'mono' }, ` ${c.usage}`) : null, args(c) ? h('div', { class: 'muted', style: 'font-size:12px' }, args(c)) : null),
+      h('td', { class: 'w' }, c.help || '–'),
+      h('td', {}, c.permission === 'operator' ? h('span', { class: 'chip warn', title: 'Only the server\'s operators (access.operators) may use it' }, 'operators only') : 'everyone')]), 'This plugin has no commands.')));
+}
+// One typed setting: the control that fits the type, Save, and the server's own words when it says no.
+function settingRow(e, p, k, i) {
+  const num = k.type === 'int' || k.type === 'float', id = `set-${e.n}-${i}`;
+  const now = k.secret ? '' : k.set ? String(k.value ?? '') : k.default != null ? String(k.default) : '';
+  let input;
+  if (k.type === 'bool') input = h('input', { type: 'checkbox', id, checked: now.toLowerCase() === 'true', style: 'flex:none', 'aria-label': k.key });
+  else if (k.choices && k.choices.length) input = h('select', { id }, k.set || k.default != null ? null : h('option', { value: '' }, '(not set)'), k.choices.map(x => h('option', { value: x, selected: x === now }, x)));
+  else input = h('input', { id, type: num ? 'number' : k.secret ? 'password' : 'text', value: now, autocomplete: 'off', min: num ? k.min : null, max: num ? k.max : null, step: num ? (k.type === 'int' ? 1 : 'any') : null, maxLength: num ? null : k.maxLen || (k.secret ? 2048 : 200), placeholder: k.secret ? (k.set ? 'set; type a new value' : 'the value (shown nowhere afterwards)') : '' });
+  const val = () => k.type === 'bool' ? String(input.checked) : input.value.trim();
+  let shown = k.type === 'bool' ? String(input.checked) : input.value.trim();
+  const err = h('div', { class: 'err', role: 'alert' });
+  const save = h('button', { class: 'small', disabled: true }, 'Save');
+  const sync = () => { save.disabled = val() === shown || (k.type !== 'bool' && !val()); save.classList.toggle('primary', !save.disabled); };
+  input.addEventListener('input', sync); input.addEventListener('change', sync);
+  save.onclick = async () => {
+    err.textContent = ''; save.classList.add('busy'); save.disabled = true;
+    try { await api('POST', '/api/plugins/config', { id: p.id, key: k.key, value: val() }); shown = val(); toast(`${p.id} ${k.key} set`); await loadPlugins(); }
+    catch (x) { if (!x.auth) err.textContent = x.message; }
+    finally { save.classList.remove('busy'); sync(); }
+  };
+  const kinds = { string: 'text', int: 'whole number', float: 'number', bool: 'yes or no' };
+  const hint = [kinds[k.type] || k.type || 'text',
+    num && (k.min != null || k.max != null) ? (k.min != null && k.max != null ? `${k.min} to ${k.max}` : k.min != null ? `at least ${k.min}` : `at most ${k.max}`) : null,
+    k.type === 'string' && k.maxLen ? `up to ${k.maxLen} characters` : null,
+    k.choices && k.choices.length ? `one of ${k.choices.join(', ')}` : null,
+    k.default != null ? `default ${k.default}` : null, k.secret ? 'a secret' : null].filter(Boolean).join(' · ');
+  return h('div', { class: 'set' },
+    h('div', {}, h('label', { for: id }, h('b', { class: 'mono' }, k.key)), ' ', h('span', { class: 'chip ' + (k.set ? 'ok' : k.default != null ? '' : 'warn') }, k.set ? 'set' : k.default != null ? 'default' : 'no value'),
+      h('div', { class: 'muted', style: 'font-size:12.5px' }, k.description || ''), h('div', { class: 'muted', style: 'font-size:12px' }, hint)),
+    h('div', {}, h('div', { class: 'row', style: 'flex-wrap:nowrap' }, input, save,
+      k.set ? h('button', { class: 'small', onclick: ev => act(`${p.id} ${k.key} removed`, () => api('POST', '/api/plugins/config', { id: p.id, key: k.key }).then(loadPlugins), ev.currentTarget) }, k.default != null ? 'Use the default' : 'Remove') : null), err));
+}
+function settingsSec(e, p) {
+  const keys = p.config || [];
+  return section('Settings', keys.length ? [
+    ...keys.map((k, i) => settingRow(e, p, k, i)),
+    keys.some(k => k.secret) ? h('p', { class: 'muted', style: 'margin:8px 0 0;font-size:12px' }, 'A secret: the server puts it in the plugin\'s requests; the plugin never sees it and no list or log shows it. Over this plain-HTTP page it travels as everything here does; the command line (pcds plugin config set) reads it from the terminal instead.') : null
+  ] : h('div', { class: 'muted' }, 'This plugin has no settings.'));
+}
+function costSec(p) {
+  const s = p.stats || {}, lim = (p.limits || {}).fuelPerEvent, u = (n, v, t) => h('div', { class: 'unit', title: t || '' }, h('div', { class: 'n' }, n), h('div', { class: 'v' }, v));
+  const ev = [...(s.byEvent || [])].sort((a, b) => b.maxFuel - a.maxFuel);
+  return section('Cost',
+    h('div', { class: 'units', style: 'margin-top:0' },
+      u('Calls', nf(s.calls)), u('Average call', `${nf(s.averageMicros)} µs`), u('Slowest call', `${nf(s.maxMicros)} µs`), u('Fuel in all', nf(s.fuel), 'Fuel counts the work a plugin does; a call that spends its whole budget is stopped'),
+      u('Restarts', nf(s.restarts)), u('Slow calls', nf(s.slow)), u('Shed ticks', nf(s.shed), 'Tick events skipped because the tick\'s time was spent; they come at the next tick'),
+      u('Refused calls', nf(s.denied), 'Calls the host refused because the capability was not granted'), u('Actions', nf(s.actions), 'Changes the plugin made to the world'), u('Refused by the game', nf(s.refused), 'Actions the game turned down'), u('Vetoes', nf(s.vetoes), 'Player actions the plugin refused')),
+    h('p', { class: 'muted', style: 'margin:10px 0 6px;font-size:12px' }, lim ? `Fuel budget of one event: ${nf(lim)}. The bar is the most fuel one call of that event has used.` : 'Fuel budget of one event: not known.'),
+    h('div', { class: 'tw' }, table(['Event', 'Calls', 'Fuel, average', 'Fuel, most', 'Budget used', 'µs, average', 'µs, most'], ev.map(x => {
+      const pct = lim ? Math.min(100, x.maxFuel / lim * 100) : null;
+      return [h('td', { class: 'mono' }, x.event), h('td', { class: 'num' }, nf(x.calls)), h('td', { class: 'num' }, nf(x.averageFuel)), h('td', { class: 'num' }, nf(x.maxFuel)),
+        h('td', {}, pct === null ? '–' : h('div', { class: 'meter' }, h('div', { class: 'bar' + (pct >= 90 ? ' hot' : pct >= 60 ? ' warm' : ''), 'aria-hidden': 'true' }, h('i', { style: `width:${pct.toFixed(1)}%` })), h('span', { class: 'num' }, `${pct < 10 ? pct.toFixed(1) : Math.round(pct)} %`))),
+        h('td', { class: 'num' }, nf(x.averageMicros)), h('td', { class: 'num' }, nf(x.maxMicros))];
+    }), 'No event has been delivered yet.')));
+}
+function faultsSec(e, p) {
+  const s = p.stats || {}, log = [...(s.faultLog || [])].reverse();
+  return section('Faults',
+    h('p', { class: 'sub', style: 'margin:0 0 6px' }, s.faults ? `${s.faults} fault${s.faults === 1 ? '' : 's'}${s.lastFaultAt ? `, last at ${when(s.lastFaultAt)}` : ''}. The newest are listed.` : 'No faults.'),
+    p.status === 'failed' ? h('div', { class: 'note bad', style: 'margin-bottom:8px' }, p.detail || 'It stopped after too many faults.', ' ', h('button', { class: 'small', onclick: ev => reloadPlugins(p.id, 'started again', ev.currentTarget) }, 'Start again')) : null,
+    log.length ? h('div', { class: 'tw' }, table(['Time', 'During', 'What happened'], log.map(f => [h('td', { class: 'num' }, when(f.at)), h('td', { class: 'mono' }, f.during || '–'), h('td', { class: 'w' }, f.text)]), '')) : null);
+}
+async function loadPlugins() {
+  try { pluginData = await api('GET', '/api/plugins'); drawPlugins(); }
+  catch (e) { if (!e.auth) $('pluginsNote').textContent = e.message; }
+  try { tokenData = await api('GET', '/api/plugins/tokens'); $('scopedNote').textContent = ''; drawTokens(); }
+  catch (e) { if (!e.auth) $('scopedNote').textContent = e.message; }
+  if (current === 'plugins') for (const e of plugs.values()) loadLog(e);
 }
 function drawPlugins() {
   const d = pluginData; if (!d) return;
@@ -1842,25 +2070,12 @@ function drawPlugins() {
   $('pluginsNote').textContent = d.approvalsError ? `approved.json cannot be read, so no plugin runs: ${d.approvalsError}` : '';
   $('keysNote').textContent = d.keysError ? `trusted-keys.json cannot be read, so no key is trusted: ${d.keysError}` : '';
   const what = Object.fromEntries((d.capabilities || []).map(c => [c.name, c.allows]));
-  const rows = (d.plugins || []).map(p => {
-    const caps = h('td', {}, (p.requested || []).map(c => h('span', { class: 'chip ' + ((p.granted || []).includes(c) ? 'ok' : 'warn'), title: what[c] || '' }, c)), reaches(p), configLine(p));
-    const calls = p.stats.calls ? `${p.stats.calls.toLocaleString()} calls, ${Math.round(p.stats.averageMicros)} µs each, slowest ${Math.round(p.stats.maxMicros)} µs` : 'no calls yet';
-    const http = p.stats.http && p.stats.http.requests ? ` · ${p.stats.http.requests} requests (${p.stats.http.answered} answered, ${p.stats.http.failed} failed, ${bytes(p.stats.http.bytesOut)} out, ${bytes(p.stats.http.bytesIn)} in)` : '';
-    const problem = [p.detail, p.notice, p.stats.lastError ? `last fault: ${p.stats.lastError}` : null, ...(p.warnings || [])].filter(Boolean);
-    const buttons = h('td', { class: 'row' },
-      p.status === 'running'
-        ? h('button', { class: 'small', onclick: e => act(`${p.id} switched off`, () => api('POST', '/api/plugins/disable', { id: p.id }).then(loadPlugins), e.currentTarget) }, 'Disable')
-        : ['invalid', 'incompatible'].includes(p.status) ? null
-        : h('button', { class: 'small primary', onclick: e => approvePlugin(p, what, e.currentTarget) }, p.status === 'pending' || p.status === 'changed' ? 'Approve…' : 'Enable…'),
-      p.status === 'failed' ? h('button', { class: 'small', onclick: e => act(`${p.id} started again`, () => api('POST', '/api/plugins/reload').then(loadPlugins), e.currentTarget) }, 'Start again') : null);
-    return [
-      h('td', {}, h('b', {}, p.name || p.id), h('div', { class: 'muted mono' }, `${p.id} ${p.version || ''} · ${p.kind || '?'}${p.license ? ' · ' + p.license : ''}`), p.description ? h('div', { class: 'muted' }, p.description) : null, signatureLine(p)),
-      h('td', {}, h('span', { class: 'chip ' + (STATE_CHIP[p.status] || '') }, p.status), ...problem.map(t => h('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' }, t))),
-      caps,
-      h('td', {}, calls, h('div', { class: 'muted' }, `${p.stats.faults} faults · ${p.stats.actions} actions${p.stats.denied ? ` · ${p.stats.denied} refused calls` : ''}${http}`)),
-      buttons
-    ];
-  });
+  const list = d.plugins || [], ids = new Set(list.map(p => p.id));
+  for (const [id, e] of plugs) if (!ids.has(id)) { e.root.remove(); plugs.delete(id); }
+  for (const p of list) drawPlug(plugBlock(p.id), p, what);
+  const box = $('pluginsList');
+  list.forEach((p, i) => { const el = plugs.get(p.id).root; if (box.children[i] !== el) box.insertBefore(el, box.children[i] || null); });
+  $('pluginsEmpty').hidden = list.length > 0;
   const consumers = (d.stream && d.stream.consumers) || [];
   $('pluginConsumers').replaceChildren(table(['Name', 'Events', 'Last poll', 'Polls'], consumers.map(c => [h('td', { class: 'mono' }, c.name), (c.kinds || []).join(', '), `${c.lastPollSecondsAgo} s ago`, String(c.polls)]), 'No program is reading the stream'));
   const keys = d.trustedKeys || [], revoked = d.revokedKeys || [];
@@ -1869,21 +2084,28 @@ function drawPlugins() {
       h('td', {}, h('button', { class: 'small danger', onclick: e => untrust(k, e.currentTarget) }, 'Remove'))]),
     ...revoked.map(r => [h('td', {}, h('b', {}, r.name), h('div', { class: 'muted' }, `removed ${ago(r.at)}`)), h('td', { class: 'mono' }, r.id), h('td', {}, h('span', { class: 'chip bad' }, 'revoked')), h('td')])
   ], 'No publisher is trusted: every plugin is approved by its own files.'));
-  const sig = JSON.stringify(rows.map(r => r.map(c => c.textContent)));
-  if ($('pluginsTable').dataset.sig === sig) return;
-  $('pluginsTable').dataset.sig = sig;
-  $('pluginsTable').replaceChildren(table(['Plugin', 'State', 'Capabilities asked (green: granted)', 'Use', ''], rows, 'No plugins installed. pcds plugin new ID makes one; the guide is docs/plugins-guide.md.'));
 }
+// The question before a plugin runs: what it asks for, what is new in it, and where it may reach. Only the ticked capabilities are granted.
 async function approvePlugin(p, what, btn) {
-  const asked = p.requested || [];
-  const g = p.signature || {};
-  const list = h('div', {}, asked.map(c => checkRow(c, [h('b', {}, c), ': may ' + (what[c] || '')], c !== 'net.http.local', CAP_CARE[c])));
-  const body = [h('p', { style: 'margin:0 0 8px' }, `${p.name || p.id} ${p.version || ''} asks for (untick what it should not have):`), list];
-  if (p.net) body.push(h('div', { style: 'margin:8px 0 0;padding:8px;border:1px solid var(--line);border-radius:6px' }, h('b', {}, 'Where it may send requests'), p.net.allow.map(a => h('div', { class: 'mono' }, a + (a.includes('://*.') ? '   ← a wildcard: every name below it, whoever runs them' : '') + (a.startsWith('http://') ? '   ← not encrypted' : ''))), h('div', { class: 'muted', style: 'font-size:12px' }, 'Only these, pinned by the files you approve now. It never reaches this machine or your network unless you also grant net.http.local.')));
-  const keysNeeded = (p.config || []).filter(k => !k.set);
+  const c = p.changes, g = p.signature || {}, granted = p.granted || [];
+  const added = c ? c.added || [] : [], gone = c ? c.removed || [] : [], addedHosts = c ? c.addedHosts || [] : [], goneHosts = c ? c.removedHosts || [] : [];
+  const have = p.requested || [];
+  // The files on disk may be the ones asking (not approved yet) or may wait beside a running older version: both give old minus gone plus new.
+  const asked = [...have.filter(x => !gone.includes(x)), ...added.filter(x => !have.includes(x))];
+  const hosts = p.net || addedHosts.length ? [...((p.net && p.net.allow) || []).filter(a => !goneHosts.includes(a)), ...addedHosts.filter(a => !((p.net && p.net.allow) || []).includes(a))] : [];
+  const fresh = x => added.includes(x), freshHost = a => addedHosts.includes(a);
+  // What was approved stays ticked; what is new waits for a tick; this machine only if it was granted before.
+  const on = x => c ? (!fresh(x) && (x !== 'net.http.local' || granted.includes(x))) : x !== 'net.http.local';
+  const tag = a => a ? h('span', { class: 'chip warn', style: 'margin-left:6px' }, 'new') : null;
+  const list = h('div', {}, asked.map(x => checkRow(x, [h('b', {}, x), tag(fresh(x)), ': may ' + (what[x] || '')], on(x), CAP_CARE[x])));
+  const more = added.length || addedHosts.length;
+  const body = [h('p', { style: 'margin:0 0 8px' }, c ? `Version ${c.version || '?'} of ${p.name || p.id} ${more ? 'asks for more than you approved. What is new is marked new and is not ticked: tick what it should have.' : 'asks for nothing new.'}` : `${p.name || p.id} ${p.version || ''} asks for (untick what it should not have):`), asked.length ? list : h('p', { class: 'muted', style: 'margin:0' }, 'It asks for no capability.')];
+  if (hosts.length) body.push(h('div', { style: 'margin:8px 0 0;padding:8px;border:1px solid var(--line);border-radius:6px' }, h('b', {}, 'Where it may send requests'), hosts.map(a => h('div', { class: 'mono' }, a, tag(freshHost(a)), (a.includes('://*.') ? '   ← a wildcard: every name below it, whoever runs them' : '') + (a.startsWith('http://') ? '   ← not encrypted' : ''))), h('div', { class: 'muted', style: 'font-size:12px' }, 'Only these, pinned by the files you approve now. It never reaches this machine or your network unless you also grant net.http.local.')));
+  if (gone.length || goneHosts.length) body.push(h('p', { class: 'muted', style: 'margin:8px 0 0;font-size:12px' }, [gone.length ? `No longer asks for: ${gone.join(', ')}. ` : '', goneHosts.length ? `No longer reaches: ${goneHosts.join(', ')}.` : ''].join('')));
+  const keysNeeded = configNeeded(p);
   if (keysNeeded.length) body.push(h('p', { class: 'muted', style: 'margin:8px 0 0' }, `It needs values from you (${keysNeeded.map(k => k.key).join(', ')}): set them after approving.`));
   body.push(h('p', { class: 'muted', style: 'margin:8px 0 0' }, g.state === 'trusted' ? `Signed by ${g.keyName}, whom you trust${(g.vouches || []).length ? ' for ' + g.vouches.join(', ') : ''}: later versions it signs will not need approving again while they ask for nothing beyond this.` : g.state === 'untrusted' ? 'It is signed by a key you have not trusted; approving does not trust the key. It waits for you again if its files change.' : asked.length ? 'It gets these and nothing else, for exactly these files: if they change, it waits for you again.' : 'It asks for nothing: it can read nothing and change nothing.'));
-  if (await ask({ title: `Approve ${p.id}?`, body, ok: 'Approve' })) act(`${p.id} approved`, () => api('POST', '/api/plugins/enable', { id: p.id, grant: checked(list), digest: p.digest }).then(loadPlugins), btn);
+  if (await ask({ title: `Approve ${p.id}?`, body, ok: 'Approve' })) act(`${p.id} approved`, () => api('POST', '/api/plugins/enable', { id: p.id, grant: checked(list), digest: c ? c.digest : p.digest }).then(loadPlugins), btn);
 }
 async function untrust(k, btn) {
   if (await ask({ title: `Stop trusting ${k.name}?`, body: 'The plugins that run only because this publisher signed them stop at the next look at the folder (a few seconds); plugins you approved yourself go on. The key is remembered as revoked.', ok: 'Remove', danger: true })) act(`${k.name} is no longer trusted`, () => api('POST', '/api/plugins/untrust', { id: k.id }).then(loadPlugins), btn);
@@ -1923,7 +2145,7 @@ $('scopedForm').onsubmit = async e => {
 };
 onShow.plugins = loadPlugins;
 setInterval(() => { if (current === 'plugins' && !document.hidden) loadPlugins(); }, 5000);
-$('pluginsReload').onclick = e => act('The plugin folder is read again', () => api('POST', '/api/plugins/reload').then(loadPlugins), e.currentTarget);
+$('pluginsReload').onclick = e => reloadPlugins(null, null, e.currentTarget);
 
 // ---- everything from one status ----
 function render(s) {

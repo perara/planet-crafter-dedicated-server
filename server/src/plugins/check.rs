@@ -29,10 +29,14 @@ struct Canned {
 
 impl World for Canned {
     fn info(&self) -> WorldInfo {
-        WorldInfo { game_ms: 3_725_000, planet: "Prime".into(), players: 2, world_objects: 900, network_objects: 1200, terraformation: 1234.5, standing_still: false, unix_ms: 1_760_000_000_000 }
+        WorldInfo { game_ms: 3_725_000, planet: "Prime".into(), players: 16, world_objects: 900, network_objects: 1200, terraformation: 1234.5, standing_still: false, unix_ms: 1_760_000_000_000, command_prefix: "!".into() }
     }
     fn players(&self) -> Vec<PlayerInfo> {
-        vec![PlayerInfo { client: 1, name: "Ann".into(), position: [10.0, 2.0, 30.0], gauges: [100.0, 80.0, 90.0, 0.0], ..Default::default() }, PlayerInfo { client: 2, name: "Bo".into(), ..Default::default() }]
+        // A busy server: the samples show what a plugin costs with sixteen players in, not two.
+        (1..=16u64).map(|c| PlayerInfo { client: c, name: if c == 1 { "Ann".into() } else if c == 2 { "Bo".into() } else { format!("Player{c}") }, position: [10.0 * c as f32, 2.0, 30.0], gauges: [100.0, 80.0, 90.0, 0.0], player_id: c + 1000, ..Default::default() }).collect()
+    }
+    fn inventory(&self, client: u64) -> Option<pcds_plugin_api::InventoryInfo> {
+        (client <= 16).then(|| pcds_plugin_api::InventoryInfo { slots_used: 3, slots_total: 30, items: vec![pcds_plugin_api::query::ItemCount { group: "Iron".into(), count: 3 }] })
     }
     fn rules(&self) -> String {
         "{}".into()
@@ -52,23 +56,25 @@ impl Sink for Canned {
 /// The capability each host function needs, by its import name.
 fn import_cap(import: &str) -> Option<&'static str> {
     Some(match import.strip_prefix("pcds.")? {
-        "query" => caps::WORLD_READ,
-        "say" | "tell" => caps::CHAT_SAY,
+                "say" | "tell" => caps::CHAT_SAY,
         "kick" => caps::PLAYER_KICK,
         "teleport" => caps::PLAYER_TELEPORT,
         "rules_patch" => caps::RULES_WRITE,
         "http_request" => caps::NET_HTTP,
+        "give" => caps::PLAYER_GIVE,
+        "tokens" => caps::WORLD_TOKENS,
+        "timer_set" | "timer_cancel" => caps::EVENT_TIMER,
         _ => return None,
     })
 }
 
-fn sample(kind: Kind, command: Option<&str>, rpc: Option<&str>) -> Event<'static> {
+fn sample(kind: Kind, command: Option<&str>, rpc: Option<&str>, args: usize) -> Event<'static> {
     match kind {
         Kind::Tick => Event::Tick { game_ms: 3_725_000, tick: 744_000, players: 2, since_ms: 1000, unix_ms: 1_760_000_000_000 },
         Kind::PlayerJoin => Event::PlayerJoin { client: 1, name: "Ann", steam_id: "76561198000000000", player_id: 76561198000000000 },
         Kind::PlayerLeave => Event::PlayerLeave { client: 1, name: "Ann", player_id: 76561198000000000 },
         Kind::Chat => Event::Chat { client: 1, name: "Ann", text: "hello everyone", player_id: 76561198000000000 },
-        Kind::Command => Event::Command { client: 1, name: "Ann", command: Box::leak(command.unwrap_or("help").to_string().into_boxed_str()), args: vec!["one", "two"], text: "!command one two", player_id: 76561198000000000 },
+        Kind::Command => Event::Command { client: 1, name: "Ann", command: Box::leak(command.unwrap_or("help").to_string().into_boxed_str()), args: ["one", "two", "three"][..args.min(3)].to_vec(), text: "!command one two three", player_id: 76561198000000000 },
         Kind::RpcBefore => Event::RpcBefore { client: 1, rpc: Box::leak(rpc.unwrap_or("Some.Rpc").to_string().into_boxed_str()), object: 42, args_json: "[1,2,3]" },
         Kind::RpcAfter => Event::RpcAfter { client: 1, rpc: Box::leak(rpc.unwrap_or("Some.Rpc").to_string().into_boxed_str()), object: 42, args_json: "[1,2,3]" },
         Kind::ObjectPlaced => Event::ObjectPlaced { id: 100, group: "Drill1", position: [1.0, 2.0, 3.0], client: 1 },
@@ -148,8 +154,16 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
                 for cap in p.capabilities.iter().filter(|c| import_cap_needed(c) && !used.contains(c.as_str())) {
                     report.warnings.push(format!("the manifest asks for {cap}, but the module imports nothing that needs it"));
                 }
+                // A setting that is a secret cannot be read by the plugin: it is only put into a request. A key the module never names
+                // as `${config.KEY}` and that is secret is a setting the plugin cannot see.
+                for k in m.config.iter().filter(|k| k.is_secret()) {
+                    let needle = format!("config.{}", k.key);
+                    if !entry.windows(needle.len()).any(|w| w == needle.as_bytes()) {
+                        report.warnings.push(format!("the setting {} is a secret (the default for a string), and the module never uses ${{config.{}}}: the plugin cannot read it. Say secret = false if the plugin reads it with host.config()", k.key, k.key));
+                    }
+                }
                 let limits = super::limits::Limits::resolve(&m.budget, &Default::default());
-                match super::wasm::Wasm::new(&engine, &module, Ctx::new(&p.id, grant), limits, Default::default()) {
+                match super::wasm::Wasm::new(&engine, &module, { let mut c = Ctx::new(&p.id, grant); c.settings = found.settings.clone(); c }, limits, Default::default()) {
                     Ok(w) => runtime = Some(Box::new(w)),
                     Err(e) => report.errors.push(format!("the module does not start: {e}")),
                 }
@@ -168,7 +182,7 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
                 report.facts.push(format!("rules: {} commands, {} joins, {} leaves, {} announcements, {} rule switches", rules.commands.len(), rules.on_join.len(), rules.on_leave.len(), rules.every.len(), rules.when_players.len()));
                 kinds = rules.kinds();
                 found.commands = rules.command_names();
-                runtime = Some(Box::new(super::data::Data::new(rules, Ctx::new(&p.id, grant))));
+                runtime = Some(Box::new(super::data::Data::new(rules, { let mut c = Ctx::new(&p.id, grant); c.settings = found.settings.clone(); c })));
             }
         },
     }
@@ -190,7 +204,12 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
     }
     // The smoke test: start it, then show it an event of each kind it wants.
     if let Some(mut rt) = runtime {
-        match rt.start(None) {
+        // Started as the server starts it: the world there to read.
+        let canned = Canned::default();
+        rt.ctx().begin(&canned, 3_725_000);
+        let started = rt.start(None);
+        let _ = rt.ctx().end();
+        match started {
             Err(f) => report.errors.push(format!("start: {f}")),
             Ok(()) => {
                 let mut world = Canned::default();
@@ -205,23 +224,40 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
                     };
                     for name in names {
                         let (command, rpc) = ((*kind == Kind::Command).then_some(name.as_str()), matches!(kind, Kind::RpcBefore | Kind::RpcAfter).then_some(name.as_str()));
-                        let event = sample(*kind, command, rpc);
-                        let mut payload = pcds_plugin_api::Writer::new();
-                        event.encode(&mut payload);
-                        rt.ctx().begin(&world, 3_725_000);
-                        let result = rt.event(&event, &payload.0);
-                        let (queued, denied) = {
-                            let c = rt.ctx();
-                            (c.end(), std::mem::take(&mut c.denied))
+                        // A command is typed the way its manifest says: the fewest arguments it takes.
+                        let args = m.commands.iter().find(|c| Some(c.name.to_lowercase().as_str()) == command).and_then(|c| c.min_args).unwrap_or(0) as usize;
+                        let event = sample(*kind, command, rpc, args);
+                        // The first call of an instance is dearer: the engine translates the functions it runs for the first time and
+                        // charges for it. The sample is the second call; the first is shown beside it, because it is the one a budget must hold.
+                        let (first, _, _) = call_once(&mut rt, &mut world, &p.id, &event);
+                        let (second, asked, denied) = call_once(&mut rt, &mut world, &p.id, &event);
+                        let label = match (command, rpc) {
+                            (Some(c), _) => format!("{} !{c}", kind.name()),
+                            (_, Some(r)) => format!("{} {r}", kind.name()),
+                            _ => kind.name().to_string(),
                         };
-                        match result {
-                            Ok((_, cost)) => report.facts.push(format!("{} sample: ok, {} fuel, {} actions asked", kind.name(), cost.fuel, queued.len())),
-                            Err(f) => report.errors.push(format!("{} sample: {f}", kind.name())),
+                        match (first, second) {
+                            (Ok(first), Ok(second)) => {
+                                let budget = found.limits.fuel_per_event;
+                                report.facts.push(format!("{label} sample: ok, {} fuel ({:.1}% of the {budget} budget), first call {} fuel, {asked} actions asked", second.fuel, second.fuel as f64 * 100.0 / budget as f64, first.fuel));
+                                if first.fuel * 2 > budget {
+                                    report.warnings.push(format!("{label}: the first call used {} of {budget} fuel: close to the budget with 16 players online. Ask for more (budget.fuel_per_event, at most {}) or do less in one call", first.fuel, super::limits::MAX_FUEL_PER_EVENT));
+                                }
+                            }
+                            (Err(f), _) | (_, Err(f)) => report.errors.push(format!("{label} sample: {f}")),
                         }
                         if denied > 0 {
-                            report.warnings.push(format!("{} sample: {denied} calls were refused for a missing capability", kind.name()));
+                            report.warnings.push(format!("{label} sample: {denied} calls were refused for a missing capability"));
                         }
-                        let _ = world.apply(&p.id, queued);
+                    }
+                }
+                // A timer: delivered to a plugin that may set one.
+                if grant.has(caps::EVENT_TIMER) {
+                    let event = Event::Timer { id: 1, game_ms: 3_725_000, late_ms: 0 };
+                    let (first, _, _) = call_once(&mut rt, &mut world, &p.id, &event);
+                    match first {
+                        Ok(c) => report.facts.push(format!("timer sample (id 1): ok, {} fuel ({:.1}% of the {} budget)", c.fuel, c.fuel as f64 * 100.0 / found.limits.fuel_per_event as f64, found.limits.fuel_per_event)),
+                        Err(f) => report.errors.push(format!("timer sample (id 1): {f}")),
                     }
                 }
                 // A plugin that may send requests is shown answers of each sort (it hears them in the host
@@ -267,6 +303,23 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
     report
 }
 
+/// Capabilities that a host function stands for (`query` is not one: it needs `world.read` for the world and nothing for the
+/// plugin's own settings, and which it asks for is not in the module).
+/// One event to the started plugin in the canned world: the outcome, the actions it asked for, the calls refused.
+fn call_once(rt: &mut Box<dyn Runtime>, world: &mut Canned, id: &str, event: &Event<'_>) -> (Result<super::runtime::Cost, super::runtime::Fault>, usize, u32) {
+    let mut payload = pcds_plugin_api::Writer::new();
+    event.encode(&mut payload);
+    rt.ctx().begin(&*world, 3_725_000);
+    let result = rt.event(event, &payload.0).map(|(_, cost)| cost);
+    let (queued, denied) = {
+        let c = rt.ctx();
+        (c.end(), std::mem::take(&mut c.denied))
+    };
+    let n = queued.len();
+    let _ = world.apply(id, queued);
+    (result, n, denied)
+}
+
 fn import_cap_needed(cap: &str) -> bool {
-    [caps::WORLD_READ, caps::CHAT_SAY, caps::PLAYER_KICK, caps::PLAYER_TELEPORT, caps::RULES_WRITE, caps::NET_HTTP].contains(&cap)
+    [caps::CHAT_SAY, caps::PLAYER_KICK, caps::PLAYER_TELEPORT, caps::RULES_WRITE, caps::NET_HTTP, caps::PLAYER_GIVE, caps::WORLD_TOKENS, caps::EVENT_TIMER].contains(&cap)
 }

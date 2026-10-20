@@ -19,7 +19,7 @@ note = "the first tick sends the lines gathered so far, in one request"
 advance = "1s"
 expect = [
   # The runner shows a request as METHOD scheme://host BODY: the path (and the webhook placeholder) is not in it.
-  { http = true, contains = "POST https://discord.com " },
+  { http = true, contains = "POST https://discord.com/api/webhooks/${config.webhook} " },
   { http = true, contains = "**Ann** joined" },
   { http = true, contains = "hello @​everyone" },
   { http = true, contains = "\"allowed_mentions\":{\"parse\":[]}" },

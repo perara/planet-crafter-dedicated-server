@@ -13,7 +13,7 @@
 //!   outside it traps the call.
 
 use pcds_plugin_api::{ABI_MAJOR, ABI_MINOR, Event, Level, Verdict};
-use wasmi::{Caller, Config, CustomFuelCosts, Engine, Error, Extern, Instance, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
+use wasmi::{Caller, CompilationMode, Config, CustomFuelCosts, Engine, Error, Extern, Instance, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
 
 use super::ctx::Ctx;
 use super::limits::{self, Limits};
@@ -28,6 +28,11 @@ pub(super) const IMPORTS: [&str; 12] = ["log", "query", "say", "tell", "kick", "
 pub fn engine() -> Engine {
     let mut config = Config::default();
     config.consume_fuel(true);
+    // The whole module is translated when it is read (before the world stops, in the new bank), not
+    // function by function when each is first called: translation is paid for in fuel, so a lazy module
+    // made its first call dear (a big module's first call used 5 to 10 times the fuel of the next ones, and a
+    // budget that held the steady state faulted the instance, which then did it again).
+    config.compilation_mode(CompilationMode::Eager);
     // wasmi's own price for bulk memory (memory.fill and copy, table ops) is a unit of fuel per 64
     // bytes: a fill of the 64 MiB a module may have cost a million fuel and 14 ms, where a million
     // fuel is meant to be a third of a millisecond. Four bytes a unit puts a fill at about the time

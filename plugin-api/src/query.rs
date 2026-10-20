@@ -6,7 +6,9 @@ use alloc::vec::Vec;
 
 use crate::codec::{DecodeError, Reader, Writer};
 
+/// The world's numbers: the answer is a `WorldInfo`.
 pub const Q_WORLD: u32 = 1;
+/// The players online: the answer is a count and that many `PlayerInfo`.
 pub const Q_PLAYERS: u32 = 2;
 /// The rules that differ from the defaults, as JSON text (the same text as RuleChange).
 pub const Q_RULES: u32 = 3;
@@ -22,17 +24,27 @@ pub const Q_OBJECT: u32 = 6;
 /// their defaults say): a count and that many (`str` key, `str` value). Needs no capability, and
 /// never holds a secret.
 pub const Q_CONFIG: u32 = 7;
+/// ABI 1.3. One online player: the argument is the client (`u64`); the answer is one `PlayerInfo`.
+/// Much cheaper than `Q_PLAYERS` when you know who you want.
+pub const Q_PLAYER: u32 = 8;
 
-/// The most `Q_NEARBY` returns, and the widest radius it looks at.
+/// The most objects `Q_NEARBY` returns.
 pub const MAX_NEARBY: u32 = 64;
+/// The widest radius `Q_NEARBY` looks at.
 pub const MAX_NEARBY_RADIUS: f32 = 1000.0;
 
+/// The world's numbers (`Q_WORLD`).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct WorldInfo {
+    /// Game time in milliseconds.
     pub game_ms: i64,
+    /// The planet's name.
     pub planet: String,
+    /// Players online.
     pub players: u32,
+    /// World objects (buildings, items on the ground).
     pub world_objects: u32,
+    /// Network objects.
     pub network_objects: u32,
     /// The planet's terraformation index (the game's own total).
     pub terraformation: f64,
@@ -40,24 +52,32 @@ pub struct WorldInfo {
     pub standing_still: bool,
     /// ABI 1.3. The wall clock, Unix milliseconds.
     pub unix_ms: i64,
+    /// ABI 1.3. What chat commands begin with (the `chat.commandPrefix` rule, else `!`).
+    pub command_prefix: String,
 }
 
 impl WorldInfo {
+    /// Writes the answer in the codec's format.
     pub fn encode(&self, w: &mut Writer) {
-        w.i64(self.game_ms).str(&self.planet).u32(self.players).u32(self.world_objects).u32(self.network_objects).f64(self.terraformation).bool(self.standing_still).i64(self.unix_ms);
+        w.i64(self.game_ms).str(&self.planet).u32(self.players).u32(self.world_objects).u32(self.network_objects).f64(self.terraformation).bool(self.standing_still).i64(self.unix_ms).str(&self.command_prefix);
     }
+    /// Reads the answer. New fields come at the end, so bytes after the known ones are ignored.
     pub fn decode(bytes: &[u8]) -> Result<WorldInfo, DecodeError> {
         let mut r = Reader::new(bytes);
-        Ok(WorldInfo { game_ms: r.i64()?, planet: r.string()?, players: r.u32()?, world_objects: r.u32()?, network_objects: r.u32()?, terraformation: r.f64()?, standing_still: r.bool()?, unix_ms: r.i64()? })
+        Ok(WorldInfo { game_ms: r.i64()?, planet: r.string()?, players: r.u32()?, world_objects: r.u32()?, network_objects: r.u32()?, terraformation: r.f64()?, standing_still: r.bool()?, unix_ms: r.i64()?, command_prefix: r.string()? })
     }
 }
 
+/// One online player (`Q_PLAYERS`, `Q_PLAYER`).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PlayerInfo {
+    /// The connection number of this session.
     pub client: u64,
+    /// The player's name.
     pub name: String,
     /// Verified SteamID64 as text (invite-code players), else empty.
     pub steam_id: String,
+    /// Where the player is.
     pub position: [f32; 3],
     /// Oxygen, water, health, toxicity.
     pub gauges: [f32; 4],
@@ -68,6 +88,7 @@ pub struct PlayerInfo {
 }
 
 impl PlayerInfo {
+    /// Writes one player in the codec's format.
     pub fn encode(&self, w: &mut Writer) {
         w.u64(self.client).str(&self.name).str(&self.steam_id);
         self.position.iter().for_each(|v| {
@@ -78,6 +99,7 @@ impl PlayerInfo {
         });
         w.u64(self.player_id).bool(self.operator);
     }
+    /// Reads one player from `r`.
     pub fn decode(r: &mut Reader<'_>) -> Result<PlayerInfo, DecodeError> {
         let (client, name, steam_id) = (r.u64()?, r.string()?, r.string()?);
         let position = [r.f32()?, r.f32()?, r.f32()?];
@@ -86,11 +108,13 @@ impl PlayerInfo {
     }
 }
 
+/// Writes the `Q_PLAYERS` answer: a count and each player.
 pub fn encode_players(players: &[PlayerInfo], w: &mut Writer) {
     w.u32(players.len() as u32);
     players.iter().for_each(|p| p.encode(w));
 }
 
+/// Reads the `Q_PLAYERS` answer. A count the bytes cannot hold is `Short`.
 pub fn decode_players(bytes: &[u8]) -> Result<Vec<PlayerInfo>, DecodeError> {
     let mut r = Reader::new(bytes);
     let n = r.u32()? as usize;
@@ -106,25 +130,30 @@ pub fn decode_players(bytes: &[u8]) -> Result<Vec<PlayerInfo>, DecodeError> {
 pub struct ItemCount {
     /// The item's group id, as the game's tables name it (`Iron`, `WaterBottle1`).
     pub group: String,
+    /// How many of it.
     pub count: u32,
 }
 
 /// A player's backpack (`Q_INVENTORY`): the items by group, and how full it is.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InventoryInfo {
+    /// Slots with something in them.
     pub slots_used: u32,
+    /// Slots the backpack has.
     pub slots_total: u32,
     /// Sorted by group id.
     pub items: Vec<ItemCount>,
 }
 
 impl InventoryInfo {
+    /// Writes the answer in the codec's format.
     pub fn encode(&self, w: &mut Writer) {
         w.u32(self.slots_used).u32(self.slots_total).u32(self.items.len() as u32);
         for i in &self.items {
             w.str(&i.group).u32(i.count);
         }
     }
+    /// Reads the `Q_INVENTORY` answer. A count the bytes cannot hold is `Short`.
     pub fn decode(bytes: &[u8]) -> Result<InventoryInfo, DecodeError> {
         let mut r = Reader::new(bytes);
         let (slots_used, slots_total, n) = (r.u32()?, r.u32()?, r.u32()? as usize);
@@ -144,15 +173,20 @@ impl InventoryInfo {
 /// The argument of `Q_NEARBY`: a sphere. `max` is cut to `MAX_NEARBY`, `radius` to `MAX_NEARBY_RADIUS`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NearbyArgs {
+    /// The middle of the sphere.
     pub center: [f32; 3],
+    /// Its radius.
     pub radius: f32,
+    /// The most objects wanted.
     pub max: u32,
 }
 
 impl NearbyArgs {
+    /// Writes the argument in the codec's format.
     pub fn encode(&self, w: &mut Writer) {
         w.f32(self.center[0]).f32(self.center[1]).f32(self.center[2]).f32(self.radius).u32(self.max);
     }
+    /// Reads the argument.
     pub fn decode(bytes: &[u8]) -> Result<NearbyArgs, DecodeError> {
         let mut r = Reader::new(bytes);
         Ok(NearbyArgs { center: [r.f32()?, r.f32()?, r.f32()?], radius: r.f32()?, max: r.u32()? })
@@ -163,17 +197,21 @@ impl NearbyArgs {
 /// `ObjectDestroyed` carry), or of a network object (what an RPC's `object` is).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectRef {
+    /// A world object's id.
     World(i32),
+    /// A network object's id.
     Net(u64),
 }
 
 impl ObjectRef {
+    /// Writes the argument in the codec's format.
     pub fn encode(&self, w: &mut Writer) {
         match self {
             ObjectRef::World(id) => w.u8(0).u64(*id as i64 as u64),
             ObjectRef::Net(id) => w.u8(1).u64(*id),
         };
     }
+    /// Reads the argument.
     pub fn decode(bytes: &[u8]) -> Result<ObjectRef, DecodeError> {
         let mut r = Reader::new(bytes);
         match r.u8()? {
@@ -192,13 +230,16 @@ pub struct ObjectInfo {
     pub net: u64,
     /// The object's group id (`Drill1`, `Container1`).
     pub group: String,
+    /// Where it is.
     pub position: [f32; 3],
 }
 
 impl ObjectInfo {
+    /// Writes one object in the codec's format.
     pub fn encode(&self, w: &mut Writer) {
         w.i32(self.id).u64(self.net).str(&self.group).f32(self.position[0]).f32(self.position[1]).f32(self.position[2]);
     }
+    /// Reads one object from `r`.
     pub fn decode(r: &mut Reader<'_>) -> Result<ObjectInfo, DecodeError> {
         Ok(ObjectInfo { id: r.i32()?, net: r.u64()?, group: r.string()?, position: [r.f32()?, r.f32()?, r.f32()?] })
     }
@@ -207,10 +248,13 @@ impl ObjectInfo {
 /// An object and its distance from the point asked about.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Nearby {
+    /// The object.
     pub object: ObjectInfo,
+    /// Its distance from the center.
     pub distance: f32,
 }
 
+/// Writes the `Q_NEARBY` answer: a count and each object with its distance.
 pub fn encode_nearby(found: &[Nearby], w: &mut Writer) {
     w.u32(found.len() as u32);
     for n in found {
@@ -219,6 +263,7 @@ pub fn encode_nearby(found: &[Nearby], w: &mut Writer) {
     }
 }
 
+/// Reads the `Q_NEARBY` answer. A count the bytes cannot hold is `Short`.
 pub fn decode_nearby(bytes: &[u8]) -> Result<Vec<Nearby>, DecodeError> {
     let mut r = Reader::new(bytes);
     let n = r.u32()? as usize;
@@ -229,6 +274,7 @@ pub fn decode_nearby(bytes: &[u8]) -> Result<Vec<Nearby>, DecodeError> {
     (0..n).map(|_| Ok(Nearby { object: ObjectInfo::decode(&mut r)?, distance: r.f32()? })).collect()
 }
 
+/// Writes the `Q_CONFIG` answer: a count and each key and value.
 pub fn encode_settings(settings: &[(String, String)], w: &mut Writer) {
     w.u32(settings.len() as u32);
     for (k, v) in settings {
@@ -236,6 +282,7 @@ pub fn encode_settings(settings: &[(String, String)], w: &mut Writer) {
     }
 }
 
+/// Reads the `Q_CONFIG` answer. A count the bytes cannot hold is `Short`.
 pub fn decode_settings(bytes: &[u8]) -> Result<Vec<(String, String)>, DecodeError> {
     let mut r = Reader::new(bytes);
     let n = r.u32()? as usize;

@@ -34,19 +34,39 @@
 //! ```
 
 use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::{RefCell, RefMut};
 
 use crate::caps;
-use crate::event::{Event, Verdict};
+use crate::event::{Event, Kind, Verdict};
 use crate::host::{Error, Host, Level};
 use crate::http::HttpRequest;
 use crate::query::{self, InventoryInfo, Nearby, ObjectInfo, ObjectRef, PlayerInfo, WorldInfo};
+use crate::json;
 use crate::{Plugin, SavedState, State};
 
 /// The most actions a call may queue on the real host. `MockHost::with_limits` enforces it.
 pub const ACTIONS_PER_CALL: u32 = 16;
+// The real host's other numbers (server/src/plugins/limits.rs). The rates are counted in game
+// time here, in wall time there.
+const ACTIONS_PER_SECOND: u32 = 200;
+const GIVES_PER_SECOND: u32 = 10;
+const TOKEN_CHANGES_PER_SECOND: u32 = 2;
+const RULE_CHANGES_PER_SECOND: u32 = 2;
+const HTTP_PER_SECOND: u32 = 10;
+const HTTP_IN_FLIGHT: usize = 2;
+const MAX_GIVE_COUNT: u32 = 50;
+const MAX_TOKENS_PER_ACTION: i32 = 10_000;
+const MAX_TIMERS: usize = 16;
+const MIN_TIMER_REPEAT_MS: u32 = 100;
+const MAX_TIMER_DELAY_MS: u32 = 604_800_000;
+/// Timer events one plugin gets in a game tick (here: in a step of `advance_ms`).
+const TIMER_EVENTS_PER_TICK: usize = 4;
+const SAY_CHARS: usize = 500;
+const KICK_REASON_CHARS: usize = 128;
+const MAX_TELEPORT: f32 = 100_000.0;
 
 /// The game ticks every 5 ms; `Event::Tick::tick` is the game time divided by this.
 const GAME_TICK_MS: i64 = 5;
@@ -69,7 +89,7 @@ pub struct Timer {
 pub struct HttpCall {
     /// `GET`, `POST` and so on.
     pub method: String,
-    /// The URL as the plugin wrote it (`${secret.NAME}` is not replaced).
+    /// The URL as the plugin wrote it (`${config.KEY}` is not replaced).
     pub url: String,
     /// The request headers.
     pub headers: Vec<(String, String)>,
@@ -94,6 +114,23 @@ struct Records {
     denied: Vec<String>,
 }
 
+/// A count of actions in the current second of game time.
+#[derive(Default)]
+struct Window {
+    start: i64,
+    n: u32,
+}
+
+impl Window {
+    /// Starts a new second when the last is over; true if fewer than `max` were counted in this one.
+    fn has_room(&mut self, now: i64, max: u32) -> bool {
+        if now - self.start >= 1000 {
+            *self = Window { start: now, n: 0 };
+        }
+        self.n < max
+    }
+}
+
 struct Inner {
     world: WorldInfo,
     game_ms: i64,
@@ -109,7 +146,33 @@ struct Inner {
     queued: u32,
     next_ticket: u64,
     timers: Vec<Timer>,
+    /// Timers set in `load`: they start counting at the first step after it, as on the host.
+    unstarted: Vec<u32>,
+    loading: bool,
+    /// Clients the plugin kicked; the harness removes them after the call.
+    pending_kicks: Vec<u64>,
+    /// Tickets of requests with no answer yet.
+    in_flight: Vec<u64>,
+    actions: Window,
+    gives: Window,
+    token_changes: Window,
+    rule_changes: Window,
+    http_starts: Window,
     rec: Records,
+}
+
+impl Inner {
+    /// Queues an action: with limits on, a call may queue 16 and a second 200.
+    fn queue(&mut self) -> Result<(), Error> {
+        if self.limits {
+            if self.queued >= ACTIONS_PER_CALL || !self.actions.has_room(self.game_ms, ACTIONS_PER_SECOND) {
+                return Err(Error::Full);
+            }
+            self.queued += 1;
+            self.actions.n += 1;
+        }
+        Ok(())
+    }
 }
 
 /// A `Host` for tests: a small world you set up, and a record of what the plugin did.
@@ -134,7 +197,7 @@ impl MockHost {
     pub fn new() -> MockHost {
         MockHost {
             inner: RefCell::new(Inner {
-                world: WorldInfo { planet: "Prime".to_string(), ..WorldInfo::default() },
+                world: WorldInfo { planet: "Prime".to_string(), command_prefix: "!".to_string(), ..WorldInfo::default() },
                 game_ms: 0,
                 unix_offset: 1_760_000_000_000,
                 players: Vec::new(),
@@ -147,6 +210,15 @@ impl MockHost {
                 queued: 0,
                 next_ticket: 1,
                 timers: Vec::new(),
+                unstarted: Vec::new(),
+                loading: false,
+                pending_kicks: Vec::new(),
+                in_flight: Vec::new(),
+                actions: Window::default(),
+                gives: Window::default(),
+                token_changes: Window::default(),
+                rule_changes: Window::default(),
+                http_starts: Window::default(),
                 rec: Records::default(),
             }),
         }
@@ -155,7 +227,8 @@ impl MockHost {
     // ---- Setting up the world.
 
     /// Sets the world's numbers. `game_ms` and `unix_ms` start the clock (a zero `unix_ms` keeps
-    /// the current one). A zero `players` or `world_objects` is filled in from the mock's lists.
+    /// the current one). A zero `players` or `world_objects` is filled in from the mock's lists, an
+    /// empty `command_prefix` reads as `!`.
     pub fn with_world(self, world: WorldInfo) -> MockHost {
         {
             let mut s = self.inner.borrow_mut();
@@ -209,9 +282,12 @@ impl MockHost {
         self
     }
 
-    /// Turns on the real host's limit: a call queues at most 16 actions (say, tell, kick,
-    /// teleport, rules_patch, http_request, give, tokens), then gets `Err(Error::Full)`. The
-    /// count starts again at `begin_call`, which `Harness` calls before every event.
+    /// Turns on the real host's rates: a call queues at most 16 actions (say, tell, kick,
+    /// teleport, rules_patch, http_request, give, tokens), then gets `Err(Error::Full)`; a
+    /// second of game time takes 200 actions, 10 gives, 2 token changes, 2 rule changes and 10
+    /// requests, and 2 requests may be alive (until `Harness::http_done`). The count of a call
+    /// starts again at `begin_call`, which `Harness` calls before every event. The sizes (a
+    /// give of over 50, 16 timers) are always checked, with or without this.
     pub fn with_limits(self) -> MockHost {
         self.inner.borrow_mut().limits = true;
         self
@@ -251,6 +327,27 @@ impl MockHost {
     /// Sets one of the plugin's settings (what the admin put in the manifest's `[[config]]`).
     pub fn set_setting(&self, key: &str, value: &str) {
         self.inner.borrow_mut().settings.insert(key.to_string(), value.to_string());
+    }
+
+    /// Moves a player. Does nothing if they are not there.
+    pub fn set_position(&self, client: u64, position: [f32; 3]) {
+        if let Some(p) = self.inner.borrow_mut().players.iter_mut().find(|p| p.client == client) {
+            p.position = position;
+        }
+    }
+
+    /// Makes a player an operator or not. Does nothing if they are not there.
+    pub fn set_operator(&self, client: u64, operator: bool) {
+        if let Some(p) = self.inner.borrow_mut().players.iter_mut().find(|p| p.client == client) {
+            p.operator = operator;
+        }
+    }
+
+    /// Changes the world's numbers (`terraformation`, `standing_still`, `planet`...). The clock
+    /// fields `game_ms` and `unix_ms` are not kept: they come from the clock (`advance_clock`,
+    /// `set_unix_ms`).
+    pub fn set_world(&self, change: impl FnOnce(&mut WorldInfo)) {
+        change(&mut self.inner.borrow_mut().world);
     }
 
     // ---- The clock.
@@ -304,6 +401,26 @@ impl MockHost {
         self.inner.borrow().rec.told.clone()
     }
 
+    /// What was told to one player, in order.
+    pub fn told_to(&self, client: u64) -> Vec<String> {
+        self.inner.borrow().rec.told.iter().filter(|(c, _)| *c == client).map(|(_, t)| t.clone()).collect()
+    }
+
+    /// The reasons one player was kicked with, in order.
+    pub fn kicks_of(&self, client: u64) -> Vec<String> {
+        self.inner.borrow().rec.kicked.iter().filter(|(c, _)| *c == client).map(|(_, r)| r.clone()).collect()
+    }
+
+    /// The positions one player was teleported to, in order.
+    pub fn teleports_of(&self, client: u64) -> Vec<[f32; 3]> {
+        self.inner.borrow().rec.teleported.iter().filter(|(c, _)| *c == client).map(|(_, p)| *p).collect()
+    }
+
+    /// The items given to one player: (group, count), in order.
+    pub fn given_to(&self, client: u64) -> Vec<(String, u32)> {
+        self.inner.borrow().rec.given.iter().filter(|(c, _, _)| *c == client).map(|(_, g, n)| (g.clone(), *n)).collect()
+    }
+
     /// The kicks: (client, reason).
     pub fn kicked(&self) -> Vec<(u64, String)> {
         self.inner.borrow().rec.kicked.clone()
@@ -351,28 +468,45 @@ impl MockHost {
 
     // ---- Inside: used by the harness and the Host impl.
 
-    /// Takes the borrow for a call that needs `cap`: refuses it when the capability is denied,
-    /// and, for an action, when this call already queued 16 (with limits on).
-    fn gate(&self, cap: &str, action: bool) -> Result<RefMut<'_, Inner>, Error> {
+    /// Takes the borrow for a call that needs `cap`, or refuses it when the capability is denied.
+    fn gate(&self, cap: &str) -> Result<RefMut<'_, Inner>, Error> {
         let mut s = self.inner.borrow_mut();
         if s.deny.iter().any(|c| c == cap) {
             s.rec.denied.push(cap.to_string());
             return Err(Error::Denied);
         }
-        if action && s.limits {
-            if s.queued >= ACTIONS_PER_CALL {
-                return Err(Error::Full);
-            }
-            s.queued += 1;
-        }
         Ok(s)
+    }
+
+    fn command_prefix(&self) -> String {
+        let prefix = self.inner.borrow().world.command_prefix.clone();
+        if prefix.is_empty() { "!".to_string() } else { prefix }
+    }
+
+    /// Writes a line the host says to a player itself (a refused command): it is not the plugin's
+    /// action, so it is recorded without any limit.
+    fn host_tells(&self, client: u64, text: String) {
+        self.inner.borrow_mut().rec.told.push((client, text));
+    }
+
+    fn set_loading(&self, loading: bool) {
+        self.inner.borrow_mut().loading = loading;
+    }
+
+    fn next_kick(&self) -> Option<u64> {
+        let mut s = self.inner.borrow_mut();
+        if s.pending_kicks.is_empty() { None } else { Some(s.pending_kicks.remove(0)) }
+    }
+
+    fn finish_http(&self, ticket: u64) {
+        self.inner.borrow_mut().in_flight.retain(|t| *t != ticket);
     }
 
     fn player_count(&self) -> u32 {
         self.inner.borrow().players.len() as u32
     }
 
-    fn player(&self, client: u64) -> Option<PlayerInfo> {
+    fn find_player(&self, client: u64) -> Option<PlayerInfo> {
         self.inner.borrow().players.iter().find(|p| p.client == client).cloned()
     }
 
@@ -385,34 +519,51 @@ impl MockHost {
     }
 
     fn clear_timers(&self) {
-        self.inner.borrow_mut().timers.clear();
+        let mut s = self.inner.borrow_mut();
+        s.timers.clear();
+        s.unstarted.clear();
     }
 
-    /// Takes the timers that are due: (id, how late). A repeating timer is set for its next time
-    /// (a time already past is skipped); a one-shot timer is gone.
-    fn take_due_timers(&self) -> Vec<(u32, u32)> {
+    /// Takes the timers that are due: (id, how late), as the host does at a game tick: the first
+    /// four in the order they were set; a repeating timer is set for its next time after now, a
+    /// one-shot is gone. With `only`, that timer is made due now and is the only one taken. Timers
+    /// set in `load` start counting here.
+    fn take_due_timers(&self, only: Option<u32>) -> Vec<(u32, u32)> {
         let mut s = self.inner.borrow_mut();
         let now = s.game_ms;
-        let (mut due, mut keep) = (Vec::new(), Vec::new());
-        for mut t in core::mem::take(&mut s.timers) {
-            if t.due_ms > now {
-                keep.push(t);
-                continue;
+        for id in core::mem::take(&mut s.unstarted) {
+            if let Some(t) = s.timers.iter_mut().find(|t| t.id == id) {
+                t.due_ms = now + t.delay_ms as i64;
             }
-            due.push((t.due_ms, t.id));
-            if t.repeat_ms > 0 {
-                let r = t.repeat_ms as i64;
-                t.due_ms += r;
-                if t.due_ms <= now {
-                    t.due_ms += (now - t.due_ms) / r * r + r;
+        }
+        let most = if only.is_some() { 1 } else { TIMER_EVENTS_PER_TICK };
+        let mut due = Vec::new();
+        let mut keep = Vec::new();
+        for mut t in core::mem::take(&mut s.timers) {
+            if only == Some(t.id) {
+                t.due_ms = now;
+            }
+            if t.due_ms <= now && due.len() < most && only.is_none_or(|id| id == t.id) {
+                let at = t.due_ms;
+                due.push((t.id, (now - at) as u32));
+                if t.repeat_ms > 0 {
+                    let r = t.repeat_ms as i64;
+                    t.due_ms = at + ((now - at) / r + 1) * r;
+                    keep.push(t);
                 }
+            } else {
                 keep.push(t);
             }
         }
         s.timers = keep;
-        due.sort();
-        due.into_iter().map(|(at, id)| (id, (now - at) as u32)).collect()
+        due
     }
+}
+
+/// One chat line as the host cleans it: control characters out (not newlines), cut to 500
+/// characters, trimmed.
+fn line(text: &str, most: usize) -> String {
+    text.chars().filter(|c| !c.is_control() || *c == '\n').take(most).collect::<String>().trim().to_string()
 }
 
 fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -426,7 +577,7 @@ impl Host for MockHost {
     }
 
     fn world(&self) -> Result<WorldInfo, Error> {
-        let s = self.gate(caps::WORLD_READ, false)?;
+        let s = self.gate(caps::WORLD_READ)?;
         let mut world = s.world.clone();
         world.game_ms = s.game_ms;
         world.unix_ms = s.unix_offset + s.game_ms;
@@ -436,46 +587,90 @@ impl Host for MockHost {
         if world.world_objects == 0 {
             world.world_objects = s.objects.len() as u32;
         }
+        if world.command_prefix.is_empty() {
+            world.command_prefix = "!".to_string();
+        }
         Ok(world)
     }
 
     fn players(&self) -> Result<Vec<PlayerInfo>, Error> {
-        Ok(self.gate(caps::WORLD_READ, false)?.players.clone())
+        Ok(self.gate(caps::WORLD_READ)?.players.clone())
     }
 
     fn rules(&self) -> Result<String, Error> {
-        Ok(self.gate(caps::WORLD_READ, false)?.rules.clone())
+        Ok(self.gate(caps::WORLD_READ)?.rules.clone())
     }
 
     fn say(&self, text: &str) -> Result<(), Error> {
-        self.gate(caps::CHAT_SAY, true)?.rec.said.push(text.to_string());
+        let mut s = self.gate(caps::CHAT_SAY)?;
+        let text = line(text, SAY_CHARS);
+        if text.is_empty() {
+            return Err(Error::Bad);
+        }
+        s.queue()?;
+        s.rec.said.push(text);
         Ok(())
     }
 
     fn tell(&self, client: u64, text: &str) -> Result<(), Error> {
-        self.gate(caps::CHAT_SAY, true)?.rec.told.push((client, text.to_string()));
+        let mut s = self.gate(caps::CHAT_SAY)?;
+        let text = line(text, SAY_CHARS);
+        if text.is_empty() {
+            return Err(Error::Bad);
+        }
+        s.queue()?;
+        s.rec.told.push((client, text));
         Ok(())
     }
 
     fn kick(&self, client: u64, reason: &str) -> Result<(), Error> {
-        self.gate(caps::PLAYER_KICK, true)?.rec.kicked.push((client, reason.to_string()));
+        let mut s = self.gate(caps::PLAYER_KICK)?;
+        let reason = line(reason, KICK_REASON_CHARS);
+        s.queue()?;
+        s.rec.kicked.push((client, if reason.is_empty() { "Kicked".to_string() } else { reason }));
+        s.pending_kicks.push(client);
         Ok(())
     }
 
     fn teleport(&self, client: u64, position: [f32; 3]) -> Result<(), Error> {
-        self.gate(caps::PLAYER_TELEPORT, true)?.rec.teleported.push((client, position));
+        let mut s = self.gate(caps::PLAYER_TELEPORT)?;
+        if !position.iter().all(|v| v.is_finite() && v.abs() <= MAX_TELEPORT) {
+            return Err(Error::Bad);
+        }
+        s.queue()?;
+        s.rec.teleported.push((client, position));
         Ok(())
     }
 
-    fn rules_patch(&self, json: &str) -> Result<(), Error> {
-        self.gate(caps::RULES_WRITE, true)?.rec.patches.push(json.to_string());
+    fn rules_patch(&self, patch: &str) -> Result<(), Error> {
+        let mut s = self.gate(caps::RULES_WRITE)?;
+        if !matches!(json::parse(patch), Ok(json::Value::Object(_))) {
+            return Err(Error::Bad);
+        }
+        let now = s.game_ms;
+        if s.limits && !s.rule_changes.has_room(now, RULE_CHANGES_PER_SECOND) {
+            return Err(Error::Full);
+        }
+        s.queue()?;
+        s.rule_changes.n += 1;
+        s.rec.patches.push(patch.to_string());
         Ok(())
     }
 
     fn http_request(&self, request: &HttpRequest<'_>) -> Result<u64, Error> {
-        let mut s = self.gate(caps::NET_HTTP, true)?;
+        let mut s = self.gate(caps::NET_HTTP)?;
+        if !["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"].contains(&request.method) || request.url.is_empty() {
+            return Err(Error::Bad);
+        }
+        let now = s.game_ms;
+        if s.limits && (s.in_flight.len() >= HTTP_IN_FLIGHT || !s.http_starts.has_room(now, HTTP_PER_SECOND)) {
+            return Err(Error::Full);
+        }
+        s.queue()?;
+        s.http_starts.n += 1;
         let ticket = s.next_ticket;
         s.next_ticket += 1;
+        s.in_flight.push(ticket);
         s.rec.http.push(HttpCall {
             method: request.method.to_string(),
             url: request.url.to_string(),
@@ -486,13 +681,24 @@ impl Host for MockHost {
         Ok(ticket)
     }
 
+    fn player(&self, client: u64) -> Result<PlayerInfo, Error> {
+        let s = self.gate(caps::WORLD_READ)?;
+        s.players.iter().find(|p| p.client == client).cloned().ok_or(Error::NotFound)
+    }
+
     fn inventory(&self, client: u64) -> Result<InventoryInfo, Error> {
-        let s = self.gate(caps::WORLD_READ, false)?;
-        s.inventories.iter().find(|(c, _)| *c == client).map(|(_, i)| i.clone()).ok_or(Error::NotFound)
+        let s = self.gate(caps::WORLD_READ)?;
+        if !s.players.iter().any(|p| p.client == client) {
+            return Err(Error::NotFound);
+        }
+        Ok(s.inventories.iter().find(|(c, _)| *c == client).map(|(_, i)| i.clone()).unwrap_or(InventoryInfo { slots_used: 0, slots_total: 30, items: Vec::new() }))
     }
 
     fn nearby(&self, center: [f32; 3], radius: f32, max: u32) -> Result<Vec<Nearby>, Error> {
-        let s = self.gate(caps::WORLD_READ, false)?;
+        let s = self.gate(caps::WORLD_READ)?;
+        if !center.iter().chain([&radius]).all(|v| v.is_finite()) || radius < 0.0 {
+            return Err(Error::Bad);
+        }
         let radius = radius.min(query::MAX_NEARBY_RADIUS);
         let mut found: Vec<Nearby> = s
             .objects
@@ -506,7 +712,7 @@ impl Host for MockHost {
     }
 
     fn object(&self, which: ObjectRef) -> Result<Option<ObjectInfo>, Error> {
-        let s = self.gate(caps::WORLD_READ, false)?;
+        let s = self.gate(caps::WORLD_READ)?;
         Ok(s.objects
             .iter()
             .find(|o| match which {
@@ -522,25 +728,61 @@ impl Host for MockHost {
     }
 
     fn give(&self, client: u64, group: &str, count: u32) -> Result<(), Error> {
-        self.gate(caps::PLAYER_GIVE, true)?.rec.given.push((client, group.to_string(), count));
+        let mut s = self.gate(caps::PLAYER_GIVE)?;
+        let name_ok = !group.is_empty() && group.len() <= 64 && group.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        if !name_ok || count == 0 || count > MAX_GIVE_COUNT {
+            return Err(Error::Bad);
+        }
+        let now = s.game_ms;
+        if s.limits && !s.gives.has_room(now, GIVES_PER_SECOND) {
+            return Err(Error::Full);
+        }
+        s.queue()?;
+        s.gives.n += 1;
+        s.rec.given.push((client, group.to_string(), count));
         Ok(())
     }
 
     fn tokens(&self, amount: i32) -> Result<(), Error> {
-        self.gate(caps::WORLD_TOKENS, true)?.rec.tokens += amount as i64;
+        let mut s = self.gate(caps::WORLD_TOKENS)?;
+        if amount == 0 || amount.abs() > MAX_TOKENS_PER_ACTION {
+            return Err(Error::Bad);
+        }
+        let now = s.game_ms;
+        if s.limits && !s.token_changes.has_room(now, TOKEN_CHANGES_PER_SECOND) {
+            return Err(Error::Full);
+        }
+        s.queue()?;
+        s.token_changes.n += 1;
+        s.rec.tokens += amount as i64;
         Ok(())
     }
 
     fn set_timer(&self, id: u32, delay_ms: u32, repeat_ms: u32) -> Result<(), Error> {
-        let mut s = self.gate(caps::EVENT_TIMER, false)?;
-        s.timers.retain(|t| t.id != id);
+        let mut s = self.gate(caps::EVENT_TIMER)?;
+        if delay_ms > MAX_TIMER_DELAY_MS || repeat_ms > MAX_TIMER_DELAY_MS || (repeat_ms != 0 && repeat_ms < MIN_TIMER_REPEAT_MS) {
+            return Err(Error::Bad);
+        }
+        if s.timers.len() >= MAX_TIMERS && !s.timers.iter().any(|t| t.id == id) {
+            return Err(Error::Full);
+        }
         let due_ms = s.game_ms + delay_ms as i64;
-        s.timers.push(Timer { id, delay_ms, repeat_ms, due_ms });
+        let timer = Timer { id, delay_ms, repeat_ms, due_ms };
+        match s.timers.iter().position(|t| t.id == id) {
+            Some(i) => s.timers[i] = timer,
+            None => s.timers.push(timer),
+        }
+        s.unstarted.retain(|u| *u != id);
+        if s.loading {
+            s.unstarted.push(id);
+        }
         Ok(())
     }
 
     fn cancel_timer(&self, id: u32) -> Result<(), Error> {
-        self.gate(caps::EVENT_TIMER, false)?.timers.retain(|t| t.id != id);
+        let mut s = self.gate(caps::EVENT_TIMER)?;
+        s.timers.retain(|t| t.id != id);
+        s.unstarted.retain(|u| *u != id);
         Ok(())
     }
 }
@@ -550,12 +792,26 @@ impl Host for MockHost {
 /// The `join`, `leave`, `place` and `destroy` calls also keep the mock's player and object lists
 /// in step. Every event is one call: the mock's action count starts again before it. Records stay
 /// in the mock until `clear`.
+///
+/// Like the host, the harness removes a player the plugin kicked and delivers their
+/// `Event::PlayerLeave` right after the call that kicked them.
 pub struct Harness<P: Plugin> {
     mock: MockHost,
     plugin: P,
     tick_every_ms: u32,
     step_ms: u32,
     last_tick_ms: i64,
+    /// The interest mask of `subscribe`; `None`: every event.
+    subscribed: Option<u32>,
+    commands: Vec<CommandSpec>,
+}
+
+/// A command as the manifest declares it (`Harness::declare_command`).
+struct CommandSpec {
+    name: String,
+    min_args: u32,
+    max_args: u32,
+    operator_only: bool,
 }
 
 impl<P: Plugin> Harness<P> {
@@ -571,9 +827,13 @@ impl<P: Plugin> Harness<P> {
 
     fn boot(mock: MockHost, state: Option<State<'_>>) -> Harness<P> {
         mock.begin_call();
+        mock.set_loading(true);
         let plugin = P::load(&mock, state);
+        mock.set_loading(false);
         let last_tick_ms = mock.game_ms();
-        Harness { mock, plugin, tick_every_ms: 1000, step_ms: 50, last_tick_ms }
+        let mut harness = Harness { mock, plugin, tick_every_ms: 1000, step_ms: 50, last_tick_ms, subscribed: None, commands: Vec::new() };
+        harness.settle();
+        harness
     }
 
     /// How often a tick is delivered, in game milliseconds; 0 for never. The default is 1000.
@@ -587,6 +847,23 @@ impl<P: Plugin> Harness<P> {
     pub fn tick_step_ms(mut self, ms: u32) -> Harness<P> {
         self.step_ms = ms.max(1);
         self
+    }
+
+    /// Delivers only the kinds of event given, as a manifest's `events` list does (the default is
+    /// every kind). `Timer`, `HttpDone` and `Command` are always delivered, as on the host.
+    pub fn subscribe(mut self, kinds: &[Kind]) -> Harness<P> {
+        self.subscribed = Some(kinds.iter().fold(0, |mask, k| mask | k.bit()));
+        self
+    }
+
+    /// Declares a chat command as the manifest does. From then on `command` answers like the host: a
+    /// player who is not an operator (for `operator_only`), or who gives fewer than `min_args` or
+    /// more than `max_args` arguments (`u32::MAX`: no limit), is told `!name is for the server's
+    /// operators.` or `Use: !name`, and the plugin is not called. A command not declared is delivered.
+    pub fn declare_command(&mut self, name: &str, min_args: u32, max_args: u32, operator_only: bool) {
+        let name = name.to_ascii_lowercase();
+        self.commands.retain(|c| c.name != name);
+        self.commands.push(CommandSpec { name, min_args, max_args, operator_only });
     }
 
     /// The mock host.
@@ -614,10 +891,34 @@ impl<P: Plugin> Harness<P> {
         self.mock.set_unix_ms(unix_ms);
     }
 
-    /// Delivers any event as one call, and returns the plugin's verdict.
+    /// Delivers any event as one call, and returns the plugin's verdict. With `subscribe`, an
+    /// event of a kind not listed is not delivered (the answer is `Continue`). Players the plugin
+    /// kicked in the call leave afterwards.
     pub fn event(&mut self, event: &Event<'_>) -> Verdict {
+        let verdict = self.deliver(event);
+        self.settle();
+        verdict
+    }
+
+    fn deliver(&mut self, event: &Event<'_>) -> Verdict {
+        let kind = event.kind();
+        let always = matches!(kind, Kind::Timer | Kind::HttpDone | Kind::Command);
+        if !always && self.subscribed.is_some_and(|mask| mask & kind.bit() == 0) {
+            return Verdict::Continue;
+        }
         self.mock.begin_call();
         self.plugin.event(&self.mock, event)
+    }
+
+    /// Applies what the host does after a call: a player the plugin kicked is removed and their
+    /// `PlayerLeave` is delivered (which may kick again).
+    fn settle(&mut self) {
+        while let Some(client) = self.mock.next_kick() {
+            if let Some(who) = self.mock.find_player(client) {
+                self.mock.remove_player(client);
+                self.deliver(&Event::PlayerLeave { client, name: &who.name, player_id: who.player_id });
+            }
+        }
     }
 
     // ---- Players and chat.
@@ -644,27 +945,46 @@ impl<P: Plugin> Harness<P> {
 
     /// A player leaves: removes them from the mock and delivers `Event::PlayerLeave`.
     pub fn leave(&mut self, client: u64) -> Verdict {
-        let who = self.mock.player(client).unwrap_or_else(|| PlayerInfo { client, player_id: client + 1000, ..PlayerInfo::default() });
+        let who = self.mock.find_player(client).unwrap_or_else(|| PlayerInfo { client, player_id: client + 1000, ..PlayerInfo::default() });
         self.mock.remove_player(client);
         self.event(&Event::PlayerLeave { client, name: &who.name, player_id: who.player_id })
     }
 
     /// A player says something: delivers `Event::Chat`. The player should have joined.
     pub fn chat(&mut self, client: u64, text: &str) -> Verdict {
-        let who = self.mock.player(client).unwrap_or_default();
+        let who = self.mock.find_player(client).unwrap_or_default();
         self.event(&Event::Chat { client, name: &who.name, text, player_id: who.player_id })
     }
 
-    /// A player uses a chat command: delivers `Event::Command` with `text` as the player typed
-    /// it, `!name arg ...`. The player should have joined.
+    /// A player uses a chat command: delivers `Event::Command` with `text` as the player typed it
+    /// (the world's prefix, `!` by default, the name, the arguments). The `command` delivered is
+    /// the name in lower case, as the host will deliver it. If the command was declared
+    /// (`declare_command`) and the player may not use it or gave the wrong number of arguments, the
+    /// host's answer is recorded as told to the player and nothing is delivered. The player should
+    /// have joined.
     pub fn command(&mut self, client: u64, name: &str, args: &[&str]) -> Verdict {
-        let who = self.mock.player(client).unwrap_or_default();
-        let mut text = alloc::format!("!{name}");
+        let who = self.mock.find_player(client).unwrap_or_default();
+        let prefix = self.mock.command_prefix();
+        let command = name.to_ascii_lowercase();
+        if let Some(spec) = self.commands.iter().find(|c| c.name == command) {
+            let refusal = if spec.operator_only && !who.operator {
+                Some(format!("{prefix}{command} is for the server's operators."))
+            } else if (args.len() as u64) < spec.min_args as u64 || (args.len() as u64) > spec.max_args as u64 {
+                Some(format!("Use: {prefix}{command}"))
+            } else {
+                None
+            };
+            if let Some(reply) = refusal {
+                self.mock.host_tells(client, reply);
+                return Verdict::Continue;
+            }
+        }
+        let mut text = format!("{prefix}{name}");
         for arg in args {
             text.push(' ');
             text.push_str(arg);
         }
-        self.event(&Event::Command { client, name: &who.name, command: name, args: args.to_vec(), text: &text, player_id: who.player_id })
+        self.event(&Event::Command { client, name: &who.name, command: &command, args: args.to_vec(), text: &text, player_id: who.player_id })
     }
 
     // ---- The world.
@@ -680,9 +1000,15 @@ impl<P: Plugin> Harness<P> {
     }
 
     /// An object is placed (`client` 0: nobody built it): adds it to the mock and delivers
-    /// `Event::ObjectPlaced`.
+    /// `Event::ObjectPlaced`. The object has no network id; see `place_net`.
     pub fn place(&mut self, id: i32, group: &str, position: [f32; 3], client: u64) -> Verdict {
-        self.mock.add_object(ObjectInfo { id, net: 0, group: group.to_string(), position });
+        self.place_net(id, group, position, 0, client)
+    }
+
+    /// Like `place`, for an object with the network id `net` (what `Host::object` finds with
+    /// `ObjectRef::Net` and an RPC's `object` is).
+    pub fn place_net(&mut self, id: i32, group: &str, position: [f32; 3], net: u64, client: u64) -> Verdict {
+        self.mock.add_object(ObjectInfo { id, net, group: group.to_string(), position });
         self.event(&Event::ObjectPlaced { id, group, position, client })
     }
 
@@ -713,18 +1039,26 @@ impl<P: Plugin> Harness<P> {
     }
 
     /// An HTTP request is over: delivers `Event::HttpDone` with no headers and no error text. Take
-    /// the ticket from `MockHost::http_requests`. A `status` of 0 means no answer.
+    /// the ticket from `MockHost::http_requests`.
     pub fn http_done(&mut self, ticket: u64, status: u32, body: &[u8]) -> Verdict {
-        self.event(&Event::HttpDone { ticket, status, error: "", body, headers: Vec::new() })
+        self.http_done_with(ticket, status, "", &[], body)
+    }
+
+    /// Like `http_done`, with the answer's headers and, for a request that got no answer (`status`
+    /// 0), the error text. The request is no longer in flight for the limit of `with_limits`.
+    pub fn http_done_with(&mut self, ticket: u64, status: u32, error: &str, headers: &[(&str, &str)], body: &[u8]) -> Verdict {
+        self.mock.finish_http(ticket);
+        self.event(&Event::HttpDone { ticket, status, error, body, headers: headers.to_vec() })
     }
 
     // ---- Time.
 
     /// Lets `ms` of game time pass, one step at a time (`tick_step_ms`). At the end of each step it
     /// delivers a `Tick` if `tick_every_ms` has passed since the last one, then a `Timer` for each
-    /// timer that is due (oldest first). A repeating timer is called at most once per step; a
+    /// timer that is due, as the host does at a game tick: the first four, in the order they were
+    /// set (the rest wait for the next step). A repeating timer is called at most once per step; a
     /// repeat that fell inside a step is skipped. A timer set while these are delivered waits for
-    /// the next step.
+    /// the next step, and one set in `load` starts counting at the first step.
     pub fn advance_ms(&mut self, ms: u64) {
         let mut left = ms as i64;
         while left > 0 {
@@ -737,9 +1071,21 @@ impl<P: Plugin> Harness<P> {
                 self.last_tick_ms = now;
                 self.event(&Event::Tick { game_ms: now, tick: (now / GAME_TICK_MS) as i32, players: self.mock.player_count(), since_ms, unix_ms: self.mock.unix_ms() });
             }
-            for (id, late_ms) in self.mock.take_due_timers() {
+            for (id, late_ms) in self.mock.take_due_timers(None) {
                 self.event(&Event::Timer { id, game_ms: now, late_ms });
             }
+        }
+    }
+
+    /// Calls a timer now, whenever it is due: delivers `Event::Timer` with `late_ms` 0, and removes
+    /// the timer if it is a one-shot or sets it for its next time if it repeats, as the host does.
+    /// Panics if the plugin has no timer with this id.
+    pub fn fire_timer(&mut self, id: u32) -> Verdict {
+        assert!(self.mock.timers().iter().any(|t| t.id == id), "no timer {id} is set");
+        let now = self.mock.game_ms();
+        match self.mock.take_due_timers(Some(id)).first() {
+            Some(&(id, late_ms)) => self.event(&Event::Timer { id, game_ms: now, late_ms }),
+            None => Verdict::Continue,
         }
     }
 
@@ -759,8 +1105,11 @@ impl<P: Plugin> Harness<P> {
         let saved = self.save();
         self.mock.clear_timers();
         self.mock.begin_call();
+        self.mock.set_loading(true);
         let state = saved.as_ref().map(|s| State { version: s.version, bytes: &s.bytes });
         self.plugin = P::load(&self.mock, state);
+        self.mock.set_loading(false);
+        self.settle();
     }
 
     /// Switches the plugin off as the server does: calls `Plugin::unload`, drops the timers, then
@@ -907,12 +1256,12 @@ mod tests {
 
     #[test]
     fn a_repeat_shorter_than_a_step_is_called_once_per_step() {
-        let mut t = start().tick_every_ms(0);
-        t.command(1, "arm", &["1", "10", "10"]);
-        t.advance_ms(200);
-        assert_eq!(t.plugin().timers.len(), 4);
-        // Due at 10, 20, ..., delivered at 50 (40 late), then the next one after that: 60, at 100.
-        assert_eq!(t.plugin().timers[1], (1, 100, 40));
+        let mut t = start().tick_every_ms(0).tick_step_ms(250);
+        t.command(1, "arm", &["1", "100", "100"]);
+        t.advance_ms(1000);
+        // Due at 100: delivered at 250 (150 late); the repeats at 200 and 300 are skipped to 300,
+        // which is delivered at 500, and so on.
+        assert_eq!(t.plugin().timers, [(1, 250, 150), (1, 500, 200), (1, 750, 150), (1, 1000, 200)]);
     }
 
     #[test]
@@ -968,12 +1317,11 @@ mod tests {
         // begin_call resets the count by hand.
         let mock = MockHost::new().with_limits();
         for _ in 0..16 {
-            mock.tokens(1).unwrap();
+            mock.say("x").unwrap();
         }
-        assert_eq!(mock.give(1, "Iron", 1), Err(Error::Full));
+        assert_eq!(mock.kick(1, "r"), Err(Error::Full));
         mock.begin_call();
-        assert_eq!(mock.give(1, "Iron", 1), Ok(()));
-        assert_eq!(mock.tokens_total(), 16);
+        assert_eq!(mock.kick(1, "r"), Ok(()));
     }
 
     #[test]
@@ -1052,6 +1400,7 @@ mod tests {
     fn queries_answer_from_the_mock_world() {
         let mock = MockHost::new()
             .with_object(at([1.0, 2.0, 3.0], -4))
+            .with_player(PlayerInfo { client: 7, name: "Ann".into(), ..Default::default() })
             .with_inventory(7, InventoryInfo { slots_used: 1, slots_total: 30, items: vec![query::ItemCount { group: "Iron".into(), count: 5 }] })
             .with_setting("zeta", "1")
             .with_setting("alpha", "2")
@@ -1062,6 +1411,8 @@ mod tests {
         assert_eq!(mock.object(ObjectRef::Net(0)), Ok(None));
         assert_eq!(mock.inventory(7).unwrap().count("Iron"), 5);
         assert_eq!(mock.inventory(8), Err(Error::NotFound));
+        assert_eq!(mock.player(7).unwrap().name, "Ann");
+        assert_eq!(mock.player(8), Err(Error::NotFound));
         assert_eq!(mock.settings().unwrap(), [("alpha".to_string(), "2".to_string()), ("zeta".to_string(), "1".to_string())]);
         assert_eq!(mock.config("alpha"), Some("2".to_string()));
         assert_eq!(mock.config("nope"), None);
@@ -1154,7 +1505,7 @@ mod tests {
         mock.tokens(10).unwrap();
         mock.tokens(-4).unwrap();
         mock.log(Level::Warn, "careful");
-        let first = mock.http_request(&HttpRequest { method: "POST", url: "https://hook.example/${secret.h}", headers: vec![("Content-Type", "application/json")], body: b"{}" }).unwrap();
+        let first = mock.http_request(&HttpRequest { method: "POST", url: "https://hook.example/${config.h}", headers: vec![("Content-Type", "application/json")], body: b"{}" }).unwrap();
         let second = mock.http_request(&HttpRequest { method: "GET", url: "https://a.example/", headers: vec![], body: b"" }).unwrap();
         assert_eq!((first, second), (1, 2));
         assert_eq!(mock.said(), ["all"]);
@@ -1166,7 +1517,7 @@ mod tests {
         assert_eq!(mock.tokens_total(), 6);
         assert_eq!(mock.logs(), [(Level::Warn, "careful".to_string())]);
         let http = mock.http_requests();
-        assert_eq!(http[0], HttpCall { method: "POST".into(), url: "https://hook.example/${secret.h}".into(), headers: vec![("Content-Type".into(), "application/json".into())], body: b"{}".to_vec(), ticket: 1 });
+        assert_eq!(http[0], HttpCall { method: "POST".into(), url: "https://hook.example/${config.h}".into(), headers: vec![("Content-Type".into(), "application/json".into())], body: b"{}".to_vec(), ticket: 1 });
         mock.clear();
         assert!(mock.said().is_empty() && mock.http_requests().is_empty() && mock.logs().is_empty());
         assert_eq!(mock.tokens_total(), 0);
@@ -1192,5 +1543,305 @@ mod tests {
         t.clear();
         assert!(t.mock().told().is_empty());
         assert_eq!(t.mock().logs().len(), 0);
+    }
+
+    #[test]
+    fn the_host_s_bounds_on_give_tokens_timers_and_text_are_checked() {
+        let mock = MockHost::new();
+        assert_eq!(mock.give(1, "Iron", 0), Err(Error::Bad));
+        assert_eq!(mock.give(1, "Iron", 51), Err(Error::Bad));
+        assert_eq!(mock.give(1, "", 1), Err(Error::Bad));
+        assert_eq!(mock.give(1, "Iron Ore", 1), Err(Error::Bad));
+        assert_eq!(mock.give(1, "Iron", 50), Ok(()));
+        assert_eq!(mock.tokens(0), Err(Error::Bad));
+        assert_eq!(mock.tokens(10_001), Err(Error::Bad));
+        assert_eq!(mock.tokens(-10_001), Err(Error::Bad));
+        assert_eq!(mock.tokens(-10_000), Ok(()));
+        assert_eq!(mock.set_timer(1, 0, 99), Err(Error::Bad));
+        assert_eq!(mock.set_timer(1, 604_800_001, 0), Err(Error::Bad));
+        assert_eq!(mock.set_timer(1, 0, 604_800_001), Err(Error::Bad));
+        assert_eq!(mock.set_timer(1, 604_800_000, 100), Ok(()));
+        for id in 2..=16 {
+            mock.set_timer(id, 1000, 0).unwrap();
+        }
+        assert_eq!(mock.set_timer(17, 1000, 0), Err(Error::Full));
+        // Replacing one of the 16 is fine.
+        assert_eq!(mock.set_timer(5, 1, 0), Ok(()));
+        assert_eq!(mock.timers().len(), 16);
+        assert_eq!(mock.say(" \u{7} "), Err(Error::Bad));
+        assert_eq!(mock.teleport(1, [f32::NAN, 0.0, 0.0]), Err(Error::Bad));
+        assert_eq!(mock.teleport(1, [100_001.0, 0.0, 0.0]), Err(Error::Bad));
+        assert_eq!(mock.rules_patch("[1]"), Err(Error::Bad));
+        assert_eq!(mock.rules_patch("nope"), Err(Error::Bad));
+        assert_eq!(mock.rules_patch(r#"{"a":1}"#), Ok(()));
+        // Text is cleaned and cut as the host does; an empty kick reason becomes "Kicked".
+        mock.say(&format!("  hi\u{7}\n{}", "x".repeat(600))).unwrap();
+        // 500 characters are kept, then the leading spaces are trimmed.
+        assert_eq!(mock.said()[0].chars().count(), 498);
+        assert!(mock.said()[0].starts_with("hi\nx"));
+        mock.kick(1, "").unwrap();
+        assert_eq!(mock.kicks_of(1), ["Kicked"]);
+        assert_eq!(mock.given(), [(1, "Iron".to_string(), 50)]);
+        assert_eq!(mock.tokens_total(), -10_000);
+    }
+
+    #[test]
+    fn the_hosts_rates_apply_with_limits_in_game_seconds() {
+        let mut t = Harness::<Probe>::start(MockHost::new().with_limits()).tick_every_ms(0);
+        let m = t.mock();
+        assert_eq!((m.tokens(1), m.tokens(1), m.tokens(1)), (Ok(()), Ok(()), Err(Error::Full)));
+        assert_eq!((m.rules_patch("{}"), m.rules_patch("{}"), m.rules_patch("{}")), (Ok(()), Ok(()), Err(Error::Full)));
+        m.begin_call();
+        for _ in 0..10 {
+            m.give(1, "Iron", 1).unwrap();
+        }
+        assert_eq!(m.give(1, "Iron", 1), Err(Error::Full));
+        t.advance_ms(1000);
+        let m = t.mock();
+        assert_eq!((m.tokens(1), m.give(1, "Iron", 1)), (Ok(()), Ok(())));
+        // Two requests alive at most, until one is answered.
+        let get = HttpRequest { method: "GET", url: "https://a.example/", headers: vec![], body: b"" };
+        assert_eq!((m.http_request(&get), m.http_request(&get), m.http_request(&get)), (Ok(1), Ok(2), Err(Error::Full)));
+        t.http_done(1, 200, b"");
+        assert_eq!(t.mock().http_request(&get), Ok(3));
+        let bad = HttpRequest { method: "FETCH", ..get.clone() };
+        assert_eq!(t.mock().http_request(&bad), Err(Error::Bad));
+    }
+
+    #[test]
+    fn the_mock_world_can_be_changed_while_the_plugin_runs() {
+        let t = start();
+        t.mock().add_player(PlayerInfo { client: 1, name: "Ann".into(), ..Default::default() });
+        t.mock().set_position(1, [1.0, 2.0, 3.0]);
+        t.mock().set_operator(1, true);
+        t.mock().set_position(9, [0.0; 3]);
+        let p = t.mock().player(1).unwrap();
+        assert_eq!((p.position, p.operator), ([1.0, 2.0, 3.0], true));
+        t.mock().set_world(|w| {
+            w.terraformation = 99.5;
+            w.standing_still = true;
+            w.planet = "Moon".into();
+            w.game_ms = 123_456;
+        });
+        let w = t.mock().world().unwrap();
+        assert_eq!((w.terraformation, w.standing_still, w.planet.as_str(), w.game_ms, w.command_prefix.as_str()), (99.5, true, "Moon", 0, "!"));
+    }
+
+    #[test]
+    fn place_net_gives_the_object_a_network_id() {
+        let mut t = start();
+        t.place_net(-5, "Drill1", [1.0, 0.0, 0.0], 777, 3);
+        assert_eq!(t.mock().object(ObjectRef::Net(777)).unwrap().unwrap().id, -5);
+        t.place(-6, "Drill1", [1.0, 0.0, 0.0], 3);
+        assert_eq!(t.mock().object(ObjectRef::World(-6)).unwrap().unwrap().net, 0);
+    }
+
+    #[test]
+    fn a_timer_can_be_fired_by_hand_and_one_set_in_load_starts_at_the_first_step() {
+        let mut t = start().tick_every_ms(0);
+        t.command(1, "arm", &["1", "5000", "0"]);
+        t.command(1, "arm", &["2", "5000", "1000"]);
+        t.advance_ms(100);
+        t.fire_timer(1);
+        t.fire_timer(2);
+        assert_eq!(t.plugin().timers, [(1, 100, 0), (2, 100, 0)]);
+        // The one-shot is gone; the repeating one is due again a repeat later.
+        assert_eq!(t.mock().timers().iter().map(|x| (x.id, x.due_ms)).collect::<Vec<_>>(), [(2, 1100)]);
+        // A timer set in load counts from the first step, not from the load.
+        struct Early;
+        impl Plugin for Early {
+            fn load(host: &dyn Host, _: Option<State<'_>>) -> Self {
+                host.set_timer(1, 200, 0).unwrap();
+                Early
+            }
+            fn event(&mut self, host: &dyn Host, event: &Event<'_>) -> Verdict {
+                if let Event::Timer { id, game_ms, .. } = event {
+                    host.log(Level::Info, &format!("timer {id} at {game_ms}"));
+                }
+                Verdict::Continue
+            }
+        }
+        let mock = MockHost::new();
+        mock.advance_clock(1000);
+        let mut e = Harness::<Early>::start(mock).tick_every_ms(0);
+        e.advance_ms(150);
+        assert!(e.mock().logs().is_empty());
+        e.advance_ms(100);
+        // Counted from the first step (1050): due at 1250.
+        assert_eq!(e.mock().logs(), [(Level::Info, "timer 1 at 1250".to_string())]);
+    }
+
+    #[test]
+    #[should_panic(expected = "no timer 5 is set")]
+    fn firing_a_timer_that_is_not_set_panics() {
+        start().fire_timer(5);
+    }
+
+    #[test]
+    fn at_most_four_timers_come_in_a_step_in_the_order_set() {
+        let mut t = start().tick_every_ms(0);
+        for id in [9, 3, 7, 1, 5, 2] {
+            t.mock().set_timer(id, 10, 0).unwrap();
+        }
+        t.advance_ms(50);
+        assert_eq!(t.plugin().timers.iter().map(|x| x.0).collect::<Vec<_>>(), [9, 3, 7, 1]);
+        t.advance_ms(50);
+        assert_eq!(t.plugin().timers.iter().map(|x| x.0).collect::<Vec<_>>(), [9, 3, 7, 1, 5, 2]);
+        assert_eq!(t.plugin().timers[4].2, 90);
+    }
+
+    #[test]
+    fn subscribe_holds_back_the_kinds_not_listed() {
+        let mut t = start().subscribe(&[Kind::PlayerJoin]).tick_every_ms(100);
+        t.join(1, "Ann");
+        t.chat(1, "hi");
+        t.advance_ms(300);
+        t.rpc_before(1, "x", 1, "[]");
+        t.place(1, "Drill1", [0.0; 3], 0);
+        assert!(t.plugin().ticks.is_empty());
+        // Timers, commands and HTTP answers always pass.
+        t.command(1, "count", &[]);
+        t.mock().set_timer(1, 10, 0).unwrap();
+        t.advance_ms(50);
+        t.http_done(4, 200, b"");
+        assert_eq!(t.mock().told(), [(1, "1".to_string())]);
+        assert_eq!(t.plugin().timers.len(), 1);
+        assert_eq!(t.plugin().http_done, [(4, 200)]);
+    }
+
+    #[test]
+    fn a_kicked_player_leaves_after_the_call() {
+        struct Bouncer(Vec<std::string::String>);
+        impl Plugin for Bouncer {
+            fn load(_: &dyn Host, _: Option<State<'_>>) -> Self {
+                Bouncer(Vec::new())
+            }
+            fn event(&mut self, host: &dyn Host, event: &Event<'_>) -> Verdict {
+                match event {
+                    Event::Chat { client, text: "bye", .. } => {
+                        host.kick(*client, "asked for it").unwrap();
+                        // Still there during the call.
+                        self.0.push(format!("online {}", host.players().unwrap().len()));
+                    }
+                    Event::PlayerLeave { name, player_id, .. } => self.0.push(format!("left {name} {player_id}")),
+                    _ => {}
+                }
+                Verdict::Continue
+            }
+        }
+        let mut t = Harness::<Bouncer>::start(MockHost::new());
+        t.join(1, "Ann");
+        t.join(2, "Bo");
+        t.chat(1, "bye");
+        assert_eq!(t.plugin().0, ["online 2", "left Ann 1001"]);
+        assert_eq!(t.mock().kicks_of(1), ["asked for it"]);
+        assert_eq!(t.mock().players().unwrap().len(), 1);
+        assert_eq!(t.mock().inventory(1), Err(Error::NotFound));
+        // A kick of someone who is not there changes nothing.
+        t.mock().kick(77, "").unwrap();
+        t.chat(2, "hello");
+        assert_eq!(t.plugin().0.len(), 2);
+    }
+
+    #[test]
+    fn a_declared_command_is_refused_like_the_host_does() {
+        let mut t = start();
+        t.join(1, "Ann");
+        t.join(2, "Op");
+        t.mock().set_operator(2, true);
+        t.declare_command("Count", 0, 1, false);
+        t.declare_command("ban", 1, u32::MAX, true);
+        // Too many arguments: the player is told, the plugin is not called.
+        t.command(1, "count", &["a", "b"]);
+        assert_eq!(t.mock().told_to(1), ["Use: !count"]);
+        assert_eq!(t.plugin().count, 0);
+        // The right number, whatever the case: delivered, in lower case.
+        t.command(1, "COUNT", &["a"]);
+        assert_eq!(t.plugin().count, 1);
+        assert_eq!(t.mock().told_to(1), ["Use: !count", "1"]);
+        t.command(1, "ban", &["x"]);
+        assert_eq!(t.mock().told_to(1)[2], "!ban is for the server's operators.");
+        t.command(2, "ban", &[]);
+        assert_eq!(t.mock().told_to(2), ["Use: !ban"]);
+        // A command nobody declared is delivered as it is.
+        t.command(1, "count", &[]);
+        assert_eq!(t.plugin().count, 2);
+    }
+
+    #[test]
+    fn the_command_event_carries_a_lower_case_name_and_the_typed_text() {
+        struct Spy(Vec<(std::string::String, std::string::String)>);
+        impl Plugin for Spy {
+            fn load(_: &dyn Host, _: Option<State<'_>>) -> Self {
+                Spy(Vec::new())
+            }
+            fn event(&mut self, _: &dyn Host, event: &Event<'_>) -> Verdict {
+                if let Event::Command { command, text, .. } = event {
+                    self.0.push((command.to_string(), text.to_string()));
+                }
+                Verdict::Continue
+            }
+        }
+        let mock = MockHost::new();
+        mock.set_world(|w| w.command_prefix = "?".into());
+        let mut t = Harness::<Spy>::start(mock);
+        t.command(1, "Stats", &["X"]);
+        assert_eq!(t.plugin().0, [("stats".to_string(), "?Stats X".to_string())]);
+    }
+
+    #[test]
+    fn a_joined_player_has_an_empty_backpack_that_exists() {
+        let mut t = start();
+        assert_eq!(t.mock().inventory(1), Err(Error::NotFound));
+        t.join(1, "Ann");
+        let inventory = t.mock().inventory(1).unwrap();
+        assert_eq!((inventory.slots_used, inventory.slots_total, inventory.items.len()), (0, 30, 0));
+        t.leave(1);
+        assert_eq!(t.mock().inventory(1), Err(Error::NotFound));
+    }
+
+    #[test]
+    fn the_readers_filter_by_player() {
+        let mock = MockHost::new();
+        mock.tell(1, "a").unwrap();
+        mock.tell(2, "b").unwrap();
+        mock.tell(1, "c").unwrap();
+        mock.give(1, "Iron", 2).unwrap();
+        mock.give(2, "Ice", 3).unwrap();
+        mock.teleport(2, [1.0, 2.0, 3.0]).unwrap();
+        mock.kick(2, "x").unwrap();
+        assert_eq!(mock.told_to(1), ["a", "c"]);
+        assert_eq!(mock.given_to(2), [("Ice".to_string(), 3)]);
+        assert_eq!(mock.teleports_of(2), [[1.0, 2.0, 3.0]]);
+        assert_eq!(mock.teleports_of(1), Vec::<[f32; 3]>::new());
+        assert_eq!(mock.kicks_of(2), ["x"]);
+    }
+
+    #[test]
+    fn an_http_answer_can_carry_headers_and_an_error() {
+        struct Echo(Vec<std::string::String>);
+        impl Plugin for Echo {
+            fn load(_: &dyn Host, _: Option<State<'_>>) -> Self {
+                Echo(Vec::new())
+            }
+            fn event(&mut self, _: &dyn Host, event: &Event<'_>) -> Verdict {
+                if let Event::HttpDone { status, error, headers, body, .. } = event {
+                    self.0.push(format!("{status} {error:?} {headers:?} {}", body.len()));
+                }
+                Verdict::Continue
+            }
+        }
+        let mut t = Harness::<Echo>::start(MockHost::new());
+        t.http_done_with(1, 200, "", &[("etag", "x")], b"abc");
+        t.http_done_with(2, 0, "timed out", &[], b"");
+        assert_eq!(t.plugin().0, [r#"200 "" [("etag", "x")] 3"#, r#"0 "timed out" [] 0"#]);
+    }
+
+    #[test]
+    fn the_error_reads_in_plain_words() {
+        assert_eq!(Error::Denied.to_string(), "denied: the capability is not granted");
+        assert!(Error::NotFound.to_string().starts_with("not found"));
+        let boxed: std::boxed::Box<dyn std::error::Error> = std::boxed::Box::new(Error::Full);
+        assert!(boxed.to_string().starts_with("full"));
     }
 }

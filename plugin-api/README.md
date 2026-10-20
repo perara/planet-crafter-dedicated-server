@@ -58,8 +58,9 @@ fn hello_answers_the_command() {
 }
 ```
 
-The mock can also refuse capabilities, enforce the 16 actions per call, answer `nearby`
-queries, and run timers, ticks, saves and reloads. See the `testing` module.
+The mock can also refuse capabilities, enforce the host's limits (16 actions per call, the
+sizes of `give`, `tokens` and timers), answer `nearby` queries, kick players, honour declared
+commands, and run timers, ticks, saves and reloads. See the `testing` module.
 
 ## Features
 
@@ -80,9 +81,8 @@ what you do to use new features.
 
 ## Minimum Rust version
 
-1.85 (edition 2024) is what `rust-version` says. Tested on 1.92.0, 1.94.0, 1.96.0, 1.97.1 and
-1.98.1; 1.85 itself is not installed on the machine where this was written, so it is not
-tested yet.
+1.85 (edition 2024) is what `rust-version` says. Tested on 1.92.0 and 1.98.1; 1.85 itself is not
+installed on the machine where this was written, so it is not tested yet.
 
 ## Licence
 

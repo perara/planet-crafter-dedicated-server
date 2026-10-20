@@ -275,6 +275,8 @@ pub struct Loaded {
     pub denied_caps: Vec<&'static str>,
     /// New files on disk that wait for approval while this version goes on: what they ask for.
     pub incoming: Option<Incoming>,
+    /// What the plugin asked for while it loaded; the host applies it once the game is its own again.
+    boot_queue: Vec<Action>,
 }
 
 /// The files that wait for the admin, as far as the admin needs to judge them.
@@ -320,6 +322,7 @@ impl Loaded {
             logs: Arc::default(),
             denied_caps: Vec::new(),
             incoming: None,
+            boot_queue: Vec::new(),
         }
     }
 
@@ -496,7 +499,7 @@ impl Loaded {
     }
 
     /// Instantiates and starts what `inspect` prepared. On failure the plugin is `Failed`.
-    fn start(&mut self, engine: &wasmi::Engine, gauge: &Arc<wasm::Gauge>, saved: &state::Saved, world: &str) {
+    fn start(&mut self, engine: &wasmi::Engine, gauge: &Arc<wasm::Gauge>, saved: &state::Saved, world: &str, boot: Option<Boot>) {
         let Some(pending) = self.pending.take() else { return };
         let state = self.starting_state(saved, world);
         let mut ctx = Ctx::new(&self.id, self.grant);
@@ -507,14 +510,33 @@ impl Loaded {
             Pending::Wasm(module) => wasm::Wasm::new(engine, &module, ctx, self.limits, gauge.clone()).map(|w| Box::new(w) as Box<dyn Runtime>),
             Pending::Data(rules) => Ok(Box::new(data::Data::new(rules, ctx))),
         };
-        let started = made.and_then(|mut rt| rt.start(state.as_ref()).map(|()| rt).map_err(|f| format!("start failed: {f}")));
+        let mut queued = Vec::new();
+        let started = made.and_then(|mut rt| {
+            // The world as it is, for the plugin's `load` to read (the start of a game, a reload, a hot update).
+            if let Some(b) = boot {
+                // SAFETY: `b` was made from a live reference by the caller, which holds it for this whole call.
+                rt.ctx().begin(unsafe { &*b.0 }, b.1);
+            }
+            let result = rt.start(state.as_ref());
+            if boot.is_some() {
+                queued = rt.ctx().end();
+            }
+            result.map(|()| rt).map_err(|f| self.explain_start(&f))
+        });
         match started {
-            Ok(rt) => self.rt = Some(rt),
+            Ok(rt) => {
+                self.rt = Some(rt);
+                self.boot_queue = queued;
+            }
             Err(e) => {
                 eprintln!("plugin {}: {e}", self.id);
                 self.status = Status::Failed(clean(&e));
             }
         }
+    }
+
+    fn explain_start(&self, fault: &Fault) -> String {
+        format!("start failed: {}", self.explain(fault, "starting"))
     }
 
     /// Whether the same files, approved the same way, were meant: a reload leaves it as it is.
@@ -665,6 +687,21 @@ pub struct Host {
     /// A host that sends nothing (`pcds plugin test`, `check`): the requests plugins make are kept here
     /// instead of going to the workers.
     pub offline: Option<Vec<net::Fetch>>,
+    boot: Option<Boot>,
+}
+
+/// The world as it is while plugins are being started (`pcds_load` may ask about it), for the length of
+/// one `start_all_in` or `rescan_in`: set there, cleared there.
+#[derive(Clone, Copy)]
+struct Boot(*const dyn World, i64);
+
+// SAFETY: made and used inside one call on the game's thread (`Host::start_all_in`, `rescan_in`), then dropped.
+unsafe impl Send for Boot {}
+unsafe impl Sync for Boot {}
+
+fn erase(world: &dyn World) -> *const dyn World {
+    // SAFETY: only the lifetime is erased; `Boot` is used and dropped inside the call that made it.
+    unsafe { std::mem::transmute::<&dyn World, &'static dyn World>(world) as *const dyn World }
 }
 
 /// Size and modification time of the files that decide what plugins there are: a change in any is
@@ -762,7 +799,7 @@ pub fn prepare(dir: &Path, world: &str) -> Host {
 impl Host {
     /// A host with no plugin.
     pub fn empty(dir: &Path, world: &str) -> Host {
-        Host { dir: dir.to_path_buf(), world: world.to_string(), engine: wasm::engine(), plugins: Vec::new(), commands: HashMap::new(), interest: 0, rotate: 0, approvals_error: None, keys_error: None, gauge: Arc::default(), sig: Vec::new(), net: net::Net::default(), offline: None }
+        Host { dir: dir.to_path_buf(), world: world.to_string(), engine: wasm::engine(), plugins: Vec::new(), commands: HashMap::new(), interest: 0, rotate: 0, approvals_error: None, keys_error: None, gauge: Arc::default(), sig: Vec::new(), net: net::Net::default(), offline: None, boot: None }
     }
 
     /// The folder's files that matter, as they are now.
@@ -813,6 +850,7 @@ impl Host {
     /// folder merely changed elsewhere. Returns the summary line.
     pub fn rescan(&mut self, saved: &mut state::Saved, explicit: bool) -> String {
         let before = self.states();
+        let boot = self.boot;
         let (fresh, error, keys_error) = scan(&self.engine, &self.dir);
         self.approvals_error = error;
         self.keys_error = keys_error;
@@ -821,7 +859,7 @@ impl Host {
         let mut next: Vec<Loaded> = Vec::new();
         for mut p in fresh {
             let Some(i) = old.iter().position(|q| q.id == p.id) else {
-                p.start(&self.engine, &self.gauge, saved, &world);
+                p.start(&self.engine, &self.gauge, saved, &world, boot);
                 next.push(p);
                 continue;
             };
@@ -845,7 +883,7 @@ impl Host {
                 };
                 p.checkpoint = handed;
                 p.logs = prev.logs.clone();
-                p.start(&self.engine, &self.gauge, saved, &world);
+                p.start(&self.engine, &self.gauge, saved, &world, boot);
                 if p.rt.is_some() {
                     p.stats.restarts = prev.stats.restarts;
                     if let Some(b) = &p.checkpoint {
@@ -893,7 +931,7 @@ impl Host {
             }
             // A plugin that is to run starts (an explicit reload of a failed one, or an enable).
             if p.pending.is_some() && p.status == Status::Running {
-                p.start(&self.engine, &self.gauge, saved, &world);
+                p.start(&self.engine, &self.gauge, saved, &world, boot);
             }
             next.push(p);
         }
@@ -950,12 +988,39 @@ impl Host {
         }
     }
 
+    /// `start_all`, with the world there for the plugins' `load` to read. What they ask for in `load`
+    /// is applied by `flush_boot` once the game is free.
+    pub fn start_all_in(&mut self, saved: &state::Saved, world: &dyn World, game_ms: i64) {
+        self.boot = Some(Boot(erase(world), game_ms));
+        self.start_all(saved);
+        self.boot = None;
+    }
+
+    /// `rescan`, with the world there for the new plugins' `load`.
+    pub fn rescan_in(&mut self, saved: &mut state::Saved, explicit: bool, world: &dyn World, game_ms: i64) -> String {
+        self.boot = Some(Boot(erase(world), game_ms));
+        let line = self.rescan(saved, explicit);
+        self.boot = None;
+        line
+    }
+
+    /// Applies what plugins asked for while they loaded (a `say`, a `give`, a request).
+    pub fn flush_boot(&mut self, sink: &mut dyn Sink) {
+        for i in 0..self.plugins.len() {
+            let queued = std::mem::take(&mut self.plugins[i].boot_queue);
+            if !queued.is_empty() {
+                self.dispatch_actions(i, sink, queued);
+            }
+        }
+    }
+
     /// Starts every approved plugin with its state (from `saved`, else from disk).
     fn start_all(&mut self, saved: &state::Saved) {
+        let boot = self.boot;
         let (engine, world) = (self.engine.clone(), self.world.clone());
         let gauge = self.gauge.clone();
         for p in &mut self.plugins {
-            p.start(&engine, &gauge, saved, &world);
+            p.start(&engine, &gauge, saved, &world, boot);
         }
         self.index_commands();
         self.recompute();
@@ -1040,6 +1105,8 @@ impl Host {
         {
             let prefix = sink.command_prefix();
             if let Some((command, args)) = crate::chathooks::command(Some(&prefix), text) {
+                // The name is matched without regard to case; the plugin is given it in lower case.
+                let command = command.to_lowercase();
                 let command = Event::Command { client: *client, name, command: &command, args: args.iter().map(String::as_str).collect(), text, player_id: *player_id };
                 self.run(sink, &command, game_ms);
             }
@@ -1147,7 +1214,12 @@ impl Host {
                 return Verdict::Continue;
             }
         }
-        // HTTP requests go to the workers; the rest is applied to the game.
+        self.dispatch_actions(i, sink, queued);
+        verdict
+    }
+
+    /// What plugin `i` asked for in a call: its HTTP requests go to the workers, the rest is applied to the game.
+    fn dispatch_actions(&mut self, i: usize, sink: &mut dyn Sink, queued: Vec<Action>) {
         let (http, queued): (Vec<Action>, Vec<Action>) = queued.into_iter().partition(|a| matches!(a, Action::Http(_)));
         if !http.is_empty() {
             let p = &mut self.plugins[i];
@@ -1167,7 +1239,6 @@ impl Host {
         let p = &mut self.plugins[i];
         p.stats.actions += applied.done as u64;
         p.stats.refused += applied.refused as u64;
-        verdict
     }
 
     /// Whether requests of plugins are out and their answers not taken yet.
@@ -1258,26 +1329,29 @@ impl Host {
 /// the plugins were prepared (an approval given during a hot update, say): it is looked at once
 /// more here, so the set that runs is the folder's at this moment, not at the compile.
 pub fn attach(game: &mut crate::game::Game, mut host: Host, flipped: bool) {
-    let slot = &mut game.ext.plugins;
-    slot.place = Some((host.dir.clone(), host.world.clone()));
+    game.ext.plugins.place = Some((host.dir.clone(), host.world.clone()));
     let changed = host.signature() != host.sig;
+    let game_ms = (game.time.secs() * 1000.0) as i64;
+    // The state of the plugins is a part of the game: it is taken out while they start, which they do reading the world.
+    let mut saved = std::mem::take(&mut game.ext.plugins.saved);
     if !host.is_empty() {
-        host.start_all(&slot.saved);
+        host.start_all_in(&saved, &*game, game_ms);
         // State of plugins that are gone is not carried on.
         let ids: HashSet<&str> = host.plugins.iter().map(|p| p.id.as_str()).collect();
-        slot.saved.states.retain(|id, _| ids.contains(id.as_str()));
+        saved.states.retain(|id, _| ids.contains(id.as_str()));
         println!("{}", host.summary_line());
         host.announce(&HashMap::new());
     }
     if changed {
-        host.rescan(&mut slot.saved, false);
+        host.rescan_in(&mut saved, false, &*game, game_ms);
     }
-    slot.scan = Scan { next: Some(Instant::now() + POLL_EVERY), seen: host.sig.clone(), settling: None };
-    slot.host = (!host.is_empty()).then(|| Box::new(host));
-    slot.refresh();
+    game.ext.plugins.saved = saved;
+    host.flush_boot(game);
+    game.ext.plugins.scan = Scan { next: Some(Instant::now() + POLL_EVERY), seen: host.sig.clone(), settling: None };
+    game.ext.plugins.host = (!host.is_empty()).then(|| Box::new(host));
+    game.ext.plugins.refresh();
     // A hot update: the plugins that asked hear that they were carried over, once, before the world runs on.
     if flipped && let Some(mut host) = game.ext.plugins.host.take() {
-        let game_ms = (game.time.secs() * 1000.0) as i64;
         host.run(game, &Event::Flip { game_ms, server_version: env!("CARGO_PKG_VERSION") }, game_ms);
         game.ext.plugins.host = Some(host);
         game.ext.plugins.refresh();
@@ -1346,7 +1420,11 @@ pub fn reload(game: &mut crate::game::Game) -> Result<String, String> {
 fn rescan_game(game: &mut crate::game::Game, explicit: bool) -> Result<String, String> {
     let (dir, world) = game.ext.plugins.place.clone().ok_or("the plugin host has not started")?;
     let mut host = game.ext.plugins.host.take().map(|h| *h).unwrap_or_else(|| Host::empty(&dir, &world));
-    let line = host.rescan(&mut game.ext.plugins.saved, explicit);
+    let game_ms = (game.time.secs() * 1000.0) as i64;
+    let mut saved = std::mem::take(&mut game.ext.plugins.saved);
+    let line = host.rescan_in(&mut saved, explicit, &*game, game_ms);
+    game.ext.plugins.saved = saved;
+    host.flush_boot(game);
     game.ext.plugins.scan.seen = host.sig.clone();
     game.ext.plugins.scan.settling = None;
     game.ext.plugins.host = (!host.is_empty()).then(|| Box::new(host));

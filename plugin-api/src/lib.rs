@@ -42,20 +42,12 @@
 
 extern crate alloc;
 
-// `allow(missing_docs)` marks the modules whose public items still lack doc comments. Remove the
-// attribute from a module when it is documented.
-#[allow(missing_docs)]
 pub mod caps;
-#[allow(missing_docs)]
 pub mod codec;
-#[allow(missing_docs)]
 pub mod event;
-#[allow(missing_docs)]
 pub mod host;
-#[allow(missing_docs)]
 pub mod http;
 pub mod json;
-#[allow(missing_docs)]
 pub mod query;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -101,7 +93,9 @@ pub struct SavedState {
 /// A plugin. Implement it and call `export!` with the type.
 pub trait Plugin: Sized {
     /// Once when the plugin starts (a server start, a reload, or after a hot update): `state` is
-    /// what `save` returned last time, if anything.
+    /// what `save` returned last time, if anything. World queries (`world()`, `players()`,
+    /// `inventory()`...) work here: the host answers them from the world at that moment. A timer
+    /// set here starts counting at the first game tick after it.
     fn load(host: &dyn Host, state: Option<State<'_>>) -> Self;
 
     /// An event the manifest subscribed to. Keep it short: it has a fuel budget. Answer
@@ -116,8 +110,9 @@ pub trait Plugin: Sized {
 
     /// Once when the plugin is switched off, removed, or switched off for faults: the last call,
     /// with a budget (as `save`'s), after which the instance and its memory are dropped and `save`
-    /// is asked one more time. Nothing queued during it is applied. A reload (a new version taking
-    /// over) does not call it: `save` and the new version's `load` hand the state over. (ABI 1.1.)
+    /// is asked one more time. It has no `Host`: there is nothing to ask or to do then but tidy up
+    /// your own state. A reload (a new version taking over) does not call it: `save` and the new
+    /// version's `load` hand the state over. (ABI 1.1.)
     fn unload(&mut self) {}
 }
 
@@ -391,7 +386,7 @@ mod tests {
 
     #[test]
     fn query_answers_round_trip() {
-        let world = WorldInfo { game_ms: 5, planet: "Prime".to_string(), players: 2, world_objects: 9, network_objects: 11, terraformation: 1234.5, standing_still: true, unix_ms: 1_760_000_000_000 };
+        let world = WorldInfo { game_ms: 5, planet: "Prime".to_string(), players: 2, world_objects: 9, network_objects: 11, terraformation: 1234.5, standing_still: true, unix_ms: 1_760_000_000_000, command_prefix: "!".to_string() };
         let mut w = Writer::new();
         world.encode(&mut w);
         assert_eq!(WorldInfo::decode(&w.0).unwrap(), world);
@@ -437,7 +432,7 @@ mod tests {
 
     #[test]
     fn a_request_round_trips_and_a_bad_one_is_an_error_never_a_panic() {
-        let request = HttpRequest { method: "POST", url: "https://discord.com/api/webhooks/${secret.hook}", headers: vec![("Content-Type", "application/json"), ("X-Empty", "")], body: b"{\"content\":\"hi\"}" };
+        let request = HttpRequest { method: "POST", url: "https://discord.com/api/webhooks/${config.hook}", headers: vec![("Content-Type", "application/json"), ("X-Empty", "")], body: b"{\"content\":\"hi\"}" };
         let mut w = Writer::new();
         request.encode(&mut w);
         assert_eq!(HttpRequest::decode(&w.0).unwrap(), request);

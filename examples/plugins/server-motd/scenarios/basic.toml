@@ -1,0 +1,52 @@
+name = "message of the day and rotating tips"
+
+[world]
+planet = "Prime"
+
+[[player]]
+client = 1
+name = "Ann"
+
+[[step]]
+note = "a player joins: three lines to them alone"
+join = { client = 2, name = "Bo" }
+expect = [
+  { tell = 2, contains = "Welcome to the server, Bo! 2 online on Prime." },
+  { tell = 2, contains = "!rules has the rules" },
+  { tell = 2, contains = "new base area" },
+  { say = true, count = 0 },
+]
+
+[[step]]
+chat = { client = 1, text = "!motd" }
+expect = [{ tell = 1, contains = "new base area" }]
+
+[[step]]
+note = "asked again at once: the cooldown holds"
+chat = { client = 1, text = "!motd" }
+expect = [{ tell = 1, count = 0 }]
+
+[[step]]
+chat = { client = 1, text = "!help" }
+expect = [{ tell = 1, contains = "Commands: !motd !rules !help !online" }]
+
+[[step]]
+note = "ten minutes (the clock starts at the first tick): the first tip"
+advance = "10m2s"
+expect = [{ say = true, contains = "Tip: a Container", count = 1 }]
+
+[[step]]
+note = "ten more: the second tip"
+advance = "10m"
+expect = [{ say = true, contains = "Tip: water and oxygen", count = 1 }]
+
+[[step]]
+note = "nobody online: nothing is said"
+leave = 1
+
+[[step]]
+leave = 2
+
+[[step]]
+advance = "40m"
+expect = [{ say = true, count = 0 }]

@@ -1,0 +1,11 @@
+[plugin]
+id = "scaling-rules"
+name = "Scaling rules by player count"
+version = "0.1.0"
+description = "Tunes plant growth and machine speed to the number of players: faster for one or two, the game's own speed from six"
+authors = ["Planet Crafter dedicated server contributors"]
+license = "MIT"
+kind = "data"
+entry = "rules.toml"
+abi = 1
+capabilities = ["event.chat", "event.tick", "world.read", "chat.say", "rules.write"]

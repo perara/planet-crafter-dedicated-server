@@ -20,7 +20,7 @@ flip = true
 [[step]]
 advance = "1s"
 expect = [
-  { http = true, contains = "POST https://hooks.slack.com " },
+  { http = true, contains = "POST https://hooks.slack.com/services/${config.webhook} " },
   { http = true, contains = "{\"text\":\"*Ann &amp; Bo*: ‹!channel› ∗hi∗\"}" },
   { http = true, contains = "allowed_mentions", count = 0 },
 ]

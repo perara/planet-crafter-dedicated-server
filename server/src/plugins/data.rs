@@ -81,13 +81,35 @@ pub struct Say {
 #[serde(deny_unknown_fields)]
 pub struct Every {
     pub seconds: f64,
-    pub say: String,
+    /// One text, or a list that is said in turn (the first, the second, ... then the first again).
+    pub say: Lines,
+    /// Only said while at least this many players are online (default 0: always; 1: not to an empty server).
+    pub min_players: Option<u32>,
+}
+
+/// A text, or several to rotate through.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Lines {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Lines {
+    pub fn all(&self) -> Vec<&str> {
+        match self {
+            Lines::One(t) => vec![t.as_str()],
+            Lines::Many(l) => l.iter().map(String::as_str).collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct When {
     pub at_least: u32,
+    /// With `at_least`, a band of player counts: from `at_least` to `at_most` (both included). Without it, `at_least` and above.
+    pub at_most: Option<u32>,
     pub set_rules: Option<toml::Value>,
     pub otherwise_rules: Option<toml::Value>,
 }
@@ -121,7 +143,9 @@ impl Rules {
             t.extend(s.say.as_deref().map(|s| ("on_join/on_leave say", s)));
             t.extend(s.tell.as_deref().map(|s| ("on_join/on_leave tell", s)));
         }
-        t.extend(self.every.iter().map(|e| ("every say", e.say.as_str())));
+        for e in &self.every {
+            t.extend(e.say.all().into_iter().map(|l| ("every say", l)));
+        }
         t
     }
 
@@ -164,8 +188,14 @@ impl Rules {
             if !(1.0..=604_800.0).contains(&e.seconds) {
                 return Err(format!("every: seconds {} (from 1 to 604800)", e.seconds));
             }
+            if e.say.all().is_empty() || e.say.all().len() > MAX_ENTRIES {
+                return Err(format!("every: say is one text or a list of 1 to {MAX_ENTRIES} texts"));
+            }
         }
         for w in &self.when_players {
+            if w.at_most.is_some_and(|m| m < w.at_least) {
+                return Err(format!("when_players: at_most {} is below at_least {}", w.at_most.unwrap_or(0), w.at_least));
+            }
             if w.set_rules.is_none() && w.otherwise_rules.is_none() {
                 return Err("a when_players entry has neither set_rules nor otherwise_rules".into());
             }
@@ -301,12 +331,14 @@ pub struct Data {
     applied: Vec<Option<bool>>,
     /// The game time (ms) each (command, player) last ran.
     last: HashMap<(usize, u64), i64>,
+    /// Per `every`: which of its texts is next.
+    turn: Vec<usize>,
 }
 
 impl Data {
     pub fn new(rules: Rules, ctx: Ctx) -> Data {
         let (n, m) = (rules.every.len(), rules.when_players.len());
-        Data { rules, ctx, due: vec![None; n], applied: vec![None; m], last: HashMap::new() }
+        Data { rules, ctx, due: vec![None; n], applied: vec![None; m], last: HashMap::new(), turn: vec![0; n] }
     }
 
     /// The variables of one event; the world's (players, planet, time) only when a text uses
@@ -376,18 +408,23 @@ impl Runtime for Data {
             }
             Event::Tick { game_ms, players, .. } => {
                 for i in 0..self.rules.every.len() {
-                    let (seconds, text) = (self.rules.every[i].seconds, self.rules.every[i].say.clone());
+                    let (seconds, lines, min) = (self.rules.every[i].seconds, self.rules.every[i].say.all().into_iter().map(str::to_string).collect::<Vec<_>>(), self.rules.every[i].min_players.unwrap_or(0));
                     // The first tick only starts the clock: nothing is announced at once.
                     let due = *self.due[i].get_or_insert(game_ms + (seconds * 1000.0) as i64);
                     if *game_ms >= due {
                         self.due[i] = Some(game_ms + (seconds * 1000.0) as i64);
-                        let vars = self.vars(&[&text], 0, "", &[]);
-                        self.ctx.say(&render(&text, &vars));
+                        // Said only with enough players; the turn does not move while it is not said.
+                        if *players >= min {
+                            let text = &lines[self.turn[i] % lines.len()];
+                            self.turn[i] += 1;
+                            let vars = self.vars(&[text], 0, "", &[]);
+                            self.ctx.say(&render(text, &vars));
+                        }
                     }
                 }
                 for i in 0..self.rules.when_players.len() {
                     let w = self.rules.when_players[i].clone();
-                    let high = *players >= w.at_least;
+                    let high = *players >= w.at_least && w.at_most.is_none_or(|m| *players <= m);
                     if self.applied[i] == Some(high) {
                         continue;
                     }

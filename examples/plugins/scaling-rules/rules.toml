@@ -1,0 +1,25 @@
+# The world is tuned to how many people play. Three bands: each sets both rules, so a player leaving
+# or joining moves the world from one band to the next. A rule is changed only when the band changes.
+# (Every band sets the same keys: a band that left one out would keep the value of the band before.)
+
+# One or two players: a small team gets things done faster.
+[[when_players]]
+at_least = 1
+at_most = 2
+set_rules = { speed = { growth = 2.0, machines = 1.5 } }
+
+# Three to five: a little faster than the game.
+[[when_players]]
+at_least = 3
+at_most = 5
+set_rules = { speed = { growth = 1.5, machines = 1.25 } }
+
+# Six and more: the game's own speed.
+[[when_players]]
+at_least = 6
+set_rules = { speed = { growth = 1.0, machines = 1.0 } }
+
+[[command]]
+name = "tier"
+reply = "{players} online. Plants grow 2x as fast with 1-2 players, 1.5x with 3-5, at the game's speed from 6."
+cooldown_seconds = 10

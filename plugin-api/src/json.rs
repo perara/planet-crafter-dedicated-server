@@ -58,6 +58,9 @@ impl fmt::Display for ParseError {
     }
 }
 
+#[cfg(feature = "std")]
+impl std::error::Error for ParseError {}
+
 /// Reads one JSON value. The whole text must be that value (spaces around it are fine).
 pub fn parse(text: &str) -> Result<Value, ParseError> {
     if text.len() > MAX_BYTES {

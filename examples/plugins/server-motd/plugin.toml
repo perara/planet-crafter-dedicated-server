@@ -1,0 +1,12 @@
+[plugin]
+id = "server-motd"
+name = "Server MOTD and announcements"
+version = "0.1.0"
+description = "A message of the day for each player who joins, !motd, !rules and !help, and tips that rotate every ten minutes while someone is online"
+authors = ["Planet Crafter dedicated server contributors"]
+license = "MIT"
+kind = "data"
+entry = "rules.toml"
+abi = 1
+# What rules.toml needs; `pcds plugin check` tells when this list and the file disagree.
+capabilities = ["event.chat", "event.player", "event.tick", "world.read", "chat.say"]

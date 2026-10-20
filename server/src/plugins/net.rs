@@ -344,7 +344,7 @@ fn expand(text: &str, config: &BTreeMap<String, String>) -> Result<String, Rejec
         let after = &rest[at + 2..];
         let end = after.find('}').ok_or_else(|| Reject::Bad("a ${ without its }".into()))?;
         let key = after[..end].strip_prefix("config.").ok_or_else(|| Reject::Bad("only ${config.KEY} can be put in a request".into()))?;
-        let value = config.get(key).ok_or_else(|| Reject::Bad(format!("config {key} is not declared in the manifest, or the admin has not set it (pcds plugin config set ID {key})")))?;
+        let value = config.get(key).ok_or_else(|| Reject::Bad(format!("config {key} is not declared in the manifest, or has no value yet (the admin sets it: pcds plugin config set ID {key}; in a scenario: the [config] table)")))?;
         out.push_str(value);
         rest = &after[end + 1..];
     }

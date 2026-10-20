@@ -16,26 +16,16 @@ impl World for Game {
             terraformation: crate::units::value(self, crate::units::Kind::Terraformation, 0),
             standing_still: self.held || (self.rules.world.pause_when_empty && !self.clients.values().any(|c| c.ready.is_some())),
             unix_ms: super::stream::unix_ms() as i64,
+            command_prefix: self.rules.chat.command_prefix.clone().filter(|p| !p.is_empty()).unwrap_or_else(|| "!".into()),
         }
     }
 
     fn players(&self) -> Vec<PlayerInfo> {
-        self.clients
-            .values()
-            .filter_map(|c| {
-                let state = c.ready.as_ref()?;
-                let object = c.player.and_then(|o| self.net.objects.get(&o));
-                Some(PlayerInfo {
-                    client: c.id,
-                    name: state.name.clone(),
-                    steam_id: c.verified_steam_id.map(|i| i.to_string()).unwrap_or_default(),
-                    position: object.map(|o| o.position).unwrap_or(state.position),
-                    gauges: c.player.map(|o| crate::gauges::values(self, o)).unwrap_or(state.gauges),
-                    player_id: state.id,
-                    operator: self.access.is_operator(c.verified_steam_id),
-                })
-            })
-            .collect()
+        self.clients.values().filter_map(|c| self.player_info(c)).collect()
+    }
+
+    fn player(&self, client: u64) -> Option<PlayerInfo> {
+        self.clients.get(&client).and_then(|c| self.player_info(c))
     }
 
     fn rules(&self) -> String {
@@ -81,6 +71,20 @@ impl World for Game {
 }
 
 impl Game {
+    fn player_info(&self, c: &crate::game::Client) -> Option<PlayerInfo> {
+        let state = c.ready.as_ref()?;
+        let object = c.player.and_then(|o| self.net.objects.get(&o));
+        Some(PlayerInfo {
+            client: c.id,
+            name: state.name.clone(),
+            steam_id: c.verified_steam_id.map(|i| i.to_string()).unwrap_or_default(),
+            position: object.map(|o| o.position).unwrap_or(state.position),
+            gauges: c.player.map(|o| crate::gauges::values(self, o)).unwrap_or(state.gauges),
+            player_id: state.id,
+            operator: self.access.is_operator(c.verified_steam_id),
+        })
+    }
+
     fn object_info(&self, wo: &crate::model::WorldObject) -> ObjectInfo {
         let position = wo.net.and_then(|n| self.net.objects.get(&n)).map_or(wo.position, |o| o.position);
         ObjectInfo { id: wo.id, net: wo.net.unwrap_or(0), group: self.data.groups[wo.group].id.clone(), position }
