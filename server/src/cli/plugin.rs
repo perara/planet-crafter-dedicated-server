@@ -155,9 +155,9 @@ impl Ctx {
         let dir = self.plugins_dir();
         let folder = if Path::new(target).join(manifest::FILE).is_file() { PathBuf::from(target) } else if manifest::valid_id(target) && dir.join(target).is_dir() { dir.join(target) } else { return Err(format!("{target}: no {} there, and no installed plugin of that id", manifest::FILE)) };
         let report = plugins::check::check_folder(&folder, Some(&dir));
-        report.facts.iter().for_each(|f| println!("  {f}"));
-        report.warnings.iter().for_each(|w| println!("  warning: {w}"));
-        report.errors.iter().for_each(|e| println!("  ERROR: {e}"));
+        report.facts.iter().for_each(|f| println!("  {}", plugins::clean(f)));
+        report.warnings.iter().for_each(|w| println!("  warning: {}", plugins::clean(w)));
+        report.errors.iter().for_each(|e| println!("  ERROR: {}", plugins::clean(e)));
         if report.errors.is_empty() {
             println!("pcds: {} is fine ({} warnings)", folder.display(), report.warnings.len());
             Ok(())
@@ -173,8 +173,8 @@ impl Ctx {
         }
         let from = Path::new(path);
         let report = plugins::check::check_folder(from, Some(&self.plugins_dir()));
-        report.errors.iter().for_each(|e| println!("  ERROR: {e}"));
-        report.warnings.iter().for_each(|w| println!("  warning: {w}"));
+        report.errors.iter().for_each(|e| println!("  ERROR: {}", plugins::clean(e)));
+        report.warnings.iter().for_each(|w| println!("  warning: {}", plugins::clean(w)));
         if !report.errors.is_empty() {
             return Err(format!("{path} does not pass pcds plugin check: not installed"));
         }

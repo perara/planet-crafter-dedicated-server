@@ -403,6 +403,15 @@ digest they displayed, and the approval is refused if the files changed meanwhil
 `POST /api/plugins/enable`). A file that cannot be read, or an `approved.json` that does not parse,
 means nothing is approved (never "everything is allowed").
 
+**What a manifest may say.** The author's words (name, description, authors, license, a command's
+help, a config key's description) are shown on the admin's terminal above the capabilities and
+the question, so each is one line of plain text (name 64 characters, description 500, help and key
+description 200, 16 authors): a control character (an escape sequence can hide what follows,
+redraw the screen or set the clipboard), a line break (it forges lines of the approval) or a
+direction mark (U+202E) is refused. What the host says of a plugin whose files are wrong (a
+folder's name, a quoted line of TOML, the name of an import) has such characters replaced by `?`.
+The dashboard puts all of it in as text.
+
 The checks are at two places, so a missing capability shows up where it is used: **events** are
 only delivered if the capability for their kind is granted (a warning in the listing tells which
 are not), and every **host function** checks its capability when called (a refused call returns

@@ -161,6 +161,15 @@ impl Status {
             Status::Unloading => "unloading",
         }
     }
+    /// The same status with its text made plain (`clean`).
+    fn cleaned(self) -> Status {
+        match self {
+            Status::Invalid(s) => Status::Invalid(clean(&s)),
+            Status::Incompatible(s) => Status::Incompatible(clean(&s)),
+            Status::Failed(s) => Status::Failed(clean(&s)),
+            other => other,
+        }
+    }
     pub fn detail(&self) -> Option<&str> {
         match self {
             Status::Invalid(s) | Status::Incompatible(s) | Status::Failed(s) => Some(s),
@@ -280,6 +289,16 @@ impl Loaded {
     /// (An installed plugin's folder is named for its id: `prepare` checks that, a source folder
     /// being checked or installed is named as its author likes.)
     fn inspect(engine: &wasmi::Engine, dir: &Path, approval: Option<&Approval>, values: Option<&config::Values>, keys: &sign::Keys) -> Loaded {
+        // Everything the host says of a plugin (its listing, its log lines, the screen of its approval)
+        // is made of what its files and its folder say; none of it reaches a terminal as it was written.
+        let mut p = Loaded::inspect_files(engine, dir, approval, values, keys);
+        p.id = clean(&p.id);
+        p.status = p.status.cleaned();
+        p.warnings.iter_mut().for_each(|w| *w = clean(w));
+        p
+    }
+
+    fn inspect_files(engine: &wasmi::Engine, dir: &Path, approval: Option<&Approval>, values: Option<&config::Values>, keys: &sign::Keys) -> Loaded {
         let folder = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let mut p = Loaded::bare(&folder, dir, Status::Pending);
         let manifest_bytes = match read_regular(&dir.join(manifest::FILE), limits::MAX_MANIFEST_BYTES) {
@@ -428,7 +447,7 @@ impl Loaded {
             Ok(rt) => self.rt = Some(rt),
             Err(e) => {
                 eprintln!("plugin {}: {e}", self.id);
-                self.status = Status::Failed(e);
+                self.status = Status::Failed(clean(&e));
             }
         }
     }
@@ -483,7 +502,7 @@ impl Loaded {
     fn faulted(&mut self, fault: &Fault, during: &str) {
         let now = Instant::now();
         self.stats.faults += 1;
-        self.stats.last_error = Some(format!("{during}: {fault}"));
+        self.stats.last_error = Some(clean(&format!("{during}: {fault}")));
         self.stats.last_fault_unix = Some(approvals::now());
         self.faults.push_back(now);
         while self.faults.front().is_some_and(|t| now.duration_since(*t) > limits::FAULT_WINDOW) {
@@ -495,7 +514,7 @@ impl Loaded {
             eprintln!("plugin {}: {why} (pcds plugin reload {} starts it again)", self.id, self.id);
             // No more events from now on; the instance is held until the host has made its last
             // call and saved its state (`Host::settle`, between events).
-            self.status = Status::Failed(why);
+            self.status = Status::Failed(clean(&why));
             self.retire_due = self.rt.is_some();
             return;
         }
@@ -507,7 +526,7 @@ impl Loaded {
             let why = format!("could not restart after a fault: {e}");
             eprintln!("plugin {}: {why}", self.id);
             self.rt = None;
-            self.status = Status::Failed(why);
+            self.status = Status::Failed(clean(&why));
         }
     }
 
@@ -617,6 +636,7 @@ fn scan(engine: &wasmi::Engine, dir: &Path) -> (Vec<Loaded>, Option<String>, Opt
         // Installed plugins live in a folder named for their id: it is how a command or a state file
         // finds its owner, and what `pcds plugin enable ID` names.
         if p.manifest.as_ref().is_some_and(|m| m.id() != id) {
+            let id = clean(&id);
             let why = format!("the folder is {id} but the manifest's id is {}: the folder's name is the id", p.id);
             (p.id, p.status, p.pending, p.kinds, p.grant) = (id, Status::Invalid(why), None, 0, Grant::default());
         }
@@ -1222,6 +1242,13 @@ pub(crate) fn read_regular(path: &Path, max: usize) -> std::io::Result<Vec<u8>> 
         return Err(Error::new(ErrorKind::InvalidData, format!("over {max} bytes: at most {max} are loaded")));
     }
     Ok(bytes)
+}
+
+/// Text an author chose, made safe to put on a terminal and in a log: a control character (an escape
+/// sequence that hides, redraws or sets the clipboard; a line break that forges a line), a mark that
+/// turns the text around (U+202E) and the zero-width ones become `?`. Plain text is returned as it is.
+pub fn clean(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}') { '?' } else { c }).collect()
 }
 
 /// The same, with the keys the admin trusts (for the signature to be judged).

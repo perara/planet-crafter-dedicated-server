@@ -904,3 +904,56 @@ fn files_swapped_between_the_screen_and_the_approval_are_not_approved() {
     assert_eq!(Approvals::load(&dir).unwrap().0["p"].digest, now);
     approve(&dir, "p", None).unwrap();
 }
+
+// ---- text a plugin's author wrote, on the admin's terminal (security review v0.7+) ----------------
+
+fn plain(s: &str) -> bool {
+    s.chars().all(|c| !c.is_control() && !matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}'))
+}
+
+/// `pcds plugin enable` shows the author's name, description and the rest on the admin's terminal,
+/// above the capabilities and the question. An escape sequence in them can hide what follows
+/// (`ESC[8m` conceals text), draw a screen of its own or set the clipboard (OSC 52); a line break
+/// in them forges lines of the approval ("deny: net.http.local"). The text is one plain line.
+#[test]
+fn a_manifest_text_with_a_control_character_is_refused() {
+    let good = "[plugin]\nid = \"p\"\nname = \"P\"\nversion = \"1.0.0\"\nkind = \"data\"\nentry = \"rules.toml\"\nabi = 1\n";
+    assert!(Manifest::parse(good).is_ok());
+    let with = |extra: &str| good.replace("abi = 1\n", &format!("abi = 1\n{extra}\n"));
+    for (what, text) in [
+        ("name", good.replace("name = \"P\"", "name = \"P\\u001b[8m\"")),
+        ("description with a line break", with("description = \"fine\\nnet.http.local: denied\"")),
+        ("description with OSC 52", with("description = \"a\\u001b]52;c;ZWNobyBwd25lZA==\\u0007\"")),
+        ("description with a right-to-left override", with("description = \"right to left \\u202e gnp.exe\"")),
+        ("license", with("license = \"MIT\\r\"")),
+        ("an author", with("authors = [\"a\", \"b\\u001b[2J\"]")),
+    ] {
+        let e = Manifest::parse(&text).unwrap_err();
+        assert!(plain(&e) && e.contains("plain"), "{what}: {e:?}");
+    }
+    assert!(Manifest::parse(&good.replace("abi = 1\n", "abi = 1\ndescription = \"x\"\n[[command]]\nname = \"c\"\nhelp = \"two\\nlines\"\n")).is_err());
+    assert!(Manifest::parse(&good.replace("abi = 1\n", &format!("abi = 1\ndescription = \"{}\"\n", "d".repeat(501)))).is_err());
+}
+
+/// What the host says of a plugin (its id, why it does not run) comes from names the author chose: a
+/// folder, a TOML mistake (the error quotes the line), an import of a module.
+#[test]
+fn what_the_host_says_of_a_plugin_has_no_control_character_whatever_the_folder_and_the_files_say() {
+    let dir = fresh_dir("terminal");
+    let name = "evil\u{1b}]52;c;ZWNobyBwd25lZA==\u{7}\nplugin good: running";
+    let folder = dir.join(name);
+    std::fs::create_dir_all(&folder).unwrap();
+    // A manifest that is not TOML, quoting an escape sequence back in its error.
+    std::fs::write(folder.join("plugin.toml"), "\u{1b}[8m = \u{1b}[2J").unwrap();
+    // And one that is a plugin, importing a module under a name of the same kind.
+    let bad_import = module("(i32.const 0)", "").replacen("(module", "(module (import \"x\\1b[8m\\0a\" \"y\" (func))", 1);
+    write_plugin(&dir, "importer", &bad_import, &CHAT_SAY, SUBSCRIBE_CHAT);
+    approve(&dir, "importer", None).unwrap();
+    let host = prepare(&dir, "world");
+    assert_eq!(host.plugins.len(), 2);
+    for p in &host.plugins {
+        let said = format!("{} {} {:?} {:?} {:?}", p.id, p.status.detail().unwrap_or(""), p.warnings, p.notice, crate::plugins::admin::plugin_json(p)["detail"]);
+        assert!(plain(&p.id) && plain(p.status.detail().unwrap_or("")) && p.warnings.iter().all(|w| plain(w)), "{said:?}");
+    }
+    assert!(host.plugins.iter().any(|p| matches!(&p.status, Status::Invalid(why) if why.contains("importer") || why.contains("imports"))), "{:?}", host.plugins.iter().map(|p| &p.status).collect::<Vec<_>>());
+}

@@ -144,7 +144,8 @@ pub fn version_triple(v: &str) -> Option<(u64, u64, u64)> {
 
 impl Manifest {
     pub fn parse(text: &str) -> Result<Manifest, String> {
-        let m: Manifest = toml::from_str(text).map_err(|e| e.to_string())?;
+        // A TOML error quotes the line it stumbled on: whatever the author put there.
+        let m: Manifest = toml::from_str(text).map_err(|e| super::clean(&e.to_string()))?;
         m.validate()?;
         Ok(m)
     }
@@ -154,8 +155,31 @@ impl Manifest {
         if !valid_id(&p.id) {
             return Err(format!("plugin.id {:?}: a lowercase letter, then lowercase letters, digits and dashes, 32 characters at most", p.id));
         }
-        if p.name.trim().is_empty() || p.name.chars().count() > 64 {
+        if p.name.trim().is_empty() {
             return Err("plugin.name: 1 to 64 characters".into());
+        }
+        // The author's words are shown on the admin's terminal above the capabilities and the question:
+        // one line of plain text each (docs/plugins.md, "What a manifest may say").
+        let line = |what: &str, text: &str, most: usize| {
+            if text.chars().count() > most || super::clean(text) != text {
+                return Err(format!("{what}: one line of plain text of {most} characters at most (no control character, line break or direction mark)"));
+            }
+            Ok(())
+        };
+        line("plugin.name", &p.name, 64)?;
+        line("plugin.description", &p.description, 500)?;
+        line("plugin.license", &p.license, 64)?;
+        if p.authors.len() > 16 {
+            return Err("plugin.authors: 16 at most".into());
+        }
+        for a in &p.authors {
+            line("plugin.authors", a, 64)?;
+        }
+        for c in &self.commands {
+            line("[[command]] help", &c.help, 200)?;
+        }
+        for k in &self.config {
+            line("[[config]] description", &k.description, 200)?;
         }
         if version_triple(&p.version).is_none() {
             return Err(format!("plugin.version {:?}: three numbers, as 1.2.3", p.version));
