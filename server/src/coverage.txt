@@ -260,7 +260,7 @@ module plugins::data  plugins::data::tests::a_rules_file_says_what_it_needs plug
 module plugins::limits  plugins::tests::a_crowd_of_plugins_cannot_stretch_a_tick_and_takes_turns plugins::tests::memory_is_limited_and_a_module_that_asks_for_too_much_does_not_start plugins::tests::the_flip_budget_leaves_a_slow_saver_with_its_last_state
 module plugins::manifest  plugins::manifest::tests::a_good_manifest_parses_and_names_its_kinds plugins::manifest::tests::mistakes_are_refused_with_the_reason plugins::manifest::tests::ids_and_versions
 module plugins::runtime  plugins::tests::nonsense_answers_and_pointers_are_faults_not_crashes
-module plugins::state  plugins::state::tests::hex_round_trips_and_refuses_garbage plugins::state::tests::saved_state_is_text plugins::state::tests::a_state_file_keeps_its_version_and_refuses_other_files
+module plugins::state  plugins::state::tests::the_saved_state_refuses_hex_that_is_not plugins::state::tests::saved_state_is_text plugins::state::tests::a_state_file_keeps_its_version_and_refuses_other_files
 module plugins::stream  plugins::stream::tests::the_ring_numbers_filters_and_forgets plugins::stream::tests::consumers_register_leave_and_are_forgotten_when_silent plugins::game_tests::a_data_plugin_changes_the_rules_with_the_players_online_and_the_stream_hears_of_it
 module plugins::view  plugins::game_tests::the_example_plugins_run_in_the_game_and_their_state_goes_through_a_hot_update
 module plugins::wasm  plugins::tests::a_module_with_imports_the_server_does_not_have_is_refused_by_name plugins::tests::a_module_built_for_another_abi_does_not_run plugins::tests::only_a_plugin_that_may_veto_can_veto_an_rpc
@@ -285,7 +285,7 @@ module util  util::tests::the_helpers_do_what_their_names_say
 module utp utp::tests::a_client_that_never_acks_is_dropped utp::tests::connection_limits utp::tests::datagrams_from_another_address_are_dropped utp::tests::garbage_datagrams_do_not_crash_the_transport utp::tests::handshake_reliable_stream_and_acks utp::tests::hostile_reliable_streams utp::tests::nothing_but_the_accept_before_data utp::tests::unreliable_fragments_reassemble utp::tests::unreliable_reassembly_is_capped utp::tests::the_sender_never_runs_a_window_past_the_oldest_unacknowledged_packet
 module water  water::tests::an_inactive_object_stays_hidden_whatever_its_activators water::tests::rotation_round_trip water::tests::story_interpolated_water_starts_offset_and_ends_at_its_scene_position water::tests::machines_built_underwater_have_no_energy_at_once  # water
 module wire  wire::tests::batch_round_trip wire::tests::packing_matches_netcode_samples
-module world  animals::spawn::tests::animal_layout_matches_the_captured_spawn_tail world::tests::hex_reads_pairs_and_does_not_panic_on_text_that_is_not_ascii
+module world  animals::spawn::tests::animal_layout_matches_the_captured_spawn_tail world::tests::hex_reads_pairs_and_a_typo_is_not_a_zero_byte
 
 module routes routes::tests::the_first_matching_route_wins_prefixes_and_any_method_included
 module worlds  worlds::tests::names_are_one_rule_with_two_ways_in worlds::tests::a_worlds_files_are_beside_the_save worlds::tests::the_listing_takes_json_files_and_skips_the_settings_files worlds::tests::worlds_lists_saves_and_this_worlds_backups cli::worlds::tests::import_converts_an_old_save_and_copies_a_current_one

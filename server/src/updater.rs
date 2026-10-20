@@ -21,6 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 use crate::msg::{json as show, BankInfo, Fallback, RolledBack};
+use crate::util::to_hex;
 
 /// The releases of this project (PCDS_RELEASES points elsewhere: a mirror, or a test).
 pub const RELEASES: &str = "https://api.github.com/repos/perara/planet-crafter-dedicated-server/releases";
@@ -112,10 +113,6 @@ pub fn lookup(base: &str, version: Option<&str>) -> Result<Release, String> {
     };
     let name = format!("pcds-{tag}-linux-x86_64.tar.gz");
     Ok(Release { tarball: asset(&name)?, checksum: asset(&format!("{name}.sha256"))?, tag, local })
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Whether the release in a bank can take over the world the running bank holds (its HELLO
@@ -369,7 +366,7 @@ fn unpack(release: &Release, new: &Path) -> Result<BankInfo, String> {
     let http = agent(release.local);
     let tarball = get(&http, &release.tarball)?;
     let published = String::from_utf8_lossy(&get(&http, &release.checksum)?).split_whitespace().next().unwrap_or("").to_ascii_lowercase();
-    let downloaded = hex(ring::digest::digest(&ring::digest::SHA256, &tarball).as_ref());
+    let downloaded = to_hex(ring::digest::digest(&ring::digest::SHA256, &tarball).as_ref());
     if published != downloaded {
         return Err(format!("{tag}: the download does not match its published sha256 ({published} published, {downloaded} downloaded); nothing installed"));
     }
@@ -628,7 +625,7 @@ pub mod tests {
     /// A release server for one release on 127.0.0.1; its releases URL.
     fn fake(dir: &Path, tag: &str, program: &[u8], tamper: bool) -> String {
         let tar = tarball(dir, tag, program);
-        let sum = hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
+        let sum = to_hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
         let sum = if tamper { format!("{}{}", if sum.starts_with('0') { '1' } else { '0' }, &sum[1..]) } else { sum };
         format!("{}/releases", serve(release("BASE", tag, tar, sum)))
     }
@@ -884,7 +881,7 @@ pub mod tests {
             std::fs::remove_dir_all(dir.join(name)).unwrap();
             std::fs::read(dir.join("t.tar.gz")).unwrap()
         };
-        let sum = hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
+        let sum = to_hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
         let base = format!("{}/releases", serve(release("BASE", "v9.9.9", tar, sum)));
         let banks = dir.join("bin");
         let e = install(&lookup(&base, None).unwrap(), &banks, "b", None).unwrap_err();
@@ -908,7 +905,7 @@ pub mod tests {
         let listing = Command::new("tar").arg("-tvzf").arg(&out).output().unwrap().stdout;
         assert!(String::from_utf8_lossy(&listing).lines().any(|l| l.starts_with('h')), "the crafted tar holds a hard link entry");
         let tar = std::fs::read(&out).unwrap();
-        let sum = hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
+        let sum = to_hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
         let base = format!("{}/releases", serve(release("BASE", "v9.9.9", tar, sum)));
         let banks = dir.join("bin");
         let e = install(&lookup(&base, None).unwrap(), &banks, "b", None).unwrap_err();
@@ -1126,7 +1123,7 @@ pub mod tests {
         std::fs::create_dir_all(banks.join("b")).unwrap();
         std::fs::write(banks.join("b/pcds"), "the old one").unwrap();
         let serve_tar = |tag: &str, tar: Vec<u8>| {
-            let sum = hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
+            let sum = to_hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
             lookup(&format!("{}/releases", serve(release("BASE", tag, tar, sum))), None).unwrap()
         };
         let good = tarball(&dir, "v9.9.9", &script(crate::ipc::PROTOCOL));

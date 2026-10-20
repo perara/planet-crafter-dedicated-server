@@ -43,28 +43,13 @@ mod hex_blobs {
     }
 
     pub fn serialize<S: Serializer>(m: &BTreeMap<String, Blob>, s: S) -> Result<S::Ok, S::Error> {
-        s.collect_map(m.iter().map(|(k, b)| (k, Wire { version: b.version, hex: super::hex(&b.bytes) })))
+        s.collect_map(m.iter().map(|(k, b)| (k, Wire { version: b.version, hex: crate::util::to_hex(&b.bytes) })))
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Blob>, D::Error> {
         let wire: BTreeMap<String, Wire> = Deserialize::deserialize(d)?;
-        wire.into_iter().map(|(k, w)| super::unhex(&w.hex).map(|bytes| (k, Blob { version: w.version, bytes })).map_err(serde::de::Error::custom)).collect()
+        wire.into_iter().map(|(k, w)| crate::util::from_hex(&w.hex).map_err(|e| format!("state: {e}")).map(|bytes| (k, Blob { version: w.version, bytes })).map_err(serde::de::Error::custom)).collect()
     }
-}
-
-pub fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
-}
-
-pub fn unhex(text: &str) -> Result<Vec<u8>, String> {
-    if !text.len().is_multiple_of(2) {
-        return Err("state: an odd number of hex digits".into());
-    }
-    (0..text.len() / 2).map(|i| u8::from_str_radix(&text[2 * i..2 * i + 2], 16).map_err(|_| "state: not hex".to_string())).collect()
 }
 
 /// Where a plugin's state for a world lives: the plugin's own folder, so removing the plugin
@@ -101,9 +86,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hex_round_trips_and_refuses_garbage() {
-        assert_eq!(unhex(&hex(&[0, 1, 254, 255])).unwrap(), vec![0, 1, 254, 255]);
-        assert!(unhex("abc").is_err() && unhex("zz").is_err());
+    fn the_saved_state_refuses_hex_that_is_not() {
+        let text = r#"{"states":{"p":{"version":1,"hex":"0z"}}}"#;
+        let e = serde_json::from_str::<Saved>(text).unwrap_err().to_string();
+        assert!(e.contains("state: not hex"), "{e}");
+        assert!(serde_json::from_str::<Saved>(&text.replace("0z", "0")).unwrap_err().to_string().contains("state: an odd number"));
     }
 
     #[test]

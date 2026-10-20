@@ -70,14 +70,14 @@ test, which the audit asked for, now exists. Steps 4, 7, 8, 13 and 15 are not do
 | A17 | README and docs said things the code did not: the S3 rules, `PCDS_RELEASES`, spike sections of docs/hot-update.md, stale comments (`/api/manifest`, "extractor", HELLO and READY keys) | fixed in 0.7.0 for the README and the settings table; the comments are fixed in this branch. The spike sections of docs/hot-update.md stay on purpose as the design record, and the page says so | README "Off-site copies (S3)", docs/env.md, docs/hot-update.md header |
 | A18 | Dead code and stale `allow`s: five stale allows, `sig_debug`, `refresh_generation_multiplier`, `PCDS_BANK`, the constant `"standalone"` status field | fixed in 0.7.0: all removed. The two `cfg_attr(not(test), allow(dead_code))` that remain mark fields only tests read | grep finds none of the removed names |
 | A19 | Legacy paths kept for 0.5 and 0.6: the clean-up of 0.5 layouts, the 0.6 rules and snapshot compatibility, error shims, `reads` lists | fixed in 0.7.0: removed. Old saves are refused with a message, or imported by `pcds world import` | `oldsave.rs` tests, docs/hot-update.md |
-| A20 | Silent fallbacks against the "no fallbacks" rule: a garbage `active` file reads as bank `a`, a missing planet reads as `Prime`, `world::hex` reads bad hex as 0 | open for these three; a missing or mistyped RPC argument reading as 0 is by design (the hostile-RPC test relies on it) | `updater::active`, `scene.rs`, `world.rs` |
+| A20 | Silent fallbacks against the "no fallbacks" rule: a garbage `active` file reads as bank `a`, a missing planet reads as `Prime`, `world::hex` reads bad hex as 0 (fixed after 0.7.0: it panics naming the text; `util::from_hex` is strict) | open for these three; a missing or mistyped RPC argument reading as 0 is by design (the hostile-RPC test relies on it) | `updater::active`, `scene.rs`, `world.rs` |
 | A21 | The S3 uploader runs in the game process with process-wide statics that are not in the snapshot, so a flip resets "last upload" | open: the owner's call whether S3 belongs in the front | `s3.rs` (`LAST`, `UPLOADED`, `BUSY`, `PENDING`) |
 | A22 | The join rules live in four places (`Game::approve`, `enforce`, the front's trust check, `utp::is_loopback`) and `game` imports `utp` | open: step 12 of the audit's list, never scheduled | `game.rs` calls `crate::utp::is_loopback` |
 | A23 | The flip and recovery logic is welded to processes and clocks and is tested only through real servers; `bank::run` and others call `process::exit` inline | open: step 15, the last and the owner's call | `tests/hot_update.rs` is the only coverage of the whole state machine |
 | A24 | The table reader (`native/`) is tested by hand, so it is the riskiest code to touch | open: one ignored test plus a comparison script | `native::tables::tests::read_game_writes_the_test_tables`, `tools/dev/tables-check.sh` |
 | A25 | Hygiene: duplicate type names (`Ctx`, `Bank`, `Access`), about 220 `pub` items used only in their module, `Result<_, String>` everywhere, raw `println!` logging | by design: the audit judged it not worth a project | none |
 | A26 | The web page restates the server: the unit order and symbols (the chat limit and timeouts were also listed) | open for the unit order; the rest was not rechecked | `UNIT_ORDER` in `server/web/index.html` |
-| A27 | The same small helper written several times: the clock in seconds, hex, file mtime, parent folder, hand-built `{"error":...}` strings | fixed in part in 0.7.0: `util.rs` holds the clock and the parent folder. `hex` still has three copies and the error strings were not counted again | `util.rs`; `fn hex` in `updater.rs`, `plugins/state.rs`, `world.rs` |
+| A27 | The same small helper written several times: the clock in seconds, hex, file mtime, parent folder, hand-built `{"error":...}` strings | fixed in part: `util.rs` holds the clock, the parent folder and, after 0.7.0, hex once (`to_hex`, and the strict `from_hex`; the copies in `updater.rs`, `plugins/state.rs` and the test helper in `wire.rs` are gone). The error strings were not counted again | `util::tests::the_helpers_do_what_their_names_say` |
 
 What the audit said to leave alone is still true: the settings schema and its tests, `coverage.rs`
 and `coverage.txt`, the encapsulation of the subsystems, the low layers, `ipc.rs`, `utp.rs`,
@@ -228,8 +228,7 @@ Architecture:
   `tests/hot_update.rs` first, then step 15.
 * **A24** The table reader has one ignored test. Next: run `tools/dev/tables-check.sh` on every game
   update and before touching `native/`.
-* **A26, A27** The web page restates the unit order; `hex` has three copies. Next: serve the unit
-  order from `/api/status`; use one `hex`.
+* **A26** The web page restates the unit order. Next: serve the unit order from `/api/status`.
 
 Static:
 
@@ -249,4 +248,4 @@ front's log showed the bank restarting. Not reproduced on 0.7.0; run `tools/chao
 
 Unverified (could not be checked, listed so they are not lost): **S14** (chat hooks stay off after a
 delivery panic), **S15** (two sets growing per hostile connection id), **S25** (small suspects), and
-the parts of A3, A14, A19, A26 and A27 named in their rows.
+the parts of A3, A14, A19 and A26 named in their rows.

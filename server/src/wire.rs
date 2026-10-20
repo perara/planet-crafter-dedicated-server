@@ -325,9 +325,7 @@ mod tests {
         assert_eq!(m[1], (5, &[1u8, 2, 3][..]));
     }
 
-    pub fn hex(s: &str) -> Vec<u8> {
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
-    }
+    use crate::world::hex;
 }
 
 #[cfg(any(fuzzing, pcds_corpus))]

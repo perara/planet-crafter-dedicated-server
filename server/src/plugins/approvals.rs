@@ -74,7 +74,7 @@ pub fn digest(manifest: &[u8], entry: &[u8]) -> String {
     ctx.update(manifest);
     ctx.update(&[0]);
     ctx.update(entry);
-    super::state::hex(ctx.finish().as_ref())
+    crate::util::to_hex(ctx.finish().as_ref())
 }
 
 pub fn now() -> u64 {
