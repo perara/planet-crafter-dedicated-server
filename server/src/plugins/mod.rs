@@ -282,7 +282,7 @@ impl Loaded {
     fn inspect(engine: &wasmi::Engine, dir: &Path, approval: Option<&Approval>, values: Option<&config::Values>, keys: &sign::Keys) -> Loaded {
         let folder = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let mut p = Loaded::bare(&folder, dir, Status::Pending);
-        let manifest_bytes = match std::fs::read(dir.join(manifest::FILE)) {
+        let manifest_bytes = match read_regular(&dir.join(manifest::FILE), limits::MAX_MANIFEST_BYTES) {
             Ok(b) => b,
             Err(e) => {
                 p.status = Status::Invalid(format!("{}: {e}", manifest::FILE));
@@ -313,10 +313,10 @@ impl Loaded {
             p.manifest = Some(m);
             return p;
         }
-        // The entry's size is bounded before it is read: a plugin folder is the admin's, but a
-        // file that is a symlink to /dev/zero must not stop the start.
+        // The entry is whatever the folder holds under that name: read as a file of at most the module
+        // limit or not at all (a link to /dev/zero has size 0 and no end, a named pipe blocks the open).
         let entry_path = dir.join(&m.plugin.entry);
-        let entry = match std::fs::metadata(&entry_path).map_err(|e| e.to_string()).and_then(|meta| if meta.len() as usize > limits::MAX_MODULE_BYTES { Err(format!("{} bytes: at most {} are loaded", meta.len(), limits::MAX_MODULE_BYTES)) } else { std::fs::read(&entry_path).map_err(|e| e.to_string()) }) {
+        let entry = match read_regular(&entry_path, limits::MAX_MODULE_BYTES) {
             Ok(b) => b,
             Err(e) => {
                 p.status = Status::Invalid(format!("{}: {e}", m.plugin.entry));
@@ -1198,6 +1198,30 @@ pub(crate) fn poll_now(game: &mut crate::game::Game) {
 /// What a folder holds, read as far as the manifest and the entry go (no approval, nothing compiled).
 pub fn read_folder(folder: &Path) -> Loaded {
     Loaded::inspect(&wasm::engine(), folder, None, None, &sign::Keys::default())
+}
+
+/// A file of a plugin's folder, at most `max` bytes of it. The folder is what an archive unpacked,
+/// and every folder of plugins/ is read before anyone approves it: a named pipe in the place of a file
+/// would block the open for ever (the game thread reads these), and a device such as /dev/zero has
+/// a size of 0 and no end. Only a regular file is read (a link to one is followed), and it is
+/// opened without waiting so that even a pipe is looked at and refused.
+pub(crate) fn read_regular(path: &Path, max: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::{Error, ErrorKind, Read};
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY).open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(Error::new(ErrorKind::InvalidInput, "not a regular file"));
+    }
+    if meta.len() > max as u64 {
+        return Err(Error::new(ErrorKind::InvalidData, format!("{} bytes: at most {max} are loaded", meta.len())));
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.take(max as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > max {
+        return Err(Error::new(ErrorKind::InvalidData, format!("over {max} bytes: at most {max} are loaded")));
+    }
+    Ok(bytes)
 }
 
 /// The same, with the keys the admin trusts (for the signature to be judged).

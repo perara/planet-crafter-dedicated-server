@@ -186,7 +186,7 @@ impl Ctx {
         }
         // The manifest and the entry only: nothing else of the folder (a target/ with a build in it) is copied.
         for name in [manifest::FILE, m.plugin.entry.as_str()] {
-            let bytes = fs::read(from.join(name)).map_err(|e| format!("{}: {e}", from.join(name).display()))?;
+            let bytes = plugins::read_regular(&from.join(name), plugins::limits::MAX_MODULE_BYTES).map_err(|e| format!("{}: {e}", from.join(name).display()))?;
             let target = to.join(name);
             super::mkdir(target.parent().unwrap_or(&to))?;
             super::replace_file(&target, &bytes, 0o644)?;

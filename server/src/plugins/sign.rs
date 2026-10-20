@@ -150,21 +150,13 @@ impl Signed {
 
 /// Checks the `plugin.sig` in `folder` against `digest` (the digest of the files as they are read now).
 pub fn check(folder: &Path, digest: &str, keys: &Keys) -> Signed {
-    use std::io::Read;
     let path = folder.join(FILE);
-    let mut text = String::new();
-    match std::fs::File::open(&path) {
-        Ok(f) => {
-            if let Err(e) = f.take(MAX_SIG_BYTES + 1).read_to_string(&mut text) {
-                return Signed::Broken(format!("{FILE}: {e}"));
-            }
-        }
+    let text = match super::read_regular(&path, MAX_SIG_BYTES as usize) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Signed::No,
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => return Signed::Broken(format!("{FILE}: over {MAX_SIG_BYTES} bytes")),
         Err(e) => return Signed::Broken(format!("{FILE}: {e}")),
-    }
-    if text.len() as u64 > MAX_SIG_BYTES {
-        return Signed::Broken(format!("{FILE}: over {MAX_SIG_BYTES} bytes"));
-    }
+    };
     let broken = |why: &str| Signed::Broken(format!("{FILE}: {why}"));
     let Ok(sig) = serde_json::from_str::<Sig>(&text) else { return broken("not a signature file") };
     let (Ok(public), Ok(signature)) = (unhex(&sig.public_key), unhex(&sig.signature)) else { return broken("the key or the signature is not hex") };

@@ -121,7 +121,7 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
         report.facts.push("asks for no capability: it can read nothing and change nothing".into());
     }
     // Prepare it as the host would after approval: read the entry again with the grant.
-    let entry = match std::fs::read(folder.join(&p.entry)) {
+    let entry = match super::read_regular(&folder.join(&p.entry), super::limits::MAX_MODULE_BYTES) {
         Ok(e) => e,
         Err(e) => {
             report.errors.push(format!("{}: {e}", p.entry));

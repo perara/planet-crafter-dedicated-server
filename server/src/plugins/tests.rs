@@ -791,3 +791,64 @@ fn asking_the_world_again_and_again_is_paid_for_in_fuel() {
     let (took, cut) = one_event_takes("(drop (call $query (i32.const 1) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 1048576)))", &["event.chat", "world.read"], 2000);
     assert!(took < bound && cut, "query of 2000 players into 1 MiB: {took:?} (cut by its fuel: {cut})");
 }
+
+// ---- files in a plugin's folder that are not files (security review v0.7+) ------------------------
+
+fn mkfifo(path: &Path) {
+    let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    // SAFETY: mkfifo with a NUL-terminated path that lives through the call.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0, "mkfifo {}", path.display());
+}
+
+/// Runs `f` on a thread and says whether it came back within `within`; a thread that does not is
+/// left blocked (the test process ends it).
+fn returns_within<T: Send + 'static>(within: Duration, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || drop(tx.send(f())));
+    rx.recv_timeout(within).ok()
+}
+
+/// The folder of a plugin is whatever an archive unpacked into it, and every folder of plugins/ is
+/// read (the manifest, the module, the signature) before anyone approves it, on the game thread
+/// every few seconds: a named pipe where a file should be must not hold the game up for ever, and
+/// a device that reads without end (a link to /dev/zero has size 0) must not be read to the end.
+#[test]
+fn a_plugin_folder_with_a_pipe_or_a_device_in_place_of_a_file_does_not_hold_the_host() {
+    for victim in ["plugin.sig", "plugin.wasm", "plugin.toml"] {
+        let dir = fresh_dir("fifo");
+        install(&dir, "p", &module("(i32.const 0)", ""), &CHAT_SAY, SUBSCRIBE_CHAT, None);
+        let file = dir.join("p").join(victim);
+        std::fs::remove_file(&file).ok();
+        mkfifo(&file);
+        let d = dir.clone();
+        let host = returns_within(Duration::from_secs(5), move || prepare(&d, "world"));
+        let host = host.unwrap_or_else(|| panic!("prepare() is blocked on a pipe named {victim}"));
+        assert!(!host.plugins.is_empty() && !host.plugins[0].running(), "{victim}: {:?}", host.plugins[0].status);
+    }
+    // A saved state that is a pipe: the plugin starts without one.
+    let dir = fresh_dir("fifo-state");
+    install(&dir, "p", &module("(i32.const 0)", ""), &CHAT_SAY, SUBSCRIBE_CHAT, None);
+    std::fs::create_dir_all(dir.join("p/data")).unwrap();
+    mkfifo(&dir.join("p/data/world.state"));
+    let d = dir.clone();
+    assert!(returns_within(Duration::from_secs(5), move || boot(&d)).is_some(), "start() is blocked on a pipe named data/world.state");
+    // The module is a link to a device with no end and no size.
+    let dir = fresh_dir("zero");
+    install(&dir, "p", &module("(i32.const 0)", ""), &CHAT_SAY, SUBSCRIBE_CHAT, None);
+    let file = dir.join("p/plugin.wasm");
+    std::fs::remove_file(&file).unwrap();
+    std::os::unix::fs::symlink("/dev/zero", &file).unwrap();
+    // (Before, `std::fs::read` of it grew until the memory was gone: the size check looked at a size of 0.)
+    assert!(read_regular(&file, limits::MAX_MODULE_BYTES).is_err(), "a device is not a module");
+    let d = dir.clone();
+    let host = returns_within(Duration::from_secs(5), move || prepare(&d, "world")).expect("prepare() reads a device for ever");
+    assert!(matches!(&host.plugins[0].status, Status::Invalid(why) if why.contains("not a regular file")), "{:?}", host.plugins[0].status);
+    // A file that is one, a link to one included, is read as before; one over the limit is not.
+    let big = dir.join("big");
+    std::fs::write(&big, vec![0u8; 1001]).unwrap();
+    assert_eq!(read_regular(&big, 1001).unwrap().len(), 1001);
+    assert!(read_regular(&big, 1000).unwrap_err().to_string().contains("at most 1000"));
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&big, &link).unwrap();
+    assert_eq!(read_regular(&link, 2000).unwrap().len(), 1001);
+}

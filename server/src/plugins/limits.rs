@@ -21,6 +21,8 @@ pub const FUEL_LOAD: u64 = 100_000_000;
 /// 64 KiB pages of memory: 64 is 4 MiB; at most 1024 is 64 MiB.
 pub const MEMORY_PAGES: u32 = 64;
 pub const MAX_MEMORY_PAGES: u32 = 1024;
+/// A manifest bigger than this is not read (a real one is a few KiB).
+pub const MAX_MANIFEST_BYTES: usize = 256 << 10;
 /// A module bigger than this is not loaded.
 pub const MAX_MODULE_BYTES: usize = 8 << 20;
 
