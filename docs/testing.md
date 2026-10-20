@@ -144,7 +144,8 @@ had stopped compiling unnoticed.
 
 Targets: `wire utp rpcspec transform ipc config chathooks updater access rules save handoff game front`, and
 since round 3 ([audits.md](audits.md)) `oldsave savelayout manifest pluginnet pluginsign wasmhost bincodec adminhttp
-adminroutes names msg toxic loadsave twin tessera` (each is described in the header of `server/fuzz/Cargo.toml`).
+adminroutes names msg toxic loadsave twin tessera`, and for the operability release (`pcds doctor`, metrics, the
+structured log, `pcds backup`, the S3 reads) `prom logline s3resp backup doctor` (each is described in the header of `server/fuzz/Cargo.toml`).
 `twin` is the check of a flip's exactness: a game and the game restored from its snapshot are given the same inputs and
 the same ticks (on the game's own clock, `sim_time`), and every message they send must be the same.
 `PCDS_FUZZ_SAVE=SAVE` makes `game`, `twin` and `loadsave` start from a save of this server (a mid-game world with

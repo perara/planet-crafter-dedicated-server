@@ -135,3 +135,20 @@ put("loadsave", "ops", bytes(range(1, 60)))
 put("twin", "ops", bytes(range(1, 120)))
 put("wasmhost", "calls", bytes(range(1, 200)))
 put("bincodec", "world-object", b"\x02" + bytes(range(1, 50)))
+
+# prom: the metrics input of the front (status, plugins, front counters, bank numbers) of a running world.
+put("prom", "running", '{"status":{"state":"running","serverVersion":"0.8.0","gameVersion":"2.103","save":"my \\"base\\"\\\\x","planet":"Prime","held":false,"uptimeSeconds":3600,"players":[{"id":1},{"id":2}],"tick":{"samples":1000,"p50Micros":150,"p99Micros":900,"maxMicros":4000},"busyPercent":12.5,"longestLoopMicros":5000,"fps":200,"process":{"cpuSeconds":12.5},"objects":{"world":33583,"network":1200,"inventories":2246},"traffic":{"bytesIn":100,"bytesOut":2000},"lastSave":{"ok":true,"at":1792000000,"error":null},"backup":{"enabled":true,"lastOkAt":1792000100,"error":null},"s3":{"enabled":true,"uploading":false,"last":{"ok":false,"at":1792000200,"error":"no"}},"banks":{"flips":3,"crashes":1,"frontProtocol":3,"live":{"bank":"a","version":"0.8.0","format":7}},"update":{"available":true}},"plugins":[{"id":"welcome","status":"running","stats":{"calls":10,"faults":0,"restarts":0,"slow":1,"shed":0,"denied":2,"refused":0,"actions":5,"vetoes":0,"fuel":123456}},{"id":"broken","status":"failed","stats":{"calls":3,"faults":3,"restarts":2,"slow":0,"shed":0,"denied":0,"refused":0,"actions":0,"vetoes":0,"fuel":99}}],"front":{"connections":{"ip":1,"steam":1},"memory":{"front":50000000,"bank":80000000,"next_bank":null},"flipsFailed":1,"lastStandMillis":12.5,"crashes":4,"watchdogKills":2,"queue":{"waitingBytes":10,"droppedClients":1,"droppedBytes":17000000}},"bank":{"maxPlayers":16,"saveMillis":250.0,"backupVerify":{"file":"w-1","ok":false,"at":1792000300,"worldObjects":0,"error":"x"}}}')
+put("prom", "stopped", '{"status": {"state": "stopped"}, "plugins": [], "front": {}, "bank": {}}')
+
+# logline: flags (json, journald, level), then message, a secret, a second secret, split by 0xff.
+put("logline", "text", b"\x08client 7: name\rforged\x1b[2J Authorization: Bearer abc123def and pcdst_0123abcd and hunter2secret\xffhunter2secret\xff")
+put("logline", "json", b"\x07a \"quoted\" line\nsecond line with secretvalue\xffsecretvalue\xff")
+# s3resp: a listing (the bucket's XML) and an error body, then keys split by NUL for the round trip.
+put("s3resp", "listing", "<ListBucketResult><IsTruncated>true</IsTruncated><Contents><Key>pcds/world-20261020-170930.json</Key></Contents><Contents><Key>pcds/a&amp;b.json</Key></Contents><NextContinuationToken>tok/en+1</NextContinuationToken></ListBucketResult>")
+put("s3resp", "error", "<Error><Code>AccessDenied</Code><Message>Access &lt;Denied&gt;\x1b[31m</Message></Error>")
+put("s3resp", "keys", b"pcds/world-1.json\x00a&lt;b\x00\x00tok")
+# backup: the world's name, the file names in backups/, the NAME typed.
+put("backup", "names", b"world\xffworld-20261001-000000.json\xffworld-20261003-000000.json\xffworld-2-20261005-000000.json\xffworld-20261001-000000.json.tmp\xff20261003-000000")
+put("backup", "path", b"world\xffworld-20261001-000000.json\xff../x.json")
+# doctor: server.env, rules.json, access.json, the world, approved.json, backup names, then two unit paths.
+put("doctor", "files", b"PCDS_WORLD=world\n\xff{\"save\":{\"backupsKept\":3}}\xff{\"banned\":[\"Ann\"]}\xff{}\xff{}\xffworld-20261001-000000.json\nworld-20261003-000000.json\xff/srv/50%/run\"x\xffunit")

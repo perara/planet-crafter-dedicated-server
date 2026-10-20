@@ -425,3 +425,7 @@ mod tests {
         assert!(module_path!().starts_with("pcds::logging"), "{}", module_path!());
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/logline.rs"]
+pub mod fuzz;

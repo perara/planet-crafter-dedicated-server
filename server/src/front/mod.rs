@@ -62,6 +62,8 @@ mod history;
 mod metrics;
 mod ops;
 mod prometheus;
+#[cfg(any(fuzzing, pcds_corpus))]
+pub use prometheus::fuzz as fuzz_prom;
 mod queue;
 mod snapshot;
 mod status;

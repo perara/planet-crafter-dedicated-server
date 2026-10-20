@@ -10,7 +10,8 @@
 #
 # Targets: wire utp rpcspec transform ipc config chathooks updater access rules save handoff game front,
 # and (round 3, docs/audits.md) oldsave savelayout manifest pluginnet pluginsign wasmhost bincodec
-# adminhttp adminroutes names msg toxic loadsave twin tessera.
+# adminhttp adminroutes names msg toxic loadsave twin tessera, and (the operability release) prom logline
+# s3resp backup doctor.
 # oldsave: an old-layout save through the import. savelayout: the loader's layout checks and the
 # writer. manifest: plugin.toml, a data plugin's rules and the JSON files beside the plugins (first byte
 # picks). pluginnet: allow-list patterns, URLs, redirects, the request a plugin encodes, and which
@@ -21,6 +22,11 @@
 # the toxic areas' keys. loadsave: a save damaged one field at a time, loaded. twin: a game and the
 # game restored from its snapshot given the same inputs for 1000 ticks send the same bytes. tessera:
 # the wreck solver on seeds (PCDS_FUZZ_SAVE=a save of this server is the base of game, twin, loadsave).
+# prom: GET /api/metrics for any JSON the front puts together, read back by a strict reader of the
+# format. logline: log lines in both formats (secrets masked, one JSON line, no control character in
+# text), util::utc against its inverse. s3resp: a bucket's listing and error bodies, the SigV4 encoder.
+# backup: backups/ with any file names, the list and the names pcds backup takes. doctor: the file
+# checks of pcds doctor on hostile files, the unit files for any path.
 # Sweeps (one run each, no libFuzzer input): handoffsweep and savesweep put awkward numbers and strings
 # in a real snapshot / save, one value at a time (PCDS_FUZZ_SWEEP_FILE, _STEP, _OFFSET; pass -timeout=0).
 # game runs 40 inputs on one Game, takes a snapshot and restores it every 20 (a NaN fails there), and

@@ -1065,3 +1065,7 @@ mod tests {
         assert!(mb(1) == "1B" && mb(3 << 20) == "3.0MB" && mb(25 << 20) == "25MB");
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../../fuzz/targets/doctor.rs"]
+pub mod fuzz;
