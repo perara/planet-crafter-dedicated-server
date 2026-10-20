@@ -88,10 +88,10 @@ expected, so the table is what the compiler checks. (`grep -rn "GameTime" server
 | `rockets.rs`, `rockets/back_and_forth.rs` | the despawn of ignited rockets, the departure's `switch_at`, `last_tick` (a delta), the update and relaunch of exchange rockets | converted |
 | `instances.rs` | the opened instance's second (`next_second`), the generators' despawn | converted |
 | `logistics.rs` | the frame loop (`last_tick`: `u64`), the 1 s task refresh (`next_tasks`) | converted; the tick-to-time conversion is the float's while young |
-| `events.rs`, `plugins/` (`view.rs`, `mod.rs`), `bank.rs` | `game_ms`, `gameTime` of the status | read from `GameTime::secs()` |
+| `events.rs`, `plugins/` (`view.rs`, `mod.rs`), `bank/` | `game_ms`, `gameTime` of the status | read from `GameTime::secs()` |
 | `game.rs` `clock`, `paused`, `last_clock` | the real clock, the seconds the world stood still | not needed: already f64 (seconds from an `Instant`, 1e-8 s at a year) |
 | `handlers.rs` `Limits::chat`, `motion` | the clients' rate limits | not needed: f64 clock, differences only |
-| `bank.rs`, `front.rs`, `chathooks.rs`, `updater.rs`, `utp.rs`, `ipc.rs`, `admin.rs`, `cli/`, `s3.rs`, `save.rs` | deadlines, timeouts, backups and stamps | not needed: `Instant` or wall-clock seconds in 64 bits, not the game's time |
+| `bank/`, `front/`, `chathooks/`, `updater.rs`, `utp.rs`, `ipc.rs`, `admin.rs`, `cli/`, `s3.rs`, `save.rs` | deadlines, timeouts, backups and stamps | not needed: `Instant` or wall-clock seconds in 64 bits, not the game's time |
 | `plugins/mod.rs` `next_tick`, `last_tick` | the host's own ticks | not needed: `i64`, wall clock |
 | `meteo.rs` `DayNight.pong`, `value` | the day's accumulators | not needed: reset every cycle (a few hundred) |
 | `WorldObject::growth`, `hunger` | grown / starving percentages | not needed: bounded 0..100 and −100..100, steps are deltas |
