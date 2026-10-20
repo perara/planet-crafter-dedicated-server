@@ -124,7 +124,8 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
     let entry = match std::fs::read(folder.join(&p.entry)) {
         Ok(e) => e,
         Err(e) => {
-            report.errors.push(format!("{}: {e}", p.entry));
+            let build = if matches!(p.kind, PluginKind::Wasm) && e.kind() == std::io::ErrorKind::NotFound { " (build it first: 'cargo build --release' in the plugin's folder, README.md there)" } else { "" };
+            report.errors.push(format!("{}: {e}{build}", p.entry));
             return report;
         }
     };

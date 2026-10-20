@@ -29,11 +29,13 @@ steamcmd) with your package manager. Then it downloads the latest release into
 files, which takes under a minute. It asks
 whether to play one of your saves or a new world, and starts the server as a service that
 survives reboots. It checks that players can get in, and prints the invite code and the address
-to join. Run the same command again to upgrade; your worlds and settings stay.
+to join. Run the same command again to upgrade; your worlds and settings stay. The server restarts then, so
+players join again and the invite code changes (without a login token); `pcds upgrade` is the way to
+update with nobody disconnected.
 
 Options go after `bash -s --`, for example
 `curl -fsSL .../install.sh | bash -s -- --world ~/Standard-1.json`:
-`--dir DIR`, `--world SAVE.json`, `--new [--planet ID]`, `--game DIR` (a game folder outside Steam),
+`--dir DIR`, `--version vX.Y.Z` (a given release instead of the latest), `--world SAVE.json`, `--new [--planet ID]`, `--game DIR` (a game folder outside Steam),
 `--steam-user NAME` (no game on this machine: download it with steamcmd and your Steam login),
 `--yes` (install packages without asking).
 
