@@ -93,7 +93,6 @@ pub struct Slot {
     /// What the timer scan of the folder has seen.
     #[serde(skip)]
     pub scan: Scan,
-    #[serde(default)]
     pub saved: state::Saved,
 }
 

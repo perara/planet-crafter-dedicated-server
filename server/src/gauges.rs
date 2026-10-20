@@ -17,7 +17,6 @@ pub struct State {
     pub client: u64,
     pub next_tick: f32,
     /// `next_tick` in f64 once the game clock is old (units::advance).
-    #[serde(default)]
     pub late_tick: Option<f64>,
     pub rebreather: bool,
     pub outside_oxygen: f32,

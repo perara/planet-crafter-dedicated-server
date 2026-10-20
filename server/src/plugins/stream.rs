@@ -30,9 +30,7 @@ pub struct Ring {
     /// Unix milliseconds when the ring began.
     pub epoch: u64,
     next: u64,
-    #[serde(default)]
     events: VecDeque<Value>,
-    #[serde(default)]
     dropped: u64,
     /// Who is registered (not in the snapshot: a consumer registers again with its next poll).
     #[serde(skip)]

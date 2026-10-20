@@ -21,17 +21,13 @@ pub struct Blob {
     pub bytes: Vec<u8>,
 }
 
-/// What the snapshot of a flip carries for plugins. Additive: an older bank reading a snapshot
-/// that has it ignores it (the field is unknown to it), and a bank reading an older snapshot gets
-/// the default (no part named `plugins`, or one without `states` or `stream`). Docs/plugins.md,
-/// "Plugin state in a flip".
+/// What the snapshot of a flip carries for plugins (docs/plugins.md, "Plugin state in a flip").
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Saved {
     /// Per plugin id: its state (hex in the JSON, so the snapshot stays text and small).
-    #[serde(default, with = "hex_blobs")]
+    #[serde(with = "hex_blobs")]
     pub states: BTreeMap<String, Blob>,
     /// The events kept for the out-of-process stream (POST /api/plugins/events): ids go on across a flip.
-    #[serde(default)]
     pub stream: super::stream::Ring,
 }
 
@@ -111,16 +107,13 @@ mod tests {
     }
 
     #[test]
-    fn saved_state_is_text_and_older_documents_still_read() {
+    fn saved_state_is_text() {
         let mut saved = Saved::default();
         saved.states.insert("hello".into(), Blob { version: 2, bytes: vec![9, 8, 7] });
         let text = serde_json::to_string(&saved).unwrap();
         assert!(text.contains("\"hex\":\"090807\""), "{text}");
         let back: Saved = serde_json::from_str(&text).unwrap();
         assert_eq!(back.states["hello"], Blob { version: 2, bytes: vec![9, 8, 7] });
-        // A document from before plugins, or with fields a later build adds, reads.
-        assert!(serde_json::from_str::<Saved>("{}").unwrap().states.is_empty());
-        assert!(serde_json::from_str::<Saved>("{\"states\":{},\"future\":1}").unwrap().states.is_empty());
     }
 
     #[test]

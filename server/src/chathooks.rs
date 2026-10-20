@@ -167,7 +167,6 @@ pub struct State {
     #[serde(skip)]
     pub outbox: Vec<Event>,
     /// Replies for the chat at the next tick.
-    #[serde(default)]
     pub replies: VecDeque<String>,
     /// The chat rules changed: the bank sends them to the front.
     #[serde(skip)]

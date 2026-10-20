@@ -155,9 +155,7 @@ pub struct Units {
     next_compute: f32,
     next_define: f32,
     /// The same due times in f64 once the game clock is past EXACT_AFTER (see `advance`).
-    #[serde(default)]
     late_compute: Option<f64>,
-    #[serde(default)]
     late_define: Option<f64>,
     /// The terraformation totals _unitSysTerraformation was last made from (bits).
     sys_from: Option<Vec<u32>>,

@@ -22,10 +22,8 @@ pub struct Ext {
     pub first_item_linked: crate::handlers::FirstItemLinked,
     pub default_colors: crate::handlers::DefaultColors,
     /// Chat events on their way to the front's hooks, and the replies back.
-    #[serde(default)]
     pub chat: crate::chathooks::State,
     /// The plugin host (never in the snapshot) and what the snapshot carries for plugins: their
-    /// state and the event stream. Additive: banks that do not know it ignore it (docs/plugins.md).
-    #[serde(default)]
+    /// state and the event stream (docs/plugins.md).
     pub plugins: crate::plugins::Slot,
 }

@@ -205,7 +205,6 @@ pub struct Game {
     paused: f64,
     /// The admin paused the world (POST /api/pause): it stands still as with nobody in it,
     /// players in it or not, until resumed.
-    #[serde(default)]
     pub held: bool,
     last_clock: f64,
     /// The clock moved since main last took this: an autosave of a world that stood still since
@@ -241,7 +240,6 @@ pub struct Game {
     /// A subsystem asks for a save (SavedDataHandler.SaveWorldData); main writes it after the tick.
     pub save_requested: bool,
     /// Chat rate and RPC work per client.
-    #[serde(default)]
     pub limits: crate::handlers::Limits,
     /// While the world loads: what the machines' energy checks share, the water boxes and which
     /// groups work underwater (None: not loading, each check makes its own). The boxes only move

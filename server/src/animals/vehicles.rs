@@ -45,7 +45,6 @@ struct Vehicle {
     /// When the next rigidbody check is due: f32 like the game's while the clock is young, f64
     /// in `late_check` after (units::advance: adding 0.15 to an f32 stops changing it at 2^22 s).
     next_check: f32,
-    #[serde(default)]
     late_check: Option<f64>,
     disable_distance: f32,
 }
@@ -75,7 +74,6 @@ pub struct State {
     /// A seated player's object -> (where the seat put it, the owner's own last state): the
     /// game's seat overrides the copy of the player every frame, and once it lets go the copy
     /// goes back to what the owner last sent.
-    #[serde(default)]
     seated: HashMap<u64, Seated>,
 }
 
