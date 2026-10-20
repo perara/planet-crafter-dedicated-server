@@ -731,3 +731,254 @@ mod tests {
         assert!(unpack(packed(1, 33, &[0; 8])).is_err());
     }
 }
+
+// Unity 6000.3 release type-tree field descriptors; validated against installed game data.
+const TERRAIN_COLLIDER_6000_3: &[(u8, &str, &str, i32, bool)] = &[
+    (1, "PPtr<GameObject>", "m_GameObject", 12, false),
+    (2, "int", "m_FileID", 4, false),
+    (2, "SInt64", "m_PathID", 8, false),
+    (1, "PPtr<PhysicsMaterial>", "m_Material", 12, false),
+    (2, "int", "m_FileID", 4, false),
+    (2, "SInt64", "m_PathID", 8, false),
+    (1, "BitField", "m_IncludeLayers", 4, false),
+    (2, "unsigned int", "m_Bits", 4, false),
+    (1, "BitField", "m_ExcludeLayers", 4, false),
+    (2, "unsigned int", "m_Bits", 4, false),
+    (1, "int", "m_LayerOverridePriority", 4, false),
+    (1, "bool", "m_ProvidesContacts", 1, true),
+    (1, "bool", "m_Enabled", 1, true),
+    (1, "PPtr<TerrainData>", "m_TerrainData", 12, false),
+    (2, "int", "m_FileID", 4, false),
+    (2, "SInt64", "m_PathID", 8, false),
+    (1, "bool", "m_EnableTreeColliders", 1, false),
+];
+
+// Unity 6000.3 release type-tree field descriptors; validated against installed game data.
+const TERRAIN_DATA_6000_3: &[(u8, &str, &str, i32, bool)] = &[
+    (1, "string", "m_Name", -1, false),
+    (2, "Array", "Array", -1, true),
+    (3, "int", "size", 4, false),
+    (3, "char", "data", 1, false),
+    (1, "SplatDatabase", "m_SplatDatabase", -1, false),
+    (2, "vector", "m_TerrainLayers", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "PPtr<TerrainLayer>", "data", 12, false),
+    (5, "int", "m_FileID", 4, false),
+    (5, "SInt64", "m_PathID", 8, false),
+    (2, "vector", "m_AlphaTextures", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "PPtr<Texture2D>", "data", 12, false),
+    (5, "int", "m_FileID", 4, false),
+    (5, "SInt64", "m_PathID", 8, false),
+    (2, "int", "m_AlphamapResolution", 4, false),
+    (2, "int", "m_BaseMapResolution", 4, false),
+    (1, "DetailDatabase", "m_DetailDatabase", -1, false),
+    (2, "vector", "m_Patches", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "DetailPatch", "data", -1, false),
+    (5, "vector", "layerIndices", -1, false),
+    (6, "Array", "Array", -1, true),
+    (7, "int", "size", 4, false),
+    (7, "UInt8", "data", 1, false),
+    (5, "vector", "coverage", -1, false),
+    (6, "Array", "Array", -1, true),
+    (7, "int", "size", 4, false),
+    (7, "UInt8", "data", 1, false),
+    (2, "vector", "m_DetailPrototypes", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "DetailPrototype", "data", 116, false),
+    (5, "PPtr<GameObject>", "prototype", 12, false),
+    (6, "int", "m_FileID", 4, false),
+    (6, "SInt64", "m_PathID", 8, false),
+    (5, "PPtr<Texture2D>", "prototypeTexture", 12, false),
+    (6, "int", "m_FileID", 4, false),
+    (6, "SInt64", "m_PathID", 8, false),
+    (5, "float", "minWidth", 4, false),
+    (5, "float", "maxWidth", 4, false),
+    (5, "float", "minHeight", 4, false),
+    (5, "float", "maxHeight", 4, false),
+    (5, "int", "noiseSeed", 4, false),
+    (5, "float", "noiseSpread", 4, false),
+    (5, "float", "holeTestRadius", 4, false),
+    (5, "float", "density", 4, false),
+    (5, "ColorRGBA", "healthyColor", 16, false),
+    (6, "float", "r", 4, false),
+    (6, "float", "g", 4, false),
+    (6, "float", "b", 4, false),
+    (6, "float", "a", 4, false),
+    (5, "ColorRGBA", "dryColor", 16, false),
+    (6, "float", "r", 4, false),
+    (6, "float", "g", 4, false),
+    (6, "float", "b", 4, false),
+    (6, "float", "a", 4, false),
+    (5, "int", "renderMode", 4, false),
+    (5, "int", "usePrototypeMesh", 4, false),
+    (5, "int", "useInstancing", 4, false),
+    (5, "int", "useDensityScaling", 4, false),
+    (5, "float", "alignToGround", 4, false),
+    (5, "float", "positionJitter", 4, false),
+    (5, "float", "targetCoverage", 4, false),
+    (2, "int", "m_PatchCount", 4, false),
+    (2, "int", "m_PatchSamples", 4, false),
+    (2, "ColorRGBA", "WavingGrassTint", 16, false),
+    (3, "float", "r", 4, false),
+    (3, "float", "g", 4, false),
+    (3, "float", "b", 4, false),
+    (3, "float", "a", 4, false),
+    (2, "float", "m_WavingGrassStrength", 4, false),
+    (2, "float", "m_WavingGrassAmount", 4, false),
+    (2, "float", "m_WavingGrassSpeed", 4, false),
+    (2, "int", "m_DetailScatterMode", 4, false),
+    (2, "vector", "m_TreeInstances", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "TreeInstance", "data", 36, false),
+    (5, "Vector3f", "position", 12, false),
+    (6, "float", "x", 4, false),
+    (6, "float", "y", 4, false),
+    (6, "float", "z", 4, false),
+    (5, "float", "widthScale", 4, false),
+    (5, "float", "heightScale", 4, false),
+    (5, "float", "rotation", 4, false),
+    (5, "ColorRGBA", "color", 4, false),
+    (6, "unsigned int", "rgba", 4, false),
+    (5, "ColorRGBA", "lightmapColor", 4, false),
+    (6, "unsigned int", "rgba", 4, false),
+    (5, "int", "index", 4, false),
+    (2, "vector", "m_TreePrototypes", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "TreePrototype", "data", 20, false),
+    (5, "PPtr<GameObject>", "prefab", 12, false),
+    (6, "int", "m_FileID", 4, false),
+    (6, "SInt64", "m_PathID", 8, false),
+    (5, "float", "bendFactor", 4, false),
+    (5, "int", "navMeshLod", 4, false),
+    (2, "vector", "m_PreloadTextureAtlasData", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "PPtr<Texture2D>", "data", 12, false),
+    (5, "int", "m_FileID", 4, false),
+    (5, "SInt64", "m_PathID", 8, false),
+    (2, "PPtr<Shader>", "m_DefaultShaders[0]", 12, false),
+    (3, "int", "m_FileID", 4, false),
+    (3, "SInt64", "m_PathID", 8, false),
+    (2, "PPtr<Shader>", "m_DefaultShaders[1]", 12, false),
+    (3, "int", "m_FileID", 4, false),
+    (3, "SInt64", "m_PathID", 8, false),
+    (2, "PPtr<Shader>", "m_DefaultShaders[2]", 12, false),
+    (3, "int", "m_FileID", 4, false),
+    (3, "SInt64", "m_PathID", 8, false),
+    (1, "Heightmap", "m_Heightmap", -1, false),
+    (2, "vector", "m_Heights", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "SInt16", "data", 2, false),
+    (2, "vector", "m_Holes", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "UInt8", "data", 1, false),
+    (2, "vector", "m_HolesLOD", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "UInt8", "data", 1, false),
+    (2, "bool", "m_EnableHolesTextureCompression", 1, true),
+    (2, "vector", "m_PrecomputedError", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "float", "data", 4, false),
+    (2, "vector", "m_MinMaxPatchHeights", -1, false),
+    (3, "Array", "Array", -1, true),
+    (4, "int", "size", 4, false),
+    (4, "float", "data", 4, false),
+    (2, "int", "m_Resolution", 4, false),
+    (2, "int", "m_Levels", 4, false),
+    (2, "Vector3f", "m_Scale", 12, false),
+    (3, "float", "x", 4, false),
+    (3, "float", "y", 4, false),
+    (3, "float", "z", 4, false),
+    (1, "vector", "m_PreloadShaders", -1, false),
+    (2, "Array", "Array", -1, true),
+    (3, "int", "size", 4, false),
+    (3, "PPtr<Shader>", "data", 12, false),
+    (4, "int", "m_FileID", 4, false),
+    (4, "SInt64", "m_PathID", 8, false),
+];
+
+pub fn terrain_collider(version: &str, data: &[u8]) -> Result<(bool, super::unity::PPtr), String> {
+    let rows = layout_for(version, &[("6000.3", TERRAIN_COLLIDER_6000_3)], "TerrainCollider")?;
+    let fields = fields(rows, data, true)?;
+    let at = |name| {
+        fields
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, r)| r.start)
+            .ok_or_else(|| format!("TerrainCollider.{name}"))
+    };
+    let enabled = Reader::new(&data[at("m_Enabled")?..]).bool().ok_or("TerrainCollider.enabled")?;
+    let pointer = Reader::new(&data[at("m_TerrainData")?..]).pptr().ok_or("TerrainCollider.terrainData")?;
+    Ok((enabled, pointer))
+}
+
+/// Signed terrain samples scale by 32766 per heightmapScale.y, including negative elevations.
+/// Bounds cover each
+/// patch's highest vertex, hence every bilinear surface sample between them as well.
+/// Normalization: UnityCsReference/Modules/Terrain/Public/PaintContext.cs, kNormalizedHeightScale.
+pub fn terrain_patches(version: &str, data: &[u8]) -> Result<Vec<crate::geometry::navigation::Bounds>, String> {
+    let rows = layout_for(version, &[("6000.3", TERRAIN_DATA_6000_3)], "TerrainData")?;
+    fields(rows, data, true)?;
+    let nodes = build(rows, &mut 0, 1);
+    let at = |name| {
+        locate(&nodes, &mut Reader::new(data), &["m_Heightmap", name])
+            .map(|r| r.start)
+            .ok_or_else(|| format!("TerrainData.{name}"))
+    };
+    let res = Reader::new(&data[at("m_Resolution")?..]).i32().ok_or("terrain resolution")?;
+    let scale = Reader::new(&data[at("m_Scale")?..]).vec3().ok_or("terrain scale")?;
+    let mut r = Reader::new(&data[at("m_Heights")?..]);
+    let count = r.count().ok_or("terrain samples")?;
+    if !(2..=8193).contains(&res) || count != res as usize * res as usize || !scale.iter().all(|v| v.is_finite() && *v > 0.0) {
+        return Err("invalid terrain resolution, height count or scale".into());
+    }
+    let heights = (0..count).map(|_| r.i16()).collect::<Option<Vec<_>>>().ok_or("truncated terrain heights")?;
+    height_patches(res as usize, scale, &heights)
+}
+
+fn height_patches(res: usize, scale: [f32; 3], heights: &[i16]) -> Result<Vec<crate::geometry::navigation::Bounds>, String> {
+    let mut out = Vec::new();
+    for z in (0..res - 1).step_by(16) {
+        for x in (0..res - 1).step_by(16) {
+            let (x1, z1) = ((x + 16).min(res - 1), (z + 16).min(res - 1));
+            let max = (z..=z1).flat_map(|z| (x..=x1).map(move |x| heights[z * res + x])).max().unwrap();
+            let top = (f32::from(max) + 1.0) / 32766.0 * scale[1] + 0.1;
+            out.push(crate::geometry::navigation::Bounds {
+                min: [x as f32 * scale[0], -10000.0, z as f32 * scale[2]],
+                max: [x1 as f32 * scale[0], top, z1 as f32 * scale[2]],
+            });
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::*;
+    #[test]
+    fn height_patches_cover_peaks_at_shared_edges_and_the_last_cell() {
+        let mut heights = vec![0; 18 * 18];
+        heights[16 * 18 + 16] = 32766;
+        heights[17 * 18 + 17] = 16383;
+        let b = height_patches(18, [2.0, 600.0, 3.0], &heights).unwrap();
+        assert_eq!(b.len(), 4);
+        assert!(b.iter().all(|b| b.max[1] > 600.0));
+        assert_eq!(b[3].max[0], 34.0);
+        assert_eq!(b[3].max[2], 51.0);
+        heights.fill(-16383);
+        let below = height_patches(18, [2.0, 600.0, 3.0], &heights).unwrap();
+        assert!(below.iter().all(|b| b.max[1] > -300.0 && b.max[1] < -299.0));
+    }
+}

@@ -240,7 +240,7 @@ module native::rpcs  native::rpcs::tests::finds_one_handler_hash_per_rpc native:
 module native::scenes  native::scenes::tests::instance_scenes_are_placed_and_woken_as_in_the_game
 manual native::serial  native::tables::tests::read_game_writes_the_test_tables
 manual native::tables  native::tables::tests::read_game_writes_the_test_tables
-module native::typetree  native::typetree::tests::packed_floats_must_fit_their_data
+module native::typetree  native::typetree::tests::packed_floats_must_fit_their_data native::typetree::navigation_tests::height_patches_cover_peaks_at_shared_edges_and_the_last_cell
 module native::unity  native::unity::tests::only_format_22_files_of_unity_6000_3_with_objects_inside_open native::unity::tests::the_build_lists_its_scenes_and_scripts native::unity::tests::the_shipped_class_ids_are_named
 manual native::wrecks  native::tables::tests::read_game_writes_the_test_tables
 module net  net::tests::scene_objects_are_written_in_place_with_the_bytes_they_always_had net::tests::fixed_string_deltas_carry_the_whole_string_flag
@@ -302,3 +302,4 @@ module routes routes::tests::the_first_matching_route_wins_prefixes_and_any_meth
 module worlds  worlds::tests::names_are_one_rule_with_two_ways_in worlds::tests::a_worlds_files_are_beside_the_save worlds::tests::the_listing_takes_json_files_and_skips_the_settings_files worlds::tests::worlds_lists_saves_and_this_worlds_backups cli::worlds::tests::import_converts_an_old_save_and_copies_a_current_one
 
 module geometry::navigation geometry::navigation::tests::cruise_clears_all_bounds_and_docking_is_vertical geometry::navigation::tests::indexed_routes_match_full_scan_across_negative_cells_and_long_diagonals geometry::navigation::tests::invalid_or_stale_maps_are_refused
+module native::navigation native::navigation::tests::nonuniform_sphere_bounds_keep_the_scaled_center_and_cover_the_whole_radius

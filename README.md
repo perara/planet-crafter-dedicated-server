@@ -909,8 +909,8 @@ Indoor pickup and docking deliberately permit passage through walls, so enclosed
 continues working. This uses conservative bounding boxes, including inactive scene colliders
 that may appear as terraformation progresses; large terrain meshes can therefore cause high,
 longer flights. This is aerial clearance, not a shortest-path or doorway navigation system.
-TerrainCollider geometry is refused by the reader rather than silently omitted. Procedural
-wreck interiors, moving vehicles, players and temporary meteor debris are outside this map.
+Terrain heightmaps are split into conservative patches; holes remain covered for clearance. Procedural
+wreck interiors, moving scenery, vehicles, players and temporary meteor debris are outside this map.
 
 The server indexes obstacles by location, caches each drone's route, and rebuilds the index
 after buildings are constructed or destroyed. Navigation caches are rebuilt after snapshot

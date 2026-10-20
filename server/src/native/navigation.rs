@@ -11,13 +11,33 @@ use std::collections::HashMap;
 use std::path::Path;
 
 impl Ctx {
-    fn navigation_bounds(&mut self, nodes: Vec<Id>, root: Option<Id>, meshes: &mut HashMap<Id, Bounds>) -> Result<Vec<Bounds>, String> {
+    fn navigation_bounds(&mut self, nodes: Vec<Id>, root: Option<Id>, meshes: &mut HashMap<Id, Bounds>, terrains: &mut HashMap<Id, Vec<Bounds>>) -> Result<Vec<Bounds>, String> {
         let mut boxes = Vec::new();
         for node in nodes {
             let components = self.graph.nodes[&node].components.clone();
             for (id, class) in components {
                 if class == 154 {
-                    return Err("TerrainCollider is not supported by the drone map reader".into());
+                    let file = &self.data.files[id.0];
+                    let bytes = file.data(file.object(id.1).ok_or("missing TerrainCollider")?);
+                    let (enabled, pointer) = super::typetree::terrain_collider(&file.unity_version, bytes)?;
+                    if !enabled {
+                        continue;
+                    }
+                    let terrain = self.data.resolve(id.0, pointer)?.ok_or("TerrainCollider without TerrainData")?;
+                    if let std::collections::hash_map::Entry::Vacant(e) = terrains.entry(terrain) {
+                        let file = &self.data.files[terrain.0];
+                        let bytes = file.data(file.object(terrain.1).ok_or("missing TerrainData")?);
+                        e.insert(super::typetree::terrain_patches(&file.unity_version, bytes)?);
+                    }
+                    let (p, r, scale) = if let Some(root) = root { self.in_root(root, node)? } else { self.graph.world(node)? };
+                    for b in &terrains[&terrain] {
+                        let scaled = Bounds {
+                            min: [0, 1, 2].map(|i| (b.min[i] * scale[i]).min(b.max[i] * scale[i])),
+                            max: [0, 1, 2].map(|i| (b.min[i] * scale[i]).max(b.max[i] * scale[i])),
+                        };
+                        boxes.push(scaled.transformed(p, r));
+                    }
+                    continue;
                 }
                 if ![unity::BOX_COLLIDER, unity::SPHERE_COLLIDER, unity::CAPSULE_COLLIDER, unity::MESH_COLLIDER].contains(&class) {
                     continue;
@@ -27,6 +47,7 @@ impl Ctx {
                 if collider.trigger || !collider.enabled {
                     continue;
                 }
+                let rounded = matches!(&collider.shape, unity::Shape::Sphere { .. } | unity::Shape::Capsule { .. });
                 let (center, half) = match collider.shape {
                     unity::Shape::Box { center, size } => (center, size.map(|v| v * 0.5)),
                     unity::Shape::Sphere { center, radius } => (center, [radius; 3]),
@@ -78,17 +99,7 @@ impl Ctx {
                     }
                 };
                 let (p, r, scale) = if let Some(root) = root { self.in_root(root, node)? } else { self.graph.world(node)? };
-                let c = geometry::rotate(r, [0, 1, 2].map(|i| center[i] * scale[i]));
-                let axes = [0, 1, 2].map(|i| {
-                    let mut v = [0.0; 3];
-                    v[i] = half[i] * scale[i];
-                    geometry::rotate(r, v)
-                });
-                let h = [0, 1, 2].map(|i| axes.iter().map(|a| a[i].abs()).sum::<f32>());
-                boxes.push(Bounds {
-                    min: [0, 1, 2].map(|i| p[i] + c[i] - h[i]),
-                    max: [0, 1, 2].map(|i| p[i] + c[i] + h[i]),
-                });
+                boxes.push(shape_bounds(center, half, p, r, scale, rounded));
             }
         }
         Ok(boxes)
@@ -110,6 +121,7 @@ pub fn extract(game: &Path, tables: &Path) -> Result<Data, String> {
         ..Default::default()
     };
     let mut meshes = HashMap::new();
+    let mut terrains = HashMap::new();
     for (id, root) in ctx.groups.clone() {
         let Some(root) = root else {
             continue;
@@ -120,7 +132,7 @@ pub fn extract(game: &Path, tables: &Path) -> Result<Data, String> {
         }
         ctx.graph_file(root.0)?;
         let nodes = ctx.graph.descendants(root);
-        let bounds = ctx.navigation_bounds(nodes, Some(root), &mut meshes).map_err(|e| format!("{id}: {e}"))?;
+        let bounds = ctx.navigation_bounds(nodes, Some(root), &mut meshes, &mut terrains).map_err(|e| format!("{id}: {e}"))?;
         if !bounds.is_empty() {
             out.buildings.insert(id, bounds);
         }
@@ -132,8 +144,10 @@ pub fn extract(game: &Path, tables: &Path) -> Result<Data, String> {
         let mut nodes: Vec<_> = ctx.graph.nodes.keys().copied().filter(|n| files.contains(&n.0)).collect();
         nodes.sort_by_key(|n| (n.0, n.1));
         // Include inactive scene colliders conservatively: terraformation may reveal them later.
-        let bounds = ctx.navigation_bounds(nodes, None, &mut meshes).map_err(|e| format!("{id}: {e}"))?;
-        if bounds.is_empty() { return Err(format!("{id}: no terrain colliders found")); }
+        let bounds = ctx.navigation_bounds(nodes, None, &mut meshes, &mut terrains).map_err(|e| format!("{id}: {e}"))?;
+        if bounds.is_empty() {
+            return Err(format!("{id}: no terrain colliders found"));
+        }
         eprintln!("drone-map: {id}: {} collider bounds", bounds.len());
         out.planets.insert(crate::data::stable_hash(id), bounds);
     }
@@ -157,5 +171,34 @@ pub fn run(args: &[String]) {
     if let Err(e) = result {
         eprintln!("drone-map: {e}");
         std::process::exit(1);
+    }
+}
+
+fn shape_bounds(center: [f32; 3], half: [f32; 3], p: [f32; 3], r: [f32; 4], scale: [f32; 3], rounded: bool) -> Bounds {
+    let c = geometry::rotate(r, [0, 1, 2].map(|i| center[i] * scale[i]));
+    // Unity's sphere/capsule radius uses the largest relevant scale component.
+    let extent_scale = if rounded { [scale.iter().map(|s| s.abs()).fold(0.0f32, f32::max); 3] } else { scale };
+    let axes = [0, 1, 2].map(|i| {
+        let mut v = [0.0; 3];
+        v[i] = half[i] * extent_scale[i];
+        geometry::rotate(r, v)
+    });
+    let h = [0, 1, 2].map(|i| axes.iter().map(|a| a[i].abs()).sum::<f32>());
+    Bounds {
+        min: [0, 1, 2].map(|i| p[i] + c[i] - h[i]),
+        max: [0, 1, 2].map(|i| p[i] + c[i] + h[i]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn nonuniform_sphere_bounds_keep_the_scaled_center_and_cover_the_whole_radius() {
+        let b = shape_bounds([1.0; 3], [2.0; 3], [0.0; 3], [0.0, 0.0, 0.0, 1.0], [3.0, 1.0, 2.0], true);
+        assert_eq!(b.min, [-3.0, -5.0, -4.0]);
+        assert_eq!(b.max, [9.0, 7.0, 8.0]);
+        let box_bounds = shape_bounds([0.0; 3], [1.0; 3], [0.0; 3], geometry::from_euler_y(90.0), [3.0, 1.0, 2.0], false);
+        assert!((box_bounds.max[0] - 2.0).abs() < 1e-5 && (box_bounds.max[2] - 3.0).abs() < 1e-5);
     }
 }
