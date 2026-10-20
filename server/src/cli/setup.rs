@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use super::env::{build_id, parse_env};
 use super::{need, say, sleep, wait_for, Ctx, Result};
+#[cfg(test)]
+use crate::msg::BankInfo;
 use crate::updater;
 
 impl Ctx {
@@ -59,7 +61,7 @@ impl Ctx {
         };
         self.install_bank(&target, &lib)?;
         // A later version than the one rolled back from: the rollback note is done with.
-        if updater::rolled_back(&banks).is_some_and(|r| r["bank"] == target.as_str()) {
+        if updater::rolled_back(&banks).is_some_and(|r| r.bank == target) {
             updater::clear_rolled_back(&banks)?;
         }
         updater::set_active(&banks, &target)?;
@@ -96,7 +98,7 @@ impl Ctx {
         let version = env!("CARGO_PKG_VERSION");
         // What a bank holds: its release's tag when it came from one (a release whose program
         // forgot to bump its version is still that release), else its program's version.
-        let held_of = |b: &str| updater::info(banks, b).map(|i| updater::held_release(banks, b, i["version"].as_str().unwrap_or("")));
+        let held_of = |b: &str| updater::info(banks, b).map(|i| updater::held_release(banks, b, i.version.as_deref().unwrap_or("")));
         let newer_than = |b: &str| match held_of(b) {
             None => true,
             Some(held) => updater::newer(version, &held) || (!updater::newer(&held, version) && super::modified(&self.exe) > super::modified(&program(b))),
@@ -110,7 +112,7 @@ impl Ctx {
         // The standby bank, or the active one while it is empty (never the live one, which
         // holds the world and so is not empty).
         let target = if updater::info(banks, &active).is_none() && live.is_none() { active } else { updater::other(&active).to_string() };
-        let rolled_from = updater::rolled_back(banks).filter(|r| r["bank"] == target.as_str()).and_then(|_| held_of(&target));
+        let rolled_from = updater::rolled_back(banks).filter(|r| r.bank == target).and_then(|_| held_of(&target));
         if let Some(held) = rolled_from.filter(|held| !updater::newer(version, held)) {
             return Ok(Err(Some(format!("pcds {version} is not installed: bank {target} holds pcds {}, the release the server was rolled back from, and is kept ('pcds upgrade' installs a release there)", held.trim_start_matches('v')))));
         }
@@ -133,8 +135,8 @@ impl Ctx {
             copy(lib, &new.join("libsteam_api.so"))?;
             copy(&self.web, &new.join("web/index.html"))?;
             let mut info = crate::bank::info();
-            info["installed"] = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).into();
-            info["from"] = self.exe.display().to_string().into();
+            info.installed = Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+            info.extra.insert("from".into(), self.exe.display().to_string().into());
             updater::write_info(&new, &info)?;
             updater::put(&banks, bank, &new)
         })();
@@ -211,7 +213,7 @@ impl Ctx {
         if code == crate::front::BOOT_FAILED && !STOP_ASKED.load(Ordering::SeqCst) {
             match fallback_bank(&banks, &first) {
                 Ok(other) => {
-                    let reason = format!("could not start the world: its front (pcds {}) ended without running it (exit {code}; see pcds logs)", updater::info(&banks, &first).map_or("?".into(), |i| i["version"].as_str().unwrap_or("?").to_string()));
+                    let reason = format!("could not start the world: its front (pcds {}) ended without running it (exit {code}; see pcds logs)", updater::info(&banks, &first).map_or("?".into(), |i| i.version().to_string()));
                     eprintln!("pcds: bank {first} {reason}. Starting bank {other}, which ran before");
                     updater::note_fallback(&banks, &first, &other, &reason)?;
                     updater::set_active(&banks, &other)?;
@@ -477,7 +479,7 @@ impl Ctx {
 }
 
 /// How long the banks of a front that ended get to save and end before they are killed. A
-/// stop gives the front 60 s (front.rs STOP_GRACE twice), then this: 80 s, under the unit's
+/// stop gives the front 60 s (front/mod.rs STOP_GRACE twice), then this: 80 s, under the unit's
 /// TimeoutStopSec=90.
 const BANKS_GRACE: Duration = Duration::from_secs(20);
 
@@ -496,7 +498,7 @@ fn fallback_bank(banks: &Path, failed: &str) -> std::result::Result<String, Stri
     if updater::info(banks, other).is_none() {
         return Err("holds no release to fall back to".into());
     }
-    if updater::rolled_back(banks).is_some_and(|r| r["bank"] == other) {
+    if updater::rolled_back(banks).is_some_and(|r| r.bank == other) {
         return Err("is the one the server was rolled back from: it is not started (pcds upgrade --rollback goes back to it)".into());
     }
     Ok(other.to_string())
@@ -698,7 +700,7 @@ mod tests {
         assert!(fallback_bank(&banks, "a").unwrap_err().contains("no release"));
         fs::create_dir_all(banks.join("b")).unwrap();
         fs::write(banks.join("b/pcds"), "").unwrap();
-        updater::write_info(&banks.join("b"), &serde_json::json!({"version": "0.6.0"})).unwrap();
+        updater::write_info(&banks.join("b"), &BankInfo { version: Some("0.6.0".into()), ..Default::default() }).unwrap();
         assert_eq!(fallback_bank(&banks, "a").unwrap(), "b");
         updater::set_rolled_back(&banks, "b").unwrap();
         assert!(fallback_bank(&banks, "a").unwrap_err().contains("rolled back from"));
@@ -725,7 +727,7 @@ mod tests {
         };
         ctx.install_beside(None).unwrap();
         assert_eq!((updater::active(&banks), program("a"), program("b")), ("a".into(), Some("build 1".into()), None));
-        assert_eq!(updater::info(&banks, "a").unwrap()["protocol"], crate::ipc::PROTOCOL);
+        assert_eq!(updater::info(&banks, "a").unwrap().protocol, Some(crate::ipc::PROTOCOL));
         assert!(banks.join("a/libsteam_api.so").is_file() && banks.join("a/web/index.html").is_file() && ctx.installed().is_file());
         ctx.install_beside(None).unwrap();
         assert!(!banks.join("b").exists(), "the same build again: nothing");
@@ -749,7 +751,7 @@ mod tests {
         assert_eq!((updater::active(&banks), program("b")), ("a".into(), Some("build 2".into())));
         // A later version than the release rolled back from does go there, and ends the note
         // (a newer release folder's pcds start, as an upgrade from it).
-        updater::write_info(&banks.join("b"), &serde_json::json!({"version": "0.0.1", "protocol": crate::ipc::PROTOCOL})).unwrap();
+        updater::write_info(&banks.join("b"), &BankInfo::new("0.0.1", crate::ipc::PROTOCOL, 0, 0)).unwrap();
         ctx.install_beside(None).unwrap();
         assert_eq!((updater::active(&banks), program("b")), ("b".into(), Some("build 3".into())));
         assert!(updater::rolled_back(&banks).is_none());
@@ -758,7 +760,7 @@ mod tests {
         assert_eq!((updater::active(&banks), program("b")), ("b".into(), Some("build 3".into())));
         // A release of a later version in the standby bank (pcds upgrade): an older build never
         // goes over it, however new its file.
-        updater::write_info(&banks.join("a"), &serde_json::json!({"version": "99.0.0", "tag": "v99.0.0", "protocol": crate::ipc::PROTOCOL})).unwrap();
+        updater::write_info(&banks.join("a"), &BankInfo { tag: Some("v99.0.0".into()), ..BankInfo::new("99.0.0", crate::ipc::PROTOCOL, 0, 0) }).unwrap();
         build("build 4");
         ctx.install_beside(None).unwrap();
         assert_eq!((updater::active(&banks), program("a"), program("b")), ("b".into(), Some("build 1".into()), Some("build 3".into())));
@@ -766,7 +768,7 @@ mod tests {
         let why = ctx.bank_for(&banks, None).unwrap().unwrap_err().unwrap();
         assert!(why.contains("bank a holds pcds 99.0.0, which is newer") && why.contains(&format!("pcds upgrade v{} --restart", env!("CARGO_PKG_VERSION"))), "{why}");
         // A later build while bank a runs the world (the active file says b): into b, never a.
-        updater::write_info(&banks.join("a"), &serde_json::json!({"version": "0.0.1", "protocol": crate::ipc::PROTOCOL})).unwrap();
+        updater::write_info(&banks.join("a"), &BankInfo::new("0.0.1", crate::ipc::PROTOCOL, 0, 0)).unwrap();
         build("build 5");
         assert_eq!(ctx.bank_for(&banks, Some("a")).unwrap(), Ok("b".to_string()));
         assert_eq!(ctx.bank_for(&banks, Some("b")).unwrap(), Ok("a".to_string()));
@@ -794,10 +796,7 @@ mod tests {
             let base = fs::metadata(dir.join("build/pcds")).unwrap().modified().unwrap();
             let at = if later { base + std::time::Duration::from_secs(60) } else { base - std::time::Duration::from_secs(60) };
             fs::File::options().write(true).open(&program).unwrap().set_modified(at).unwrap();
-            let mut info = serde_json::json!({"version": version});
-            if let Some(tag) = tag {
-                info["tag"] = tag.into();
-            }
+            let info = BankInfo { version: Some(version.to_string()), tag: tag.map(str::to_string), ..Default::default() };
             updater::write_info(&banks.join(name), &info).unwrap();
         };
         let rule = |active: &str, live: Option<&str>| {

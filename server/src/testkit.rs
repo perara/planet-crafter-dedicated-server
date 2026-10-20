@@ -162,3 +162,24 @@ pub fn group_with(g: &Game, classes: &[&str], building: bool) -> String {
         .unwrap_or_else(|| panic!("no group with {classes:?}"))
         .clone()
 }
+
+/// One HTTP request read off a test listener: (headers, lowercase names; body).
+pub fn read_request(stream: &mut std::net::TcpStream) -> (Vec<(String, String)>, String) {
+    use std::io::{BufRead, Read};
+    let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+    let (mut headers, mut line) = (Vec::new(), String::new());
+    reader.read_line(&mut line).unwrap();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).unwrap() == 0 || line.trim().is_empty() {
+            break;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
+        }
+    }
+    let length = headers.iter().find(|(k, _)| k == "content-length").map_or(0, |(_, v)| v.parse().unwrap());
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).unwrap();
+    (headers, String::from_utf8(body).unwrap())
+}

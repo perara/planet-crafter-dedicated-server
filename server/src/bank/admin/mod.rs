@@ -21,6 +21,7 @@ use super::persist::settle;
 use super::status::Ctx;
 use crate::game::Game;
 use crate::ipc;
+use crate::msg::{self, AdminAnswer};
 use crate::routes::{find, route, Route};
 
 mod players;
@@ -90,18 +91,13 @@ pub(super) fn request(game: &mut Game, method: &str, path: &str, body: &Value, c
 /// request would end in the front's 10 s timeout, "the game loop did not answer"): its place is
 /// an error that says what to do.
 pub(super) fn frame(status: u16, body: String) -> String {
-    #[derive(Serialize)]
-    struct Frame<'a> {
-        status: u16,
-        body: &'a str,
-    }
-    let answer = serde_json::to_string(&Frame { status, body: &body }).unwrap_or_default();
+    let answer = msg::text(&AdminAnswer { status: Some(status.into()), body: Some(body) });
     if ipc::fits(answer.as_bytes()) {
         return answer;
     }
     let message = format!("the answer is {} MiB, more than the link to the front carries ({} MiB): for a world's file, copy it from the worlds folder on the server", answer.len() >> 20, ipc::MAX_FRAME >> 20);
     let error = serde_json::to_string(&Error { error: &message }).unwrap_or_default();
-    serde_json::to_string(&Frame { status: 500, body: &error }).unwrap_or_default()
+    msg::text(&AdminAnswer { status: Some(500), body: Some(error) })
 }
 
 #[derive(Serialize)]

@@ -35,14 +35,13 @@ pub(crate) use panic::contained;
 pub use run::run;
 pub use start::enforce;
 
-use serde_json::{json, Value};
-
 use crate::ipc;
+use crate::msg::BankInfo;
 
 /// What this bank says in its HELLO, and `pcds bank-info` prints: its version, the front
 /// protocol it speaks, the snapshot format it writes and reads (only that one), and the format
 /// of the game tables it loads (and its read-game writes).
-pub fn info() -> Value {
-    json!({"version": env!("CARGO_PKG_VERSION"), "protocol": ipc::PROTOCOL, "format": crate::handoff::FORMAT, "tablesFormat": crate::native::tables::TABLES_FORMAT})
+pub fn info() -> BankInfo {
+    BankInfo::new(env!("CARGO_PKG_VERSION"), ipc::PROTOCOL, crate::handoff::FORMAT.into(), crate::native::tables::TABLES_FORMAT.into())
 }
 

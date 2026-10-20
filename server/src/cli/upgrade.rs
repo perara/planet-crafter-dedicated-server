@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::{say, Ctx, Result};
+use crate::msg::{BankInfo, Fallback, RolledBack};
 use crate::updater;
 
 const USAGE: &str = "pcds upgrade [VERSION] [--restart] | --rollback | --check";
@@ -98,7 +99,7 @@ impl Ctx {
         let banks = self.banks();
         let bank = running.map_or_else(|| updater::active(&banks), str::to_string);
         let held = updater::info(&banks, &bank)?;
-        let (image, held) = (env!("CARGO_PKG_VERSION"), held["version"].as_str().unwrap_or("?").to_string());
+        let (image, held) = (env!("CARGO_PKG_VERSION"), held.version().to_string());
         let how = if held == image { "the image's version".to_string() } else if updater::newer(&held, image) {
             format!("newer than the image's: a hot update put it in /data/bin, and a bank newer than the image wins over it, so the image tag does not pin the server. 'pcds upgrade v{image} --restart' runs the image's release again; an image newer than the banks replaces them at its first start")
         } else {
@@ -160,14 +161,14 @@ impl Ctx {
             println!("{note}");
         }
         // The running front's view, else the note on disk.
-        let fallback = live.map(|l| l["fallback"].clone()).filter(|f| !f.is_null()).or_else(|| updater::fallback(&banks));
+        let fallback = live.and_then(|l| serde_json::from_value::<Fallback>(l["fallback"].clone()).ok()).or_else(|| updater::fallback(&banks));
         if let Some(f) = fallback {
-            println!("started from bank {} because bank {} {}", text(&f["to"]), text(&f["from"]), text(&f["reason"]));
+            println!("started from bank {} because bank {} {}", f.to, f.from, f.reason);
         }
         // The running front's view, else the note on disk: a release given up for crashes.
-        let given_up = live.map(|l| l["rolledBack"].clone()).filter(|r| !r.is_null()).or_else(|| updater::rolled_back(&banks));
-        if let Some(r) = given_up.filter(|r| r["reason"].is_string()) {
-            println!("the release in bank {} ({}) was rolled back from automatically: {}", text(&r["bank"]), text(&r["tag"]), text(&r["reason"]));
+        let given_up = live.and_then(|l| serde_json::from_value::<RolledBack>(l["rolledBack"].clone()).ok()).or_else(|| updater::rolled_back(&banks));
+        if let Some(r) = given_up.filter(|r| r.reason.is_some()) {
+            println!("the release in bank {} ({}) was rolled back from automatically: {}", r.bank, r.tag.as_deref().unwrap_or("null"), r.reason.as_deref().unwrap_or_default());
         }
     }
 }
@@ -178,15 +179,11 @@ fn api_error(e: String) -> String {
     e.find("{\"error\"").and_then(|i| serde_json::from_str::<Value>(&e[i..]).ok()).and_then(|v| v["error"].as_str().map(str::to_string)).unwrap_or(e)
 }
 
-fn text(v: &Value) -> String {
-    v.as_str().map_or_else(|| v.to_string(), str::to_string)
-}
-
 /// "pcds 0.6.0 (v0.6.0), front protocol 2, snapshot format 1, installed 2026-10-18 15:00".
-fn describe(info: &Value) -> String {
-    let tag = info["tag"].as_str().map(|t| format!(" ({t})")).unwrap_or_else(|| " (a local build)".into());
-    let when = info["installed"].as_u64().map(|t| format!(", installed {}", super::local_time(std::time::UNIX_EPOCH + Duration::from_secs(t)))).unwrap_or_default();
-    format!("pcds {}{tag}, front protocol {}, snapshot format {}{when}", info["version"].as_str().unwrap_or("?"), info["protocol"], info["format"])
+fn describe(info: &BankInfo) -> String {
+    let tag = info.tag.as_ref().map(|t| format!(" ({t})")).unwrap_or_else(|| " (a local build)".into());
+    let when = info.installed.map(|t| format!(", installed {}", super::local_time(std::time::UNIX_EPOCH + Duration::from_secs(t)))).unwrap_or_default();
+    format!("pcds {}{tag}, front protocol {}, snapshot format {}{when}", info.version(), crate::msg::json(&info.protocol), crate::msg::json(&info.format))
 }
 
 #[cfg(test)]
@@ -209,7 +206,7 @@ mod tests {
         let e = ctx.tables_or_undo(Some(&dir.join("no-game-here")), &banks, "a").unwrap_err();
         assert!(e.contains("is still the active one") && e.contains("not restarted"), "{e}");
         assert_eq!(updater::active(&banks), "a");
-        assert!(describe(&json!({"version": "0.6.0", "tag": "v0.6.0", "protocol": 2, "format": 1})).starts_with("pcds 0.6.0 (v0.6.0), front protocol 2, snapshot format 1"));
+        assert!(describe(&serde_json::from_value(json!({"version": "0.6.0", "tag": "v0.6.0", "protocol": 2, "format": 1})).unwrap()).starts_with("pcds 0.6.0 (v0.6.0), front protocol 2, snapshot format 1"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -225,7 +222,7 @@ mod tests {
         }
         let put = |bank: &str, version: &str| {
             std::fs::write(banks.join(bank).join("pcds"), "").unwrap();
-            updater::write_info(&banks.join(bank), &json!({"version": version})).unwrap();
+            updater::write_info(&banks.join(bank), &BankInfo { version: Some(version.to_string()), ..Default::default() }).unwrap();
         };
         put("a", image);
         assert_eq!(ctx.image_note(None), None, "outside the container there is no image");

@@ -3,7 +3,7 @@
 //! Transport, and runs the game's server side, ported from the game (see game.rs), on the
 //! world in the save file, with the game's tables for this version (data/<version>/).
 //!
-//! It runs as two processes (docs/hot-update.md): the front (front.rs: the sockets, Steam, the
+//! It runs as two processes (docs/hot-update.md): the front (front/: the sockets, Steam, the
 //! admin API, the chat hooks) and a bank (bank/: the world), so a new release can take over
 //! the running world without a player noticing.
 //!
@@ -109,6 +109,7 @@ mod native;
 mod machines;
 mod meteo;
 mod model;
+mod msg;
 mod net;
 mod newworld;
 mod objects;
@@ -136,6 +137,7 @@ mod util;
 mod utp;
 mod water;
 mod wire;
+mod worlds;
 mod world;
 
 use std::collections::HashMap;
@@ -299,7 +301,7 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("serve") => front::run(&args[2..]),
         Some("bank") => bank::run(&args[2..]),
-        Some("bank-info") => println!("{}", bank::info()),
+        Some("bank-info") => println!("{}", msg::json(&bank::info())),
         Some("probe") => probe::run(&args[2..]),
         Some("load") => load::run(&args[2..]),
         Some("read-game") => native::tables::run(&args[2..]),

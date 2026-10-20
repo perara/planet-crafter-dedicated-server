@@ -329,6 +329,7 @@ unban everyone): fix it or move it away.
 
 The admin API listens on 127.0.0.1. To reach the web page from another machine, use an SSH
 tunnel (`ssh -L 7782:127.0.0.1:7782 server`) rather than exposing it.
+Every route of the API, who answers it and what it takes: docs/admin-api.md.
 
 To run a second server on the same machine, give it its own folder and unit names:
 `PCDS_HOME=/srv/world2 PCDS_UNIT=pcds-world2 PCDS_LISTEN=0.0.0.0:7778 PCDS_ADMIN=127.0.0.1:7783

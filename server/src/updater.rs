@@ -20,6 +20,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
+use crate::msg::{json as show, BankInfo, Fallback, RolledBack};
+
 /// The releases of this project (PCDS_RELEASES points elsewhere: a mirror, or a test).
 pub const RELEASES: &str = "https://api.github.com/repos/perara/planet-crafter-dedicated-server/releases";
 /// The largest tarball read (a release is about 15 MB).
@@ -118,26 +120,26 @@ fn hex(bytes: &[u8]) -> String {
 
 /// Whether the release in a bank can take over the world the running bank holds (its HELLO
 /// or bank.json: format), with this front. Err says what to do instead.
-pub fn compatible(info: &Value, live: &Value) -> Result<(), String> {
+pub fn compatible(info: &BankInfo, live: Option<&BankInfo>) -> Result<(), String> {
     compatible_for(info, live, false)
 }
 
 /// The command that installs the release with a restart: for a rollback, going back to the
 /// bank that did not run (no download); else the release's own tag (a bank that holds a build
 /// has none: its version names it).
-fn restart_command(info: &Value, rollback: bool) -> String {
+fn restart_command(info: &BankInfo, rollback: bool) -> String {
     if rollback {
         return "pcds upgrade --rollback --restart".into();
     }
-    let tag = info["tag"].as_str().map(str::to_string).or_else(|| info["version"].as_str().map(tag)).unwrap_or_else(|| "VERSION".into());
+    let tag = info.tag.clone().or_else(|| info.version.as_deref().map(tag)).unwrap_or_else(|| "VERSION".into());
     format!("pcds upgrade --restart {tag}")
 }
 
 /// compatible(), for a rollback (`rollback`: the release is the other bank's, the one that ran
 /// before) or an update: the same checks, and the command to run instead says which.
-pub fn compatible_for(info: &Value, live: &Value, rollback: bool) -> Result<(), String> {
-    let what = info["tag"].as_str().map(str::to_string).unwrap_or_else(|| format!("pcds {}", info["version"].as_str().unwrap_or("?")));
-    let protocol = info["protocol"].as_u64().unwrap_or(0);
+pub fn compatible_for(info: &BankInfo, live: Option<&BankInfo>, rollback: bool) -> Result<(), String> {
+    let what = info.tag.clone().unwrap_or_else(|| format!("pcds {}", info.version()));
+    let protocol = info.protocol.unwrap_or(0);
     let restart = restart_command(info, rollback);
     if protocol != crate::ipc::PROTOCOL {
         return Err(format!(
@@ -146,24 +148,23 @@ pub fn compatible_for(info: &Value, live: &Value, rollback: bool) -> Result<(), 
         ));
     }
     // The tables on disk are the running bank's: a release that reads another format would
-    // refuse them (a live of Null: a HELLO checked on its own, nothing runs yet).
-    if !live.is_null() && info["tablesFormat"] != live["tablesFormat"] {
-        let theirs = |v: &Value| v.to_string();
+    // refuse them (no live: a HELLO checked on its own, nothing runs yet).
+    if let Some(live) = live.filter(|l| info.tables_format != l.tables_format) {
         return Err(format!(
             "{what} reads game tables of format {}, the running server's are of format {}: it cannot take over the running world. {restart} {} the game tables again and restarts the server, which disconnects every player",
-            theirs(&info["tablesFormat"]),
-            theirs(&live["tablesFormat"]),
+            show(&info.tables_format),
+            show(&live.tables_format),
             if rollback { "goes back, reads" } else { "installs it, reads" }
         ));
     }
-    let format = live["format"].as_u64().unwrap_or(0);
-    if info["format"].as_u64() != Some(format) {
+    let format = live.and_then(|l| l.format).unwrap_or(0);
+    if info.format != Some(format) {
         // A release reads its own snapshot format only: across a change of it an update or a
         // rollback is a restart (the stop saves the world; the other release loads the save).
         // No loss: players are disconnected, nothing is rolled back in the world.
         return Err(format!(
             "{what} reads snapshot format {}, the running world is in format {format}: {} needs a restart ({restart}; the server saves the world as it stops and {what} loads that save), which disconnects every player",
-            info["format"],
+            show(&info.format),
             if rollback { "a rollback across a change of the snapshot format" } else { "it" }
         ));
     }
@@ -181,7 +182,7 @@ enum Asked {
 /// What a bank's program says it is (`pcds bank-info`), within 20 s. A downloaded program, so
 /// it runs with PATH, HOME and LANG only, as the chat exec hook does: never with the admin or
 /// Steam token.
-fn ask(program: &Path) -> Result<Value, Asked> {
+fn ask(program: &Path) -> Result<BankInfo, Asked> {
     let mut command = Command::new(program);
     command.arg("bank-info").env_clear().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     for key in ["PATH", "HOME", "LANG"] {
@@ -213,14 +214,14 @@ fn ask(program: &Path) -> Result<Value, Asked> {
         std::thread::sleep(Duration::from_millis(20));
     }
     let out = child.wait_with_output().map_err(|e| Asked::Failed(e.to_string()))?;
-    serde_json::from_slice(&out.stdout).ok().filter(|v: &Value| out.status.success() && v["protocol"].is_u64()).ok_or(Asked::Unknown)
+    serde_json::from_slice(&out.stdout).ok().filter(|v: &BankInfo| out.status.success() && v.protocol.is_some()).ok_or(Asked::Unknown)
 }
 
 /// The release into banks/<bank>: downloaded, checked against its sha256, unpacked beside the
 /// bank, asked what it is, and only then moved over the bank. `live`: the running bank's HELLO,
 /// for a release that is to take over its world (a hot update); None for an install while the
 /// server is stopped. Err leaves the bank as it was.
-pub fn install(release: &Release, banks: &Path, bank: &str, live: Option<&Value>) -> Result<Value, String> {
+pub fn install(release: &Release, banks: &Path, bank: &str, live: Option<&BankInfo>) -> Result<BankInfo, String> {
     if !BANKS.contains(&bank) {
         return Err(format!("no bank {bank}"));
     }
@@ -229,7 +230,7 @@ pub fn install(release: &Release, banks: &Path, bank: &str, live: Option<&Value>
     let new = staging(banks, bank);
     let result = unpack(release, &new).and_then(|info| {
         if let Some(live) = live {
-            compatible(&info, live)?;
+            compatible(&info, Some(live))?;
         }
         put(banks, bank, &new)?;
         Ok(info)
@@ -323,7 +324,7 @@ fn put_with(banks: &Path, bank: &str, new: &Path, sync: impl Fn(&Path) -> std::i
     sync(banks).map_err(|e| format!("{}: could not be flushed to disk: {e} (the bank is installed)", banks.display()))
 }
 
-fn unpack(release: &Release, new: &Path) -> Result<Value, String> {
+fn unpack(release: &Release, new: &Path) -> Result<BankInfo, String> {
     let tag = &release.tag;
     let http = agent(release.local);
     let tarball = get(&http, &release.tarball)?;
@@ -357,9 +358,9 @@ fn unpack(release: &Release, new: &Path) -> Result<Value, String> {
         Asked::Unknown => format!("{tag}: its pcds does not answer bank-info; nothing installed"),
         Asked::Failed(e) => format!("{tag}: {e}"),
     })?;
-    info["tag"] = tag.clone().into();
-    info["sha256"] = downloaded.into();
-    info["installed"] = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).into();
+    info.tag = Some(tag.clone());
+    info.sha256 = Some(downloaded);
+    info.installed = Some(SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
     write_info(new, &info)?;
     Ok(info)
 }
@@ -380,13 +381,13 @@ fn plain_files(root: &Path, dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn write_info(bank: &Path, info: &Value) -> Result<(), String> {
+pub fn write_info(bank: &Path, info: &BankInfo) -> Result<(), String> {
     let path = bank.join("bank.json");
     std::fs::write(&path, serde_json::to_string_pretty(info).unwrap_or_default() + "\n").map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// What is in a bank (its bank.json); None: nothing installed there.
-pub fn info(banks: &Path, bank: &str) -> Option<Value> {
+pub fn info(banks: &Path, bank: &str) -> Option<BankInfo> {
     let text = std::fs::read_to_string(banks.join(bank).join("bank.json")).ok()?;
     serde_json::from_str(&text).ok().filter(|_| banks.join(bank).join("pcds").is_file())
 }
@@ -408,9 +409,9 @@ pub fn set_active(banks: &Path, bank: &str) -> Result<(), String> {
 /// The automatic update does not install that tag again, and `pcds run` installs nothing over
 /// that bank; a later release, an explicit update (`pcds upgrade`, POST /api/update with a
 /// version or the latest) or the next rollback replaces or clears it.
-pub fn rolled_back(banks: &Path) -> Option<Value> {
+pub fn rolled_back(banks: &Path) -> Option<RolledBack> {
     let text = std::fs::read_to_string(banks.join("rolled-back")).ok()?;
-    serde_json::from_str(&text).ok().filter(|v: &Value| v["bank"].is_string())
+    serde_json::from_str(&text).ok()
 }
 
 /// A rollback away from `bank`: it is noted with the release it holds.
@@ -419,7 +420,7 @@ pub fn set_rolled_back(banks: &Path, bank: &str) -> Result<(), String> {
 }
 
 /// The front's own rollback: the release in `bank` ended the game over and over after it was
-/// flipped to (front::Front::give_up). The note also says why and when, for the dashboard and
+/// flipped to (front/supervise.rs give_up). The note also says why and when, for the dashboard and
 /// `pcds status` (a rollback of the owner's is not explained: they asked for it).
 pub fn set_rolled_back_by_crashes(banks: &Path, bank: &str, why: &str) -> Result<(), String> {
     note_rolled_back(banks, bank, Some(why))
@@ -427,14 +428,10 @@ pub fn set_rolled_back_by_crashes(banks: &Path, bank: &str, why: &str) -> Result
 
 fn note_rolled_back(banks: &Path, bank: &str, why: Option<&str>) -> Result<(), String> {
     let held = info(banks, bank).unwrap_or_default();
-    let tag = held["tag"].as_str().map(str::to_string).or_else(|| held["version"].as_str().map(tag));
-    let mut note = json!({"bank": bank, "tag": tag});
-    if let Some(why) = why {
-        note["reason"] = why.into();
-        note["at"] = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).into();
-    }
+    let tag = held.tag.or_else(|| held.version.as_deref().map(tag));
+    let note = RolledBack { bank: bank.to_string(), tag, reason: why.map(str::to_string), at: why.map(|_| SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)) };
     let _lock = lock(banks)?;
-    crate::cli::replace_file(&banks.join("rolled-back"), (note.to_string() + "\n").as_bytes(), 0o644)
+    crate::cli::replace_file(&banks.join("rolled-back"), (crate::msg::text(&note) + "\n").as_bytes(), 0o644)
 }
 
 /// The bank a release that keeps ending the game is given up for: the other one. Err (why not):
@@ -445,7 +442,7 @@ pub fn crash_rollback_target(banks: &Path, bad: &str) -> Result<&'static str, St
     if info(banks, to).is_none() {
         return Err(format!("bank {to} holds no release to go back to"));
     }
-    if rolled_back(banks).is_some_and(|r| r["bank"] == to) {
+    if rolled_back(banks).is_some_and(|r| r.bank == to) {
         return Err(format!("bank {to} is the one the server was rolled back from"));
     }
     Ok(to)
@@ -466,15 +463,15 @@ pub fn clear_rolled_back(banks: &Path) -> Result<(), String> {
 /// bank; `pcds upgrade` clears it.
 pub fn note_fallback(banks: &Path, from: &str, to: &str, reason: &str) -> Result<(), String> {
     let at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let note = json!({"from": from, "to": to, "reason": reason, "at": at});
+    let note = Fallback { from: from.to_string(), to: to.to_string(), reason: reason.to_string(), at: Some(at) };
     let _lock = lock(banks)?;
-    crate::cli::replace_file(&banks.join("fallback"), (note.to_string() + "\n").as_bytes(), 0o644)
+    crate::cli::replace_file(&banks.join("fallback"), (crate::msg::text(&note) + "\n").as_bytes(), 0o644)
 }
 
 /// The fallback note, while the bank it started is the active one.
-pub fn fallback(banks: &Path) -> Option<Value> {
+pub fn fallback(banks: &Path) -> Option<Fallback> {
     let text = std::fs::read_to_string(banks.join("fallback")).ok()?;
-    serde_json::from_str(&text).ok().filter(|v: &Value| v["to"] == active(banks).as_str())
+    serde_json::from_str(&text).ok().filter(|f: &Fallback| f.to == active(banks))
 }
 
 pub fn clear_fallback(banks: &Path) -> Result<(), String> {
@@ -489,7 +486,7 @@ pub fn clear_fallback(banks: &Path) -> Result<(), String> {
 /// What the automatic update does with the latest release `tag` after a rollback: skip it
 /// (Some: why) when it is the release rolled back from; a later one clears the note.
 pub fn auto_skips(banks: &Path, tag: &str) -> Result<Option<String>, String> {
-    let Some(from) = rolled_back(banks).and_then(|r| r["tag"].as_str().map(str::to_string)) else { return Ok(None) };
+    let Some(from) = rolled_back(banks).and_then(|r| r.tag) else { return Ok(None) };
     if from == tag {
         return Ok(Some(format!("{tag} is the release the server was rolled back from: the automatic update leaves it out (pcds upgrade {tag} installs it)")));
     }
@@ -514,7 +511,7 @@ pub fn newer(tag: &str, version: &str) -> bool {
 /// release folder's program). A tag the program's version does not match (a forgotten bump)
 /// then still counts as installed, and is not fetched again at every check.
 pub fn held_release(banks: &Path, bank: &str, version: &str) -> String {
-    info(banks, bank).and_then(|i| i["tag"].as_str().map(str::to_string)).unwrap_or_else(|| version.to_string())
+    info(banks, bank).and_then(|i| i.tag).unwrap_or_else(|| version.to_string())
 }
 
 /// A pre-release's part: numbers by value, and below words (semver 11.4).
@@ -667,6 +664,11 @@ pub mod tests {
 
     const LIVE: &str = r#"{"format": 1}"#;
 
+    /// A bank's info from the JSON a test spells out.
+    fn bi(v: Value) -> BankInfo {
+        serde_json::from_value(v).unwrap()
+    }
+
     /// The unpacked files are flushed before the folder is moved to the bank's name, and the
     /// move after; a flush that fails stops the install with the bank as it was.
     #[test]
@@ -715,11 +717,11 @@ pub mod tests {
         std::fs::write(banks.join("b/old"), "").unwrap();
         let release = lookup(&base, None).unwrap();
         assert_eq!(release.tag, "v9.9.9");
-        let live: Value = serde_json::from_str(LIVE).unwrap();
+        let live: BankInfo = serde_json::from_str(LIVE).unwrap();
         let info = install(&release, &banks, "b", Some(&live)).unwrap();
-        assert_eq!((info["tag"].as_str(), info["protocol"].as_u64()), (Some("v9.9.9"), Some(crate::ipc::PROTOCOL)));
+        assert_eq!((info.tag.as_deref(), info.protocol), (Some("v9.9.9"), Some(crate::ipc::PROTOCOL)));
         assert!(banks.join("b/pcds").is_file() && banks.join("b/web/index.html").is_file() && !banks.join("b/old").exists());
-        assert_eq!(super::info(&banks, "b").unwrap()["tag"], "v9.9.9");
+        assert_eq!(super::info(&banks, "b").unwrap().tag.as_deref(), Some("v9.9.9"));
         assert_eq!(names(&banks), ["b"], "nothing left beside the bank");
         // A given version, as v-less as people write it.
         assert_eq!(lookup(&base, Some("9.9.9")).unwrap().tag, "v9.9.9");
@@ -745,7 +747,7 @@ pub mod tests {
     fn a_release_of_another_front_protocol_is_refused_with_what_to_do() {
         let dir = test_dir("protocol");
         let banks = dir.join("bin");
-        let live: Value = serde_json::from_str(LIVE).unwrap();
+        let live: BankInfo = serde_json::from_str(LIVE).unwrap();
         let base = fake(&dir, "v9.9.9", &script(999), false);
         let e = install(&lookup(&base, None).unwrap(), &banks, "b", Some(&live)).unwrap_err();
         assert!(e.contains("front protocol 999") && e.contains("pcds upgrade --restart v9.9.9") && e.contains("disconnects every player") && e.contains("Steam"), "{e}");
@@ -757,13 +759,13 @@ pub mod tests {
         let e = install(&lookup(&base, None).unwrap(), &banks, "a", Some(&live)).unwrap_err();
         assert!(e.contains("does not answer bank-info"), "{e}");
         // A release that cannot read the running world's snapshot format.
-        let old: Value = serde_json::from_str(r#"{"protocol": 2, "format": 7}"#).unwrap();
-        assert!(compatible(&super::info(&banks, "b").map(|mut i| { i["protocol"] = crate::ipc::PROTOCOL.into(); i }).unwrap(), &old).unwrap_err().contains("format 7"));
+        let old: BankInfo = serde_json::from_str(r#"{"protocol": 2, "format": 7}"#).unwrap();
+        assert!(compatible(&super::info(&banks, "b").map(|mut i| { i.protocol = Some(crate::ipc::PROTOCOL); i }).unwrap(), Some(&old)).unwrap_err().contains("format 7"));
         // A release that reads game tables of another format than the running bank's.
-        let tables = |f: u64| json!({"version": "9.9.9", "tag": "v9.9.9", "protocol": crate::ipc::PROTOCOL, "format": 1, "tablesFormat": f});
-        let live = json!({"format": 1, "tablesFormat": 1});
-        assert!(compatible(&tables(1), &live).is_ok());
-        let e = compatible(&tables(2), &live).unwrap_err();
+        let tables = |f: u64| bi(json!({"version": "9.9.9", "tag": "v9.9.9", "protocol": crate::ipc::PROTOCOL, "format": 1, "tablesFormat": f}));
+        let live = bi(json!({"format": 1, "tablesFormat": 1}));
+        assert!(compatible(&tables(1), Some(&live)).is_ok());
+        let e = compatible(&tables(2), Some(&live)).unwrap_err();
         assert!(e.contains("tables of format 2") && e.contains("are of format 1") && e.contains("pcds upgrade --restart v9.9.9"), "{e}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -828,7 +830,7 @@ pub mod tests {
         std::fs::write(&program, "#!/bin/sh\nprintf '{\"protocol\":1,\"env\":\"%s\"}\\n' \"$(env | cut -d= -f1 | sort | tr '\\n' ' ')\"\n").unwrap();
         std::fs::set_permissions(&program, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let info = ask(&program).unwrap();
-        let seen: Vec<&str> = info["env"].as_str().unwrap().split_whitespace().collect();
+        let seen: Vec<&str> = info.extra["env"].as_str().unwrap().split_whitespace().collect();
         // What the shell sets itself (PWD, SHLVL, _) aside.
         assert!(seen.contains(&"PATH") && seen.iter().all(|k| ["PATH", "HOME", "LANG", "PWD", "OLDPWD", "SHLVL", "_"].contains(k)), "{seen:?}");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -839,10 +841,10 @@ pub mod tests {
         let dir = test_dir("rolled-back");
         std::fs::create_dir_all(dir.join("b")).unwrap();
         std::fs::write(dir.join("b/pcds"), "").unwrap();
-        write_info(&dir.join("b"), &json!({"version": "0.7.0", "tag": "v0.7.0"})).unwrap();
+        write_info(&dir.join("b"), &bi(json!({"version": "0.7.0", "tag": "v0.7.0"}))).unwrap();
         assert_eq!(auto_skips(&dir, "v0.7.0").unwrap(), None, "no rollback: nothing left out");
         set_rolled_back(&dir, "b").unwrap();
-        assert_eq!(rolled_back(&dir).unwrap(), json!({"bank": "b", "tag": "v0.7.0"}));
+        assert_eq!(rolled_back(&dir).unwrap(), RolledBack { bank: "b".into(), tag: Some("v0.7.0".into()), reason: None, at: None });
         assert!(auto_skips(&dir, "v0.7.0").unwrap().unwrap().contains("rolled back from"));
         assert!(rolled_back(&dir).is_some(), "an older or the same release keeps the note");
         assert_eq!(auto_skips(&dir, "v0.6.5").unwrap(), None);
@@ -851,9 +853,9 @@ pub mod tests {
         assert_eq!(auto_skips(&dir, "v0.8.0").unwrap(), None);
         assert!(rolled_back(&dir).is_none());
         // A bank of a local build is noted by its version.
-        write_info(&dir.join("b"), &json!({"version": "0.7.1"})).unwrap();
+        write_info(&dir.join("b"), &bi(json!({"version": "0.7.1"}))).unwrap();
         set_rolled_back(&dir, "b").unwrap();
-        assert_eq!(rolled_back(&dir).unwrap()["tag"], "v0.7.1");
+        assert_eq!(rolled_back(&dir).unwrap().tag.as_deref(), Some("v0.7.1"));
         clear_rolled_back(&dir).unwrap();
         clear_rolled_back(&dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
@@ -867,7 +869,7 @@ pub mod tests {
         let bank = |name: &str, tag: &str| {
             std::fs::create_dir_all(dir.join(name)).unwrap();
             std::fs::write(dir.join(name).join("pcds"), "").unwrap();
-            write_info(&dir.join(name), &json!({"version": "0.7.0", "tag": tag})).unwrap();
+            write_info(&dir.join(name), &bi(json!({"version": "0.7.0", "tag": tag}))).unwrap();
         };
         bank("b", "v0.7.0");
         assert!(crash_rollback_target(&dir, "b").unwrap_err().contains("bank a holds no release"), "an empty bank is not gone back to");
@@ -875,9 +877,9 @@ pub mod tests {
         assert_eq!(crash_rollback_target(&dir, "b").unwrap(), "a");
         set_rolled_back_by_crashes(&dir, "b", "ended the game 6 times").unwrap();
         let note = rolled_back(&dir).unwrap();
-        assert_eq!((note["bank"].as_str(), note["tag"].as_str(), note["reason"].as_str()), (Some("b"), Some("v0.7.0"), Some("ended the game 6 times")));
-        assert!(note["at"].as_u64().unwrap() > 0);
-        assert_eq!(describe(&dir)["rolledBack"], note, "shown in the banks of /api/status");
+        assert_eq!((note.bank.as_str(), note.tag.as_deref(), note.reason.as_deref()), ("b", Some("v0.7.0"), Some("ended the game 6 times")));
+        assert!(note.at.unwrap() > 0);
+        assert_eq!(describe(&dir)["rolledBack"], serde_json::to_value(&note).unwrap(), "shown in the banks of /api/status");
         // The automatic update leaves that release out, like any rollback.
         assert!(auto_skips(&dir, "v0.7.0").unwrap().unwrap().contains("rolled back from"));
         // And a bank that was rolled back from is not the target of the next give-up.
@@ -929,7 +931,7 @@ pub mod tests {
         for (bank, info) in [("a", json!({"version": "0.6.1", "tag": "v0.6.2"})), ("b", json!({"version": "0.6.1"}))] {
             std::fs::create_dir_all(dir.join(bank)).unwrap();
             std::fs::write(dir.join(bank).join("pcds"), "").unwrap();
-            write_info(&dir.join(bank), &info).unwrap();
+            write_info(&dir.join(bank), &bi(info)).unwrap();
         }
         let held = held_release(&dir, "a", "0.6.1");
         assert_eq!(held, "v0.6.2");
@@ -1054,26 +1056,27 @@ pub mod tests {
     /// the release by its tag, or by its version when there is no tag.
     #[test]
     fn a_rollback_across_a_snapshot_format_is_a_restart_and_says_which() {
-        let before = json!({"version": "0.6.0", "protocol": crate::ipc::PROTOCOL, "format": 2, "tablesFormat": 2});
-        let live = json!({"format": 3, "tablesFormat": 2});
-        let e = compatible_for(&before, &live, true).unwrap_err();
+        let before = bi(json!({"version": "0.6.0", "protocol": crate::ipc::PROTOCOL, "format": 2, "tablesFormat": 2}));
+        let live = bi(json!({"format": 3, "tablesFormat": 2}));
+        let live = Some(&live);
+        let e = compatible_for(&before, live, true).unwrap_err();
         assert!(e.contains("a rollback across a change of the snapshot format") && e.contains("pcds upgrade --rollback --restart") && !e.contains("VERSION") && e.contains("disconnects every player"), "{e}");
-        let e = compatible_for(&before, &live, false).unwrap_err();
+        let e = compatible_for(&before, live, false).unwrap_err();
         assert!(e.contains("pcds upgrade --restart v0.6.0") && !e.contains("VERSION"), "{e}");
         let mut tagged = before.clone();
-        tagged["tag"] = "v0.6.0".into();
-        assert!(compatible_for(&tagged, &live, false).unwrap_err().contains("pcds upgrade --restart v0.6.0"));
+        tagged.tag = Some("v0.6.0".into());
+        assert!(compatible_for(&tagged, live, false).unwrap_err().contains("pcds upgrade --restart v0.6.0"));
         // The other refusals of a rollback name the same command.
         let mut other = tagged.clone();
-        other["protocol"] = 2.into();
-        assert!(compatible_for(&other, &live, true).unwrap_err().contains("(pcds upgrade --rollback --restart)"));
+        other.protocol = Some(2);
+        assert!(compatible_for(&other, live, true).unwrap_err().contains("(pcds upgrade --rollback --restart)"));
         let mut other = tagged.clone();
-        other["tablesFormat"] = 1.into();
-        assert!(compatible_for(&other, &live, true).unwrap_err().contains("pcds upgrade --rollback --restart goes back, reads"));
+        other.tables_format = Some(1);
+        assert!(compatible_for(&other, live, true).unwrap_err().contains("pcds upgrade --rollback --restart goes back, reads"));
         // The release in the format of the running world goes back hot.
         let mut same = before.clone();
-        same["format"] = 3.into();
-        assert!(compatible_for(&same, &live, true).is_ok());
+        same.format = Some(3);
+        assert!(compatible_for(&same, live, true).is_ok());
     }
 
     /// A banks folder that cannot be written (permissions): the install fails with the path, the

@@ -12,7 +12,7 @@ pub struct Route<H> {
     pub handler: H,
 }
 
-/// A line of a table: `route("GET", "/api/status", status)`.
+/// A line of a table: `route("GET", "/x/status", status)`.
 pub const fn route<H>(method: &'static str, path: &'static str, handler: H) -> Route<H> {
     Route { method, path, handler }
 }
@@ -38,13 +38,13 @@ mod tests {
 
     #[test]
     fn the_first_matching_route_wins_prefixes_and_any_method_included() {
-        let table = [route("GET", "/api/status", 1), route("POST", "/api/save", 2), route("*", "/api/plugins*", 3), route("POST", "/api/plugins/x", 4), route("GET", "/api/*", 5)];
+        let table = [route("GET", "/x/status", 1), route("POST", "/x/save", 2), route("*", "/x/plugins*", 3), route("POST", "/x/plugins/x", 4), route("GET", "/x/*", 5)];
         let at = |m: &str, p: &str| find(&table, m, p).copied();
-        assert_eq!((at("GET", "/api/status"), at("POST", "/api/save"), at("GET", "/api/save")), (Some(1), Some(2), Some(5)));
+        assert_eq!((at("GET", "/x/status"), at("POST", "/x/save"), at("GET", "/x/save")), (Some(1), Some(2), Some(5)));
         // A prefix takes its whole subtree, any method; routes after it never see those paths.
-        assert_eq!((at("GET", "/api/plugins"), at("DELETE", "/api/plugins/a/b"), at("POST", "/api/plugins/x")), (Some(3), Some(3), Some(3)));
+        assert_eq!((at("GET", "/x/plugins"), at("DELETE", "/x/plugins/a/b"), at("POST", "/x/plugins/x")), (Some(3), Some(3), Some(3)));
         // Exact means exact: no prefix match, no trailing slash.
-        assert_eq!((at("GET", "/api/status/"), at("GET", "/api/statu"), at("GET", "/other"), at("GET", "")), (Some(5), Some(5), None, None));
+        assert_eq!((at("GET", "/x/status/"), at("GET", "/x/statu"), at("GET", "/other"), at("GET", "")), (Some(5), Some(5), None, None));
         assert_eq!(find::<u8>(&[], "GET", "/"), None);
     }
 }

@@ -39,14 +39,14 @@ paid (so the list only gets shorter). `scripts/check-layers` runs that test alon
 
 | Layer | Modules | May use | What it is |
 |---|---|---|---|
-| base | `wire` `idmap` `geometry` `world` `save` `oldsave` `data` `protocol` `rpcspec` `transform` `gamedata` `model` `ipc` `utp` `routes` | base | Bytes, ids, the game's tables as data, the framing of the transports. No game, no process, no sockets of their own. |
+| base | `wire` `idmap` `geometry` `world` `save` `oldsave` `data` `protocol` `rpcspec` `transform` `gamedata` `model` `ipc` `msg` `worlds` `utp` `routes` | base | Bytes, ids, the game's tables as data, the framing of the transports, the typed bodies of the frames between the front and the banks (`msg`), the world files' names and places (`worlds`), the lookup of a route table (`routes`: the bank's admin requests and the front's use one type). No game, no process, no sockets of their own. |
 | world | `net` | base | The game's network state: objects, variables, RPC messages. |
 | core | `game` `handlers` `hooks` `ext` `scene` `status` `gauges` `units` `energy` `water` `machines` `logistics` `meteo` `rockets` `planets` `animals` `genetics` `players` `inventories` `instances` `objects` `panels` `deconstruct` `equipment` `toxic` `unlocks` `access` `rules` `config` `chathooks` `handoff` | base, world, core, extension | The game logic, ported class by class, with no I/O: files, sockets and threads are not in it. A subsystem is free functions over `&mut Game`, reached through `hooks.rs`. |
 | extension | `events` `plugins` | base, world, core, extension | What the world tells the outside (`events`) and the host of the plugins that listen (`plugins`). |
 | reader | `native` | base | `pcds read-game`: reads the game's own files into the tables. A program of its own. |
 | tools | `probe` `load` | base, world, tools | Scripted players for tests and load: clients of a server. |
 | bank | `bank` `dashboard` `s3` `newworld` | base, world, core, extension, reader, bank | The bank's loop and what it serves: admin requests, the world listing, off-site backups, new worlds. |
-| front | `front` `admin` `updater` | base, front | Sockets, Steam, supervising the banks, the admin HTTP threads, the updater. |
+| front | `front` `admin` `updater` | base, front | Sockets, Steam, supervising the banks, the admin HTTP threads, the updater. `front` is a directory of small modules: see "The front" below. |
 | cli | `cli` | everything | The command line. Nothing may use it. |
 
 Two more rules in `layers.txt` that carry the plugin system: `plugins` may be used by `events`,
@@ -62,12 +62,61 @@ the work" that removes it.
 
 | Edge | Why it is there | Step |
 |---|---|---|
-| `admin → chathooks`, `front → chathooks` | `chathooks/delivery.rs` is the front's feed, worker and HTTP; the front and the admin threads still reach it as `chathooks::{Feed, Hooks, api}` (re-exports in `chathooks/mod.rs`), and the chat `Event` they share is defined in `chathooks` ("Chat hooks and the event bus" below) | 6 (the front's half) |
 | `bank → cli`, `native → cli`, `native → net` | the tables folder's contract (build id, finding tables, an encoder) is defined in `cli` and `net`; the bank asks it in `bank/status.rs` (the installed game) | 7 |
 | `front → cli`, `updater → cli` | file primitives (`hold`, `replace_file`, `set_env_file`) live in `cli` | 13 |
-| `front → bank`, `bank → front` | the kick batch is built in `bank/mail.rs` (`reason_batch`); the snapshot's path (`snapshot_path`, used by `bank/persist.rs`) is in `front.rs` | 4 |
+| `front → bank`, `bank → front` | the kick batch is built in `bank/mail.rs` (`reason_batch`); the snapshot's path (`snapshot_path`, used by `bank/persist.rs`) is in `front/snapshot.rs` | 4 |
 | `config → bank` | `bank::enforce` (an access policy, in `bank/start.rs`) is called from the settings code | 4 |
-| `front → config`, `front → rules`, `front → dashboard` | settings read by name; the chat rules' struct; process metrics | 8, 6 |
+| `front → config`, `front → rules` | settings read by name; the chat rules' struct | 8 |
+
+## The front
+
+`server/src/front/` is a directory of small modules, each with one job. The front moves bytes
+for the game and keeps the world in a bank; it does not know the game's rules.
+
+| Module | Lines | What it is |
+|---|---|---|
+| `mod.rs` | 370 | the `Front` struct (one field per part below), the loop (`serve`), the shutdown, `pcds serve` |
+| `transport.rs`, `transport/steam.rs` | 260, 370 | the clients' connections over direct IP and Steam: one table of client ids, send, kick, close, the Steam login, the caps and the game's message framing. Knows no bank |
+| `clients.rs` | 115 | relays between the transport and the live bank (CONNECTED, DATA, GONE) |
+| `queue.rs` | 310 | the frames held for a bank while the world stands, and the budgets that drop a client, not the world |
+| `bank_link.rs` | 370 | the banks as processes on sockets: start, boot, wait for the first frames, read, and route each frame kind (the table in its header) |
+| `flip.rs` | 450 | `Phase` as a state machine (the picture is in its header); every change goes through `Front::enter`, which the tests hold to the table of transitions; the flip's checks, hand-over and failure |
+| `supervise.rs` | 320 | the watchdog, the crash window, restarts, giving a release up |
+| `snapshot.rs` | 85 | the last flip's snapshot, kept for a world that is in no bank |
+| `updates.rs`, `history.rs` | 310, 130 | looking up, downloading and flipping to a release; the typed history, which `Front::record` is the one place to add to |
+| `world_control.rs` | 190 | stop, start and switch the world |
+| `ops.rs` | 110 | the rules the bank sends (OPS): the autosave timer, the update schedule, the watchdog's limit |
+| `status.rs`, `metrics.rs` | 65, 110 | the front's part of `GET /api/status`; the process's CPU and memory, the traffic, the cgroup's memory |
+| `admin_routes.rs` | 420 | the table of the admin API and the front's answers (below) |
+| `chat_hooks.rs` | 610 | the chat feed, its worker (webhooks, exec) and the endpoints; the game's half is `chathooks/` |
+
+The rules inside the front: a part with state is a struct with methods that take what they need
+and touch no other part (`Transport`, `Queue`, `Updates`, `CrashWindow`, `Watchdog`, `Autosave`,
+`Admin`); the `impl Front` blocks in the other files are where the parts meet. A frame of a bank is
+a type (`msg.rs`), read in `bank_link.rs` and handled by the module the table in its header names.
+
+**The admin API has one table**: `ROUTES` in `front/admin_routes.rs` says for each route who
+answers it (the HTTP thread of `admin.rs`, the front's loop, or the bank), what it takes and what
+it does (a `routes::Route<Entry>`: `routes.rs` is the one table type, the bank's `ROUTES` holds functions where this one holds an `Entry`). The front's loop and `admin.rs` route by it; `docs/admin-api.md` is written from it (a
+test keeps them equal); a test holds the bank's and the plugins' `("POST", "/api/...")` arms to
+the table, so a new route that is not in it fails the build. `server/tests/admin_golden.rs` pins
+the status and the shape (keys, their order, types) of every route's answer in both phases against
+`server/tests/golden/admin-api.txt`.
+
+**Typed messages**: `msg.rs` (base layer) has one struct for each body that crosses between the
+front and a bank, or between the programs and the banks' folder: `BankInfo` (also `pcds
+bank-info` and bank.json), `Hello`, `Restore`, `Ready`, `SnapshotNote`, `SnapshotHead`,
+`Connected`, `AdminCall`, `AdminAnswer`, `Ops`, `ChatEvent`, and the notes of the banks' folder
+(`RolledBack`, `Fallback`). Both ends use the same definition; the
+bytes are the JSON they always were (a test pins each), and a message of another release is read
+leniently (keys missing are `None`, keys not known are kept when `BankInfo` is written back). Not
+typed: the bodies of the admin API's requests and answers (the table says what they take, the
+golden test pins the answers' shapes).
+
+**World files** (`worlds.rs`, base layer): the name rule, where a world's save, backups and
+kept copies are, and the listing of a folder, for `pcds world`, the admin API and the front.
+Left as they were on purpose: how the command line and the API sort and number a removal in
+the same second; `save.rs`' backup naming and `s3.rs`' own recognition of a backup's name.
 
 ## Where new code goes
 
@@ -149,17 +198,15 @@ for anything but the log lines the server already prints, an environment variabl
 
 `routes.rs` (base layer) is the shared table type: a `Route { method, path, handler }` line, a path
 ending in `*` is a prefix, the method `*` any, the first match wins. The handler type is the table's
-own. The bank's table is `bank::admin::ROUTES` (`fn(&mut Game, &Request) -> Reply`); the front's
-admin routes (`front.rs` matches `(method, path)` in a ladder) can use the same type with their
-own handler type, with a test like the bank's that no route is shadowed.
+own. The bank's table is `bank::admin::ROUTES` (`fn(&mut Game, &Request) -> Reply`); the front's is
+`front::admin_routes::ROUTES`, the same `Route` with an `Entry` (who answers, what it takes, what it
+does) for its handler (see "The front" above). Both have a test that no route is shadowed.
 
 The JSON the bank answers with is typed where a struct is easy: the status (`status::Status`, the
 tick, backup and S3 parts), the answers of save, pause, backup and the rules, and the messages to the
-front (READY, the snapshot's head, OPS). Golden tests (`the_*_prints_what_the_json_macro_did`) keep
+front (READY, the snapshot's note, OPS: the structs of `msg.rs`). Golden tests (`the_*_prints_what_the_json_macro_did`) keep
 the old hand-built JSON in the test and compare bytes: the API's names, their order, and numbers
-(the game's f32 values go out as the f64 they widen to, as `json!` made them). The HELLO (`info()`)
-is still a `Value`: `pcds bank-info` and `pcds up` extend it, and the typed messages between front
-and bank are step 5.
+(the game's f32 values go out as the f64 they widen to, as `json!` made them). The HELLO (`info()`) is `msg::BankInfo`, which `pcds bank-info` and `pcds up` extend.
 
 ## Chat hooks and the event bus
 
@@ -177,27 +224,14 @@ hands the event to its subscribers in turn, each only for the kinds it `wants`: 
 (`chathooks::wants` is true for chat messages only; `chathooks::on_event` queues the typed `Event`
 for the front), then the plugins. A third listener is a line in `emit` and in `wants`.
 
-`chathooks/` has two halves. `mod.rs` is the bank's: the typed `Event` (the message of the CHAT
-frame and the JSON of `GET /api/chat/events`), the command prefix parsing, `State` (outbox, replies,
-changed), `say`, `tick`, the subscription. `delivery.rs` is the front's: `Feed`, `Hooks`
-(`configure`, `replies`), the worker, the signed webhook POST, the exec program, `api`. They meet in
-the CHAT, CHATCFG and SAY frames only (`ipc.rs`).
-
-**Handover to the front's split.** The front uses exactly `chathooks::Hooks` (`default`, `.feed.push`,
-`configure`, `replies`), `Feed` and `api`; `mod.rs` re-exports them from `delivery.rs`, so `front.rs`
-and `admin.rs` compile unchanged and there is no second path. When the front owns the delivery, the
-merge is mechanical:
-
-1. take the front's new home for the worker and move `chathooks/delivery.rs` there (or use the
-   front's copy if it has one), with its tests (they use the helpers of `chathooks::tests`, which are
-   `pub`); it needs `chathooks::Event`, `MAX_REPLY` and `REPLIES` (`pub(crate)` in `mod.rs`) and
-   `rules::Chat`;
-2. delete `mod delivery;` and the `pub use delivery::{api, Feed, Hooks}` line (and the two `cfg`
-   lines for the fuzz target) in `chathooks/mod.rs`; point the front's and `admin.rs`'s imports at
-   the new place;
-3. the `Event` struct is the one type both halves share: move it to a base module (next to `ipc`)
-   so that the front does not use a core module for it, then delete `debt admin -> chathooks` and
-   `debt front -> chathooks` from `layers.txt` (`front → rules` stays until the typed settings, step 8).
+`chathooks/mod.rs` is the bank's half: the command prefix parsing, `State` (outbox, replies,
+changed), `say`, `tick`, and the subscription (`wants`, `on_event`). The chat event is `msg::ChatEvent`
+(`chathooks::Event` is the same type), the message of the CHAT frame and the JSON of `GET
+/api/chat/events`. The front's half is `front/chat_hooks.rs`: `Feed`, `Hooks` (`configure`,
+`replies`), the worker, the signed webhook POST, the exec program, `api`. The two meet in the CHAT,
+CHATCFG and SAY frames only (`ipc.rs`), and `admin.rs` reaches the feed through `front::chat_api`.
+There is one delivery worker; the debts `admin → chathooks`, `front → chathooks` and `front →
+dashboard` are paid.
 
 ## Target: crates instead of modules
 
@@ -237,10 +271,12 @@ the audit's list (the ones not done here are another agent's or later).
 | 0 | `layers.txt` and its test; the `events` module; the plugin host | done with the plugin system | `scripts/check-layers`; zero behaviour change: the bench fingerprint and the handoff comparison are equal |
 | 1-3 | single source of truth for settings and rules, delete dead code | the refactor1 branch | its own |
 | 4 | small relocations: `DISCONNECT_REASON` and `reason_batch` into `protocol.rs`; `enforce` into `access.rs`; the serde helpers of `handoff` into a neutral module; `now_secs`, `hex` and friends once | next | removes the debts `front → bank`, `bank → front`, `config → bank` |
-| 5 | typed messages between front and bank (`Hello`, `Ready`, `BankInfo`) | later | `tests/hot_update.rs` |
-| 6 | split `front.rs`, `bank.rs`, `chathooks.rs` by concern, moving code only | `bank/` and `chathooks/` done (branch split-bank); `front.rs` is split-front's | `cargo test`; the bench fingerprint and handoff equal; removes `admin → chathooks`, `front → chathooks`, `front → dashboard` once the front owns the delivery |
+| 5 | typed messages between front and bank (`Hello`, `Ready`, `BankInfo`, ...) | done for the frames, bank.json and the banks' folder's notes (`msg.rs`); the API's requests and answers are not typed | `tests/hot_update.rs`, `msg::tests`, `tests/admin_golden.rs` |
+| 6 | split `front.rs`, `bank.rs`, `chathooks.rs` by concern, moving code only | `front/`, `bank/` and `chathooks/` done (the modules above and in "The bank, module by module") | `cargo test`; removed `admin → chathooks`, `front → chathooks`, `front → dashboard` |
 | 7 | a `tables` module that owns the tables folder's contract | later | `pcds read-game` then `pcds tables-diff`; removes `bank → cli`, `native → cli`, `native → net` |
 | 8 | typed settings accessor | later | removes `front → config`, `front → rules` |
+| 9 | one worlds module | done for the names, the paths and the listing (`worlds.rs`) | `worlds::tests`, `tests/cli.rs`, `tests/admin_golden.rs` |
+| 11 | one admin route table | done: the table, `docs/admin-api.md`, the test against the source, the golden test; not done: typed requests and answers, one timeout table, dropping routes | `front::admin_routes::tests`, `tests/admin_golden.rs` |
 | 13 | one place for the file primitives | later | removes `front → cli`, `updater → cli` |
 | 14 | a workspace, with the crates above, one at a time, base first | after 4, 7, 13 | each crate: the build, the tests and the flip |
 | 15 | the flip and recovery as a state machine with its own tests | last, and the owner's call | `tests/hot_update.rs` first extended |
@@ -254,5 +290,4 @@ It added two modules (`events`, `plugins`), a field in `Ext`, a handful of one-l
 `events::*` (in `hooks.rs`, `game.rs`, `players.rs`, `handlers.rs`, `rules.rs`) and a few lines in
 the bank (now `bank/plugins_glue.rs`). It did not touch the front, the transports, the snapshot's format number or the
 files the other refactors are changing (`config.rs`, `handoff.rs`), and it adds no edge to the
-debt list. The splits of `bank.rs` and `chathooks.rs` are done (below); the split of `front.rs` is not in this
-branch.
+debt list. The splits of `front.rs`, `bank.rs` and `chathooks.rs` are done ("The front" above).

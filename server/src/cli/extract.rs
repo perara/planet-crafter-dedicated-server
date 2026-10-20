@@ -65,7 +65,7 @@ impl Ctx {
         let netdata = out.0.join("netdata.json");
         let text = fs::read_to_string(&netdata).map_err(|e| format!("{}: {e}", netdata.display()))?;
         let version: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", netdata.display()))?;
-        let version = version["gameVersion"].as_str().filter(|v| super::env::world_arg(v).is_ok_and(|name| name == *v)).ok_or_else(|| format!("{}: no gameVersion to name the folder by", netdata.display()))?.to_string();
+        let version = version["gameVersion"].as_str().filter(|v| crate::worlds::arg(v).is_ok_and(|name| name == *v)).ok_or_else(|| format!("{}: no gameVersion to name the folder by", netdata.display()))?.to_string();
         let tables = self.run.join(format!("data/{version}"));
         // The old tables of this version (a re-read) end up in `out`, which is removed.
         swap_in(&out.0, &tables)?;

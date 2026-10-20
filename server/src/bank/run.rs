@@ -7,12 +7,10 @@ use std::os::fd::FromRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
-use serde_json::Value;
-
 use super::{info, plugins_glue, serve, start};
 use crate::config;
 use crate::ipc::{self, Link};
+use crate::msg::{self, Hello, Ready};
 
 /// The page faults this process (all its threads) has had without reading a disk: a restore into
 /// a new process touches every page of the world for the first time.
@@ -25,20 +23,6 @@ fn minor_faults() -> u64 {
 
 fn fail_for_test(what: &str) -> bool {
     config::dev("bank-fail").is_some_and(|v| v == what)
-}
-
-/// What the front is told with READY: what the restore took (and the check of the restored state,
-/// when PCDS_DEV=flip-verify asked for it: `verified` is true, else null), when it began and ended on
-/// the monotonic clock (ns), and the page faults it cost.
-#[derive(Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Ready {
-    restore_ms: f64,
-    verify_ms: f64,
-    verified: Value,
-    got_at: u64,
-    ready_at: u64,
-    faults: u64,
 }
 
 pub fn run(args: &[String]) {
@@ -97,14 +81,13 @@ fn open_link() -> Link {
 
 /// HELLO: what this bank is (`info`) and the game version of its tables.
 fn hello(link: &mut Link, game_version: &str) {
-    let mut hello = info();
-    hello["gameVersion"] = game_version.into();
+    let hello = Hello { info: info(), game_version: Some(game_version.to_string()) };
     let protocol = if fail_for_test("protocol") { 999 } else { ipc::PROTOCOL };
     if fail_for_test("slow-hello") {
         println!("bank: holding its hello for 4 s (PCDS_DEV=bank-fail=slow-hello)");
         std::thread::sleep(Duration::from_secs(4));
     }
-    link.send(ipc::HELLO, protocol, hello.to_string().as_bytes());
+    link.send(ipc::HELLO, protocol, &msg::body(&hello));
 }
 
 /// What a restore took, for READY: when it began (a start has none: zeros), and the check of the
@@ -113,25 +96,25 @@ struct Restore {
     started: Instant,
     got_at: u64,
     faults_before: u64,
-    verified: Value,
+    verified: Option<bool>,
     verify_ms: f64,
 }
 
 impl Default for Restore {
     fn default() -> Self {
-        Restore { started: Instant::now(), got_at: 0, faults_before: 0, verified: Value::Null, verify_ms: 0.0 }
+        Restore { started: Instant::now(), got_at: 0, faults_before: 0, verified: None, verify_ms: 0.0 }
     }
 }
 
 /// READY, and the test switches that hold it or end the bank after it.
 fn ready(link: &mut Link, took: &Restore) {
     // gotAt and readyAt (the monotonic clock, ns) put the restore on the flip's timeline in the front.
-    let ready = Ready { restore_ms: took.started.elapsed().as_secs_f64() * 1000.0 - took.verify_ms, verify_ms: took.verify_ms, verified: took.verified.clone(), got_at: took.got_at, ready_at: ipc::now_ns(), faults: minor_faults() - took.faults_before };
+    let ready = Ready { restore_ms: Some(took.started.elapsed().as_secs_f64() * 1000.0 - took.verify_ms), verify_ms: Some(took.verify_ms), verified: took.verified, got_at: took.got_at, ready_at: ipc::now_ns(), faults: Some(minor_faults() - took.faults_before) };
     if fail_for_test("slow-ready") {
         println!("bank: holding its ready for 2 s (PCDS_DEV=bank-fail=slow-ready)");
         std::thread::sleep(Duration::from_secs(2));
     }
-    link.send(ipc::READY, 0, serde_json::to_string(&ready).unwrap_or_default().as_bytes());
+    link.send(ipc::READY, 0, &msg::body(&ready));
     if fail_for_test("die-after-ready") {
         println!("bank: ending 1 s after its ready (PCDS_DEV=bank-fail=die-after-ready)");
         std::thread::spawn(|| {
@@ -144,14 +127,14 @@ fn ready(link: &mut Link, took: &Restore) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     /// READY prints the bytes the json! macro made of it.
     #[test]
     fn the_ready_message_prints_what_the_json_macro_did() {
-        for (restore_ms, verify_ms, verified, got_at, ready_at, faults) in [(0.0f64, 0.0f64, Value::Null, 0u64, 0u64, 0u64), (812.3456789, 12.5, Value::Bool(true), 99_000_000_000, 99_812_000_000, 301_227)] {
-            let old = json!({"restoreMs": restore_ms, "verifyMs": verify_ms, "verified": verified, "gotAt": got_at, "readyAt": ready_at, "faults": faults}).to_string();
-            assert_eq!(serde_json::to_string(&Ready { restore_ms, verify_ms, verified, got_at, ready_at, faults }).unwrap(), old);
+        for (restore_ms, verify_ms, verified, got_at, ready_at, faults) in [(0.0f64, 0.0f64, None, 0u64, 0u64, 0u64), (812.3456789, 12.5, Some(true), 99_000_000_000, 99_812_000_000, 301_227)] {
+            let old = json!({"restoreMs": restore_ms, "verifyMs": verify_ms, "verified": verified.map_or(Value::Null, Value::Bool), "gotAt": got_at, "readyAt": ready_at, "faults": faults}).to_string();
+            assert_eq!(msg::text(&Ready { restore_ms: Some(restore_ms), verify_ms: Some(verify_ms), verified, got_at, ready_at, faults: Some(faults) }), old);
         }
     }
 }

@@ -1,8 +1,17 @@
-//! Chat hooks, the delivery: the front's half. The ring of events (`Feed`) the front fills from the
-//! bank's CHAT frames, the worker thread that POSTs each to the webhooks and runs the exec program
-//! (`deliver`), the replies back (`Hooks::replies`), and the admin API's chat endpoints (`api`).
-//! The game's half, the typed `Event` and the subscription to the event bus, is in mod.rs. This
-//! file moves to the front when the front owns the delivery (docs/architecture.md).
+//! Chat hooks, the front's side: every chat message players send becomes an event for tools outside
+//! the game. They live in the front (docs/hot-update.md), so they outlive a flip and their event
+//! ids go on. The game (a bank) only queues the event (chathooks/mod.rs `State::outbox`), which the
+//! bank sends to the front (CHAT); the front adds it to a ring of the last KEPT events (`Feed`).
+//! One worker thread POSTs each event to the rules' chat.webhooks (signed with chat.secret) and
+//! runs chat.exec with it, and the admin API's threads read the ring (GET /api/chat/events, a long
+//! poll). A hook more than KEPT events behind loses the oldest; they are counted (`dropped`).
+//! Replies (a webhook's {"reply": "..."}, the exec program's output, POST /api/chat) come back
+//! through a bounded channel to the front, which sends them to the bank (SAY); they go to the chat
+//! at the next tick, from the server (client 0). Chat text is never a command line: the exec
+//! program gets it only as JSON on stdin, with an environment of PATH, HOME and LANG only.
+//!
+//! The hooks' settings arrive as CHATCFG (the rules' chat section) and are read by the worker for
+//! each event; the first time any hook is set, the worker starts and gets the events from then on.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -14,21 +23,19 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{Event, MAX_REPLY, REPLIES};
+use super::admin_routes::error;
+use crate::msg::{ChatEvent as Event, CHAT_MAX_REPLY as MAX_REPLY, CHAT_REPLIES as REPLIES};
 use crate::rules::Chat;
 
 /// Events kept for the hooks and the API.
 const KEPT: usize = 256;
-
+/// The most of a webhook's answer read.
 const MAX_ANSWER: u64 = 64 << 10;
-
 /// The longest a GET /api/chat/events may wait.
 const MAX_WAIT: u64 = 30;
-
 /// GET /api/chat/events long polls waiting at once; more are answered 503 at once, so polls
 /// never hold every admin connection.
 pub const MAX_POLLS: usize = 8;
-
 static POLLS: AtomicU64 = AtomicU64::new(0);
 
 /// One waiting long poll; freed when the request ends.
@@ -39,7 +46,6 @@ impl Drop for Poll {
         POLLS.fetch_sub(1, Ordering::SeqCst);
     }
 }
-
 /// The webhook POST's signature header: "sha256=" and the body's HMAC-SHA256, hex.
 const SIGNATURE: &str = "X-PCDS-Signature";
 
@@ -77,7 +83,7 @@ impl Feed {
     }
 
     /// The events after `last`, waiting up to `wait` for one, and the last event's id.
-    pub(super) fn after(&self, last: u64, wait: Duration) -> (Vec<Event>, u64) {
+    fn after(&self, last: u64, wait: Duration) -> (Vec<Event>, u64) {
         let deadline = Instant::now() + wait;
         let mut ring = lock(&self.ring);
         while ring.next - 1 <= last {
@@ -134,6 +140,7 @@ impl Hooks {
     }
 }
 
+
 /// The admin API's chat endpoints, served on its own threads (a long poll must not hold the
 /// game loop): GET /api/chat/events?after=ID&wait=SECONDS, POST /api/chat {"text": "..."}.
 pub fn api(feed: &Feed, method: &str, path: &str, query: &str, body: &Value) -> (u16, String) {
@@ -144,7 +151,7 @@ pub fn api(feed: &Feed, method: &str, path: &str, query: &str, body: &Value) -> 
             let _poll = if wait > 0 {
                 if POLLS.fetch_add(1, Ordering::SeqCst) >= MAX_POLLS as u64 {
                     POLLS.fetch_sub(1, Ordering::SeqCst);
-                    return (503, json!({"error": format!("{MAX_POLLS} chat polls are already waiting: try again, or poll without wait")}).to_string());
+                    return error(503, &format!("{MAX_POLLS} chat polls are already waiting: try again, or poll without wait"));
                 }
                 Some(Poll)
             } else {
@@ -155,10 +162,10 @@ pub fn api(feed: &Feed, method: &str, path: &str, query: &str, body: &Value) -> 
         }
         ("POST", "/api/chat") => match body["text"].as_str().filter(|t| !t.trim().is_empty()) {
             Some(text) if feed.say(text) => (200, "{\"ok\":true}".into()),
-            Some(_) => (503, "{\"error\":\"too many chat messages waiting\"}".into()),
-            None => (400, "{\"error\":\"'text' is required\"}".into()),
+            Some(_) => error(503, "too many chat messages waiting"),
+            None => error(400, "'text' is required"),
         },
-        _ => (404, "{\"error\":\"unknown endpoint\"}".into()),
+        _ => error(404, "unknown endpoint"),
     }
 }
 
@@ -334,15 +341,106 @@ fn exec(argv: &[String], body: &str, timeout: Duration) -> Result<String, String
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
+/// The hooks' settings a bank sent (CHATCFG). Err names the field only: a value may be a
+/// webhook URL or the secret, and serde's messages quote values.
+pub(super) fn chat_config(body: &[u8]) -> Result<Chat, String> {
+    let v: Value = serde_json::from_slice(body).map_err(|_| "chat config unreadable (not JSON)".to_string())?;
+    serde_json::from_value(v.clone()).map_err(|_| {
+        let fields = v.as_object().into_iter().flatten();
+        match fields.into_iter().find(|(k, x)| serde_json::from_value::<Chat>(json!({ k.as_str(): x })).is_err()) {
+            Some((k, _)) => format!("chat config unreadable at chat.{k}"),
+            None => "chat config unreadable".to_string(),
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chathooks::tests::{answer, chat_sent, hooked, pump, read_request, send_chat, wait_for_reply};
-    use crate::chathooks::tick;
     use crate::game::tests::{join, save};
-    use crate::game::test_game;
-    use std::io::Read;
+    use crate::game::{test_game, Args};
+    use crate::game::Game;
+    use crate::chathooks::{say, tick};
+    use crate::testkit::read_request;
     use std::net::{TcpListener, TcpStream};
+    use std::io::{Read, Write};
+
+    fn send_chat(g: &mut Game, client: u64, text: &str) {
+        assert!(crate::handlers::rpc(g, client, 0, 0, "ChatHandler.SendChatMessageServerRpc", &Args(vec![json!(text)])));
+    }
+
+    /// The chat messages queued for the clients: (from, text).
+    fn chat_sent(g: &Game) -> Vec<(u64, String)> {
+        g.net.out.iter().filter(|(_, kind, _)| *kind == crate::protocol::CLIENT_RPC).filter_map(|(_, _, body)| {
+            let mut r = crate::wire::Reader::new(body);
+            r.packed_u64()?;
+            r.packed_u16()?;
+            let method = r.packed_u32()?;
+            (g.net.spec.get(method)?.name == "ChatHandler.ReceiveChatMessageClientRpc").then_some(())?;
+            let args = g.net.spec.decode(method, r.rest())?;
+            Some((args[0].as_u64()?, args[1].as_str()?.to_string()))
+        }).collect()
+    }
+
+    /// What the bank and the front do with the chat each loop: events to the feed, a change of
+    /// the chat rules to the hooks, the replies back into the game.
+    fn pump(g: &mut Game, h: &mut Hooks) {
+        g.ext.chat.outbox.drain(..).for_each(|e| h.feed.push(e));
+        if std::mem::take(&mut g.ext.chat.changed) {
+            h.configure(g.rules.chat.clone());
+        }
+        for reply in h.replies() {
+            say(g, &reply);
+        }
+    }
+
+    /// Ticks until a chat message from the server is queued (5 s at most).
+    fn wait_for_reply(g: &mut Game, h: &mut Hooks) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            pump(g, h);
+            tick(g);
+            let replies: Vec<String> = chat_sent(g).into_iter().filter(|(from, _)| *from == 0).map(|(_, t)| t).collect();
+            if !replies.is_empty() {
+                return replies;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Vec::new()
+    }
+    fn answer(stream: &mut TcpStream, body: &str) {
+        let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+    }
+
+    /// As the admin API changes them: checked, then live in the front's hooks.
+    fn hooked(g: &mut Game, chat: Chat) -> Hooks {
+        let rules = crate::rules::Rules { chat, ..g.rules.clone() };
+        crate::rules::set(g, rules).unwrap();
+        let mut h = Hooks::default();
+        pump(g, &mut h);
+        h
+    }
+
+    #[test]
+    fn a_chat_rpc_becomes_an_event_and_still_reaches_everyone() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        g.rules.chat.command_prefix = Some("!".into());
+        g.net.out.clear();
+        send_chat(&mut g, 1, "hello there");
+        send_chat(&mut g, 1, "!tp home base");
+        let mut h = Hooks::default();
+        pump(&mut g, &mut h);
+        let (events, last) = h.feed.after(0, Duration::ZERO);
+        assert_eq!(last, 2);
+        let e = &events[0];
+        assert_eq!((e.id, e.client, e.name.as_deref(), e.steam_id.as_deref(), e.planet.as_str(), e.text.as_str()), (1, 1, Some("Ann"), None, "Prime", "hello there"));
+        assert!(e.command.is_none() && e.time > 1_700_000_000_000);
+        assert_eq!((events[1].command.as_deref(), events[1].args.clone()), (Some("tp"), vec!["home".to_string(), "base".into()]));
+        let json = serde_json::to_value(e).unwrap();
+        assert_eq!(json.as_object().unwrap().keys().collect::<Vec<_>>(), ["id", "time", "client", "name", "steamId", "planet", "text", "command", "args"]);
+        assert_eq!(chat_sent(&g), [(1, "hello there".to_string()), (1, "!tp home base".into())], "the game's broadcast is unchanged");
+    }
 
     #[test]
     fn a_full_ring_drops_the_oldest_and_counts_them() {
@@ -459,6 +557,8 @@ mod tests {
         assert!(!marker.exists(), "the child left behind was killed");
     }
 
+    /// While nobody is in the game (world.pauseWhenEmpty), replies are dropped, not kept for
+    /// whoever joins next.
     fn ask(addr: std::net::SocketAddr, request: &str) -> Value {
         let mut s = TcpStream::connect(addr).unwrap();
         s.write_all(request.as_bytes()).unwrap();
@@ -497,5 +597,15 @@ mod tests {
         assert_eq!(chat_sent(&g), [(0, "Server restarts in 5 minutes".to_string())]);
         pump(&mut g, &mut h);
         assert!(h.feed.after(1, Duration::ZERO).0.is_empty(), "the server's own messages are not events");
+    }
+
+    #[test]
+    fn a_chat_config_error_never_shows_a_value() {
+        assert!(chat_config(br#"{"webhooks": ["https://example.com/hook"], "retries": 1}"#).is_ok());
+        for (body, field) in [(r#"{"webhooks": "https://hooks.example/t0psecret"}"#, "chat.webhooks"), (r#"{"secret": ["t0psecret"]}"#, "chat.secret"), (r#"{"t0psecret": 1}"#, "chat.t0psecret")] {
+            let e = chat_config(body.as_bytes()).unwrap_err();
+            assert_eq!(e, format!("chat config unreadable at {field}"));
+        }
+        assert_eq!(chat_config(b"{\"secret\": \"t0psecret").unwrap_err(), "chat config unreadable (not JSON)");
     }
 }

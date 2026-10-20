@@ -2,10 +2,9 @@
 //! front's hooks act on (chat hooks deliver from the front, so they outlive a flip), and the rules
 //! the front acts on itself (autosave, updates, the watchdog).
 
-use serde::Serialize;
-
 use crate::game::Game;
 use crate::ipc::{self, Link};
+use crate::msg::{self, Ops};
 
 /// The chat events for the front's hooks, and the hooks' settings when they changed.
 pub(super) fn forward_chat(game: &mut Game, link: &mut Link) {
@@ -17,22 +16,12 @@ pub(super) fn forward_chat(game: &mut Game, link: &mut Link) {
     }
 }
 
-/// The rules the front acts on (OPS frame): autosave, updates and the watchdog.
-#[derive(Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct Ops {
-    autosave_minutes: u32,
-    auto_update: bool,
-    update_check_hours: u32,
-    bank_watchdog_seconds: u32,
-}
-
 /// The rules the front acts on (autosave, updates): sent at the start and whenever they change.
 pub(super) fn forward_ops(game: &Game, link: &mut Link, last: &mut Option<Ops>) {
     let (save, update) = (&game.rules.save, &game.rules.update);
-    let ops = Ops { autosave_minutes: save.autosave_minutes, auto_update: update.auto, update_check_hours: update.check_hours, bank_watchdog_seconds: game.rules.limits.bank_watchdog_seconds };
+    let ops = Ops { autosave_minutes: Some(save.autosave_minutes.into()), auto_update: Some(update.auto), update_check_hours: Some(update.check_hours.into()), bank_watchdog_seconds: Some(game.rules.limits.bank_watchdog_seconds.into()) };
     if last.as_ref() != Some(&ops) {
-        link.send(ipc::OPS, 0, serde_json::to_string(&ops).unwrap_or_default().as_bytes());
+        link.send(ipc::OPS, 0, &msg::body(&ops));
         *last = Some(ops);
     }
 }

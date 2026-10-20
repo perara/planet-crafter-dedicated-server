@@ -9,11 +9,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
-use serde_json::Value;
-
 use super::admin;
-use super::forward::{forward_chat, forward_ops, Ops};
+use super::forward::{forward_chat, forward_ops};
 use super::mail::{check_loading, post, reason_batch, send};
 use super::panic::{contained, guarded, taint, ticked};
 use super::persist::{autosave, final_save, persist, persist_later, settle};
@@ -22,6 +19,7 @@ use super::status::{Ctx, TickTimes};
 use crate::game::Game;
 use crate::idmap::FxHashMap;
 use crate::ipc::{self, Frame, Link};
+use crate::msg::{self, AdminCall, Connected, Ops, SnapshotNote};
 use crate::{chathooks, wire};
 
 pub(super) struct Bank {
@@ -30,17 +28,6 @@ pub(super) struct Bank {
     pub save_path: String,
     pub build_id: Option<String>,
     pub data_dir: String,
-}
-
-/// What the front is told with the snapshot of a flip (SNAPSHOT frame): its size, how long it took
-/// and when (the monotonic clock, ns), which puts it on the flip's timeline in the front.
-#[derive(Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SnapshotHead {
-    bytes: u64,
-    ms: f64,
-    got_at: u64,
-    done_at: u64,
 }
 
 /// What the loop keeps from one turn to the next.
@@ -114,8 +101,8 @@ impl Bank {
         let game = &mut self.game;
         match f.kind {
             ipc::CONNECTED => {
-                let c: Value = serde_json::from_slice(&f.body).unwrap_or_default();
-                guarded(game, f.n, &self.save_path, |game| game.connect(f.n, c["steamId"].as_u64(), c["trusted"] == true, c["ip"].as_str().map(str::to_string)));
+                let c: Connected = msg::parse(&f.body).unwrap_or_default();
+                guarded(game, f.n, &self.save_path, |game| game.connect(f.n, c.steam_id, c.trusted, c.ip));
             }
             // Kicked this loop too (game.kicks goes out after it): nothing more counts.
             ipc::DATA if !t.kicked.contains(&f.n) && !game.kicks.iter().any(|(c, _)| *c == f.n) && game.clients.contains_key(&f.n) => {
@@ -134,9 +121,9 @@ impl Bank {
                 }
             }
             ipc::ADMIN => {
-                let r: Value = serde_json::from_slice(&f.body).unwrap_or_default();
+                let r: AdminCall = msg::parse(&f.body).unwrap_or_default();
                 let ctx = Ctx { ticks: &t.ticks, save_path: &self.save_path, build_id: self.build_id.as_deref(), data_dir: &self.data_dir, loop_rate: t.loops.2, busy: t.busy_last };
-                let request = || admin::request(game, r["method"].as_str().unwrap_or(""), r["path"].as_str().unwrap_or(""), &r["body"], &ctx);
+                let request = || admin::request(game, &r.method, &r.path, &r.body, &ctx);
                 let (status, body) = contained("an admin request", request).unwrap_or_else(|| admin::error(500, "the server failed on this request"));
                 self.link.send(ipc::ANSWER, f.n, admin::frame(status, body).as_bytes());
             }
@@ -165,8 +152,8 @@ impl Bank {
         match crate::handoff::snapshot_memfd(game, &mut Vec::new()) {
             Ok(fd) => {
                 let len = std::fs::File::from(fd.try_clone().expect("dup")).metadata().map(|m| m.len()).unwrap_or(0);
-                let head = SnapshotHead { bytes: len, ms: started.elapsed().as_secs_f64() * 1000.0, got_at, done_at: ipc::now_ns() };
-                self.link.send_fd(ipc::SNAPSHOT, n, serde_json::to_string(&head).unwrap_or_default().as_bytes(), Some(fd));
+                let head = SnapshotNote { bytes: Some(len), ms: Some(started.elapsed().as_secs_f64() * 1000.0), got_at, done_at: ipc::now_ns() };
+                self.link.send_fd(ipc::SNAPSHOT, n, &msg::body(&head), Some(fd));
                 // The world stays in memory until the new bank runs.
                 match self.link.recv() {
                     Some(f) if f.kind == ipc::RESUME => println!("bank: resumed, the new bank failed"),
@@ -251,7 +238,7 @@ mod tests {
     fn the_snapshot_head_prints_what_the_json_macro_did() {
         for (bytes, ms, got_at, done_at) in [(0u64, 0.0f64, 0u64, 0u64), (123_456_789, 41.7000000001, 1_234_567_890_123, 1_234_567_990_123), (u64::from(u32::MAX) + 1, 1e-7, 7, 8)] {
             let old = json!({"bytes": bytes, "ms": ms, "gotAt": got_at, "doneAt": done_at}).to_string();
-            assert_eq!(serde_json::to_string(&SnapshotHead { bytes, ms, got_at, done_at }).unwrap(), old);
+            assert_eq!(msg::text(&SnapshotNote { bytes: Some(bytes), ms: Some(ms), got_at, done_at }), old);
         }
     }
 }

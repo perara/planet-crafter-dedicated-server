@@ -51,19 +51,6 @@ pub fn set_env_file(path: &Path, key: &str, value: &str) -> Result {
     super::replace_file(path, set_env_text(&text, key, value).as_bytes(), 0o600)
 }
 
-/// A world name from an argument (a save's file name works too).
-pub fn world_arg(arg: &str) -> Result<String> {
-    let name = arg.strip_suffix(".json").unwrap_or(arg);
-    let name = name.rsplit('/').next().unwrap_or(name);
-    let ok = name.len() <= 64
-        && name.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
-        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
-    if !ok {
-        return Err(format!("world names are letters, digits, '.', '_' and '-' (up to 64): '{arg}'"));
-    }
-    Ok(name.to_string())
-}
-
 /// The game build: a hash of the game's code, which changes with every game update. One way
 /// for every installation (Steam, steamcmd or a copied folder).
 pub fn build_id(game: &Path) -> Result<String> {
@@ -179,8 +166,8 @@ PCDS_WORLD=world
             return Ok(crate::native::tables::TABLES_FORMAT);
         }
         let info = updater::info(&banks, &active).ok_or_else(|| format!("bank {active} has no readable bank.json in {}", banks.display()))?;
-        let format = info["tablesFormat"].as_u64().and_then(|f| u32::try_from(f).ok());
-        format.ok_or_else(|| format!("bank {active} (pcds {}) does not say which game tables it reads: reinstall it (make build and pcds restart, or pcds upgrade --restart)", info["version"].as_str().unwrap_or("?")))
+        let format = info.tables_format.and_then(|f| u32::try_from(f).ok());
+        format.ok_or_else(|| format!("bank {active} (pcds {}) does not say which game tables it reads: reinstall it (make build and pcds restart, or pcds upgrade --restart)", info.version()))
     }
 
     /// The tables of the installed game.
@@ -274,17 +261,6 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[test]
-    fn world_names() {
-        assert_eq!(world_arg("world").unwrap(), "world");
-        assert_eq!(world_arg("my.world_2-b").unwrap(), "my.world_2-b");
-        assert_eq!(world_arg("/home/me/saves/Standard-1.json").unwrap(), "Standard-1");
-        assert_eq!(world_arg(&"a".repeat(64)).unwrap().len(), 64);
-        for bad in ["", ".hidden", "-x", "two words", "ünï", "a/", &"a".repeat(65)] {
-            assert!(world_arg(bad).is_err(), "{bad}");
-        }
-    }
-
     /// The tables of a game build in the active bank's tables format; another format or build
     /// is named in the error.
     #[test]
@@ -312,10 +288,10 @@ mod tests {
         let bank = dir.join("run/bin/a");
         fs::create_dir_all(&bank).unwrap();
         fs::write(bank.join("pcds"), "").unwrap();
-        updater::write_info(&bank, &serde_json::json!({"version": "9.0.0", "tablesFormat": ours + 1})).unwrap();
+        updater::write_info(&bank, &crate::msg::BankInfo { tables_format: Some(u64::from(ours) + 1), ..crate::msg::BankInfo::new("9.0.0", 0, 0, 0) }).unwrap();
         assert_eq!(ctx.program(), bank.join("pcds"));
         assert!(ctx.tables("b1").unwrap_err().contains(&format!("the server reads format {}", ours + 1)));
-        updater::write_info(&bank, &serde_json::json!({"version": "9.0.0"})).unwrap();
+        updater::write_info(&bank, &crate::msg::BankInfo { version: Some("9.0.0".into()), ..Default::default() }).unwrap();
         assert!(ctx.tables("b1").unwrap_err().contains("does not say which game tables it reads"));
         fs::remove_dir_all(&dir).unwrap();
     }

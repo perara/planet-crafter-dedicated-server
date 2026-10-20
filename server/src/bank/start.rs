@@ -5,11 +5,10 @@
 
 use std::time::Duration;
 
-use serde_json::Value;
-
 use super::persist::note_backup;
 use crate::game::Game;
 use crate::ipc::{self, Frame};
+use crate::msg::{self, Restore};
 use crate::save::SaveFile;
 use crate::{access, config, rules, save};
 
@@ -109,7 +108,7 @@ pub fn enforce(game: &mut Game) {
 /// How the check of a restored state came out (PCDS_DEV=flip-verify, tests): `verified` is true,
 /// or null when it did not run, and `ms` what it took.
 pub(super) struct Verified {
-    pub verified: Value,
+    pub verified: Option<bool>,
     pub ms: f64,
 }
 
@@ -118,8 +117,8 @@ pub(super) struct Verified {
 /// since. After a crash (`recover`) the clients in it are gone. Exits on a snapshot that does not
 /// restore (the front then tries the old bank again).
 pub(super) fn restore(f: &Frame, net_data: crate::data::NetData, data: crate::gamedata::GameData, spec: crate::rpcspec::Spec, scenes: crate::Scenes, save_path: &str) -> (Game, Verified) {
-    let (mut verified, mut verify_ms) = (Value::Null, 0.0);
-    let recover = serde_json::from_slice::<Value>(&f.body).is_ok_and(|b| b["recover"] == true);
+    let (mut verified, mut verify_ms) = (None, 0.0);
+    let recover = msg::parse::<Restore>(&f.body).is_ok_and(|b| b.recover);
     let snapshot = f.fd.as_ref().ok_or("no memfd".to_string()).and_then(|fd| ipc::map_memfd(fd).map_err(|e| e.to_string()));
     let restored = snapshot.and_then(|s| crate::handoff::restore_bytes(net_data, data, spec, &s, scenes).map(|g| (g, s)));
     match restored {
@@ -130,7 +129,7 @@ pub(super) fn restore(f: &Frame, net_data: crate::data::NetData, data: crate::ga
                     eprintln!("bank: {e}");
                     std::process::exit(3);
                 }
-                verified = true.into();
+                verified = Some(true);
                 verify_ms = t.elapsed().as_secs_f64() * 1000.0;
             }
             if let Err(e) = reread(&mut g, &access_path(save_path), &rules_path(save_path)) {

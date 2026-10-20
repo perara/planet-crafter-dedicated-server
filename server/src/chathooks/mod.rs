@@ -1,21 +1,17 @@
 //! Chat hooks, the game's side: every chat message players send becomes an event for tools outside
 //! the game, and what those tools reply goes into the chat. This is the pure half (no thread, no
-//! socket, no file): the command prefix parsing, the typed `Event`, the bank's `State` (the events
-//! not sent yet, the replies waiting for the tick) and the subscription to the event bus.
+//! socket, no file): the command prefix parsing, the typed event (msg.rs `ChatEvent`), the bank's
+//! `State` (the events not sent yet, the replies waiting for the tick) and the subscription to the
+//! event bus.
 //!
 //! One path from a game event to the hooks: the game calls `events::chat` (events.rs, as for every
 //! event), which hands it to its subscribers in turn: this one first (`wants`, `on_event`: the chat
 //! message becomes an `Event` in `State::outbox`), then the plugins. The bank sends the outbox to the
-//! front every loop (bank/forward.rs) and the front's hooks (delivery.rs) take it from there.
-//!
+//! front every loop (bank/forward.rs) and the front's hooks (front/chat_hooks.rs) take it from there:
+//! the feed, the worker that delivers to the webhooks and the exec program, and the HTTP endpoints.
 //! The hooks live in the front (docs/hot-update.md), so they outlive a flip and their event ids go
-//! on; their delivery is `delivery`: the front adds each event to a ring of the last KEPT events
-//! (`Feed`), one worker thread POSTs it to the rules' chat.webhooks (signed with chat.secret) and
-//! runs chat.exec with it, and the admin API's threads read the ring (GET /api/chat/events, a long
-//! poll). Replies (a webhook's {"reply": "..."}, the exec program's output, POST /api/chat) come
-//! back through a bounded channel to the front, which sends them to the bank; they go to the chat
-//! at the next tick, from the server (client 0). Chat text is never a command line: the exec
-//! program gets it only as JSON on stdin, with an environment of PATH, HOME and LANG only.
+//! on. Replies (a webhook's {"reply": "..."}, the exec program's output, POST /api/chat) come back
+//! to the bank as SAY and go to the chat at the next tick, from the server (client 0).
 
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,37 +23,9 @@ use serde_json::json;
 use crate::game::Game;
 use crate::net::Target;
 
-mod delivery;
-// The front's half, until the front owns it (docs/architecture.md, "Chat hooks and the event bus").
-pub use delivery::{api, Feed, Hooks};
-#[cfg(any(fuzzing, pcds_corpus))]
-use delivery::sign;
-#[cfg(any(fuzzing, pcds_corpus))]
-use serde_json::Value;
-
-/// Replies waiting for the next tick; more are refused.
-pub(crate) const REPLIES: usize = 64;
-/// The longest reply, in characters.
-pub(crate) const MAX_REPLY: usize = 500;
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Event {
-    /// 1, 2, 3... since the server started: a gap is events dropped before they were read.
-    pub id: u64,
-    /// Unix time in milliseconds.
-    pub time: u64,
-    /// The connection's client id.
-    pub client: u64,
-    pub name: Option<String>,
-    /// Verified (invite-code players) only, as a string: JSON numbers do not hold a SteamID64.
-    pub steam_id: Option<String>,
-    pub planet: String,
-    pub text: String,
-    /// With chat.commandPrefix "!": "!tp home" is command "tp" with args ["home"].
-    pub command: Option<String>,
-    pub args: Vec<String>,
-}
+/// A chat message as an event (msg.rs: it crosses from the bank to the front).
+pub use crate::msg::ChatEvent as Event;
+use crate::msg::{CHAT_MAX_REPLY as MAX_REPLY, CHAT_REPLIES as REPLIES};
 
 /// The game's side, in the bank: events for the front, and replies from it for the chat.
 #[derive(Default, Serialize, Deserialize)]
@@ -151,113 +119,10 @@ pub fn on_event(game: &mut Game, event: &pcds_plugin_api::Event<'_>) {
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
+    use crate::game::test_game;
     use crate::game::tests::{join, save};
-    use crate::game::{test_game, Args};
-    use crate::rules::Chat;
-    use serde_json::json;
-    use std::io::{BufRead, BufReader, Read, Write};
-    use std::net::TcpStream;
-    use std::time::{Duration, Instant};
-
-    pub fn send_chat(g: &mut Game, client: u64, text: &str) {
-        assert!(crate::handlers::rpc(g, client, 0, 0, "ChatHandler.SendChatMessageServerRpc", &Args(vec![json!(text)])));
-    }
-
-    /// The chat messages queued for the clients: (from, text).
-    pub fn chat_sent(g: &Game) -> Vec<(u64, String)> {
-        g.net.out.iter().filter(|(_, kind, _)| *kind == crate::protocol::CLIENT_RPC).filter_map(|(_, _, body)| {
-            let mut r = crate::wire::Reader::new(body);
-            r.packed_u64()?;
-            r.packed_u16()?;
-            let method = r.packed_u32()?;
-            (g.net.spec.get(method)?.name == "ChatHandler.ReceiveChatMessageClientRpc").then_some(())?;
-            let args = g.net.spec.decode(method, r.rest())?;
-            Some((args[0].as_u64()?, args[1].as_str()?.to_string()))
-        }).collect()
-    }
-
-    /// What the bank and the front do with the chat each loop: events to the feed, a change of
-    /// the chat rules to the hooks, the replies back into the game.
-    pub fn pump(g: &mut Game, h: &mut Hooks) {
-        g.ext.chat.outbox.drain(..).for_each(|e| h.feed.push(e));
-        if std::mem::take(&mut g.ext.chat.changed) {
-            h.configure(g.rules.chat.clone());
-        }
-        for reply in h.replies() {
-            say(g, &reply);
-        }
-    }
-
-    /// Ticks until a chat message from the server is queued (5 s at most).
-    pub fn wait_for_reply(g: &mut Game, h: &mut Hooks) -> Vec<String> {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            pump(g, h);
-            tick(g);
-            let replies: Vec<String> = chat_sent(g).into_iter().filter(|(from, _)| *from == 0).map(|(_, t)| t).collect();
-            if !replies.is_empty() {
-                return replies;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        Vec::new()
-    }
-
-    /// One HTTP request read off a test listener: (headers, lowercase names; body).
-    pub fn read_request(stream: &mut TcpStream) -> (Vec<(String, String)>, String) {
-        let mut reader = BufReader::new(stream.try_clone().unwrap());
-        let (mut headers, mut line) = (Vec::new(), String::new());
-        reader.read_line(&mut line).unwrap();
-        loop {
-            line.clear();
-            if reader.read_line(&mut line).unwrap() == 0 || line.trim().is_empty() {
-                break;
-            }
-            if let Some((k, v)) = line.split_once(':') {
-                headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
-            }
-        }
-        let length = headers.iter().find(|(k, _)| k == "content-length").map_or(0, |(_, v)| v.parse().unwrap());
-        let mut body = vec![0; length];
-        reader.read_exact(&mut body).unwrap();
-        (headers, String::from_utf8(body).unwrap())
-    }
-
-    pub fn answer(stream: &mut TcpStream, body: &str) {
-        let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-    }
-
-    /// As the admin API changes them: checked, then live in the front's hooks.
-    pub fn hooked(g: &mut Game, chat: Chat) -> Hooks {
-        let rules = crate::rules::Rules { chat, ..g.rules.clone() };
-        crate::rules::set(g, rules).unwrap();
-        let mut h = Hooks::default();
-        pump(g, &mut h);
-        h
-    }
-
-    #[test]
-    fn a_chat_rpc_becomes_an_event_and_still_reaches_everyone() {
-        let Some(mut g) = test_game(save()) else { return };
-        join(&mut g, 1, "Ann");
-        g.rules.chat.command_prefix = Some("!".into());
-        g.net.out.clear();
-        send_chat(&mut g, 1, "hello there");
-        send_chat(&mut g, 1, "!tp home base");
-        let mut h = Hooks::default();
-        pump(&mut g, &mut h);
-        let (events, last) = h.feed.after(0, Duration::ZERO);
-        assert_eq!(last, 2);
-        let e = &events[0];
-        assert_eq!((e.id, e.client, e.name.as_deref(), e.steam_id.as_deref(), e.planet.as_str(), e.text.as_str()), (1, 1, Some("Ann"), None, "Prime", "hello there"));
-        assert!(e.command.is_none() && e.time > 1_700_000_000_000);
-        assert_eq!((events[1].command.as_deref(), events[1].args.clone()), (Some("tp"), vec!["home".to_string(), "base".into()]));
-        let json = serde_json::to_value(e).unwrap();
-        assert_eq!(json.as_object().unwrap().keys().collect::<Vec<_>>(), ["id", "time", "client", "name", "steamId", "planet", "text", "command", "args"]);
-        assert_eq!(chat_sent(&g), [(1, "hello there".to_string()), (1, "!tp home base".into())], "the game's broadcast is unchanged");
-    }
 
     /// The chat hooks are a subscriber of the event bus like the plugins: they want chat messages and
     /// nothing else, whether a plugin listens or not, and an event that goes through the bus
