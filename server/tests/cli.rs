@@ -220,6 +220,26 @@ fn a_start_falls_back_to_the_other_bank() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// systemd counts every start toward the unit's limit (5 in 10 minutes), so `pcds restart` clears
+/// the count first: an upgrade, a rollback and an upgrade again must not leave the unit failed.
+#[test]
+fn a_restart_clears_the_units_start_count_first() {
+    let dir = test_dir("reset-failed");
+    let log = dir.join("systemctl.log");
+    let fake = fake_systemctl(&dir, &format!("echo \"$*\" >> {}; echo inactive", log.display()));
+    let game = with_reader(&dir, 1);
+    assert!(pcds(&dir, &fake, &["extract", "--game", game.to_str().unwrap()]).status.success());
+    std::fs::create_dir_all(dir.join("run/worlds")).unwrap();
+    std::fs::write(dir.join("run/worlds/world.json"), "{\"saveDisplayName\":\"w\"}").unwrap();
+    std::fs::create_dir_all(dir.join("home/.config/systemd/user")).unwrap();
+    std::fs::write(dir.join("home/.config/systemd/user/pcds-cli-itest.service"), "").unwrap();
+    let out = pcds(&dir, &fake, &["restart"]);
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let (reset, restart) = (calls.find("reset-failed pcds-cli-itest.service"), calls.find("restart pcds-cli-itest.service"));
+    assert!(reset.is_some() && restart.is_some() && reset < restart, "{calls}\n{}", text(&out));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// A second server on a world another one runs is refused before it touches anything.
 #[test]
 fn one_server_per_world() {
@@ -254,9 +274,13 @@ fn an_unknown_setting_stops_the_start() {
     std::fs::write(dir.join("home/.config/systemd/user/pcds-cli-itest.service"), "").unwrap();
     let out = pcds(&dir, &fake, &["restart"]);
     assert!(text(&out).contains(&format!("unknown setting {autosave}")) && out.status.code() == Some(1), "{}", text(&out));
+    assert!(said.contains(&format!("{autosave} is the rule save.autosaveMinutes now")), "{said}");
     // Without them the start goes on, to the missing world.
     std::fs::write(dir.join("run/server.env"), "PCDS_ADMIN_TOKEN=s3cret-token\n").unwrap();
     assert!(text(&pcds(&dir, &fake, &["run"])).contains("no world at"));
+    // A retired setting in the process environment (a compose file's environment:) is no error, but is said.
+    let out = Command::new(PCDS).arg("run").env("PCDS_HOME", dir.join("run")).env("PCDS_UNIT", "pcds-cli-itest").env("HOME", dir.join("home")).env("PATH", format!("{}:{}", fake.display(), std::env::var("PATH").unwrap_or_default())).env(backups, "0").output().unwrap();
+    assert!(text(&out).contains(&format!("ignored in the environment: {backups} is the rule save.backupsKept now")) && text(&out).contains("no world at"), "{}", text(&out));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

@@ -126,6 +126,8 @@ Where the game keeps its saves:
 
 ### Upgrading
 
+**Coming from 0.6.x or 0.7.0?** Read [docs/upgrading.md](docs/upgrading.md) first: this release refuses the autosave, backup and other old settings that earlier releases wrote into `server.env` (they are rules now), and the jump needs a restart, not a hot update. The page has the steps, the rollback and the downtime measured.
+
 A new server release takes over the running world without disconnecting anyone (a hot update):
 
 ```bash

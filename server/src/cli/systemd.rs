@@ -41,7 +41,7 @@ impl Ctx {
 
     /// A property of the server's unit (systemctl show); Err with what systemctl said when it
     /// fails.
-    fn show(&self, property: &str) -> Result<String> {
+    pub(super) fn show(&self, property: &str) -> Result<String> {
         let mut cmd = self.systemctl(&["show", "-p", property, "--value", &self.unit()]);
         let out = cmd.stdin(std::process::Stdio::null()).output().map_err(|e| format!("{}: {e}", super::describe(&cmd)))?;
         if !out.status.success() {
@@ -205,6 +205,9 @@ WantedBy=timers.target
         if self.container {
             say("restart the container for it to take effect (docker restart CONTAINER)");
         } else if self.active()? {
+            // systemd counts every start toward the unit's limit (5 in 10 minutes): an upgrade, a
+            // rollback and an upgrade again must not leave the server failed and down.
+            quiet(&mut self.systemctl(&["reset-failed", &self.unit()]));
             check(&mut self.systemctl(&["restart", &self.unit()]))?;
             say("server restarted");
         }

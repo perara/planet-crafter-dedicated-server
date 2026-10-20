@@ -16,8 +16,8 @@ Run:  tools/chaos/soak.py --world run/worlds/world.json [--seconds 7500] [--play
 
 A pass: exit status 0 and a last JSON line {"pass": true, ...}. That means: the server answered
 the status for the whole run; the bank's and the front's memory in the last fifth of the run is
-within --max-rss-growth-pct of the second fifth's (the first fifth is warm-up); threads and
-file descriptors did not grow; no timed save took longer than --max-save-ms; the final stop
+within --max-rss-growth-pct of the second fifth's (the first fifth is warm-up); the median
+number of threads and of file descriptors did not grow; no timed save took longer than --max-save-ms; the final stop
 exited 0; and the server log has no panic. samples.csv has the numbers behind it.
 """
 import argparse
@@ -32,7 +32,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lib  # noqa: E402
 
-COLS = "t,f_rss,f_vsz,f_thr,f_fds,f_cpu,b_rss,b_vsz,b_thr,b_fds,b_cpu,busy,longest_us,winmax_longest_us,winmax_busy,fps,wo,net,inv,players,gametime,save_bytes,backups,log_bytes,udp_rx,udp_tx,tcp_admin".split(",")
+COLS = "t,f_rss,f_vsz,f_thr,f_fds,f_cpu,b_rss,b_vsz,b_thr,b_fds,b_cpu,busy,longest_us,winmax_longest_us,winmax_busy,fps,wo,net,inv,players,gametime,save_bytes,backups,log_bytes,udp_rx,udp_tx,tcp_admin,tick_p50_us,tick_p99_us,tick_max_us,spikes".split(",")
 
 
 def main():
@@ -53,7 +53,7 @@ def main():
     csv = open(os.path.join(srv.home, "samples.csv"), "w")
     csv.write(",".join(COLS) + "\n")
 
-    win = dict(longest=0, busy=0.0, fails=0, calls=0)
+    win = dict(longest=0, busy=0.0, fails=0, calls=0, spikes=0)
     stop = threading.Event()
 
     def poller():
@@ -63,6 +63,9 @@ def main():
             if s == 200:
                 win["longest"] = max(win["longest"], j.get("longestLoopMicros", 0))
                 win["busy"] = max(win["busy"], j.get("busyPercent", 0))
+                if j.get("longestLoopMicros", 0) > 50000:  # a loop over 50 ms: when it was, against the last save, for the cause
+                    win["spikes"] += 1
+                    log("spike", j["longestLoopMicros"], "us busy", j.get("busyPercent"), "lastSave.at", (j.get("lastSave") or {}).get("at"), "now", int(time.time()))
             else:
                 win["fails"] += 1
             stop.wait(1)
@@ -93,9 +96,10 @@ def main():
                    winmax_longest_us=win["longest"], winmax_busy=win["busy"], fps=j.get("fps", -1) if s == 200 else -1,
                    wo=o.get("world", -1), net=o.get("network", -1), inv=o.get("inventories", -1),
                    players=len(j.get("players", [])) if s == 200 else -1, gametime=j.get("gameTime", -1) if s == 200 else -1,
+                   tick_p50_us=(j.get("tick") or {}).get("p50Micros", -1), tick_p99_us=(j.get("tick") or {}).get("p99Micros", -1), tick_max_us=(j.get("tick") or {}).get("maxMicros", -1), spikes=win["spikes"],
                    save_bytes=os.path.getsize(srv.world) if os.path.exists(srv.world) else -1, backups=len(glob.glob(os.path.join(srv.home, "backups", "*.json"))),
                    log_bytes=os.path.getsize(srv.log), udp_rx=q[0], udp_tx=q[1], tcp_admin=lib.tcp_count(srv.admin))
-        win["longest"], win["busy"] = 0, 0.0
+        win["longest"], win["busy"], win["spikes"] = 0, 0.0, 0
         rows.append(row)
         csv.write(",".join(str(row[c]) for c in COLS) + "\n")
         csv.flush()
@@ -118,8 +122,11 @@ def main():
         verdict.fail("the status did not answer", failed=win["fails"], of=win["calls"])
     fifth = max(1, len(rows) // 5)
     for k in ("b_rss", "f_rss", "b_thr", "f_thr", "b_fds", "f_fds"):
-        early = statistics.mean(r[k] for r in rows[fifth:2 * fifth]) if len(rows) >= 2 * fifth else None
-        late = statistics.mean(r[k] for r in rows[-fifth:]) if rows else None
+        # Memory by the mean; threads and descriptors by the median: an admin connection or a worker thread that happens to
+        # be there at a sample (a stalled host piles them up for a while) is no growth, a level that stays higher is.
+        mid = statistics.mean if k.endswith("rss") else statistics.median
+        early = mid(r[k] for r in rows[fifth:2 * fifth]) if len(rows) >= 2 * fifth else None
+        late = mid(r[k] for r in rows[-fifth:]) if rows else None
         if early and late and early > 0:
             growth = 100 * (late - early) / early
             limit = args.max_rss_growth_pct if k.endswith("rss") else 0.0

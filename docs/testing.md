@@ -314,3 +314,5 @@ in place. It works on rootless Docker too. Details and measurements: [docker.md]
 one of every building and six players. It is by hand because it needs the tables and a download. The
 release checklist, with the gate's meaning, is in
 [hot-update.md](hot-update.md) (under "As built": the paragraphs "The flip gate" and "Release checklist"): follow that list before tagging; this file does not repeat it.
+
+The last full run of all of this on a build, with the numbers and what it found, is [soak-report.md](soak-report.md).

@@ -353,6 +353,140 @@ class Srv:
     def logtext(self):
         return open(self.log, errors="replace").read()
 
+    def final_rc(self):
+        return self.proc.returncode if self.proc else None
+
+
+class UnitSrv(Srv):
+    """The server as an owner runs it: `pcds setup` in an installation folder (server.env, worlds/,
+    data/, bin/ with both banks), then `pcds run` as a transient systemd USER unit with the
+    properties of the service file `pcds setup` writes (Restart=on-failure after 15 s, five starts
+    in ten minutes, KillMode=mixed, 90 s to stop). The unit must be named pcds-qa-*: the real
+    server's `pcds` is never touched. The game folder is a made-up one whose build id the copied
+    tables carry (as docker/test.sh does). Bank b is a copy of bank a with another release tag, so
+    a flip is a flip between two releases. Same interface as Srv; supervision is systemd's."""
+
+    def __init__(self, name, args, unit, rules=None, env=None, dev=None, port=None, world=None, cpus="8-15"):
+        if not unit.startswith("pcds-qa-"):
+            sys.exit(f"unit {unit}: a scratch unit must be named pcds-qa-*")
+        self.unit = unit
+        self.cpus = cpus
+        super().__init__(name, args, port=port, world=world, rules=rules, env=env, dev=dev, banks=False)
+        h = self.home
+        os.makedirs(f"{h}/worlds")
+        os.replace(self.world, f"{h}/worlds/world.json")
+        self.world = f"{h}/worlds/world.json"
+        self.game = f"{h}/game"
+        os.makedirs(f"{self.game}/Planet Crafter_Data/Managed")
+        open(f"{self.game}/Planet Crafter.exe", "w").close()
+        open(f"{self.game}/Planet Crafter_Data/Managed/Assembly-CSharp.dll", "w").write(f"a made-up game build for {unit}\n")
+        rel = f"{h}/release"
+        os.makedirs(f"{rel}/web")
+        exe = os.path.realpath(args.bin)
+        d = os.path.dirname(exe)
+        shutil.copy(exe, f"{rel}/pcds")
+        shutil.copy(os.path.join(d, "libsteam_api.so"), f"{rel}/libsteam_api.so")
+        shutil.copy(os.path.join(d, "web", "index.html") if os.path.exists(os.path.join(d, "web", "index.html")) else os.path.join(REPO, "server", "web", "index.html"), f"{rel}/web/index.html")
+        self.exe = f"{rel}/pcds"
+        self.cli_env = dict(os.environ, PCDS_HOME=h, PCDS_UNIT=unit, PCDS_GAME_DIR=self.game, XDG_CONFIG_HOME=f"{h}/xdg", PCDS_RELEASES=self.env["PCDS_RELEASES"])
+        for k in ("PCDS_LISTEN", "PCDS_ADMIN", "PCDS_ADMIN_TOKEN", "PCDS_STEAM", "PCDS_DEV"):
+            self.cli_env.pop(k, None)
+        said = subprocess.run([self.exe, "status"], env=self.cli_env, capture_output=True, text=True)
+        m = re.search(r"game build ([0-9a-f]+) has no tables", said.stdout + said.stderr)
+        if not m:
+            sys.exit("pcds status did not name the made-up game's build:\n" + said.stdout + said.stderr)
+        shutil.copytree(args.data, f"{h}/data/test")
+        open(f"{h}/data/test/buildid", "w").write(m.group(1))
+        env = dict(PCDS_LISTEN=self.listen, PCDS_STEAM="off", PCDS_ADMIN=f"{LOOPBACK}:{self.admin}", PCDS_ADMIN_TOKEN=self.token, PCDS_WORLD="world", PCDS_RELEASES=self.env["PCDS_RELEASES"])
+        if env_extra := {k: v for k, v in self.env.items() if k not in ("PCDS_LISTEN", "PCDS_ADMIN", "PCDS_ADMIN_TOKEN", "PCDS_STEAM", "PCDS_HOME", "PCDS_RELEASES", "PCDS_DEV")}:
+            env.update(env_extra)
+        with open(f"{h}/server.env", "w") as f:
+            f.write("".join(f"{k}={v}\n" for k, v in env.items()))
+        os.chmod(f"{h}/server.env", 0o600)
+        r = subprocess.run([self.exe, "setup", "--game", self.game], env=self.cli_env, capture_output=True, text=True)
+        if r.returncode:
+            sys.exit("pcds setup failed:\n" + r.stdout + r.stderr)
+        # Bank b: the same program as another release (the standby a flip needs).
+        shutil.copytree(f"{h}/bin/a", f"{h}/bin/b", symlinks=True)
+        bj = json.load(open(f"{h}/bin/b/bank.json"))
+        bj["tag"] = "v0.0.0-qa-b"
+        json.dump(bj, open(f"{h}/bin/b/bank.json", "w"))
+        open(f"{h}/bin/active", "w").write("a")
+        self.pcds = f"{h}/bin/pcds"
+
+    # -- systemd
+    def sysctl(self, *a, timeout=120):
+        return subprocess.run(["systemctl", "--user", *a], capture_output=True, text=True, timeout=timeout)
+
+    def unit_state(self):
+        r = self.sysctl("show", "-p", "ActiveState", "-p", "SubState", "-p", "Result", "-p", "NRestarts", "-p", "ExecMainStatus", f"{self.unit}.service")
+        return dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+
+    def start(self, wait=90):
+        if not port_free(self.port) or not port_free(self.admin):
+            sys.exit(f"ports {self.port}/{self.admin} are in use")
+        if self not in _started:
+            _started.append(self)
+        self.sysctl("reset-failed", f"{self.unit}.service")
+        cmd = ["systemd-run", "--user", "--quiet", f"--unit={self.unit}", f"--description=pcds qa unit ({self.name})", "--slice=agents-planetcrafter.slice",
+               "-p", f"AllowedCPUs={self.cpus}", "-p", f"EnvironmentFile={self.home}/server.env", "-p", "Restart=on-failure", "-p", "RestartSec=15",
+               "-p", "StartLimitIntervalSec=600", "-p", "StartLimitBurst=5", "-p", "KillMode=mixed", "-p", "TimeoutStopSec=90",
+               "-p", f"StandardOutput=append:{self.log}", "-p", f"StandardError=append:{self.log}",
+               f"--setenv=PCDS_HOME={self.home}", f"--setenv=PCDS_UNIT={self.unit}", f"--setenv=PCDS_GAME_DIR={self.game}"]
+        if "PCDS_DEV" in self.env:
+            cmd.append(f"--setenv=PCDS_DEV={self.env['PCDS_DEV']}")
+        r = subprocess.run(cmd + [self.pcds, "run"], capture_output=True, text=True)
+        if r.returncode:
+            raise RuntimeError("systemd-run: " + r.stderr)
+        end = time.time() + wait
+        while time.time() < end:
+            s, j = self.status()
+            if s == 200 and isinstance(j, dict) and j.get("state") == "running":
+                return j
+            if self.unit_state().get("ActiveState") == "failed":
+                raise RuntimeError(f"the unit failed; see {self.log}")
+            time.sleep(0.3)
+        raise RuntimeError(f"no start within {wait} s; see {self.log}")
+
+    def ensure_running(self):
+        """What an owner (or a monitor) would do: nothing while systemd restarts the unit by itself;
+        when it gave up (start limit) or ended, reset it and start it again. Returns the unit's Result when it had to."""
+        for _ in range(3):  # the instant between systemd's restart job and the start looks like "inactive"
+            st = self.unit_state()
+            if st.get("ActiveState") in ("active", "activating", "deactivating") or st.get("SubState") == "auto-restart":
+                return None
+            time.sleep(1)
+        why = st.get("Result", "?")
+        self.sysctl("reset-failed", f"{self.unit}.service")
+        if self.sysctl("restart", f"{self.unit}.service").returncode:
+            self.sysctl("reset-failed", f"{self.unit}.service")
+            self.start(wait=120)
+        return why
+
+    def stop(self, wait=100):
+        if self.unit_state().get("ActiveState") in ("active", "activating"):
+            self.post("/api/stop")
+            end = time.time() + wait
+            while time.time() < end and self.unit_state().get("ActiveState") not in ("inactive", "failed"):
+                time.sleep(0.5)
+        self.final = self.unit_state()
+        self.kill_all()
+
+    def final_rc(self):
+        """The main process's exit status at the last stop (0: a clean stop)."""
+        f = getattr(self, "final", None) or self.unit_state()
+        return int(f.get("ExecMainStatus", "-1")) if f.get("Result") in ("success", "exit-code") else f.get("Result")
+
+    def kill_all(self):
+        self.sysctl("stop", f"{self.unit}.service")
+        self.sysctl("reset-failed", f"{self.unit}.service")
+        for ps in self.pids().values():
+            for p in ps:
+                try:
+                    os.kill(p, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
 
 def window(srv, secs, every=0.5):
     """Polls the status for `secs`: (longest loop ms, mean busy %, max busy %)."""
@@ -369,11 +503,11 @@ def window(srv, secs, every=0.5):
 
 # ---- the bots ----------------------------------------------------------------------------
 
-def load_proc(srv_or_addr, args, players, seconds, action_ms=200, stdout=subprocess.PIPE):
+def load_proc(srv_or_addr, args, players, seconds, action_ms=200, stdout=subprocess.PIPE, name=None):
     """`pcds load`: players that walk and act. Its summary (round trips, bytes per player) is
     printed at the end; exit status 1 when a player failed."""
     addr = srv_or_addr if isinstance(srv_or_addr, str) else f"{LOOPBACK}:{srv_or_addr.port}"
-    return subprocess.Popen([args.bin, "load", addr, args.data, str(players), str(seconds), str(action_ms)], stdout=stdout, stderr=subprocess.STDOUT, text=True)
+    return subprocess.Popen([args.bin, "load", addr, args.data, str(players), str(seconds), str(action_ms)] + ([name] if name else []), stdout=stdout, stderr=subprocess.STDOUT, text=True)
 
 
 _test_bin = None

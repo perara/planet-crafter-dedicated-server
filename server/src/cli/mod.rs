@@ -43,6 +43,7 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
   pcds new [--planet ID] [--start LOCATION] [--seed N] [--set KEY=VALUE]... [--force]
                          replace the current world with a new one (kept in backups/)
   pcds start | stop | restart | status [--json] | logs
+  pcds check-settings         read server.env as the next start will, and say what stops it (nothing is restarted)
   pcds upgrade [VERSION] [--restart] | --rollback | --check
                          a new server release from GitHub (the latest, or VERSION) into the
                          standby bank, and the running world handed over to it with nobody
@@ -203,6 +204,8 @@ impl Ctx {
                     self.refresh_unit()?;
                     // A newer bank may read another tables format.
                     self.ensure_tables(None)?;
+                    // Start requests count toward the unit's start limit (5 in 10 minutes).
+                    quiet(&mut self.systemctl(&["reset-failed", &self.unit()]));
                 }
                 let code = passthrough(&mut self.systemctl(&[what, &self.unit()]))?;
                 if code == 0 {
@@ -214,6 +217,10 @@ impl Ctx {
                 return Ok(code);
             }
             ["upgrade", ..] => self.upgrade(&args[1..])?,
+            ["check-settings"] => {
+                self.check_settings()?;
+                say("server.env is fine for this release");
+            }
             ["status"] => self.status()?,
             ["status", "--json"] => self.status_json()?,
             ["logs"] => {

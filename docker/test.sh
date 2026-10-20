@@ -5,6 +5,8 @@
 #                                   what `make docker` builds)
 #   PCDS_TEST_DATA=DIR docker/test.sh IMAGE
 #                                   DIR holds game tables (netdata.json, ...), as for cargo test
+#   PCDS_TEST_PORTS="UDP ADMIN FEED" docker/test.sh IMAGE
+#                                   three ports to use instead of three free ones the system picks
 #
 # Checks that need no game run always (part 1): the image's updater installs a release into the
 # standby bank on a read-only root filesystem with /data a volume, and a start without the game
@@ -61,14 +63,14 @@ done
 docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "no image $IMAGE (make docker, or pass the image's name)"
 
 # Three ports free now (a made-up game's UDP port, the admin API, the release feed).
-PORTS="$(python3 - <<'EOF'
+PORTS="${PCDS_TEST_PORTS:-$(python3 - <<'EOF'
 import socket
 socks = [socket.socket(socket.AF_INET, socket.SOCK_DGRAM) for _ in range(3)]
 for s in socks:
     s.bind(("127.0.0.1", 0))
 print(" ".join(str(s.getsockname()[1]) for s in socks))
 EOF
-)"
+)}"
 set -- $PORTS
 UDP=$1 ADMIN=$2 FEED=$3
 

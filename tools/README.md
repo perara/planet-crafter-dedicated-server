@@ -30,10 +30,10 @@ Python 3.9+, standard library only.
 
 | Tool | What |
 |---|---|
-| `chaos.py` | Random faults (kill -9 and SIGSTOP of the bank or front, flips, save storms, a read-only folder, bad settings, chat hooks and S3 against a fake endpoint) with the invariants checked after each. |
+| `chaos.py` | Random faults (kill -9 and SIGSTOP of the bank, front or `pcds run`, the bank watchdog (a 125 s stop must replace the bank, a 10 s one must not), flips and real updates from a local release feed, world stop, start and switch, save storms, a read-only folder, bad settings, chat hooks and S3 against a fake endpoint, and plugin churn all the time: install, approve, disable, remove, damaged files, a plugin that traps in every event) with the invariants checked after each. `--unit pcds-qa-NAME` runs the server as `pcds run` under a transient systemd user unit (the service file's restart rules) instead of supervising it itself. |
 | `soak.py` | Players for hours; a sample every 30 s of CPU, memory, tick times and file sizes, to find leaks and drift. |
 | `churn.py` | Sessions that join and leave badly (vanish, never become a player, only handshake), driven by the ignored test `load::tests::churn`. |
-| `stress.py` | Four abuse scenarios on a fresh server each: `burst` (16 players acting every 200 down to 1 ms), `bigchat` (900 KB chat lines), `full` (40 rejoining players on a 16-player server), `stop` (the bank stopped for 30 and 120 s). |
+| `stress.py` | Six abuse scenarios on a fresh server each: `burst` (16 players acting every 200 down to 1 ms), `bigchat` (900 KB chat lines), `full` (40 rejoining players on a 16-player server), `stop` (the bank stopped for 30 and 120 s), `queuecap` (64 players sending 900 KB lines while the bank stands: the front drops the client with the most waiting at 256 MiB, and its memory stays bounded) and `slowclient` (four players stopped for 40 s: their sessions time out, the others do not notice). |
 | `limits.py` | The front's connection limits, with raw datagrams. |
 | `fuzz.py` | Garbage datagrams at the front's UDP port. |
 | `diskfull.py`, `diskfull.sh` | What the server does when the world's disk fills (the shell wrapper makes a small private tmpfs with `unshare`, no root). |

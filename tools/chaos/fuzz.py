@@ -55,20 +55,29 @@ def main():
         s.setblocking(False)
         return s
 
+    refused = [0]
+
+    def send(sock, data, to):
+        """sendto; the host's own firewall may answer EPERM now and then (an output rule): counted, not a failure of the server."""
+        try:
+            sock.sendto(data, to)
+        except PermissionError:
+            refused[0] += 1
+
     sent, sessions, t0 = 0, [], time.time()
     while time.time() - t0 < args.seconds:
         mode = rnd.randrange(6)
         if mode == 0:  # pure noise
             s = newsock(rnd.randrange(50))
-            s.sendto(rnd.randbytes(rnd.randrange(0, 1500)), target)
+            send(s, rnd.randbytes(rnd.randrange(0, 1500)), target)
             s.close()
         elif mode == 1:  # the signature's prefix with a random rest
             s = newsock(rnd.randrange(50))
-            s.sendto(SIG[:rnd.randrange(1, 5)] + rnd.randbytes(rnd.randrange(0, 40)), target)
+            send(s, SIG[:rnd.randrange(1, 5)] + rnd.randbytes(rnd.randrange(0, 40)), target)
             s.close()
         elif mode == 2:  # a session request; the socket is kept for the datagrams below
             s, tok = newsock(rnd.randrange(50)), rnd.randbytes(8)
-            s.sendto(SIG + b"\x01" + tok, target)
+            send(s, SIG + b"\x01" + tok, target)
             sessions.append((s, tok))
             if len(sessions) > 100:
                 sessions.pop(0)[0].close()
@@ -78,15 +87,15 @@ def main():
             body = bytes([kind]) + tok + rnd.randbytes(rnd.randrange(0, 1300))
             if kind == 1 and rnd.random() < 0.7:
                 body = bytes([1]) + tok + bytes([rnd.choice([3, 0, 1, 2, 4, 255])]) + rnd.randbytes(rnd.randrange(0, 40))
-            s.sendto(body, target)
+            send(s, body, target)
         elif mode == 4 and sessions:  # a reliable payload with a huge or negative batch length
             s, tok = rnd.choice(sessions)
             hdr = rnd.randbytes(2) + rnd.randbytes(2) + rnd.randrange(0, 65536).to_bytes(2, "little") + rnd.randrange(0, 65536).to_bytes(2, "little") + rnd.randbytes(8)
             payload = rnd.choice([(2**31 - 1).to_bytes(4, "little"), (-5).to_bytes(4, "little", signed=True), (1 << 20).to_bytes(4, "little"), b"\x00\x00\x00\x00", b""]) + rnd.randbytes(rnd.randrange(0, 200))
-            s.sendto(bytes([1]) + tok + bytes([3]) + hdr + payload, target)
+            send(s, bytes([1]) + tok + bytes([3]) + hdr + payload, target)
         else:  # oversize
             s = newsock(rnd.randrange(50))
-            s.sendto(rnd.randbytes(rnd.randrange(1500, 9000)), target)
+            send(s, rnd.randbytes(rnd.randrange(1500, 9000)), target)
             s.close()
         sent += 1
         if sent % 2000 == 0:
