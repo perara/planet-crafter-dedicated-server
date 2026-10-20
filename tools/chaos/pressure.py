@@ -13,9 +13,9 @@ prints one JSON line with the numbers and the failed checks. Exit status 0: ever
 (the numbers are for you to read: a loaded host stretches them, and they are marked so).
 
 Scenarios (--only a,b to choose; --minutes sets the length of each phase):
-  cpu       32 players on a free server, then on CPUQuota=100% (one core), then on 2 cores (AllowedCPUs); --cpu-tight: 12 % and 6 % of a core too
+  cpu       32 players on a free server, then on CPUQuota=100% (one core), then on 2 cores (AllowedCPUs); --cpu-runs adds a quota of 12 % and of 6 % of a core
   slowdisk  8 players, autosave and backup every minute, writes limited to --io (default 512K) a second, then reads too
-  memhigh   8 players under MemoryHigh (--memhigh, default 110M) with no swap: the reclaim of a small host
+  memhigh   8 players under MemoryHigh (--memhigh, default 128M and 96M) with no swap: the reclaim of a small host
   fds       100 players and 300 idle admin connections under LimitNOFILE=256
   worlds    20 small worlds, 200 switches between them (--switches), the memory, threads and descriptors after
   chat      16 players chatting 1500-character lines while the chat hook answers 500, hangs, and drops the connection
@@ -50,7 +50,7 @@ from longsoak import Fake  # noqa: E402
 class Run:
     """One scenario's server, its sampler and its verdict."""
 
-    def __init__(self, args, name, port, rules=None, props=(), cpus="8-15", env=None, world=None):
+    def __init__(self, args, name, port, rules=None, props=(), cpus="8-15", env=None, world=None, start_wait=90):
         self.args, self.name, self.port = args, name, port
         self.log = lib.Log(os.path.join(args.work, f"{name}.events"))
         self.verdict = lib.Verdict(name, self.log)
@@ -59,7 +59,9 @@ class Run:
         self.endpoint = f"http://{lib.LOOPBACK}:{port + 2}"
         base = {"save": {"autosaveMinutes": 1, "backupsKept": 6, "backupMinutes": 5}, "limits": {"maxPlayers": 40}, "world": {"dlcPlanets": ["Humble"]}}
         self.srv = lib.UnitSrv(name, args, f"pcds-qa-soak2-{name}", port=port, rules=lib.merge(base, rules or {}), env=env, cpus=cpus, props=props, world=world)
-        self.srv.start()
+        t_start = time.time()
+        self.srv.start(wait=start_wait)
+        self.start_seconds = round(time.time() - t_start, 1)
         self.t0 = time.time()
         self.rows = []
         self.csv = open(os.path.join(args.work, f"{name}.csv"), "w")
@@ -198,10 +200,10 @@ class Run:
 
 def scenario_cpu(args):
     ok = True
-    runs = [("free", (), "8-15"), ("quota1", ("CPUQuota=100%",), "8-15"), ("two", (), "20-21")]
-    if args.cpu_tight:  # a quota under what the bank needs (it uses about 10 % of a core with 32 players): the loop cannot keep up
-        runs += [("tight12", ("CPUQuota=12%",), "8-15"), ("tight6", ("CPUQuota=6%",), "8-15")]
-    for tag, props, cpus in runs:
+    every = {"free": ((), "8-15"), "quota1": (("CPUQuota=100%",), "8-15"), "two": ((), "20-21"),
+             # a quota under what the bank needs (it uses about 10 % of a core with 32 players): the loop cannot keep up
+             "tight12": (("CPUQuota=12%",), "8-15"), "tight6": (("CPUQuota=6%",), "8-15")}
+    for tag, (props, cpus) in [(k, every[k]) for k in args.cpu_runs.split(",")]:
         r = Run(args, f"cpu-{tag}", args.port, props=props, cpus=cpus)
         r.base_bad = lib.check_save(r.srv.world)[0]
         p = r.bots(32, args.minutes * 60 + 60)
@@ -247,21 +249,27 @@ def scenario_slowdisk(args):
 
 
 def scenario_memhigh(args):
-    r = Run(args, "memhigh", args.port, props=(f"MemoryHigh={args.memhigh}", "MemorySwapMax=0"))
-    r.base_bad = lib.check_save(r.srv.world)[0]
-    p = r.bots(8, args.minutes * 60 + 120)
-    n = r.wait_players(8, 180)
-    if n < 8:
-        r.fail("8 players did not get in under MemoryHigh", players=n)
-    r.phase_run("play", args.minutes * 60)
-    ev = ""
-    try:
-        ev = open(r.cg + "/memory.events").read().replace("\n", " ")
-    except Exception:
-        pass
-    w = r.window("play")
-    p.terminate()
-    return r.finish(window=w, memory_events=ev)
+    """The unit's memory.high below what the server wants and no swap: the kernel makes every allocation over it wait."""
+    ok = True
+    for high in args.memhigh.split(","):
+        r = Run(args, f"memhigh-{high}", args.port, props=(f"MemoryHigh={high}", "MemorySwapMax=0"), start_wait=600)
+        r.base_bad = lib.check_save(r.srv.world)[0]
+        r.log("started after", round(time.time() - r.t0), "s")
+        p = r.bots(8, args.minutes * 60 + 300)
+        n = r.wait_players(8, 300)
+        if n < 8:
+            r.fail("8 players did not get in under MemoryHigh", players=n)
+        r.phase_run("play", args.minutes * 60)
+        ev = ""
+        try:
+            ev = open(r.cg + "/memory.events").read().replace("\n", " ")
+        except Exception:
+            pass
+        w = r.window("play")
+        p.terminate()
+        ok &= r.finish(window=w, memory_events=ev, start_seconds=r.start_seconds)
+        time.sleep(5)
+    return ok
 
 
 def scenario_fds(args):
@@ -458,8 +466,8 @@ def main():
     ap.add_argument("--minutes", type=float, default=10, help="the length of a phase (default %(default)s)")
     ap.add_argument("--io", default="512K", help="slowdisk: bytes a second the unit may write and read (default %(default)s)")
     ap.add_argument("--device", default="/dev/nvme0n1", help="slowdisk: the disk the work folder is on (default %(default)s)")
-    ap.add_argument("--memhigh", default="110M", help="memhigh: MemoryHigh of the unit (default %(default)s)")
-    ap.add_argument("--cpu-tight", action="store_true", help="cpu: also with a CPUQuota of 12%% and of 6%% of a core")
+    ap.add_argument("--memhigh", default="128M,96M", help="memhigh: MemoryHigh of the unit, one run each (default %(default)s)")
+    ap.add_argument("--cpu-runs", default="free,quota1,two", help="cpu: which runs: free, quota1 (one core), two (two cores), tight12 and tight6 (a CPUQuota of 12%% and of 6%% of a core) (default %(default)s)")
     ap.add_argument("--switches", type=int, default=200, help="worlds: how many switches (default %(default)s)")
     ap.add_argument("--small-world", default="", help="worlds: a small save to copy 20 times")
     args = ap.parse_args()

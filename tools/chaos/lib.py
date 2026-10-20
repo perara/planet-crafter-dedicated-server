@@ -547,7 +547,7 @@ class Bots:
     def __init__(self, test, args, server, players=8, seconds=60, **env):
         exe = test_binary(args)
         e = steam_env(exe)
-        e.update(PCDS_TEST_DATA=args.data, PCDS_LOAD_SERVER=server, PCDS_LOAD_PLAYERS=str(players), PCDS_LOAD_SECONDS=str(seconds))
+        e.update(PCDS_TEST_DATA=args.data, PCDS_LOAD_SERVER=server, PCDS_LOAD_PLAYERS=str(players), PCDS_LOAD_SECONDS=str(int(seconds)))
         e.update({k: str(v) for k, v in env.items()})
         self.events = []
         self.p = subprocess.Popen([exe, f"load::tests::{test}", "--ignored", "--nocapture", "--exact"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=e, cwd=os.path.join(REPO, "server"))

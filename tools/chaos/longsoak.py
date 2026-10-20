@@ -47,6 +47,8 @@ import signal
 import subprocess
 import sys
 import tarfile
+import urllib.error
+import urllib.request
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -56,7 +58,7 @@ import lib  # noqa: E402
 
 COLS = ("t,f_rss,f_thr,f_fds,f_cpu,f_cpu_pct,b_pid,b_rss,b_thr,b_fds,b_cpu,b_cpu_pct,busy,longest_us,winmax_longest_us,winmax_busy,fps,tick_p50_us,tick_p99_us,tick_max_us,wo,net,inv,players,gametime,"
         "save_bytes,backups,backups_bytes,home_bytes,log_bytes,log_lines,udp_rx,udp_tx,tcp_admin,plugins_running,plugin_faults,s3_hits,hook_hits,plug_hits,"
-        "st_ms_p50,st_ms_max,st_fails,bytes_in,bytes_out,flips,crashes,unit_anon,unit_mem,unit_restarts,phase").split(",")
+        "st_ms_p50,st_ms_max,st_fails,bytes_in,bytes_out,flips,crashes,unit_anon,unit_mem,unit_restarts,m_scrapes,m_bad,m_series,m_bytes,m_ms,m_rss_front,m_rss_bank,doctor_rc,phase").split(",")
 
 RULE_SETS = [
     {"speed": {"growth": 2, "machines": 1}, "gauges": {"oxygenDrain": 1, "thirstDrain": 1}, "meteo": {"eventChance": 1}, "loot": {"amount": 1}},
@@ -121,6 +123,13 @@ class Fake:
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
 
 
+def _json_line(line):
+    try:
+        return isinstance(json.loads(line), dict)
+    except ValueError:
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter, epilog="See the header of this file for requirements and what a pass is.")
     lib.add_server_args(ap, port=8640)
@@ -130,6 +139,7 @@ def main():
     ap.add_argument("--unit", default="pcds-qa-soak2-long", help="the transient systemd user unit (must start with pcds-qa-)")
     ap.add_argument("--cpus", default="8-15", help="AllowedCPUs of the unit (default %(default)s)")
     ap.add_argument("--netplugin", default="", help="folder of a built net.http plugin (plugin.toml, plugin.wasm) that posts to http://127.0.0.1:PORT+3/hook")
+    ap.add_argument("--ops", action="store_true", help="a build with /api/metrics and pcds doctor (the ops-ready release): log.format json, save.verifyBackups, a scrape of /api/metrics every 15 s checked as Prometheus text, pcds doctor every hour")
     ap.add_argument("--steady", type=int, default=8, help="players of the steady load (default %(default)s)")
     ap.add_argument("--examples", default=os.path.join(lib.REPO, "examples", "plugins"), help="the example plugins (default %(default)s)")
     args = ap.parse_args()
@@ -160,6 +170,9 @@ def main():
     endpoint = f"http://{lib.LOOPBACK}:{PORT + 3}"
 
     rules = {"save": {"autosaveMinutes": 1, "backupsKept": 24, "backupMinutes": 10}, "limits": {"maxPlayers": 40}, "world": {"dlcPlanets": ["Humble"]}}
+    if args.ops:
+        rules["log"] = {"format": "json"}
+        rules["save"]["verifyBackups"] = True
     srv = lib.UnitSrv("long", args, args.unit, rules=rules, env={"PCDS_RELEASES": f"{endpoint}/releases"}, cpus=args.cpus)
     home = srv.home
     srv.start()
@@ -511,6 +524,88 @@ def main():
         fake.modes[kind] = old
         L("outage", kind, "end")
 
+    # ---- /api/metrics every 15 s, checked as Prometheus text; pcds doctor every hour -----------------
+    mt = dict(scrapes=0, bad=0, series=-1, bytes=-1, ms=-1, rss_front=-1, rss_bank=-1, doctor_rc=-1, last={}, families=set())
+    mlog = open(os.path.join(work, "metrics.log"), "w")
+
+    def parse_metrics(text):
+        series = {}
+        types = {}
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            if line.startswith("#"):
+                p = line.split()
+                if len(p) >= 4 and p[1] == "TYPE":
+                    types[p[2]] = p[3]
+                continue
+            key, _, val = line.rpartition(" ")
+            v = float(val)
+            if v != v or v in (float("inf"), float("-inf")):
+                raise ValueError(f"not finite: {line[:80]}")
+            if key in series:
+                raise ValueError(f"duplicate series: {key[:80]}")
+            series[key] = v
+        return series, types
+
+    def scrape():
+        while not stop.is_set():
+            t1 = time.time()
+            s, body = api_text("/api/metrics")
+            ms = (time.time() - t1) * 1000
+            if s == 200:
+                try:
+                    series, types = parse_metrics(body)
+                    mt["scrapes"] += 1
+                    mt["series"], mt["bytes"], mt["ms"] = len(series), len(body), round(ms)
+                    for k, v in series.items():
+                        name = k.split("{")[0]
+                        if name == "pcds_memory_resident_bytes":
+                            if 'process="front"' in k:
+                                mt["rss_front"] = v
+                            elif 'process="bank"' in k or 'process="game"' in k:
+                                mt["rss_bank"] = v
+                        if name.endswith("_total") and not name.startswith("pcds_plugin_") and k in mt["last"] and v < mt["last"][k]:
+                            mt["bad"] += 1
+                            mlog.write(f"{round(time.time() - log.t0)} counter went back: {k} {mt['last'][k]} -> {v}\n")
+                            mlog.flush()
+                    for name, kind in types.items():
+                        if kind == "counter" and not name.startswith("pcds_plugin_") and name not in series and not any(k.startswith(name) for k in series):
+                            pass
+                    mt["last"] = series
+                    if any(not k.startswith("pcds_") for k in series):
+                        mt["bad"] += 1
+                        mlog.write(f"{round(time.time() - log.t0)} foreign series\n")
+                except Exception as e:
+                    mt["bad"] += 1
+                    mlog.write(f"{round(time.time() - log.t0)} unparsable: {e!r}\n")
+                    mlog.flush()
+            elif s != 0:
+                mt["bad"] += 1
+                mlog.write(f"{round(time.time() - log.t0)} HTTP {s}\n")
+                mlog.flush()
+            stop.wait(max(0.0, 15 - (time.time() - t1)))
+
+    def api_text(path):
+        import urllib.request
+        req = urllib.request.Request(f"http://{lib.LOOPBACK}:{srv.admin}{path}", headers={"Authorization": f"Bearer {srv.token}"})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode(errors="replace")
+        except Exception as e:
+            return 0, str(e)
+
+    def doctor():
+        r = subprocess.run([srv.pcds, "doctor"], env=srv.cli_env, capture_output=True, text=True, timeout=300)
+        mt["doctor_rc"] = r.returncode
+        open(os.path.join(work, "doctor.log"), "a").write(f"=== t={round(time.time() - log.t0)} rc={r.returncode}\n{r.stdout}{r.stderr}\n")
+        L("doctor rc", r.returncode, len((r.stdout + r.stderr).splitlines()), "lines")
+
+    if args.ops:
+        threading.Thread(target=scrape, daemon=True).start()
+
     # ---- the timetable --------------------------------------------------------------------------
     ev = []
 
@@ -536,6 +631,8 @@ def main():
         at(m(59.5), "churn end", churn_end)
         at(m(58), "integrity", integrity, f"hour {h}")
         at(m(1), "plugin sample", plugins_snapshot)
+        if args.ops:
+            at(m(3), "doctor", doctor)
         if h in (3, 7, 11):
             at(m(17), "real update", real_update)
         if h % 2 == 1 and h >= 1:
@@ -662,7 +759,7 @@ def main():
                        plugins_running=pl.get("running", -1), plugin_faults=pl.get("faults", -1), s3_hits=fake.hits["s3"], hook_hits=fake.hits["chat"], plug_hits=fake.hits["plug"],
                        st_ms_p50=round(row_win["p50"], 1), st_ms_max=round(row_win["mx"], 1), st_fails=row_win["fails"],
                        bytes_in=(j.get("traffic") or {}).get("bytesIn", -1), bytes_out=(j.get("traffic") or {}).get("bytesOut", -1), flips=bk.get("flips", -1), crashes=bk.get("crashes", -1),
-                       unit_anon=anon, unit_mem=mem, unit_restarts=srv.unit_state().get("NRestarts", -1), phase=phase_at(el))
+                       unit_anon=anon, unit_mem=mem, unit_restarts=srv.unit_state().get("NRestarts", -1), m_scrapes=mt["scrapes"], m_bad=mt["bad"], m_series=mt["series"], m_bytes=mt["bytes"], m_ms=mt["ms"], m_rss_front=mt["rss_front"], m_rss_bank=mt["rss_bank"], doctor_rc=mt["doctor_rc"], phase=phase_at(el))
             csv.write(",".join(str(row[c]) for c in COLS) + "\n")
             csv.flush()
         time.sleep(0.5)
@@ -686,6 +783,13 @@ def main():
         verdict.fail("the final stop did not exit 0", rc=rc)
     if "panicked" in text:
         verdict.fail("a panic in the server log", log=srv.log)
+    if args.ops:
+        bad_lines = [l for l in text.splitlines() if l.strip() and not _json_line(l)]
+        L("log lines that are not JSON:", len(bad_lines), bad_lines[:3])
+        if len(bad_lines) > 20:  # a few lines of the start (before the rules are read) and of a killed process may not be
+            verdict.fail("the log is not JSON lines", not_json=len(bad_lines), first=bad_lines[:3])
+        if mt["bad"]:
+            verdict.fail("the metrics were not valid or counters went back", bad=mt["bad"])
     # A restart from the final save: every container is still there.
     before = lib.containers(srv.world)
     srv.start(wait=120)
