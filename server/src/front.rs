@@ -58,6 +58,14 @@ const MAX_SPLIT: usize = 1 << 20;
 /// A client's frames waiting for the bank (a stalled or flipping world) past this: the client
 /// is dropped, not the world.
 const MAX_CLIENT_QUEUE: usize = 16 << 20;
+/// All clients' frames waiting for the bank together (held while the world stands for a flip,
+/// or queued to a bank that does not read): past this the client with the most waiting, the one
+/// the stall hurts most, is dropped, until the new frame fits. 128 clients at MAX_CLIENT_QUEUE
+/// each would hold two gigabytes.
+const MAX_TOTAL_QUEUE: usize = 256 << 20;
+/// A stall that had this much waiting, once over, gives the memory back to the system (the
+/// allocator keeps freed memory of that size in the process).
+const TRIM_AFTER: usize = 8 << 20;
 /// At a stop, the live bank gets this long to take STOP and save, then as long again to end,
 /// before it is killed: 60 s in all, under the supervisor's 20 s for orphans (cli/setup.rs
 /// BANKS_GRACE) and systemd's TimeoutStopSec=90 (and Docker's --stop-timeout 90), so
@@ -196,6 +204,11 @@ struct Front {
     /// Frames for the bank while the world stands (and their bytes per client).
     held: Vec<(u8, u64, Vec<u8>, u64)>,
     held_bytes: HashMap<u64, usize>,
+    /// The sum of held_bytes; the most that waited since the last time the memory was given back.
+    held_total: usize,
+    waiting_peak: usize,
+    /// MAX_TOTAL_QUEUE (a field for the tests).
+    queue_cap: usize,
     /// The last snapshot a flip carried: a crashed bank starts from it when it is newer than
     /// the save.
     last_snapshot: Option<(OwnedFd, SystemTime)>,
@@ -311,6 +324,9 @@ impl Front {
             flip: None,
             held: Vec::new(),
             held_bytes: HashMap::new(),
+            held_total: 0,
+            waiting_peak: 0,
+            queue_cap: MAX_TOTAL_QUEUE,
             last_snapshot: None,
             recover_from: None,
             crashes: VecDeque::new(),
@@ -591,6 +607,7 @@ impl Front {
             self.supervise();
             sent |= self.drops();
             self.flush_banks();
+            self.release_memory();
             if self.phase == Phase::Restoring
                 && let (Some(flip), Some(n)) = (self.flip.as_mut(), self.next.as_ref())
                 && flip.at[2] == 0
@@ -811,8 +828,10 @@ impl Front {
         };
         if client != 0 && queued + body.len() > MAX_CLIENT_QUEUE {
             eprintln!("client {client}: over {} MiB waiting for the game; dropped", MAX_CLIENT_QUEUE >> 20);
-            self.kicked.insert(client);
-            self.close(client);
+            self.drop_waiting(client);
+            return;
+        }
+        if client != 0 && !self.make_room(client, body.len() + 13) {
             return;
         }
         match (&mut self.live, holding) {
@@ -820,9 +839,70 @@ impl Front {
             _ => {
                 if client != 0 {
                     *self.held_bytes.entry(client).or_default() += body.len() + 13;
+                    self.held_total += body.len() + 13;
                 }
                 self.held.push((kind, n, body.to_vec(), client));
             }
+        }
+    }
+
+    /// What all clients have waiting for the bank.
+    fn waiting_total(&self) -> usize {
+        self.held_total + self.live.as_ref().map_or(0, |b| b.link.queued_total)
+    }
+
+    /// The client with the most bytes waiting (held and queued), and how many.
+    fn slowest_waiting(&self) -> Option<(u64, usize)> {
+        let mut per: HashMap<u64, usize> = self.held_bytes.clone();
+        for (client, bytes) in self.live.iter().flat_map(|b| b.link.queued.iter()) {
+            *per.entry(*client).or_default() += bytes;
+        }
+        per.into_iter().max_by_key(|(client, bytes)| (*bytes, *client)).filter(|(_, bytes)| *bytes > 0)
+    }
+
+    /// Room for `need` more bytes among all clients' waiting frames: the client with the most
+    /// waiting is dropped, again and again, until it fits. False when that was `client` itself.
+    fn make_room(&mut self, client: u64, need: usize) -> bool {
+        while self.waiting_total() + need > self.queue_cap {
+            let Some((slowest, bytes)) = self.slowest_waiting() else { break };
+            eprintln!(
+                "client {slowest}: {} MiB waiting for the game, the most of the {} MiB all clients have waiting (at most {} MiB): dropped",
+                bytes >> 20,
+                self.waiting_total() >> 20,
+                self.queue_cap >> 20
+            );
+            self.drop_waiting(slowest);
+            if slowest == client {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// A client dropped for what it has waiting: its frames not yet sent to the bank are
+    /// taken back (they are the memory), then it is closed.
+    fn drop_waiting(&mut self, client: u64) {
+        if let Some(bytes) = self.held_bytes.remove(&client) {
+            self.held_total = self.held_total.saturating_sub(bytes);
+            self.held.retain(|h| h.3 != client);
+        }
+        if let Some(b) = self.live.as_mut() {
+            b.link.purge(client);
+        }
+        self.kicked.insert(client);
+        self.close(client);
+    }
+
+    /// After a stall that held a lot of memory, once it is over: the freed memory goes back to
+    /// the system (glibc keeps what a burst of large frames freed).
+    fn release_memory(&mut self) {
+        let waiting = self.waiting_total();
+        self.waiting_peak = self.waiting_peak.max(waiting);
+        if self.waiting_peak >= TRIM_AFTER && waiting < TRIM_AFTER / 64 {
+            println!("memory: {} MiB waited for the game at most; given back to the system", self.waiting_peak >> 20);
+            self.waiting_peak = 0;
+            // SAFETY: malloc_trim only returns free memory to the system.
+            unsafe { libc::malloc_trim(0) };
         }
     }
 
@@ -830,6 +910,7 @@ impl Front {
     fn release_held(&mut self) -> usize {
         let held = std::mem::take(&mut self.held);
         self.held_bytes.clear();
+        self.held_total = 0;
         let n = held.len();
         if let Some(b) = self.live.as_mut() {
             for (kind, num, body, client) in held {
@@ -1190,6 +1271,7 @@ impl Front {
         }
         self.held.clear();
         self.held_bytes.clear();
+        self.held_total = 0;
         self.answers.clear();
         // The snapshot stays held: should this bank die too before it saves, the next one
         // starts from it again.
@@ -1713,6 +1795,7 @@ impl Front {
         }
         self.held.clear();
         self.held_bytes.clear();
+        self.held_total = 0;
         for (_, (reply, _)) in self.answers.drain() {
             let _ = reply.send((503, "{\"error\":\"the world stopped\"}".into()));
         }
@@ -2394,6 +2477,119 @@ mod tests {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+
+    /// All the clients' frames waiting for the bank have a total cap: past it the client with the most
+    /// waiting is dropped (its frames taken back), whether it is the sender or another, and the
+    /// accounting follows the frames in and out.
+    #[test]
+    fn what_all_clients_have_waiting_for_the_bank_is_capped_by_dropping_the_slowest() {
+        let mut front = test_front();
+        front.queue_cap = 4 << 20;
+        let (live, _bank) = fake_bank("a");
+        front.live = Some(live);
+        // Three clients (their connections are only entries here).
+        for client in 1..=3u64 {
+            front.conns.insert(client, Conn::Ip([client as u8; 8]));
+        }
+        let mib = vec![7u8; (1 << 20) - 13];
+        // The bank is not reading: frames pile up in the link's queue. 2 MiB, 1 MiB, 0.
+        for (client, count) in [(1u64, 2), (2, 1)] {
+            for _ in 0..count {
+                front.to_bank(ipc::DATA, client, &mib, client);
+            }
+        }
+        assert_eq!(front.waiting_total(), 3 << 20);
+        assert_eq!(front.slowest_waiting(), Some((1, 2 << 20)));
+        // 1 MiB more from client 3 does not fit beside the 3: client 1 has the most and goes.
+        front.to_bank(ipc::DATA, 3, &mib, 3);
+        front.to_bank(ipc::DATA, 3, &mib, 3);
+        assert!(!front.conns.contains_key(&1) && front.conns.contains_key(&2) && front.conns.contains_key(&3), "client 1 was dropped");
+        assert_eq!(front.live.as_ref().unwrap().link.queued.get(&1), None, "its frames were taken back");
+        assert_eq!(front.waiting_total(), 3 << 20, "client 2's and client 3's: {:?}", front.live.as_ref().unwrap().link.queued);
+        // Held while the world stands (a flip): the same, from the held frames.
+        front.phase = Phase::Snapshotting;
+        front.live.as_mut().unwrap().link.purge(2);
+        front.live.as_mut().unwrap().link.purge(3);
+        assert_eq!(front.waiting_total(), 0);
+        for _ in 0..3 {
+            front.to_bank(ipc::DATA, 2, &mib, 2);
+        }
+        front.to_bank(ipc::DATA, 3, &mib, 3);
+        assert_eq!((front.held_total, front.held_bytes.len()), (4 << 20, 2));
+        // Client 3 asks for more: 2 has the most, 2 goes (held frames removed, total follows).
+        front.to_bank(ipc::DATA, 3, &mib, 3);
+        assert!(!front.conns.contains_key(&2) && front.conns.contains_key(&3));
+        assert_eq!((front.held_total, front.held.iter().filter(|h| h.3 == 2).count()), (2 << 20, 0));
+        // A client alone that is over the cap itself is dropped, the frame not kept.
+        for _ in 0..3 {
+            front.to_bank(ipc::DATA, 3, &mib, 3);
+        }
+        assert!(!front.conns.contains_key(&3));
+        assert_eq!(front.held_total, 0);
+        // Released: only the GONE frames of the two clients that were dropped in the hold are left, and nothing is counted as waiting.
+        assert_eq!(front.release_held(), 2);
+        assert_eq!(front.waiting_total(), 0);
+        for mut child in [front.live.take()].into_iter().flatten().map(|b| b.child) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    /// A measurement, not a check (run by hand: cargo test --release front::tests::measure_ -- --ignored
+    /// --nocapture --test-threads=1): a stall that holds 192 MiB of client frames (12000 of 16 KiB
+    /// from 64 clients), released into a bank that reads again, and the resident memory of the
+    /// process before, at the peak, after the queue drained, and after release_memory().
+    #[test]
+    #[ignore]
+    fn measure_memory_after_a_stall() {
+        let rss = || std::fs::read_to_string("/proc/self/statm").unwrap().split_whitespace().nth(1).unwrap().parse::<usize>().unwrap() * 4096 >> 20;
+        let mut front = test_front();
+        front.queue_cap = usize::MAX;
+        let (live, mut peer) = fake_bank("a");
+        front.live = Some(live);
+        front.phase = Phase::Snapshotting;
+        let reader = std::thread::spawn(move || {
+            let mut seen = 0usize;
+            // The bank reads again once the front lets the frames go.
+            while peer.fill(usize::MAX) {
+                while peer.next().is_some() {
+                    seen += 1;
+                }
+            }
+            seen
+        });
+        let before = rss();
+        let body = vec![5u8; 16 << 10];
+        let mut small = Vec::new();
+        for i in 0..12_000u64 {
+            front.to_bank(ipc::DATA, 1 + i % 64, &body, 1 + i % 64);
+            // What the front allocates meanwhile and keeps (connections, log lines, tables): the heap
+            // cannot shrink from its end past it.
+            if i % 8 == 0 {
+                small.push(vec![1u8; 200]);
+            }
+        }
+        let peak = rss();
+        assert_eq!(front.held_total >> 20, 12_000 * (16 << 10) >> 20);
+        front.phase = Phase::Idle;
+        front.release_held();
+        while front.live.as_ref().unwrap().link.pending() {
+            front.flush_banks();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let drained = rss();
+        front.waiting_peak = front.waiting_peak.max(TRIM_AFTER);
+        front.release_memory();
+        let trimmed = rss();
+        println!("resident memory of the front: {before} MiB before, {peak} MiB holding 192 MiB of frames, {drained} MiB after the queue drained, {trimmed} MiB after release_memory()");
+        drop(small);
+        let live = front.live.take().unwrap();
+        drop(live.link);
+        let mut child = live.child;
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(reader.join().unwrap(), 12_000);
     }
 
     /// What the live bank says of the rules the front acts on (OPS) sets the autosave timer and
