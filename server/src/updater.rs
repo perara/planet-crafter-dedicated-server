@@ -379,10 +379,40 @@ pub fn rolled_back(banks: &Path) -> Option<Value> {
 
 /// A rollback away from `bank`: it is noted with the release it holds.
 pub fn set_rolled_back(banks: &Path, bank: &str) -> Result<(), String> {
+    note_rolled_back(banks, bank, None)
+}
+
+/// The front's own rollback: the release in `bank` ended the game over and over after it was
+/// flipped to (front::Front::give_up). The note also says why and when, for the dashboard and
+/// `pcds status` (a rollback of the owner's is not explained: they asked for it).
+pub fn set_rolled_back_by_crashes(banks: &Path, bank: &str, why: &str) -> Result<(), String> {
+    note_rolled_back(banks, bank, Some(why))
+}
+
+fn note_rolled_back(banks: &Path, bank: &str, why: Option<&str>) -> Result<(), String> {
     let held = info(banks, bank).unwrap_or_default();
     let tag = held["tag"].as_str().map(str::to_string).or_else(|| held["version"].as_str().map(tag));
+    let mut note = json!({"bank": bank, "tag": tag});
+    if let Some(why) = why {
+        note["reason"] = why.into();
+        note["at"] = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).into();
+    }
     let _lock = lock(banks)?;
-    crate::cli::replace_file(&banks.join("rolled-back"), (json!({"bank": bank, "tag": tag}).to_string() + "\n").as_bytes(), 0o644)
+    crate::cli::replace_file(&banks.join("rolled-back"), (note.to_string() + "\n").as_bytes(), 0o644)
+}
+
+/// The bank a release that keeps ending the game is given up for: the other one. Err (why not):
+/// it holds no release, or it is the one the server was rolled back from (the release in `bad`
+/// was installed after it): going back would only bring the old trouble back.
+pub fn crash_rollback_target(banks: &Path, bad: &str) -> Result<&'static str, String> {
+    let to = other(bad);
+    if info(banks, to).is_none() {
+        return Err(format!("bank {to} holds no release to go back to"));
+    }
+    if rolled_back(banks).is_some_and(|r| r["bank"] == to) {
+        return Err(format!("bank {to} is the one the server was rolled back from"));
+    }
+    Ok(to)
 }
 
 pub fn clear_rolled_back(banks: &Path) -> Result<(), String> {
@@ -474,7 +504,7 @@ fn version_key(v: &str) -> (Vec<u64>, bool, Vec<Part<'_>>) {
 /// The admin API's view of the banks.
 pub fn describe(banks: &Path) -> Value {
     let installed: Vec<Value> = BANKS.iter().map(|b| json!({"bank": b, "info": info(banks, b)})).collect();
-    json!({"dir": banks, "active": active(banks), "installed": installed, "fallback": fallback(banks)})
+    json!({"dir": banks, "active": active(banks), "installed": installed, "fallback": fallback(banks), "rolledBack": rolled_back(banks)})
 }
 
 #[cfg(test)]
@@ -732,6 +762,32 @@ pub mod tests {
         assert_eq!(rolled_back(&dir).unwrap()["tag"], "v0.7.1");
         clear_rolled_back(&dir).unwrap();
         clear_rolled_back(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A release that keeps ending the game is given up for the other bank, with the reason in
+    /// the note; never for an empty bank, nor for the bank the server was rolled back from.
+    #[test]
+    fn a_release_that_keeps_crashing_is_given_up_for_the_other_bank_when_there_is_one() {
+        let dir = test_dir("crash-rollback");
+        let bank = |name: &str, tag: &str| {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+            std::fs::write(dir.join(name).join("pcds"), "").unwrap();
+            write_info(&dir.join(name), &json!({"version": "0.7.0", "tag": tag})).unwrap();
+        };
+        bank("b", "v0.7.0");
+        assert!(crash_rollback_target(&dir, "b").unwrap_err().contains("bank a holds no release"), "an empty bank is not gone back to");
+        bank("a", "v0.6.0");
+        assert_eq!(crash_rollback_target(&dir, "b").unwrap(), "a");
+        set_rolled_back_by_crashes(&dir, "b", "ended the game 6 times").unwrap();
+        let note = rolled_back(&dir).unwrap();
+        assert_eq!((note["bank"].as_str(), note["tag"].as_str(), note["reason"].as_str()), (Some("b"), Some("v0.7.0"), Some("ended the game 6 times")));
+        assert!(note["at"].as_u64().unwrap() > 0);
+        assert_eq!(describe(&dir)["rolledBack"], note, "shown in the banks of /api/status");
+        // The automatic update leaves that release out, like any rollback.
+        assert!(auto_skips(&dir, "v0.7.0").unwrap().unwrap().contains("rolled back from"));
+        // And a bank that was rolled back from is not the target of the next give-up.
+        assert!(crash_rollback_target(&dir, "a").unwrap_err().contains("bank b is the one the server was rolled back from"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

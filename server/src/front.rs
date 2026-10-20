@@ -200,6 +200,10 @@ struct Front {
     /// What a recovering bank starts from: the snapshot (else the save).
     recover_from: Option<OwnedFd>,
     crashes: VecDeque<Instant>,
+    /// The bank a flip (an update, a rollback) made the live one in this front's life; None
+    /// when the live bank is the one the front started with. A release that ends the game over
+    /// and over is given up (give_up) only when it came by a flip.
+    flipped: Option<String>,
     exiting: Vec<(Child, Instant)>,
     /// Writes of the banks folder's files that a flip made (they flush to disk, which takes as
     /// long as the disk does): off the front's thread, joined at shutdown.
@@ -303,6 +307,7 @@ impl Front {
             last_snapshot: None,
             recover_from: None,
             crashes: VecDeque::new(),
+            flipped: None,
             exiting: Vec::new(),
             persisting: Vec::new(),
             admin: None,
@@ -365,6 +370,12 @@ impl Front {
     /// The first bank, waited for (nobody is connected yet): the active one, else the other one
     /// when the active one cannot start (a broken update), as a bootloader falls back.
     fn boot(&mut self) {
+        // A rollback the previous front made for crashes is in the history of this one (the
+        // note outlives it: banks/rolled-back, until a later release or an update clears it).
+        if let Some(r) = self.banks.as_deref().and_then(updater::rolled_back).filter(|r| r["reason"].is_string()) {
+            let message = format!("the release in bank {} ({}) was given up: {}; the server went back to bank {}", r["bank"].as_str().unwrap_or("?"), r["tag"].as_str().unwrap_or("?"), r["reason"].as_str().unwrap_or(""), updater::other(r["bank"].as_str().unwrap_or("")));
+            self.updates.history.push_back(json!({"seq": 0, "ok": false, "message": message, "at": r["at"], "rolledBack": true, "bank": r["bank"], "tag": r["tag"]}));
+        }
         let first = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
         let mut kept = self.kept_snapshot().unwrap_or_else(|e| {
             eprintln!("{e}");
@@ -997,6 +1008,9 @@ impl Front {
         }
         let stood = flip.stopped.map(|t| released.duration_since(t)).unwrap_or_default();
         self.flips += 1;
+        // The crashes counted so far were another release's: the new one starts with none.
+        self.crashes.clear();
+        self.flipped = Some(to.clone());
         let verified = match ready["verified"].as_bool() {
             Some(true) => format!("; the restored state is the snapshot's, checked in {:.1} ms (in the stand)", ready["verifyMs"].as_f64().unwrap_or(0.0)),
             _ => String::new(),
@@ -1139,8 +1153,7 @@ impl Front {
             self.crashes.pop_front();
         }
         if self.crashes.len() > MAX_CRASHES {
-            eprintln!("the game ended {} times within {} minutes: stopping (systemd starts the server again)", self.crashes.len(), CRASH_WINDOW.as_secs() / 60);
-            self.shutdown(1);
+            self.give_up(bank);
         }
         let clients: Vec<u64> = self.conns.keys().copied().collect();
         let reason = crate::bank::reason_batch(RESTARTED);
@@ -1178,6 +1191,31 @@ impl Front {
                 self.shutdown(1);
             }
         }
+    }
+
+    /// More crashes than MAX_CRASHES within CRASH_WINDOW: the front ends (the supervisor starts
+    /// it again). When the bank that keeps ending came by a flip of this front, the release in
+    /// it is given up first: it is noted as rolled back (the automatic update leaves it out) and
+    /// `active` points at the other bank, so the supervisor's restart runs the release that ran
+    /// before. Without that the restart would start the same bank, for ever.
+    fn give_up(&mut self, bank: &str) -> ! {
+        let seen = format!("the game ended {} times within {} minutes", self.crashes.len(), CRASH_WINDOW.as_secs() / 60);
+        let rolled = match (&self.banks, self.flipped.as_deref() == Some(bank)) {
+            (Some(dir), true) => updater::crash_rollback_target(dir, bank).and_then(|to| {
+                let tag = updater::info(dir, bank).map_or("?".into(), |i| i["tag"].as_str().or(i["version"].as_str()).unwrap_or("?").to_string());
+                let why = format!("{seen} after it was flipped to");
+                updater::set_rolled_back_by_crashes(dir, bank, &why)?;
+                updater::set_active(dir, to)?;
+                Ok(format!("ROLLED BACK: the release in bank {bank} ({tag}) is given up, {why}: the server stops and starts again in bank {to}; the automatic update leaves {tag} out (pcds upgrade {tag} installs it)"))
+            }),
+            (Some(_), false) => Err(format!("bank {bank} was the active one when this server started")),
+            (None, _) => Err("this server runs from a build, without banks".into()),
+        };
+        match rolled {
+            Ok(line) => eprintln!("{line}"),
+            Err(why) => eprintln!("{seen}: stopping (systemd starts the server again); no rollback: {why}"),
+        }
+        self.shutdown(1)
     }
 
     /// Timeouts and the old banks' ends.
@@ -1673,6 +1711,7 @@ impl Front {
         self.game_version = b.hello["gameVersion"].as_str().unwrap_or("").to_string();
         *self.web.write().unwrap_or_else(|e| e.into_inner()) = self.web_page(&bank);
         self.live = Some(b);
+        self.flipped = None;
         self.phase = Phase::Idle;
         self.next_save = Instant::now() + Duration::from_secs(self.autosave_minutes.max(1) * 60);
         let name = self.world_name();

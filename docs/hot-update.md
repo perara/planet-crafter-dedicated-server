@@ -87,7 +87,13 @@ last snapshot when it is newer than the save, else from the save (either way `ac
 `rules.json` are read again from disk, so a ban after the last flip stays), tells its players "The server
 restarted after an error: join again" and closes their connections; the Steam login and the
 invite code stay. A snapshot restored this way drops every client in it. More than 5 crashes in
-10 minutes and the front exits (systemd's restart and start limit take over). At the first
+10 minutes and the front exits (systemd's restart and start limit take over). When the bank
+that keeps ending came by a flip of this front (an update), the release in it is given up
+first: `run/bin/rolled-back` notes it with the reason (the automatic update leaves that
+release out), `active` points at the other bank, and the restart runs the release that ran
+before; not when that bank is empty or is the one the owner rolled back from (the log says
+`no rollback:` and why). The reason is in `/api/update`'s history, `/api/status` (`banks.rolledBack`)
+and `pcds status`. At the first
 start, a bank that cannot load the world makes the front try the other bank once (a broken
 update falls back to the release that ran before), and writes `run/bin/fallback`. Every HELLO,
 at boot, flip or recovery, is checked the same way; a recovering bank of another protocol stops

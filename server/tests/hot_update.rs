@@ -976,6 +976,89 @@ fn a_new_bank_that_ends_after_its_flip_restarts_from_the_flips_snapshot() {
     bank_killed_in("new-after-ready");
 }
 
+/// The front's end, waited for (None: still running after `secs`).
+fn exit_within(server: &mut Server, secs: u64) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < deadline {
+        if let Some(status) = server.child.try_wait().unwrap() {
+            return Some(status);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    None
+}
+
+/// This build behind a script that makes its game end 1 s after every READY: a release that flips
+/// fine and then fails under load.
+fn crashing_program(dir: &Path) -> PathBuf {
+    let program = dir.join("crashing-pcds");
+    // bank-info runs with a cleared environment: the Steam library's folder is given here.
+    let lib = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+    std::fs::write(&program, format!("#!/bin/sh\nLD_LIBRARY_PATH=\"{lib}\" PCDS_DEV=\"${{PCDS_DEV:+$PCDS_DEV,}}bank-fail=die-after-ready\" exec {PCDS} \"$@\"\n")).unwrap();
+    std::fs::set_permissions(&program, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    program
+}
+
+/// A release that flips fine and then ends the game under load: after the crash limit the front
+/// gives it up (the note, `active`, an exit), and the front the supervisor starts again runs the
+/// bank that ran before, with the reason in /api/update and /api/status.
+#[test]
+fn a_release_that_keeps_crashing_after_its_update_is_given_up() {
+    let Some(data) = tables() else { return };
+    let dir = world_dir("crash-rollback", &data);
+    let banks = banks(&dir);
+    let releases = release_server(release(&dir, "v9.9.9", &crashing_program(&dir), false));
+    let mut server = start(&dir, &data, &banks, &releases);
+    let players = load(&server, &data, 2, 90);
+    std::thread::sleep(Duration::from_secs(3));
+    let done = server.update(json!({"version": "v9.9.9"}));
+    assert_eq!(done["ok"], true, "{done}\n{}", server.log());
+    // Six endings of the game within ten minutes: the sixth is more than the limit.
+    let status = exit_within(&mut server, 240).unwrap_or_else(|| panic!("the front did not give the release up\n{}", server.log()));
+    let log = server.log();
+    assert_eq!(status.code(), Some(1), "{log}");
+    assert!(log.matches("restarting bank b").count() == 5 && log.contains("ROLLED BACK: the release in bank b (v9.9.9)"), "{log}");
+    assert_eq!(active_bank(&banks), "a");
+    let note: Value = serde_json::from_str(&std::fs::read_to_string(banks.join("rolled-back")).unwrap()).unwrap();
+    assert_eq!((note["bank"].as_str(), note["tag"].as_str()), (Some("b"), Some("v9.9.9")), "{note}");
+    assert!(note["reason"].as_str().unwrap().contains("ended 6 times within 10 minutes after it was flipped to"), "{note}");
+    let _ = finish(players);
+    // The supervisor starts the front again: bank a runs the world, and says why.
+    drop(server);
+    let again = start(&dir, &data, &banks, &releases);
+    assert_eq!(again.live()["bank"], "a", "{}", again.log());
+    let (_, update) = again.api("GET", "/api/update", json!({}));
+    let entry = update["history"].as_array().unwrap().iter().find(|e| e["rolledBack"] == true).unwrap_or_else(|| panic!("{update}"));
+    assert!(entry["ok"] == false && entry["message"].as_str().unwrap().contains("was given up") && entry["message"].as_str().unwrap().contains("went back to bank a"), "{entry}");
+    let (_, status) = again.api("GET", "/api/status", json!({}));
+    assert_eq!(status["banks"]["rolledBack"]["bank"], "b", "{status}");
+    assert_eq!(again.api("POST", "/api/stop", json!({})).0, 200);
+    let mut again = again;
+    assert!(again.child.wait().unwrap().success(), "{}", again.log());
+    drop(again);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A bank the owner rolled back from is not gone back to: a crashing release that took the place
+/// of a rollback ends the front as it always did, and says why it did not roll back.
+#[test]
+fn a_crashing_release_is_not_given_up_for_the_bank_the_owner_rolled_back_from() {
+    let Some(data) = tables() else { return };
+    let dir = world_dir("crash-no-rollback", &data);
+    let banks = banks(&dir);
+    let bad = banks.join("b/pcds");
+    std::fs::remove_file(&bad).unwrap();
+    std::fs::copy(crashing_program(&dir), &bad).unwrap();
+    let mut server = start(&dir, &data, &banks, "http://127.0.0.1:9/releases");
+    assert_eq!(server.update(json!({"rollback": true}))["ok"], true, "{}", server.log());
+    let status = exit_within(&mut server, 240).unwrap_or_else(|| panic!("the front did not end\n{}", server.log()));
+    let log = server.log();
+    assert_eq!(status.code(), Some(1), "{log}");
+    assert!(log.contains("no rollback: bank a is the one the server was rolled back from") && !log.contains("ROLLED BACK"), "{log}");
+    assert_eq!(active_bank(&banks), "b");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// What a player or the admin does while the world stands for a flip: held, then done.
 #[test]
 fn requests_and_players_during_a_flip_are_held_and_then_served() {
