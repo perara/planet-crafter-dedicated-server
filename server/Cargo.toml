@@ -14,6 +14,13 @@ publish = false
 name = "pcds"
 path = "src/main.rs"
 
+[features]
+# Sanitizer builds (docs/testing.md): wasmi's default dispatch runs a plugin's instructions as calls the
+# compiler must turn into jumps (a tail call), which AddressSanitizer's and ThreadSanitizer's
+# instrumentation prevents: a loop in a module then overflows the native stack. This one is a plain
+# loop. The release build does not use it.
+portable-dispatch = ["wasmi/portable-dispatch"]
+
 # fuzz/ builds this crate with --cfg fuzzing (see fuzz/Cargo.toml).
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)', 'cfg(pcds_corpus)'] }
