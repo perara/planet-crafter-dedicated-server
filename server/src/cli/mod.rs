@@ -38,6 +38,9 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
                          settings and the systemd unit
   pcds worlds                 the worlds in run/worlds/ (* = the one the server runs)
   pcds world use NAME | new NAME [NEW OPTIONS] | import SAVE.json [NAME] | remove NAME
+                         import also converts a save of the game's old layouts (2022, one
+                         planet) as the game does when it opens one; setup --world, world
+                         use and the start refuse such a save and say so
   pcds new [--planet ID] [--start LOCATION] [--seed N] [--set KEY=VALUE]... [--force]
                          replace the current world with a new one (kept in backups/)
   pcds start | stop | restart | status [--json] | logs

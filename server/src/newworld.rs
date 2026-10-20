@@ -11,11 +11,7 @@ use crate::data::{stable_hash, NetData};
 use crate::game::{Rng, START_EQUIPMENT_SIZE, START_INVENTORY_SIZE};
 use crate::gamedata::GameData;
 use crate::model::{Inventory, WorldObject};
-use crate::save::SaveFile;
-
-/// DataConfig.GameSettingMode and GameSettingDyingConsequences: the game parses these labels.
-const MODES: [&str; 6] = ["Chill", "Standard", "Intense", "Hardcore", "Creative", "Custom"];
-const DYING: [&str; 4] = ["NoConsequences", "DropSomeItems", "DropAllItems", "DeleteSaveFile"];
+use crate::save::{SaveFile, DYING, MODES};
 
 pub struct Options {
     /// None: the first free starting planet.

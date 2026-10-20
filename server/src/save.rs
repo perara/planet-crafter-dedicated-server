@@ -64,6 +64,10 @@ fn entries(section: &str) -> Result<Vec<Value>, String> {
         .collect()
 }
 
+/// The game modes and dying consequences JsonableGameState names (DataConfig.GameSettingMode, GameSettingDyingConsequences).
+pub const MODES: [&str; 6] = ["Chill", "Standard", "Intense", "Hardcore", "Creative", "Custom"];
+pub const DYING: [&str; 4] = ["NoConsequences", "DropSomeItems", "DropAllItems", "DeleteSaveFile"];
+
 /// What the errors about an old save tell the user to run.
 pub const IMPORT_HINT: &str = "`pcds world import SAVE.json`";
 
@@ -140,7 +144,7 @@ fn layout(sections: &[&str], save: &SaveFile) -> Result<(), String> {
             continue;
         }
         let old = matches!(k, "unit levels" | "colour layers") || (i == 1 && k == "a player");
-        let where_ = format!("{n} sections, {k} in section {} where {name} are expected", i + 1);
+        let where_ = format!("{n} sections, {k} in section {} where a save has {name}", i + 1);
         return Err(if old {
             format!("{where_}: the game's old save format (before several planets); {IMPORT_HINT} converts it")
         } else {
@@ -811,7 +815,7 @@ mod tests {
         for garbage in ["", "\u{feff}", "hello", "{}", "[1,2]", "@@@@@@@@@@", "\0\0\0@", &"x@".repeat(10), &good.replace("\r@", "\r@\r@"), &format!("{good}\r{{\"a\":1}}\r@")] {
             assert!(SaveFile::parse(garbage).and_then(|s| check_settings(&s.settings)).is_err(), "{garbage:?}");
         }
-        // Sections in the wrong places (a world object where the players belong): no silent shift (these say "are expected").
+        // Sections in the wrong places (a world object where the players belong): no silent shift.
         let swapped = good.replacen("\"Convict-1\"", "\"x\",\"gId\":\"Iron\"", 1).replacen("\"playerPosition\":\"1,2,3\",", "", 1);
         assert!(SaveFile::parse(&swapped).err().is_some_and(|e| e.contains("world objects in section 3")), "{swapped}");
     }

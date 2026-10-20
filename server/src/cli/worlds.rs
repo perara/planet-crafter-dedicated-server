@@ -56,6 +56,13 @@ impl Ctx {
         self.new_world(&world, &options)
     }
 
+    /// The game version of the tables, "" when there are none yet (an imported old save says which
+    /// game it was saved by).
+    fn game_version(&self) -> String {
+        let text = self.data_dir().ok().and_then(|d| fs::read_to_string(d.join("netdata.json")).ok());
+        text.and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).and_then(|v| v["gameVersion"].as_str().map(str::to_string)).unwrap_or_default()
+    }
+
     pub fn worlds(&self) -> Result {
         let current = self.world_name();
         let mut files: Vec<_> = fs::read_dir(&self.worlds).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "json")).collect();
@@ -113,15 +120,19 @@ impl Ctx {
                 if !save.is_file() {
                     return Err(format!("pcds world import SAVE.json [NAME]: no save at '{}'", save.display()));
                 }
-                super::check_world(save)?;
                 let name = world_arg(a.get(2).copied().unwrap_or(&save.to_string_lossy()))?;
                 if file(&name).exists() {
                     return Err(format!("world {name} exists: pass another NAME"));
                 }
+                // A save of the current layout is copied as it is; one of the game's old layouts is
+                // converted as the game converts it when it opens one.
+                let text = fs::read_to_string(save).map_err(|e| format!("{}: {e}", save.display()))?;
+                let seed = crate::game::Rng::seeded().range(0, i32::MAX) as u32;
+                let converted = crate::oldsave::import(&text, seed, &self.game_version()).map_err(|e| format!("{}: {e}", save.display()))?;
                 super::mkdir(&self.worlds)?;
-                let part = self.worlds.join(format!("{name}.json.part"));
-                fs::copy(save, &part).and_then(|_| fs::rename(&part, file(&name))).map_err(|e| format!("{}: {e}", file(&name).display()))?;
-                say(format!("world {name} imported; 'pcds world use {name}' plays it"));
+                super::replace_file(&file(&name), converted.as_bytes(), 0o644)?;
+                let how = if converted == text { "" } else { " (converted from the game's old save format)" };
+                say(format!("world {name} imported{how}; 'pcds world use {name}' plays it"));
                 Ok(())
             }
             ["remove", name] => {
@@ -181,6 +192,29 @@ mod tests {
         let e = ctx.replace_world(&old).unwrap_err();
         assert!(e.contains("pcds world import"), "{e}");
         assert!(!ctx.world_file().exists() && !ctx.worlds.join("backups").exists(), "nothing was installed");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `world import` converts an old save into a world that loads, copies a current one byte for
+    /// byte, and never writes over a world.
+    #[test]
+    fn import_converts_an_old_save_and_copies_a_current_one() {
+        let dir = super::super::test_dir("import-world");
+        let ctx = super::super::test_ctx(&dir);
+        let old = dir.join("Survival-Konsider.json");
+        fs::write(&old, SaveFile::old_format_text()).unwrap();
+        ctx.world(&args(&["import", &old.to_string_lossy()])).unwrap();
+        // The name is the file's.
+        let made = ctx.worlds.join("Survival-Konsider.json");
+        let save = SaveFile::load(&made.to_string_lossy()).unwrap();
+        assert_eq!((save.objects.len(), save.players.len(), save.planets[0]["planetId"].as_str(), save.settings["dyingConsequencesLabel"].as_str()), (2, 1, Some("Prime"), Some("DropSomeItems")));
+        assert!(save.settings["worldSeed"].as_u64().is_some_and(|s| s > 0));
+        assert_eq!(fs::read_to_string(&old).unwrap(), SaveFile::old_format_text(), "the old save is left as it is");
+        assert!(ctx.world(&args(&["import", &old.to_string_lossy()])).unwrap_err().contains("exists"));
+        let current = dir.join("cur.json");
+        fs::write(&current, SaveFile::tiny_text("cur")).unwrap();
+        ctx.world(&args(&["import", &current.to_string_lossy(), "copy"])).unwrap();
+        assert_eq!(fs::read_to_string(ctx.worlds.join("copy.json")).unwrap(), SaveFile::tiny_text("cur"));
         fs::remove_dir_all(&dir).unwrap();
     }
 }
