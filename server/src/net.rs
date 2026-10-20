@@ -267,7 +267,9 @@ pub fn apply_delta(net: &mut Net, client: u64, body: &[u8]) -> bool {
     // passed on (a float the server keeps could make the snapshot unreadable).
     let mut writes = Vec::new();
     for (i, v) in b.vars.iter().enumerate() {
-        let Some(dirty) = r.bool() else { break };
+        // Netcode writes a flag for every variable of the behaviour: a message that ends before the
+        // last is cut, and is neither applied nor passed on (every other client would read past its end).
+        let Some(dirty) = r.bool() else { return false };
         if !dirty {
             continue;
         }

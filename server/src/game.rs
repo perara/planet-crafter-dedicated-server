@@ -625,6 +625,12 @@ impl Game {
             return;
         }
         let update = crate::transform::update(body);
+        // Passed on to everyone, so a state that is cut or garbage after its object id is not: the
+        // other clients would read past its end. (Half-float states are relayed undecoded.)
+        if update.is_none() && !crate::transform::is_half_float_state(body) {
+            self.limits.warn(client, "a transform state that is cut or not a state, dropped");
+            return;
+        }
         // NaN or infinity: neither kept (the snapshot and save could not be read back) nor
         // passed on; the next state moves the object on.
         if update.as_ref().is_some_and(|u| !u.finite()) {
@@ -1213,6 +1219,52 @@ pub mod tests {
         g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, d)]));
         assert!(matches!(scale(&g), Some(crate::net::VarValue::Plain(b)) if b == 0.5f32.to_le_bytes()));
         assert_eq!(g.net.out.len(), 1, "passed on");
+    }
+
+    /// A transform state that is garbage after the object id the sender owns (or cut) is not relayed;
+    /// whole ones, and half-float ones (relayed undecoded), are.
+    #[test]
+    fn a_transform_state_that_is_garbage_is_not_passed_on() {
+        let Some(mut g) = test_game(save()) else { return };
+        let ann = join(&mut g, 1, "Ann");
+        join(&mut g, 2, "Bob");
+        g.sim_time = Some(100.0);
+        g.net.out.clear();
+        let relayed = |g: &Game| g.net.out.iter().filter(|(to, kind, _)| *kind == NETWORK_TRANSFORM && to.reaches(2)).count();
+        let mut whole = Writer::new();
+        whole.packed_u64(ann).packed_i32(0).packed_u32(2).packed_i32(1).bytes(&1.0f32.to_le_bytes());
+        for cut in 0..whole.0.len() {
+            g.receive(1, &wire::batch(&[(NETWORK_TRANSFORM, whole.0[..cut].to_vec())]));
+        }
+        let mut junk = Writer::new();
+        junk.packed_u64(ann).bytes(&[0xff; 7]);
+        g.receive(1, &wire::batch(&[(NETWORK_TRANSFORM, junk.0)]));
+        assert_eq!(relayed(&g), 0, "cut and garbage states");
+        g.receive(1, &wire::batch(&[(NETWORK_TRANSFORM, whole.0.clone())]));
+        let mut half = Writer::new();
+        half.packed_u64(ann).packed_i32(0).packed_u32(2 | (1 << 14)).packed_i32(1).bytes(&[1, 2]);
+        g.receive(1, &wire::batch(&[(NETWORK_TRANSFORM, half.0)]));
+        assert_eq!(relayed(&g), 2, "a whole state, and a half-float one");
+    }
+
+    /// Netcode writes a dirty flag for each variable of the behaviour: a delta that ends before the
+    /// last is not passed on (the other clients would read past its end), whatever it set before.
+    #[test]
+    fn a_cut_variable_delta_is_not_passed_on() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        let iron = g.create_world_object(g.data.group("Iron").unwrap(), 0, true);
+        g.drop_on_floor(iron, [561.0, 3.0, 497.0], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 0.0, false, 1);
+        let net = g.wos[&iron].net.unwrap();
+        join(&mut g, 2, "Bob");
+        g.net.out.clear();
+        let whole = delta(&g, net, "GroupNetworkContainer", "_scale", &0.5f32.to_le_bytes());
+        for cut in 1..whole.len() - 4 {
+            g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, whole[..cut].to_vec())]));
+            assert!(g.net.out.is_empty(), "a delta cut at {cut} of {} bytes was passed on", whole.len());
+        }
+        g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, whole)]));
+        assert_eq!(g.net.out.len(), 1, "the whole one is");
     }
 
     /// RPC floats come through JSON, which has no NaN or infinity: they read as 0.
