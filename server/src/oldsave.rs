@@ -188,7 +188,7 @@ pub fn convert(text: &str, world_seed: u32, version: &str) -> Result<SaveFile, S
     let settings = settings(&first(8, "game settings")?, world_seed, version)?;
     // Colour layers (a section some layouts hold before the instances) are skipped.
     let instances = if section(9).starts_with("{\"layerId\"") { section(10) } else { section(9) };
-    Ok(SaveFile { world, planets, players, objects, inventories, stats, messages, story_events, settings, procedural: list(instances, "procedural instances")? })
+    Ok(SaveFile { world, planets, players, objects, inventories, stats, messages, story_events, settings, procedural: list(instances, "procedural instances")?, pending: None })
 }
 
 /// The game settings as the game reads them (a JsonableGameState at its defaults, overwritten

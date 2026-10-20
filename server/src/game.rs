@@ -297,10 +297,21 @@ fn connection_data(body: &[u8]) -> Option<String> {
 /// hand. The start stops instead, saying which.
 pub fn check_save_content(save: &SaveFile, data: &GameData, net_data: &NetData) -> Result<(), String> {
     world_planet(save, net_data)?;
-    let unknown: Vec<&str> = save.objects.iter().filter(|o| WorldObject::from_json(o, data, 0).is_none()).map(|o| o["gId"].as_str().unwrap_or("(no group)")).collect();
-    match unknown.first() {
-        None => Ok(()),
-        Some(first) => Err(format!("{} world objects of groups these game tables do not know (the first: {first}): a save from a newer game version, or edited? Update the server or its game data (`pcds update`), then try again", unknown.len())),
+    // The entries one at a time: a save read deferred has them as text, and holding the unknown ones
+    // beyond a count and the first would hold a tree for each.
+    let (mut unknown, mut first) = (0, String::new());
+    for o in save.world_objects() {
+        let o = o.map_err(|e| format!("section 3: {e}"))?;
+        if WorldObject::from_json(&o, data, 0).is_none() {
+            if unknown == 0 {
+                first = o["gId"].as_str().unwrap_or("(no group)").to_string();
+            }
+            unknown += 1;
+        }
+    }
+    match unknown {
+        0 => Ok(()),
+        n => Err(format!("{n} world objects of groups these game tables do not know (the first: {first}): a save from a newer game version, or edited? Update the server or its game data (`pcds update`), then try again")),
     }
 }
 
@@ -446,16 +457,20 @@ impl Game {
     /// scene's network objects and every placed world object of the current planet.
     fn load(&mut self) {
         let default_planet = stable_hash(self.started_planet());
-        for o in std::mem::take(&mut self.save.objects) {
+        // The entries come one at a time from the text of a save read deferred, and a tree of values each.
+        for o in self.save.world_objects() {
+            let o = o.unwrap_or_else(|e| panic!("a save the start would have refused (check_save_content): section 3: {e}"));
             if let Some(wo) = WorldObject::from_json(&o, &self.data, default_planet) {
                 self.wos.insert(wo.id, wo);
             }
         }
-        for inv in std::mem::take(&mut self.save.inventories) {
+        for inv in self.save.inventory_entries() {
+            let inv = inv.unwrap_or_else(|e| panic!("a save the start would have refused (check_save_content): section 4: {e}"));
             if let Some(inv) = Inventory::from_json(&inv, &self.data, |id| self.wos.contains_key(&id)) {
                 self.inventories.insert(inv.id, inv);
             }
         }
+        self.save.release_world();
         self.rebuild_holders();
         self.saved_players = self.save.players.clone();
         let crafted = self.save.stats["craftedObjects"].as_u64().unwrap_or(0);
@@ -918,6 +933,7 @@ impl Game {
             story_events: self.save.story_events.clone(),
             settings: self.save.settings.clone(),
             procedural: self.save.procedural.clone(),
+            pending: None,
         };
         save.world["pcdsCurrentPlanet"] = json!(self.planet_id());
         crate::players::mark_host(&mut save.players, self.planet_id());

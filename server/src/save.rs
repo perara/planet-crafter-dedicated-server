@@ -31,6 +31,27 @@ pub struct SaveFile {
     pub settings: Value,
     #[serde(with = "crate::bincodec::json_values")]
     pub procedural: Vec<Value>,
+    /// The world objects and inventories of a save read for a start, still as text (`objects` and
+    /// `inventories` are empty then): see `parse_deferred`. Never in a snapshot.
+    #[serde(skip)]
+    pub(crate) pending: Option<Box<Pending>>,
+}
+
+/// The file's text and where the entries of the world objects' and the inventories' sections
+/// are in it.
+pub(crate) struct Pending {
+    text: String,
+    objects: Vec<(u32, u32)>,
+    inventories: Vec<(u32, u32)>,
+}
+
+impl Pending {
+    fn entries<'a>(&'a self, places: &'a [(u32, u32)]) -> impl Iterator<Item = Result<Value, String>> + 'a {
+        places.iter().map(|&(from, to)| {
+            let entry = &self.text[from as usize..to as usize];
+            serde_json::from_str(entry).map_err(|e| format!("{e} in {}", entry.chars().take(80).collect::<String>()))
+        })
+    }
 }
 
 /// Splits on `delimiter` outside JSON strings: a name or a sign text may contain '@' or '|'
@@ -274,6 +295,7 @@ impl SaveFile {
             story_events: Vec::new(),
             settings: Value::Null,
             procedural: Vec::new(),
+            pending: None,
         }
     }
 
@@ -325,24 +347,100 @@ impl SaveFile {
 
     /// The sections of a save in the current layout; anything else is refused (`layout`).
     pub fn parse(text: &str) -> Result<SaveFile, String> {
+        SaveFile::parse_text(text, false)
+    }
+
+    /// `load`, with the world objects and the inventories left in the text (`parse_deferred`).
+    pub fn load_deferred(path: &str) -> std::io::Result<SaveFile> {
+        let bad = |e: String| std::io::Error::new(std::io::ErrorKind::InvalidData, e);
+        let save = SaveFile::parse_deferred(std::fs::read_to_string(path)?).map_err(bad)?;
+        check_settings(&save.settings).map_err(bad)?;
+        Ok(save)
+    }
+
+    /// `parse`, but the entries of the world objects' and the inventories' sections stay in the
+    /// text, which the save keeps: a world of 200,000 objects is 12 MB of text and 100 MB as a
+    /// tree of values, and the game turns each entry into what it keeps one at a time
+    /// (`world_objects`, `inventory_entries`: a damaged entry is an error there, as it is in `parse`).
+    pub fn parse_deferred(text: String) -> Result<SaveFile, String> {
+        let mut save = SaveFile::parse_text(&text, true)?;
+        let body = text.trim_start_matches('\u{feff}');
+        let sections = split_outside_strings(body, '@');
+        let places = |i: usize| -> Vec<(u32, u32)> {
+            let section = sections.get(i).copied().unwrap_or("");
+            let base = text.as_ptr() as usize;
+            split_outside_strings(section, '|')
+                .into_iter()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    let from = s.as_ptr() as usize - base;
+                    (from as u32, (from + s.len()) as u32)
+                })
+                .collect()
+        };
+        if text.len() >= u32::MAX as usize {
+            return Err("a save of 4 GB or more".into());
+        }
+        let (objects, inventories) = (places(3), places(4));
+        save.pending = Some(Box::new(Pending { text, objects, inventories }));
+        Ok(save)
+    }
+
+    /// The world objects: the entries of section 3, parsed one at a time when the save was read
+    /// deferred. An Err is a damaged entry.
+    pub fn world_objects(&self) -> Box<dyn Iterator<Item = Result<Value, String>> + '_> {
+        match &self.pending {
+            Some(p) => Box::new(p.entries(&p.objects)),
+            None => Box::new(self.objects.iter().cloned().map(Ok)),
+        }
+    }
+
+    /// The inventories (section 4), as `world_objects`.
+    pub fn inventory_entries(&self) -> Box<dyn Iterator<Item = Result<Value, String>> + '_> {
+        match &self.pending {
+            Some(p) => Box::new(p.entries(&p.inventories)),
+            None => Box::new(self.inventories.iter().cloned().map(Ok)),
+        }
+    }
+
+    /// Lets go of the world objects and inventories, and of the text they were in: the game has them.
+    pub fn release_world(&mut self) {
+        self.objects = Vec::new();
+        self.inventories = Vec::new();
+        self.pending = None;
+    }
+
+    fn parse_text(text: &str, defer: bool) -> Result<SaveFile, String> {
         let text = text.trim_start_matches('\u{feff}');
         let sections = split_outside_strings(text, '@');
         let section = |i: usize| sections.get(i).copied().unwrap_or("");
         let list = |i: usize| entries(section(i)).map_err(|e| format!("section {i}: {e}"));
         let first = |i: usize| list(i).map(|v| v.into_iter().next().unwrap_or(Value::Null));
-        let save = SaveFile {
+        // Deferred: only the first entry of the two sections is read now, for the check of the layout.
+        let head = |i: usize| -> Result<Vec<Value>, String> {
+            let section = section(i);
+            let first = split_outside_strings(section, '|').into_iter().map(str::trim).find(|s| !s.is_empty());
+            first.map(|s| serde_json::from_str(s).map(|v| vec![v]).map_err(|e| format!("section {i}: {e} in {}", s.chars().take(80).collect::<String>()))).unwrap_or(Ok(Vec::new()))
+        };
+        let mut save = SaveFile {
             world: first(0)?,
             planets: list(1)?,
             players: list(2)?,
-            objects: list(3)?,
-            inventories: list(4)?,
+            objects: if defer { head(3)? } else { list(3)? },
+            inventories: if defer { head(4)? } else { list(4)? },
             stats: first(5)?,
             messages: list(6)?,
             story_events: list(7)?,
             settings: first(8)?,
             procedural: list(9)?,
+            pending: None,
         };
         layout(&sections, &save)?;
+        if defer {
+            save.objects.clear();
+            save.inventories.clear();
+        }
         Ok(save)
     }
 
@@ -696,6 +794,35 @@ mod tests {
         assert_eq!(back.objects[0]["text"], "a@b|c");
         assert_eq!(back.settings["planetId"], "Prime");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A save read deferred has the same world objects and inventories as one read whole, and
+    /// parses them one at a time: a damaged entry is an error where it is read, naming the section.
+    #[test]
+    fn a_deferred_save_has_the_entries_of_the_whole_one_and_a_damaged_entry_is_an_error() {
+        let mut save = SaveFile::empty();
+        save.world = json!({"terraTokens": 1});
+        save.objects = (0..50).map(|i| json!({"id": 200_000_000 + i, "gId": "Iron", "text": format!("a|b@{i}"), "pos": "1,2,3"})).collect();
+        save.inventories = (0..20).map(|i| json!({"id": i, "woIds": "1,2", "size": 12})).collect();
+        save.settings = json!({"planetId": "Prime", "mode": "Standard", "dyingConsequencesLabel": "DropSomeItems"});
+        let text = save.to_text();
+        let whole = SaveFile::parse(&text).unwrap();
+        let deferred = SaveFile::parse_deferred(text.clone()).unwrap();
+        assert!(deferred.objects.is_empty() && deferred.inventories.is_empty());
+        assert_eq!(deferred.world_objects().collect::<Result<Vec<_>, _>>().unwrap(), whole.objects);
+        assert_eq!(deferred.inventory_entries().collect::<Result<Vec<_>, _>>().unwrap(), whole.inventories);
+        assert_eq!(whole.world_objects().collect::<Result<Vec<_>, _>>().unwrap(), whole.objects);
+        assert_eq!(deferred.world, whole.world);
+        let mut released = SaveFile::parse_deferred(text.clone()).unwrap();
+        released.release_world();
+        assert_eq!(released.world_objects().count(), 0);
+        // The same refusals: an old layout, and a damaged entry (found where it is read).
+        let old = SaveFile::old_format_text();
+        assert_eq!(SaveFile::parse(&old).err(), SaveFile::parse_deferred(old).err());
+        let damaged = text.replacen("\"id\":200000007", "\"id\":", 1);
+        let (whole_error, deferred_error) = (SaveFile::parse(&damaged).err().unwrap(), SaveFile::parse_deferred(damaged).unwrap());
+        let found = deferred_error.world_objects().find_map(Result::err).unwrap();
+        assert!(whole_error.starts_with("section 3: ") && whole_error.contains(&found), "{whole_error} / {found}");
     }
 
     #[test]
