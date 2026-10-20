@@ -173,7 +173,7 @@ stall is real but inflated. Finding numbers are those of the report.
 | D6 | No watchdog on a bank: a hung or stopped bank is never replaced | Medium, design | fixed in 0.7.0: rule `limits.bankWatchdogSeconds` (default 60), not during a flip, a stop or a save | `hot_update::a_hung_bank_is_replaced_but_a_slow_paused_or_stopped_one_is_not`, README rules table |
 | D7 | Large worlds cross thresholds: 90,000 objects spike the idle loop to 100 ms; a flip stands over 100 ms from 11,000 network objects; a join takes seconds at 200,000. At rest, half the cost was the 10 Hz scan of every object for explosives | Medium, design | open in part: the snapshot and join work was made faster in 0.7.0 (snapshot in parts on several threads, writing straight to the save); the 10 Hz full scan is still in place, marked in the code | `meteo/explode.rs` (`ponytail:` comment), `tools/perf/`, docs/hot-update.md "Flip speed" |
 | D8 | After a bank stall the front held up to 16 MiB per client and never gave it back (9 to 226 MB) | Low | fixed in 0.7.0: bounded in all, in bytes, and returned | `what_all_clients_have_waiting_for_the_bank_is_capped_by_dropping_the_slowest`, `the_connections_together_may_not_queue_without_end`, docs/hot-update.md |
-| D9 | Saved players are never pruned: each new name adds about 1.2 KB to the save for ever | Low | open: a retention rule is a product decision | no pruning code in `players.rs` or `save.rs` |
+| D9 | Saved players are never pruned: each new name adds about 1.2 KB to the save for ever | Low | fixed after 0.7.0 by the opt-in rule `players.forgetAfterDays` (0: keep for ever): a player away that long who never crafted or earned a token, holds no more than the joining kit and is not the host or in the game is forgotten with those items; everyone else is kept | `players::tests::players_away_with_nothing_past_the_kit_are_forgotten_and_no_one_else`, `players::forget_unseen` |
 | D10 | A client that vanishes holds its slot and name for the 30 s UDP timeout; this filled the churn runs with "session full" | Low | by design: the slot is held to the UDP timeout so a client can come back | README, "Connection slots can be flooded" |
 | D11 | Unit totals were f32 and stop growing above about rate x 1.7e6 | Suspect | fixed in 0.7.0: totals are exact f64 after the first hour, the f32 the game shows is derived | `clock::tests::a_total_of_millions_keeps_growing_after_the_first_hour` |
 | D12 | The network tick counter saturates at 828 days and the logistics frame loop stops | Suspect | fixed in 0.7.0: 64-bit inside, wraps on the wire like the game's int | docs/clock.md, "Design" (the tick counter) |
@@ -241,7 +241,6 @@ Dynamic:
 * **D7** The 10 Hz scan of every world object for explosives remains, and large worlds still
   produce long flips and joins. Next: drive `explode::scan` from changes, not from a timer, and
   re-measure with `tools/perf/` at 90,000 objects.
-* **D9** Saved players are never pruned. Next: owner decides a retention rule.
 
 Lead from the tools' smoke runs, not a finding: in two of three disk-full runs against 0.6.2,
 `GET /api/status` was refused for 8 s after a `kill -9` of the bank on a full disk although the

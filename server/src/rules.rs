@@ -26,6 +26,7 @@ pub struct Rules {
     pub loot: Loot,
     pub limits: Limits,
     pub world: World,
+    pub players: Players,
     pub chat: Chat,
     pub backup: Backup,
     pub save: Save,
@@ -206,6 +207,15 @@ pub struct World {
     /// stands still: its clock, and with it every timer, day and night, growth, production,
     /// terraformation, meteo, drone and vehicle. It goes on from there when a player is in.
     pub pause_when_empty: bool,
+}
+
+/// What the save keeps of the people who have been in the world.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct Players {
+    /// Days away after which a saved player who has made nothing and holds no more than a new
+    /// player is given is forgotten (players::forget_unseen). 0: every player is kept for ever.
+    pub forget_after_days: u32,
 }
 
 /// Chat hooks (chathooks/): every chat message as a JSON event, sent off the game thread.

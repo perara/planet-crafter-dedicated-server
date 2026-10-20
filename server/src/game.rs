@@ -252,6 +252,10 @@ pub struct Game {
     /// with terraformation, which stands still while the world is placed.
     #[serde(skip)]
     pub load_water: Option<crate::energy::Underwater>,
+    /// The hour (Unix time / 3600) players::forget_unseen last looked, so that it looks once an
+    /// hour; 0 after a start or a hot update (it looks at once, which does nothing twice).
+    #[serde(skip)]
+    pub forgot_hour: u64,
 }
 
 /// An RPC message's method hash (after sender, object and behaviour).
@@ -335,6 +339,7 @@ impl Game {
             watchers: HashMap::new(),
             tmp_inventory_id: -2,
             clients: Default::default(),
+            forgot_hour: 0,
             saved_players: Vec::new(),
             total_crafted: HashMap::new(),
             all_time_tokens: HashMap::new(),
@@ -801,6 +806,11 @@ impl Game {
     }
 
     fn every_second(&mut self) {
+        let now = crate::util::now_secs();
+        if self.rules.players.forget_after_days > 0 && now / 3600 != self.forgot_hour {
+            self.forgot_hour = now / 3600;
+            crate::players::forget_unseen(self, now);
+        }
         let tick = self.tick_number();
         self.out_to(Target::All, protocol::time_sync(tick));
         // A connection that never becomes a player (no request, no PlayerReady) has the world

@@ -13,6 +13,8 @@ pub const FIRST_STEAM_ID: u64 = 0x0110_0001_0000_0000;
 /// Ids from name_id start here; below are the connection numbers older saves used.
 const NAME_IDS: u64 = 0x00F0_0000_0000_0000;
 const PLAYERS: &str = "PlayersDataManager";
+/// The saved player's field with the Unix time they were last in the game (players.forgetAfterDays).
+const LAST_SEEN: &str = "pcdsLastSeen";
 
 /// The plugin server's NameId: a stable id for a player known only by name.
 pub fn name_id(name: &str) -> u64 {
@@ -220,7 +222,7 @@ impl Game {
 
     /// JsonablePlayerState for a player in the game.
     fn state_json(&self, client: u64, state: &PlayerState, position: [f32; 3], gauges: [f32; 4]) -> Value {
-        json!({
+        let mut entry = json!({
             "id": state.id,
             "name": state.name,
             "inventoryId": state.inventory,
@@ -238,7 +240,13 @@ impl Game {
             // UpdatePlayerStateData: a player other than the host is saved with camera view 1
             // exactly when it faces yaw 0 (the game tests the rotation, not the camera).
             "cameraView": i32::from(crate::geometry::euler_y(state.rotation).abs() < 1.1920929e-7),
-        })
+        });
+        // When players.forgetAfterDays is on, the time they were last in the game (the game ignores
+        // the field, as it ignores pcdsCurrentPlanet). Off: the save is the game's, field for field.
+        if self.rules.players.forget_after_days > 0 {
+            entry[LAST_SEEN] = json!(crate::util::now_secs());
+        }
+        entry
     }
 
     /// The PlayersDataManager and PlayerMainController RPCs; false when not one of them.
@@ -362,6 +370,61 @@ pub fn update_saved_players(game: &mut Game) {
     }
 }
 
+/// players.forgetAfterDays: a saved player is forgotten when all of this holds, at `now` (Unix
+/// seconds):
+/// - they have been away that many days (their `pcdsLastSeen`; a record without one is stamped now,
+///   so the days count from the first look, never from before the rule was on);
+/// - they are not in the game, and are not the host this save marks;
+/// - they never crafted anything or earned a terra token;
+/// - their equipment is empty and their backpack holds no more than the joining kit (the starter
+///   items every new player gets, `joining_kit`), counted by item.
+/// Their record and their two inventories with those items go; nothing else is touched. Returns how
+/// many were forgotten.
+pub fn forget_unseen(game: &mut Game, now: u64) -> usize {
+    let limit = u64::from(game.rules.players.forget_after_days) * 86_400;
+    if limit == 0 {
+        return 0;
+    }
+    let online: Vec<u64> = game.clients.values().filter_map(|c| c.ready.as_ref().map(|s| s.id)).collect();
+    for p in game.saved_players.iter_mut().filter(|p| p[LAST_SEEN].as_u64().is_none()) {
+        p[LAST_SEEN] = json!(now);
+    }
+    let kit = game.joining_kit();
+    let forget: Vec<(u64, String, i32, i32)> = game
+        .saved_players
+        .iter()
+        .filter_map(|p| {
+            let id = p["id"].as_u64().filter(|id| !online.contains(id))?;
+            let away = now.saturating_sub(p[LAST_SEEN].as_u64()?);
+            let made_nothing = p["totalCraftedObjects"].as_u64().unwrap_or(0) == 0 && p["totalTerraTokenEarned"].as_u64().unwrap_or(0) == 0;
+            let (backpack, equipment) = (i32::try_from(p["inventoryId"].as_i64()?).ok()?, i32::try_from(p["equipmentId"].as_i64()?).ok()?);
+            let holds_no_more_than_new = game.inventories.get(&equipment).is_none_or(|i| i.items.is_empty()) && game.holds_no_more_than(backpack, &kit);
+            (p["host"] != true && away >= limit && made_nothing && holds_no_more_than_new).then(|| (id, p["name"].as_str().unwrap_or("").to_string(), backpack, equipment))
+        })
+        .collect();
+    for (id, name, backpack, equipment) in &forget {
+        game.saved_players.retain(|p| p["id"].as_u64() != Some(*id));
+        // Their inventories are nobody's now, so destroy_inventory takes them (and the items).
+        game.destroy_inventory(*backpack, false);
+        game.destroy_inventory(*equipment, false);
+        println!("players: forgot {name} ({id}), away for {} days with nothing past the starter items", game.rules.players.forget_after_days);
+    }
+    forget.len()
+}
+
+impl Game {
+    /// Whether an inventory holds no more than `kit` (a group once per item), counted by group. A
+    /// missing inventory holds nothing.
+    fn holds_no_more_than(&self, inventory: i32, kit: &[usize]) -> bool {
+        let Some(inv) = self.inventories.get(&inventory) else { return true };
+        let mut left = kit.to_vec();
+        inv.items.iter().all(|wo| {
+            let group = self.wos.get(wo).map(|w| w.group);
+            group.and_then(|g| left.iter().position(|k| *k == g)).map(|i| left.swap_remove(i)).is_some()
+        })
+    }
+}
+
 /// The saved player a save moved back into the game treats as its host: SavedDataHandler.
 /// InitSavedData loads the host's planet (the starting planet without one). The server keeps its
 /// planet in pcdsCurrentPlanet, which the game does not read, so the player saved last on that
@@ -386,7 +449,7 @@ pub fn inventory_changed(game: &mut Game, inventory: i32, wo: i32, added: bool) 
 mod tests {
     use serde_json::json;
 
-    use super::PLAYERS;
+    use super::{forget_unseen, PLAYERS};
     use crate::data::stable_hash;
     use crate::game::tests::join;
     use crate::net::Target;
@@ -509,5 +572,71 @@ mod tests {
         let bob = join(&mut g, 2, "Bob");
         assert_eq!(g.net.objects[&bob].position, [-415.0, 35.65, -82.0]);
         assert_eq!(g.clients[&2].ready.as_ref().unwrap().planet, "Selenea");
+    }
+
+    /// players.forgetAfterDays: only a player away that long, who made and earned nothing and holds
+    /// no more than the joining kit, is forgotten, with their two inventories and the kit; anyone
+    /// in the game, the host, a crafter and anyone with an item of their own stay.
+    #[test]
+    fn players_away_with_nothing_past_the_kit_are_forgotten_and_no_one_else() {
+        let Some(mut g) = crate::planets::tests::game() else { return };
+        let day = 86_400;
+        let t0 = crate::util::now_secs();
+        let has = |g: &crate::game::Game, name: &str| g.saved_players.iter().any(|p| p["name"] == name);
+        let leave = |g: &mut crate::game::Game, client: u64, name: &str, f: &dyn Fn(&mut crate::game::Game, i32)| {
+            let backpack = {
+                join(g, client, name);
+                g.clients[&client].ready.as_ref().unwrap().inventory
+            };
+            f(g, backpack);
+            g.disconnect(client);
+        };
+        // Off (the default): the record carries no time, and nothing is ever forgotten.
+        leave(&mut g, 1, "Ann", &|_, _| {});
+        assert!(g.saved_players.iter().all(|p| p["pcdsLastSeen"].is_null()), "the save is the game's while the rule is off");
+        assert_eq!(forget_unseen(&mut g, t0 + 1000 * day), 0);
+        assert!(has(&g, "Ann"));
+        g.rules.players.forget_after_days = 30;
+        let iron = g.data.group("Iron").unwrap();
+        leave(&mut g, 2, "Bob", &|g, backpack| {
+            g.add_new_item(iron, backpack, 0);
+        });
+        leave(&mut g, 3, "Cat", &|g, _| {
+            g.total_crafted.insert(3, 1);
+        });
+        leave(&mut g, 4, "Dan", &|_, _| {});
+        join(&mut g, 5, "Eve");
+        // The host this save marks, away and empty, stays too.
+        g.saved_players.iter_mut().find(|p| p["name"] == "Dan").unwrap()["host"] = json!(true);
+        let ann = g.saved_players.iter().find(|p| p["name"] == "Ann").unwrap().clone();
+        let (ann_backpack, ann_equipment) = (ann["inventoryId"].as_i64().unwrap() as i32, ann["equipmentId"].as_i64().unwrap() as i32);
+        let kit_items = g.inventories[&ann_backpack].items.clone();
+        assert!(!kit_items.is_empty() && kit_items.iter().all(|wo| g.wos.contains_key(wo)));
+        // Ann left before the rule was on: unstamped, so her days count from the first look.
+        assert!(g.saved_players.iter().find(|p| p["name"] == "Ann").unwrap()["pcdsLastSeen"].is_null());
+        assert_eq!(forget_unseen(&mut g, t0), 0);
+        assert_eq!(forget_unseen(&mut g, t0 + 29 * day), 0, "29 days is not 30");
+        assert!(["Ann", "Bob", "Cat", "Dan"].iter().all(|n| has(&g, n)));
+        // 31 days on: only Ann (kit, no crafts, no tokens). Eve is in the game, Bob holds iron, Cat
+        // crafted, Dan is marked host.
+        g.saved_players.iter_mut().filter(|p| p["name"] != "Ann").for_each(|p| p["pcdsLastSeen"] = json!(t0));
+        assert_eq!(forget_unseen(&mut g, t0 + 31 * day), 1);
+        assert!(!has(&g, "Ann") && ["Bob", "Cat", "Dan"].iter().all(|n| has(&g, n)));
+        assert!(!g.inventories.contains_key(&ann_backpack) && !g.inventories.contains_key(&ann_equipment));
+        assert!(kit_items.iter().all(|wo| !g.wos.contains_key(wo)), "her starter items go with her inventory");
+        assert!(g.clients[&5].ready.is_some());
+        let bob = g.saved_players.iter().find(|p| p["name"] == "Bob").unwrap().clone();
+        assert!(g.inventories.contains_key(&(bob["inventoryId"].as_i64().unwrap() as i32)), "an item of his own keeps his things");
+        // Eve is online: her record may be in the list at a save; she is never forgotten.
+        crate::players::update_saved_players(&mut g);
+        g.saved_players.iter_mut().find(|p| p["name"] == "Eve").unwrap()["pcdsLastSeen"] = json!(0);
+        assert_eq!(forget_unseen(&mut g, t0 + 1000 * day), 0);
+        assert!(has(&g, "Eve"));
+        // A clock that stepped back: a time ahead of now is not "away".
+        g.saved_players.iter_mut().find(|p| p["name"] == "Bob").unwrap()["pcdsLastSeen"] = json!(t0 + 5000 * day);
+        assert_eq!(forget_unseen(&mut g, t0 + 1000 * day), 0);
+        // Rule off again: nothing.
+        g.rules.players.forget_after_days = 0;
+        assert_eq!(forget_unseen(&mut g, t0 + 9999 * day), 0);
     }
 }
