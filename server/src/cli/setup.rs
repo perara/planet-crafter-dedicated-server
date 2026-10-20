@@ -198,7 +198,7 @@ impl Ctx {
             // world it runs: the dashboard can run another), the rules and access lists (the
             // installation's, whichever world runs) and the banks (bin/) in it.
             server.env("PCDS_HOME", &self.run);
-            // The game the tables are for: /api/status says when it has changed (bank.rs).
+            // The game the tables are for: /api/status says when it has changed (bank/status.rs).
             server.env("PCDS_GAME_DIR", &game);
             server
         };
@@ -504,7 +504,7 @@ fn fallback_bank(banks: &Path, failed: &str) -> std::result::Result<String, Stri
 
 /// The front, run as a child of this process, which ends only after every process the front
 /// left behind. A front that crashes leaves its banks running; they save the world when they
-/// find it gone (bank.rs) and end. Under systemd (KillMode=mixed) and in Docker (tini, then
+/// find it gone (bank/serve.rs) and end. Under systemd (KillMode=mixed) and in Docker (tini, then
 /// the container's PID namespace) the end of the main process kills what is left of the unit
 /// or container at once, before any bank could save: this process is that main process, a
 /// subreaper the orphaned banks are handed to, and it waits for them (BANKS_GRACE at most,

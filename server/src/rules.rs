@@ -204,7 +204,7 @@ pub struct World {
     pub pause_when_empty: bool,
 }
 
-/// Chat hooks (chathooks.rs): every chat message as a JSON event, sent off the game thread.
+/// Chat hooks (chathooks/): every chat message as a JSON event, sent off the game thread.
 /// Only admins set these (rules.json, the admin API); webhooks, secret and exec are never logged.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]

@@ -480,8 +480,8 @@ plugin part is a normal part of the current snapshot format, not a second format
   `tests/hot_update.rs` through real flips).
 
 The change to the files another agent is rewriting is small and isolated in its own commit:
-`ext.rs` (one field) and `bank.rs` (the call to `plugins::checkpoint` before the snapshot, two
-lines). If the snapshot becomes a binary format, `Saved` is `Serialize`/`Deserialize` and works in
+`ext.rs` (one field) and the bank (the call to `plugins::checkpoint` before the snapshot, two
+lines; now all the bank's calls into the host are in `bank/plugins_glue.rs`). If the snapshot becomes a binary format, `Saved` is `Serialize`/`Deserialize` and works in
 any serde format; only the hex text of the states (`state.rs`, `hex_blobs`) should become raw bytes.
 
 ## Parity and fairness
@@ -577,9 +577,9 @@ The server is GPL-3.0-or-later. What that means for a plugin, honestly:
 
 | Built-in | Today | As a user of the same API | Done here |
 |---|---|---|---|
-| Chat hooks (webhooks, exec, `GET /api/chat/events`) | `chathooks.rs`: the bank queues a chat event, the front's worker delivers | the front-side half is an integration that reads the stream; the bank-side half is `events::chat`'s first subscriber | the bank side is already the first subscriber of `events`. Replacing the front's worker by the stream needs the front-side long-poll, and the file split (docs/architecture.md, step 6): not done |
+| Chat hooks (webhooks, exec, `GET /api/chat/events`) | `chathooks/`: the bank queues a chat event (`mod.rs`, a subscriber of the bus), the front's worker delivers (`delivery.rs`) | the front-side half is an integration that reads the stream; the bank-side half is `events::chat`'s first subscriber | the bank side is the first subscriber of `events` (`chathooks::wants` and `on_event`, called by `events::emit`). Replacing the front's worker by the stream needs the front-side long-poll; the file split is done (`chathooks/delivery.rs` is the part that moves, docs/architecture.md, "Chat hooks and the event bus") |
 | Rules (`speed.*`, `gauges.*`...) | `rules.rs`, read by the game's code | stays core: it changes how the game computes, and parity depends on it | plugins change rules with `rules.write`; `rules::set` emits `rule_change` |
-| Backups to S3 | `s3.rs` called from `bank.rs`: network I/O and a thread in the game process, with process-wide statics that a flip resets | the first user of a future `net.http` capability, on `world_saved`, its status kept as plugin state | the event exists; the capability and the thread model do not. Until then it stays where it is |
+| Backups to S3 | `s3.rs` called from `bank/persist.rs` and `bank/admin/worlds.rs`: network I/O and a thread in the game process, with process-wide statics that a flip resets | the first user of a future `net.http` capability, on `world_saved`, its status kept as plugin state | the event exists; the capability and the thread model do not. Until then it stays where it is |
 | `world.pauseWhenEmpty`, the pause | the clock | stays core | |
 
 Chat has one path (`events::chat`, with the chat hooks as its first subscriber); no parallel one was

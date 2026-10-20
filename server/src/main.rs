@@ -4,7 +4,7 @@
 //! world in the save file, with the game's tables for this version (data/<version>/).
 //!
 //! It runs as two processes (docs/hot-update.md): the front (front.rs: the sockets, Steam, the
-//! admin API, the chat hooks) and a bank (bank.rs: the world), so a new release can take over
+//! admin API, the chat hooks) and a bank (bank/: the world), so a new release can take over
 //! the running world without a player noticing.
 //!
 //! Usage: pcds serve DATA_DIR SAVE.json   (the front; it starts the bank)

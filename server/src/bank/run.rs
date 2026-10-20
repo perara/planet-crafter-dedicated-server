@@ -46,7 +46,42 @@ pub fn run(args: &[String]) {
         eprintln!("usage: pcds bank DATA_DIR SAVE.json (the front starts it)");
         std::process::exit(2);
     };
-    // Ctrl-C and SIGTERM are the front's: it tells this bank to save and stop.
+    let mut link = open_link();
+    // The tables load before the hello: the front stops the old bank only once they are in.
+    let (net_data, data, spec) = crate::tables(dir);
+    let scenes = crate::scene_tables(dir, &net_data, &data);
+    let build_id = std::fs::read_to_string(format!("{dir}/buildid")).ok().map(|b| b.trim().to_string());
+    // The plugins are read and compiled now, with the tables, while the old bank still plays: after a
+    // restore only their start is left (a hot update stops the world for that, not for this).
+    let prepared = plugins_glue::prepare(save_path);
+    hello(&mut link, &net_data.game_version);
+    let mut took = Restore::default();
+    let mut game = match link.recv() {
+        Some(f) if f.kind == ipc::START => start::load(dir, save_path, net_data, data, spec, scenes),
+        Some(f) if f.kind == ipc::RESTORE => {
+            took = Restore { started: Instant::now(), got_at: ipc::now_ns(), faults_before: minor_faults(), ..Restore::default() };
+            if fail_for_test("restore") {
+                eprintln!("bank: dying on the restore (PCDS_DEV=bank-fail=restore)");
+                std::process::exit(3);
+            }
+            let (restored, checked) = start::restore(&f, net_data, data, spec, scenes, save_path);
+            (took.verified, took.verify_ms) = (checked.verified, checked.ms);
+            restored
+        }
+        _ => return,
+    };
+    plugins_glue::attach(&mut game, prepared);
+    // What the start freed (the save's JSON, a snapshot's text, the tables' text) goes back to
+    // the system, not to sit in the process.
+    // SAFETY: malloc_trim only returns free memory to the system.
+    unsafe { libc::malloc_trim(0) };
+    ready(&mut link, &took);
+    serve::Bank { game, link, save_path: save_path.clone(), build_id, data_dir: dir.clone() }.serve();
+}
+
+/// The front's end of the socket (PCDS_IPC_FD). Ctrl-C and SIGTERM are the front's: it tells this
+/// bank to save and stop.
+fn open_link() -> Link {
     // SAFETY: plain signal dispositions, set before any other thread exists.
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_IGN);
@@ -57,49 +92,41 @@ pub fn run(args: &[String]) {
         std::process::exit(2)
     });
     // SAFETY: the front put our end of the socket at this descriptor; nothing else owns it.
-    let mut link = Link::new(unsafe { UnixStream::from_raw_fd(fd) });
-    // The tables load before the hello: the front stops the old bank only once they are in.
-    let (net_data, data, spec) = crate::tables(dir);
-    let scenes = crate::scene_tables(dir, &net_data, &data);
-    let build_id = std::fs::read_to_string(format!("{dir}/buildid")).ok().map(|b| b.trim().to_string());
-    // The plugins are read and compiled now, with the tables, while the old bank still plays: after a
-    // restore only their start is left (a hot update stops the world for that, not for this).
-    let prepared = plugins_glue::prepare(save_path);
+    Link::new(unsafe { UnixStream::from_raw_fd(fd) })
+}
+
+/// HELLO: what this bank is (`info`) and the game version of its tables.
+fn hello(link: &mut Link, game_version: &str) {
     let mut hello = info();
-    hello["gameVersion"] = net_data.game_version.clone().into();
+    hello["gameVersion"] = game_version.into();
     let protocol = if fail_for_test("protocol") { 999 } else { ipc::PROTOCOL };
     if fail_for_test("slow-hello") {
         println!("bank: holding its hello for 4 s (PCDS_DEV=bank-fail=slow-hello)");
         std::thread::sleep(Duration::from_secs(4));
     }
     link.send(ipc::HELLO, protocol, hello.to_string().as_bytes());
-    let (mut verified, mut verify_ms) = (Value::Null, 0.0);
-    let mut started = Instant::now();
-    let (mut got_at, mut faults_before) = (0, 0);
-    let game = match link.recv() {
-        Some(f) if f.kind == ipc::START => start::load(dir, save_path, net_data, data, spec, scenes),
-        Some(f) if f.kind == ipc::RESTORE => {
-            started = Instant::now();
-            got_at = ipc::now_ns();
-            faults_before = minor_faults();
-            if fail_for_test("restore") {
-                eprintln!("bank: dying on the restore (PCDS_DEV=bank-fail=restore)");
-                std::process::exit(3);
-            }
-            let (restored, checked) = start::restore(&f, net_data, data, spec, scenes, save_path);
-            (verified, verify_ms) = (checked.verified, checked.ms);
-            restored
-        }
-        _ => return,
-    };
-    let mut game = game;
-    plugins_glue::attach(&mut game, prepared);
-    // What the start freed (the save's JSON, a snapshot's text, the tables' text) goes back to
-    // the system, not to sit in the process.
-    // SAFETY: malloc_trim only returns free memory to the system.
-    unsafe { libc::malloc_trim(0) };
+}
+
+/// What a restore took, for READY: when it began (a start has none: zeros), and the check of the
+/// restored state.
+struct Restore {
+    started: Instant,
+    got_at: u64,
+    faults_before: u64,
+    verified: Value,
+    verify_ms: f64,
+}
+
+impl Default for Restore {
+    fn default() -> Self {
+        Restore { started: Instant::now(), got_at: 0, faults_before: 0, verified: Value::Null, verify_ms: 0.0 }
+    }
+}
+
+/// READY, and the test switches that hold it or end the bank after it.
+fn ready(link: &mut Link, took: &Restore) {
     // gotAt and readyAt (the monotonic clock, ns) put the restore on the flip's timeline in the front.
-    let ready = Ready { restore_ms: started.elapsed().as_secs_f64() * 1000.0 - verify_ms, verify_ms, verified, got_at, ready_at: ipc::now_ns(), faults: minor_faults() - faults_before };
+    let ready = Ready { restore_ms: took.started.elapsed().as_secs_f64() * 1000.0 - took.verify_ms, verify_ms: took.verify_ms, verified: took.verified.clone(), got_at: took.got_at, ready_at: ipc::now_ns(), faults: minor_faults() - took.faults_before };
     if fail_for_test("slow-ready") {
         println!("bank: holding its ready for 2 s (PCDS_DEV=bank-fail=slow-ready)");
         std::thread::sleep(Duration::from_secs(2));
@@ -112,7 +139,6 @@ pub fn run(args: &[String]) {
             std::process::exit(3)
         });
     }
-    serve::Bank { game, link, save_path: save_path.clone(), build_id, data_dir: dir.clone() }.serve();
 }
 
 #[cfg(test)]
