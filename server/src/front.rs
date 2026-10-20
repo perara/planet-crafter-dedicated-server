@@ -1442,7 +1442,7 @@ impl Front {
         if let Err(e) = self.flip_fits() {
             return (409, json!({"error": e}).to_string());
         }
-        let version = body["version"].as_str().filter(|v| *v != "latest").map(str::to_string);
+        let version = body["version"].as_str().map(str::to_string);
         self.download(seq, dir, target, version, body["onlyNewer"] == true, false);
         (200, json!({"ok": true, "seq": seq}).to_string())
     }
