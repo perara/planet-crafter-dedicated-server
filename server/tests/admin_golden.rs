@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 const PCDS: &str = env!("CARGO_BIN_EXE_pcds");
+/// The admin token of the test server: long enough that the log must never hold it (logging.rs).
+const TOKEN: &str = "golden-admin-token-7f3a9c2e41";
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/admin-api.txt");
 
 fn tables() -> Option<String> {
@@ -50,7 +52,7 @@ impl Server {
         let body = body.to_string();
         let mut s = TcpStream::connect(("127.0.0.1", self.admin)).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
-        let auth = if token { "Authorization: Bearer t\r\n" } else { "" };
+        let auth = if token { format!("Authorization: Bearer {TOKEN}\r\n") } else { String::new() };
         write!(s, "{method} {path} HTTP/1.1\r\n{auth}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
         let mut answer = String::new();
         let _ = s.read_to_string(&mut answer);
@@ -86,7 +88,7 @@ fn start(dir: &Path, data: &str) -> Server {
             .env_remove("PCDS_GAME_DIR")
             .env("PCDS_LISTEN", format!("127.0.0.1:{udp}"))
             .env("PCDS_ADMIN", format!("127.0.0.1:{admin}"))
-            .env("PCDS_ADMIN_TOKEN", "t")
+            .env("PCDS_ADMIN_TOKEN", TOKEN)
             .env("PCDS_STEAM", "off")
             .env("PCDS_HOME", dir)
             .env("PCDS_RELEASES", "http://127.0.0.1:9/releases")
@@ -254,6 +256,8 @@ fn every_route_answers_with_the_keys_it_always_did() {
     record("POST /api/stop", ask("POST", "/api/stop", json!({})));
     let mut server = server;
     assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    // The log of a server that was asked everything above, in the text format: the token is not in it.
+    assert!(!server.log().contains(TOKEN) && server.log().contains(" INFO  "), "{}", server.log());
     drop(server);
     std::fs::remove_dir_all(&dir).unwrap();
 

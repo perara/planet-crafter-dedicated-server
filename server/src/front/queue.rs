@@ -115,7 +115,7 @@ impl Front {
             self.queue.held_bytes.get(&client).copied().unwrap_or(0) + self.live.as_ref().and_then(|b| b.link.queued.get(&client).copied()).unwrap_or(0)
         };
         if client != 0 && queued + body.len() > MAX_CLIENT_QUEUE {
-            eprintln!("client {client}: over {} MiB waiting for the game; dropped", MAX_CLIENT_QUEUE >> 20);
+            warn!("client {client}: over {} MiB waiting for the game; dropped", MAX_CLIENT_QUEUE >> 20);
             self.drop_waiting(client);
             return;
         }
@@ -137,7 +137,7 @@ impl Front {
     fn make_room(&mut self, client: u64, need: usize) -> bool {
         while self.waiting_total() + need > self.queue.cap {
             let Some((slowest, bytes)) = self.queue.slowest(self.live.as_ref().map(|b| &b.link)) else { break };
-            eprintln!(
+            warn!(
                 "client {slowest}: {} MiB waiting for the game, the most of the {} MiB all clients have waiting (at most {} MiB): dropped",
                 bytes >> 20,
                 self.waiting_total() >> 20,
@@ -170,7 +170,7 @@ impl Front {
     pub(super) fn release_memory(&mut self) {
         let waiting = self.waiting_total();
         if let Some(peak) = self.queue.settled(waiting) {
-            println!("memory: {} MiB waited for the game at most; given back to the system", peak >> 20);
+            info!("memory: {} MiB waited for the game at most; given back to the system", peak >> 20);
             // SAFETY: malloc_trim only returns free memory to the system.
             unsafe { libc::malloc_trim(0) };
         }

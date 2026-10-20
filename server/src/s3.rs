@@ -107,10 +107,10 @@ pub fn after_backup(b: &Backup, save_path: &str, force: bool) -> Result<Option<S
             let result = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display())).and_then(|body| put(&b, &key, &body, SystemTime::now()));
             match &result {
                 Ok(()) => {
-                    println!("backup: {name} copied to s3://{}/{key}", b.s3_bucket.as_deref().unwrap_or(""));
+                    info!("file" = name, "key" = key; "backup: {name} copied to s3://{}/{key}", b.s3_bucket.as_deref().unwrap_or(""));
                     *UPLOADED.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.clone());
                 }
-                Err(e) => eprintln!("backup: {name} not copied to S3: {e}"),
+                Err(e) => warn!("backup: {name} not copied to S3: {e}"),
             }
             record(result.is_ok(), &name, result.as_ref().err().map(String::as_str).unwrap_or(""));
             // A backup made during this upload: the newest goes next.

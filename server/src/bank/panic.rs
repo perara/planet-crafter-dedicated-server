@@ -19,7 +19,7 @@ use crate::game::Game;
 pub(super) fn guarded(game: &mut Game, client: u64, save_path: &str, work: impl FnOnce(&mut Game)) {
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(game))).is_err() {
         taint();
-        eprintln!("client {client}: the server panicked on it; kicked. The world may hold half of what it did: the save on disk is left as it is, and the next save keeps it as {save_path}.before-panic first");
+        error!("client {client}: the server panicked on it; kicked. The world may hold half of what it did: the save on disk is left as it is, and the next save keeps it as {save_path}.before-panic first");
         game.kick(client, "Server error");
     }
 }
@@ -53,7 +53,7 @@ pub(crate) fn contained<T>(what: &str, work: impl FnOnce() -> T) -> Option<T> {
     let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
     if done.is_err() {
         taint();
-        eprintln!("{what}: the server panicked on it; going on (the next save keeps the one on disk as .before-panic first)");
+        error!("{what}: the server panicked on it; going on (the next save keeps the one on disk as .before-panic first)");
     }
     done.ok()
 }

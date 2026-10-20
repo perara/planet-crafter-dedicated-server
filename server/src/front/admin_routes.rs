@@ -202,20 +202,20 @@ impl Admin {
             return Ok(());
         }
         let Some(token) = crate::env("PCDS_ADMIN_TOKEN") else {
-            eprintln!("admin: PCDS_ADMIN_TOKEN is not set: the admin API and web page are off (pcds setup writes one)");
+            warn!("admin: PCDS_ADMIN_TOKEN is not set: the admin API and web page are off (pcds setup writes one)");
             return Ok(());
         };
         // Scoped tokens (run/plugins/tokens.json, beside the plugins the bank hosts) may make the requests of their scopes.
         let tokens = std::sync::Arc::new(crate::tokens::Checker::new(std::path::PathBuf::from(crate::config::installation_file(&crate::env, save, "plugins"))));
         match admin::start_with(&addr, token, self.web.clone(), feed, tokens) {
             Ok(rx) => {
-                println!("admin: http://{addr}/");
+                info!("admin: http://{addr}/");
                 // Plain HTTP: off this machine the token and every action travel in the clear.
                 // The container binds 0.0.0.0 inside its own network; its port is published on
                 // 127.0.0.1.
                 let loopback = addr.rsplit_once(':').and_then(|(h, _)| h.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok()).is_some_and(|ip| ip.is_loopback());
                 if !loopback && crate::env("PCDS_CONTAINER").is_none() {
-                    eprintln!("admin: WARNING: {addr} is reachable from other machines over plain HTTP; bind 127.0.0.1 and use an SSH tunnel or an HTTPS proxy");
+                    warn!("admin: WARNING: {addr} is reachable from other machines over plain HTTP; bind 127.0.0.1 and use an SSH tunnel or an HTTPS proxy");
                 }
                 self.rx = Some(rx);
                 Ok(())

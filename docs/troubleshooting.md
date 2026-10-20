@@ -31,7 +31,7 @@ leave). Run `pcds doctor` first: most of the table below is what it already chec
 | The unit stops after a few starts and `systemctl` says `start-limit-hit` | The server crashed 5 times in 10 minutes. The older backups are kept. | `pcds logs` for the reason, then `systemctl --user reset-failed pcds` and `pcds start`. |
 | `no systemd user session here: start the server with 'pcds run'` | A machine without a systemd user session (a plain SSH login on some systems, a container). | `pcds run` keeps the server in that terminal; use `tmux` or the Docker image to leave it running. |
 
-When the world does not start, the reason is a few lines above the last message in `pcds logs`.
+When the world does not start, the reason is a few lines above the last message in `pcds logs`. Narrow it with `pcds logs --since "1 hour ago" --grep error`; the log's format and level are the rules `log.format` and `log.level`, and how long it is kept is in [monitoring.md](monitoring.md#the-log).
 
 ## Players cannot join
 

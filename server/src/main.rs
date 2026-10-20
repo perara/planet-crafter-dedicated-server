@@ -62,6 +62,9 @@ macro_rules! section {
     };
 }
 
+// The log's macros (info!, warn!, error!, debug!, trace!) are used by every module after this line.
+#[macro_use]
+mod logging;
 #[cfg(any(fuzzing, pcds_corpus))]
 #[path = "../fuzz/entry.rs"]
 mod fuzz_entry;
@@ -198,7 +201,7 @@ fn check_format(dir: &str) -> Result<(), String> {
 }
 
 fn no_tables(dir: &str, e: String) -> ! {
-    eprintln!("the game tables in {dir} cannot be used: run `pcds update`, which reads them again (see README) ({e})");
+    error!("the game tables in {dir} cannot be used: run `pcds update`, which reads them again (see README) ({e})");
     std::process::exit(1)
 }
 

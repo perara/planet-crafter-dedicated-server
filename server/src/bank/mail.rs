@@ -21,7 +21,7 @@ pub(super) fn check_loading(game: &mut Game, loading: &mut HashMap<u64, i64>) {
     loading.retain(|c, left| match game.clients.get(c) {
         Some(client) if client.ready.is_none() => {
             if *left < 0 {
-                println!("client {c}: sent {} MiB more than its world while not a player; dropped", LOADING_ALLOWANCE >> 20);
+                info!("client {c}: sent {} MiB more than its world while not a player; dropped", LOADING_ALLOWANCE >> 20);
                 game.kicks.push((*c, "MENU_Network_Error_Timeout".into()));
             }
             *left >= 0
@@ -38,7 +38,7 @@ pub(super) fn send(link: &mut Link, mail: &mut crate::idmap::FxHashMap<u64, wire
             // Over the frame limit the front would end the link: that client goes instead (it
             // cannot go on without the batch). A join batch is ~14 bytes per world object.
             if !ipc::fits(&batch) {
-                eprintln!("client {c}: a batch of {} bytes is over the {} bytes a frame holds; it is dropped", batch.len(), ipc::MAX_FRAME);
+                warn!("client {c}: a batch of {} bytes is over the {} bytes a frame holds; it is dropped", batch.len(), ipc::MAX_FRAME);
                 link.send(ipc::DATA, *c, &protocol::reason_batch("The world is too large for this server to send"));
                 link.send(ipc::KICK, *c, &[]);
                 continue;

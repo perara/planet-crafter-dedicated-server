@@ -47,7 +47,7 @@ pub fn say(game: &mut Game, text: &str) {
         return;
     }
     if game.ext.chat.replies.len() >= REPLIES {
-        eprintln!("chat: {REPLIES} replies are waiting for the chat; one more was dropped");
+        warn!("chat: {REPLIES} replies are waiting for the chat; one more was dropped");
         return;
     }
     game.ext.chat.replies.push_back(text);
@@ -59,7 +59,7 @@ pub fn drop_replies(game: &mut Game) {
     let n = game.ext.chat.replies.len();
     if n > 0 {
         game.ext.chat.replies.clear();
-        println!("chat: nobody is in the game; {n} message(s) to the chat dropped");
+        info!("chat: nobody is in the game; {n} message(s) to the chat dropped");
     }
 }
 

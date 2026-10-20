@@ -80,7 +80,7 @@ impl Front {
         self.last_snapshot = None;
         self.recover_from = None;
         self.enter(Phase::Stopped);
-        println!("world {}: stopped by the admin", self.world_name());
+        info!("world {}: stopped by the admin", self.world_name());
         saved
     }
 
@@ -119,7 +119,7 @@ impl Front {
                 if let Some(home) = crate::env("PCDS_HOME")
                     && let Err(e) = crate::config::set_env_file(&std::path::Path::new(&home).join("server.env"), "PCDS_WORLD", &name)
                 {
-                    eprintln!("world {name}: not remembered for the next start ({e})");
+                    warn!("world {name}: not remembered for the next start ({e})");
                 }
                 Ok(world)
             }
@@ -143,7 +143,7 @@ impl Front {
         self.enter(Phase::Idle);
         self.autosave.restart();
         let name = self.world_name();
-        println!("world {name}: running (bank {bank}), started by the admin");
+        info!("world {name}: running (bank {bank}), started by the admin");
         Ok(name)
     }
 }

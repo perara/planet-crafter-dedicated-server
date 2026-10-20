@@ -351,7 +351,7 @@ fn put_with(banks: &Path, bank: &str, new: &Path, sync: impl Fn(&Path) -> std::i
     // A crash of an earlier install: what it left is made whole first (never removed blindly: the
     // bank it moved away may be the only copy).
     for done in recover_locked(banks)? {
-        println!("banks: {done}");
+        info!("banks: {done}");
     }
     let path = banks.join(bank);
     let old = banks.join(format!(".{bank}.old"));

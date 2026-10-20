@@ -25,6 +25,10 @@ services:
       PUID: "1000"   # the owner of ./data on the host (id -u)
       PGID: "1000"
     stop_grace_period: 90s
+    # Docker's default log driver never rotates; this keeps at most 50 MB (docs/monitoring.md).
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
     # The server writes only /data (and /game is read-only), so the rest can be locked down:
     # read_only: true
     # security_opt: ["no-new-privileges:true"]

@@ -104,7 +104,7 @@ pub(super) fn teleport(game: &mut Game, r: &Request) -> Reply {
     };
     match find_client(game, &named) {
         Ok(Some(c)) if crate::status::teleport(game, c, t.position) => {
-            println!("client {c}: teleported to {:?} (admin)", t.position);
+            info!("client {c}: teleported to {:?} (admin)", t.position);
             ok()
         }
         Err(e) => e,

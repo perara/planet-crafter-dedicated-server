@@ -327,6 +327,8 @@ file and the name.
 ./pcds api GET /api/status     # any admin API route, through the token in server.env
 ./pcds status --json           # the whole status, for scripts
 ./pcds doctor                  # checks everything the server needs, with the fix for each problem
+./pcds logs                    # the last 100 lines of the log, then new ones (Ctrl+C leaves)
+./pcds logs --since "1 hour ago" --grep error   # what was said, then exit (-n LINES, --follow)
 ```
 
 `./pcds help` lists every command. When a command cannot do what you asked, it says what to do;
@@ -444,7 +446,9 @@ reason in `./pcds logs`.
 | `save.backupMinutes` | `60` | minutes between those backups |
 | `update.auto` | `false` | install each new server release and hand the world over to it (see [Upgrading](#upgrading)); off: nothing contacts GitHub on its own |
 | `update.checkHours` | `24` | hours between those checks |
-| `log.trace` | `false` | log every incoming message and RPC (debugging; a lot of output) |
+| `log.trace` | `false` | log every incoming message and RPC (debugging; a lot of output; written whatever `log.level` is) |
+| `log.format` | `text` | how a line of the log is written: `text` (time, level, component, message) or `json` (one object per line: `timestamp`, `level`, `component`, `message`, `fields`). The front and the game process change together, at once |
+| `log.level` | `info` | the lines written, this level and above: `error` (failures), `warn` (what needs a look), `info` (what happens: joins, saves, hand-overs), `debug` (and the protocol noise) |
 | `limits.buildings` | none | building group id to how many the world may have; one more is taken down at once and its materials go back to the builder |
 | `players.forgetAfterDays` | `0` | days away after which a saved player is forgotten (about 1.2 KB each). Only a player who never crafted or earned a token and holds no more than a new player is given (the starter items) is forgotten, with those items; anyone with more, the host and anyone in the game is kept for ever. `0`: every player is kept for ever. The days count from the day the rule is first on (players already saved have no time yet) |
 | `world.dlcPlanets` | none | the DLC planets (Humble, Toxicity) you own, as names: `./pcds rules set world.dlcPlanets=Humble,Toxicity`. The server cannot ask Steam about an account, so this is your statement of ownership, not a check. A world on a DLC planet does not start unless the planet is listed, and players can travel only to the DLC planets listed. `/api/status` shows them as `dlcPlanets` |

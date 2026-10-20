@@ -225,7 +225,7 @@ impl Checker {
                     // Fail closed, say so once.
                     cache.tokens.clear();
                     if !std::mem::replace(&mut cache.error_said, true) {
-                        eprintln!("admin: {e}: no scoped token is valid until that is fixed");
+                        warn!("admin: {e}: no scoped token is valid until that is fixed");
                     }
                 }
             }

@@ -65,7 +65,7 @@ impl Ring {
             let gone: Vec<String> = self.consumers.iter().filter(|(_, c)| c.last.elapsed() > KEEP_ASKING).map(|(n, _)| n.clone()).collect();
             for name in gone {
                 self.consumers.remove(&name);
-                println!("stream consumer {name}: gone (no poll for {} s)", KEEP_ASKING.as_secs());
+                debug!("stream consumer {name}: gone (no poll for {} s)", KEEP_ASKING.as_secs());
             }
         }
         self.consumers.values().fold(0, |m, c| m | c.kinds)
@@ -81,7 +81,7 @@ impl Ring {
         }
         let kinds = kinds & STREAMABLE;
         let c = self.consumers.entry(name.to_string()).or_insert_with(|| {
-            println!("stream consumer {name}: registered");
+            debug!("stream consumer {name}: registered");
             Consumer { kinds, last: Instant::now(), polls: 0, after }
         });
         (c.kinds, c.last, c.after) = (kinds, Instant::now(), after);
@@ -93,7 +93,7 @@ impl Ring {
     pub fn unregister(&mut self, name: &str) -> bool {
         let there = self.consumers.remove(name).is_some();
         if there {
-            println!("stream consumer {name}: deregistered");
+            debug!("stream consumer {name}: deregistered");
         }
         there
     }

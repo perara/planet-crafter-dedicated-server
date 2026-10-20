@@ -99,10 +99,10 @@ impl Front {
         let Some(mut b) = self.live.take() else { return };
         let status = end(&mut b);
         let name = b.name.clone();
-        eprintln!("bank {name} (pid {}) ended ({status})", b.child.id());
+        warn!("bank {name} (pid {}) ended ({status})", b.child.id());
         match self.phase {
             // The snapshot is with the new bank already: it takes over as if nothing happened.
-            Phase::Restoring => eprintln!("the new bank has its snapshot: it takes over"),
+            Phase::Restoring => warn!("the new bank has its snapshot: it takes over"),
             Phase::Starting | Phase::Snapshotting => {
                 self.fail_flip("the running bank ended");
             }
@@ -138,12 +138,12 @@ impl Front {
         };
         match self.spawn(bank, None) {
             Ok(b) => {
-                eprintln!("restarting bank {bank} (pid {}) from {from}; {} players were told to join again", b.child.id(), told);
+                warn!("restarting bank {bank} (pid {}) from {from}; {} players were told to join again", b.child.id(), told);
                 self.next = Some(b);
                 self.enter(Phase::Recovering);
             }
             Err(e) => {
-                eprintln!("cannot restart bank {bank}: {e}");
+                error!("cannot restart bank {bank}: {e}");
                 self.shutdown(1);
             }
         }
@@ -155,7 +155,7 @@ impl Front {
     pub(super) fn restart_hello(&mut self, hello: Result<Hello, String>) {
         if let Err(e) = &hello {
             let name = self.next.as_ref().map(|b| b.name.clone()).unwrap_or_default();
-            eprintln!("bank {name} cannot run the world again: {e}; stopping");
+            error!("bank {name} cannot run the world again: {e}; stopping");
             self.shutdown(1);
         }
         let start = match self.recover_from.take() {
@@ -187,8 +187,8 @@ impl Front {
             (None, _) => Err("this server runs from a build, without banks".into()),
         };
         match rolled {
-            Ok(line) => eprintln!("{line}"),
-            Err(why) => eprintln!("{seen}: stopping (systemd starts the server again); no rollback: {why}"),
+            Ok(line) => warn!("{line}"),
+            Err(why) => error!("{seen}: stopping (systemd starts the server again); no rollback: {why}"),
         }
         self.shutdown(1)
     }
@@ -215,7 +215,7 @@ impl Front {
                 live.link.queue(ipc::ADMIN, id, &msg::body(&ping), None, 0);
             }
             Watch::Kill(silent) => {
-                eprintln!("bank {} (pid {}) said nothing for {} s (the rule limits.bankWatchdogSeconds is {} s): it is hung; killed, and the world starts again from the last snapshot or save, as after a crash", live.name, live.child.id(), silent.as_secs(), self.watch.limit.as_secs());
+                warn!("bank {} (pid {}) said nothing for {} s (the rule limits.bankWatchdogSeconds is {} s): it is hung; killed, and the world starts again from the last snapshot or save, as after a crash", live.name, live.child.id(), silent.as_secs(), self.watch.limit.as_secs());
                 self.totals.watchdog_kills += 1;
                 let mut b = self.live.take().expect("live bank");
                 let _ = b.child.kill();

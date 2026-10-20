@@ -158,17 +158,18 @@ fn ms(d: Duration) -> f64 {
 
 pub fn run(args: &[String]) {
     let [dir, save] = args else {
-        eprintln!("usage: pcds serve DATA_DIR SAVE.json (settings are environment variables: docs/env.md; 'pcds run' is what the service runs)");
+        error!("usage: pcds serve DATA_DIR SAVE.json (settings are environment variables: docs/env.md; 'pcds run' is what the service runs)");
         std::process::exit(2);
     };
+    crate::logging::start("front", &crate::config::installation_file(&crate::env, save, "rules.json"));
     // Settings that are not what they should be stop the start, before anything is opened.
     if let Err(e) = crate::config::check_env(crate::env) {
-        eprintln!("{e}");
+        error!("{e}");
         std::process::exit(2);
     }
     // One server per world, for this front's life (released when the process ends).
     let world = crate::util::hold(std::path::Path::new(&format!("{save}.lock")), "another server runs this world").unwrap_or_else(|e| {
-        eprintln!("{e}");
+        error!("{e}");
         std::process::exit(1)
     });
     // SAFETY: set before any other thread exists; the Steam API reads it during init.
@@ -183,10 +184,10 @@ pub fn run(args: &[String]) {
         addr => {
             let addr: SocketAddr = addr.parse().expect("PCDS_LISTEN: host:port");
             let utp = Utp::bind(addr).unwrap_or_else(|e| {
-                eprintln!("direct IP {addr}: {e}. Another program (a second pcds server?) may use that port: change PCDS_LISTEN in server.env ('pcds config'), or set it to off");
+                error!("direct IP {addr}: {e}. Another program (a second pcds server?) may use that port: change PCDS_LISTEN in server.env ('pcds config'), or set it to off");
                 std::process::exit(1)
             });
-            println!("direct IP: listening on {addr}");
+            info!("direct IP: listening on {addr}");
             Some(utp)
         }
     };
@@ -235,14 +236,14 @@ impl Front {
 
     fn start_admin(&mut self) {
         if let Err(e) = self.admin.start(self.hooks.feed.clone(), &self.save) {
-            eprintln!("{e}");
+            error!("{e}");
             self.shutdown(1);
         }
     }
 
     fn start_steam(&mut self) {
         if let Err(e) = self.net.start_steam(&self.game_version) {
-            eprintln!("{e}");
+            error!("{e}");
             self.shutdown(1);
         }
     }
@@ -313,7 +314,7 @@ impl Front {
             self.keep_snapshot();
         }
         if let Err(e) = self.stop_live() {
-            eprintln!("{e}");
+            error!("{e}");
             code = code.max(1);
         }
         for (mut child, _) in self.exiting.drain(..) {

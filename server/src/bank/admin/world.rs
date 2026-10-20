@@ -57,7 +57,7 @@ pub(super) fn pause(game: &mut Game, r: &Request) -> Reply {
         Some(p) => {
             if game.held != p {
                 game.held = p;
-                println!("world {} by the admin", if p { "paused" } else { "resumed" });
+                info!("world {} by the admin", if p { "paused" } else { "resumed" });
                 game.ext.chat.replies.push_back(if p { "The world is paused by the server admin." } else { "The world goes on." }.to_string());
             }
             json(200, &Paused { paused: p })

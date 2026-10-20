@@ -61,7 +61,7 @@ impl Transport {
                 Ok(())
             }
             Err(e) if self.utp.is_some() => {
-                eprintln!("steam: {e}; continuing with direct IP only");
+                warn!("steam: {e}; continuing with direct IP only");
                 Ok(())
             }
             Err(e) => Err(e),
@@ -86,7 +86,7 @@ impl Transport {
                             let _ = request.accept();
                         }
                         Err(why) => {
-                            println!("{steam_id}: Steam connection refused ({why})");
+                            info!("{steam_id}: Steam connection refused ({why})");
                             request.reject(NetConnectionEnd::App(AppNetConnectionEnd::generic_normal()), Some("the server cannot take this connection now"));
                         }
                     }
@@ -103,7 +103,7 @@ impl Transport {
                 }
                 ListenSocketEvent::Disconnected(event) => {
                     let peer = event.remote().steam_id().map(|id| id.raw()).unwrap_or(0);
-                    println!("{peer}: disconnected ({:?})", event.end_reason());
+                    info!("{peer}: disconnected ({:?})", event.end_reason());
                     let fresh: Vec<(u64, u64)> = joined.iter().map(|j| (j.client, j.steam_id)).collect();
                     gone.extend(disconnected(event.user_data(), peer, &fresh));
                 }
@@ -115,7 +115,7 @@ impl Transport {
     /// A new Steam connection into the table.
     pub(in crate::front) fn add_steam(&mut self, joined: Joined) {
         let Joined { client, steam_id, connection } = joined;
-        println!("client {client}: connected over Steam as {steam_id}");
+        info!("client {client}: connected over Steam as {steam_id}");
         self.conns.insert(client, Conn::Steam { connection, split: None, steam_id });
     }
 
@@ -129,7 +129,7 @@ impl Transport {
                     match reassemble(split, message.data()) {
                         Ok(batch) => incoming.extend(batch.map(|b| (*client, b))),
                         Err(e) => {
-                            println!("client {client}: dropped ({e})");
+                            info!("client {client}: dropped ({e})");
                             gone.push(*client);
                             break;
                         }
@@ -170,7 +170,7 @@ fn login(version: &str, session_number: u32) -> Result<(Server, ListenSocket, St
     let listen = steam.networking_sockets().create_listen_socket_p2p(0, [buffer]).map_err(|_| "P2P listen socket failed")?;
     let steam_id = steam.steam_id().raw();
     let code = format!("{}{:04}", crate::protocol::invite_code(steam_id), session_number);
-    println!("steam: game server {steam_id}, invite code {code}{}", if crate::env("PCDS_STEAM_TOKEN").is_some() { "" } else { " (it changes at every start: PCDS_STEAM_TOKEN in server.env keeps it)" });
+    info!("steam: game server {steam_id}, invite code {code}{}", if crate::env("PCDS_STEAM_TOKEN").is_some() { "" } else { " (it changes at every start: PCDS_STEAM_TOKEN in server.env keeps it)" });
     Ok((steam, listen, code))
 }
 

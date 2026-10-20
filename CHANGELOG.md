@@ -47,8 +47,25 @@ Every release has two parts a reader can rely on:
   dashboard [docs/grafana/pcds.json](docs/grafana/pcds.json) (all its queries run on a real
   Prometheus). `pcds health` is the command form of the health route.
 
+* **A structured, filterable log.** The rule `log.format` (`text` or `json`) and `log.level`
+  (`error`, `warn`, `info`, `debug`) apply to the front and the game process at once and change
+  while the server runs. A JSON line has `timestamp`, `level`, `component`, `message` and
+  `fields` (the process, its pid, and the data of the event: client, name, path, ...); a text
+  line starts with its UTC time, level and component. Under systemd each line carries its priority,
+  so `journalctl -p warning` works. No token, webhook URL, chat secret or S3 key is ever written
+  (they are replaced where they appear, and a test writes such values in both formats).
+  `pcds logs` takes `-n LINES`, `--since TIME`, `--grep PATTERN` and `--follow`.
+  [docs/monitoring.md](docs/monitoring.md) says how long journald, Docker and Kubernetes keep it
+  and how to set that; [compose.yaml](compose.yaml) now rotates the container's log.
+
 ### Changed
 
+* **Every line of the log starts with its time, level and component** (`2026-10-20T18:07:37.354Z
+  INFO  front: client 1: connected from ...`), also in `pcds logs`, where journald's own time is
+  not shown. Warnings and errors still go to standard error and the rest to standard output.
+  A program that parsed the old lines has to skip the prefix, or read `log.format=json`.
+* **The game's protocol noise is `debug`**: an RPC to an object without the class, a variable an
+  object does not carry. It is no longer in the log unless `log.level=debug`.
 * **The Docker health check and the Kubernetes probes use the health route.** The image's
   `HEALTHCHECK` runs `pcds health` (it needed the admin token and a status request before), and
   [docs/kubernetes.yaml](docs/kubernetes.yaml) probes `GET /api/health` over HTTP. The liveness

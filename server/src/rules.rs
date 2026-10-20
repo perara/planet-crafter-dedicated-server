@@ -68,11 +68,21 @@ impl Default for Update {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Log {
     /// Log every incoming message and RPC (a lot of output).
     pub trace: bool,
+    /// "text" or "json": how a line of the log is written (logging.rs).
+    pub format: String,
+    /// "error", "warn", "info" or "debug": the lines at this level and above are written.
+    pub level: String,
+}
+
+impl Default for Log {
+    fn default() -> Self {
+        Log { trace: false, format: "text".into(), level: "info".into() }
+    }
 }
 
 /// Off-site copies of the save backups: each new backup is uploaded to an S3-compatible bucket
@@ -442,10 +452,12 @@ fn merge(target: &mut Value, patch: &Value) {
 pub fn start(game: &mut Game, rules: Rules, path: String) {
     game.rules = rules;
     game.rules_path = Some(path);
+    // The format and level are in force before the rules are said (the defaults changed nothing).
+    apply_log(&game.rules.log);
     changed(game, &Rules::default());
     let changes = changes(&game.rules);
     if !changes.is_empty() {
-        println!("rules: {}", changes.join(", "));
+        info!("rules: {}", changes.join(", "));
     }
 }
 
@@ -500,6 +512,27 @@ fn changed(game: &mut Game, old: &Rules) {
     if game.rules.chat != old.chat {
         crate::chathooks::configure(game);
     }
+    // The log's format and level apply to this process at once (the front hears of them by OPS), and
+    // what the rules hold secret is kept out of every line from now on.
+    if game.rules.log != old.log {
+        apply_log(&game.rules.log);
+    }
+    crate::logging::rule_secrets(secret_values(&game.rules));
+}
+
+/// The rules log.format and log.level, in force in this process.
+pub fn apply_log(log: &Log) {
+    crate::logging::set(crate::logging::Format::parse(&log.format).unwrap_or(crate::logging::Format::Text), crate::logging::Level::parse(&log.level).unwrap_or(crate::logging::Level::Info));
+}
+
+/// The values of the rules that hold secrets (the chat secret and webhook URLs, the S3 keys): the
+/// log replaces them wherever they appear.
+pub fn secret_values(rules: &Rules) -> Vec<String> {
+    let mut values: Vec<String> = rules.chat.webhooks.clone();
+    values.extend(rules.chat.secret.clone());
+    values.extend(rules.backup.s3_access_key.clone());
+    values.extend(rules.backup.s3_secret_key.clone());
+    values
 }
 
 #[cfg(test)]

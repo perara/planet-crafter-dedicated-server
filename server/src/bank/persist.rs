@@ -77,7 +77,7 @@ pub(super) fn note_backup(result: &Result<bool, String>) {
         Ok(true) => BACKUPS.set((Some(unix_now()), None)),
         Ok(false) => {}
         Err(e) => {
-            eprintln!("backup failed: {e}");
+            error!("backup failed: {e}");
             BACKUPS.with_borrow_mut(|b| b.1 = Some((unix_now(), e.clone())));
         }
     }
@@ -96,9 +96,9 @@ fn write_save(path: &str, text: &[u8], files: &crate::rules::Save, after_panic: 
     if after_panic {
         let before = format!("{path}.before-panic");
         match std::fs::read(path).map_err(|e| e.to_string()).and_then(|bytes| save::write_atomic(&before, &bytes).map_err(|e| e.to_string())) {
-            Ok(()) => eprintln!("the world is saved after a panic; the save before it is kept as {before}"),
-            Err(e) if !std::path::Path::new(path).exists() => eprintln!("a panic was contained, and there is no save yet to keep ({e})"),
-            Err(e) => eprintln!("the save before a panic could not be kept as {before} ({e}); it is replaced by the save that follows"),
+            Ok(()) => warn!("the world is saved after a panic; the save before it is kept as {before}"),
+            Err(e) if !std::path::Path::new(path).exists() => error!("a panic was contained, and there is no save yet to keep ({e})"),
+            Err(e) => error!("the save before a panic could not be kept as {before} ({e}); it is replaced by the save that follows"),
         }
     }
     let backup = save::backup(path, Duration::from_secs(u64::from(files.backup_minutes) * 60), files.backups_kept as usize).map_err(|e| format!("{path}: {e}"));
@@ -114,11 +114,11 @@ fn saved(game: &mut Game, path: &str, written: &Written, took: Duration) {
     note_backup(&written.backup);
     LAST_SAVE.set(Some(LastSave { ok: saved.is_ok(), at, error: saved.as_ref().err().cloned() }));
     match saved {
-        Ok(()) => println!("saved {path}"),
-        Err(e) => eprintln!("save failed: {e}"),
+        Ok(()) => info!("path" = path, "millis" = (took.as_secs_f64() * 1e4).round() / 10.0; "saved {path}"),
+        Err(e) => error!("save failed: {e}"),
     }
     if let Err(e) = crate::s3::after_backup(&game.rules.backup, path, false) {
-        eprintln!("backup: {e}");
+        warn!("backup: {e}");
     }
     super::plugins_glue::world_saved(game, saved.is_ok());
 }
@@ -162,7 +162,7 @@ pub(super) fn persist_later(game: &mut Game, path: &str) -> bool {
         Ok(_) => WRITING.set(Some(Writing { path: path.to_string(), done, started })),
         Err(e) => {
             // No thread to write in: the world stands still for it, as it always did.
-            eprintln!("save: no thread ({e}); writing here");
+            warn!("save: no thread ({e}); writing here");
             return persist(game, path).is_ok();
         }
     }
@@ -205,9 +205,9 @@ pub(super) fn final_save(game: &mut Game, path: &str) -> i32 {
         write(&beside).map(|()| None).or_else(|b| write(&elsewhere).map(|()| Some(b)))
     });
     match kept {
-        Ok(None) => eprintln!("the world could not be saved ({e}): it is kept in {beside}, and the next start runs it"),
-        Ok(Some(b)) => eprintln!("the world could not be saved ({e}) nor kept beside it ({b}): it is kept in {elsewhere}; move it to {beside} for the next start to run it"),
-        Err(k) => eprintln!("the world could not be saved ({e}) nor kept ({k}): what it did since the last save is lost"),
+        Ok(None) => error!("the world could not be saved ({e}): it is kept in {beside}, and the next start runs it"),
+        Ok(Some(b)) => error!("the world could not be saved ({e}) nor kept beside it ({b}): it is kept in {elsewhere}; move it to {beside} for the next start to run it"),
+        Err(k) => error!("the world could not be saved ({e}) nor kept ({k}): what it did since the last save is lost"),
     }
     1
 }

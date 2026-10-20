@@ -2,13 +2,15 @@
 
 What to watch on a running server, and how to get it into the tools you already use: a health
 route for container probes and uptime monitors, a metrics route for Prometheus (and anything that
-reads its text format), a Grafana dashboard and alert rules to start from. `pcds doctor` is the other half: it checks the
-setup, and this page watches the running server.
+reads its text format), a Grafana dashboard, alert rules to start from, and the log (its format, where
+it goes and how long it is kept). `pcds doctor` is the other half: it checks the setup, and this
+page watches the running server.
 
 | You want | Use |
 |---|---|
 | "Is it up?" for Docker, Kubernetes or an uptime monitor | `GET /api/health` (no token) |
 | Graphs and alerts | `GET /api/metrics` (a token), the dashboard in [grafana/pcds.json](grafana/pcds.json) |
+| What it said | `pcds logs`, `docker logs`; the rules `log.format` and `log.level` |
 | A check of the setup, once | `pcds doctor` |
 
 ## Health
@@ -241,3 +243,100 @@ source). It shows the state at a glance (world running, players, last save and b
 S3 copy), then the game loop (tick time p50, p99 and max, how busy it is), memory by process, CPU,
 traffic, the size of the world, saves and backups, hand-overs and crashes, the waiting queue, and
 the plugins. A `Server` selector at the top picks the machine when you scrape several.
+
+## The log
+
+Everything the front and the game process say goes to their standard output (information) and
+standard error (warnings and errors). Under systemd that is the journal of the unit, in Docker
+the container's log, in a terminal the terminal.
+
+```bash
+pcds logs                                       # the last 100 lines, then new ones; Ctrl+C leaves
+pcds logs --since "1 hour ago" --grep "error|warn"   # what matched, then exit (journalctl's --since and --grep)
+pcds logs -n 500 --follow                       # the last 500 and on
+docker logs --since 1h --follow pcds            # in Docker
+journalctl --user -u pcds -p warning            # only warnings and errors: each line carries its priority
+```
+
+### Format and level
+
+Two rules, which change while the server runs and apply to the front and the game process alike:
+
+| Rule | Values | |
+|---|---|---|
+| `log.format` | `text` (default), `json` | how a line is written |
+| `log.level` | `error`, `warn`, `info` (default), `debug` | the lines written: this level and above |
+| `log.trace` | `true`, `false` | every message and RPC from the players; written whatever the level, as `debug` lines |
+
+```bash
+pcds rules set log.format=json                  # at once, no restart
+pcds rules set log.level=warn
+```
+
+`text`, one line per event, starting with its time in UTC to the millisecond:
+
+```
+2026-10-20T18:07:37.354Z INFO  front: client 1: connected from 127.0.0.1:37163
+2026-10-20T18:07:37.460Z INFO  players: client 1: Ann (67761912165969176) ready, saved player
+2026-10-20T18:07:37.165Z WARN  utp: 192.0.2.7:51000: nothing acknowledged for 10 s, dropped
+```
+
+`json`, one object per line, for Loki, Elasticsearch, Datadog, `jq`:
+
+```json
+{"timestamp":"2026-10-20T18:07:37.460Z","level":"info","component":"players","message":"client 1: Ann (67761912165969176) ready, saved player","fields":{"process":"bank","pid":3862721,"client":1,"name":"Ann","id":67761912165969176}}
+```
+
+* `component` is the part of the server that wrote the line (`front`, `bank`, `players`, `utp`,
+  `plugins`, `s3`, `updater`, ...; `run` for `pcds run` and the container's start).
+* `fields` always has `process` (`front`, `bank` or `run`) and `pid`; the lines that have data
+  of their own add it (`client`, `name`, `path`, `millis`, `tag`, `bank`, `file`, ...).
+* A message of several lines is one JSON object, and in `text` every line of it starts with its
+  time, so a `grep` finds the whole of it.
+* The levels: `error` is a failure the operator should look at (a save that failed, a game process
+  that cannot run), `warn` something that was refused or went wrong and was handled (a player
+  dropped for a stalled connection, a webhook that failed), `info` what happens (joins, saves,
+  hand-overs, updates), `debug` the protocol noise of the game's own messages (an RPC to an object
+  that does not have the class, a variable the object does not carry). Stopping at `warn` makes a
+  quiet log for a monitor.
+
+Valve's Steam library writes a few lines of its own while the server logs in (`dlopen failed
+trying to load: steamclient.so`, `Setting breakpad minidump AppID`, ...). They are not ours, they
+are plain text in either format, and a JSON reader should skip a line that does not start with `{`.
+
+### Time
+
+The `text` format starts every line with its own UTC time, so `pcds logs` (which asks journald for
+the message only, `-o cat`) and `docker logs` show when without help. journald adds its own time
+to every line too: `journalctl --user -u pcds -o short-iso` shows both, in local time and in UTC.
+Under systemd each line also starts with the priority tag journald reads and removes (`<3>` for an
+error), which is what makes `journalctl -p warning` work; Docker and a terminal never see it.
+
+### Secrets
+
+The log never holds a secret. The admin token, the Steam login token, the chat secret, the
+webhook URLs and the S3 keys are replaced by `***` wherever they appear in a line, and so is
+anything that looks like a bearer token or a scoped token (`pcdst_...`). The code does not print
+them in the first place; this is the net under it, and a test writes lines with such values in
+both formats. Still, a log is as private as the machine: a player's name, address and SteamID are in it.
+
+### How long it is kept
+
+The server keeps nothing itself; the system that collects the output decides.
+
+* **systemd (journald).** Set a limit instead of the default (10 percent of the disk, at most
+  4 GB): `SystemMaxUse=500M` and `MaxRetentionSec=1month` in `/etc/systemd/journald.conf`
+  (or a file in `journald.conf.d/`), then `systemctl restart systemd-journald`. Clean up now with
+  `journalctl --vacuum-size=500M` or `--vacuum-time=30d`; `journalctl --disk-usage` says how
+  much there is. The per-user journal of a service of your own is kept only with
+  `Storage=persistent` (the folder `/var/log/journal` exists); without it the journal lives in
+  memory and is gone at a reboot.
+* **Docker.** The default `json-file` driver never rotates: a server logs a few megabytes a
+  day, but set it anyway, per container (`--log-opt max-size=10m --log-opt max-file=5`;
+  [compose.yaml](../compose.yaml) has it) or for the daemon in `/etc/docker/daemon.json`:
+  `{"log-driver": "json-file", "log-opts": {"max-size": "10m", "max-file": "5"}}`.
+* **Kubernetes.** The kubelet rotates container logs (10 MiB and 5 files by default); ship them
+  with the collector you have (Loki, Fluent Bit, a cloud agent) before the pod goes, and use
+  `log.format=json` for it.
+* **Long term.** Ship the lines (promtail, Vector, Fluent Bit, the Datadog agent) rather than
+  keeping them on the server; the `json` format needs no parsing rules.

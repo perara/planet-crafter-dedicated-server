@@ -97,7 +97,7 @@ fn load(game: &Game) -> Vec<Area> {
         let position = [0, 1, 2].map(|i| v["position"][i].as_f64().unwrap_or(0.0) as f32);
         let id = area_id(position);
         if areas.iter().any(|a| a.id == id) {
-            eprintln!("toxic area at key {id}: another area has it, the game would not register this one");
+            warn!("toxic area at key {id}: another area has it, the game would not register this one");
             continue;
         }
         let ids: Vec<i32> = v["fields"]["_toxicObjects"].as_array().into_iter().flatten().filter_map(|o| o["worldObjectId"].as_i64()).map(|i| i as i32).collect();

@@ -148,7 +148,7 @@ pub fn listen_with(listener: TcpListener, token: String, web_index: Web, chat: A
             // No thread for it (the process is at its limit): the connection is closed (the
             // closure, with its slot and stream, is dropped with the error), and the acceptor goes on.
             if let Err(e) = spawned {
-                eprintln!("admin: no thread for a connection ({e}); it was closed, the listener goes on");
+                warn!("admin: no thread for a connection ({e}); it was closed, the listener goes on");
                 std::thread::sleep(accepting.pause_after_failure());
             }
         }
@@ -181,7 +181,7 @@ impl Accepting {
                 self.failures = self.failures.saturating_add(1);
                 // The first, and then one in a while: a minute of a stuck listener is a few lines.
                 if self.failures == 1 || self.failures.is_multiple_of(60) {
-                    eprintln!("admin: accept failed ({e}), {} in a row; trying again in {:?} (connections wait or are refused until it clears)", self.failures, Self::backoff(self.failures));
+                    error!("admin: accept failed ({e}), {} in a row; trying again in {:?} (connections wait or are refused until it clears)", self.failures, Self::backoff(self.failures));
                 }
                 Step::Pause(Self::backoff(self.failures))
             }
