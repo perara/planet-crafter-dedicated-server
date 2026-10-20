@@ -97,7 +97,7 @@ const STOPPED_UPDATE: &str = "the world is stopped, so no bank runs a world to h
 
 enum Conn {
     /// Steam networking: the connection carries the verified SteamID.
-    Steam { connection: NetConnection, split: Option<(Vec<u8>, usize)> },
+    Steam { connection: NetConnection, split: Option<(Vec<u8>, usize)>, steam_id: u64 },
     Ip(utp::Token),
 }
 
@@ -206,6 +206,8 @@ struct Front {
     /// when the live bank is the one the front started with. A release that ends the game over
     /// and over is given up (give_up) only when it came by a flip.
     flipped: Option<String>,
+    /// Who may connect over Steam (the caps of the UDP side).
+    steam_gate: SteamGate,
     /// The rule limits.bankWatchdogSeconds (ipc::OPS), and when the live bank was last pinged.
     watchdog: Duration,
     pinged: Option<Instant>,
@@ -313,6 +315,7 @@ impl Front {
             recover_from: None,
             crashes: VecDeque::new(),
             flipped: None,
+            steam_gate: SteamGate::default(),
             watchdog: Duration::from_secs(u64::from(rules.limits.bank_watchdog_seconds)),
             pinged: None,
             exiting: Vec::new(),
@@ -619,11 +622,22 @@ impl Front {
     fn poll_steam(&mut self) {
         let Some((steam, listen)) = &self.steam else { return };
         steam.run_callbacks();
-        let (mut joined, mut gone, mut incoming) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut joined, mut gone, mut incoming, mut accepted) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         while let Some(event) = listen.try_receive_event() {
             match event {
                 ListenSocketEvent::Connecting(request) => {
-                    let _ = request.accept();
+                    let steam_id = request.remote().steam_id().map(|id| id.raw()).unwrap_or(0);
+                    let open: Vec<u64> = self.conns.values().filter_map(|c| if let Conn::Steam { steam_id, .. } = c { Some(*steam_id) } else { None }).chain(joined.iter().map(|(_, s, _)| *s)).chain(accepted.iter().copied()).collect();
+                    match self.steam_gate.admit(steam_id, Instant::now(), &open) {
+                        Ok(()) => {
+                            accepted.push(steam_id);
+                            let _ = request.accept();
+                        }
+                        Err(why) => {
+                            println!("{steam_id}: Steam connection refused ({why})");
+                            request.reject(NetConnectionEnd::App(AppNetConnectionEnd::generic_normal()), Some("the server cannot take this connection now"));
+                        }
+                    }
                 }
                 ListenSocketEvent::Connected(event) => {
                     let steam_id = event.remote().steam_id().map(|id| id.raw()).unwrap_or(0);
@@ -645,7 +659,7 @@ impl Front {
         }
         for (client, steam_id, connection) in joined {
             println!("client {client}: connected over Steam as {steam_id}");
-            self.conns.insert(client, Conn::Steam { connection, split: None });
+            self.conns.insert(client, Conn::Steam { connection, split: None, steam_id });
             self.to_bank(ipc::CONNECTED, client, json!({"steamId": steam_id, "trusted": false}).to_string().as_bytes(), 0);
         }
         for (client, conn) in self.conns.iter_mut() {
@@ -1810,6 +1824,46 @@ impl Front {
     }
 }
 
+/// Steam connections the server takes at once, and from one SteamID: the UDP side's caps
+/// (utp::MAX_CONNECTIONS; a player has one connection, a few more while an old one closes).
+const MAX_PER_STEAM_ID: usize = 4;
+
+/// Whether a Steam connection request is accepted: the caps direct-IP sessions have (utp.rs):
+/// connections in all, connections of one SteamID, and new connections of one SteamID within
+/// a window. Steam gives every request a verified identity but no address, so the SteamID
+/// stands where the IP does there.
+#[derive(Default)]
+struct SteamGate {
+    handshakes: HashMap<u64, (Instant, u32)>,
+}
+
+impl SteamGate {
+    /// `open`: the SteamIDs of the connections there are (and the ones accepted just now).
+    /// Err says which cap.
+    fn admit(&mut self, steam_id: u64, now: Instant, open: &[u64]) -> Result<(), String> {
+        if open.len() >= utp::MAX_CONNECTIONS {
+            return Err(format!("{} connections already", open.len()));
+        }
+        let same = open.iter().filter(|s| **s == steam_id).count();
+        if same >= MAX_PER_STEAM_ID {
+            return Err(format!("{same} connections of this SteamID already"));
+        }
+        let (since, n) = self.handshakes.entry(steam_id).or_insert((now, 0));
+        if now.saturating_duration_since(*since) > utp::HANDSHAKE_WINDOW {
+            (*since, *n) = (now, 0);
+        }
+        if *n >= utp::MAX_HANDSHAKES {
+            return Err(format!("more than {} new connections in {} s", utp::MAX_HANDSHAKES, utp::HANDSHAKE_WINDOW.as_secs()));
+        }
+        *n += 1;
+        // Connections are capped, so this holds the SteamIDs of the last window and little more.
+        if self.handshakes.len() > 4 * utp::MAX_CONNECTIONS {
+            self.handshakes.retain(|_, (t, _)| now.saturating_duration_since(*t) <= utp::HANDSHAKE_WINDOW);
+        }
+        Ok(())
+    }
+}
+
 /// What the watchdog does about the live bank.
 #[derive(Debug, PartialEq)]
 enum Watch {
@@ -2171,6 +2225,41 @@ mod tests {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+
+    /// Steam connections have the caps direct-IP sessions have: in all, per SteamID, and how often a
+    /// SteamID may connect. (The event loop that asks it needs a Steam login and is not run by the tests.)
+    #[test]
+    fn steam_connections_have_the_udp_caps() {
+        let now = Instant::now();
+        let mut gate = SteamGate::default();
+        // One SteamID: four at once (a reconnect while the old one closes), the fifth refused.
+        let mut open: Vec<u64> = Vec::new();
+        for _ in 0..MAX_PER_STEAM_ID {
+            gate.admit(7, now, &open).unwrap();
+            open.push(7);
+        }
+        assert!(gate.admit(7, now, &open).unwrap_err().contains("4 connections of this SteamID"));
+        // Others are not held back by it.
+        gate.admit(8, now, &open).unwrap();
+        // The total: 128, whoever asks.
+        let full: Vec<u64> = (0..utp::MAX_CONNECTIONS as u64).map(|i| 1000 + i).collect();
+        assert!(gate.admit(9, now, &full).unwrap_err().contains("128 connections already"));
+        assert!(gate.admit(9, now, &full[1..]).is_ok());
+        // The rate: four new connections within the window, whatever became of them.
+        let mut gate = SteamGate::default();
+        for i in 0..utp::MAX_HANDSHAKES {
+            gate.admit(5, now + Duration::from_secs(u64::from(i)), &[]).unwrap();
+        }
+        assert!(gate.admit(5, now + Duration::from_secs(5), &[]).unwrap_err().contains("new connections in 10 s"));
+        assert!(gate.admit(6, now + Duration::from_secs(5), &[]).is_ok());
+        assert!(gate.admit(5, now + utp::HANDSHAKE_WINDOW + Duration::from_secs(1), &[]).is_ok(), "the window moves on");
+        // Many SteamIDs asking once each do not make the table grow without end.
+        let mut gate = SteamGate::default();
+        for i in 0..2000u64 {
+            gate.admit(i, now + Duration::from_secs(i / 10), &[]).unwrap();
+        }
+        assert!(gate.handshakes.len() <= 4 * utp::MAX_CONNECTIONS + 1);
     }
 
     /// A world that does not start leaves the server stopped on the world it stopped, with its

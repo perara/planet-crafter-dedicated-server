@@ -51,13 +51,13 @@ const MAX_QUEUED: usize = 64 << 20;
 /// The room an emptied send queue keeps.
 const QUEUE_KEPT: usize = 256 << 10;
 const MAX_DATAGRAMS: usize = 4096;
-const MAX_CONNECTIONS: usize = 128;
+pub const MAX_CONNECTIONS: usize = 128;
 const MAX_PER_IP: usize = 8;
 const DATA_WITHIN: Duration = Duration::from_secs(10);
 /// New sessions per IP within HANDSHAKE_WINDOW. Loopback addresses are exempt from the per-IP
 /// limits: nobody outside can forge them, and behind a UDP relay every player has one.
-const MAX_HANDSHAKES: u32 = 4;
-const HANDSHAKE_WINDOW: Duration = Duration::from_secs(10);
+pub const MAX_HANDSHAKES: u32 = 4;
+pub const HANDSHAKE_WINDOW: Duration = Duration::from_secs(10);
 
 /// Loopback, also as an IPv4-mapped IPv6 address.
 pub fn is_loopback(ip: IpAddr) -> bool {
