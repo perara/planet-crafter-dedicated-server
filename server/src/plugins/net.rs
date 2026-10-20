@@ -9,7 +9,7 @@
 //! - **Which machine**: the host resolves the name itself, once for each connection, and the
 //!   addresses it connects to are exactly the ones it checked: loopback, private, link-local,
 //!   shared (CGNAT), documentation, multicast, reserved and the non-global IPv6 ranges are refused
-//!   unless `net.http.local` is granted. A name with one such address among its answers is refused
+//!   unless `net.http.local` is granted (the cloud metadata addresses, never). A name with one such address among its answers is refused
 //!   whole. A second check in the connector looks at the addresses ureq is about to use. So a name
 //!   that points at the local network (or changes its mind between two lookups) reaches nothing.
 //! - **How much**: a request is at most `MAX_HTTP_REQUEST` bytes; the answer is cut at the
@@ -28,7 +28,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -253,6 +253,10 @@ fn classify(ip: IpAddr) -> Class {
 fn classify_v4(a: Ipv4Addr) -> Class {
     let o = a.octets();
     match o {
+        // The cloud metadata services (AWS, Azure, GCP, OpenStack: 169.254.169.254; Alibaba: 100.100.100.200)
+        // hand the machine's credentials to whoever asks from it: not a "local network" a plugin may be
+        // granted, whatever net.http.local says.
+        [169, 254, 169, 254] | [100, 100, 100, 200] => Class::Never,
         [127, ..] | [10, ..] | [169, 254, ..] | [192, 168, ..] => Class::Local,
         [172, b, ..] if (16..32).contains(&b) => Class::Local,
         [100, b, ..] if (64..128).contains(&b) => Class::Local,
@@ -268,6 +272,10 @@ fn classify_v6(a: Ipv6Addr) -> Class {
         return Class::Local;
     }
     let s = a.segments();
+    // AWS's IPv6 metadata address (see classify_v4).
+    if s == [0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254] {
+        return Class::Never;
+    }
     // fc00::/7 unique-local, fe80::/10 link-local: this network.
     if s[0] & 0xfe00 == 0xfc00 || s[0] & 0xffc0 == 0xfe80 {
         return Class::Local;
@@ -426,6 +434,35 @@ fn blocked(why: &'static str) -> ureq::Error {
     ureq::Error::Other(Box::new(Blocked(why)))
 }
 
+/// The name lookups waiting at once for all plugins. The system's lookup cannot be interrupted: a
+/// request that gives up at its deadline leaves its thread behind until the resolver answers or
+/// gives up itself (tens of seconds, with a name server that never replies), and a plugin may start
+/// ten requests a second whose timeout is a millisecond.
+const MAX_LOOKUPS: usize = 16;
+static LOOKUPS: Lookups = Lookups(AtomicUsize::new(0));
+
+struct Lookups(AtomicUsize);
+
+/// One lookup under way, counted until it is dropped (when its thread ends).
+struct Lookup<'a>(&'a Lookups);
+
+impl Lookups {
+    fn start(&self, most: usize) -> Option<Lookup<'_>> {
+        if self.0.fetch_add(1, Ordering::SeqCst) >= most {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Lookup(self))
+    }
+}
+
+impl Drop for Lookup<'_> {
+    fn drop(&mut self) {
+        (self.0).0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+const LOOKUPS_BUSY: &str = "too many name lookups are waiting (a name server that does not answer)";
 const DISALLOWED_ADDRESS: &str = "the name resolves to an address the plugin may not reach (local, private or reserved)";
 
 /// Resolves a name the way the plugin's policy allows and no other way.
@@ -452,7 +489,11 @@ impl Resolver for Guard {
                 let left = self.deadline.saturating_duration_since(Instant::now());
                 let (tx, rx) = mpsc::sync_channel(1);
                 let (dns, host, port) = (self.dns.clone(), target.host.clone(), target.port);
-                std::thread::Builder::new().name("pcds-plugin-dns".into()).spawn(move || drop(tx.send(dns.lookup(&host, port)))).map_err(ureq::Error::Io)?;
+                let Some(lookup) = LOOKUPS.start(MAX_LOOKUPS) else { return Err(blocked(LOOKUPS_BUSY)) };
+                std::thread::Builder::new().name("pcds-plugin-dns".into()).spawn(move || {
+                    let _lookup = lookup;
+                    drop(tx.send(dns.lookup(&host, port)))
+                }).map_err(ureq::Error::Io)?;
                 match rx.recv_timeout(left) {
                     Ok(Ok(a)) => a,
                     Ok(Err(_)) => return Err(ureq::Error::HostNotFound),
@@ -830,12 +871,12 @@ mod tests {
             let ip: IpAddr = ip.parse().unwrap();
             assert!(public.ip_ok(ip) && local.ip_ok(ip), "{ip}");
         }
-        for ip in ["127.0.0.1", "127.255.255.254", "10.0.0.1", "172.16.0.1", "172.31.255.255", "192.168.1.1", "169.254.169.254", "100.64.0.1", "100.127.255.255", "::1", "fc00::1", "fd12:3456::1", "fe80::1", "::ffff:127.0.0.1", "::ffff:10.1.2.3", "::ffff:169.254.169.254"] {
+        for ip in ["127.0.0.1", "127.255.255.254", "10.0.0.1", "172.16.0.1", "172.31.255.255", "192.168.1.1", "169.254.169.253", "100.64.0.1", "100.127.255.255", "::1", "fc00::1", "fd12:3456::1", "fe80::1", "::ffff:127.0.0.1", "::ffff:10.1.2.3", "100.100.100.199", "fd00:ec2::253"] {
             let ip: IpAddr = ip.parse().unwrap();
             assert!(!public.ip_ok(ip), "{ip} is local and must be refused");
             assert!(local.ip_ok(ip), "{ip} is local and net.http.local allows it");
         }
-        for ip in ["0.0.0.0", "0.1.2.3", "224.0.0.1", "239.255.255.255", "255.255.255.255", "240.0.0.1", "192.0.2.1", "198.51.100.7", "203.0.113.9", "198.18.0.1", "192.88.99.1", "::", "ff02::1", "2001:db8::1", "2001::1", "2002:7f00:1::1", "64:ff9b::7f00:1", "::ffff:224.0.0.1", "3fff::1", "1::1"] {
+        for ip in ["169.254.169.254", "::ffff:169.254.169.254", "100.100.100.200", "fd00:ec2::254", "0.0.0.0", "0.1.2.3", "224.0.0.1", "239.255.255.255", "255.255.255.255", "240.0.0.1", "192.0.2.1", "198.51.100.7", "203.0.113.9", "198.18.0.1", "192.88.99.1", "::", "ff02::1", "2001:db8::1", "2001::1", "2002:7f00:1::1", "64:ff9b::7f00:1", "::ffff:224.0.0.1", "3fff::1", "1::1"] {
             let ip: IpAddr = ip.parse().unwrap();
             assert!(!public.ip_ok(ip) && !local.ip_ok(ip), "{ip} is never a peer");
         }
@@ -870,6 +911,17 @@ mod tests {
         assert!(p.build(&HttpRequest { method: "GET", url: &format!("https://discord.com/{long}"), headers: vec![], body: b"" }, &config).is_err());
         let big = vec![0u8; limits::MAX_HTTP_BODY + 1];
         assert!(p.build(&HttpRequest { method: "POST", url: "https://discord.com/", headers: vec![], body: &big }, &config).is_err());
+    }
+
+    #[test]
+    fn lookups_that_cannot_be_given_up_are_few() {
+        let lookups = Lookups(AtomicUsize::new(0));
+        let held: Vec<_> = (0..3).map(|_| lookups.start(3).expect("under the limit")).collect();
+        assert!(lookups.start(3).is_none(), "one over the limit is refused, and does not count");
+        drop(held);
+        assert!(lookups.start(3).is_some() && lookups.0.load(Ordering::SeqCst) == 0, "a lookup that ends gives its place back");
+        // The real limit is the few a host has threads to spare for; a plugin's timeout does not raise it.
+        assert!((1..=64).contains(&MAX_LOOKUPS));
     }
 
     #[test]

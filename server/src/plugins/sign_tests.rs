@@ -263,3 +263,24 @@ fn the_signed_example_is_current() {
     assert!(the(&host).running(), "{:?}", the(&host).status);
     assert_eq!(the(&host).grant.names().len(), 5);
 }
+
+/// The example publisher's private key is in the repository: a plugin anyone signs with it, under a
+/// key an admin trusted by following the README, runs without approval, and the listing says why that is no trust.
+#[test]
+fn a_plugin_signed_by_the_published_example_key_carries_a_warning() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins");
+    let private = std::fs::read_to_string(root.join("example-publisher.key")).unwrap();
+    let public = sign::parse_public(&std::fs::read_to_string(root.join("example-publisher.pub")).unwrap()).unwrap();
+    let dir = fresh_dir("sign-published");
+    publish(&dir, "p", &say(5), &CHAT_SAY, &private);
+    trust(&dir, &public, &["event.chat", "chat.say"]);
+    let host = boot(&dir);
+    assert!(the(&host).running(), "it runs (the key vouches for what it asks)");
+    assert!(the(&host).warnings.iter().any(|w| w.contains("published") && w.contains("anybody can sign")), "{:?}", the(&host).warnings);
+    // A key nobody published carries none.
+    let (private, public) = pair();
+    let dir = fresh_dir("sign-own");
+    publish(&dir, "p", &say(5), &CHAT_SAY, &private);
+    trust(&dir, &public, &["event.chat", "chat.say"]);
+    assert!(the(&boot(&dir)).warnings.is_empty());
+}

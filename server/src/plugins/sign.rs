@@ -33,6 +33,17 @@ const PUBLIC_HEADER: &str = "pcds-plugin-public-key-v1";
 /// A signature file is a few hundred bytes; more is not read.
 const MAX_SIG_BYTES: u64 = 4096;
 
+/// The keys whose private half is in this repository (examples/plugins/example-publisher.key, for
+/// trying the signing flow): anyone can sign as them. Trusting one is said, in the listing, at the
+/// approval and when it is done.
+pub const PUBLISHED_KEY_IDS: [&str; 1] = ["d6d9b10b298c53f9fe73f4c9d8570e69"];
+
+pub fn published(id: &str) -> bool {
+    PUBLISHED_KEY_IDS.contains(&id)
+}
+
+pub const PUBLISHED_WARNING: &str = "the private half of this key is published in the project's repository: anybody can sign as it, so trusting it is trusting everybody";
+
 /// A key's short name: the first 16 bytes of sha256 of the public key, hex.
 pub fn key_id(public_key: &[u8]) -> String {
     crate::util::to_hex(&ring::digest::digest(&ring::digest::SHA256, public_key).as_ref()[..16])
@@ -141,7 +152,8 @@ impl Signed {
             Signed::Trusted(k) => {
                 let vouched: Vec<&str> = requested.iter().filter(|c| k.grant.contains(c)).map(String::as_str).collect();
                 let rest: Vec<&str> = requested.iter().filter(|c| !k.grant.contains(c)).map(String::as_str).collect();
-                format!("signed by {} ({}), whom you trust for: {}; needs your approval for: {}", k.name, k.id, if vouched.is_empty() { "none of what it asks".to_string() } else { vouched.join(", ") }, if rest.is_empty() { "nothing".to_string() } else { rest.join(", ") })
+                let warning = if published(&k.id) { format!(" - WARNING: {PUBLISHED_WARNING}") } else { String::new() };
+                format!("signed by {} ({}), whom you trust for: {}; needs your approval for: {}{warning}", k.name, k.id, if vouched.is_empty() { "none of what it asks".to_string() } else { vouched.join(", ") }, if rest.is_empty() { "nothing".to_string() } else { rest.join(", ") })
             }
         }
     }
@@ -149,21 +161,13 @@ impl Signed {
 
 /// Checks the `plugin.sig` in `folder` against `digest` (the digest of the files as they are read now).
 pub fn check(folder: &Path, digest: &str, keys: &Keys) -> Signed {
-    use std::io::Read;
     let path = folder.join(FILE);
-    let mut text = String::new();
-    match std::fs::File::open(&path) {
-        Ok(f) => {
-            if let Err(e) = f.take(MAX_SIG_BYTES + 1).read_to_string(&mut text) {
-                return Signed::Broken(format!("{FILE}: {e}"));
-            }
-        }
+    let text = match super::read_regular(&path, MAX_SIG_BYTES as usize) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Signed::No,
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => return Signed::Broken(format!("{FILE}: over {MAX_SIG_BYTES} bytes")),
         Err(e) => return Signed::Broken(format!("{FILE}: {e}")),
-    }
-    if text.len() as u64 > MAX_SIG_BYTES {
-        return Signed::Broken(format!("{FILE}: over {MAX_SIG_BYTES} bytes"));
-    }
+    };
     let broken = |why: &str| Signed::Broken(format!("{FILE}: {why}"));
     let Ok(sig) = serde_json::from_str::<Sig>(&text) else { return broken("not a signature file") };
     let (Ok(public), Ok(signature)) = (crate::util::from_hex(&sig.public_key), crate::util::from_hex(&sig.signature)) else { return broken("the key or the signature is not hex") };
@@ -352,6 +356,19 @@ mod tests {
         std::fs::remove_dir(d.join(FILE)).unwrap();
         std::fs::write(d.join(FILE), good).unwrap();
         assert!(matches!(check(&d, &digest, &keys), Signed::Trusted(_)));
+    }
+
+    /// The example publisher's private key is in the repository on purpose; the id the host warns about
+    /// is that key's, and a plugin signed by it says so wherever it is shown.
+    #[test]
+    fn the_published_example_key_is_known_for_what_it_is() {
+        let pub_file = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins/example-publisher.pub")).unwrap();
+        let public = parse_public(&pub_file).unwrap();
+        assert!(published(&key_id(&public)), "{}", key_id(&public));
+        assert!(!published("00000000000000000000000000000000"));
+        let mut keys = Keys::default();
+        let trusted = keys.trust(&public, "Example", vec!["chat.say".into()], false).unwrap();
+        assert!(Signed::Trusted(trusted).describe(&["chat.say".to_string()]).contains("WARNING"));
     }
 
     #[test]

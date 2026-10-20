@@ -30,6 +30,9 @@ const DEADLINE: Duration = Duration::from_secs(10);
 const ANSWER: Duration = Duration::from_secs(10);
 const WORLD_ANSWER: Duration = Duration::from_secs(200);
 
+/// The page's Content-Security-Policy (see `respond_with`).
+const PAGE_POLICY: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; base-uri 'none'; frame-ancestors 'none'";
+
 pub struct Request {
     pub method: String,
     pub path: String,
@@ -246,8 +249,11 @@ fn respond_with(mut stream: TcpStream, status: u16, content_type: &str, body: &s
         503 => "Service Unavailable",
         _ => "Error",
     };
-    // The page holds the token once logged in: no other site may frame it (clickjacking).
-    let frames = "X-Frame-Options: DENY\r\nContent-Security-Policy: frame-ancestors 'none'\r\n";
+    // The page holds the token once logged in: no other site may frame it (clickjacking). The page
+    // itself may talk to this server and nobody else (a script that got in could not send the token
+    // anywhere), load nothing from elsewhere and take no <base>; its script and style are inline.
+    let policy = if content_type.starts_with("text/html") { PAGE_POLICY } else { "frame-ancestors 'none'" };
+    let frames = format!("X-Frame-Options: DENY\r\nContent-Security-Policy: {policy}\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCache-Control: no-store\r\n");
     write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{extra}{frames}Connection: close\r\n\r\n{body}", body.len())
 }
 
@@ -262,21 +268,34 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>
     let target = parts.next().unwrap_or("");
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let (path, query) = (path.to_string(), query.to_string());
-    let (mut auth, mut length, mut chunked) = (String::new(), Some(0usize), false);
+    let (mut auth, mut length, mut chunked) = (None::<String>, None::<Option<usize>>, false);
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header)? == 0 || header.trim().is_empty() {
             break;
         }
-        if let Some((k, v)) = header.split_once(':') {
-            match k.trim().to_ascii_lowercase().as_str() {
-                "authorization" => auth = v.trim().to_string(),
-                "content-length" => length = v.trim().parse().ok(),
-                "transfer-encoding" => chunked = true,
-                _ => {}
-            }
+        // The head is read as one reader reads it or not at all: what a proxy in front may read
+        // another way (a line folded onto the one before, a name with a space, two lengths, two
+        // tokens) is refused, so no request means one thing here and another there.
+        let bad = |what: &str| respond(stream.try_clone()?, 400, "application/json", &serde_json::json!({ "error": what }).to_string());
+        if !header.ends_with('\n') {
+            return respond(stream, 431, "application/json", "{\"error\":\"the head of a request is at most 64 KiB\"}");
+        }
+        if header.starts_with([' ', '\t']) {
+            return bad("a header folded over lines");
+        }
+        let Some((k, v)) = header.split_once(':') else { return bad("a header line without a colon") };
+        if k.is_empty() || !k.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) {
+            return bad("a header name is letters, digits and the usual signs, with no space before the colon");
+        }
+        match k.to_ascii_lowercase().as_str() {
+            "authorization" if auth.replace(v.trim().to_string()).is_some() => return bad("two Authorization headers"),
+            "content-length" if length.replace(v.trim().parse().ok()).is_some() => return bad("two Content-Length headers"),
+            "transfer-encoding" => chunked = true,
+            _ => {}
         }
     }
+    let (auth, length) = (auth.unwrap_or_default(), length.unwrap_or(Some(0)));
     reader.get_mut().get_mut().1 = started + DEADLINE;
     // A chunked body would read as empty, and {} answered as done: refused instead.
     if chunked {
@@ -627,5 +646,59 @@ mod tests {
             ask(addr, wrong).starts_with("HTTP/1.1 401")
         });
         assert!(served, "slots are freed when connections end");
+    }
+
+    /// A head that a proxy in front of the admin port could read another way is refused, so that no
+    /// request means one thing there and another here: a header folded onto the line before (the
+    /// continuation was read as a header of its own, `Authorization` among them), a name with a
+    /// space before the colon, two lengths, two tokens, a head over the limit.
+    #[test]
+    fn a_head_that_can_be_read_two_ways_is_refused_not_guessed() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let rx = listen(listener, "secret".into(), Default::default(), crate::front::Hooks::default().feed).unwrap();
+        let auth = "Authorization: Bearer secret\r\n";
+        for (what, request) in [
+            ("a folded line", format!("GET /api/ping HTTP/1.1\r\nX: a\r\n {auth}\r\n")),
+            ("a folded line after a tab", format!("GET /api/ping HTTP/1.1\r\nX: a\r\n\t{auth}\r\n")),
+            ("a space before the colon", "GET /api/ping HTTP/1.1\r\nAuthorization : Bearer secret\r\n\r\n".to_string()),
+            ("two tokens", format!("GET /api/ping HTTP/1.1\r\nAuthorization: Bearer nope\r\n{auth}\r\n")),
+            ("two lengths", format!("POST /api/save HTTP/1.1\r\n{auth}Content-Length: 5\r\ncontent-length: 0\r\n\r\n")),
+            ("a line without a colon", format!("GET /api/ping HTTP/1.1\r\n{auth}garbage\r\n\r\n")),
+            ("an empty name", format!("GET /api/ping HTTP/1.1\r\n{auth}: x\r\n\r\n")),
+        ] {
+            let answer = ask(addr, request.as_bytes());
+            assert!(answer.starts_with("HTTP/1.1 400"), "{what}: {answer}");
+        }
+        let answer = ask(addr, format!("GET /api/ping HTTP/1.1\r\n{auth}X: {}\r\n\r\n", "a".repeat(70_000)).as_bytes());
+        assert!(answer.starts_with("HTTP/1.1 431"), "{answer:.60}");
+        assert!(rx.try_recv().is_err(), "none of them reached the game loop");
+        // A head as clients write it still goes through (any case, LF-only lines, a body).
+        let client = std::thread::spawn(move || ask(addr, b"POST /api/save HTTP/1.1\nauthorization:   Bearer secret  \nCONTENT-LENGTH: 2\nX-Other: a:b\n\n{}"));
+        let request = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        request.reply.send((200, "{}".into())).unwrap();
+        assert!(client.join().unwrap().starts_with("HTTP/1.1 200"));
+    }
+
+    /// The page may talk to this server and nobody else, load nothing from elsewhere and not be kept
+    /// by a cache; the API's answers carry the framing and caching rules but not the page's policy.
+    #[test]
+    fn the_page_has_a_policy_of_its_own_and_the_api_does_not_need_it() {
+        let dir = std::env::temp_dir().join(format!("pcds-admin-page-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("index.html");
+        std::fs::write(&file, "<!doctype html><title>x</title>").unwrap();
+        let web: Web = Arc::new(RwLock::new(Some(file.display().to_string())));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _rx = listen(listener, "secret".into(), web, crate::front::Hooks::default().feed).unwrap();
+        let page = ask(addr, b"GET / HTTP/1.1\r\n\r\n");
+        assert!(page.starts_with("HTTP/1.1 200") && page.contains("Content-Type: text/html"), "{page}");
+        for header in ["default-src 'none'", "connect-src 'self'", "base-uri 'none'", "frame-ancestors 'none'", "X-Frame-Options: DENY\r\n", "X-Content-Type-Options: nosniff\r\n", "Referrer-Policy: no-referrer\r\n", "Cache-Control: no-store\r\n"] {
+            assert!(page.contains(header), "{header}: {page}");
+        }
+        let api = ask(addr, b"GET /api/status HTTP/1.1\r\n\r\n");
+        assert!(api.contains("Cache-Control: no-store\r\n") && api.contains("Content-Security-Policy: frame-ancestors 'none'\r\n") && !api.contains("script-src"), "{api}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

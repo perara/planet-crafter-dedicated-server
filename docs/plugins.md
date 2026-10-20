@@ -399,8 +399,19 @@ capability in plain words, and may grant less than was asked (`--grant event.cha
 `approved.json` records the grant and a **digest** (sha256 of the manifest and the entry file).
 At every start and reload the host recomputes it; a plugin whose files changed since the approval
 is `changed` and runs nothing until approved again, so an update or a swapped file cannot slip
-in. A file that cannot be read, or an `approved.json` that does not parse, means nothing is
-approved (never "everything is allowed").
+in. The approval is for the files that were shown: `pcds plugin enable` and the dashboard hold the
+digest they displayed, and the approval is refused if the files changed meanwhile (`digest` in
+`POST /api/plugins/enable`). A file that cannot be read, or an `approved.json` that does not parse,
+means nothing is approved (never "everything is allowed").
+
+**What a manifest may say.** The author's words (name, description, authors, license, a command's
+help, a config key's description) are shown on the admin's terminal above the capabilities and
+the question, so each is one line of plain text (name 64 characters, description 500, help and key
+description 200, 16 authors): a control character (an escape sequence can hide what follows,
+redraw the screen or set the clipboard), a line break (it forges lines of the approval) or a
+direction mark (U+202E) is refused. What the host says of a plugin whose files are wrong (a
+folder's name, a quoted line of TOML, the name of an import) has such characters replaced by `?`.
+The dashboard puts all of it in as text.
 
 The checks are at two places, so a missing capability shows up where it is used: **events** are
 only delivered if the capability for their kind is granted (a warning in the listing tells which
@@ -449,8 +460,9 @@ resolver reads as addresses (`127.1`, `0x7f.1`, `2130706433`) are not host names
 label begins with a letter), and one that reaches the resolver anyway is judged by the address it
 becomes. `net.http.local` (asked for in the manifest, granted by the admin as its own line in the
 approval) opens loopback, the private ranges, link-local and shared address space, for a plugin
-whose job is the local network (a bridge on the same machine); unspecified, multicast and the
-reserved ranges stay closed.
+whose job is the local network (a bridge on the same machine); unspecified, multicast, the
+reserved ranges and the cloud metadata addresses (169.254.169.254, 100.100.100.200, fd00:ec2::254:
+they hand out the machine's credentials) stay closed.
 
 **Limits that need no goodwill.** One wall clock from the lookup to the last byte (so a server
 that trickles one byte a second is let go: `timeout_ms`, 10 s by default, 30 s at most); the answer
@@ -517,7 +529,8 @@ The change is in `front/` and `admin.rs`, which a hot update does not replace: i
 
 | What | Limit | When it is over |
 |---|---|---|
-| work per event | fuel: 1,000,000 by default (about 0.3 ms of plain arithmetic), 20,000,000 at most; the manifest may ask for less or more up to the maximum, the admin may lower it | the call stops with a trap: a fault |
+| work per event | fuel: 1,000,000 by default (about 0.3 ms of plain arithmetic; a byte moved by `memory.fill` or `memory.copy` costs a quarter of a fuel, wasmi's own price being 1/64), 20,000,000 at most; the manifest may ask for less or more up to the maximum, the admin may lower it | the call stops with a trap: a fault |
+| the host's work for a call | each host call costs 200 fuel besides the call itself, and each byte the host copies for it (a text, a `query` answer) 1, each byte it parses (a rules patch, an HTTP request) 16; a `log`, `say`, `tell` or `kick` text is cut at 4096 bytes, a rules patch over 64 KiB is refused (`-1`); a `query` is built once per call | the call runs out of fuel: a fault |
 | work for `pcds_save` | 5,000,000 by default, 50,000,000 at most | a fault; the plugin keeps its older saved state |
 | starting a plugin | 100,000,000 | the plugin is `failed` |
 | memory | 64 pages (4 MiB) by default, 1024 (64 MiB) at most; one memory, one table | growth fails (the module sees -1); a module that needs more at its start does not start |
@@ -525,10 +538,11 @@ The change is in `front/` and `admin.rs`, which a hot update does not replace: i
 | all plugins' saves in a hot update | 25 ms | a plugin not reached keeps the state of its last save |
 | actions | 16 per call, 200 per second per plugin | refused, counted |
 | log lines | 20 per second per plugin, 240 characters | dropped, counted and said once a second |
+| a data plugin's rules file | 64 commands, 16 each of on_join and on_leave, 64 every, 32 when_players, 64 vars; a text 2000 bytes, a variable 1000 | not loaded (`invalid`, with the count) |
 | state | 1 MiB | a fault |
 | module | 8 MiB | not loaded |
 | faults | 5 in 60 seconds | the plugin is switched off (`failed`) until `pcds plugin reload` or the dashboard starts it |
-| HTTP requests | 2 alive and 10 a second per plugin, 4 workers and a queue of 32 for all, 10 s (30 s at most) each, answers of 64 KiB (1 MiB at most) | refused (`-3`), or answered with an error |
+| HTTP requests | 2 alive and 10 a second per plugin, 4 workers and a queue of 32 for all, 16 name lookups waiting at once for all, 10 s (30 s at most) each, answers of 64 KiB (1 MiB at most) | refused (`-3`), or answered with an error |
 
 A **fault** is a trap (including `unreachable`, which is what a Rust panic becomes with
 `panic = "abort"`), running out of fuel, a pointer outside the module's memory, an answer that is

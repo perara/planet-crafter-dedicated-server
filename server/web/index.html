@@ -1883,7 +1883,7 @@ async function approvePlugin(p, what, btn) {
   const keysNeeded = (p.config || []).filter(k => !k.set);
   if (keysNeeded.length) body.push(h('p', { class: 'muted', style: 'margin:8px 0 0' }, `It needs values from you (${keysNeeded.map(k => k.key).join(', ')}): set them after approving.`));
   body.push(h('p', { class: 'muted', style: 'margin:8px 0 0' }, g.state === 'trusted' ? `Signed by ${g.keyName}, whom you trust${(g.vouches || []).length ? ' for ' + g.vouches.join(', ') : ''}: later versions it signs will not need approving again while they ask for nothing beyond this.` : g.state === 'untrusted' ? 'It is signed by a key you have not trusted; approving does not trust the key. It waits for you again if its files change.' : asked.length ? 'It gets these and nothing else, for exactly these files: if they change, it waits for you again.' : 'It asks for nothing: it can read nothing and change nothing.'));
-  if (await ask({ title: `Approve ${p.id}?`, body, ok: 'Approve' })) act(`${p.id} approved`, () => api('POST', '/api/plugins/enable', { id: p.id, grant: checked(list) }).then(loadPlugins), btn);
+  if (await ask({ title: `Approve ${p.id}?`, body, ok: 'Approve' })) act(`${p.id} approved`, () => api('POST', '/api/plugins/enable', { id: p.id, grant: checked(list), digest: p.digest }).then(loadPlugins), btn);
 }
 async function untrust(k, btn) {
   if (await ask({ title: `Stop trusting ${k.name}?`, body: 'The plugins that run only because this publisher signed them stop at the next look at the folder (a few seconds); plugins you approved yourself go on. The key is remembered as revoked.', ok: 'Remove', danger: true })) act(`${k.name} is no longer trusted`, () => api('POST', '/api/plugins/untrust', { id: k.id }).then(loadPlugins), btn);

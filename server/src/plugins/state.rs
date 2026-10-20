@@ -59,7 +59,7 @@ pub fn path(plugin_dir: &Path, world: &str) -> PathBuf {
 }
 
 pub fn read(file: &Path) -> Result<Option<Blob>, String> {
-    let bytes = match std::fs::read(file) {
+    let bytes = match super::read_regular(file, super::limits::MAX_STATE_BYTES + 12) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("{}: {e}", file.display())),

@@ -161,6 +161,15 @@ impl Status {
             Status::Unloading => "unloading",
         }
     }
+    /// The same status with its text made plain (`clean`).
+    fn cleaned(self) -> Status {
+        match self {
+            Status::Invalid(s) => Status::Invalid(clean(&s)),
+            Status::Incompatible(s) => Status::Incompatible(clean(&s)),
+            Status::Failed(s) => Status::Failed(clean(&s)),
+            other => other,
+        }
+    }
     pub fn detail(&self) -> Option<&str> {
         match self {
             Status::Invalid(s) | Status::Incompatible(s) | Status::Failed(s) => Some(s),
@@ -280,9 +289,19 @@ impl Loaded {
     /// (An installed plugin's folder is named for its id: `prepare` checks that, a source folder
     /// being checked or installed is named as its author likes.)
     fn inspect(engine: &wasmi::Engine, dir: &Path, approval: Option<&Approval>, values: Option<&config::Values>, keys: &sign::Keys) -> Loaded {
+        // Everything the host says of a plugin (its listing, its log lines, the screen of its approval)
+        // is made of what its files and its folder say; none of it reaches a terminal as it was written.
+        let mut p = Loaded::inspect_files(engine, dir, approval, values, keys);
+        p.id = clean(&p.id);
+        p.status = p.status.cleaned();
+        p.warnings.iter_mut().for_each(|w| *w = clean(w));
+        p
+    }
+
+    fn inspect_files(engine: &wasmi::Engine, dir: &Path, approval: Option<&Approval>, values: Option<&config::Values>, keys: &sign::Keys) -> Loaded {
         let folder = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let mut p = Loaded::bare(&folder, dir, Status::Pending);
-        let manifest_bytes = match std::fs::read(dir.join(manifest::FILE)) {
+        let manifest_bytes = match read_regular(&dir.join(manifest::FILE), limits::MAX_MANIFEST_BYTES) {
             Ok(b) => b,
             Err(e) => {
                 p.status = Status::Invalid(format!("{}: {e}", manifest::FILE));
@@ -313,10 +332,10 @@ impl Loaded {
             p.manifest = Some(m);
             return p;
         }
-        // The entry's size is bounded before it is read: a plugin folder is the admin's, but a
-        // file that is a symlink to /dev/zero must not stop the start.
+        // The entry is whatever the folder holds under that name: read as a file of at most the module
+        // limit or not at all (a link to /dev/zero has size 0 and no end, a named pipe blocks the open).
         let entry_path = dir.join(&m.plugin.entry);
-        let entry = match std::fs::metadata(&entry_path).map_err(|e| e.to_string()).and_then(|meta| if meta.len() as usize > limits::MAX_MODULE_BYTES { Err(format!("{} bytes: at most {} are loaded", meta.len(), limits::MAX_MODULE_BYTES)) } else { std::fs::read(&entry_path).map_err(|e| e.to_string()) }) {
+        let entry = match read_regular(&entry_path, limits::MAX_MODULE_BYTES) {
             Ok(b) => b,
             Err(e) => {
                 p.status = Status::Invalid(format!("{}: {e}", m.plugin.entry));
@@ -329,6 +348,7 @@ impl Loaded {
         match &p.signed {
             sign::Signed::Broken(why) => p.warnings.push(format!("{why}: the plugin is judged as if it were not signed")),
             sign::Signed::Revoked { id } => p.warnings.push(format!("signed by the key {id}, which was revoked: it is not trusted")),
+            sign::Signed::Trusted(k) if sign::published(&k.id) => p.warnings.push(format!("signed by the key {}: {}", k.id, sign::PUBLISHED_WARNING)),
             _ => {}
         }
         let (standing, granted) = approvals::standing(approval, &p.digest, &p.requested, &p.signed);
@@ -428,7 +448,7 @@ impl Loaded {
             Ok(rt) => self.rt = Some(rt),
             Err(e) => {
                 eprintln!("plugin {}: {e}", self.id);
-                self.status = Status::Failed(e);
+                self.status = Status::Failed(clean(&e));
             }
         }
     }
@@ -483,7 +503,7 @@ impl Loaded {
     fn faulted(&mut self, fault: &Fault, during: &str) {
         let now = Instant::now();
         self.stats.faults += 1;
-        self.stats.last_error = Some(format!("{during}: {fault}"));
+        self.stats.last_error = Some(clean(&format!("{during}: {fault}")));
         self.stats.last_fault_unix = Some(approvals::now());
         self.faults.push_back(now);
         while self.faults.front().is_some_and(|t| now.duration_since(*t) > limits::FAULT_WINDOW) {
@@ -495,7 +515,7 @@ impl Loaded {
             eprintln!("plugin {}: {why} (pcds plugin reload {} starts it again)", self.id, self.id);
             // No more events from now on; the instance is held until the host has made its last
             // call and saved its state (`Host::settle`, between events).
-            self.status = Status::Failed(why);
+            self.status = Status::Failed(clean(&why));
             self.retire_due = self.rt.is_some();
             return;
         }
@@ -507,7 +527,7 @@ impl Loaded {
             let why = format!("could not restart after a fault: {e}");
             eprintln!("plugin {}: {why}", self.id);
             self.rt = None;
-            self.status = Status::Failed(why);
+            self.status = Status::Failed(clean(&why));
         }
     }
 
@@ -617,6 +637,7 @@ fn scan(engine: &wasmi::Engine, dir: &Path) -> (Vec<Loaded>, Option<String>, Opt
         // Installed plugins live in a folder named for their id: it is how a command or a state file
         // finds its owner, and what `pcds plugin enable ID` names.
         if p.manifest.as_ref().is_some_and(|m| m.id() != id) {
+            let id = clean(&id);
             let why = format!("the folder is {id} but the manifest's id is {}: the folder's name is the id", p.id);
             (p.id, p.status, p.pending, p.kinds, p.grant) = (id, Status::Invalid(why), None, 0, Grant::default());
         }
@@ -1200,6 +1221,37 @@ pub fn read_folder(folder: &Path) -> Loaded {
     Loaded::inspect(&wasm::engine(), folder, None, None, &sign::Keys::default())
 }
 
+/// A file of a plugin's folder, at most `max` bytes of it. The folder is what an archive unpacked,
+/// and every folder of plugins/ is read before anyone approves it: a named pipe in the place of a file
+/// would block the open for ever (the game thread reads these), and a device such as /dev/zero has
+/// a size of 0 and no end. Only a regular file is read (a link to one is followed), and it is
+/// opened without waiting so that even a pipe is looked at and refused.
+pub(crate) fn read_regular(path: &Path, max: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::{Error, ErrorKind, Read};
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY).open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(Error::new(ErrorKind::InvalidInput, "not a regular file"));
+    }
+    if meta.len() > max as u64 {
+        return Err(Error::new(ErrorKind::InvalidData, format!("{} bytes: at most {max} are loaded", meta.len())));
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.take(max as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > max {
+        return Err(Error::new(ErrorKind::InvalidData, format!("over {max} bytes: at most {max} are loaded")));
+    }
+    Ok(bytes)
+}
+
+/// Text an author chose, made safe to put on a terminal and in a log: a control character (an escape
+/// sequence that hides, redraws or sets the clipboard; a line break that forges a line), a mark that
+/// turns the text around (U+202E) and the zero-width ones become `?`. Plain text is returned as it is.
+pub fn clean(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}') { '?' } else { c }).collect()
+}
+
 /// The same, with the keys the admin trusts (for the signature to be judged).
 pub fn read_folder_with(folder: &Path, keys: &sign::Keys) -> Loaded {
     Loaded::inspect(&wasm::engine(), folder, None, None, keys)
@@ -1207,7 +1259,16 @@ pub fn read_folder_with(folder: &Path, keys: &sign::Keys) -> Loaded {
 
 /// Approves a plugin: records `grant` (default: everything it asks for; never more) and the digest
 /// of the files as they are now, and enables it. The server reads it at the next reload.
+#[cfg(test)]
 pub fn approve(dir: &Path, id: &str, grant: Option<Vec<String>>) -> Result<Approval, String> {
+    approve_digest(dir, id, grant, None)
+}
+
+/// `approve`, for the files whose digest the admin was shown (`expect`): the approval records the
+/// digest of the files it reads now, so files swapped between the screen and the answer (a folder a
+/// sync or a `git pull` keeps current, a plugin's author with the folder open) would be approved
+/// unseen. They are refused instead.
+pub fn approve_digest(dir: &Path, id: &str, grant: Option<Vec<String>>, expect: Option<&str>) -> Result<Approval, String> {
     if !manifest::valid_id(id) {
         return Err(format!("{id:?} is not a plugin id"));
     }
@@ -1218,6 +1279,10 @@ pub fn approve(dir: &Path, id: &str, grant: Option<Vec<String>>) -> Result<Appro
     }
     if found.id != id {
         return Err(format!("{id}: the manifest's id is {}: the folder's name is the id", found.id));
+    }
+    if let Some(shown) = expect.filter(|d| *d != found.digest) {
+        let short = |d: &str| d.chars().take(12).collect::<String>();
+        return Err(format!("{id}: its files changed after you looked at them (digest {} then, {} now): nothing approved; look at it again", short(shown), short(&found.digest)));
     }
     let grant = grant.unwrap_or_else(|| found.requested.clone());
     if let Some(extra) = grant.iter().find(|g| !found.requested.contains(g)) {

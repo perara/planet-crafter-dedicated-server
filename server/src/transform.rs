@@ -59,6 +59,14 @@ pub fn update(body: &[u8]) -> Option<Update> {
     Some(u)
 }
 
+/// Whether a state is one `update` does not decode on purpose (half-float axes): whole as far as
+/// the header goes. A body that is neither this nor an `update` is cut or garbage.
+pub fn is_half_float_state(body: &[u8]) -> bool {
+    let mut r = Reader::new(body);
+    let header = (r.packed_u64(), r.packed_i32(), r.packed_u32(), r.packed_i32());
+    matches!(header, (Some(_), Some(_), Some(flags), Some(_)) if flags & HALF_FLOATS != 0)
+}
+
 /// (object id, position, rotation) of a state carrying the whole position.
 #[cfg(test)]
 pub fn position_rotation(body: &[u8]) -> Option<(u64, [f32; 3], Option<[f32; 4]>)> {

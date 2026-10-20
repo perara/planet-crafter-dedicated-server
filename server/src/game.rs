@@ -51,6 +51,11 @@ pub(crate) const LOADING_RPCS: &[&str] = &[
     "ProceduralInstancesHandler.LoadInstanceFromSceneServerRpc",
 ];
 
+/// The most of an animator message the server passes on: it is relayed undecoded to every other
+/// client, and the game's (the parameters of an animator and the states of its layers) are a few
+/// hundred bytes.
+const MAX_ANIMATOR_MESSAGE: usize = 8 << 10;
+
 /// The server RPCs the game declares `[Rpc(SendTo.Server)]` without `InvokePermission =
 /// Everyone`: Netcode drops one whose sender does not own the object it is sent to
 /// (RpcMessageHelpers.Handle).
@@ -240,6 +245,10 @@ pub struct Game {
     /// Clients refused a change to another player's inventory (logged once each).
     #[serde(skip)]
     pub refused_inventories: std::collections::HashSet<u64>,
+    /// A client's RPC that waited for its turn panicked in the tick and was contained (its client
+    /// kicked): the bank taints the world as it does for the panics it contains (bank/panic.rs).
+    #[serde(skip)]
+    pub panicked: bool,
     /// RPCs refused for the object they were sent to (logged once each).
     #[serde(skip)]
     misrouted: std::collections::HashSet<String>,
@@ -381,6 +390,7 @@ impl Game {
             unhandled: Default::default(),
             misrouted: Default::default(),
             refused_inventories: Default::default(),
+            panicked: false,
             save_requested: false,
             limits: Default::default(),
             load_water: None,
@@ -568,6 +578,12 @@ impl Game {
             self.kick(client, "MULTIPLAYER_Game_Session_Full");
             return;
         }
+        // The world is sent to a session at the rate a forged address could make the server reflect it.
+        if self.clients.get(&client).and_then(|c| c.ip.clone()).is_some_and(|ip| !ip.parse().is_ok_and(crate::utp::is_loopback)) && !self.limits.join(std::time::Instant::now(), max) {
+            println!("client {client}: refused (worlds are being sent to new sessions as fast as they are allowed)");
+            self.kick(client, "Many players are joining at once: try again in a moment");
+            return;
+        }
         let mut o = NetObj::from_layout(&self.net_data.prefabs["Player"].layout(self.tick_number()));
         o.owner = client;
         let object = self.net.spawn(o);
@@ -640,6 +656,12 @@ impl Game {
             return;
         }
         let update = crate::transform::update(body);
+        // Passed on to everyone, so a state that is cut or garbage after its object id is not: the
+        // other clients would read past its end. (Half-float states are relayed undecoded.)
+        if update.is_none() && !crate::transform::is_half_float_state(body) {
+            self.limits.warn(client, "a transform state that is cut or not a state, dropped");
+            return;
+        }
         // NaN or infinity: neither kept (the snapshot and save could not be read back) nor
         // passed on; the next state moves the object on.
         if update.as_ref().is_some_and(|u| !u.finite()) {
@@ -693,7 +715,7 @@ impl Game {
     /// The work of an RPC (handlers::rpc_cost).
     fn rpc_cost(&self, body: &[u8]) -> u32 {
         let name = rpc_method(body).and_then(|m| self.net.spec.get(m)).map(|r| r.name.as_str());
-        crate::handlers::rpc_cost(name.unwrap_or(""), self.wos.len())
+        crate::handlers::rpc_cost(name.unwrap_or(""), self.wos.len(), body.len())
     }
 
     fn run_rpc(&mut self, client: u64, body: &[u8]) {
@@ -703,7 +725,11 @@ impl Game {
             return;
         }
         let Some(args) = self.net.spec.decode(method, r.rest()) else {
-            eprintln!("client {client}: undecodable RPC {method}");
+            // Logged once for each RPC of the game's, not for each message (a client can send them by
+            // the thousand) and not at all for a number that is none of them (nor kept: there are 2^32).
+            if self.net.spec.get(method).is_some() && self.unhandled.insert(format!("undecodable {method}")) {
+                eprintln!("client {client}: undecodable RPC {method} (logged once)");
+            }
             return;
         };
         let Some(name) = self.net.spec.get(method).map(|r| r.name.clone()) else { return };
@@ -741,7 +767,7 @@ impl Game {
             eprintln!("rpc {name}: no {client_rpc} to pass it on");
             return true;
         };
-        if self.net.objects.get(&object).is_some_and(|o| o.owner == client) {
+        if self.net.objects.get(&object).is_some_and(|o| o.owner == client) && body.len() <= MAX_ANIMATOR_MESSAGE {
             let mut w = Writer::new();
             w.packed_u64(object).packed_u16(behaviour).packed_u32(hash).bytes(body);
             self.out_to(Target::Except(client), (protocol::CLIENT_RPC, w.0));
@@ -1145,17 +1171,20 @@ pub mod tests {
         let ann = join(&mut g, 1, "Ann");
         join(&mut g, 2, "Bob");
         let message = vec![3, 1, 4, 1, 5];
-        let send = |g: &mut Game, client: u64| {
+        let send = |g: &mut Game, client: u64, message: &[u8]| {
             let mut w = Writer::new();
-            w.packed_u64(client).packed_u64(ann).packed_u16(7).packed_u32(g.net.spec.hash("NetworkAnimator.SendAnimTriggerServerRpc").unwrap()).bytes(&message);
+            w.packed_u64(client).packed_u64(ann).packed_u16(7).packed_u32(g.net.spec.hash("NetworkAnimator.SendAnimTriggerServerRpc").unwrap()).bytes(message);
             g.net.out.clear();
             g.receive(client, &wire::batch(&[(protocol::RPC, w.0)]));
             g.net.out.iter().filter(|m| m.1 == protocol::CLIENT_RPC).map(|(to, _, body)| (*to, body.clone())).collect::<Vec<_>>()
         };
         let mut w = Writer::new();
         w.packed_u64(ann).packed_u16(7).packed_u32(g.net.spec.hash("NetworkAnimator.SendAnimTriggerClientRpc").unwrap()).bytes(&message);
-        assert!(matches!(&send(&mut g, 1)[..], [(Target::Except(1), body)] if *body == w.0));
-        assert!(send(&mut g, 2).is_empty(), "not the owner");
+        assert!(matches!(&send(&mut g, 1, &message)[..], [(Target::Except(1), body)] if *body == w.0));
+        assert!(send(&mut g, 2, &message).is_empty(), "not the owner");
+        // What goes to everyone else is an animator's message, not a megabyte of anything.
+        assert_eq!(send(&mut g, 1, &vec![7u8; MAX_ANIMATOR_MESSAGE]).len(), 1, "up to the limit");
+        assert!(send(&mut g, 1, &vec![7u8; MAX_ANIMATOR_MESSAGE + 1]).is_empty(), "past it");
     }
 
     fn transform_message(object: u64, flags: u32, floats: &[f32]) -> Vec<u8> {
@@ -1211,6 +1240,55 @@ pub mod tests {
         let r = request(&g);
         g.approve(8, &r);
         assert!(g.clients[&8].approved, "Ann is in: one joining from her address");
+    }
+
+    /// Sessions from other machines get the world at a bounded rate (a forged address makes the
+    /// server reflect it): a burst, then one a second; sessions from this machine, and Steam's
+    /// (no address), are not held.
+    #[test]
+    fn worlds_go_to_sessions_from_other_machines_at_a_bounded_rate() {
+        let Some(mut g) = test_game(save()) else { return };
+        let request = |g: &Game| {
+            let data = format!("{}|0", g.net_data.game_version);
+            let mut w = Writer::new();
+            w.packed_i32(0).u64(0).i32(data.len() as i32).bytes(data.as_bytes());
+            w.0
+        };
+        let mut told = 0;
+        for client in 1..=60u64 {
+            g.connect(client, None, false, Some(format!("203.0.113.{client}")));
+            let r = request(&g);
+            g.approve(client, &r);
+            told += g.net.out.iter().filter(|(to, kind, _)| *to == Target::Only(client) && *kind == CONNECTION_APPROVED).count();
+            g.net.out.clear();
+            g.disconnect(client);
+        }
+        assert!((16..=18).contains(&told), "the burst, and not much more within a few milliseconds: {told}");
+        assert!(g.kicks.iter().all(|(_, why)| why.contains("joining at once")) && g.kicks.len() == 60 - told);
+        // From this machine (a relay's players, the tests') and over Steam: no limit.
+        for client in 100..160u64 {
+            g.connect(client, None, false, Some("127.0.0.1".into()));
+            let r = request(&g);
+            g.approve(client, &r);
+            assert!(g.clients[&client].approved, "{client}");
+            g.disconnect(client);
+        }
+    }
+
+    /// What the server remembers of RPCs it could not run is bounded by the RPCs there are, not by
+    /// the numbers a client sends.
+    #[test]
+    fn rpc_numbers_that_are_none_are_not_remembered() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        let object = *g.net.objects.keys().next().unwrap();
+        let before = g.unhandled.len();
+        for method in 1..5000u32 {
+            let mut w = Writer::new();
+            w.packed_u64(1).packed_u64(object).packed_u16(0).packed_u32(method.wrapping_mul(2_654_435_761)).bytes(&[1, 2, 3]);
+            g.run_rpc(1, &w.0);
+        }
+        assert_eq!(g.unhandled.len(), before);
     }
 
     /// A dropped item's owner sends NaN: nothing changes, nothing is passed on, and the
@@ -1271,6 +1349,52 @@ pub mod tests {
         g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, d)]));
         assert!(matches!(scale(&g), Some(crate::net::VarValue::Plain(b)) if b == 0.5f32.to_le_bytes()));
         assert_eq!(g.net.out.len(), 1, "passed on");
+    }
+
+    /// A transform state that is garbage after the object id the sender owns (or cut) is not relayed;
+    /// whole ones, and half-float ones (relayed undecoded), are.
+    #[test]
+    fn a_transform_state_that_is_garbage_is_not_passed_on() {
+        let Some(mut g) = test_game(save()) else { return };
+        let ann = join(&mut g, 1, "Ann");
+        join(&mut g, 2, "Bob");
+        g.sim_time = Some(100.0);
+        g.net.out.clear();
+        let relayed = |g: &Game| g.net.out.iter().filter(|(to, kind, _)| *kind == NETWORK_TRANSFORM && to.reaches(2)).count();
+        let mut whole = Writer::new();
+        whole.packed_u64(ann).packed_i32(0).packed_u32(2).packed_i32(1).bytes(&1.0f32.to_le_bytes());
+        for cut in 0..whole.0.len() {
+            g.receive(1, &wire::batch(&[(NETWORK_TRANSFORM, whole.0[..cut].to_vec())]));
+        }
+        let mut junk = Writer::new();
+        junk.packed_u64(ann).bytes(&[0xff; 7]);
+        g.receive(1, &wire::batch(&[(NETWORK_TRANSFORM, junk.0)]));
+        assert_eq!(relayed(&g), 0, "cut and garbage states");
+        g.receive(1, &wire::batch(&[(NETWORK_TRANSFORM, whole.0.clone())]));
+        let mut half = Writer::new();
+        half.packed_u64(ann).packed_i32(0).packed_u32(2 | (1 << 14)).packed_i32(1).bytes(&[1, 2]);
+        g.receive(1, &wire::batch(&[(NETWORK_TRANSFORM, half.0)]));
+        assert_eq!(relayed(&g), 2, "a whole state, and a half-float one");
+    }
+
+    /// Netcode writes a dirty flag for each variable of the behaviour: a delta that ends before the
+    /// last is not passed on (the other clients would read past its end), whatever it set before.
+    #[test]
+    fn a_cut_variable_delta_is_not_passed_on() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        let iron = g.create_world_object(g.data.group("Iron").unwrap(), 0, true);
+        g.drop_on_floor(iron, [561.0, 3.0, 497.0], [0.0, 0.0, 0.0, 1.0], 0.0, false, false, 0, 0.0, false, 1);
+        let net = g.wos[&iron].net.unwrap();
+        join(&mut g, 2, "Bob");
+        g.net.out.clear();
+        let whole = delta(&g, net, "GroupNetworkContainer", "_scale", &0.5f32.to_le_bytes());
+        for cut in 1..whole.len() - 4 {
+            g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, whole[..cut].to_vec())]));
+            assert!(g.net.out.is_empty(), "a delta cut at {cut} of {} bytes was passed on", whole.len());
+        }
+        g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, whole)]));
+        assert_eq!(g.net.out.len(), 1, "the whole one is");
     }
 
     /// RPC floats come through JSON, which has no NaN or infinity: they read as 0.
@@ -1378,7 +1502,9 @@ pub mod tests {
             run(&mut g);
             assert_eq!(answers(&mut g), n);
         }
-        assert_eq!(crate::handlers::rpc_cost("WorldObjectsHandler.HasWorldObjectAtPositionServerRpc", 50_000), 49);
+        assert_eq!(crate::handlers::rpc_cost("WorldObjectsHandler.HasWorldObjectAtPositionServerRpc", 50_000, 40), 49);
+        // An RPC costs one more for each KiB it carries (at most the budget), so a list of thousands of items is not one RPC's work.
+        assert_eq!((crate::handlers::rpc_cost("A.B", 0, 200), crate::handlers::rpc_cost("A.B", 0, 5000), crate::handlers::rpc_cost("A.B", 0, 1 << 20)), (1, 5, 33));
     }
 
     /// A whitelist of SteamIDs only: who is not on it never gets the world.

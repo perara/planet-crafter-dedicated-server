@@ -190,6 +190,10 @@ impl Bank {
             let _ = persist(game, &self.save_path);
             std::process::exit(1);
         }
+        // A client's waiting RPC panicked in it and was contained: the world may hold half of what it did.
+        if std::mem::take(&mut game.panicked) {
+            taint();
+        }
         // Plugins appear, change and go while the world runs: the folder is looked at between ticks.
         if frame {
             plugins_glue::poll(game);

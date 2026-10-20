@@ -121,7 +121,7 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
         report.facts.push("asks for no capability: it can read nothing and change nothing".into());
     }
     // Prepare it as the host would after approval: read the entry again with the grant.
-    let entry = match std::fs::read(folder.join(&p.entry)) {
+    let entry = match super::read_regular(&folder.join(&p.entry), super::limits::MAX_MODULE_BYTES) {
         Ok(e) => e,
         Err(e) => {
             let build = if matches!(p.kind, PluginKind::Wasm) && e.kind() == std::io::ErrorKind::NotFound { " (build it first: 'cargo build --release' in the plugin's folder, README.md there)" } else { "" };

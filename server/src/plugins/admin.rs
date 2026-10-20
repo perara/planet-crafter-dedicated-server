@@ -3,7 +3,8 @@
 //! - `GET /api/plugins`: every plugin with its status, capabilities asked and granted, budgets,
 //!   counters and last error; the capabilities there are.
 //! - `POST /api/plugins/reload`: read the folder again.
-//! - `POST /api/plugins/enable {"id", "grant": [...]}`: approve (default: all it asks for) and reload.
+//! - `POST /api/plugins/enable {"id", "grant": [...], "digest"}`: approve (default: all it asks for) and
+//!   reload; with the `digest` the listing showed, only if the files are still those.
 //! - `POST /api/plugins/disable {"id"}`.
 //! - `POST /api/plugins/events {"after", "types", "limit"}`: the event stream (stream.rs).
 //! - `GET /api/plugins/tokens`, `POST /api/plugins/tokens {"name", "scopes", "ratePerMinute"}` (the
@@ -122,7 +123,7 @@ pub fn request(game: &mut Game, method: &str, path: &str, body: &Value) -> (u16,
                 Err(e) => return e,
             };
             let grant = body["grant"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>());
-            if let Err(e) = super::approve(&dir, &id, grant) {
+            if let Err(e) = super::approve_digest(&dir, &id, grant, body["digest"].as_str()) {
                 return error(400, e);
             }
             reload_answer(game, &id)
@@ -196,7 +197,7 @@ pub fn request(game: &mut Game, method: &str, path: &str, body: &Value) -> (u16,
             });
             match result {
                 Ok(key) => match super::reload(game) {
-                    Ok(_) => (200, json!({"ok": true, "key": key}).to_string()),
+                    Ok(_) => (200, json!({"ok": true, "key": key, "warning": super::sign::published(&key.id).then_some(super::sign::PUBLISHED_WARNING)}).to_string()),
                     Err(e) => error(500, e),
                 },
                 Err(e) => error(400, e),
@@ -259,7 +260,9 @@ fn events(game: &mut Game, body: &Value) -> (u16, String) {
     }
     let after = body["after"].as_u64().unwrap_or(0);
     let limit = body["limit"].as_u64().unwrap_or(200).clamp(1, 500) as usize;
-    ring.ask(name, kinds, after);
+    if !ring.ask(name, kinds, after) {
+        return error(429, format!("{} consumers are registered already: poll under one of their names, or unregister one", stream::MAX_CONSUMERS));
+    }
     let answer = ring.read(after, kinds, limit);
     game.ext.plugins.refresh();
     (200, answer.to_string())

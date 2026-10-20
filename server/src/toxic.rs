@@ -36,6 +36,13 @@ use crate::net::Target;
 /// always the same bit for bit; the keys of two areas are thousands apart.
 const KEY_SLACK: i32 = 4;
 
+/// What one client may have registered at a time, in each list. A game client registers for the
+/// areas it stands in (a few) and, at load, for the end of every area of the planet (the DLC
+/// planet has 33, a volume and a decal each); it unregisters as it leaves. Both RPCs are allowed
+/// before PlayerReady, and each entry is looked at in every tick of every player, so a client that
+/// goes on registering would slow the whole world and fill the snapshot.
+const MAX_REGISTRATIONS: usize = 256;
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Area {
     /// ToxicAreaHandler.GetToxicAreaId: the integer part of the squared length of the position.
@@ -197,7 +204,13 @@ pub fn rpc(game: &mut Game, client: u64, name: &str, a: &Args) -> bool {
             let args = [json!(sum(&|a| a.cleaned)), json!(sum(&|a| a.total)), json!(sum(&|a| i32::from(a.cleaned == a.total))), json!(areas.len())];
             game.net.rpc_scene(Target::Only(client), "ToxicAreaHandler.GetCurrentPlanetToxicProgressClientRpc", &args);
         }
-        "ToxicAreaHandler.RegisterToAreaToxicProgressServerRpc" => game.ext.toxic.progress.push((a.i(0), client, -1.0)),
+        "ToxicAreaHandler.RegisterToAreaToxicProgressServerRpc" => {
+            if game.ext.toxic.progress.iter().filter(|(_, c, _)| *c == client).count() >= MAX_REGISTRATIONS {
+                game.limits.warn(client, "toxic area registrations over the limit, ignored");
+            } else {
+                game.ext.toxic.progress.push((a.i(0), client, -1.0));
+            }
+        }
         "ToxicAreaHandler.UnregisterToAreaToxicProgressServerRpc" => {
             let t = &mut game.ext.toxic;
             if let Some(i) = t.progress.iter().position(|(key, c, _)| *key == a.i(0) && *c == client) {
@@ -211,9 +224,15 @@ pub fn rpc(game: &mut Game, client: u64, name: &str, a: &Args) -> bool {
                 t.finished.len() - 1
             });
             let waits = &mut t.finished[i].1;
+            let mut over = false;
+            let room = waits.len() < MAX_REGISTRATIONS;
             match waits.iter_mut().find(|(key, _)| *key == a.i(0)) {
-                Some((_, count)) => *count += 1,
-                None => waits.push((a.i(0), 1)),
+                Some((_, count)) if (*count as usize) < MAX_REGISTRATIONS => *count += 1,
+                None if room => waits.push((a.i(0), 1)),
+                _ => over = true,
+            }
+            if over {
+                game.limits.warn(client, "toxic area registrations over the limit, ignored");
             }
         }
         "ToxicAreaHandler.UnregisterToAreaToxicFinishedServerRpc" => {
@@ -273,6 +292,40 @@ mod tests {
 
     fn toxic_value(g: &Game, player: u64) -> f32 {
         crate::gauges::values(g, player)[3]
+    }
+
+    /// A client (before PlayerReady too) cannot register without end: every entry is looked at in each
+    /// tick, for every player, and is in the snapshot.
+    #[test]
+    fn a_client_cannot_register_for_toxic_areas_without_end() {
+        // A whole tick of the game: it runs the RPCs that waited for their turn (a client's budget).
+        fn step(g: &mut Game) {
+            g.time += 0.2;
+            g.tick();
+        }
+        let Some((mut g, _)) = world() else { return };
+        for i in 0..5 * MAX_REGISTRATIONS as i32 {
+            for name in ["ToxicAreaHandler.RegisterToAreaToxicProgressServerRpc", "ToxicAreaHandler.RegisterToAreaToxicFinishedServerRpc"] {
+                send_scene(&mut g, 1, name, &[json!(i)]);
+            }
+            if i % 16 == 15 {
+                step(&mut g);
+            }
+        }
+        for _ in 0..200 {
+            step(&mut g);
+        }
+        let t = &g.ext.toxic;
+        assert_eq!(t.progress.len(), MAX_REGISTRATIONS);
+        assert_eq!(t.finished.iter().map(|(_, w)| w.len()).sum::<usize>(), MAX_REGISTRATIONS);
+        // The same key again counts up to the limit, not past it; a client that left takes its entries along.
+        for _ in 0..2 * MAX_REGISTRATIONS {
+            send_scene(&mut g, 1, "ToxicAreaHandler.RegisterToAreaToxicFinishedServerRpc", &[json!(7)]);
+            step(&mut g);
+        }
+        assert!(g.ext.toxic.finished[0].1.iter().all(|(_, n)| *n as usize <= MAX_REGISTRATIONS));
+        client_left(&mut g, 1);
+        assert!(g.ext.toxic.progress.is_empty() && g.ext.toxic.finished.is_empty());
     }
 
     /// A planet without toxic areas answers zero progress (as the game does on Prime),

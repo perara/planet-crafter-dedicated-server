@@ -132,7 +132,7 @@ pub const ROUTES: &[Route] = &[
     route("GET", "/api/map", Owner::Bank, "", "The buildings on this planet, for the players' map."),
     route("GET", "/api/plugins", Owner::Bank, "", "Every plugin with its status, capabilities, budgets and counters."),
     route("POST", "/api/plugins/reload", Owner::Bank, "", "Reads the plugins' folder again."),
-    route("POST", "/api/plugins/enable", Owner::Bank, "`{\"id\", \"grant\"?: [...]}`", "Approves a plugin (all it asks for, by default) and reloads."),
+    route("POST", "/api/plugins/enable", Owner::Bank, "`{\"id\", \"grant\"?: [...], \"digest\"?}`", "Approves a plugin (all it asks for, by default) and reloads; with the `digest` the listing showed, only if the files are still those."),
     route("POST", "/api/plugins/disable", Owner::Bank, "`{\"id\"}`", "Disables a plugin."),
     route("POST", "/api/plugins/config", Owner::Bank, "`{\"id\", \"key\", \"value\"?: \"...\"}`", "Sets a config key the plugin declares (an empty or missing value clears it) and reloads."),
     route("POST", "/api/plugins/trust", Owner::Bank, "`{\"publicKey\", \"name\"?, \"grant\"?: [...], \"force\"?: bool}`", "Trusts a publisher's Ed25519 key: plugins signed by it load without approving each file's digest, with the capabilities granted."),
@@ -140,7 +140,7 @@ pub const ROUTES: &[Route] = &[
     route("GET", "/api/plugins/tokens", Owner::Bank, "", "The scoped tokens (never the token itself), the scopes there are and the rate limits."),
     route("POST", "/api/plugins/tokens", Owner::Bank, "`{\"name\", \"scopes\": [...], \"ratePerMinute\"?}`", "Makes a scoped token for an out-of-process plugin; the answer's `token` is shown this once."),
     route("POST", "/api/plugins/tokens/revoke", Owner::Bank, "`{\"id\"}` (the id or the name)", "Revokes a scoped token at once."),
-    route("POST", "/api/plugins/events", Owner::Bank, "`{\"after\"?, \"types\"?, \"limit\"?, \"consumer\"?, \"unregister\"?, \"wait\"?: SECONDS}`", "The plugin event stream; with `wait` (at most 25 s; at most 8 polls wait at once) the front holds the request until an event comes or the wait is over."),
+    route("POST", "/api/plugins/events", Owner::Bank, "`{\"after\"?, \"types\"?, \"limit\"?, \"consumer\"?, \"unregister\"?, \"wait\"?: SECONDS}`", "The plugin event stream; with `wait` (at most 25 s; at most 8 polls wait at once) the front holds the request until an event comes or the wait is over. At most 16 consumer names are registered at once (429 for a new one beyond)."),
 ];
 
 /// The route the HTTP thread answers itself for a request: the first line of the table that
@@ -471,5 +471,57 @@ mod tests {
             let handler = front_handler(r.method, r.path, true);
             assert!(matches!(r.handler.owner, Owner::Loop(h, _) if Some(h) == handler), "{} {} is answered by {handler:?}", r.method, r.path);
         }
+    }
+
+    /// Every route of the table, every method and the paths that could be mistaken for it, with a token of
+    /// each scope and a token that was never made: only the five requests the scopes name pass, and each
+    /// of them lands on the route that is meant (the first the table matches), so a scope cannot reach
+    /// a route by a path the token check reads one way and the table another.
+    #[test]
+    fn a_scoped_token_reaches_only_the_five_routes_of_its_scopes_and_each_lands_where_it_is_meant() {
+        use crate::tokens::{create, scope_for, Checker, Denied, SCOPES};
+        let dir = std::env::temp_dir().join(format!("pcds-routes-scopes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tokens: Vec<(&str, String)> = SCOPES.iter().map(|(scope, _)| (*scope, create(&dir, &scope.replace('.', "-"), &[scope.to_string()], Some(6000)).unwrap().1)).collect();
+        let check = Checker::new(dir.clone());
+        let mut paths: Vec<(String, String)> = Vec::new();
+        for r in ROUTES {
+            let base = r.path.trim_end_matches('*');
+            for method in ["GET", "POST", "PUT", "DELETE", "HEAD", "get", "post"] {
+                for path in [base.to_string(), format!("{base}/"), format!("{base}x"), format!("{base}/x"), format!("{base}%2f"), format!("{base}?a=b"), base.to_uppercase(), format!("/{base}")] {
+                    paths.push((method.to_string(), path));
+                }
+            }
+        }
+        let mut passed = std::collections::BTreeSet::new();
+        for (method, path) in &paths {
+            for (scope, token) in &tokens {
+                let answer = check.authorize(&format!("Bearer {token}"), method, path);
+                match answer {
+                    Ok(_) => {
+                        assert_eq!(scope_for(method, path), Some(*scope), "{scope} passed {method} {path}");
+                        passed.insert((method.clone(), path.clone(), scope.to_string()));
+                    }
+                    Err(Denied::Scope(needs)) => assert_ne!(needs, Some(*scope), "{scope} refused {method} {path} for a scope it has"),
+                    Err(e) => panic!("{scope} {method} {path}: {e:?}"),
+                }
+            }
+            assert_eq!(check.authorize("Bearer pcdst_nothing", method, path), Err(Denied::Unknown));
+        }
+        let want: Vec<(&str, &str, &str, Owner)> = vec![
+            ("POST", "/api/plugins/events", "events.read", Owner::Bank),
+            ("GET", "/api/chat/events", "chat.read", Owner::Http(Http::Chat)),
+            ("POST", "/api/chat", "chat.send", Owner::Http(Http::Chat)),
+            ("POST", "/api/kick", "player.kick", Owner::Bank),
+            ("POST", "/api/teleport", "player.teleport", Owner::Bank),
+        ];
+        for (method, path, scope, owner) in &want {
+            assert!(passed.contains(&(method.to_string(), path.to_string(), scope.to_string())), "{scope} must pass {method} {path}");
+            let first = ROUTES.iter().find(|r| r.matches(method, path)).unwrap();
+            assert_eq!(first.handler.owner, *owner, "{method} {path} lands on {:?}", first.handler.owner);
+        }
+        assert_eq!(passed.len(), want.len(), "only those five: {passed:?}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

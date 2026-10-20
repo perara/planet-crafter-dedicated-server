@@ -21,6 +21,8 @@ pub const FUEL_LOAD: u64 = 100_000_000;
 /// 64 KiB pages of memory: 64 is 4 MiB; at most 1024 is 64 MiB.
 pub const MEMORY_PAGES: u32 = 64;
 pub const MAX_MEMORY_PAGES: u32 = 1024;
+/// A manifest bigger than this is not read (a real one is a few KiB).
+pub const MAX_MANIFEST_BYTES: usize = 256 << 10;
 /// A module bigger than this is not loaded.
 pub const MAX_MODULE_BYTES: usize = 8 << 20;
 
@@ -37,6 +39,21 @@ pub const FLIP_BUDGET: Duration = Duration::from_millis(25);
 /// A call that takes longer than this is counted as slow and logged (the fuel limit is what stops
 /// it; this is for finding it).
 pub const SLOW_CALL: Duration = Duration::from_millis(5);
+
+/// What the host's work for a plugin costs it in fuel (wasm.rs `charge`): a host call, then each
+/// byte the host copies for it and each it parses (JSON, a URL, headers: several times a copy).
+/// A million fuel is about a third of a millisecond, so this keeps a call that names big buffers
+/// to the time its fuel is worth. A `log` or `say` text is cut at `MAX_TEXT_BYTES` (every user of
+/// it cuts it shorter), a rules patch is refused over `MAX_PATCH_BYTES`.
+pub const HOST_CALL_FUEL: u64 = 200;
+pub const FUEL_PER_BYTE: u64 = 1;
+pub const FUEL_PER_PARSED_BYTE: u64 = 16;
+pub const MAX_TEXT_BYTES: usize = 4096;
+pub const MAX_PATCH_BYTES: usize = 64 << 10;
+
+/// Bytes a module's bulk memory operation (memory.fill, memory.copy) moves for one unit of fuel
+/// (wasmi's default is 64; see wasm.rs `engine`).
+pub const BYTES_COPIED_PER_FUEL: u32 = 4;
 
 /// Actions a plugin may queue in one call, and in one second.
 pub const ACTIONS_PER_CALL: usize = 16;

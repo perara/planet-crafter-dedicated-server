@@ -155,9 +155,9 @@ impl Ctx {
         let dir = self.plugins_dir();
         let folder = if Path::new(target).join(manifest::FILE).is_file() { PathBuf::from(target) } else if manifest::valid_id(target) && dir.join(target).is_dir() { dir.join(target) } else { return Err(format!("{target}: no {} there, and no installed plugin of that id", manifest::FILE)) };
         let report = plugins::check::check_folder(&folder, Some(&dir));
-        report.facts.iter().for_each(|f| println!("  {f}"));
-        report.warnings.iter().for_each(|w| println!("  warning: {w}"));
-        report.errors.iter().for_each(|e| println!("  ERROR: {e}"));
+        report.facts.iter().for_each(|f| println!("  {}", plugins::clean(f)));
+        report.warnings.iter().for_each(|w| println!("  warning: {}", plugins::clean(w)));
+        report.errors.iter().for_each(|e| println!("  ERROR: {}", plugins::clean(e)));
         if report.errors.is_empty() {
             println!("pcds: {} is fine ({} warnings)", folder.display(), report.warnings.len());
             Ok(())
@@ -173,8 +173,8 @@ impl Ctx {
         }
         let from = Path::new(path);
         let report = plugins::check::check_folder(from, Some(&self.plugins_dir()));
-        report.errors.iter().for_each(|e| println!("  ERROR: {e}"));
-        report.warnings.iter().for_each(|w| println!("  warning: {w}"));
+        report.errors.iter().for_each(|e| println!("  ERROR: {}", plugins::clean(e)));
+        report.warnings.iter().for_each(|w| println!("  warning: {}", plugins::clean(w)));
         if !report.errors.is_empty() {
             return Err(format!("{path} does not pass pcds plugin check: not installed"));
         }
@@ -186,7 +186,7 @@ impl Ctx {
         }
         // The manifest and the entry only: nothing else of the folder (a target/ with a build in it) is copied.
         for name in [manifest::FILE, m.plugin.entry.as_str()] {
-            let bytes = fs::read(from.join(name)).map_err(|e| format!("{}: {e}", from.join(name).display()))?;
+            let bytes = plugins::read_regular(&from.join(name), plugins::limits::MAX_MODULE_BYTES).map_err(|e| format!("{}: {e}", from.join(name).display()))?;
             let target = to.join(name);
             super::mkdir(target.parent().unwrap_or(&to))?;
             crate::util::replace_file(&target, &bytes, 0o644)?;
@@ -256,7 +256,8 @@ impl Ctx {
                 return Err("not approved".into());
             }
         }
-        plugins::approve(&dir, id, grant)?;
+        // The files that were shown are the files approved, or nothing is.
+        plugins::approve_digest(&dir, id, grant, Some(&found.digest))?;
         println!("pcds: {id} is approved");
         self.plugin_reload_running();
         let _ = approvals::FILE;
@@ -280,6 +281,9 @@ impl Ctx {
         let mut keys = sign::Keys::load(&dir)?;
         let trusted = keys.trust(&public, &name, grant, force)?;
         keys.save(&dir)?;
+        if sign::published(&trusted.id) {
+            println!("pcds: WARNING: {}", sign::PUBLISHED_WARNING);
+        }
         println!("pcds: trusting {} ({}); it vouches for: {}", trusted.name, trusted.id, if trusted.grant.is_empty() { "no capability (its plugins still wait for you to approve what they ask for, and then follow its updates)".to_string() } else { trusted.grant.join(", ") });
         self.plugin_reload_running();
         Ok(())

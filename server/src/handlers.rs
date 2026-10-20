@@ -58,7 +58,19 @@ pub struct Limits {
     /// Per client before PlayerReady: the inventories it made and the items put into them.
     #[serde(skip)]
     loading_created: HashMap<u64, (u32, u32)>,
+    /// The worlds sent to addresses that could be forged: when the allowance was last counted, and
+    /// how many joins are left in it.
+    #[serde(skip)]
+    joins: Option<(std::time::Instant, f64)>,
 }
+
+/// New sessions from other machines get the world (megabytes) at this rate in all, after a burst of
+/// the players the server holds (at least JOIN_BURST). A UDP session needs no answer from its
+/// address to be sent the world and to be told, blind, how fast to take it (utp.rs): a forged
+/// source address makes the server a reflector from a few hundred bytes to the whole world. This
+/// bounds what it can reflect (a join takes seconds, so players never meet it).
+const JOINS_PER_SECOND: f64 = 1.0;
+const JOIN_BURST: usize = 16;
 
 impl Limits {
     /// `what` logged once for this client (forgotten with it: the table holds the clients there are).
@@ -116,6 +128,20 @@ impl Limits {
         false
     }
 
+    /// Whether a session from an address other than this machine's gets the world now (see
+    /// JOINS_PER_SECOND); `players`: the most the server holds.
+    pub fn join(&mut self, now: std::time::Instant, players: usize) -> bool {
+        let burst = players.max(JOIN_BURST) as f64;
+        let (last, left) = self.joins.get_or_insert((now, burst));
+        *left = (*left + now.saturating_duration_since(*last).as_secs_f64() * JOINS_PER_SECOND).min(burst);
+        *last = now;
+        if *left < 1.0 {
+            return false;
+        }
+        *left -= 1.0;
+        true
+    }
+
     /// Whether a client that is no player yet may create an inventory with `items` initial items
     /// (MAX_LOADING_INVENTORIES and MAX_LOADING_ITEMS in all); a refusal is logged once.
     pub fn loading_create(&mut self, client: u64, items: usize) -> bool {
@@ -140,11 +166,14 @@ impl Limits {
     }
 }
 
-/// The work an RPC makes: HasWorldObjectAtPosition looks at every world object, as the game's.
-pub fn rpc_cost(name: &str, world_objects: usize) -> u32 {
+/// The work an RPC makes: HasWorldObjectAtPosition looks at every world object, as the game's, and
+/// the rest one each and one more for every KiB it carries (a game client's RPCs are tens of bytes;
+/// a list of thousands of items is that many times the handler's work).
+pub fn rpc_cost(name: &str, world_objects: usize, bytes: usize) -> u32 {
+    let size = (bytes / 1024).min(RPC_BUDGET as usize) as u32;
     match name {
-        "WorldObjectsHandler.HasWorldObjectAtPositionServerRpc" => 1 + (world_objects / 1024) as u32,
-        _ => 1,
+        "WorldObjectsHandler.HasWorldObjectAtPositionServerRpc" => 1 + (world_objects / 1024) as u32 + size,
+        _ => 1 + size,
     }
 }
 
@@ -172,7 +201,14 @@ pub fn run_pending(game: &mut Game, cost: impl Fn(&Game, &[u8]) -> u32, run: imp
             game.limits.pending_bytes.remove(&client);
         }
         for rpc in due {
-            run(game, client, &rpc);
+            // These run inside the tick, which a panic ends the bank in (the world restarts from its
+            // save): a client's RPC is contained as one that ran on arrival is (bank/panic.rs guarded).
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(game, client, &rpc))).is_err() {
+                eprintln!("client {client}: the server panicked on an RPC that waited for its turn; kicked");
+                game.panicked = true;
+                game.kick(client, "Server error");
+                break;
+            }
         }
     }
 }
@@ -526,6 +562,48 @@ mod tests {
     use crate::net::{enc, Target, VarValue};
     use crate::testkit::*;
     use serde_json::{json, Value};
+
+    /// New sessions from other machines are let in at JOINS_PER_SECOND after a burst.
+    #[test]
+    fn joins_have_a_burst_and_a_rate() {
+        let mut l = super::Limits::default();
+        let t0 = std::time::Instant::now();
+        assert!((0..16).all(|_| l.join(t0, 16)));
+        assert!(!l.join(t0, 16), "the burst is spent");
+        assert!(!l.join(t0 + std::time::Duration::from_millis(900), 16));
+        assert!(l.join(t0 + std::time::Duration::from_millis(1000), 16) && !l.join(t0 + std::time::Duration::from_millis(1000), 16), "one a second");
+        // A long quiet gives the burst back, not more; a server of more players has a bigger one.
+        let later = t0 + std::time::Duration::from_secs(3600);
+        assert!((0..16).all(|_| l.join(later, 16)) && !l.join(later, 16));
+        let mut big = super::Limits::default();
+        assert!((0..64).all(|_| big.join(t0, 64)) && !big.join(t0, 64));
+    }
+
+    /// An RPC that waited for its turn runs inside the tick; one that panics there must kick its client
+    /// and go on, not end the bank (a client must not be able to restart the world by sending
+    /// something that panics: it can, if only a queued RPC does it). The others' RPCs still run.
+    #[test]
+    fn a_waiting_rpc_that_panics_kicks_its_client_and_not_the_world() {
+        let Some((mut g, _)) = world() else { return };
+        crate::game::tests::join(&mut g, 2, "Bob");
+        for client in [1, 2] {
+            g.limits.pending.insert(client, std::collections::VecDeque::from(vec![vec![1u8], vec![2u8]]));
+        }
+        let ran = std::cell::RefCell::new(Vec::new());
+        let quiet = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        super::run_pending(&mut g, |_, _| 1, |_, client, rpc| {
+            ran.borrow_mut().push((client, rpc[0]));
+            if client == 1 {
+                panic!("a handler bug");
+            }
+        });
+        std::panic::set_hook(quiet);
+        assert!(g.panicked && g.kicks.iter().any(|(c, _)| *c == 1) && !g.kicks.iter().any(|(c, _)| *c == 2));
+        let mut ran = ran.into_inner();
+        ran.sort();
+        assert_eq!(ran, [(1, 1), (2, 1), (2, 2)], "the client that panicked runs no more, the other goes on");
+    }
 
     /// The RPCs a client has waiting for the next ticks are bounded in bytes too (a count of 8192
     /// RPCs of a batch each was gigabytes); the bytes follow the queue in and out and go with the

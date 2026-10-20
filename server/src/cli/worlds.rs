@@ -20,7 +20,7 @@ impl Ctx {
         let to = super::free_path(&backups, &crate::worlds::kept_stem(name, why, std::time::SystemTime::now()));
         let from = self.worlds.join(format!("{name}.json"));
         let bytes = fs::read(&from).map_err(|e| format!("{}: {e}", from.display()))?;
-        crate::util::replace_file(&to, &bytes, 0o644)?;
+        crate::util::replace_file(&to, &bytes, 0o600)?;
         let modified = fs::metadata(&from).and_then(|m| m.modified()).map_err(|e| e.to_string())?;
         fs::File::options().write(true).open(&to).and_then(|f| f.set_modified(modified)).map_err(|e| format!("{}: {e}", to.display()))
     }
@@ -137,7 +137,7 @@ impl Ctx {
                 let seed = crate::game::Rng::seeded().range(0, i32::MAX) as u32;
                 let converted = crate::oldsave::import(&text, seed, &self.game_version()).map_err(|e| format!("{}: {e}", save.display()))?;
                 super::mkdir(&self.worlds)?;
-                crate::util::replace_file(&file(&name), converted.as_bytes(), 0o644)?;
+                crate::util::replace_file(&file(&name), converted.as_bytes(), 0o600)?;
                 let how = if converted == text { "" } else { " (converted from the game's old save format)" };
                 say(format!("world {name} imported{how}; 'pcds world use {name}' plays it"));
                 Ok(())
@@ -222,6 +222,14 @@ mod tests {
         fs::write(&current, SaveFile::tiny_text("cur")).unwrap();
         ctx.world(&args(&["import", &current.to_string_lossy(), "copy"])).unwrap();
         assert_eq!(fs::read_to_string(ctx.worlds.join("copy.json")).unwrap(), SaveFile::tiny_text("cur"));
+        // A world holds the players' Steam ids, names and chat: like the saves the server writes, 0600.
+        use std::os::unix::fs::PermissionsExt;
+        for made in [ctx.worlds.join("copy.json"), ctx.worlds.join("Survival-Konsider.json")] {
+            assert_eq!(fs::metadata(&made).unwrap().permissions().mode() & 0o777, 0o600, "{}", made.display());
+        }
+        ctx.keep_copy("copy", "replaced").unwrap();
+        let kept = fs::read_dir(ctx.worlds.join("backups")).unwrap().flatten().find(|e| e.file_name().to_string_lossy().starts_with("copy-replaced-")).unwrap().path();
+        assert_eq!(fs::metadata(&kept).unwrap().permissions().mode() & 0o777, 0o600);
         fs::remove_dir_all(&dir).unwrap();
     }
 }

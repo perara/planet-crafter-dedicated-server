@@ -82,11 +82,13 @@ impl Lists {
     }
 }
 
-/// Characters that show nothing and change no letter: a soft hyphen, zero-width spaces and
-/// joiners, direction marks, a byte order mark, variation selectors. A name with one in it must
-/// not be another name than without.
+/// Characters that show nothing and change no letter: spaces, a soft hyphen, zero-width spaces and
+/// joiners, Hangul and Braille fillers, direction marks, a byte order mark, variation selectors,
+/// tags. A name with one in it must not be another name than without (a ban is dodged by a space).
 fn invisible(c: char) -> bool {
-    matches!(c, '\u{ad}' | '\u{34f}' | '\u{61c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{feff}' | '\u{fe00}'..='\u{fe0f}' | '\u{e0100}'..='\u{e01ef}')
+    // Spaces of every kind too: "Mallory " is the player "Mallory" to everyone who reads the list of players.
+    c.is_whitespace()
+        || matches!(c, '\u{ad}' | '\u{34f}' | '\u{61c}' | '\u{115f}' | '\u{1160}' | '\u{17b4}' | '\u{17b5}' | '\u{180b}'..='\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{2800}' | '\u{3164}' | '\u{feff}' | '\u{fe00}'..='\u{fe0f}' | '\u{ffa0}' | '\u{1d159}' | '\u{e0000}'..='\u{e0fff}')
 }
 
 /// A name as the access lists compare it: NFKC (fullwidth and circled letters, ligatures and
@@ -265,6 +267,14 @@ mod tests {
         for name in ["Mallory2", "Mallo", "Zoe", "Strasse1", "Мallory"] {
             assert!(a.name_allowed(name, None), "{name:?}");
         }
+        // Spaces and the blanks that show as nothing: a banned name with one added or between its words is the same name.
+        let mut b = Access { lists: Lists::default(), path: None };
+        b.ban("Mallory", None, None).unwrap();
+        b.ban("Dark Lord", None, None).unwrap();
+        for name in ["Mallory ", " Mallory", "Mallory\u{a0}", "Mallory\u{3000}", "Mallory\u{3164}", "Mallory\u{2800}", "Mallory\u{115f}", "Mal lory", "Mallory\u{e0041}", "DarkLord", "Dark  Lord", "dark\u{a0}lord"] {
+            assert!(!b.name_allowed(name, None), "{name:?} is a banned name");
+        }
+        assert!(b.name_allowed("Mallory2", None) && b.name_allowed("Dark Lords", None));
         // The whitelist and the unban fold the same way; a SteamID entry still needs a verified id.
         a.set(Lists { whitelist: vec!["Ｂｏｂ".into()], banned_names: vec!["Eve".into()], ..Default::default() }).unwrap();
         assert!(a.name_allowed("BOB", None) && a.name_allowed("bob\u{200b}", None) && !a.name_allowed("Alice", None));

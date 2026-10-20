@@ -10,6 +10,12 @@ use crate::game::{Args, Game};
 use crate::net::Target;
 
 const EPSILON: f32 = 1.1920929E-07;
+/// What a client may start: a scene part (an id of the scene's), at a speed that gets somewhere
+/// (the slowest of the game's takes minutes; 0 or a speed of 1e-30 never ends), and no more moves
+/// at once than a scene has parts that move. Each running move costs every frame, a message to all
+/// the clients and a saved world object.
+const MIN_SPEED: f32 = 1e-4;
+const MAX_ACTIVE: usize = 1024;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Interpolation {
@@ -56,14 +62,17 @@ pub fn rpc(game: &mut Game, client: u64, name: &str, a: &Args) -> bool {
 /// StartInterpolationServerRpc: a running move only speeds up; otherwise a move starts if it
 /// leaves its end (up from 0, down from above 0).
 fn start(game: &mut Game, wo: i32, speed: f32, direction: i32) {
-    // Scene world objects have positive ids; 0 would make a fresh one.
-    if wo <= 0 {
+    // Scene world objects have positive ids below the players'; 0 would make a fresh one.
+    if wo <= 0 || !crate::model::is_from_scene(wo) || speed.is_nan() || speed < MIN_SPEED {
         return;
     }
     if let Some(i) = game.ext.animals.interpolation.active.get_mut(&wo) {
         if speed > i.speed {
             i.speed = speed;
         }
+        return;
+    }
+    if game.ext.animals.interpolation.active.len() >= MAX_ACTIVE {
         return;
     }
     if !game.wos.contains_key(&wo) {
@@ -153,6 +162,36 @@ mod tests {
         assert!(g.ext.animals.interpolation.active.is_empty());
         send_scene(&mut g, 3, "SceneInterpolationHandler.StartInterpolationServerRpc", &[json!(ELEVATOR), json!(0.5), json!(0)]);
         assert_eq!(g.ext.animals.interpolation.active[&ELEVATOR].direction, -1);
+    }
+
+    /// A client cannot keep moves running without end: each costs every frame, a message to everyone
+    /// and a saved world object. Only scene ids, only a speed that gets somewhere, only so many.
+    #[test]
+    fn a_client_cannot_start_moves_without_end() {
+        let Some((mut g, _)) = world() else { return };
+        for (id, speed) in [(200_000_000, 0.5), (i32::MAX, 0.5), (ELEVATOR, 0.0), (ELEVATOR, 1e-30), (ELEVATOR, -1.0)] {
+            send_scene(&mut g, 1, "SceneInterpolationHandler.StartInterpolationServerRpc", &[json!(id), json!(speed), json!(1)]);
+        }
+        assert!(g.ext.animals.interpolation.active.is_empty(), "no scene id, no speed, no move");
+        let before = g.wos.len();
+        for i in 0..MAX_ACTIVE as i32 + 100 {
+            send_scene(&mut g, 1, "SceneInterpolationHandler.StartInterpolationServerRpc", &[json!(101_000_000 + i), json!(0.0002), json!(1)]);
+            if i % 16 == 15 {
+                g.time += 0.2;
+                g.tick();
+            }
+        }
+        for _ in 0..200 {
+            g.time += 0.2;
+            g.tick();
+        }
+        assert_eq!(g.ext.animals.interpolation.active.len(), MAX_ACTIVE);
+        assert_eq!(g.wos.len(), before + MAX_ACTIVE);
+        // The ones running can still be sped up.
+        send_scene(&mut g, 1, "SceneInterpolationHandler.StartInterpolationServerRpc", &[json!(101_000_000), json!(0.5), json!(1)]);
+        g.time += 0.2;
+        g.tick();
+        assert_eq!(g.ext.animals.interpolation.active[&101_000_000].speed, 0.5);
     }
 
     /// A move the save left running (its setting) starts again when a client checks it, as in

@@ -744,3 +744,216 @@ fn a_hundred_loads_and_unloads_leave_nothing_and_cost_no_tick_time() {
     assert!(after < before * 5.0 + 5000.0, "tick cost before {before:.0} ns, after {after:.0} ns");
     println!("100 cycles: tick cost {before:.0} ns before, {after:.0} ns after");
 }
+
+// ---- the cost of a host call (security review v0.7+) ---------------------------------------------
+
+/// A module that calls one host function in a loop for as long as its fuel lasts, with the buffers
+/// of a plugin that wants the host to do the most work: a big range of its memory (16 pages,
+/// 1 MiB) and a world with many players. `call` is the loop body (an expression of no result).
+fn host_call_loop(call: &str, pages: u32) -> String {
+    let body = format!("(local $i i32) (loop $l {call} (local.set $i (i32.add (local.get $i) (i32.const 1))) (br_if $l (i32.lt_u (local.get $i) (i32.const 1000000)))) (i32.const 0)");
+    module(&body, "")
+        .replacen("(module", "(module (import \"pcds\" \"log\" (func $log (param i32 i32 i32))) (import \"pcds\" \"http_request\" (func $http (param i32 i32) (result i64)))", 1)
+        .replace("(memory (export \"memory\") 1)", &format!("(memory (export \"memory\") {pages})"))
+}
+
+/// One event of a plugin that asks the host for as much work as one call can: it is over within
+/// the time its fuel buys, however large the buffers it names. (Fuel is the plugin's budget of
+/// work; a host function that does work by the byte must take that work out of it.)
+fn one_event_takes(call: &str, caps: &[&str], players: u32) -> (Duration, bool) {
+    let dir = fresh_dir("host-call-cost");
+    install(&dir, "greedy", &host_call_loop(call, 20), caps, SUBSCRIBE_CHAT, None);
+    let mut host = boot(&dir);
+    let mut world = Mock { players, ..Default::default() };
+    let t = Instant::now();
+    host.run(&mut world, &chat("x"), 0);
+    (t.elapsed(), plugin(&host, "greedy").stats.faults == 1)
+}
+
+#[test]
+fn a_host_call_with_a_megabyte_buffer_is_paid_for_in_fuel() {
+    let bound = Duration::from_millis(300);
+    // `log` needs no capability at all: a plugin that asks for nothing could keep the game thread busy.
+    let (took, cut) = one_event_takes("(call $log (i32.const 2) (i32.const 0) (i32.const 1048576))", &["event.chat"], 0);
+    assert!(took < bound && cut, "log with a 1 MiB range: {took:?} (cut by its fuel: {cut})");
+    let (took, cut) = one_event_takes("(drop (call $say (i32.const 0) (i32.const 1048576)))", &CHAT_SAY, 0);
+    assert!(took < bound && cut, "say with a 1 MiB range: {took:?} (cut by its fuel: {cut})");
+    let (took, cut) = one_event_takes("(drop (call $patch (i32.const 0) (i32.const 1048576)))", &["event.chat", "rules.write"], 0);
+    assert!(took < bound && cut, "rules_patch with a 1 MiB range: {took:?} (cut by its fuel: {cut})");
+    // The request is copied before anything is checked, capability included.
+    let (took, cut) = one_event_takes("(drop (call $http (i32.const 0) (i32.const 1179648)))", &["event.chat"], 0);
+    assert!(took < bound && cut, "http_request with a 1.1 MiB range, no capability: {took:?} (cut by its fuel: {cut})");
+}
+
+#[test]
+fn asking_the_world_again_and_again_is_paid_for_in_fuel() {
+    let bound = Duration::from_millis(300);
+    let (took, cut) = one_event_takes("(drop (call $query (i32.const 1) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 1048576)))", &["event.chat", "world.read"], 2000);
+    assert!(took < bound && cut, "query of 2000 players into 1 MiB: {took:?} (cut by its fuel: {cut})");
+}
+
+// ---- files in a plugin's folder that are not files (security review v0.7+) ------------------------
+
+fn mkfifo(path: &Path) {
+    let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    // SAFETY: mkfifo with a NUL-terminated path that lives through the call.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0, "mkfifo {}", path.display());
+}
+
+/// Runs `f` on a thread and says whether it came back within `within`; a thread that does not is
+/// left blocked (the test process ends it).
+fn returns_within<T: Send + 'static>(within: Duration, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || drop(tx.send(f())));
+    rx.recv_timeout(within).ok()
+}
+
+/// The folder of a plugin is whatever an archive unpacked into it, and every folder of plugins/ is
+/// read (the manifest, the module, the signature) before anyone approves it, on the game thread
+/// every few seconds: a named pipe where a file should be must not hold the game up for ever, and
+/// a device that reads without end (a link to /dev/zero has size 0) must not be read to the end.
+#[test]
+fn a_plugin_folder_with_a_pipe_or_a_device_in_place_of_a_file_does_not_hold_the_host() {
+    for victim in ["plugin.sig", "plugin.wasm", "plugin.toml"] {
+        let dir = fresh_dir("fifo");
+        install(&dir, "p", &module("(i32.const 0)", ""), &CHAT_SAY, SUBSCRIBE_CHAT, None);
+        let file = dir.join("p").join(victim);
+        std::fs::remove_file(&file).ok();
+        mkfifo(&file);
+        let d = dir.clone();
+        let host = returns_within(Duration::from_secs(5), move || prepare(&d, "world"));
+        let host = host.unwrap_or_else(|| panic!("prepare() is blocked on a pipe named {victim}"));
+        assert!(!host.plugins.is_empty() && !host.plugins[0].running(), "{victim}: {:?}", host.plugins[0].status);
+    }
+    // A saved state that is a pipe: the plugin starts without one.
+    let dir = fresh_dir("fifo-state");
+    install(&dir, "p", &module("(i32.const 0)", ""), &CHAT_SAY, SUBSCRIBE_CHAT, None);
+    std::fs::create_dir_all(dir.join("p/data")).unwrap();
+    mkfifo(&dir.join("p/data/world.state"));
+    let d = dir.clone();
+    assert!(returns_within(Duration::from_secs(5), move || boot(&d)).is_some(), "start() is blocked on a pipe named data/world.state");
+    // The module is a link to a device with no end and no size.
+    let dir = fresh_dir("zero");
+    install(&dir, "p", &module("(i32.const 0)", ""), &CHAT_SAY, SUBSCRIBE_CHAT, None);
+    let file = dir.join("p/plugin.wasm");
+    std::fs::remove_file(&file).unwrap();
+    std::os::unix::fs::symlink("/dev/zero", &file).unwrap();
+    // (Before, `std::fs::read` of it grew until the memory was gone: the size check looked at a size of 0.)
+    assert!(read_regular(&file, limits::MAX_MODULE_BYTES).is_err(), "a device is not a module");
+    let d = dir.clone();
+    let host = returns_within(Duration::from_secs(5), move || prepare(&d, "world")).expect("prepare() reads a device for ever");
+    assert!(matches!(&host.plugins[0].status, Status::Invalid(why) if why.contains("not a regular file")), "{:?}", host.plugins[0].status);
+    // A file that is one, a link to one included, is read as before; one over the limit is not.
+    let big = dir.join("big");
+    std::fs::write(&big, vec![0u8; 1001]).unwrap();
+    assert_eq!(read_regular(&big, 1001).unwrap().len(), 1001);
+    assert!(read_regular(&big, 1000).unwrap_err().to_string().contains("at most 1000"));
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&big, &link).unwrap();
+    assert_eq!(read_regular(&link, 2000).unwrap().len(), 1001);
+}
+
+// ---- bulk memory operations and deep recursion (security review v0.7+) ---------------------------
+
+/// wasmi charged one fuel for 64 bytes of memory.fill: a fill of the 64 MiB a module may have was a
+/// million fuel and 14 ms, where a million fuel is meant to be a third of a millisecond. A byte
+/// moved by a bulk operation now costs a quarter of a fuel (limits::BYTES_COPIED_PER_FUEL).
+#[test]
+fn a_bulk_memory_operation_is_paid_for_by_the_byte() {
+    let fill = |bytes: u32| {
+        let wat = module(&format!("(memory.fill (i32.const 0) (i32.const 1) (i32.const {bytes})) (i32.const 0)"), "").replace("(memory (export \"memory\") 1)", "(memory (export \"memory\") 16)");
+        let dir = fresh_dir("bulk");
+        install(&dir, "filler", &wat, &CHAT_SAY, SUBSCRIBE_CHAT, None);
+        let mut host = boot(&dir);
+        host.run(&mut Mock::default(), &chat("x"), 0);
+        plugin(&host, "filler").stats.fuel
+    };
+    let (small, big) = (fill(64), fill(1 << 20));
+    assert!(big - small >= ((1 << 20) - 64) / limits::BYTES_COPIED_PER_FUEL as u64, "a megabyte filled cost {} fuel more than 64 bytes", big - small);
+}
+
+/// A module that calls itself for ever, or does with frames of many locals, ends in a trap.
+#[test]
+fn endless_recursion_ends_in_a_trap_and_the_plugin_goes_on() {
+    for (what, extra) in [("plain", "(func $r (call $r))".to_string()), ("30000 locals a frame", format!("(func $r {} (call $r))", "(local i64) ".repeat(30000)))] {
+        let dir = fresh_dir("recursion");
+        install(&dir, "deep", &module("(call $r) (i32.const 0)", &extra), &CHAT_SAY, SUBSCRIBE_CHAT, None);
+        let mut host = boot(&dir);
+        let t = Instant::now();
+        host.run(&mut Mock::default(), &chat("x"), 0);
+        let p = plugin(&host, "deep");
+        assert!(t.elapsed() < Duration::from_millis(250) && p.stats.last_error.as_deref().unwrap().contains("call stack exhausted") && p.running(), "{what}: {:?} {:?}", t.elapsed(), p.stats.last_error);
+    }
+}
+
+/// What the admin is shown is what is approved: files swapped after the screen was drawn (the digest on
+/// it) are refused, not approved unseen.
+#[test]
+fn files_swapped_between_the_screen_and_the_approval_are_not_approved() {
+    let dir = fresh_dir("toctou");
+    write_plugin(&dir, "p", &module("(i32.const 0)", ""), &CHAT_SAY, SUBSCRIBE_CHAT);
+    let shown = read_folder(&dir.join("p")).digest;
+    // The author's sync swaps the module while the admin reads the screen.
+    std::fs::write(dir.join("p/plugin.wasm"), wat::parse_str(module("(drop (call $kick (i64.const 1) (i32.const 0) (i32.const 3))) (i32.const 0)", "")).unwrap()).unwrap();
+    let e = approve_digest(&dir, "p", None, Some(&shown)).unwrap_err();
+    assert!(e.contains("changed after you looked") && !dir.join("approved.json").exists(), "{e}");
+    // The files as shown are approved; and with no digest to hold to (an old client) it works as it did.
+    let now = read_folder(&dir.join("p")).digest;
+    assert_ne!(shown, now);
+    approve_digest(&dir, "p", None, Some(&now)).unwrap();
+    assert_eq!(Approvals::load(&dir).unwrap().0["p"].digest, now);
+    approve(&dir, "p", None).unwrap();
+}
+
+// ---- text a plugin's author wrote, on the admin's terminal (security review v0.7+) ----------------
+
+fn plain(s: &str) -> bool {
+    s.chars().all(|c| !c.is_control() && !matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}'))
+}
+
+/// `pcds plugin enable` shows the author's name, description and the rest on the admin's terminal,
+/// above the capabilities and the question. An escape sequence in them can hide what follows
+/// (`ESC[8m` conceals text), draw a screen of its own or set the clipboard (OSC 52); a line break
+/// in them forges lines of the approval ("deny: net.http.local"). The text is one plain line.
+#[test]
+fn a_manifest_text_with_a_control_character_is_refused() {
+    let good = "[plugin]\nid = \"p\"\nname = \"P\"\nversion = \"1.0.0\"\nkind = \"data\"\nentry = \"rules.toml\"\nabi = 1\n";
+    assert!(Manifest::parse(good).is_ok());
+    let with = |extra: &str| good.replace("abi = 1\n", &format!("abi = 1\n{extra}\n"));
+    for (what, text) in [
+        ("name", good.replace("name = \"P\"", "name = \"P\\u001b[8m\"")),
+        ("description with a line break", with("description = \"fine\\nnet.http.local: denied\"")),
+        ("description with OSC 52", with("description = \"a\\u001b]52;c;ZWNobyBwd25lZA==\\u0007\"")),
+        ("description with a right-to-left override", with("description = \"right to left \\u202e gnp.exe\"")),
+        ("license", with("license = \"MIT\\r\"")),
+        ("an author", with("authors = [\"a\", \"b\\u001b[2J\"]")),
+    ] {
+        let e = Manifest::parse(&text).unwrap_err();
+        assert!(plain(&e) && e.contains("plain"), "{what}: {e:?}");
+    }
+    assert!(Manifest::parse(&good.replace("abi = 1\n", "abi = 1\ndescription = \"x\"\n[[command]]\nname = \"c\"\nhelp = \"two\\nlines\"\n")).is_err());
+    assert!(Manifest::parse(&good.replace("abi = 1\n", &format!("abi = 1\ndescription = \"{}\"\n", "d".repeat(501)))).is_err());
+}
+
+/// What the host says of a plugin (its id, why it does not run) comes from names the author chose: a
+/// folder, a TOML mistake (the error quotes the line), an import of a module.
+#[test]
+fn what_the_host_says_of_a_plugin_has_no_control_character_whatever_the_folder_and_the_files_say() {
+    let dir = fresh_dir("terminal");
+    let name = "evil\u{1b}]52;c;ZWNobyBwd25lZA==\u{7}\nplugin good: running";
+    let folder = dir.join(name);
+    std::fs::create_dir_all(&folder).unwrap();
+    // A manifest that is not TOML, quoting an escape sequence back in its error.
+    std::fs::write(folder.join("plugin.toml"), "\u{1b}[8m = \u{1b}[2J").unwrap();
+    // And one that is a plugin, importing a module under a name of the same kind.
+    let bad_import = module("(i32.const 0)", "").replacen("(module", "(module (import \"x\\1b[8m\\0a\" \"y\" (func))", 1);
+    write_plugin(&dir, "importer", &bad_import, &CHAT_SAY, SUBSCRIBE_CHAT);
+    approve(&dir, "importer", None).unwrap();
+    let host = prepare(&dir, "world");
+    assert_eq!(host.plugins.len(), 2);
+    for p in &host.plugins {
+        let said = format!("{} {} {:?} {:?} {:?}", p.id, p.status.detail().unwrap_or(""), p.warnings, p.notice, crate::plugins::admin::plugin_json(p)["detail"]);
+        assert!(plain(&p.id) && plain(p.status.detail().unwrap_or("")) && p.warnings.iter().all(|w| plain(w)), "{said:?}");
+    }
+    assert!(host.plugins.iter().any(|p| matches!(&p.status, Status::Invalid(why) if why.contains("importer") || why.contains("imports"))), "{:?}", host.plugins.iter().map(|p| &p.status).collect::<Vec<_>>());
+}
