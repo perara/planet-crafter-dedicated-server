@@ -12,6 +12,11 @@
 //!                        "slow-hello" holds its HELLO 4 s (the flip waits in its loading phase),
 //!                        "slow-ready" holds its READY 2 s after the restore (the flip waits in
 //!                        its restoring phase), "die-after-ready" ends 1 s after READY
+//!
+//! The modules (docs/architecture.md, "The bank, module by module"): `run` the process, `serve` the
+//! loop, `start` the world, `admin` the requests (a route table), `persist` the saves, `status` the
+//! status, `mail` the clients' batches, `forward` what the front is told, `plugins_glue` the host,
+//! `panic` the containment policy.
 
 mod admin;
 mod forward;
@@ -25,6 +30,7 @@ mod start;
 mod status;
 
 pub use mail::reason_batch;
+#[cfg(test)]
 pub(crate) use panic::contained;
 pub use run::run;
 pub use start::enforce;

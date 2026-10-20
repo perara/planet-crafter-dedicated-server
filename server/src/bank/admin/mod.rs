@@ -199,7 +199,8 @@ mod tests {
         let old_error = |e: &str| json!({"error": e}).to_string();
         for message in ["player not online", "'id' or 'name' is required", "'id': a client id", "that client has no name yet: kick it instead", "backups are off (the rule save.backupsKept is 0)", "2 players online are named \"Ann\": give the client id", "tab\there \\ and \u{e5}", "'paused': true or false", "position: three finite numbers", "'backup' and 'name' are required", "player not online and ready", "player not online: ban by name", "'value' is required", "'name' is required", "unknown endpoint", "too many\nlines"] {
             assert_eq!(error(400, message).1, old_error(message), "{message}");
-            assert_eq!(error(500, message.to_string()).1, old_error(message));
+            let owned = message.to_string();
+            assert_eq!(error(500, owned).1, old_error(message));
         }
         assert_eq!(ok(), (200, "{\"ok\":true}".to_string()));
         assert_eq!(kept(Ok(())), ok());
