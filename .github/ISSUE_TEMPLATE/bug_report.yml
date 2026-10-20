@@ -1,0 +1,55 @@
+name: Bug report
+description: The server does something other than it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read the README ("Known limits", "Differences from hosting in the game") first: some differences are on purpose.
+        **Remove secrets before you paste:** the admin token, a Steam token, invite codes you do not want public, and IP addresses of players.
+        Do not attach saves or game files.
+  - type: input
+    id: version
+    attributes:
+      label: Server version
+      description: Output of `pcds --version` (in Docker, `docker exec pcds pcds --version`).
+      placeholder: pcds 0.8.0
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How it is installed
+      options: [install.sh, release tarball, Docker image, Docker Compose, Kubernetes, built from source]
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game version and planet
+      placeholder: 2.103, Prime
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+      description: What the player or the admin saw. Steps to repeat it if you have them.
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: "`pcds status`"
+      description: Paste the whole output.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: "`pcds logs` around the time it happened"
+      description: Some lines before and after (in Docker, `docker logs pcds`).
+      render: text
+    validations:
+      required: true

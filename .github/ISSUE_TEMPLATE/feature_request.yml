@@ -1,0 +1,15 @@
+name: Feature request
+description: Something the server should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What do you want to do, and what stops you?
+      description: Say the problem first. If the game does it when you host, say where (the game's own behaviour is the reference).
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: An idea for it, if you have one

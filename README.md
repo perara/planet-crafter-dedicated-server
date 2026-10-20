@@ -85,6 +85,16 @@ tar xzf pcds-v*-linux-x86_64.tar.gz && cd pcds-v*-linux-x86_64
 `pcds` is one program: the server itself (`pcds serve`) and the commands below. A release keeps
 `libsteam_api.so` and `web/` next to it.
 
+**Check the download.** Every release publishes the tarball's sha256 beside it (the installer
+and `pcds upgrade` check it themselves) and GitHub's build provenance for it: which commit and which
+workflow run built it. With the [GitHub CLI](https://cli.github.com/):
+
+```bash
+sha256sum -c pcds-v*-linux-x86_64.tar.gz.sha256
+gh attestation verify pcds-v*-linux-x86_64.tar.gz --repo perara/planet-crafter-dedicated-server
+gh attestation verify oci://ghcr.io/perara/planet-crafter-dedicated-server:0.8.0 --repo perara/planet-crafter-dedicated-server   # the Docker image
+```
+
 `up` takes the same options as `setup`. Step by step:
 
 ```bash
@@ -143,10 +153,32 @@ and installs a release only when it is later than the one that runs (compared by
 the program's version for a build) and not the one you rolled back from. In Docker, see
 [Updating in Docker](#updating-in-docker).
 
-Other ways:
-- Run the installer again, or `./pcds up` in a newer release folder (move the old folder's `run/`
-  into it first).
+Other ways, which all **restart the server** (every player joins again; `pcds upgrade` is the live one).
+Read the release's notes first: [CHANGELOG.md](CHANGELOG.md) has a "Breaking changes" and an "Upgrade"
+part for every release, and a release that changes the snapshot format or the tables format can
+only be installed this way.
+- Run the installer again (`install.sh`, the same command as the first install). It unpacks the new
+  release over the program files in the install folder and runs `pcds up`; the worlds, settings
+  and game tables in `run/` stay, and the new program goes into the standby bank and is started.
+- By hand: `tar xzf pcds-vX.Y.Z-linux-x86_64.tar.gz --strip-components=1 -C ~/planet-crafter-server`
+  and `./pcds up` there. Or unpack into a new folder, move the old folder's `run/` into it
+  (or set `PCDS_HOME` to it) and run `./pcds up`. The tarball has no `run/`, so nothing is overwritten.
 - From source: `git pull`, `make build`, then `pcds restart`.
+- After a rollback (`pcds upgrade --rollback`) none of these installs the release you rolled back
+  from: `pcds status` says which release runs; `pcds upgrade vX.Y.Z --restart` goes there on purpose.
+
+### Uninstalling
+
+```bash
+./pcds uninstall-service   # stops the server (the world is saved) and removes its systemd units
+rm -rf ~/planet-crafter-server    # the program and run/: worlds, settings, game tables, steamcmd
+```
+
+Copy `run/worlds/` (and `run/rules.json`, `run/access.json`) first if you want to keep them: a world
+is a save in the game's own format, so the game can open it. A second server with its own `PCDS_HOME` and
+`PCDS_UNIT` is removed the same way, with those set. `loginctl disable-linger $USER` undoes the
+`enable-linger` of the install, and `rm ~/.local/bin/pcds` the link of `make install`. In Docker:
+`docker rm -f pcds`, then delete the data folder (or `docker compose down` and delete `./data`).
 
 The systemd units run `run/bin/pcds`, a copy of the program with `libsteam_api.so` and `web/`
 beside it, so `make clean` or a removed release folder does not take the server down. It hands
@@ -767,4 +799,12 @@ Plugins: the `plugin-api/` library is licensed MIT or Apache-2.0 so that a plugi
 keeps its own licence; what that means for closed-source plugins, and where the line to the GPL is
 drawn, is in docs/plugins.md ("Licensing").
 
+`libsteam_api.so`, which a release and the Docker image carry beside `pcds`, is Valve's Steamworks
+redistributable, unchanged. It is **not** covered by this licence: Valve's terms apply to it (the
+Steamworks SDK Access Agreement). The licences of the Rust crates inside `pcds` and that note are
+in [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES), which every release and the image include.
+
 The Planet Crafter is a trademark of Miju Games. Steam and the Steamworks SDK belong to Valve.
+
+Reporting a vulnerability: [SECURITY.md](SECURITY.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
+Changes by release: [CHANGELOG.md](CHANGELOG.md).
