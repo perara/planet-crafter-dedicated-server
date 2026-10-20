@@ -898,7 +898,9 @@ fn scale() {
         let n = g.net.objects.len().max(1);
         println!("scale: per network object: {:.1} behaviours, {:.1} variables, {:.0} bytes of names and types, {:.0} bytes of plain values, {:.1} list items", behaviours as f64 / n as f64, vars as f64 / n as f64, name_bytes as f64 / n as f64, value_bytes as f64 / n as f64, list_items as f64 / n as f64);
     }
+    println!("scale: {}", crate::machines::census(&g.ext.machines));
     println!("scale: prefabs parsed (of all): {:?}", g.data.group_prefabs.parsed());
+    println!("scale: world objects with nothing but an id and a group: {} of {}", g.wos.values().filter(|w| w.is_bare()).count(), g.wos.len());
     // What each part of the game holds: the heap before and after it is dropped (last: the rest
     // of the game is not whole after it).
     let mut parts = Vec::new();

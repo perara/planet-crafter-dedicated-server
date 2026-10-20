@@ -314,7 +314,7 @@ impl Game {
     pub fn set_wo_net(&mut self, id: i32, net: Option<u64>) {
         let Some(w) = self.wos.get_mut(&id) else { return };
         let (group, had) = (w.group, w.net.is_some());
-        w.net = net;
+        w.set_net(net);
         if net.is_some() {
             self.net_wos.insert(id);
         } else {

@@ -158,6 +158,29 @@ struct Machine {
     floater: Option<(f32, GameTime)>,
 }
 
+/// How many machines have each component: where the machines' memory goes (bench::scale).
+#[cfg(test)]
+pub fn census(machines: &Machines) -> String {
+    let n = machines.list.len();
+    let count = |f: &dyn Fn(&Machine) -> bool| machines.list.values().filter(|m| f(m)).count();
+    format!(
+        "{n} machines ({} bytes each): generator {}, linked_grower {}, converter {}, vegetation {}, harvestable {}, autocrafter {}, disintegrator {}, optimizer {}, floater {}, growers {}, unit_generation {}, unit_multipliers {}",
+        std::mem::size_of::<Machine>(),
+        count(&|m| m.generator.is_some()),
+        count(&|m| m.linked_grower.is_some()),
+        count(&|m| m.converter.is_some()),
+        count(&|m| m.vegetation.is_some()),
+        count(&|m| m.harvestable.is_some()),
+        count(&|m| m.autocrafter.is_some()),
+        count(&|m| m.disintegrator.is_some()),
+        count(&|m| m.optimizer.is_some()),
+        count(&|m| m.floater.is_some()),
+        count(&|m| !m.growers.is_empty()),
+        count(&|m| !m.unit_generation.is_empty()),
+        count(&|m| !m.unit_multipliers.is_empty()),
+    )
+}
+
 /// DataConfig.WorldUnitType names world objects keep generation for.
 const UNITS: [&str; 8] = crate::gamedata::UNIT_TYPES;
 

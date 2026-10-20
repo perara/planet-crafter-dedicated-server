@@ -54,6 +54,11 @@ impl GameTime {
         self.0
     }
 
+    /// The time's bits: equal bits are the same time to the last bit (a zero from -0.0, which `==` hides).
+    pub fn bits(self) -> u64 {
+        self.0.to_bits()
+    }
+
     /// Time.time as the game's float: what goes to a client, or into a float computation that the
     /// game does in a float. Exact below [`EXACT_AFTER`].
     pub fn f32(self) -> f32 {
