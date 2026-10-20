@@ -8,6 +8,8 @@
 //! - `POST /api/plugins/events {"after", "types", "limit"}`: the event stream (stream.rs).
 //! - `GET /api/plugins/tokens`, `POST /api/plugins/tokens {"name", "scopes", "ratePerMinute"}` (the
 //!   token is in the answer once) and `POST /api/plugins/tokens/revoke {"id"}`: scoped tokens (tokens.rs).
+//! - `POST /api/plugins/config {"id", "key", "value"}`: the admin's value for a key a plugin declares
+//!   (`value` null or left out: removed). A secret's value is never in any answer.
 //! - `POST /api/plugins/trust {"publicKey", "name", "grant": [...], "force"}` and
 //!   `POST /api/plugins/untrust {"id"}`: the signing keys the admin trusts (sign.rs).
 
@@ -135,6 +137,19 @@ pub fn request(game: &mut Game, method: &str, path: &str, body: &Value) -> (u16,
                 return error(400, e);
             }
             reload_answer(game, &id)
+        }
+        ("POST", "/api/plugins/config") => {
+            let Some(dir) = dir else { return error(500, "the plugin host has not started") };
+            let (Some(id), Some(key)) = (body["id"].as_str(), body["key"].as_str()) else { return error(400, "'id' and 'key' are required") };
+            let declared = game.ext.plugins.host.as_ref().and_then(|h| h.plugins.iter().find(|p| p.id == id)).and_then(|p| p.manifest.as_ref()).is_some_and(|m| m.config.iter().any(|k| k.key == key));
+            if !declared {
+                return error(400, format!("{id} is not an installed plugin that declares a config key {key}"));
+            }
+            let value = body["value"].as_str().filter(|v| !v.is_empty());
+            match super::config::set(&dir, id, key, value) {
+                Ok(()) => reload_answer(game, id),
+                Err(e) => error(400, e),
+            }
         }
         ("GET", "/api/plugins/tokens") => {
             let Some(dir) = dir else { return error(500, "the plugin host has not started") };

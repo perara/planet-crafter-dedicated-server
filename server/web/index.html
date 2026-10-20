@@ -521,9 +521,23 @@
           <div class="tw" id="pluginsTable"></div>
         </div>
         <div class="card">
+          <div class="head"><h2>Trusted publishers</h2></div>
+          <p class="sub">A plugin is approved for the exact files you saw. A publisher can also <em>sign</em> its plugins (<code>pcds plugin sign</code>), and you can trust the publisher's key instead: what the key vouches for needs no approval and its updates run as they come, and whatever it asks for beyond waits for you. A signature that does not match the files counts for nothing. Remove a key and the plugins that ran only because of it stop.</p>
+          <p class="sub" id="keysNote"></p>
+          <div class="tw" id="trustedKeys"></div>
+          <form class="row" id="trustForm" style="margin-top:8px"><input id="trustKey" placeholder="Public key: 64 hex digits, or the text of the .pub file" aria-label="Public key" style="flex:2"><input id="trustName" placeholder="Name of the publisher" aria-label="Name of the publisher"><button>Trust…</button></form>
+        </div>
+        <div class="card">
           <div class="head"><h2>Programs reading the event stream</h2></div>
-          <p class="sub">An out-of-process plugin registers by asking for events (<code>POST /api/plugins/events</code>) and leaves by saying so, or after a minute of silence. They hold the admin token: the capabilities above do not apply to them.</p>
+          <p class="sub">An out-of-process plugin registers by asking for events (<code>POST /api/plugins/events</code>) and leaves by saying so, or after a minute of silence. It has no capabilities of its own: it can do what its token can. Give each program a token that opens only what it needs, below, instead of the admin token.</p>
           <div class="tw" id="pluginConsumers"></div>
+        </div>
+        <div class="card">
+          <div class="head"><h2>Tokens for programs</h2></div>
+          <p class="sub">A token opens the requests of its scopes and nothing else (everything else needs the admin token), has a rate of its own, and can be removed at any time: it is refused from its next request. The server keeps only a hash of it, so the token is shown once, when it is made. Tokens are checked by the front: after an update that adds them, <code>pcds upgrade --restart</code> brings them in.</p>
+          <p class="sub" id="scopedNote"></p>
+          <div class="tw" id="scopedTable"></div>
+          <form class="row" id="scopedForm" style="margin-top:8px"><input id="scopedName" placeholder="Name, e.g. discord-bridge" aria-label="Name of the token" maxlength="32"><button>Make a token…</button></form>
         </div>
       </section>
 
@@ -1756,20 +1770,58 @@ $('modBan').onclick = async e => {
 $('unbanForm').onsubmit = e => { e.preventDefault(); const v = $('modUnban').value.trim(); if (!v) return; act(`Unbanned ${v}`, async () => { await api('POST', '/api/unban', { value: v }); $('modUnban').value = ''; }, e.submitter); };
 
 // ---- plugins ----
-let pluginData = null;
+let pluginData = null, tokenData = null;
 async function loadPlugins() {
   try { pluginData = await api('GET', '/api/plugins'); drawPlugins(); }
   catch (e) { if (!e.auth) $('pluginsNote').textContent = e.message; }
+  try { tokenData = await api('GET', '/api/plugins/tokens'); $('scopedNote').textContent = ''; drawTokens(); }
+  catch (e) { if (!e.auth) $('scopedNote').textContent = e.message; }
 }
 const STATE_CHIP = { running: 'ok', disabled: '', pending: 'warn', changed: 'warn', unloading: 'warn', invalid: 'bad', incompatible: 'bad', failed: 'bad' };
+// What a capability can do that its name does not say, shown where the admin decides.
+const CAP_CARE = {
+  'net.http': 'It can send requests, and what it sends, to the places listed below, and only those.',
+  'net.http.local': 'Dangerous: lets those requests reach THIS machine and your local network (the admin API, other services, the router). Grant it only to a plugin whose job is that.',
+  'rules.write': 'It can change how the game plays.',
+  'player.kick': 'It can remove players.',
+  'rpc.veto': 'It can refuse what players do.'
+};
+const checkRow = (name, label, checked, note) => h('label', { style: 'display:flex;gap:8px;align-items:flex-start;margin:4px 0' }, h('input', { type: 'checkbox', name, checked: !!checked, style: 'margin-top:3px' }), h('span', {}, label, note ? h('div', { class: 'muted', style: 'font-size:12px' }, note) : null));
+const checked = root => [...root.querySelectorAll('input[type=checkbox]')].filter(x => x.checked).map(x => x.name);
+function reaches(p) {
+  const n = p.net; if (!n) return null;
+  return h('div', { style: 'margin-top:6px' }, h('span', { class: 'muted' }, 'May send requests to: '), n.allow.map(a => h('span', { class: 'chip ' + (a.includes('://*.') ? 'warn' : ''), title: a.includes('://*.') ? 'A wildcard: every name below it' : '' }, a)),
+    h('div', { class: 'muted', style: 'font-size:12px' }, n.local ? (n.localGranted ? 'and this machine and the local network (granted)' : 'and this machine and the local network if you grant net.http.local') : 'never this machine or your local network', ` · ${n.timeoutMs / 1000} s, ${bytes(n.maxResponseBytes)} at most per request`));
+}
+function signatureLine(p) {
+  const g = p.signature || {};
+  if (g.state === 'trusted') return h('div', { style: 'margin-top:4px' }, h('span', { class: 'chip ok', title: 'The files match a signature by a key you trust' }, `signed by ${g.keyName}`), (g.vouches || []).length ? h('span', { class: 'muted', style: 'font-size:12px' }, ` vouches for: ${g.vouches.join(', ')}`) : null);
+  if (g.state === 'untrusted') return h('div', { style: 'margin-top:4px' }, h('span', { class: 'chip warn', title: 'A good signature by a key you have not trusted' }, 'signed by an unknown key'), h('span', { class: 'muted mono', style: 'font-size:12px' }, ` ${g.keyId}`));
+  if (g.state === 'revoked') return h('div', { style: 'margin-top:4px' }, h('span', { class: 'chip bad' }, 'signed by a revoked key'));
+  if (g.state === 'invalid') return h('div', { style: 'margin-top:4px' }, h('span', { class: 'chip warn' }, 'signature does not hold'), h('span', { class: 'muted', style: 'font-size:12px' }, ` ${g.detail || ''}`));
+  return null;
+}
+function configLine(p) {
+  const keys = p.config || []; if (!keys.length) return null;
+  return h('div', { style: 'margin-top:6px' }, keys.map(k => h('div', { class: 'row', style: 'gap:6px;margin:2px 0;align-items:center' },
+    h('span', { class: 'chip ' + (k.set ? 'ok' : 'warn') }, k.key), h('span', { class: 'muted', style: 'font-size:12px' }, `${k.description || ''} ${k.secret ? '(a secret' + (k.set ? ', set' : ', not set') + ')' : k.set ? `= ${k.value}` : '(not set)'}`),
+    h('button', { class: 'small', onclick: () => setConfig(p, k) }, k.set ? 'Change…' : 'Set…'), k.set ? h('button', { class: 'small', onclick: e => act(`${p.id} ${k.key} removed`, () => api('POST', '/api/plugins/config', { id: p.id, key: k.key }).then(loadPlugins), e.currentTarget) }, 'Remove') : null)));
+}
+async function setConfig(p, k) {
+  const input = h('input', { type: k.secret ? 'password' : 'text', autocomplete: 'off', placeholder: k.secret ? 'the value (shown nowhere afterwards)' : 'the value', style: 'width:100%' });
+  const body = [h('p', { style: 'margin:0 0 8px' }, k.description || k.key), input, h('p', { class: 'muted', style: 'margin:8px 0 0;font-size:12px' }, k.secret ? 'A secret: the server puts it in the plugin\'s requests; the plugin never sees it and no list or log shows it. Over this plain-HTTP page it travels as everything here does; the command line (pcds plugin config set) reads it from the terminal instead.' : 'One line.')];
+  if (await ask({ title: `${p.id}: ${k.key}`, body, ok: 'Save' }) && input.value.trim()) act(`${p.id} ${k.key} set`, () => api('POST', '/api/plugins/config', { id: p.id, key: k.key, value: input.value.trim() }).then(loadPlugins));
+}
 function drawPlugins() {
   const d = pluginData; if (!d) return;
   $('pluginsFolder').textContent = d.folder || 'plugins';
   $('pluginsNote').textContent = d.approvalsError ? `approved.json cannot be read, so no plugin runs: ${d.approvalsError}` : '';
+  $('keysNote').textContent = d.keysError ? `trusted-keys.json cannot be read, so no key is trusted: ${d.keysError}` : '';
   const what = Object.fromEntries((d.capabilities || []).map(c => [c.name, c.allows]));
   const rows = (d.plugins || []).map(p => {
-    const caps = h('td', {}, (p.requested || []).map(c => h('span', { class: 'chip ' + ((p.granted || []).includes(c) ? 'ok' : 'warn'), title: what[c] || '' }, c)));
+    const caps = h('td', {}, (p.requested || []).map(c => h('span', { class: 'chip ' + ((p.granted || []).includes(c) ? 'ok' : 'warn'), title: what[c] || '' }, c)), reaches(p), configLine(p));
     const calls = p.stats.calls ? `${p.stats.calls.toLocaleString()} calls, ${Math.round(p.stats.averageMicros)} µs each, slowest ${Math.round(p.stats.maxMicros)} µs` : 'no calls yet';
+    const http = p.stats.http && p.stats.http.requests ? ` · ${p.stats.http.requests} requests (${p.stats.http.answered} answered, ${p.stats.http.failed} failed, ${bytes(p.stats.http.bytesOut)} out, ${bytes(p.stats.http.bytesIn)} in)` : '';
     const problem = [p.detail, p.notice, p.stats.lastError ? `last fault: ${p.stats.lastError}` : null, ...(p.warnings || [])].filter(Boolean);
     const buttons = h('td', { class: 'row' },
       p.status === 'running'
@@ -1778,24 +1830,73 @@ function drawPlugins() {
         : h('button', { class: 'small primary', onclick: e => approvePlugin(p, what, e.currentTarget) }, p.status === 'pending' || p.status === 'changed' ? 'Approve…' : 'Enable…'),
       p.status === 'failed' ? h('button', { class: 'small', onclick: e => act(`${p.id} started again`, () => api('POST', '/api/plugins/reload').then(loadPlugins), e.currentTarget) }, 'Start again') : null);
     return [
-      h('td', {}, h('b', {}, p.name || p.id), h('div', { class: 'muted mono' }, `${p.id} ${p.version || ''} · ${p.kind || '?'}${p.license ? ' · ' + p.license : ''}`), p.description ? h('div', { class: 'muted' }, p.description) : null),
+      h('td', {}, h('b', {}, p.name || p.id), h('div', { class: 'muted mono' }, `${p.id} ${p.version || ''} · ${p.kind || '?'}${p.license ? ' · ' + p.license : ''}`), p.description ? h('div', { class: 'muted' }, p.description) : null, signatureLine(p)),
       h('td', {}, h('span', { class: 'chip ' + (STATE_CHIP[p.status] || '') }, p.status), ...problem.map(t => h('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' }, t))),
       caps,
-      h('td', {}, calls, h('div', { class: 'muted' }, `${p.stats.faults} faults · ${p.stats.actions} actions${p.stats.denied ? ` · ${p.stats.denied} refused calls` : ''}`)),
+      h('td', {}, calls, h('div', { class: 'muted' }, `${p.stats.faults} faults · ${p.stats.actions} actions${p.stats.denied ? ` · ${p.stats.denied} refused calls` : ''}${http}`)),
       buttons
     ];
   });
   const consumers = (d.stream && d.stream.consumers) || [];
   $('pluginConsumers').replaceChildren(table(['Name', 'Events', 'Last poll', 'Polls'], consumers.map(c => [h('td', { class: 'mono' }, c.name), (c.kinds || []).join(', '), `${c.lastPollSecondsAgo} s ago`, String(c.polls)]), 'No program is reading the stream'));
+  const keys = d.trustedKeys || [], revoked = d.revokedKeys || [];
+  $('trustedKeys').replaceChildren(table(['Publisher', 'Key', 'Vouches for', ''], [
+    ...keys.map(k => [h('td', {}, h('b', {}, k.name), h('div', { class: 'muted' }, `trusted ${ago(k.addedAt)}`)), h('td', { class: 'mono' }, k.id), h('td', {}, k.grant.length ? k.grant.map(c => h('span', { class: 'chip', title: what[c] || '' }, c)) : h('span', { class: 'muted' }, 'nothing: its plugins still wait for you to approve what they ask for, and then follow its updates')),
+      h('td', {}, h('button', { class: 'small danger', onclick: e => untrust(k, e.currentTarget) }, 'Remove'))]),
+    ...revoked.map(r => [h('td', {}, h('b', {}, r.name), h('div', { class: 'muted' }, `removed ${ago(r.at)}`)), h('td', { class: 'mono' }, r.id), h('td', {}, h('span', { class: 'chip bad' }, 'revoked')), h('td')])
+  ], 'No publisher is trusted: every plugin is approved by its own files.'));
   const sig = JSON.stringify(rows.map(r => r.map(c => c.textContent)));
   if ($('pluginsTable').dataset.sig === sig) return;
   $('pluginsTable').dataset.sig = sig;
   $('pluginsTable').replaceChildren(table(['Plugin', 'State', 'Capabilities asked (green: granted)', 'Use', ''], rows, 'No plugins installed. pcds plugin new ID makes one; the guide is docs/plugins-guide.md.'));
 }
 async function approvePlugin(p, what, btn) {
-  const body = [h('p', { style: 'margin:0 0 8px' }, `${p.name || p.id} ${p.version || ''} asks for:`), h('ul', { style: 'margin:0;padding-left:18px' }, (p.requested || []).map(c => h('li', {}, h('b', {}, c), ': may ' + (what[c] || '')))), h('p', { class: 'muted', style: 'margin:8px 0 0' }, p.requested.length ? 'It gets these and nothing else, for exactly these files: if they change, it waits for you again.' : 'It asks for nothing: it can read nothing and change nothing.')];
-  if (await ask({ title: `Approve ${p.id}?`, body, ok: 'Approve' })) act(`${p.id} approved`, () => api('POST', '/api/plugins/enable', { id: p.id }).then(loadPlugins), btn);
+  const asked = p.requested || [];
+  const g = p.signature || {};
+  const list = h('div', {}, asked.map(c => checkRow(c, [h('b', {}, c), ': may ' + (what[c] || '')], c !== 'net.http.local', CAP_CARE[c])));
+  const body = [h('p', { style: 'margin:0 0 8px' }, `${p.name || p.id} ${p.version || ''} asks for (untick what it should not have):`), list];
+  if (p.net) body.push(h('div', { style: 'margin:8px 0 0;padding:8px;border:1px solid var(--line);border-radius:6px' }, h('b', {}, 'Where it may send requests'), p.net.allow.map(a => h('div', { class: 'mono' }, a + (a.includes('://*.') ? '   ← a wildcard: every name below it, whoever runs them' : '') + (a.startsWith('http://') ? '   ← not encrypted' : ''))), h('div', { class: 'muted', style: 'font-size:12px' }, 'Only these, pinned by the files you approve now. It never reaches this machine or your network unless you also grant net.http.local.')));
+  const keysNeeded = (p.config || []).filter(k => !k.set);
+  if (keysNeeded.length) body.push(h('p', { class: 'muted', style: 'margin:8px 0 0' }, `It needs values from you (${keysNeeded.map(k => k.key).join(', ')}): set them after approving.`));
+  body.push(h('p', { class: 'muted', style: 'margin:8px 0 0' }, g.state === 'trusted' ? `Signed by ${g.keyName}, whom you trust${(g.vouches || []).length ? ' for ' + g.vouches.join(', ') : ''}: later versions it signs will not need approving again while they ask for nothing beyond this.` : g.state === 'untrusted' ? 'It is signed by a key you have not trusted; approving does not trust the key. It waits for you again if its files change.' : asked.length ? 'It gets these and nothing else, for exactly these files: if they change, it waits for you again.' : 'It asks for nothing: it can read nothing and change nothing.'));
+  if (await ask({ title: `Approve ${p.id}?`, body, ok: 'Approve' })) act(`${p.id} approved`, () => api('POST', '/api/plugins/enable', { id: p.id, grant: checked(list) }).then(loadPlugins), btn);
 }
+async function untrust(k, btn) {
+  if (await ask({ title: `Stop trusting ${k.name}?`, body: 'The plugins that run only because this publisher signed them stop at the next look at the folder (a few seconds); plugins you approved yourself go on. The key is remembered as revoked.', ok: 'Remove', danger: true })) act(`${k.name} is no longer trusted`, () => api('POST', '/api/plugins/untrust', { id: k.id }).then(loadPlugins), btn);
+}
+$('trustForm').onsubmit = async e => {
+  e.preventDefault();
+  const key = $('trustKey').value.trim(); if (!key) return toast('Paste the publisher\'s public key', 'err');
+  const caps = (pluginData && pluginData.capabilities) || [];
+  const list = h('div', {}, caps.map(c => checkRow(c.name, [h('b', {}, c.name), ': ' + c.allows], false, CAP_CARE[c.name])));
+  const body = [h('p', { style: 'margin:0 0 8px' }, `Trust the key${$('trustName').value.trim() ? ' of ' + $('trustName').value.trim() : ''}. Tick what it vouches for: a plugin it signs gets those without your approval. Tick nothing to trust only who signed it: the plugin still waits for you to approve what it asks for, and then follows that publisher's updates.`), list];
+  if (await ask({ title: 'Trust this publisher?', body, ok: 'Trust' })) act('The publisher is trusted', async () => { await api('POST', '/api/plugins/trust', { publicKey: key, name: $('trustName').value.trim(), grant: checked(list) }); $('trustKey').value = ''; $('trustName').value = ''; await loadPlugins(); }, e.submitter);
+};
+function drawTokens() {
+  const d = tokenData; if (!d) return;
+  $('scopedTable').replaceChildren(table(['Name', 'Opens', 'Rate', 'Made', ''], (d.tokens || []).map(t => [
+    h('td', {}, h('b', {}, t.name), h('div', { class: 'muted mono' }, t.id)), h('td', {}, t.scopes.map(s => h('span', { class: 'chip', title: (d.scopes.find(x => x.name === s) || {}).allows || '' }, s))), `${t.ratePerMinute.toLocaleString()} / min`, ago(t.createdAt),
+    h('td', {}, h('button', { class: 'small danger', onclick: e => revokeToken(t, e.currentTarget) }, 'Revoke'))]), 'No tokens. A program that only reads the event stream should have one with events.read, not the admin token.'));
+}
+async function revokeToken(t, btn) {
+  if (await ask({ title: `Revoke ${t.name}?`, body: 'The program that holds it is refused from its next request.', ok: 'Revoke', danger: true })) act(`${t.name} revoked`, () => api('POST', '/api/plugins/tokens/revoke', { id: t.id }).then(loadPlugins), btn);
+}
+$('scopedForm').onsubmit = async e => {
+  e.preventDefault();
+  const name = $('scopedName').value.trim(); if (!name) return toast('Give the token a name', 'err');
+  const d = tokenData || { scopes: [] };
+  const list = h('div', {}, d.scopes.map(s => checkRow(s.name, [h('b', {}, s.name), ': ' + s.allows], s.name === 'events.read')));
+  const rate = h('input', { type: 'number', min: 1, max: d.maxRatePerMinute || 6000, value: d.defaultRatePerMinute || 600, style: 'width:6em' });
+  const body = [h('p', { style: 'margin:0 0 8px' }, `A token for ${name} may:`), list, h('label', { style: 'display:block;margin-top:8px' }, 'Requests a minute at most: ', rate), h('p', { class: 'muted', style: 'margin:8px 0 0;font-size:12px' }, 'Everything else (status, rules, the world, plugins, tokens) needs the admin token.')];
+  if (!await ask({ title: 'Make a token', body, ok: 'Make it' })) return;
+  const scopes = checked(list); if (!scopes.length) return toast('Tick at least one scope', 'err');
+  const made = await act(null, () => api('POST', '/api/plugins/tokens', { name, scopes, ratePerMinute: +rate.value || undefined }), e.submitter);
+  if (!made) return;
+  $('scopedName').value = '';
+  const box = h('input', { class: 'mono', readOnly: true, value: made.token, style: 'width:100%', onfocus: ev => ev.target.select() });
+  loadPlugins();
+  await ask({ title: `The token of ${made.info.name}`, body: [h('p', { style: 'margin:0 0 8px' }, 'Copy it now: it is not shown again (the server keeps a hash only).'), box, h('p', { class: 'muted', style: 'margin:8px 0 0;font-size:12px' }, 'Send it as Authorization: Bearer TOKEN.')], ok: 'Done' });
+};
 onShow.plugins = loadPlugins;
 setInterval(() => { if (current === 'plugins' && !document.hidden) loadPlugins(); }, 5000);
 $('pluginsReload').onclick = e => act('The plugin folder is read again', () => api('POST', '/api/plugins/reload').then(loadPlugins), e.currentTarget);

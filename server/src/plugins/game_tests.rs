@@ -402,3 +402,33 @@ fn the_admin_api_makes_lists_and_revokes_scoped_tokens_and_shows_a_token_once() 
     let (_, body) = admin::request(&mut g, "GET", "/api/plugins/tokens", &json!({}));
     assert!(serde_json::from_str::<Value>(&body).unwrap()["tokens"].as_array().unwrap().is_empty());
 }
+
+#[test]
+fn the_admin_api_sets_a_plugins_config_value_and_never_shows_a_secret() {
+    let Some((mut g, _)) = world() else { return };
+    let dir = fresh_dir("config-api");
+    // A plugin that declares a secret key and a plain one.
+    let to = dir.join("greeter");
+    std::fs::create_dir_all(&to).unwrap();
+    std::fs::copy(example("welcome-rules").join("rules.toml"), to.join("rules.toml")).unwrap();
+    let manifest = std::fs::read_to_string(example("welcome-rules").join(manifest::FILE)).unwrap().replace("id = \"welcome-rules\"", "id = \"greeter\"");
+    std::fs::write(to.join(manifest::FILE), format!("{manifest}\n[[config]]\nkey = \"hook\"\ndescription = \"a secret\"\n[[config]]\nkey = \"region\"\nsecret = false\n")).unwrap();
+    approve(&dir, "greeter", None).unwrap();
+    start(&mut g, &dir);
+    let (status, body) = admin::request(&mut g, "POST", "/api/plugins/config", &json!({"id": "greeter", "key": "hook", "value": "TOP-SECRET"}));
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.contains("TOP-SECRET"));
+    admin::request(&mut g, "POST", "/api/plugins/config", &json!({"id": "greeter", "key": "region", "value": "eu-1"}));
+    let (_, listing) = admin::request(&mut g, "GET", "/api/plugins", &json!({}));
+    let config: Value = serde_json::from_str::<Value>(&listing).unwrap()["plugins"][0]["config"].clone();
+    assert!(!listing.contains("TOP-SECRET"), "{listing}");
+    assert_eq!((config[0]["key"].as_str(), config[0]["set"].as_bool(), config[0]["value"].is_null()), (Some("hook"), Some(true), true));
+    assert_eq!((config[1]["key"].as_str(), config[1]["value"].as_str()), (Some("region"), Some("eu-1")));
+    assert!(std::fs::read_to_string(dir.join("config.json")).unwrap().contains("TOP-SECRET"));
+    // Removed; a key the plugin does not declare, a plugin that is not there, a bad value.
+    admin::request(&mut g, "POST", "/api/plugins/config", &json!({"id": "greeter", "key": "hook"}));
+    assert!(!std::fs::read_to_string(dir.join("config.json")).unwrap().contains("TOP-SECRET"));
+    for bad in [json!({"id": "greeter", "key": "nothing", "value": "x"}), json!({"id": "nobody", "key": "hook", "value": "x"}), json!({"id": "greeter"}), json!({"id": "greeter", "key": "hook", "value": "a\nb"})] {
+        assert_eq!(admin::request(&mut g, "POST", "/api/plugins/config", &bad).0, 400, "{bad}");
+    }
+}

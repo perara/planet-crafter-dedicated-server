@@ -389,6 +389,7 @@ All answer JSON; the bearer token is the admin token (docs/hot-update.md, README
 | `POST /api/plugins/reload` | | `{"ok": true, "message"}`: the folder is read again; a plugin whose files and approval did not change keeps running |
 | `POST /api/plugins/enable` | `{"id", "grant": [...]}` (grant optional: everything asked) | `{"ok": true, "plugin": {...}}`; 400 for an unknown plugin, a grant above what is asked, or a plugin that does not hold up |
 | `POST /api/plugins/disable` | `{"id"}` | `{"ok": true, "plugin": {...}}` |
+| `POST /api/plugins/config` | `{"id", "key", "value"}` (`value` null or left out removes it) | `{"ok": true, "plugin": {...}}`; 400 for a plugin or key that does not exist, or a value that is not one line. The plugin is restarted with it. A secret's value is in no answer |
 | `POST /api/plugins/trust` | `{"publicKey": "(64 hex or a .pub file's text)", "name", "grant": [...], "force"}` | `{"ok": true, "key": {...}}`; 400 for a key that is none, a grant that is no capability, or a revoked key without `force`. The plugins are read again |
 | `POST /api/plugins/untrust` | `{"id"}` (the id, or its first 8 characters or more) | `{"ok": true, "revoked": {...}}`; 400 for a key that is not trusted |
 | `GET /api/plugins/tokens` | | `{"tokens": [{"id","name","scopes","ratePerMinute","createdAt"}], "scopes": [{"name","allows"}], "defaultRatePerMinute", "maxRatePerMinute"}`: never a token or its hash |
