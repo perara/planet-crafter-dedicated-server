@@ -46,7 +46,11 @@ autosave setting; while the world is stopped the front answers `GET /api/status`
 /api/worlds` itself and refuses the rest. The answer comes back as ANSWER, and the front adds its part to
 `/api/status` (invite code, network, uptime, traffic, CPU and memory of front and banks,
 `banks`, `update`). Writes to a bank never block: frames wait in a queue per bank, and a client
-with more than 16 MiB waiting for the game (held during a flip, or a stalled bank) is dropped.
+with more than 16 MiB waiting for the game (held during a flip, or a stalled bank) is dropped, and
+so is, one by one, the client with the most waiting while all clients together have more than 256 MiB
+waiting; the memory of a stall is given back to the system when it is over. A bank that says nothing
+for `limits.bankWatchdogSeconds` (60) is killed and restarted like after a crash; the clock runs
+only while the world plays (not during a flip, a recovery or a stop).
 The bank writes blocking: a front that stopped reading stalls the world, which loses nothing.
 The frames queued together go out in one write (writev; a frame with a descriptor alone). The
 front loops every 5 ms; with nobody connected and no flip under way it loops every 20 ms (a
