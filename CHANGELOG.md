@@ -19,6 +19,16 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+### Fixed
+
+* **A pick-up that no inventory takes left a world object behind.** `AddWorldObjectToInventoryServerRpc`
+  makes the world object when the world does not have the id (an item that had despawned, or an id a
+  client made up); when the inventory was full or refused it, the object stayed in the world, held by
+  nobody, placed nowhere, never saved and never freed. A long-uptime run of the virtual-clock soak
+  (two scripted players on a mid-game world, 70 days of game time) grew the snapshot from 0.43 MB to
+  2.5 MB and the process's memory to 380 MB; a client that asks again and again with a full inventory
+  could do the same. The object is taken away again when the request fails.
+
 ## [0.8.0] - 2026-10-20
 
 The DLC planets (Humble, Toxicity) run on their own ground, and you say which of them you own; the
