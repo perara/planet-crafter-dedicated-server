@@ -147,7 +147,7 @@ Tools were run on the whole source; each real hit was fixed with a test. The rel
 | S21 | `cargo audit`: one warning, `paste` 1.0.15 unmaintained (a compile-time macro pulled by `steamworks`); no vulnerability; licences all compatible | open: nothing to do here until `steamworks` moves. Not rerun for the crates added since (the plugin host, `toml`, `unicode-normalization`) | `server/Cargo.lock` |
 | S22 | The updater's checksum comes from the same server as the tarball, so it guards against damage, not a compromised release or mirror | open: this is a limit of the design (the unpacked program runs as the server user), but it is written down nowhere | `updater.rs` (`unpack`) |
 | S23 | A hard link inside a release tarball passes `plain_files` (it looks like a file) | open | `updater.rs` (`plain_files`) |
-| S24 | `world::hex` slices a string by bytes and reads bad hex as 0 (offline probe and load tools only) | open | `world.rs` |
+| S24 | `world::hex` slices a string by bytes and panics on non-ASCII input (offline probe and load tools only) | fixed (consolidation after 0.7.0: no panic; bad hex still reads as 0, as the tools expect) | `world::tests::hex_reads_pairs_and_does_not_panic_on_text_that_is_not_ascii` |
 | S25 | Small suspects never reproduced: `serde_json` float parsing may move a huge value by one bit per save, `set_var` in a chat-hook test races other tests, `request.accept()` results ignored in the front | unverified | none |
 
 The fuzz harness (`server/fuzz/`) has 15 targets: access, chathooks, config, front, game, handoff,
@@ -246,7 +246,6 @@ Static:
   mirror. Next: write that limit into docs/hot-update.md.
 * **S23** A hard link in a release tarball passes the file check. Next: refuse entries with a link
   count above one, or refuse hard links in the tar listing.
-* **S24** `world::hex` panics on non-ASCII input and reads bad hex as 0. Next: return an error.
 
 Dynamic:
 
