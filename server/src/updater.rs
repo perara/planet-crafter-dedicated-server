@@ -14,6 +14,7 @@
 //! run/bin/a/ and run/bin/b/ are the banks, each a whole release (pcds, libsteam_api.so, web/) with its bank.json (what bank-info said, the tag, the tarball's
 //! sha256); run/bin/active names the one the front starts.
 
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -366,7 +367,8 @@ fn unpack(release: &Release, new: &Path) -> Result<BankInfo, String> {
 }
 
 /// Err names the first thing under `dir` that is neither a plain file nor a folder (a link, a
-/// device, a fifo): a link in a bank could point the server anywhere.
+/// device, a fifo) or is a file with more than one name (a hard link): a link in a bank could point
+/// the server anywhere.
 fn plain_files(root: &Path, dir: &Path) -> Result<(), String> {
     for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -374,7 +376,9 @@ fn plain_files(root: &Path, dir: &Path) -> Result<(), String> {
         let path = entry.path();
         if kind.is_dir() {
             plain_files(root, &path)?;
-        } else if !kind.is_file() {
+        } else if !kind.is_file() || entry.metadata().map_err(|e| e.to_string())?.nlink() > 1 {
+            // A hard link is a file that is also another path's (a tar that links to a file of the
+            // machine would share its inode with the bank): nothing in a release has two names.
             return Err(path.strip_prefix(root).unwrap_or(&path).display().to_string());
         }
     }
@@ -800,6 +804,24 @@ pub mod tests {
         let e = install(&lookup(&base, None).unwrap(), &banks, "b", None).unwrap_err();
         assert!(e.contains("web, which is not a file or a folder"), "{e}");
         assert!(!banks.join("b").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+        // A hard link: a file with two names looks like a file. The tar lists it as a link and the
+        // unpacked bank holds one inode twice.
+        let dir = test_dir("hardlinks");
+        let tar = {
+            let name = "pcds-v9.9.8-linux-x86_64";
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+            std::fs::write(dir.join(name).join("pcds"), script(crate::ipc::PROTOCOL)).unwrap();
+            std::fs::hard_link(dir.join(name).join("pcds"), dir.join(name).join("web")).unwrap();
+            assert!(Command::new("tar").arg("-czf").arg(dir.join("t.tar.gz")).arg("-C").arg(&dir).arg(name).status().unwrap().success());
+            std::fs::remove_dir_all(dir.join(name)).unwrap();
+            std::fs::read(dir.join("t.tar.gz")).unwrap()
+        };
+        let sum = hex(ring::digest::digest(&ring::digest::SHA256, &tar).as_ref());
+        let base = format!("{}/releases", serve(release("BASE", "v9.9.8", tar, sum)));
+        let banks = dir.join("bin");
+        let e = install(&lookup(&base, None).unwrap(), &banks, "b", None).unwrap_err();
+        assert!(e.contains("which is not a file or a folder") && !banks.join("b").exists(), "{e}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
