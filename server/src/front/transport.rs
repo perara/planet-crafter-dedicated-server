@@ -83,10 +83,6 @@ impl Transport {
         self.conns.keys().copied().collect()
     }
 
-    pub fn has(&self, client: u64) -> bool {
-        self.conns.contains_key(&client)
-    }
-
     /// Whether a batch from `client` still reaches the game: it is connected and not kicked.
     pub fn accepts_from(&self, client: u64) -> bool {
         self.conns.contains_key(&client) && !self.kicked.contains(&client)
@@ -252,7 +248,7 @@ mod tests {
         assert_eq!(net.take_due(later), [1]);
         assert!(net.pending_drop.is_empty());
         assert!(net.close(1) && !net.close(1), "closed once");
-        assert!(!net.has(1) && net.ip_client(&[1; 8]).is_none());
+        assert!(!net.conns.contains_key(&1) && net.ip_client(&[1; 8]).is_none());
         // Gone on its own: nothing is left of it, and it is not closed a second time.
         net.conns.insert(2, Conn::Ip([2; 8]));
         net.drop_later(2, later);
