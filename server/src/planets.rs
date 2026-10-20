@@ -37,6 +37,20 @@ fn interplanetary_pod(game: &Game) -> Option<usize> {
     singleton_group(game, "PlanetNetworkLoader", "_interplanetaryPodGroup")
 }
 
+/// A DLC planet whose ground the tables do not hold: its ore veins, water, toxic areas and world
+/// instances are in scenes/<planet>.json, which `pcds extract` reads from the game folder (tables
+/// from before the server knew the DLC planets have none). A world there would run on an empty
+/// ground, so it does not start; the text says what to do.
+pub fn ground_missing(game: &Game, index: usize) -> Option<String> {
+    let planet = &game.net_data.planets[index];
+    (planet.steam_app_id != 0 && !game.scenes.planets.contains_key(&planet.id)).then(|| {
+        format!(
+            "{0} is a DLC planet and the game tables have no ground for it (no scenes/{0}.json): its ore veins, water, toxic areas and world instances would be missing and the planet would run empty. Run `pcds extract` to read them from the game folder (or `pcds update`)",
+            planet.id
+        )
+    })
+}
+
 /// PlanetUnlocker.GetIsPlanetUnlocked: unlocked planets are the ones with terraformation units.
 pub fn is_unlocked(game: &Game, planet_hash: i32) -> bool {
     game.units.planet(planet_hash).is_some()
@@ -102,7 +116,11 @@ fn landing_transform(game: &Game, platform: &WorldObject) -> ([f32; 3], [f32; 4]
 pub fn switch_to_planet(game: &mut Game, planet_hash: i32, rocket_wo: i32, spawn_index: i32) {
     let Some(index) = game.net_data.planets.iter().position(|p| stable_hash(&p.id) == planet_hash) else { return };
     if !crate::scene::available_planets(game).contains(&index) {
-        eprintln!("switch to planet {}: not available on this server", game.net_data.planets[index].id);
+        eprintln!("switch to planet {}: not available in this world (a DLC planet is only continued, never given: the server cannot check ownership)", game.net_data.planets[index].id);
+        return;
+    }
+    if let Some(why) = ground_missing(game, index) {
+        eprintln!("switch to planet {}: {why}", game.net_data.planets[index].id);
         return;
     }
     let planet_id = game.net_data.planets[index].id.clone();
@@ -336,10 +354,32 @@ pub mod tests {
         assert_eq!(g.planet_id(), "Selenea", "the save keeps where the world is");
     }
 
+    /// The server cannot check DLC ownership, so it gives no world a DLC planet: travel to one is
+    /// refused unless the world has it already (its save lists it), and then it needs the
+    /// planet's ground in the tables.
     #[test]
-    fn dlc_planets_cannot_be_reached() {
+    fn a_world_is_given_no_dlc_planet_but_keeps_the_one_it_has() {
         let Some(mut g) = game() else { return };
-        switch_to_planet(&mut g, stable_hash("Humble"), 0, 0);
-        assert_eq!(g.planet_id(), "Prime");
+        let humble = stable_hash("Humble");
+        let index = g.net_data.planet_index("Humble").unwrap();
+        assert!(!crate::scene::available_planets(&g).contains(&index));
+        switch_to_planet(&mut g, humble, 0, 0);
+        assert_eq!(g.planet_id(), "Prime", "a world that never had Humble does not get it");
+        // The save lists it (its host owned it when the world got there): available, and the
+        // travel works where the tables hold the planet's ground (a stand-in here).
+        g.save.planets.push(json!({"planetId": "Humble"}));
+        crate::units::create(&mut g, "Humble", None);
+        assert!(crate::scene::available_planets(&g).contains(&index));
+        let ground = g.scenes.planets.remove("Humble");
+        assert!(ground_missing(&g, index).is_some_and(|why| why.contains("pcds extract")), "tables without the planet's ground say what to do");
+        switch_to_planet(&mut g, humble, 0, 0);
+        assert_eq!(g.planet_id(), "Prime", "no ground, no travel");
+        let stand_in = ground.unwrap_or_else(|| g.scenes.planets["Prime"].clone());
+        g.scenes.planets.insert("Humble".into(), stand_in);
+        assert_eq!(ground_missing(&g, index), None);
+        switch_to_planet(&mut g, humble, 0, 0);
+        assert_eq!(g.planet_id(), "Humble");
+        // A free planet never lacks its ground (the tables refuse to load without it).
+        assert_eq!(ground_missing(&g, g.net_data.planet_index("Prime").unwrap()), None);
     }
 }

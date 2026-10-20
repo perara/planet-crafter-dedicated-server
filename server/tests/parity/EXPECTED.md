@@ -158,6 +158,17 @@ energy: the grower's random state).
   WaterLifeCollector1) are built on dry land in `sweep_water`; there a client could not place
   them. Nine behave the same. An algae generator plants on the water surface below it: the
   reference plants nothing on land, this server fills the generator as if it stood on water.
+- **The DLC planets (Humble, Toxicity)**: nothing of them is compared with the game. The reference
+  is the game under Wine without Steam: `SteamManager` is not initialised, so
+  `PlanetList.GetIsPlanetPurchased` is false for a DLC planet, `GetPlanetIndex` gives -1 for it and
+  the host disconnects a world saved there (`PlanetNetworkLoader.LoadPlanetFromSave`). It could be
+  made to run one only by a Steam stand-in or a patch of `PlanetList`, and a faked ownership is not
+  done, here or in the server. What the server does with them is checked another way (COMPLETENESS.md
+  "DLC planets"). The few things that would differ, if a licensed host were compared: the host game
+  knows the toxic areas of the sectors around its own player only (here all of the planet's, so a
+  remote player in a far area is hurt here and not there); an area's key is made from the dump's
+  position and a client's key a rounding step off still means the area; the clients' registrations
+  for an area are the server's, kept through a hot update.
 - **A door on a floor** (Panel.ChangePanelServerRpc with a wall look for a floor panel, which no
   client sends): the game then also resets, at deconstruction, one of two floor panels eight
   metres apart that meet through the door look's large bounds; this server does not.

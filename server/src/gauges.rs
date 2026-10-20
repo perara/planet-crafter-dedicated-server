@@ -53,10 +53,11 @@ pub fn values(game: &Game, object: u64) -> [f32; 4] {
     ["_oxygenValue", "_thirstValue", "_healthValue", "_toxicValue"].map(|v| get_f(game, object, v))
 }
 
-/// The maxima of `values` (toxicity's is a fixed 100).
+/// The maxima of `values`: toxicity's is the time of the toxic area the player was last in
+/// (_toxicMaxValue, 100 before any).
 pub fn maxima(game: &Game, object: u64) -> [f32; 4] {
-    let [o, w, h] = ["_oxygenMaxValue", "_thirstMaxValue", "_healthMaxValue"].map(|v| get_f(game, object, v));
-    [o, w, h, INITIAL]
+    let [o, w, h, t] = ["_oxygenMaxValue", "_thirstMaxValue", "_healthMaxValue", "_toxicMaxValue"].map(|v| get_f(game, object, v));
+    [o, w, h, if t > 0.0 { t } else { INITIAL }]
 }
 
 /// UpdateGaugesDependingOnEquipmentServerRpc: the oxygen maximum the first tank gives.

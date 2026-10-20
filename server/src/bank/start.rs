@@ -45,6 +45,11 @@ pub(super) fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, d
     let session_number = config::env_number("PCDS_SESSION") as u32;
     let version = net_data.game_version.clone();
     let mut game = Game::new(net_data, data, spec, save, scenes);
+    // A world on a DLC planet needs that planet's ground in the tables: not silently empty.
+    if let Some(why) = crate::planets::ground_missing(&game, game.planet) {
+        eprintln!("{save_path}: the world cannot start: {why}");
+        std::process::exit(1);
+    }
     rules::start(&mut game, loaded_rules, rules_path);
     game.access = loaded_access;
     game.session_number = session_number;

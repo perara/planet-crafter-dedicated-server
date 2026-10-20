@@ -190,6 +190,19 @@ impl Ctx {
         Ok(Value::Null)
     }
 
+    /// GameData.ToxicAreas, one area: where it stands (its id is made of its position), whether it
+    /// is shown, and its fields (the time a gauge lasts in it, the scene objects that make it toxic).
+    fn toxic_area(&mut self, id: Id) -> Result<Value, String> {
+        let b = self.behaviour(id)?;
+        let node = attached(&b)?;
+        Ok(json!({
+            "position": vector(self.graph.world(node)?.0),
+            "active": self.graph.active_in_hierarchy(node),
+            "activators": self.activators(node)?,
+            "fields": Value::Object(self.fields(id.0, &b.fields, 0).map_err(|e| format!("{}: {e}", b.class))?),
+        }))
+    }
+
     /// GameData.OreVeins, one vein.
     fn ore_vein(&mut self, id: Id) -> Result<Value, String> {
         let b = self.behaviour(id)?;
@@ -621,12 +634,16 @@ impl Ctx {
         let files = self.planet_files(scene)?;
         let mut water = Vec::new();
         let mut veins = Vec::new();
+        let mut toxic = Vec::new();
         for f in &files {
             for v in self.all_of(*f, "WaterVolume")? {
                 water.push(self.water_volume(v)?);
             }
             for v in self.all_of(*f, "MachineGenerationGroupVein")? {
                 veins.push(self.ore_vein(v)?);
+            }
+            for v in self.all_of(*f, "ToxicArea")? {
+                toxic.push(self.toxic_area(v)?);
             }
         }
         let mut instances = Map::new();
@@ -644,8 +661,51 @@ impl Ctx {
                 }
             }
         }
-        eprintln!("read-game: {scene}: {} scene files, {} water volumes, {} ore veins, {} instance scenes", files.len(), water.len(), veins.len(), instances.len());
-        Ok(json!({"waterVolumes": water, "oreVeins": veins, "instanceScenes": instances}))
+        eprintln!("read-game: {scene}: {} scene files, {} water volumes, {} ore veins, {} toxic areas, {} instance scenes", files.len(), water.len(), veins.len(), toxic.len(), instances.len());
+        let mut dump = json!({"waterVolumes": water, "oreVeins": veins, "instanceScenes": instances});
+        // Only the planets that have toxic areas carry the section: the others' dumps stay as they were.
+        if !toxic.is_empty() {
+            dump["toxicAreas"] = Value::Array(toxic);
+        }
+        Ok(dump)
+    }
+}
+
+/// Debug: the script classes of every planet's scene files, counted per planet
+/// (pcds native-classes GAME_DIR PLANET_SCENE...; a class a DLC planet has and no free planet has
+/// is a feature the server may be missing).
+pub fn classes(args: &[String]) {
+    let mut ctx = Ctx::open(std::path::Path::new(&args[0])).expect("open game");
+    let mut table: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+    for (i, scene) in args[1..].iter().enumerate() {
+        let files = ctx.planet_files(scene).expect("planet files");
+        for f in files {
+            let all: Vec<Id> = ctx.data.files[f].objects.iter().filter(|o| o.class_id == unity::MONO_BEHAVIOUR).map(|o| Id(f, o.path)).collect();
+            for b in all {
+                if let Some((ns, class, _)) = ctx.graph.script(&mut ctx.data, b).expect("script").cloned() {
+                    table.entry(format!("{ns}.{class}")).or_insert_with(|| vec![0; args.len() - 1])[i] += 1;
+                }
+            }
+        }
+    }
+    for (class, counts) in table {
+        println!("{class}\t{}", counts.iter().map(|c| c.to_string()).collect::<Vec<_>>().join("\t"));
+    }
+}
+
+/// Debug: the fields of every instance of a script class in each planet's scene files, as
+/// JSON lines (pcds native-fields GAME_DIR CLASS PLANET_SCENE...), to compare a class between
+/// planets.
+pub fn fields_of(args: &[String]) {
+    let mut ctx = Ctx::open(std::path::Path::new(&args[0])).expect("open game");
+    for scene in &args[2..] {
+        for f in ctx.planet_files(scene).expect("planet files") {
+            for b in ctx.all_of(f, &args[1]).expect("instances") {
+                let fields = ctx.written(b).expect("fields");
+                let at = ctx.behaviour(b).ok().and_then(|b| b.game_object).map(|n| ctx.name(n)).unwrap_or_default();
+                println!("{scene}\t{}\t{at}\t{fields}", ctx.data.files[f].name);
+            }
+        }
     }
 }
 

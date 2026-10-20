@@ -41,6 +41,17 @@ pub fn world() -> Option<(Game, u64)> {
     Some((g, player))
 }
 
+/// The DLC planets' ground (id, scene dump) in the test tables. Tables read before the server knew
+/// the DLC planets, or by a reader that could not, have none: the tests that look at the real
+/// ground say so, loudly, and skip (the game's DLC data is never in the repository, so CI has none).
+pub fn dlc_grounds(g: &Game, test: &str) -> Vec<(String, crate::PlanetScene)> {
+    let grounds: Vec<_> = g.net_data.planets.iter().filter(|p| p.steam_app_id != 0).filter_map(|p| Some((p.id.clone(), g.scenes.planets.get(&p.id)?.clone()))).collect();
+    if grounds.is_empty() {
+        eprintln!("SKIPPED {test}: the test tables hold no DLC ground (scenes/Humble.json, scenes/Toxicity.json); read them with `pcds extract` from an install that has the DLC planets");
+    }
+    grounds
+}
+
 /// An RPC as a client sends it to behaviour `behaviour` of network object `object`.
 pub fn send_rpc(g: &mut Game, client: u64, object: u64, behaviour: u16, name: &str, args: &[Value]) {
     let (method, body) = g.net.spec.encode(name, args);

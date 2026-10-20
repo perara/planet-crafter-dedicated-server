@@ -737,6 +737,40 @@ mod tests {
         Some(instance_via_seed(&g, seed, 1200, false).unwrap())
     }
 
+    /// The portals of a DLC planet open every scene its PlanetData lists, with the planet's own
+    /// dump (Humble's lagoon, Toxicity's landslide among them): each scene is picked by some seed
+    /// and opens with its wrecks and props. Real DLC data: skipped, loudly, without it.
+    #[test]
+    fn the_portals_of_the_dlc_planets_open_all_their_scenes() {
+        let Some(mut g) = crate::planets::tests::game() else { return };
+        let grounds = crate::testkit::dlc_grounds(&g, "the_portals_of_the_dlc_planets_open_all_their_scenes");
+        for (planet, scene) in grounds {
+            g.planet = g.net_data.planet_index(&planet).unwrap();
+            let listed: Vec<String> = {
+                let data = g.data.asset(&format!("PlanetData:PlanetData-{planet}")).unwrap();
+                let names = g.data.asset(data["instanceScenesData"].as_str().unwrap()).unwrap()["instanceSceneNames"].as_array().unwrap().clone();
+                names.iter().map(|n| n.as_str().unwrap().to_string()).collect()
+            };
+            assert_eq!(listed.iter().filter(|n| !scene.instance_scenes.contains_key(*n)).count(), 0, "{planet}: a listed scene is not in the dump");
+            let mut opened = std::collections::HashSet::new();
+            for seed in 1..3000 {
+                let instance = instance_via_seed(&g, seed, 1200, false).expect("an instance");
+                if opened.insert(instance.scene.clone()) {
+                    let scene = instance.scene.clone();
+                    set_and_open(&mut g, Some(instance));
+                    assert_eq!(g.ext.planets.instances.opened.as_ref().map(|o| o.scene.clone()), Some(scene));
+                    unload_world_instance(&mut g);
+                }
+            }
+            let mut want: Vec<_> = listed.clone();
+            want.sort();
+            want.dedup();
+            let mut got: Vec<_> = opened.into_iter().collect();
+            got.sort();
+            assert_eq!(got, want, "{planet}: every scene its PlanetData lists is picked by some seed");
+        }
+    }
+
     #[test]
     fn world_instance_data_serializes_like_the_game() {
         // _openedWorldInstanceData as the real game sent it, opened with seed 400000032 and

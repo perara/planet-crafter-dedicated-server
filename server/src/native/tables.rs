@@ -15,8 +15,9 @@ use super::unity::{self, Data, Id};
 /// The format of what read_game writes, in its `tables-format` file: one more whenever any
 /// file it writes changes (a field, a section, a value read another way). A server loads only
 /// tables of its own format (main.rs), and `pcds update` reads them again with the active
-/// bank's program when the format differs.
-pub const TABLES_FORMAT: u32 = 3;
+/// bank's program when the format differs. 4: scenes/<planet>.json for the DLC planets too, and
+/// the "toxicAreas" section (Toxicity's).
+pub const TABLES_FORMAT: u32 = 4;
 
 /// GameData.MaxDepth.
 const MAX_DEPTH: usize = 6;
@@ -315,7 +316,7 @@ fn pretty(v: &Value) -> String {
 }
 
 /// Reads every table the server needs from the game's files into OUT (netdata.json,
-/// rpcs.json, gamedata.json, scenes/, wrecks.json, connection-request.hex, buildid); returns
+/// rpcs.json, gamedata.json, scenes/ (every planet's, DLC planets included), wrecks.json, connection-request.hex, buildid); returns
 /// the game version.
 /// Anything it cannot read is an error.
 pub fn read_game(game: &Path, out: &Path) -> Result<String, String> {
@@ -367,9 +368,11 @@ pub fn read_game(game: &Path, out: &Path) -> Result<String, String> {
     let resources = ctx.find_in_scenes(&["BootScene", "GameMainScene", &prime], "SpaceCraft", "PanelsResources")?.ok_or("no PanelsResources")?;
     let panels = ctx.panels(resources).map_err(|e| format!("panels: {e}"))?;
     let gamedata = json!({"assets": assets, "groupPrefabs": group_prefabs, "layouts": layouts, "singletons": singletons, "panels": panels});
-    // scenes/<planet>.json for the planets anyone can play (no DLC app id).
+    // scenes/<planet>.json for every planet of the PlanetList. The DLC planets' scenes are in the same
+    // base files and have the same formats, so the same reader serves them; the file stays in these
+    // tables, which are made on the owner's machine and never published.
     let mut scenes = Vec::new();
-    for planet in planets.iter().filter(|p| p["steamAppId"] == 0) {
+    for planet in planets.iter() {
         let id = planet["id"].as_str().unwrap_or_default();
         let data = assets.get(&format!("PlanetData:PlanetData-{id}")).ok_or(format!("no PlanetData-{id}"))?;
         scenes.push((id.to_string(), ctx.planet_scenes(&assets, data).map_err(|e| format!("scenes/{id}.json: {e}"))?));

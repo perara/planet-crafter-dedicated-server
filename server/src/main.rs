@@ -197,14 +197,15 @@ fn no_tables(dir: &str, e: String) -> ! {
     std::process::exit(1)
 }
 
-/// What a world needs besides tables(): the wreck layouts and every free planet's scene dump,
-/// read at start, so a missing or broken file stops the server there and not in the game.
-/// (Default: none, the stand-in a restored game holds until handoff::restore gives it its own.)
+/// What a world needs besides tables(): the wreck layouts and every planet's scene dump, read at
+/// start, so a missing or broken file stops the server there and not in the game. (Default: none,
+/// the stand-in a restored game holds until handoff::restore gives it its own.)
 #[derive(Default, Clone)]
 pub struct Scenes {
     pub wrecks: Arc<instances::generate::Wrecks>,
-    /// Free planet id -> its scene dump. DLC planets have none: the extraction reads only the
-    /// free ones, and nobody can travel to the others (planets.rs).
+    /// Planet id -> its scene dump. The free planets' are always there; a DLC planet's is there
+    /// when the extraction read it from an install that has the planet (`pcds extract` always
+    /// does) and not in tables from before DLC support (planets::ground_missing says so).
     pub planets: HashMap<String, PlanetScene>,
 }
 
@@ -213,52 +214,66 @@ pub struct Scenes {
 pub struct PlanetScene {
     pub water_volumes: Vec<serde_json::Value>,
     pub ore_veins: Vec<serde_json::Value>,
+    /// ToxicArea components (Toxicity only; empty elsewhere).
+    pub toxic_areas: Vec<serde_json::Value>,
     pub instance_scenes: HashMap<String, Arc<instances::generate::InstanceScene>>,
 }
 
-/// wrecks.json and scenes/<planet>.json of every free planet in DATA_DIR, with every world
-/// instance scene the planet's portals open.
-fn scene_tables(dir: &str, net: &NetData, data: &GameData) -> Scenes {
+/// scenes/<planet>.json: what the planet's scene files hold that the server runs.
+fn planet_scene(dir: &str, planet: &str, data: &GameData) -> Result<PlanetScene, String> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Dump {
         water_volumes: Vec<serde_json::Value>,
         ore_veins: Vec<serde_json::Value>,
+        #[serde(default)]
+        toxic_areas: Vec<serde_json::Value>,
         instance_scenes: HashMap<String, instances::generate::InstanceScene>,
     }
-    let read = |path: &str| std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"));
+    let path = format!("{dir}/scenes/{planet}.json");
+    let dump: Dump = serde_json::from_str(&std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?).map_err(|e| format!("{path}: {e}"))?;
+    let asset = format!("PlanetData:PlanetData-{planet}");
+    let planet_data = data.asset(&asset).ok_or(format!("gamedata.json: no {asset}"))?;
+    // A planet without portals has no instance data (null); one with it lists its scenes.
+    let names: Vec<&str> = match &planet_data["instanceScenesData"] {
+        serde_json::Value::Null => Vec::new(),
+        r => {
+            let names = r.as_str().and_then(|r| data.asset(r)).and_then(|d| d["instanceSceneNames"].as_array());
+            let names = names.ok_or(format!("gamedata.json: {asset}.instanceScenesData {r} has no instanceSceneNames"))?;
+            names.iter().map(|n| n.as_str().ok_or(format!("gamedata.json: {asset}: an instance scene name that is not text"))).collect::<Result<_, _>>()?
+        }
+    };
+    if let Some(missing) = names.iter().find(|n| !dump.instance_scenes.contains_key(**n)) {
+        return Err(format!("{path}: no world instance scene {missing}"));
+    }
+    check_scene(&dump.water_volumes, &dump.ore_veins, &dump.toxic_areas, data).map_err(|e| format!("{path}: {e}"))?;
+    let instance_scenes = dump.instance_scenes.into_iter().map(|(k, v)| (k, Arc::new(v))).collect();
+    Ok(PlanetScene { water_volumes: dump.water_volumes, ore_veins: dump.ore_veins, toxic_areas: dump.toxic_areas, instance_scenes })
+}
+
+/// wrecks.json and scenes/<planet>.json of every planet in DATA_DIR, with every world instance
+/// scene the planet's portals open. A free planet's file must be there; a DLC planet's may be
+/// missing (tables read before the extraction knew the DLC planets).
+fn scene_tables(dir: &str, net: &NetData, data: &GameData) -> Scenes {
     let load = || -> Result<Scenes, String> {
-        let wrecks = instances::generate::Wrecks::parse(&read(&format!("{dir}/wrecks.json"))?).map_err(|e| format!("{dir}/wrecks.json: {e}"))?;
+        let wrecks = std::fs::read_to_string(format!("{dir}/wrecks.json")).map_err(|e| format!("{dir}/wrecks.json: {e}"))?;
+        let wrecks = instances::generate::Wrecks::parse(&wrecks).map_err(|e| format!("{dir}/wrecks.json: {e}"))?;
         let mut planets = HashMap::new();
-        for planet in net.planets.iter().filter(|p| p.steam_app_id == 0) {
-            let path = format!("{dir}/scenes/{}.json", planet.id);
-            let dump: Dump = serde_json::from_str(&read(&path)?).map_err(|e| format!("{path}: {e}"))?;
-            let asset = format!("PlanetData:PlanetData-{}", planet.id);
-            let planet_data = data.asset(&asset).ok_or(format!("gamedata.json: no {asset}"))?;
-            // A planet without portals has no instance data (null); one with it lists its scenes.
-            let names: Vec<&str> = match &planet_data["instanceScenesData"] {
-                serde_json::Value::Null => Vec::new(),
-                r => {
-                    let names = r.as_str().and_then(|r| data.asset(r)).and_then(|d| d["instanceSceneNames"].as_array());
-                    let names = names.ok_or(format!("gamedata.json: {asset}.instanceScenesData {r} has no instanceSceneNames"))?;
-                    names.iter().map(|n| n.as_str().ok_or(format!("gamedata.json: {asset}: an instance scene name that is not text"))).collect::<Result<_, _>>()?
-                }
-            };
-            if let Some(missing) = names.iter().find(|n| !dump.instance_scenes.contains_key(**n)) {
-                return Err(format!("{path}: no world instance scene {missing}"));
+        for planet in &net.planets {
+            if planet.steam_app_id != 0 && !std::path::Path::new(&format!("{dir}/scenes/{}.json", planet.id)).is_file() {
+                continue;
             }
-            check_scene(&dump.water_volumes, &dump.ore_veins, data).map_err(|e| format!("{path}: {e}"))?;
-            let instance_scenes = dump.instance_scenes.into_iter().map(|(k, v)| (k, Arc::new(v))).collect();
-            planets.insert(planet.id.clone(), PlanetScene { water_volumes: dump.water_volumes, ore_veins: dump.ore_veins, instance_scenes });
+            planets.insert(planet.id.clone(), planet_scene(dir, &planet.id, data)?);
         }
         Ok(Scenes { wrecks: Arc::new(wrecks), planets })
     };
     load().unwrap_or_else(|e| no_tables(dir, e))
 }
 
-/// What water.rs and veins.rs read from a scene dump is complete: story interpolations with
-/// their world object, offset and easing; ore vein groups that name groups.
-fn check_scene(water: &[serde_json::Value], veins: &[serde_json::Value], data: &GameData) -> Result<(), String> {
+/// What water.rs, veins.rs and toxic.rs read from a scene dump is complete: story interpolations
+/// with their world object, offset and easing; ore vein groups that name groups; toxic areas
+/// with a place, a time and scene objects of known groups.
+fn check_scene(water: &[serde_json::Value], veins: &[serde_json::Value], toxic: &[serde_json::Value], data: &GameData) -> Result<(), String> {
     for (i, v) in water.iter().enumerate() {
         let s = &v["storyInterpolation"];
         let offset = s["offset"].as_array().is_some_and(|o| o.len() == 3 && o.iter().all(|x| x.is_number()));
@@ -270,6 +285,19 @@ fn check_scene(water: &[serde_json::Value], veins: &[serde_json::Value], data: &
         for r in v["fields"]["groups"].as_array().into_iter().flatten() {
             if r.as_str().and_then(|r| data.group_of_ref(r)).is_none() {
                 return Err(format!("oreVeins[{i}]: group {r} is not in gamedata.json"));
+            }
+        }
+    }
+    for (i, a) in toxic.iter().enumerate() {
+        let f = &a["fields"];
+        let place = a["position"].as_array().is_some_and(|p| p.len() == 3 && p.iter().all(|x| x.is_number()));
+        let objects = f["_toxicObjects"].as_array().filter(|o| !o.is_empty());
+        if !place || !f["_toxicTimeInSeconds"].is_number() || objects.is_none() {
+            return Err(format!("toxicAreas[{i}]: needs a position, _toxicTimeInSeconds and _toxicObjects"));
+        }
+        for o in objects.into_iter().flatten() {
+            if !o["worldObjectId"].is_i64() || o["group"].as_str().and_then(|r| data.group_of_ref(r)).is_none() {
+                return Err(format!("toxicAreas[{i}]: scene object {o} has no id or a group that is not in gamedata.json"));
             }
         }
     }
@@ -313,6 +341,8 @@ fn main() {
         Some("tables-diff") => native::diff::run(&args[2..]),
         Some("native-layout") => native::tables::layout(&args[2..]),
         Some("native-il") => native::tables::il(&args[2..]),
+        Some("native-classes") => native::scenes::classes(&args[2..]),
+        Some("native-fields") => native::scenes::fields_of(&args[2..]),
         Some("native-wrecks") => native::wrecks::debug(&args[2..]),
         Some("native-reach") => native::wrecks::reach(&args[2..]),
         Some("new-save") => newworld::run(&args[2..]),
