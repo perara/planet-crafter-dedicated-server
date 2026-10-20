@@ -28,7 +28,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -426,6 +426,35 @@ fn blocked(why: &'static str) -> ureq::Error {
     ureq::Error::Other(Box::new(Blocked(why)))
 }
 
+/// The name lookups waiting at once for all plugins. The system's lookup cannot be interrupted: a
+/// request that gives up at its deadline leaves its thread behind until the resolver answers or
+/// gives up itself (tens of seconds, with a name server that never replies), and a plugin may start
+/// ten requests a second whose timeout is a millisecond.
+const MAX_LOOKUPS: usize = 16;
+static LOOKUPS: Lookups = Lookups(AtomicUsize::new(0));
+
+struct Lookups(AtomicUsize);
+
+/// One lookup under way, counted until it is dropped (when its thread ends).
+struct Lookup<'a>(&'a Lookups);
+
+impl Lookups {
+    fn start(&self, most: usize) -> Option<Lookup<'_>> {
+        if self.0.fetch_add(1, Ordering::SeqCst) >= most {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Lookup(self))
+    }
+}
+
+impl Drop for Lookup<'_> {
+    fn drop(&mut self) {
+        (self.0).0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+const LOOKUPS_BUSY: &str = "too many name lookups are waiting (a name server that does not answer)";
 const DISALLOWED_ADDRESS: &str = "the name resolves to an address the plugin may not reach (local, private or reserved)";
 
 /// Resolves a name the way the plugin's policy allows and no other way.
@@ -452,7 +481,11 @@ impl Resolver for Guard {
                 let left = self.deadline.saturating_duration_since(Instant::now());
                 let (tx, rx) = mpsc::sync_channel(1);
                 let (dns, host, port) = (self.dns.clone(), target.host.clone(), target.port);
-                std::thread::Builder::new().name("pcds-plugin-dns".into()).spawn(move || drop(tx.send(dns.lookup(&host, port)))).map_err(ureq::Error::Io)?;
+                let Some(lookup) = LOOKUPS.start(MAX_LOOKUPS) else { return Err(blocked(LOOKUPS_BUSY)) };
+                std::thread::Builder::new().name("pcds-plugin-dns".into()).spawn(move || {
+                    let _lookup = lookup;
+                    drop(tx.send(dns.lookup(&host, port)))
+                }).map_err(ureq::Error::Io)?;
                 match rx.recv_timeout(left) {
                     Ok(Ok(a)) => a,
                     Ok(Err(_)) => return Err(ureq::Error::HostNotFound),
@@ -869,6 +902,17 @@ mod tests {
         assert!(p.build(&HttpRequest { method: "GET", url: &format!("https://discord.com/{long}"), headers: vec![], body: b"" }, &config).is_err());
         let big = vec![0u8; limits::MAX_HTTP_BODY + 1];
         assert!(p.build(&HttpRequest { method: "POST", url: "https://discord.com/", headers: vec![], body: &big }, &config).is_err());
+    }
+
+    #[test]
+    fn lookups_that_cannot_be_given_up_are_few() {
+        let lookups = Lookups(AtomicUsize::new(0));
+        let held: Vec<_> = (0..3).map(|_| lookups.start(3).expect("under the limit")).collect();
+        assert!(lookups.start(3).is_none(), "one over the limit is refused, and does not count");
+        drop(held);
+        assert!(lookups.start(3).is_some() && lookups.0.load(Ordering::SeqCst) == 0, "a lookup that ends gives its place back");
+        // The real limit is the few a host has threads to spare for; a plugin's timeout does not raise it.
+        assert!((1..=64).contains(&MAX_LOOKUPS));
     }
 
     #[test]

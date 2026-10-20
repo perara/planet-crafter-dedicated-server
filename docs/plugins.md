@@ -531,7 +531,7 @@ The change is in `front/` and `admin.rs`, which a hot update does not replace: i
 | state | 1 MiB | a fault |
 | module | 8 MiB | not loaded |
 | faults | 5 in 60 seconds | the plugin is switched off (`failed`) until `pcds plugin reload` or the dashboard starts it |
-| HTTP requests | 2 alive and 10 a second per plugin, 4 workers and a queue of 32 for all, 10 s (30 s at most) each, answers of 64 KiB (1 MiB at most) | refused (`-3`), or answered with an error |
+| HTTP requests | 2 alive and 10 a second per plugin, 4 workers and a queue of 32 for all, 16 name lookups waiting at once for all, 10 s (30 s at most) each, answers of 64 KiB (1 MiB at most) | refused (`-3`), or answered with an error |
 
 A **fault** is a trap (including `unreachable`, which is what a Rust panic becomes with
 `panic = "abort"`), running out of fuel, a pointer outside the module's memory, an answer that is
