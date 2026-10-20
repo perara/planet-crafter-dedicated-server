@@ -299,7 +299,7 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("serve") => front::run(&args[2..]),
         Some("bank") => bank::run(&args[2..]),
-        Some("bank-info") => println!("{}", bank::info()),
+        Some("bank-info") => println!("{}", msg::json(&bank::info())),
         Some("probe") => probe::run(&args[2..]),
         Some("load") => load::run(&args[2..]),
         Some("read-game") => native::tables::run(&args[2..]),

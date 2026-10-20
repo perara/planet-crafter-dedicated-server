@@ -27,6 +27,11 @@ pub fn body<T: Serialize>(message: &T) -> Vec<u8> {
     serde_json::to_vec(message).unwrap_or_default()
 }
 
+/// A message as JSON text.
+pub fn text<T: Serialize>(message: &T) -> String {
+    serde_json::to_string(message).unwrap_or_default()
+}
+
 /// A frame's body as a message. Err says what is wrong with it (a value is never quoted: serde's
 /// messages do).
 pub fn parse<T: DeserializeOwned>(body: &[u8]) -> Result<T, String> {

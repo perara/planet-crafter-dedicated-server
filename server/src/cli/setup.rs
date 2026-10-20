@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use super::env::{build_id, parse_env};
 use super::{need, say, sleep, wait_for, Ctx, Result};
+#[cfg(test)]
 use crate::msg::BankInfo;
 use crate::updater;
 
@@ -133,7 +134,7 @@ impl Ctx {
             copy(&self.exe, &new.join("pcds"))?;
             copy(lib, &new.join("libsteam_api.so"))?;
             copy(&self.web, &new.join("web/index.html"))?;
-            let mut info: BankInfo = serde_json::from_value(crate::bank::info()).unwrap_or_default();
+            let mut info = crate::bank::info();
             info.installed = Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
             info.extra.insert("from".into(), self.exe.display().to_string().into());
             updater::write_info(&new, &info)?;

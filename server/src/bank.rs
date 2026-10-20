@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 
 use crate::game::Game;
 use crate::ipc::{self, Link};
+use crate::msg::{self, AdminAnswer, AdminCall, BankInfo, Connected, Hello, Ops, Ready, Restore, SnapshotNote};
 use crate::net::Target;
 use crate::save::SaveFile;
 use crate::{access, chathooks, config, dashboard, plugins, protocol, rules, save, status, units, wire};
@@ -29,8 +30,8 @@ use crate::{access, chathooks, config, dashboard, plugins, protocol, rules, save
 /// What this bank says in its HELLO, and `pcds bank-info` prints: its version, the front
 /// protocol it speaks, the snapshot format it writes and reads (only that one), and the format
 /// of the game tables it loads (and its read-game writes).
-pub fn info() -> Value {
-    json!({"version": env!("CARGO_PKG_VERSION"), "protocol": ipc::PROTOCOL, "format": crate::handoff::FORMAT, "tablesFormat": crate::native::tables::TABLES_FORMAT})
+pub fn info() -> BankInfo {
+    BankInfo::new(env!("CARGO_PKG_VERSION"), ipc::PROTOCOL, crate::handoff::FORMAT.into(), crate::native::tables::TABLES_FORMAT.into())
 }
 
 /// The page faults this process (all its threads) has had without reading a disk: a restore into
@@ -76,15 +77,14 @@ pub fn run(args: &[String]) {
     // restore only their start is left (a hot update stops the world for that, not for this).
     let plugins = plugins_dir(save_path);
     let prepared = plugins::prepare(&plugins, &world_name(save_path));
-    let mut hello = info();
-    hello["gameVersion"] = net_data.game_version.clone().into();
+    let hello = Hello { info: info(), game_version: Some(net_data.game_version.clone()) };
     let protocol = if fail_for_test("protocol") { 999 } else { ipc::PROTOCOL };
     if fail_for_test("slow-hello") {
         println!("bank: holding its hello for 4 s (PCDS_DEV=bank-fail=slow-hello)");
         std::thread::sleep(Duration::from_secs(4));
     }
-    link.send(ipc::HELLO, protocol, hello.to_string().as_bytes());
-    let (mut verified, mut verify_ms) = (Value::Null, 0.0);
+    link.send(ipc::HELLO, protocol, &msg::body(&hello));
+    let (mut verified, mut verify_ms) = (None, 0.0);
     let mut started = Instant::now();
     let (mut got_at, mut faults_before) = (0, 0);
     let game = match link.recv() {
@@ -97,7 +97,7 @@ pub fn run(args: &[String]) {
                 eprintln!("bank: dying on the restore (PCDS_DEV=bank-fail=restore)");
                 std::process::exit(3);
             }
-            let recover = serde_json::from_slice::<Value>(&f.body).is_ok_and(|b| b["recover"] == true);
+            let recover = msg::parse::<Restore>(&f.body).is_ok_and(|b| b.recover);
             let snapshot = f.fd.as_ref().ok_or("no memfd".to_string()).and_then(|fd| ipc::map_memfd(fd).map_err(|e| e.to_string()));
             let restored = snapshot.and_then(|s| crate::handoff::restore_bytes(net_data, data, spec, &s, scenes).map(|g| (g, s)));
             match restored {
@@ -108,7 +108,7 @@ pub fn run(args: &[String]) {
                             eprintln!("bank: {e}");
                             std::process::exit(3);
                         }
-                        verified = true.into();
+                        verified = Some(true);
                         verify_ms = t.elapsed().as_secs_f64() * 1000.0;
                     }
                     if let Err(e) = reread(&mut g, &access_path(save_path), &rules_path(save_path)) {
@@ -137,12 +137,12 @@ pub fn run(args: &[String]) {
     // SAFETY: malloc_trim only returns free memory to the system.
     unsafe { libc::malloc_trim(0) };
     // gotAt and readyAt (the monotonic clock, ns) put the restore on the flip's timeline in the front.
-    let ready = json!({"restoreMs": started.elapsed().as_secs_f64() * 1000.0 - verify_ms, "verifyMs": verify_ms, "verified": verified, "gotAt": got_at, "readyAt": ipc::now_ns(), "faults": minor_faults() - faults_before});
+    let ready = Ready { restore_ms: Some(started.elapsed().as_secs_f64() * 1000.0 - verify_ms), verify_ms: Some(verify_ms), verified, got_at, ready_at: ipc::now_ns(), faults: Some(minor_faults() - faults_before) };
     if fail_for_test("slow-ready") {
         println!("bank: holding its ready for 2 s (PCDS_DEV=bank-fail=slow-ready)");
         std::thread::sleep(Duration::from_secs(2));
     }
-    link.send(ipc::READY, 0, ready.to_string().as_bytes());
+    link.send(ipc::READY, 0, &msg::body(&ready));
     if fail_for_test("die-after-ready") {
         println!("bank: ending 1 s after its ready (PCDS_DEV=bank-fail=die-after-ready)");
         std::thread::spawn(|| {
@@ -317,7 +317,7 @@ impl Bank {
         let mut ticks = TickTimes::default();
         // The hooks' settings, once at the start (a restored game's too).
         game.ext.chat.changed = true;
-        let mut last_ops = Value::Null;
+        let mut last_ops = None;
         loop {
             let woke = Instant::now();
             let frame = woke >= next_frame;
@@ -332,8 +332,8 @@ impl Bank {
             while let Some(f) = self.link.next() {
                 match f.kind {
                     ipc::CONNECTED => {
-                        let c: Value = serde_json::from_slice(&f.body).unwrap_or_default();
-                        guarded(game, f.n, &self.save_path, |game| game.connect(f.n, c["steamId"].as_u64(), c["trusted"] == true, c["ip"].as_str().map(str::to_string)));
+                        let c: Connected = msg::parse(&f.body).unwrap_or_default();
+                        guarded(game, f.n, &self.save_path, |game| game.connect(f.n, c.steam_id, c.trusted, c.ip));
                     }
                     // Kicked this loop too (game.kicks goes out after it): nothing more counts.
                     ipc::DATA if !kicked.contains(&f.n) && !game.kicks.iter().any(|(c, _)| *c == f.n) && game.clients.contains_key(&f.n) => {
@@ -352,9 +352,9 @@ impl Bank {
                         }
                     }
                     ipc::ADMIN => {
-                        let r: Value = serde_json::from_slice(&f.body).unwrap_or_default();
+                        let r: AdminCall = msg::parse(&f.body).unwrap_or_default();
                         let ctx = Ctx { ticks: &ticks, save_path: &self.save_path, build_id: self.build_id.as_deref(), data_dir: &self.data_dir, loop_rate: loops.2, busy: busy_last };
-                        let request = || admin_request(game, r["method"].as_str().unwrap_or(""), r["path"].as_str().unwrap_or(""), &r["body"], &ctx);
+                        let request = || admin_request(game, &r.method, &r.path, &r.body, &ctx);
                         let (status, body) = contained("an admin request", request).unwrap_or_else(|| (500, "{\"error\":\"the server failed on this request\"}".to_string()));
                         self.link.send(ipc::ANSWER, f.n, admin_answer(status, body).as_bytes());
                     }
@@ -375,8 +375,8 @@ impl Bank {
                         match crate::handoff::snapshot_memfd(game, &mut Vec::new()) {
                             Ok(fd) => {
                                 let len = std::fs::File::from(fd.try_clone().expect("dup")).metadata().map(|m| m.len()).unwrap_or(0);
-                                let head = json!({"bytes": len, "ms": t.elapsed().as_secs_f64() * 1000.0, "gotAt": got_at, "doneAt": ipc::now_ns()});
-                                self.link.send_fd(ipc::SNAPSHOT, f.n, head.to_string().as_bytes(), Some(fd));
+                                let head = SnapshotNote { bytes: Some(len), ms: Some(t.elapsed().as_secs_f64() * 1000.0), got_at, done_at: ipc::now_ns() };
+                                self.link.send_fd(ipc::SNAPSHOT, f.n, &msg::body(&head), Some(fd));
                                 // The world stays in memory until the new bank runs.
                                 match self.link.recv() {
                                     Some(f) if f.kind == ipc::RESUME => println!("bank: resumed, the new bank failed"),
@@ -464,12 +464,12 @@ fn forward_chat(game: &mut Game, link: &mut Link) {
 }
 
 /// The rules the front acts on (autosave, updates): sent at the start and whenever they change.
-fn forward_ops(game: &Game, link: &mut Link, last: &mut Value) {
+fn forward_ops(game: &Game, link: &mut Link, last: &mut Option<Ops>) {
     let (save, update) = (&game.rules.save, &game.rules.update);
-    let ops = json!({"autosaveMinutes": save.autosave_minutes, "autoUpdate": update.auto, "updateCheckHours": update.check_hours, "bankWatchdogSeconds": game.rules.limits.bank_watchdog_seconds});
-    if *last != ops {
-        link.send(ipc::OPS, 0, ops.to_string().as_bytes());
-        *last = ops;
+    let ops = Ops { autosave_minutes: Some(save.autosave_minutes.into()), auto_update: Some(update.auto), update_check_hours: Some(update.check_hours.into()), bank_watchdog_seconds: Some(game.rules.limits.bank_watchdog_seconds.into()) };
+    if last.as_ref() != Some(&ops) {
+        link.send(ipc::OPS, 0, &msg::body(&ops));
+        *last = Some(ops);
     }
 }
 
@@ -771,12 +771,12 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
 /// request would end in the front's 10 s timeout, "the game loop did not answer"): its place is
 /// an error that says what to do.
 fn admin_answer(status: u16, body: String) -> String {
-    let answer = json!({"status": status, "body": body}).to_string();
+    let answer = msg::text(&AdminAnswer { status: Some(status.into()), body: Some(body) });
     if ipc::fits(answer.as_bytes()) {
         return answer;
     }
     let error = json!({"error": format!("the answer is {} MiB, more than the link to the front carries ({} MiB): for a world's file, copy it from the worlds folder on the server", answer.len() >> 20, ipc::MAX_FRAME >> 20)});
-    json!({"status": 500, "body": error.to_string()}).to_string()
+    msg::text(&AdminAnswer { status: Some(500), body: Some(error.to_string()) })
 }
 
 /// /api/status's "tables": the version and build these tables are for, the installed game's
@@ -1442,7 +1442,7 @@ mod tests {
         let (a, b) = UnixStream::pair().unwrap();
         a.set_nonblocking(true).unwrap();
         let (mut front, mut bank) = (Link::new(a), Link::new(b));
-        let mut last = Value::Null;
+        let mut last = None;
         forward_ops(&game, &mut bank, &mut last);
         forward_ops(&game, &mut bank, &mut last);
         game.rules.save.autosave_minutes = 7;
