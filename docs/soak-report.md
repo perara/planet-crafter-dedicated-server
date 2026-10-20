@@ -166,7 +166,13 @@ start after each fix; the numbers above are of the runs that finished with the f
 
 ### 2b. Plugin faults during everything
 
-PLUGIN_FAULT_RESULT
+A third run, 200 actions in unit mode (seed 13, the same late-game world, the plugin that traps in every event added to the churn: 48
+installs or visits of it, each followed by 1 to 8 chat lines to trap on, between all the other faults and the churn of
+`hello-stats`): **0 failures.** The log has 1,193 traps ("wasm `unreachable` instruction executed"), 211 switch-offs
+("switched off after 5 faults in 60 s", started again by the next reload), no panic of the host, and the other plugin,
+the world, the flips (16), the real updates (6), the kills (bank 12 and during a save 7, both 5, `pcds run` 4) and the
+watchdog (2 replaced) carried on: every invariant held. The state of the plugin list matched what the churn
+did at every check (361 operations).
 
 ## 3. Stress, limits, fuzz, churn, many players
 
@@ -266,7 +272,17 @@ containers and images were removed.
 
 ## Checks of the final tree
 
-CHECKS_RESULT
+On the final tree (the commits of branch `final-soak`):
+
+| Check | Result |
+|---|---|
+| `cargo test --release --no-fail-fast` with the tables (format 4) | 640 unit tests, `cli` 15, `hot_update` 24 (3 ignored), `admin_golden` 4, `layers` 1: all ok |
+| the same as CI runs it (`PCDS_TEST_DATA=none PCDS_GAME_DIR=none`) | all ok |
+| `cargo clippy --release --locked` | 0 warnings |
+| `map.py check` | 732 groups, 208 RPCs, 165 components, 0 problems |
+| bench fingerprint on the bench world, 4 players, 300 s | `15c299165b6b3eb0`, and the handoff run `15c299165b6b3eb0`: EQUAL |
+
+(`tools/dev/verify.sh`; the tests that start servers ran beside two chaos runs and a host load of 30 and passed.)
 
 ## What was not covered
 
