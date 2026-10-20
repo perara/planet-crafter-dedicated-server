@@ -184,8 +184,29 @@ impl Game {
         if let Some(c) = self.clients.get_mut(&client) {
             c.ready = Some(state);
         }
+        self.refresh_remote_players(client);
         crate::scene::player_count_changed(self);
         crate::events::player_joined(self, client);
+    }
+
+    /// The client creates map markers only when a proxy starts with its roster entry present.
+    fn refresh_remote_players(&mut self, client: u64) {
+        let Some(player) = self.player_object(client) else { return };
+        let peers: Vec<(u64, u64)> = self.clients.values().filter(|c| c.id != client && c.ready.is_some()).filter_map(|c| Some((c.id, c.player?))).collect();
+        if peers.is_empty() {
+            return;
+        }
+        self.net.flush();
+        for (peer, object) in peers {
+            for (recipient, proxy) in [(client, object), (peer, player)] {
+                let Some(o) = self.net.objects.get(&proxy) else { continue };
+                let mut w = crate::wire::Writer::new();
+                w.u8(1).bytes(&o.scene_object(self.net.scene_handle));
+                // NetworkHide/Show only on the observer: never despawn an owner's own player.
+                self.out_to(Target::Only(recipient), crate::protocol::destroy_object(proxy));
+                self.out_to(Target::Only(recipient), (crate::protocol::CREATE_OBJECT, w.0));
+            }
+        }
     }
 
     /// The player's object went away: their state goes back to the save list, the others see
@@ -658,4 +679,89 @@ mod tests {
         g.rules.players.forget_after_days = 0;
         assert_eq!(forget_unseen(&mut g, t0 + 9999 * day), 0);
     }
+
+    /// The game creates marker labels only in its player-start callback; position updates
+    /// ignore ids without a marker. Both sides need a start after the roster is synchronized.
+    #[test]
+    fn joining_refreshes_remote_players_after_their_names_are_available() {
+        use crate::protocol::{CREATE_OBJECT, DESTROY_OBJECT, NETWORK_VARIABLE_DELTA};
+        use crate::wire::Reader;
+        for late in [2, 3] {
+            let Some((mut g, ann)) = world() else { return };
+            g.net.flush();
+            g.net.out.clear();
+            let bob = join(&mut g, late, "Bob");
+            g.net.flush();
+            let (manager, behaviour) = g.net.find_class(PLAYERS).unwrap();
+            let data_at = g.net.out.iter().position(|(_, kind, body)| {
+                let mut r = Reader::new(body);
+                *kind == NETWORK_VARIABLE_DELTA && r.packed_u64() == Some(manager) && r.packed_u16() == Some(behaviour)
+            }).expect("the new player's name must be sent");
+            for (recipient, peer) in [(1, bob), (late, ann)] {
+                let peer_message = |kind: u32| g.net.out.iter().enumerate().filter_map(|(i, (to, k, body))| {
+                    if !to.reaches(recipient) || *k != kind { return None; }
+                    let mut r = Reader::new(body);
+                    let object = if kind == CREATE_OBJECT {
+                        r.u8()?;
+                        crate::protocol::read_scene_object(&mut r)?.id
+                    } else { r.packed_u64()? };
+                    (object == peer).then_some(i)
+                }).next_back();
+                let spawn = peer_message(CREATE_OBJECT).expect("the joining client must also get the older peer's refreshed proxy");
+                let despawn = peer_message(DESTROY_OBJECT).expect("refresh replaces the existing proxy");
+                assert!(data_at < despawn && despawn < spawn, "recipient {recipient}: name must arrive before proxy restart");
+                let mut r = Reader::new(&g.net.out[spawn].2);
+                assert_eq!(r.u8(), Some(1));
+                let object = crate::protocol::read_scene_object(&mut r).unwrap();
+                assert_eq!(object.owner, if peer == ann { 1 } else { late });
+                assert_eq!(object.position, Some(g.net.objects[&peer].position));
+            }
+            assert_eq!(g.clients[&1].player, Some(ann));
+            assert_eq!(g.clients[&late].player, Some(bob));
+            assert_eq!(g.net.objects.values().filter(|o| o.hash == g.net_data.prefabs["Player"].hash).count(), 2, "only client proxies restart; the server players stay intact");
+            assert_eq!(list(&g, manager, PLAYERS, "_playersData").len(), 2);
+            g.net.out.clear();
+            send_on(&mut g, late, bob, "PlayerMainController.PlayerReadyServerRpc", &[json!(0), json!("Bob")]);
+            assert!(!g.net.out.iter().any(|(_, k, _)| *k == CREATE_OBJECT || *k == DESTROY_OBJECT), "ready is handled once");
+            for (recipient, peer) in [(1, late), (late, 1)] {
+                g.net.out.clear();
+                send_scene(&mut g, recipient, "PlayersDataManager.GetPlayersPositionsServerRpc", &[]);
+                let reply = one(&g, "PlayersDataManager.UpdateMapMarkerPositionsClientRpc");
+                assert_eq!(reply[0], json!([peer]), "map requests work in both directions");
+            }
+        }
+    }
+
+    #[test]
+    fn remote_player_refresh_waits_for_ready_peers_and_preserves_the_roster() {
+        use crate::protocol::{CREATE_OBJECT, DESTROY_OBJECT};
+        use crate::wire::Reader;
+        let Some((mut g, ann)) = world() else { return };
+        let bob = approve(&mut g, 2);
+        let cal = approve(&mut g, 3);
+        g.net.flush();
+        g.net.out.clear();
+        send_on(&mut g, 2, bob, "PlayerMainController.PlayerReadyServerRpc", &[json!(0), json!("Bob")]);
+        let proxies: Vec<_> = g.net.out.iter().filter(|(_, kind, _)| *kind == CREATE_OBJECT || *kind == DESTROY_OBJECT).collect();
+        assert_eq!(proxies.len(), 4);
+        assert!(proxies.iter().all(|(to, _, _)| !to.reaches(3)), "a loading peer is refreshed only after it is ready");
+        g.net.out.clear();
+        send_on(&mut g, 3, cal, "PlayerMainController.PlayerReadyServerRpc", &[json!(0), json!("Cal")]);
+        let spawned: Vec<_> = g.net.out.iter().filter(|(_, kind, _)| *kind == CREATE_OBJECT).map(|(to, _, body)| {
+            let mut r = Reader::new(body);
+            assert_eq!(r.u8(), Some(1));
+            (*to, crate::protocol::read_scene_object(&mut r).unwrap())
+        }).collect();
+        assert_eq!(spawned.len(), 4);
+        assert!(spawned.iter().all(|(to, o)| !to.reaches(o.owner)), "owners keep their original object");
+        assert_eq!(spawned.iter().filter(|(to, _)| to.reaches(3)).map(|(_, o)| o.id).collect::<Vec<_>>(), vec![ann, bob]);
+        let (manager, _) = g.net.find_class(PLAYERS).unwrap();
+        assert_eq!(list(&g, manager, PLAYERS, "_playersData").len(), 3);
+        g.disconnect(2);
+        let roster = list(&g, manager, PLAYERS, "_playersData");
+        assert_eq!(roster.len(), 2, "restarting proxies does not duplicate roster entries");
+        assert!(!g.net.objects.contains_key(&bob));
+        assert!(g.net.objects.contains_key(&ann) && g.net.objects.contains_key(&cal));
+    }
+
 }
