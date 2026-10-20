@@ -282,7 +282,8 @@ fn decode(body: &[u8], phases: &mut Vec<(&'static str, f64)>) -> Result<Game, St
     // The world objects and the inventories are read straight into their final Vec, each chunk
     // into its own stretch of it (a chunk cannot ask for more than the directory says).
     let total = |kind: u8| parts.iter().filter(|p| p.0 == kind).map(|p| p.1).sum::<usize>();
-    let (mut wos, mut inventories): (WoSlots, InventorySlots) = (Vec::with_capacity(total(WOS)), Vec::with_capacity(total(INVENTORIES)));
+    let (wo_count, inventory_count) = (total(WOS), total(INVENTORIES));
+    let (mut wos, mut inventories): (WoSlots, InventorySlots) = (Vec::with_capacity(wo_count), Vec::with_capacity(inventory_count));
     enum Out<'a> {
         Wos(&'a mut [MaybeUninit<Option<(i32, crate::model::WorldObject)>>]),
         Inventories(&'a mut [MaybeUninit<Option<(i32, crate::model::Inventory)>>]),
@@ -357,10 +358,11 @@ fn decode(body: &[u8], phases: &mut Vec<(&'static str, f64)>) -> Result<Game, St
     laps.clock = std::time::Instant::now();
     drop(jobs);
     // SAFETY: every chunk of both Vecs was filled in full (`fill` is Ok only then), and the
-    // chunks' lengths add up to the capacity asked for.
+    // chunks' lengths add up to the counts set here (`with_capacity` promises at least that
+    // much room, not exactly that much: the capacity is not the length).
     unsafe {
-        wos.set_len(wos.capacity());
-        inventories.set_len(inventories.capacity());
+        wos.set_len(wo_count);
+        inventories.set_len(inventory_count);
     }
     let mut g = game.ok_or("no REST part")?;
     g.ext.machines = *machines.ok_or("no MACHINES part")?;
