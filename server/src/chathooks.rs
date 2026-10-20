@@ -50,24 +50,8 @@ impl Drop for Poll {
 /// The webhook POST's signature header: "sha256=" and the body's HMAC-SHA256, hex.
 const SIGNATURE: &str = "X-PCDS-Signature";
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Event {
-    /// 1, 2, 3... since the server started: a gap is events dropped before they were read.
-    pub id: u64,
-    /// Unix time in milliseconds.
-    pub time: u64,
-    /// The connection's client id.
-    pub client: u64,
-    pub name: Option<String>,
-    /// Verified (invite-code players) only, as a string: JSON numbers do not hold a SteamID64.
-    pub steam_id: Option<String>,
-    pub planet: String,
-    pub text: String,
-    /// With chat.commandPrefix "!": "!tp home" is command "tp" with args ["home"].
-    pub command: Option<String>,
-    pub args: Vec<String>,
-}
+/// A chat message as an event (msg.rs: it crosses from the bank to the front).
+pub use crate::msg::ChatEvent as Event;
 
 struct Ring {
     events: VecDeque<Event>,

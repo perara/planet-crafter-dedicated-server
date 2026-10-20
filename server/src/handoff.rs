@@ -54,13 +54,9 @@ use crate::rpcspec::Spec;
 /// threads.
 pub const FORMAT: u32 = 5;
 
-/// The snapshot's first line: its format, and the tables it is for (state holds indices into
-/// them, so it is only valid on the same game version).
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Head {
-    format: u32,
-    game_version: String,
-}
+/// The snapshot's first line (msg::SnapshotHead): its format, and the tables it is for (state
+/// holds indices into them, so it is only valid on the same game version).
+use crate::msg::SnapshotHead as Head;
 
 // ---- the binary codec, in parts -------------------------------------------------------
 //
@@ -215,7 +211,7 @@ pub fn snapshot_to(g: &mut Game, w: &mut impl std::io::Write) -> Result<(), Stri
 /// time the encoding took per kind of part is there too, named with a dot in front.
 pub fn snapshot_timed(g: &mut Game, w: &mut impl std::io::Write, phases: &mut Vec<(&'static str, f64)>) -> Result<(), String> {
     let mut laps = Laps::new(phases);
-    let head = Head { format: FORMAT, game_version: g.net_data.game_version.clone() };
+    let head = Head { format: FORMAT.into(), game_version: g.net_data.game_version.clone() };
     let mut cpu = [0.0; KINDS];
     let parts = encode(g, &mut cpu)?;
     laps.lap("serialize");
@@ -421,7 +417,7 @@ pub fn restore_timed(net_data: NetData, data: GameData, spec: Spec, snapshot: &[
     if head.game_version != net_data.game_version {
         return Err(format!("a snapshot on game {}'s tables, these are {}'s", head.game_version, net_data.game_version));
     }
-    if head.format != FORMAT {
+    if head.format != u64::from(FORMAT) {
         return Err(format!("a snapshot of format {}: this build reads format {FORMAT} only", head.format));
     }
     laps.lap("head");
@@ -471,7 +467,7 @@ pub fn verify(g: &Game, snapshot: &[u8]) -> Result<(), String> {
         canon(v);
     };
     let (head, body) = split(snapshot)?;
-    if head.format != FORMAT {
+    if head.format != u64::from(FORMAT) {
         return Err(format!("a snapshot of format {}", head.format));
     }
     // Through the text, as the restored game below: a float is its shortest text, not its f64.

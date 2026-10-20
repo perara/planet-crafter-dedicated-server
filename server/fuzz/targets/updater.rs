@@ -13,8 +13,13 @@ pub fn run(data: &[u8]) {
     assert!(!newer(a, a));
     let _ = local(a);
     let (x, y) = (serde_json::from_str::<Value>(a).unwrap_or(Value::Null), serde_json::from_str::<Value>(b).unwrap_or(Value::Null));
-    let _ = compatible(&x, &y);
-    let _ = compatible(&x, &Value::Null);
+    let (bx, by) = (serde_json::from_value::<crate::msg::BankInfo>(x.clone()), serde_json::from_value::<crate::msg::BankInfo>(y));
+    if let (Ok(bx), Ok(by)) = (&bx, &by) {
+        let _ = compatible(bx, Some(by));
+    }
+    if let Ok(bx) = &bx {
+        let _ = compatible(bx, None);
+    }
     // A release's JSON, as lookup() reads it (without the HTTP).
     let release = &x;
     let _ = release["tag_name"].as_str().map(check_tag);

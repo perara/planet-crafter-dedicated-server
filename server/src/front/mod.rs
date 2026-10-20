@@ -39,13 +39,16 @@ use serde_json::{json, Value};
 use crate::admin;
 use crate::chathooks::Hooks;
 use crate::ipc::{self, Frame, Link};
+use crate::msg::{self, AdminAnswer, AdminCall, BankInfo, Hello, Ops, Ready, Restore, SnapshotHead, SnapshotNote};
 use crate::updater;
 use crate::utp::Utp;
 
 mod clients;
+mod history;
 mod queue;
 mod transport;
 
+use history::{FlipNote, History, Timeline};
 use queue::Queue;
 use transport::Transport;
 
@@ -97,8 +100,8 @@ struct Bank {
     name: String,
     child: Child,
     link: Link,
-    /// Its HELLO (Null until it came).
-    hello: Value,
+    /// Its HELLO (None until it came).
+    hello: Option<Hello>,
     started: Instant,
     /// The last frame it sent: the watchdog's clock (watch_verdict).
     heard: Instant,
@@ -126,7 +129,7 @@ struct Flip {
     reason: String,
     /// HANDOFF sent: the world stands from here.
     stopped: Option<Instant>,
-    snapshot: Value,
+    snapshot: SnapshotNote,
     /// The flip's events on the monotonic clock (ipc::now_ns, ns): HANDOFF sent, SNAPSHOT
     /// handled, RESTORE flushed to the new bank, READY handled, the held frames released.
     at: [u64; 5],
@@ -137,8 +140,8 @@ struct Flip {
 enum UpdateDone {
     /// A flip's banks-folder writes are on disk: its outcome is recorded now, so that whoever
     /// sees it done also finds `active` and the rollback note written.
-    Flipped { seq: u64, message: String, extra: Value },
-    Installed { seq: u64, bank: String, info: Value },
+    Flipped { seq: u64, message: String, note: FlipNote },
+    Installed { seq: u64, bank: String, info: BankInfo },
     Failed { seq: u64, message: String },
     UpToDate { seq: u64, tag: String },
     /// The automatic check left the latest release out (the one rolled back from).
@@ -154,7 +157,7 @@ struct Updates {
     /// The request being worked on (download or flip).
     busy: Option<(u64, String)>,
     seq: u64,
-    history: VecDeque<Value>,
+    history: VecDeque<History>,
     auto: bool,
     every: Duration,
     next_check: Instant,
@@ -209,6 +212,23 @@ struct Front {
     flips: u64,
     /// The lock that makes this the one server of its world (released by a switch).
     world_lock: Option<std::fs::File>,
+}
+
+impl Bank {
+    /// The version its HELLO says.
+    fn version(&self) -> Option<&str> {
+        self.hello.as_ref().and_then(|h| h.info.version.as_deref())
+    }
+
+    /// The game version of the tables it loaded, "" before its HELLO.
+    fn game_version(&self) -> &str {
+        self.hello.as_ref().and_then(|h| h.game_version.as_deref()).unwrap_or("")
+    }
+
+    /// What its HELLO says it is.
+    fn info(&self) -> Option<&BankInfo> {
+        self.hello.as_ref().map(|h| &h.info)
+    }
 }
 
 /// The banks' folder: bin/ of PCDS_HOME, which pcds run gives the front. Without one (a front
@@ -344,7 +364,7 @@ impl Front {
             });
         }
         let child = command.spawn().map_err(|e| format!("{}: {e}", exe.display()))?;
-        Ok(Bank { name: bank.to_string(), child, link: Link::new(ours), hello: Value::Null, started: Instant::now(), heard: Instant::now() })
+        Ok(Bank { name: bank.to_string(), child, link: Link::new(ours), hello: None, started: Instant::now(), heard: Instant::now() })
     }
 
     /// The first bank, waited for (nobody is connected yet): the active one, else the other one
@@ -354,7 +374,8 @@ impl Front {
         // note outlives it: banks/rolled-back, until a later release or an update clears it).
         if let Some(r) = self.banks.as_deref().and_then(updater::rolled_back).filter(|r| r["reason"].is_string()) {
             let message = format!("the release in bank {} ({}) was given up: {}; the server went back to bank {}", r["bank"].as_str().unwrap_or("?"), r["tag"].as_str().unwrap_or("?"), r["reason"].as_str().unwrap_or(""), updater::other(r["bank"].as_str().unwrap_or("")));
-            self.updates.history.push_back(json!({"seq": 0, "ok": false, "message": message, "at": r["at"], "rolledBack": true, "bank": r["bank"], "tag": r["tag"]}));
+            let text = |k: &str| r[k].as_str().map(str::to_string);
+            self.updates.history.push_back(History::rolled_back(message, r["at"].as_u64(), text("bank"), text("tag")));
         }
         let first = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
         let mut kept = self.kept_snapshot().unwrap_or_else(|e| {
@@ -375,7 +396,7 @@ impl Front {
             };
             match self.boot_bank(&bank, snapshot, &mut kept) {
                 Ok(b) => {
-                    println!("bank {bank} (pid {}, pcds {}) running the world after {:?}", b.child.id(), b.hello["version"].as_str().unwrap_or("?"), b.started.elapsed());
+                    println!("bank {bank} (pid {}, pcds {}) running the world after {:?}", b.child.id(), b.version().unwrap_or("?"), b.started.elapsed());
                     if let Some((fd, at)) = kept {
                         println!("the world is the one kept in {} at the last stop (the last flip's snapshot, newer than the save)", snapshot_path(&self.save));
                         self.last_snapshot = Some((fd, at));
@@ -389,7 +410,7 @@ impl Front {
                             eprintln!("banks: {e}");
                         }
                     }
-                    self.game_version = b.hello["gameVersion"].as_str().unwrap_or("").to_string();
+                    self.game_version = b.game_version().to_string();
                     *self.web.write().unwrap_or_else(|e| e.into_inner()) = self.web_page(&bank);
                     if let Some(dir) = &self.banks
                         && let Err(e) = updater::set_active(dir, &bank)
@@ -453,11 +474,11 @@ impl Front {
         let mut b = self.spawn(bank, None)?;
         let deadline = Instant::now() + LOAD_DEADLINE;
         let hello = wait_frame(&mut b, deadline).ok_or("it ended before its hello (see above)")?;
-        b.hello = hello_of(&hello).inspect_err(|_| {
+        let hello = hello_of(&hello).inspect_err(|_| {
             let _ = b.child.kill();
             let _ = b.child.wait();
         })?;
-        if let Some(why) = snapshot.as_ref().and_then(|fd| ipc::read_memfd(fd).ok()).and_then(|s| never_runs(&s, &b.hello)) {
+        if let Some(why) = snapshot.as_ref().and_then(|fd| ipc::read_memfd(fd).ok()).and_then(|s| never_runs(&s, &hello)) {
             let path = snapshot_path(&self.save);
             let aside = format!("{path}.unusable-{}", crate::save::stamp(SystemTime::now()));
             match std::fs::rename(&path, &aside) {
@@ -466,8 +487,9 @@ impl Front {
             }
             (snapshot, *kept) = (None, None);
         }
+        b.hello = Some(hello);
         match snapshot {
-            Some(fd) => b.link.queue(ipc::RESTORE, 0, b"{\"recover\":true}", Some(fd), 0),
+            Some(fd) => b.link.queue(ipc::RESTORE, 0, &msg::body(&Restore { recover: true }), Some(fd), 0),
             None => b.link.queue(ipc::START, 0, &[], None, 0),
         }
         let ready = wait_frame(&mut b, deadline).ok_or("it ended while loading the world (see above)")?;
@@ -639,11 +661,11 @@ impl Front {
                 Some(fd) => {
                     if let Some(flip) = self.flip.as_mut() {
                         flip.at[1] = ipc::now_ns();
-                        flip.snapshot = serde_json::from_slice(&f.body).unwrap_or_default();
+                        flip.snapshot = msg::parse(&f.body).unwrap_or_default();
                         flip.kept = fd.try_clone().ok().map(|d| (d, SystemTime::now()));
                     }
                     if let Some(n) = self.next.as_mut() {
-                        n.link.queue(ipc::RESTORE, 0, b"{\"recover\":false}", Some(fd), 0);
+                        n.link.queue(ipc::RESTORE, 0, &msg::body(&Restore { recover: false }), Some(fd), 0);
                     }
                     self.phase = Phase::Restoring;
                 }
@@ -660,7 +682,7 @@ impl Front {
             ipc::HELLO => {
                 let hello = hello_of(&f);
                 if let (Some(b), Ok(hello)) = (self.next.as_mut(), &hello) {
-                    b.hello = hello.clone();
+                    b.hello = Some(hello.clone());
                 }
                 if self.phase == Phase::Recovering {
                     // A bank of another protocol cannot be given the world: the front must be
@@ -674,9 +696,9 @@ impl Front {
                         Some(fd) => (ipc::RESTORE, Some(fd)),
                         None => (ipc::START, None),
                     };
-                    let body: &[u8] = if start.0 == ipc::RESTORE { b"{\"recover\":true}" } else { b"" };
+                    let body = if start.0 == ipc::RESTORE { msg::body(&Restore { recover: true }) } else { Vec::new() };
                     if let Some(b) = self.next.as_mut() {
-                        b.link.queue(start.0, 0, body, start.1, 0);
+                        b.link.queue(start.0, 0, &body, start.1, 0);
                     }
                     return;
                 }
@@ -687,14 +709,15 @@ impl Front {
                     Ok(hello) => hello,
                     Err(e) => return self.fail_flip(&e),
                 };
-                let live = self.live.as_ref().map(|b| b.hello.clone()).unwrap_or_default();
-                let mut info = hello.clone();
-                info["protocol"] = f.n.into();
-                if let Err(e) = updater::compatible(&info, &live) {
+                let live = self.live.as_ref().and_then(|b| b.hello.as_ref());
+                let mut info = hello.info.clone();
+                info.protocol = Some(f.n);
+                if let Err(e) = updater::compatible(&info, live.map(|h| &h.info)) {
                     return self.fail_flip(&e);
                 }
-                if hello["gameVersion"] != live["gameVersion"] {
-                    return self.fail_flip(&format!("it has game {}'s tables, the world runs on {}'s", hello["gameVersion"], live["gameVersion"]));
+                let live_game = live.and_then(|h| h.game_version.clone());
+                if hello.game_version != live_game {
+                    return self.fail_flip(&format!("it has game {}'s tables, the world runs on {}'s", msg::json(&hello.game_version), msg::json(&live_game)));
                 }
                 if let (Some(n), Some(l)) = (self.next.as_ref(), self.live.as_ref()) {
                     println!(
@@ -728,7 +751,7 @@ impl Front {
     /// The next bank runs: it becomes the live one, the old one ends.
     fn promote(&mut self, ready: &[u8]) {
         let Some(new) = self.next.take() else { return };
-        let ready: Value = serde_json::from_slice(ready).unwrap_or_default();
+        let ready: Ready = msg::parse(ready).unwrap_or_default();
         let old = self.live.take();
         let ready_at = ipc::now_ns();
         let recovered = self.phase == Phase::Recovering;
@@ -762,48 +785,60 @@ impl Front {
         // The crashes counted so far were another release's: the new one starts with none.
         self.crashes.clear();
         self.flipped = Some(to.clone());
-        let verified = match ready["verified"].as_bool() {
-            Some(true) => format!("; the restored state is the snapshot's, checked in {:.1} ms (in the stand)", ready["verifyMs"].as_f64().unwrap_or(0.0)),
+        let verified = match ready.verified {
+            Some(true) => format!("; the restored state is the snapshot's, checked in {:.1} ms (in the stand)", ready.verify_ms.unwrap_or(0.0)),
             _ => String::new(),
         };
         let message = format!(
             "flip {from} -> {to} ({}): the world stood {:.1} ms (snapshot {} bytes written in {:.1} ms, restored in {:.1} ms; {held} client frames held){verified}",
             flip.reason,
             ms(stood),
-            flip.snapshot["bytes"],
-            flip.snapshot["ms"].as_f64().unwrap_or(0.0),
-            ready["restoreMs"].as_f64().unwrap_or(0.0)
+            msg::json(&flip.snapshot.bytes),
+            flip.snapshot.ms.unwrap_or(0.0),
+            ready.restore_ms.unwrap_or(0.0)
         );
         println!("{message}");
-        let version = self.live.as_ref().map(|b| b.hello["version"].clone()).unwrap_or_default();
+        let version = self.live.as_ref().and_then(|b| b.version().map(str::to_string));
         // Where the stand went, on the monotonic clock all three processes read: the HANDOFF to
         // the old bank, its snapshot, the SNAPSHOT to the front, the front's relay of the memfd,
         // the RESTORE to the new bank, its restore, the READY to the front, the held frames out.
         let gap = |from: u64, to: u64| if from == 0 || to == 0 { 0.0 } else { (to.saturating_sub(from) as f64 / 1e4).round() / 100.0 };
-        let (bank, new) = (|k: &str| flip.snapshot[k].as_u64().unwrap_or(0), |k: &str| ready[k].as_u64().unwrap_or(0));
-        let timeline = json!({
-            "handoffMs": gap(flip.at[0], bank("gotAt")),
-            "snapshotMs": gap(bank("gotAt"), bank("doneAt")),
-            "snapshotToFrontMs": gap(bank("doneAt"), flip.at[1]),
-            "relayMs": gap(flip.at[1], flip.at[2]),
-            "restoreToBankMs": gap(flip.at[2], new("gotAt")),
-            "restoreMs": gap(new("gotAt"), new("readyAt")),
-            "readyToFrontMs": gap(new("readyAt"), ready_at),
-            "releaseMs": gap(ready_at, released_at),
-        });
-        println!("flip timeline (ms): {timeline}");
-        let extra = json!({"from": from, "to": to, "stoodMs": ms(stood), "snapshotBytes": flip.snapshot["bytes"], "snapshotMs": flip.snapshot["ms"], "restoreMs": ready["restoreMs"], "held": held, "verified": ready["verified"], "version": version, "timeline": timeline, "restoreFaults": ready["faults"]});
-        self.persist_flip(&to, rolled_back, Some((flip.seq, message, extra)));
+        let (old, new) = (&flip.snapshot, &ready);
+        let timeline = Timeline {
+            handoff_ms: gap(flip.at[0], old.got_at),
+            snapshot_ms: gap(old.got_at, old.done_at),
+            snapshot_to_front_ms: gap(old.done_at, flip.at[1]),
+            relay_ms: gap(flip.at[1], flip.at[2]),
+            restore_to_bank_ms: gap(flip.at[2], new.got_at),
+            restore_ms: gap(new.got_at, new.ready_at),
+            ready_to_front_ms: gap(new.ready_at, ready_at),
+            release_ms: gap(ready_at, released_at),
+        };
+        println!("flip timeline (ms): {}", msg::json(&timeline));
+        let note = FlipNote {
+            from,
+            to: to.clone(),
+            stood_ms: ms(stood),
+            snapshot_bytes: flip.snapshot.bytes,
+            snapshot_ms: flip.snapshot.ms,
+            restore_ms: ready.restore_ms,
+            held,
+            verified: ready.verified,
+            version,
+            timeline,
+            restore_faults: ready.faults,
+        };
+        self.persist_flip(&to, rolled_back, Some((flip.seq, message, note)));
     }
 
     /// `active` points at `bank` from now on, and a rollback notes the bank it left (so that the
     /// automatic update does not bring back what the owner left): both flush to disk, so a
     /// thread writes them.
     /// `record`: the flip's outcome (seq, message, fields), recorded once the files are written.
-    fn persist_flip(&mut self, bank: &str, rolled_back_from: Option<String>, record: Option<(u64, String, Value)>) {
+    fn persist_flip(&mut self, bank: &str, rolled_back_from: Option<String>, record: Option<(u64, String, FlipNote)>) {
         let Some(dir) = self.banks.clone() else {
-            if let Some((seq, message, extra)) = record {
-                self.record(seq, true, &message, extra);
+            if let Some((seq, message, note)) = record {
+                self.record(History::flipped(seq, message, note));
             }
             return;
         };
@@ -818,8 +853,8 @@ impl Front {
             {
                 eprintln!("banks: the rollback from bank {from} could not be noted ({e}): the automatic update may install its release again");
             }
-            if let Some((seq, message, extra)) = record {
-                let _ = tx.send(UpdateDone::Flipped { seq, message, extra });
+            if let Some((seq, message, note)) = record {
+                let _ = tx.send(UpdateDone::Flipped { seq, message, note });
             }
         };
         match std::thread::Builder::new().name("banks-folder".into()).spawn(write) {
@@ -849,7 +884,7 @@ impl Front {
         };
         eprintln!("{message}");
         if let Some(f) = flip {
-            self.record(f.seq, false, &message, json!({}));
+            self.record(History::new(f.seq, false, message.clone()));
         }
         if self.live.is_none() {
             let name = self.banks.as_deref().map(updater::active).unwrap_or_else(|| "a".into());
@@ -867,7 +902,7 @@ impl Front {
         println!("flip to bank {bank} ({reason}): pid {} loading", b.child.id());
         self.next = Some(b);
         self.phase = Phase::Starting;
-        self.flip = Some(Flip { seq, reason: reason.to_string(), stopped: None, snapshot: Value::Null, at: [0; 5], kept: None });
+        self.flip = Some(Flip { seq, reason: reason.to_string(), stopped: None, snapshot: SnapshotNote::default(), at: [0; 5], kept: None });
         self.updates.busy = Some((seq, format!("flipping to bank {bank}")));
         Ok(())
     }
@@ -945,7 +980,7 @@ impl Front {
         let seen = format!("the game ended {} times within {} minutes", self.crashes.len(), CRASH_WINDOW.as_secs() / 60);
         let rolled = match (&self.banks, self.flipped.as_deref() == Some(bank)) {
             (Some(dir), true) => updater::crash_rollback_target(dir, bank).and_then(|to| {
-                let tag = updater::info(dir, bank).map_or("?".into(), |i| i["tag"].as_str().or(i["version"].as_str()).unwrap_or("?").to_string());
+                let tag = updater::info(dir, bank).map_or("?".into(), |i| i.tag.as_deref().or(i.version.as_deref()).unwrap_or("?").to_string());
                 let why = format!("{seen} after it was flipped to");
                 updater::set_rolled_back_by_crashes(dir, bank, &why)?;
                 updater::set_active(dir, to)?;
@@ -980,8 +1015,8 @@ impl Front {
                 self.pinged = Some(now);
                 let id = self.next_request;
                 self.next_request += 1;
-                let ping = json!({"method": "GET", "path": "/api/ping", "body": {}});
-                live.link.queue(ipc::ADMIN, id, ping.to_string().as_bytes(), None, 0);
+                let ping = AdminCall { method: "GET".into(), path: "/api/ping".into(), body: json!({}) };
+                live.link.queue(ipc::ADMIN, id, &msg::body(&ping), None, 0);
             }
             Watch::Kill(silent) => {
                 eprintln!("bank {} (pid {}) said nothing for {} s (the rule limits.bankWatchdogSeconds is {} s): it is hung; killed, and the world starts again from the last snapshot or save, as after a crash", live.name, live.child.id(), silent.as_secs(), self.watchdog.as_secs());
@@ -1104,9 +1139,9 @@ impl Front {
                 _ => {
                     let id = self.next_request;
                     self.next_request += 1;
-                    let body = json!({"method": r.method, "path": r.path, "body": r.body});
+                    let call = AdminCall { method: r.method, path: r.path.clone(), body: r.body };
                     self.answers.insert(id, (r.reply, r.path));
-                    self.to_bank(ipc::ADMIN, id, body.to_string().as_bytes(), 0);
+                    self.to_bank(ipc::ADMIN, id, &msg::body(&call), 0);
                 }
             }
         }
@@ -1114,15 +1149,15 @@ impl Front {
 
     /// The rules the front acts on, as the live bank says them (ipc::OPS).
     fn ops(&mut self, body: &[u8]) {
-        let o: Value = serde_json::from_slice(body).unwrap_or_default();
-        self.set_autosave(o["autosaveMinutes"].as_u64());
-        if let Some(auto) = o["autoUpdate"].as_bool() {
+        let o: Ops = msg::parse(body).unwrap_or_default();
+        self.set_autosave(o.autosave_minutes);
+        if let Some(auto) = o.auto_update {
             self.updates.auto = auto;
         }
-        if let Some(hours) = o["updateCheckHours"].as_u64() {
+        if let Some(hours) = o.update_check_hours {
             self.updates.every = check_every(hours);
         }
-        if let Some(seconds) = o["bankWatchdogSeconds"].as_u64() {
+        if let Some(seconds) = o.bank_watchdog_seconds {
             self.watchdog = Duration::from_secs(seconds);
         }
     }
@@ -1136,9 +1171,9 @@ impl Front {
 
     fn answer(&mut self, id: u64, body: &[u8]) {
         let Some((reply, path)) = self.answers.remove(&id) else { return };
-        let a: Value = serde_json::from_slice(body).unwrap_or_default();
-        let status = a["status"].as_u64().unwrap_or(500) as u16;
-        let mut text = a["body"].as_str().unwrap_or("{}").to_string();
+        let a: AdminAnswer = msg::parse(body).unwrap_or_default();
+        let status = a.status.unwrap_or(500) as u16;
+        let mut text = a.body.unwrap_or_else(|| "{}".to_string());
         if path == "/api/status"
             && let Ok(mut s) = serde_json::from_str::<Value>(&text)
         {
@@ -1180,7 +1215,7 @@ impl Front {
     }
 
     fn banks_status(&self) -> Value {
-        let bank = |b: &Bank| json!({"bank": b.name, "pid": b.child.id(), "version": b.hello["version"], "protocol": ipc::PROTOCOL, "format": b.hello["format"], "runningSeconds": b.started.elapsed().as_secs()});
+        let bank = |b: &Bank| json!({"bank": b.name, "pid": b.child.id(), "version": b.version(), "protocol": ipc::PROTOCOL, "format": b.info().and_then(|i| i.format), "runningSeconds": b.started.elapsed().as_secs()});
         let mut v = match &self.banks {
             Some(dir) => updater::describe(dir),
             None => json!({"dir": null, "active": null, "installed": []}),
@@ -1214,12 +1249,9 @@ impl Front {
         })
     }
 
-    fn record(&mut self, seq: u64, ok: bool, message: &str, mut extra: Value) {
-        extra["seq"] = seq.into();
-        extra["ok"] = ok.into();
-        extra["message"] = message.into();
-        extra["at"] = now_secs().into();
-        self.updates.history.push_back(extra);
+    fn record(&mut self, entry: History) {
+        let seq = entry.seq;
+        self.updates.history.push_back(entry);
         while self.updates.history.len() > 20 {
             self.updates.history.pop_front();
         }
@@ -1249,7 +1281,7 @@ impl Front {
         if body["rollback"] == true {
             if let Some(dir) = &self.banks {
                 let Some(info) = updater::info(dir, &target) else { return (400, json!({"error": format!("bank {target} holds no release to go back to")}).to_string()) };
-                if let Err(e) = updater::compatible_for(&info, &live.hello, true) {
+                if let Err(e) = updater::compatible_for(&info, live.info(), true) {
                     return (400, json!({"error": e}).to_string());
                 }
             }
@@ -1279,7 +1311,7 @@ impl Front {
     /// `auto`: the automatic check, which also leaves out the release rolled back from; an
     /// update asked for clears that note.
     fn download(&mut self, seq: u64, dir: PathBuf, bank: String, version: Option<String>, only_newer: bool, auto: bool) {
-        let live = self.live.as_ref().map(|b| b.hello.clone()).unwrap_or_default();
+        let live = self.live.as_ref().and_then(|b| b.info().cloned()).unwrap_or_default();
         let held = self.held_release(&dir);
         let tx = self.updates.tx.clone();
         self.updates.busy = Some((seq, format!("downloading {} into bank {bank}", version.as_deref().unwrap_or("the latest release"))));
@@ -1301,7 +1333,7 @@ impl Front {
 
     /// The release the live bank holds (its tag, else its version: updater::held_release).
     fn held_release(&self, dir: &std::path::Path) -> String {
-        self.live.as_ref().map(|b| updater::held_release(dir, &b.name, b.hello["version"].as_str().unwrap_or(""))).unwrap_or_default()
+        self.live.as_ref().map(|b| updater::held_release(dir, &b.name, b.version().unwrap_or(""))).unwrap_or_default()
     }
 
     /// The latest release looked up on a thread of its own; nothing is installed.
@@ -1314,20 +1346,20 @@ impl Front {
 
     fn updates(&mut self) {
         while let Ok(done) = self.updates.rx.try_recv() {
-            if let UpdateDone::Flipped { seq, message, extra } = done {
-                self.record(seq, true, &message, extra);
+            if let UpdateDone::Flipped { seq, message, note } = done {
+                self.record(History::flipped(seq, message, note));
                 continue;
             }
             self.updates.checked = Some(now_secs());
             match done {
                 UpdateDone::Flipped { .. } => {}
                 UpdateDone::Installed { seq, bank, info } => {
-                    let tag = info["tag"].as_str().unwrap_or("?").to_string();
+                    let tag = info.tag.as_deref().unwrap_or("?").to_string();
                     self.updates.latest = Some(tag.clone());
                     self.updates.newer = false;
-                    println!("update: {tag} installed in bank {bank} (sha256 {} checked)", info["sha256"].as_str().unwrap_or(""));
+                    println!("update: {tag} installed in bank {bank} (sha256 {} checked)", info.sha256.as_deref().unwrap_or(""));
                     if let Err(e) = self.flip_to(&bank, &format!("update to {tag}"), seq, None) {
-                        self.record(seq, false, &format!("{tag} is in bank {bank}, but the flip did not start: {e}"), json!({}));
+                        self.record(History::new(seq, false, format!("{tag} is in bank {bank}, but the flip did not start: {e}")));
                     }
                 }
                 UpdateDone::Failed { seq, message } => {
@@ -1335,22 +1367,22 @@ impl Front {
                     if self.updates.auto_seq == Some(seq) {
                         self.updates.next_check = Instant::now() + CHECK_RETRY.min(self.updates.every);
                     }
-                    self.record(seq, false, &message, json!({}));
+                    self.record(History::new(seq, false, message));
                 }
                 UpdateDone::UpToDate { seq, tag } => {
                     self.updates.latest = Some(tag.clone());
                     self.updates.newer = false;
-                    self.record(seq, true, &format!("up to date ({tag} is the latest release)"), json!({}));
+                    self.record(History::new(seq, true, format!("up to date ({tag} is the latest release)")));
                 }
                 UpdateDone::Skipped { seq, message } => {
                     println!("update: {message}");
-                    self.record(seq, true, &message, json!({}));
+                    self.record(History::new(seq, true, message));
                 }
                 UpdateDone::Checked { seq, tag, newer } => {
                     self.updates.latest = Some(tag.clone());
                     self.updates.newer = newer;
                     let message = if newer { format!("{tag} is available") } else { format!("up to date ({tag} is the latest release)") };
-                    self.record(seq, true, &message, json!({"check": true}));
+                    self.record(History::checked(seq, message));
                 }
             }
         }
@@ -1489,7 +1521,7 @@ impl Front {
         if let Some((fd, at)) = kept {
             self.last_snapshot = Some((fd, at));
         }
-        self.game_version = b.hello["gameVersion"].as_str().unwrap_or("").to_string();
+        self.game_version = b.game_version().to_string();
         *self.web.write().unwrap_or_else(|e| e.into_inner()) = self.web_page(&bank);
         self.live = Some(Bank { heard: Instant::now(), ..b });
         self.flipped = None;
@@ -1612,32 +1644,32 @@ fn chat_config(body: &[u8]) -> Result<crate::rules::Chat, String> {
 /// Why a snapshot can never run on the bank of this HELLO: it is on another game's tables, in
 /// a format the bank does not read, or no snapshot at all. None: it may (any other error is the
 /// bank's to tell).
-fn never_runs(snapshot: &[u8], hello: &Value) -> Option<String> {
-    let head = snapshot.split(|b| *b == b'\n').next().and_then(|h| serde_json::from_slice::<Value>(h).ok());
-    let Some(head) = head.filter(|h| h["format"].is_u64() && h["game_version"].is_string()) else { return Some("not a snapshot".into()) };
-    if head["game_version"] != hello["gameVersion"] {
-        return Some(format!("it is on game {}'s tables, the bank has {}'s", head["game_version"], hello["gameVersion"]));
+fn never_runs(snapshot: &[u8], hello: &Hello) -> Option<String> {
+    let head = snapshot.split(|b| *b == b'\n').next().and_then(|h| msg::parse::<SnapshotHead>(h).ok());
+    let Some(head) = head else { return Some("not a snapshot".into()) };
+    if hello.game_version.as_ref() != Some(&head.game_version) {
+        return Some(format!("it is on game {}'s tables, the bank has {}'s", msg::json(&head.game_version), msg::json(&hello.game_version)));
     }
-    if hello["format"] != head["format"] {
-        return Some(format!("snapshot format {}, the bank reads {}", head["format"], hello["format"]));
+    if hello.info.format != Some(head.format) {
+        return Some(format!("snapshot format {}, the bank reads {}", head.format, msg::json(&hello.info.format)));
     }
     None
 }
 
 /// A bank's HELLO, refused unless it speaks this front's protocol (at the boot, a flip and a
 /// restart after a crash alike: a world never goes to a bank that reads the frames otherwise).
-fn hello_of(f: &Frame) -> Result<Value, String> {
+fn hello_of(f: &Frame) -> Result<Hello, String> {
     if f.kind != ipc::HELLO {
         return Err(format!("frame {} instead of HELLO", f.kind));
     }
-    let mut info: Value = serde_json::from_slice(&f.body).map_err(|e| format!("its HELLO is not JSON ({e})"))?;
-    info["protocol"] = f.n.into();
+    let mut hello: Hello = msg::parse(&f.body).map_err(|e| format!("its HELLO is not JSON ({e})"))?;
+    hello.info.protocol = Some(f.n);
     if f.n != ipc::PROTOCOL {
         // The same words as an update refused for its protocol.
-        updater::compatible(&info, &Value::Null)?;
+        updater::compatible(&hello.info, None)?;
     }
-    info.as_object_mut().map(|o| o.remove("protocol"));
-    Ok(info)
+    hello.info.protocol = None;
+    Ok(hello)
 }
 
 /// A bank whose socket closed (it is ending) or broke (it is killed): waited for; how it ended.
@@ -1683,7 +1715,7 @@ mod tests {
         let (ours, theirs) = UnixStream::pair().unwrap();
         ours.set_nonblocking(true).unwrap();
         let child = Command::new("sleep").arg("30").spawn().unwrap();
-        (Bank { name: name.into(), child, link: Link::new(ours), hello: Value::Null, started: Instant::now(), heard: Instant::now() }, Link::new(theirs))
+        (Bank { name: name.into(), child, link: Link::new(ours), hello: None, started: Instant::now(), heard: Instant::now() }, Link::new(theirs))
     }
 
     pub(super) fn test_front() -> Front {
@@ -1875,7 +1907,7 @@ mod tests {
     /// never run; one the bank may run goes to it (its own errors stop the start).
     #[test]
     fn a_snapshot_that_can_never_run_is_told_apart() {
-        let hello = json!({"gameVersion": "2.103", "format": 1});
+        let hello: Hello = serde_json::from_value(json!({"gameVersion": "2.103", "format": 1})).unwrap();
         assert_eq!(never_runs(b"{\"format\":1,\"game_version\":\"2.103\"}\n{\"broken", &hello), None);
         for bad in [&b"{\"format\":1,\"game_version\":\"0.0.1\"}\n{}"[..], b"{\"format\":7,\"game_version\":\"2.103\"}\n{}", b"garbage"] {
             assert!(never_runs(bad, &hello).is_some(), "{}", String::from_utf8_lossy(bad));
@@ -1888,12 +1920,12 @@ mod tests {
     fn a_flip_takes_only_the_snapshot_of_its_own_handoff() {
         let mut front = test_front();
         let (mut live, mut old) = fake_bank("a");
-        live.hello = json!({"format": 1});
+        live.hello = Some(serde_json::from_value(json!({"format": 1})).unwrap());
         let (next, mut new) = fake_bank("b");
         front.live = Some(live);
         front.next = Some(next);
         front.phase = Phase::Starting;
-        front.flip = Some(Flip { seq: 2, reason: "test".into(), stopped: None, snapshot: Value::Null, at: [0; 5], kept: None });
+        front.flip = Some(Flip { seq: 2, reason: "test".into(), stopped: None, snapshot: SnapshotNote::default(), at: [0; 5], kept: None });
         front.on_next(Frame { kind: ipc::HELLO, n: ipc::PROTOCOL, body: br#"{"format":1}"#.to_vec(), fd: None });
         assert_eq!(front.phase, Phase::Snapshotting);
         let handoff = old.recv().unwrap();
@@ -1945,7 +1977,7 @@ mod tests {
     #[test]
     fn a_bank_of_another_protocol_is_refused_on_every_path() {
         let hello = |kind, n, body: &str| hello_of(&Frame { kind, n, body: body.as_bytes().to_vec(), fd: None });
-        assert_eq!(hello(ipc::HELLO, ipc::PROTOCOL, r#"{"version":"1"}"#).unwrap()["version"], "1");
+        assert_eq!(hello(ipc::HELLO, ipc::PROTOCOL, r#"{"version":"1"}"#).unwrap().info.version(), "1");
         assert!(hello(ipc::HELLO, 999, r#"{"version":"1"}"#).unwrap_err().contains("front protocol 999"));
         assert!(hello(ipc::READY, ipc::PROTOCOL, "{}").is_err());
         assert!(hello(ipc::HELLO, ipc::PROTOCOL, "not json").is_err());

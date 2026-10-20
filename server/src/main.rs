@@ -109,6 +109,7 @@ mod native;
 mod machines;
 mod meteo;
 mod model;
+mod msg;
 mod net;
 mod newworld;
 mod objects;
