@@ -87,11 +87,38 @@ energy: the grower's random state).
 
 ## Approximations the README names
 
-- **Procedural wrecks come in 64 layouts per size** (README "Differences"): a wreck generated
-  here, outside or inside a world instance, holds the layout of its pool seed, not of the
-  game's seed. Two reference runs of `instances.json` generate the same objects; ours differ.
-  Opening the instance itself (seed 400000032) matches.
-
+- **Wrecks are laid out by Tessera from their own seed**, on a thread of their own, a moment
+  after the call (README "Differences"). Compared on 2.103 (the sweep's host, tables format 3):
+  `scripts/instances.json` (3 scene wrecks, 2 world instances: 57 placed objects); 24 scene
+  wrecks of the three sizes at random places, seeds and rotations (some tilted) generated one
+  after the other in one process; and each of the 8 world instance scenes opened once with its
+  first wreck generated. Every network object the game created, this server created too, in the
+  same order, at the same place and with the same rotation. The 24 wrecks: 28 of their creation
+  messages differ in writing, never in meaning: the sign of a zero (17), the third decimal of a
+  position (10, at most 0.001 m, the precision a save keeps) and the sign of a whole quaternion
+  (1): the same products in another order of float rounding (class b). In the saves the 1 706
+  placed objects of the 24 wrecks (65 groups) are the same in both, none in one only, and the
+  real game run twice puts them at exactly the same places. The 8 instances differ in 4
+  messages, all of that kind. What differs is the loot inside the containers (class d): of 815
+  containers 213 hold the same groups in the game against this server and in the game against
+  the game (the item counts agree in 297 and 329 containers in two runs against this server, in
+  305 against the game itself).
+  (`wrecks.py` makes the two scripts and compares the saves and the event lists; run them with `sweep.sh both`.)
+  Found and fixed by this comparison: the planters of a wreck (`TreePlanter2`, `FlowerPot2`)
+  tell everyone their growth is 0 when they appear (`GrowthProxy.SetCurrentGrowthClientRpc`);
+  this server did not.
+  What the game keeps on its prefabs (`RandomizePropData.ignore`, set by one wreck's walk and
+  read by the next one's) makes a wreck depend on the ones made before it in the process; the
+  server keeps it the same way (from its start, wrecks one at a time in the order asked), and
+  24 wrecks in a row agree. A wreck asked for twice, or a flip in the middle of one, makes it
+  the same: the flags are in the snapshot.
+- **A save from before this change keeps its wrecks.** A wreck a version of this server
+  generated holds what it generated; one it had not yet generated is laid out on the seed it
+  has, as before (the seeds of the 64-layout pool are seeds like any other).
+- **The late-game save's 8 wreck generators (version 15)** are dropped at load by the game and
+  by this server alike: all 8 generators and their objects (wreckpilar 202 to 187,
+  ProceduralWreckContainer1 45 to 19, ProceduralWreckSafe 52 to 20, ... the same counts in
+  both), measured again after this change.
 - **Scene objects inside a built prefab**: ToxicityDiorama2 holds two wreck doors
   (WorldObjectFromScene, group WreckPilar). The game registers them as world objects when the
   diorama is built (not saved, no network object) and counts them in

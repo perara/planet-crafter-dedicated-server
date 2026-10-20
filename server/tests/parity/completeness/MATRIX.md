@@ -797,7 +797,7 @@ items (200): Algae1Growable, Amber, AnimalBones, AntiToxinsExplosive1, AntiToxin
 | ConstructibleProxy.SendInSpaceRocketBackAndForthServerRpc | yes | 2 | 3 | 0 | rockets::back_and_forth |
 | ConstructibleProxy.SendInSpaceServerRpc | yes | 1 | 4 | 21 | rockets |
 | ConstructibleProxy.StartCraftAnimationServerRpc | yes | 1 | 3 | 217 | machines |
-| GenerateOnTrigger.GenerateNetworkObjectsServerRpc | yes | 2 | 4 | 0 | instances |
+| GenerateOnTrigger.GenerateNetworkObjectsServerRpc | yes | 5 | 4 | 0 | instances |
 | GeneticTraitHandler.CreateNewTraitWorldObjectServerRpc | yes | 1 | 1 | 0 | machines |
 | GroupNetworkBase.DeconstructServerRpc | yes | 1 | 2 | 368 | handlers |
 | GroupNetworkContainer.RemoveOwnershipServerRpc | yes | 1 | 1 | 0 | animals |

@@ -99,6 +99,14 @@ pub fn set_growth(game: &mut Game, wo: i32, value: f32, force: bool) {
     }
 }
 
+/// A planter the server made (a wreck's): MachineGrowerVegetationStatic.SetWorldObjectForGrower
+/// sets its growth to its world object's, and a growth of 0 tells everyone (as SetGrowth does).
+pub fn announce_growth(game: &mut Game, wo: i32) {
+    if game.ext.machines.list.get(&wo).is_some_and(|m| m.vegetation.is_some()) {
+        set_growth(game, wo, growth(game, wo), false);
+    }
+}
+
 /// GrowthProxy.ResetCurrentGrowthServerRpc.
 pub fn reset_current_growth(game: &mut Game, wo: i32, value: f32) {
     let Some(w) = game.wos.get_mut(&wo) else { return };

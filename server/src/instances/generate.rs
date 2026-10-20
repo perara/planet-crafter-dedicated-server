@@ -3,30 +3,34 @@
 //! WorldInstanceScene.InitSceneVariables (a world instance's variation, its wreck generators and
 //! its shared random props), from wrecks.json and scenes/<planet>.json (native/).
 //!
-//! ponytail: the extraction lays out seeds 1..=N of every generator with native/tessera.rs (a
-//! port of the game's Tessera), and the server gives its wrecks those seeds (pool_seed). Running
-//! that port here, off the tick, would give every wreck its own seed as the game does.
+//! A wreck's layout is the game's own: Tessera (crate::tessera, a port of the game's solver) lays
+//! it out from the wreck's seed, with the generator's tile set from wrecks.json. That takes
+//! from tens of milliseconds to a few seconds, so it runs on a thread of its own between
+//! `prepare` and `finish` (instances.rs queues the wrecks, one at a time as the game does).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use indexmap::IndexMap;
 use serde::Deserialize;
 
 use crate::game::Game;
 use crate::geometry::{from_euler_y, matrix_mul, matrix_position, matrix_rotation, trs, MathRandom, Matrix};
+use crate::tessera;
 
-/// RandomizePropData.RandomData: chance (percent), randomizeRotationY, the prop's group, and
-/// the key of the prop's own RandomizePropData list.
-type RandomData = (i32, bool, Option<String>, Option<String>);
+/// RandomizePropData.RandomData: chance (percent), randomizeRotationY, the prop's group, the
+/// key of the prop's own RandomizePropData list, and the prop's scene tiles (an index into
+/// Wrecks::prefabs) when Tessera sees them.
+type RandomData = (i32, bool, Option<String>, Option<String>, Option<usize>);
 /// A RandomizePropData: the key of its list and its index there.
 type PropId = (String, usize);
 
 #[derive(Deserialize, Default)]
 pub struct Wrecks {
-    seeds: u32,
     generators: Vec<GeneratorData>,
     props: HashMap<String, Vec<Slot>>,
+    /// The scene tiles of the props the generators' own children can place.
+    prefabs: Vec<tessera::TileNode>,
 }
 
 #[derive(Deserialize)]
@@ -40,8 +44,13 @@ struct GeneratorData {
     #[serde(default)]
     scene_instance_radius_ratio: f32,
     triggers: Vec<Trigger>,
-    /// Seed -> Tessera's tiles: (props key, local position, local rotation).
-    layouts: HashMap<String, Vec<(String, [f32; 3], [f32; 4])>>,
+    /// The TesseraGenerator: tile set, constraints, palette.
+    tessera: tessera::Generator,
+    /// The scene tiles of the prefab itself, in the generator's space.
+    fixed: Vec<tessera::SceneTile>,
+    /// The solver's tables for it, built by the first wreck that needs them.
+    #[serde(skip)]
+    model: OnceLock<Result<Arc<tessera::Model>, String>>,
 }
 
 /// A trigger collider on the generator (a sphere around it).
@@ -164,13 +173,20 @@ fn affine(a: &[f32; 12]) -> Matrix {
 }
 
 impl Wrecks {
-    /// wrecks.json, with a layout pool and the generator of every wreck size.
+    /// wrecks.json: the generator of every wreck size, its tile set and the props lists.
     pub fn parse(text: &str) -> Result<Wrecks, String> {
         let w: Wrecks = serde_json::from_str(text).map_err(|e| e.to_string())?;
-        if w.seeds == 0 || w.generators.len() != super::GENERATORS.len() {
-            return Err(format!("{} seeds and {} generators, where the game has {}", w.seeds, w.generators.len(), super::GENERATORS.len()));
+        if w.generators.len() != super::GENERATORS.len() {
+            return Err(format!("{} generators, where the game has {}", w.generators.len(), super::GENERATORS.len()));
         }
         Ok(w)
+    }
+
+    /// The solver's tables for a generator (TileModelInfo and the AdjacentModel built from it):
+    /// about 10 ms, made once.
+    fn model(&self, index: usize) -> Result<Arc<tessera::Model>, String> {
+        let data = self.generators.get(index).ok_or(format!("no wreck generator {index}"))?;
+        data.model.get_or_init(|| tessera::Model::new(data.tessera.clone()).map(Arc::new)).clone()
     }
 }
 
@@ -192,12 +208,6 @@ pub fn trigger_radius(game: &Game, index: usize, owner: i32) -> f32 {
     if owner == 0 && g.scene_instance_radius_ratio > 0.0 { radius * g.scene_instance_radius_ratio } else { radius }
 }
 
-/// The seed a wreck gets: one of the laid-out seeds in wrecks.json.
-pub fn pool_seed(game: &Game, seed: u32) -> u32 {
-    let seeds = game.scenes.wrecks.seeds;
-    if seed < 1 || seed > seeds { 1 + seed % seeds } else { seed }
-}
-
 /// RandomizePropData.RetrieveRandomProp.
 fn retrieve<'a>(id: &PropId, props: &'a [RandomData], ignore: &[PropId], random: &mut MathRandom, ignored: &mut HashSet<PropId>) -> Option<&'a RandomData> {
     if ignored.remove(id) {
@@ -215,31 +225,108 @@ fn retrieve<'a>(id: &PropId, props: &'a [RandomData], ignore: &[PropId], random:
     None
 }
 
-/// GenerateOnTrigger.InstantiateRandomPropsInHierarchy, the server's half: the props picked
-/// for the decoration (whose own props are walked next) and the network slots it buffers.
-fn walk(w: &Wrecks, key: &str, ltw: &Matrix, parent: &Matrix, random: &mut MathRandom, ignored: &mut HashSet<PropId>, buffer: &mut Vec<(PropId, Matrix)>) {
-    let mut picked = Vec::new();
-    for (i, slot) in w.props.get(key).into_iter().flatten().enumerate() {
-        let id = (key.to_string(), i);
-        if slot.network {
-            if !ignored.remove(&id) {
-                buffer.push((id, matrix_mul(&matrix_mul(parent, ltw), &affine(&slot.m))));
+/// One pass of GenerateOnTrigger.InstantiateRandomPropsInHierarchy over a decoration: the
+/// random numbers, the RandomizePropData flags, and what it picks.
+struct Walk<'a> {
+    w: &'a Wrecks,
+    random: MathRandom,
+    ignored: HashSet<PropId>,
+    /// The network slots it buffers, with their world matrices.
+    buffer: Vec<(PropId, Matrix)>,
+    /// The props it picks (their scene tiles), with their matrices in the prefab's space.
+    made: Vec<(Option<usize>, Matrix)>,
+}
+
+impl Walk<'_> {
+    /// The server's half of the walk: the props picked for the decoration (whose own props are
+    /// walked next) and the network slots it buffers. `parent` places them in the world,
+    /// `local` (a pass that wants `made`) in the prefab's own space.
+    fn walk(&mut self, key: &str, ltw: &Matrix, parent: &Matrix, local: Option<&Matrix>) {
+        let mut picked = Vec::new();
+        for (i, slot) in self.w.props.get(key).into_iter().flatten().enumerate() {
+            let id = (key.to_string(), i);
+            if slot.network {
+                if !self.ignored.remove(&id) {
+                    self.buffer.push((id, matrix_mul(&matrix_mul(parent, ltw), &affine(&slot.m))));
+                }
+                continue;
             }
-            continue;
+            if let Some(d) = retrieve(&id, &slot.props, &slot.ignore, &mut self.random, &mut self.ignored) {
+                let mut m = affine(&slot.m);
+                if d.1 {
+                    m = matrix_mul(&m, &trs([0.0; 3], from_euler_y(self.random.next_float() * 360.0), [1.0; 3]));
+                }
+                if let Some(local) = local {
+                    self.made.push((d.4, matrix_mul(&matrix_mul(local, ltw), &m)));
+                }
+                picked.push((d.3.clone(), m));
+            }
         }
-        if let Some(d) = retrieve(&id, &slot.props, &slot.ignore, random, ignored) {
-            let mut m = affine(&slot.m);
-            if d.1 {
-                m = matrix_mul(&m, &trs([0.0; 3], from_euler_y(random.next_float() * 360.0), [1.0; 3]));
+        for (prop, m) in picked {
+            if let Some(prop) = prop {
+                self.walk(&prop, &matrix_mul(ltw, &m), parent, local);
             }
-            picked.push((d.3.clone(), m));
         }
     }
-    for (prop, m) in picked {
-        if let Some(prop) = prop {
-            walk(w, &prop, &matrix_mul(ltw, &m), parent, random, ignored, buffer);
+}
+
+/// Matrix4x4.lossyScale for the matrices these are (rotation and scale): column lengths.
+fn lossy(m: &Matrix) -> [f32; 3] {
+    std::array::from_fn(|j| (m[0][j] * m[0][j] + m[1][j] * m[1][j] + m[2][j] * m[2][j]).sqrt())
+}
+
+/// What GenerateOnTrigger.Generate does before Tessera: the walk of the generator's other
+/// children from the seed. Its scene tiles are what Tessera takes as constraints.
+pub struct Prepared {
+    pub scene: Vec<tessera::SceneTile>,
+    buffer: Vec<(PropId, Matrix)>,
+    pub ignored: HashSet<PropId>,
+}
+
+/// The tile positions Tessera chose, as the walk takes them: (props key, local position, local rotation).
+pub type Layout = Vec<(String, [f32; 3], [f32; 4])>;
+
+/// How many seeds one wreck may try (the game goes on until Tessera succeeds; its failures are
+/// one in thirty or so).
+const MAX_TRIES: u32 = 1000;
+
+/// The part of Generate before Tessera, `ignored` being the RandomizePropData flags the
+/// generations before left set (the game keeps them on the prefabs). None for a generator the
+/// tables do not have.
+pub fn prepare(game: &Game, index: usize, seed: u32, position: [f32; 3], rotation: [f32; 4], mut ignored: HashSet<PropId>) -> Option<Prepared> {
+    let w = wrecks(game);
+    let data = w.generators.get(index)?;
+    // The generator's own children are its instance's (fresh flags); tiles and props are prefabs.
+    ignored.retain(|(key, _)| data.children.iter().all(|c| c.props != *key));
+    // GenerateRandomPropsFromRoot on the generator's other children (its container stays empty
+    // on a server): the network slots in the world, the props' places in the prefab's space.
+    let local = affine(&data.container);
+    let container = matrix_mul(&trs(position, rotation, data.scale), &local);
+    let mut walk = Walk { w: &w, random: MathRandom::new(seed), ignored, buffer: Vec::new(), made: Vec::new() };
+    for child in &data.children {
+        walk.walk(&child.props, &affine(&child.ltw), &container, Some(&local));
+    }
+    // Tessera sees the tiles of the prefab and of the props placed.
+    let inverse = tessera::inverse(&affine(&data.generator));
+    let mut scene = data.fixed.clone();
+    for (prefab, m) in walk.made {
+        let Some(tree) = prefab.and_then(|i| w.prefabs.get(i)) else { continue };
+        let l = lossy(&m);
+        let at = trs(matrix_position(&m), matrix_rotation(&m), std::array::from_fn(|i| tree.s[i] * l[i]));
+        tree.scene_tiles(&at, &inverse, &mut scene);
+    }
+    Some(Prepared { scene, buffer: walk.buffer, ignored: walk.ignored })
+}
+
+/// Tessera from the seed, the next seed while it fails: the wreck's tiles. Runs on a thread.
+pub fn solve(w: &Wrecks, index: usize, seed: u32, scene: &[tessera::SceneTile]) -> Result<Layout, String> {
+    let model = w.model(index)?;
+    for current in seed..seed.saturating_add(MAX_TRIES) {
+        if let Some(tiles) = tessera::generate(&model, scene, current as i32)? {
+            return Ok(tiles.iter().filter_map(|t| Some((model.tiles[t.tile].props.clone()?, t.position, t.rotation))).collect());
         }
     }
+    Err(format!("Tessera failed on {MAX_TRIES} seeds from {seed}"))
 }
 
 /// The private CreateAndInstantiateWorldObject: a generated object, with what its inventory
@@ -247,35 +334,26 @@ fn walk(w: &Wrecks, key: &str, ltw: &Matrix, parent: &Matrix, random: &mut MathR
 fn create(game: &mut Game, group: &str, position: [f32; 3], rotation: [f32; 4]) -> Vec<i32> {
     let Some(group) = game.data.group(group) else { return Vec::new() };
     let (id, _) = game.create_and_instantiate(group, position, rotation, false, true, true);
+    crate::machines::growers::announce_growth(game, id);
     let inventory = game.wos[&id].linked_inventory;
     let mut ids = vec![id];
     ids.extend(game.inventories.get(&inventory).map(|i| i.items.clone()).unwrap_or_default());
     ids
 }
 
-/// GenerateOnTrigger.Generate on the server: the network objects of a generator's wreck, from
-/// its seed's layout. Returns the generated world objects; none without the seed's layout.
-pub fn generate(game: &mut Game, index: usize, seed: u32, position: [f32; 3], rotation: [f32; 4]) -> Vec<i32> {
+/// The rest of GenerateOnTrigger.Generate on the server, once Tessera has laid the wreck out:
+/// the tiles' props, then the network objects of a generator's wreck (safes, containers,
+/// locked doors, generators). Returns the generated world objects and the flags left set.
+pub fn finish(game: &mut Game, index: usize, seed: u32, position: [f32; 3], rotation: [f32; 4], prepared: Prepared, layout: &Layout) -> (Vec<i32>, HashSet<PropId>) {
     let w = wrecks(game);
-    let Some(data) = w.generators.get(index) else { return Vec::new() };
-    let Some(layout) = data.layouts.get(&seed.to_string()) else { return Vec::new() };
+    let Some(data) = w.generators.get(index) else { return (Vec::new(), prepared.ignored) };
     let root = trs(position, rotation, data.scale);
-    let mut ignored = std::mem::take(&mut game.ext.planets.instances.ignored);
-    // The generator's own children are its instance's (fresh flags); tiles and props are prefabs.
-    ignored.retain(|(key, _)| data.children.iter().all(|c| c.props != *key));
-    let mut buffer = Vec::new();
-    // GenerateRandomPropsFromRoot on the generator's other children (its container stays
-    // empty on a server), then the tiles, each from the seed.
-    let mut random = MathRandom::new(seed);
-    let container = matrix_mul(&root, &affine(&data.container));
-    for child in &data.children {
-        walk(&w, &child.props, &affine(&child.ltw), &container, &mut random, &mut ignored, &mut buffer);
-    }
-    let mut random = MathRandom::new(seed);
     let parent = matrix_mul(&root, &affine(&data.generator));
+    let mut walk = Walk { w: &w, random: MathRandom::new(seed), ignored: prepared.ignored, buffer: prepared.buffer, made: Vec::new() };
     for (tile, p, q) in layout {
-        walk(&w, tile, &trs(*p, *q, [1.0; 3]), &parent, &mut random, &mut ignored, &mut buffer);
+        walk.walk(tile, &trs(*p, *q, [1.0; 3]), &parent, None);
     }
+    let Walk { buffer, mut ignored, .. } = walk;
     let mut random = MathRandom::new(seed.wrapping_add(1));
     let limit = |group: &str| data.limited_groups.iter().find(|(id, _)| id.as_deref() == Some(group)).map(|(_, n)| *n);
     let mut limited: IndexMap<String, Vec<(bool, Matrix)>> = IndexMap::new();
@@ -287,7 +365,7 @@ pub fn generate(game: &mut Game, index: usize, seed: u32, position: [f32; 3], ro
     };
     for (id, m) in buffer {
         let slot = &w.props[&id.0][id.1];
-        let Some((_, rotate, Some(group), _)) = retrieve(&id, &slot.props, &slot.ignore, &mut random, &mut ignored) else { continue };
+        let Some((_, rotate, Some(group), ..)) = retrieve(&id, &slot.props, &slot.ignore, &mut random, &mut ignored) else { continue };
         if !slot.no_count_limited && limit(group).is_some() {
             limited.entry(group.clone()).or_default().push((*rotate, m));
             continue;
@@ -302,6 +380,16 @@ pub fn generate(game: &mut Game, index: usize, seed: u32, position: [f32; 3], ro
             max -= 1;
         }
     }
+    (made, ignored)
+}
+
+/// A wreck laid out now, on this thread (what instances.rs does over several ticks).
+#[cfg(test)]
+pub fn generate_now(game: &mut Game, index: usize, seed: u32, position: [f32; 3], rotation: [f32; 4]) -> Vec<i32> {
+    let ignored = std::mem::take(&mut game.ext.planets.instances.ignored);
+    let prepared = prepare(game, index, seed, position, rotation, ignored).unwrap();
+    let layout = solve(&wrecks(game), index, seed, &prepared.scene).unwrap();
+    let (made, ignored) = finish(game, index, seed, position, rotation, prepared, &layout);
     game.ext.planets.instances.ignored = ignored;
     made
 }
@@ -410,7 +498,7 @@ pub fn init_scene_variables(game: &mut Game, seed: i32, difficulty: i32, scene: 
 
 #[cfg(test)]
 mod tests {
-    use super::Shape;
+    use super::*;
 
     #[test]
     fn only_an_active_box_is_a_shape() {
@@ -424,5 +512,25 @@ mod tests {
         let mut no_size = row("BoxCollider", true);
         no_size.as_object_mut().unwrap().remove("size");
         assert!(serde_json::from_value::<Shape>(no_size).is_err());
+    }
+
+    /// Tessera is deterministic in the seed, and a seed whose retries all contradict goes on to
+    /// the next, as GenerateOnTrigger.Generate does (read-game measured seed 14 of the small
+    /// wreck: every retry fails).
+    #[test]
+    fn the_same_seed_gives_the_same_layout_and_a_failing_seed_moves_on() {
+        let Some(g) = crate::planets::tests::game() else { return };
+        let w = wrecks(&g);
+        let prepare = |seed| prepare(&g, 0, seed, [0.0; 3], [0.0, 0.0, 0.0, 1.0], HashSet::new()).unwrap();
+        let model = w.model(0).unwrap();
+        let scene = prepare(14).scene;
+        assert!(tessera::generate(&model, &scene, 14).unwrap().is_none(), "seed 14 contradicts");
+        let moved = solve(&w, 0, 14, &scene).unwrap();
+        let next: Layout = tessera::generate(&model, &scene, 15).unwrap().expect("seed 15 lays out").iter().filter_map(|t| Some((model.tiles[t.tile].props.clone()?, t.position, t.rotation))).collect();
+        assert_eq!(moved, next);
+        assert_eq!(solve(&w, 0, 14, &scene).unwrap(), moved);
+        // Another seed, another wreck.
+        let other = prepare(16);
+        assert_ne!(solve(&w, 0, 16, &other.scene).unwrap(), moved);
     }
 }

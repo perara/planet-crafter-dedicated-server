@@ -155,13 +155,13 @@ planets removed** (`nodlc.py`); the full save is run once for the record.
 | weather, meteors, day and night | `meteo.rs`, `meteo/explode.rs` | 11 | `scripts/meteo_story.json` | n/a | done; impacts are computed by clients |
 | terraformation units and stages | `units.rs` | 4 | every run (units compared by rate) | 5 planets | done |
 | story events, messages | `meteo/story.rs`, `handlers.rs` | 18 | `scripts/meteo_story.json` | 40 events, 56 messages | done |
-| wrecks, world instances, portals | `instances.rs`, `instances/generate.rs` | 7 + 1 | `scripts/instances.json` | 8 instances, 2 portal generators | **partly**: a pool of 64 layouts per size, not each wreck's own seed |
+| wrecks, world instances, portals | `instances.rs`, `instances/generate.rs` | 11 + 2 | `scripts/instances.json`; wreck sweep (EXPECTED.md) | 8 instances, 2 portal generators | done: each wreck is laid out from its own seed (Tessera, on a thread), the game's objects at the game's places |
 | deconstruct, recycle | `deconstruct.rs`, `machines.rs` | 10 | sweep (every building), lg_real | all | done (gap 8) |
 | equipment, gauges, dying | `equipment.rs`, `gauges.rs`, `status.rs` | 6 | sweep use | 3 players | done |
 | crafting | client side; `AddOneToTotalCraft`, autocrafters | 3 | sweep craft/autocraft | 32 autocrafters | done |
 | blueprints, unlocks | `unlocks.rs` | 2 | `scripts/crafting.json` | 190 unlocked | done |
 | genetics | `genetics.rs`, `animals/spawn.rs` | 3 | sweep convert/animals | 511 trait items | done (random traits are class d) |
-| Tessera (wreck layouts) | `native/tessera.rs`, at extraction | 1 | by hand (`manual` tests) | n/a | done for 64 seeds per size |
+| Tessera (wreck layouts) | `tessera.rs` (run on a wreck's seed, off the tick), `native/wrecks.rs` (the tile sets, at extraction) | 1 | 24 wrecks and 8 world instances against the game; the six recorded wrecks of `wrecks_of_any_seed_come_out_as_the_game_lays_them` | 8 instances | done |
 | travel between planets | `planets.rs` | 5 | `scripts/travel_chat.json`; lg_travel | 5 planets | done for free planets; DLC planets refused |
 | **DLC planets (Humble, Toxicity)** | `scene.rs`, `machines/veins.rs`, `toxic.rs` | 3 | none possible (the reference owns no DLC) | 10 554 objects | **partly**, see gap 3 |
 | save, load, backups | `save.rs`, `load.rs` | 9 | load fidelity above | whole | done (fix in this branch) |
@@ -201,16 +201,16 @@ Severity is how likely a normal player or server owner meets it times how bad it
 | 5 | **The clock is a 32-bit float.** After about 1.5 days of play the clock's step is 15 ms, after 97 days one second; timers of 0.1 and 0.2 s then run at the wrong rate. | `game.time` is `(clock - paused) as f32` (`game.rs`); the game has the same float but does not run for months. | Keep the due times in f64: done for gauges and units on `integrate` (40242e8, c318e13); machines and logistics still to do. |
 | 6 | **Drones served equal-priority demands in another order than the game. Fixed.** The game sorts its demand inventories once, at start, with `List<T>.Sort` (an introsort: equal priorities end in an order of their own above 16 elements; same for the stations by distance, `SortInventory` and the optimizer's machines). | A save with 17 demand inventories at priority 9 and 17 at priority 0 (among the save's 159), 8 items to give them: the same 8 of 17 are served in three runs of the game, in each of the two classes; this server before the port served 14 and 12 other ones of 17 (stable sort), after it 0 and 0 (`completeness/demand_order.py`). The honey shortfall of the 5-minute runs (10 to 12 lower here, the first beehive empty at the end) was **not** this: the demand honey has one inventory, and the same runs gave the same honey before and after the port. It was the game's head start of 10 to 13 s before the probe joins (class b: the same 4.4 % in the terraformation units) against the beehive's 70 s cycle of being emptied by drones and refilled; with 12 s given to this server honey ends 189 and 192 before the port, 187 and 189 after, against 190, 191 and 192 on the game. | Done: `dotnet_sort.rs`, the game's own steps read from the IL of its `mscorlib` and checked against a real Mono. |
 | 7 | A corrupt entry in a save is skipped without a word (v0.6.2). | `save.rs` `entries()` filters with `.ok()`. This save has none (all 36 000 or so entries parse), so nothing was lost here. | Done on `integrate` (an error naming the entry). |
-| 8 | Wrecks: a pool of 64 layouts per size, not each wreck's seed; a save made by an older generator loses all its wrecks (the game does the same). | README "Differences"; the save's 8 instances (version 15) were dropped by both hosts, 805 objects with them. | Run the Tessera port at generation time instead of the pool (known open item). |
+| 8 | **Wrecks came in a pool of 64 layouts per size, not each wreck's seed. Fixed.** A save made by an older generator still loses all its wrecks (the game does the same). | The save's 8 instances (version 15) are dropped by both hosts, 805 objects with them (measured again after the fix: the same groups, the same counts). | Done: Tessera runs on the wreck's own seed when a player first enters it (0.1 to 3 s on a thread of its own; the tick spends 2.8 ms at most on the objects), and 1 706 objects of 24 wrecks equal the game's. EXPECTED.md has the comparison. |
 | 9 | Escape pods can be deconstructed by a client that sends the call; the game ignores it. | lg_real: the world's pod is gone here, still there on the game. Known, EXPECTED.md "A second escape pod"; no game client sends it. | Treat the groups whose `ActionDeconstructible` sits under `WorldContainer` as not deconstructible. |
 | 10 | Idle cost: 3.9 % of a core with no player, a slowest loop of 14 to 27 ms every second on this save. | nf run. | Find what the 14 ms second-by-second job is (a scan of 33 000 objects?). |
 | 11 | A loaded colourless Sign gets the default colour `0,0,0,1` at load; the game leaves `0,0,0,0`. Cosmetic; unexplained (the Sign's colour child is hidden on some platforms). | 18 Signs on Prime, every run. | Check on a Steam-platform host before changing. |
 | 12 | A call about an inventory id that does not exist is answered here and ignored by the game (`TransferAllItems`, `LockInventoryContent`). | lg_inventories, inventory 603. | Return silently. |
 | 13 | The game's own player spawns wild animals on arrival (five crabs on Aqualis); here animals appear when a real client reports its spawner. | lg_travel. Probably the same with real clients: not verified. | Verify with a real client. |
-| 14 | Documented limits: no physics (the nearest player owns what falls and drives), every player sees every animal, endings do not restart the session, sleeping does not skip the night, 64-layout wrecks. | README "Differences". | None planned. |
+| 14 | Documented limits: no physics (the nearest player owns what falls and drives), every player sees every animal, endings do not restart the session, sleeping does not skip the night. | README "Differences". | None planned. |
 | 15 | `NetworkTransform.SetStateServerRpc` is not handled. | No game code sends it. | None. |
 
-**Fixed in this branch:** gap 1 (commit 9520160), gap 3 (the `old-saves` branch: refusal and import), gap 6 (the .NET sort, below the table) and a one-line change to the probe so a script can address
+**Fixed in this branch:** gap 1 (commit 9520160), gap 3 (the `old-saves` branch: refusal and import), gap 6 (the .NET sort, below the table), gap 8 (the `wrecks-tessera` branch) and a one-line change to the probe so a script can address
 the world's own objects (6f34b0a). Everything else above is listed with its smallest fix and not started.
 
 ### Gap 6: where the game sorts, and what this server does
@@ -255,7 +255,6 @@ the game), a save then a load then a save changes nothing, and a probe player pl
 
 * DLC planet support: scene dumps for Humble and Toxicity from an owner's install (extraction work, no new game
   logic), then the toxic areas (one module, the `ToxicArea` registrations and two client calls).
-* Each wreck's own Tessera seed (the port exists in `native/tessera.rs`; it runs at extraction now).
 * f64 clocks for machines and logistics (gap 5).
 
 ## What could not be checked, and why

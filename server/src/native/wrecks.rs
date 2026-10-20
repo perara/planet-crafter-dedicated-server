@@ -1,5 +1,7 @@
 //! wrecks.json from the game files, with no game running: the generators' prefabs, the
-//! RandomizePropData lists their walks take, and each seed's layout from the Tessera port (tessera.rs), as the game lays it out.
+//! RandomizePropData lists their walks take, and what the server needs to run the game's Tessera
+//! (crate::tessera) on a wreck's own seed: each generator's tile set, constraints and palette, and
+//! the scene tiles that its props bring. The tile sets are game data: they stay in the tables.
 //! `native-reach` (reach below) measures how much of the game's IL a port like that has to cover.
 
 use std::collections::{HashMap, HashSet};
@@ -11,9 +13,9 @@ use serde_json::{json, Map, Value};
 use super::netdata::field;
 use super::serial::Raw;
 use super::tables::{single as num, Ctx};
-use super::tessera;
+use crate::tessera;
 use super::unity::{self, Id};
-use crate::geometry::{from_euler_y, matrix_mul, trs, MathRandom, Matrix};
+use crate::geometry::{matrix_mul, trs, Matrix};
 
 impl Ctx {
     /// ProceduralInstancesHandler._generators: each entry's generator prefab root.
@@ -113,7 +115,7 @@ impl Ctx {
     /// A TesseraTile as Tessera uses it: TesseraTileBase.OnAfterDeserialize turns its
     /// faceDetails and offsets into sylvesFaceDetails and sylvesOffsets (for cubes: the same
     /// values, every face a Square).
-    pub fn tessera_tile(&mut self, component: Id) -> Result<tessera::TileDef, String> {
+    fn tessera_tile(&mut self, component: Id, ids: &mut TileIds) -> Result<tessera::TileDef, String> {
         let b = self.behaviour(component).map_err(|e| format!("TesseraTile: unreadable: {e}"))?;
         if b.class != "TesseraTile" {
             return Err(format!("{}: a {} (only cube tiles are ported)", b.name, b.class));
@@ -146,9 +148,10 @@ impl Ctx {
             .collect::<Result<Vec<[i32; 3]>, String>>()?;
         let palette = self.target(component.0, get(f, "palette")?)?;
         Ok(tessera::TileDef {
-            id: component,
+            id: ids.id(component),
             name,
-            palette,
+            palette: palette.map(|p| ids.id(p)),
+            props: None,
             faces,
             offsets,
             center: vector(f, "center")?,
@@ -162,7 +165,7 @@ impl Ctx {
 
     /// A wreck's TesseraGenerator: its settings, tiles and constraints. Settings the port
     /// does not cover fail.
-    pub fn tessera_generator(&mut self, component: Id) -> Result<tessera::Generator, String> {
+    fn tessera_generator(&mut self, component: Id, ids: &mut TileIds) -> Result<tessera::Generator, String> {
         let b = self.behaviour(component).map_err(|e| format!("TesseraGenerator: unreadable: {e}"))?;
         let f = b.fields.clone();
         let file = component.0;
@@ -180,10 +183,10 @@ impl Ctx {
         for e in list(&f, "tiles")? {
             let e = fields(e)?;
             let Some(tile) = self.target(file, get(e, "tile")?)? else { continue };
-            tiles.push((self.tessera_tile(tile)?, single(e, "weight")?));
+            tiles.push((self.tessera_tile(tile, ids)?, single(e, "weight")?));
         }
         let sky_box = match self.target(file, get(&f, "skyBox")?)? {
-            Some(t) => Some(self.tessera_tile(t)?),
+            Some(t) => Some(self.tessera_tile(t, ids)?),
             None => None,
         };
         let mut constraints = Vec::new();
@@ -205,7 +208,7 @@ impl Ctx {
                 "CountConstraint" => {
                     let mut tiles = Vec::new();
                     for t in list(&cf, "tiles")? {
-                        tiles.extend(self.target(c.0, t)?);
+                        tiles.extend(self.target(c.0, t)?.map(|t| ids.id(t)));
                     }
                     tessera::ConstraintDef::Count { tiles, comparison: int(&cf, "comparison")? as i32, count: int(&cf, "count")? as i32, eager: boolean(&cf, "eager")? }
                 }
@@ -229,7 +232,7 @@ impl Ctx {
         // matchOverrides from the list, ToDictionary failing on a repeated pair).
         let mut palette = tessera::Palette::default();
         if let Some(p) = tiles.first().and_then(|t| t.0.palette) {
-            let pb = self.behaviour(p).map_err(|e| format!("TesseraPalette: unreadable: {e}"))?;
+            let pb = self.behaviour(ids.comps[p]).map_err(|e| format!("TesseraPalette: unreadable: {e}"))?;
             for o in list(&pb.fields, "matchOverridesList")? {
                 let o = fields(o)?;
                 let key = (int(o, "color1")? as i32, int(o, "color2")? as i32);
@@ -261,14 +264,8 @@ fn v3(v: [f32; 3]) -> Value {
     Value::Array(v.iter().map(|x| num(*x)).collect())
 }
 
-/// Matrix4x4.lossyScale for the matrices these are (rotation and scale): column lengths.
-fn lossy(m: &Matrix) -> [f32; 3] {
-    std::array::from_fn(|j| (m[0][j] * m[0][j] + m[1][j] * m[1][j] + m[2][j] * m[2][j]).sqrt())
-}
-
 /// A RandomizePropData as the walk takes it.
 struct Slot {
-    component: Id,
     /// Its matrix with the walked root at the origin, unrotated, its scale kept.
     m: Matrix,
     network: bool,
@@ -377,7 +374,7 @@ impl Ctx {
             for r in list(&b.fields, "ignoreIfGenerated")? {
                 ignore.extend(self.target(c.0, r)?);
             }
-            let slot = Slot { component: c, m: matrix_mul(&origin, &self.ltw(node)?), network, no_count_limited: boolean(&b.fields, "noCountLimited")?, props: randoms.clone(), ignore };
+            let slot = Slot { m: matrix_mul(&origin, &self.ltw(node)?), network, no_count_limited: boolean(&b.fields, "noCountLimited")?, props: randoms.clone(), ignore };
             props.lists.get_mut(key.as_ref().expect("a key for a list")).expect("the list").push(slot);
             // The props' own lists, named after them (after this list is complete).
             if !network {
@@ -391,13 +388,49 @@ impl Ctx {
         Ok(key)
     }
 
-    /// Props.Finish and the lists as JSON.
-    fn props_json(&mut self, props: &Props) -> Value {
+    /// Props.Finish and the lists as JSON, and the prefabs the lists name whose objects hold
+    /// scene tiles. Only the lists a walk from `roots` (the generators' own children) can reach
+    /// name them: Tessera sees the tiles of those walks' props and no others.
+    fn props_json(&mut self, props: &Props, roots: &[String], ids: &mut TileIds) -> Result<(Value, Value), String> {
+        let mut reachable: HashSet<&str> = HashSet::new();
+        let mut todo: Vec<&str> = roots.iter().map(String::as_str).collect();
+        while let Some(key) = todo.pop() {
+            if !reachable.insert(key) {
+                continue;
+            }
+            for s in props.lists.get(key).into_iter().flatten().filter(|s| !s.network) {
+                todo.extend(s.props.iter().filter_map(|(_, _, prop)| props.keys.get(&(*prop)?)?.as_deref()));
+            }
+        }
+        let mut prefab_of: HashMap<Id, Option<usize>> = HashMap::new();
+        let mut prefabs = Vec::new();
         let mut out = Map::new();
         for (key, slots) in &props.lists {
             let mut list = Vec::new();
             for s in slots {
-                let randoms: Vec<Value> = s.props.iter().map(|(chance, rotate, prop)| json!([chance, rotate, prop.and_then(|p| self.group_of(p)), if s.network { None } else { prop.and_then(|p| props.keys.get(&p).cloned().flatten()) }])).collect();
+                let mut randoms = Vec::new();
+                for (chance, rotate, prop) in &s.props {
+                    let group = prop.and_then(|p| self.group_of(p));
+                    let own = if s.network { None } else { prop.and_then(|p| props.keys.get(&p).cloned().flatten()) };
+                    let mut prefab = None;
+                    if let (true, false, Some(p)) = (reachable.contains(key.as_str()), s.network, prop) {
+                        prefab = match prefab_of.get(p) {
+                            Some(i) => *i,
+                            None => {
+                                let i = match self.tile_tree(*p, ids)? {
+                                    Some(tree) => {
+                                        prefabs.push(serde_json::to_value(&tree).map_err(|e| e.to_string())?);
+                                        Some(prefabs.len() - 1)
+                                    }
+                                    None => None,
+                                };
+                                prefab_of.insert(*p, i);
+                                i
+                            }
+                        };
+                    }
+                    randoms.push(json!([chance, rotate, group, own, prefab]));
+                }
                 let mut e = json!({"m": affine(&s.m), "network": s.network, "noCountLimited": s.no_count_limited, "props": randoms});
                 let ignore: Vec<Value> = s.ignore.iter().filter_map(|c| props.ids.get(c)).map(|(k, i)| json!([k, i])).collect();
                 if !ignore.is_empty() {
@@ -407,7 +440,7 @@ impl Ctx {
             }
             out.insert(key.clone(), Value::Array(list));
         }
-        Value::Object(out)
+        Ok((Value::Object(out), Value::Array(prefabs)))
     }
 
     /// Generation.Shape of the root's trigger colliders (a prefab root: at its own pose). A
@@ -447,13 +480,15 @@ impl Ctx {
         Ok(out)
     }
 
-    /// The scene tiles (TesseraTileBase) of active objects at and under a node, with the
-    /// node's matrix given: their TesseraTile and matrix. Pins and volumes are not ported.
-    fn scene_tiles(&mut self, node: Id, ltw: &Matrix, out: &mut Vec<(Id, Matrix)>) -> Result<(), String> {
+    /// The scene tiles (TesseraTileBase) of the active objects at and under a node, with the
+    /// poses between them; None without any. Pins and volumes are not ported.
+    fn tile_tree(&mut self, node: Id, ids: &mut TileIds) -> Result<Option<tessera::TileNode>, String> {
         self.graph_file(node.0)?;
         if !self.graph.nodes.get(&node).is_some_and(|n| n.active) {
-            return Ok(());
+            return Ok(None);
         }
+        let (p, q, s) = self.local(node)?;
+        let mut tiles = Vec::new();
         for (c, class_id) in self.graph.nodes.get(&node).map(|n| n.components.clone()).unwrap_or_default() {
             if class_id != unity::MONO_BEHAVIOUR {
                 continue;
@@ -463,72 +498,30 @@ impl Ctx {
                 continue;
             }
             match class.as_str() {
-                "TesseraTile" => out.push((c, *ltw)),
+                "TesseraTile" => {
+                    let t = self.tessera_tile(c, ids)?;
+                    tiles.push(tessera::TileShape { faces: t.faces, offsets: t.offsets, center: t.center });
+                }
                 "TesseraPinned" | "TesseraVolume" | "TesseraTileBase" | "TesseraHexTile" | "TesseraTrianglePrismTile" | "TesseraSquareTile" => return Err(format!("{} {class} in a wreck: not ported", self.node_name(node)?)),
                 _ => {}
             }
         }
+        let mut children = Vec::new();
         for child in self.graph.children(node) {
-            let (p, q, s) = self.local(child)?;
-            let m = matrix_mul(ltw, &trs(p, q, s));
-            self.scene_tiles(child, &m, out)?;
+            children.extend(self.tile_tree(child, ids)?);
         }
-        Ok(())
-    }
-
-    /// GenerateOnTrigger.InstantiateRandomPropsInHierarchy as read-game runs it: the props
-    /// it instantiates under the container (`parent`), as (prefab, world matrix). `ignored`:
-    /// the RandomizePropData.ignore flags set.
-    #[allow(clippy::too_many_arguments)]
-    fn walk_props(&self, props: &Props, key: &str, ltw: &Matrix, parent: &Matrix, random: &mut MathRandom, ignored: &mut HashSet<Id>, made: &mut Vec<(Id, Matrix)>) -> Result<(), String> {
-        let mut picked = Vec::new();
-        for slot in props.lists.get(key).into_iter().flatten() {
-            if slot.network {
-                ignored.remove(&slot.component);
-                continue;
-            }
-            // RandomizePropData.RetrieveRandomProp.
-            if ignored.remove(&slot.component) {
-                continue;
-            }
-            let num = random.next_int(0, 101);
-            let mut sum = 0;
-            let mut chosen = None;
-            for d in &slot.props {
-                if num >= sum && num <= sum + d.0 {
-                    ignored.extend(slot.ignore.iter().copied());
-                    chosen = Some(d);
-                    break;
-                }
-                sum += d.0;
-            }
-            let Some(&(_, rotate, prop)) = chosen else { continue };
-            let mut m = slot.m;
-            if rotate {
-                m = matrix_mul(&m, &trs([0.0; 3], from_euler_y(random.next_float() * 360.0), [1.0; 3]));
-            }
-            let prop = prop.ok_or("RandomizePropData picked a null prop")?;
-            made.push((prop, matrix_mul(&matrix_mul(parent, ltw), &m)));
-            picked.push((prop, m));
-        }
-        for (prop, m) in picked {
-            if let Some(Some(k)) = props.keys.get(&prop) {
-                self.walk_props(props, k, &matrix_mul(ltw, &m), parent, random, ignored, made)?;
-            }
-        }
-        Ok(())
+        Ok((!tiles.is_empty() || !children.is_empty()).then_some(tessera::TileNode { p, q, s, tiles, children }))
     }
 
     /// Generation.Wrecks: wrecks.json.
     pub fn wrecks(&mut self) -> Result<Value, String> {
-        const SEEDS: u32 = 64;
         if self.groups.is_empty() {
             return Err("wrecks: the groups are not read yet".into());
         }
         let mut props = Props::default();
+        let mut ids = TileIds::default();
         let mut generators = Vec::new();
-        // RandomizePropData.ignore on prefabs stays set from one generation to the next.
-        let mut ignored: HashSet<Id> = HashSet::new();
+        let mut roots = Vec::new();
         for root in self.wreck_generators()? {
             let prefab = self.node_name(root)?;
             let wreck = self.component(root, "GenerateOnTrigger")?.ok_or(format!("{prefab}: no GenerateOnTrigger"))?;
@@ -538,7 +531,6 @@ impl Ctx {
             let container = self.target(wreck.0, get(&b.fields, "_randomGeneratedPropsContainer")?)?.ok_or(format!("{prefab}: no props container"))?;
             let root_inverse = tessera::inverse(&self.ltw(root)?);
             let mut children = Vec::new();
-            let mut walked = Vec::new();
             for child in self.graph.children(root) {
                 if child == tessera_node || child == container {
                     continue;
@@ -547,8 +539,8 @@ impl Ctx {
                 if let Some(key) = self.props_key(&mut props, child, Some(name))? {
                     let (p, q, s) = self.local(child)?;
                     children.push(json!({"props": key, "ltw": affine(&trs(p, q, s))}));
+                    roots.push(key);
                 }
-                walked.push(child);
             }
             let mut limited = Vec::new();
             for l in list(&b.fields, "_limitedGroups")? {
@@ -564,75 +556,18 @@ impl Ctx {
             }
             let generator = matrix_mul(&root_inverse, &self.ltw(tessera_node)?);
             let container_m = matrix_mul(&root_inverse, &self.ltw(container)?);
-            let model = tessera::Model::new(self.tessera_generator(tessera)?)?;
-            // The tiles in the prefab copy, in the generator's space.
-            let generator_inverse = tessera::inverse(&generator);
-            let mut fixed = Vec::new();
-            self.scene_tiles(root, &root_inverse, &mut fixed)?;
-            let mut scenes = Vec::new();
-            for seed in 1..=SEEDS {
-                // GenerateRandomPropsFromRoot on the other children of a fresh copy (its own
-                // components' flags are fresh): the props it places, some with tiles.
-                let mut random = MathRandom::new(seed);
-                for child in &walked {
-                    if let Some(Some(key)) = props.keys.get(child) {
-                        for s in &props.lists[key] {
-                            ignored.remove(&s.component);
-                        }
-                    }
-                }
-                let mut made = Vec::new();
-                for child in &walked {
-                    let Some(Some(key)) = props.keys.get(child).cloned() else { continue };
-                    let (p, q, s) = self.local(*child)?;
-                    self.walk_props(&props, &key, &trs(p, q, s), &container_m, &mut random, &mut ignored, &mut made)?;
-                }
-                let mut tiles = fixed.clone();
-                for (prop, w) in made {
-                    let (_, _, scale) = self.local(prop)?;
-                    let l = lossy(&w);
-                    let at = trs(crate::geometry::matrix_position(&w), crate::geometry::matrix_rotation(&w), std::array::from_fn(|i| scale[i] * l[i]));
-                    self.scene_tiles(prop, &at, &mut tiles)?;
-                }
-                let mut scene = Vec::new();
-                for (c, m) in tiles {
-                    let t = self.tessera_tile(c)?;
-                    scene.push(tessera::SceneTile { faces: t.faces, offsets: t.offsets, center: t.center, matrix: matrix_mul(&generator_inverse, &m) });
-                }
-                scenes.push(scene);
+            // The tile set, with each tile's own props list (the walk of a tile the layout holds).
+            let mut model = self.tessera_generator(tessera, &mut ids)?;
+            for (tile, _) in model.tiles.iter_mut() {
+                let node = self.behaviour(ids.comps[tile.id])?.game_object.ok_or("TesseraTile without a game object")?;
+                tile.props = self.props_key(&mut props, node, None)?;
             }
-            // Tessera from each seed with the scene's tiles, the next seed while it fails (the
-            // seeds are independent: spread over the cores).
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(scenes.len().max(1));
-            let mut results: Vec<(usize, Result<Vec<tessera::Instance>, String>)> = std::thread::scope(|scope| {
-                let workers: Vec<_> = (0..threads)
-                    .map(|_| {
-                        scope.spawn(|| {
-                            let mut out = Vec::new();
-                            loop {
-                                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                let Some(scene) = scenes.get(i) else { return out };
-                                let seed = i as u32 + 1;
-                                out.push((i, layout(&model, scene, seed, &prefab)));
-                            }
-                        })
-                    })
-                    .collect();
-                workers.into_iter().flat_map(|w| w.join().expect("a Tessera worker panicked")).collect()
-            });
-            results.sort_by_key(|r| r.0);
-            let mut layouts = Map::new();
-            for (i, layout) in results {
-                let mut out = Vec::new();
-                for t in layout? {
-                    let tile = &model.tiles[t.tile];
-                    let node = self.behaviour(tile.id)?.game_object.ok_or("TesseraTile without a game object")?;
-                    if let Some(key) = self.props_key(&mut props, node, None)? {
-                        out.push(json!([key, v3(t.position), Value::Array(t.rotation.iter().map(|x| num(*x)).collect())]));
-                    }
-                }
-                layouts.insert((i + 1).to_string(), Value::Array(out));
+            // The generator must build (settings the port cannot run fail here, not in a game).
+            tessera::Model::new(model.clone()).map_err(|e| format!("{prefab}: {e}"))?;
+            // The tiles in the prefab itself, in the generator's space.
+            let mut fixed = Vec::new();
+            if let Some(tree) = self.tile_tree(root, &mut ids)? {
+                tree.scene_tiles(&root_inverse, &tessera::inverse(&generator), &mut fixed);
             }
             let (_, _, scale) = self.local(root)?;
             let triggers = self.triggers(root)?;
@@ -645,23 +580,30 @@ impl Ctx {
                 "limitedGroups": limited,
                 "sceneInstanceRadiusRatio": num(single(&b.fields, "_sceneInstanceRadiusRatio")?),
                 "triggers": triggers,
-                "layouts": layouts,
+                "tessera": serde_json::to_value(&model).map_err(|e| e.to_string())?,
+                "fixed": serde_json::to_value(&fixed).map_err(|e| e.to_string())?,
             }));
         }
-        let props = self.props_json(&props);
-        Ok(json!({"seeds": SEEDS, "generators": generators, "props": props}))
+        let (props, prefabs) = self.props_json(&props, &roots, &mut ids)?;
+        Ok(json!({"generators": generators, "props": props, "prefabs": prefabs}))
     }
 }
 
-/// Generation.Layouts for one seed: Tessera from the seed, the next one while it fails, up to
-/// 50 seeds.
-fn layout(model: &tessera::Model, scene: &[tessera::SceneTile], seed: u32, prefab: &str) -> Result<Vec<tessera::Instance>, String> {
-    for current in seed..seed + 50 {
-        if let Some(l) = tessera::generate(model, scene, current as i32)? {
-            return Ok(l);
-        }
+/// The TesseraTile components (and palettes) met so far, numbered in order (TileDef.id).
+#[derive(Default)]
+struct TileIds {
+    ids: HashMap<Id, usize>,
+    comps: Vec<Id>,
+}
+
+impl TileIds {
+    fn id(&mut self, component: Id) -> usize {
+        let comps = &mut self.comps;
+        *self.ids.entry(component).or_insert_with(|| {
+            comps.push(component);
+            comps.len() - 1
+        })
     }
-    Err(format!("{prefab} seed {seed}: Tessera failed on seeds {seed} to {}", seed + 49))
 }
 
 /// `pcds native-wrecks GAME_DIR OUT_FILE`: wrecks.json alone (read-game writes it too).

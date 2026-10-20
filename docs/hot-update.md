@@ -291,7 +291,7 @@ pointers): 61% of the write and 68% of the read were world objects, 28% / 20% ne
 6% machines; the time was serde_json itself, names written and matched for every struct, numbers
 as digits, `Vec<u8>` as arrays of numbers; nothing in the state was slow by itself
 (`rebuild_holders` 0.8 ms and `change_generation_for_groups` 0.01 ms at 99.5k). (3) The binary
-codec, in parts on threads (format 5, above): CPU ms at 99.5k, write / read: world objects 7.2 /
+codec, in parts on threads (format 6, above): CPU ms at 99.5k, write / read: world objects 7.2 /
 15.9, network objects 7.4 / 15.2, machines 1.7 / 4.1, inventories 0.9 / 1.8, rest 0.4 / 1.4;
 then the memfd write 4.1, the slot indexes 4.0 and the network index 0.9 in the read, all on
 one thread. What is left is the network objects' strings (class, variable name and type, three
@@ -528,7 +528,7 @@ can later mark them as rebuildable.
 
 **Not in it, and rebuilt by the new bank.** The tables `data`, `net_data`, `net.spec` (loaded
 from `data/<version>/` before the flip, so not in the pause); `data_dir`; `trace` and the "RPC
-not handled" log set; the wrecks cache in `instances` (loaded again when first needed). One
+not handled" log set; the wreck solver's tables (`Wrecks::model`, built again by the first wreck that needs them) and the Tessera thread that may be running (the queue of wrecks it serves is in the snapshot, and so are the prefabs' flags from before it started, so the new bank starts that wreck again and lays it out as the old one would have). One
 catch: `Game::new` scales the groups' generation in the tables by the world's pace and power
 settings, so the tables are not quite static; `restore` runs that scaling again. This was
 found by reading `Game::new`, not by the bench (the live world has both settings at 1.0).
@@ -557,7 +557,7 @@ acceptance test passed):
 
 ### The snapshot format and its versions
 
-A snapshot is a head line `{"format":5,"game_version":"2.103"}` and the state in the binary
+A snapshot is a head line `{"format":6,"game_version":"2.103"}` and the state in the binary
 codec of `bincodec.rs` (serde's data model with no names and no tags: a struct is its fields back
 to back; integers of two bytes and more, lengths and variants are LEB128, zigzag when signed;
 floats and bytes are fixed width; a float array that is all zeros is one byte; a `Value` is its

@@ -16,7 +16,7 @@ use super::unity::{self, Data, Id};
 /// file it writes changes (a field, a section, a value read another way). A server loads only
 /// tables of its own format (main.rs), and `pcds update` reads them again with the active
 /// bank's program when the format differs.
-pub const TABLES_FORMAT: u32 = 2;
+pub const TABLES_FORMAT: u32 = 3;
 
 /// GameData.MaxDepth.
 const MAX_DEPTH: usize = 6;
@@ -374,7 +374,7 @@ pub fn read_game(game: &Path, out: &Path) -> Result<String, String> {
         let data = assets.get(&format!("PlanetData:PlanetData-{id}")).ok_or(format!("no PlanetData-{id}"))?;
         scenes.push((id.to_string(), ctx.planet_scenes(&assets, data).map_err(|e| format!("scenes/{id}.json: {e}"))?));
     }
-    // wrecks.json: the wreck interiors as the game's Tessera lays them out, per seed.
+    // wrecks.json: what the server needs to lay a wreck out from its own seed (Tessera's tiles).
     let wrecks = ctx.wrecks().map_err(|e| format!("wrecks: {e}"))?;
     std::fs::create_dir_all(out.join("scenes")).map_err(|e| format!("{}: {e}", out.display()))?;
     write(out, "netdata.json", &pretty(&netdata))?;

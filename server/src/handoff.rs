@@ -52,7 +52,7 @@ use crate::rpcspec::Spec;
 /// across formats, and `pcds upgrade --restart` installs the release, the world then loading from
 /// the save). The format is the binary codec of bincodec.rs, written and read in parts on several
 /// threads.
-pub const FORMAT: u32 = 5;
+pub const FORMAT: u32 = 6;
 
 /// The snapshot's first line (msg::SnapshotHead): its format, and the tables it is for (state
 /// holds indices into them, so it is only valid on the same game version).
