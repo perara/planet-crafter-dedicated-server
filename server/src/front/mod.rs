@@ -227,7 +227,7 @@ impl Front {
     }
 
     fn start_admin(&mut self) {
-        self.admin.start(self.hooks.feed.clone());
+        self.admin.start(self.hooks.feed.clone(), &self.save);
     }
 
     fn start_steam(&mut self) {

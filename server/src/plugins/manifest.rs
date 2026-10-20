@@ -24,6 +24,40 @@ pub struct Manifest {
     pub events: Events,
     #[serde(default, rename = "command")]
     pub commands: Vec<Command>,
+    /// Where the plugin may send HTTP requests (capability `net.http`).
+    pub net: Option<Net>,
+    /// Values the admin sets for this plugin (`pcds plugin config set`), put into requests as
+    /// `${config.KEY}`.
+    #[serde(default, rename = "config")]
+    pub config: Vec<ConfigKey>,
+}
+
+/// `[net]`: the allow list the approval pins, and the plugin's asks for time and size.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Net {
+    /// `scheme://host[:port]` patterns; `*.` in front of a name covers the names below it.
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// The wall clock of one request, in milliseconds.
+    pub timeout_ms: Option<u32>,
+    /// The most of an answer's body the plugin takes (an answer over it is an error).
+    pub max_response_bytes: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigKey {
+    pub key: String,
+    #[serde(default)]
+    pub description: String,
+    /// A secret is never shown: not by the listing, not by the log, not to the plugin. The default.
+    #[serde(default = "yes")]
+    pub secret: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -144,7 +178,7 @@ impl Manifest {
         }
         let wants = |cap: &str| p.capabilities.iter().any(|c| c == cap);
         for name in &self.events.subscribe {
-            let kind = Kind::from_name(name).filter(|k| *k != Kind::Command).ok_or_else(|| format!("events.subscribe: {name:?} is not an event (known: {}; commands come from [[command]])", names_without_command()))?;
+            let kind = Kind::from_name(name).filter(|k| *k != Kind::Command && *k != Kind::HttpDone).ok_or_else(|| format!("events.subscribe: {name:?} is not an event to subscribe to (known: {}; commands come from [[command]], and http_done is delivered for the requests the plugin made)", names_without_command()))?;
             if !wants(caps::for_event(kind)) {
                 return Err(format!("events.subscribe has {name:?}, which needs the capability {}: add it to plugin.capabilities", caps::for_event(kind)));
             }
@@ -172,8 +206,54 @@ impl Manifest {
         if p.kind == PluginKind::Data && !(self.events.subscribe.is_empty() && self.events.rpc.is_empty() && self.commands.is_empty()) {
             return Err("a data plugin's events and commands come from its rules file: no events.subscribe, events.rpc or [[command]]".into());
         }
+        self.validate_net()?;
         if self.budget.tick_every_ms.is_some_and(|t| t < crate::plugins::limits::MIN_TICK_MS) {
             return Err(format!("budget.tick_every_ms: at least {} (a game tick is 5 ms; a plugin that needs more often should do less per call)", crate::plugins::limits::MIN_TICK_MS));
+        }
+        Ok(())
+    }
+
+    fn validate_net(&self) -> Result<(), String> {
+        let p = &self.plugin;
+        let asks = |cap: &str| p.capabilities.iter().any(|c| c == cap);
+        let (http, local) = (asks(caps::NET_HTTP), asks(caps::NET_HTTP_LOCAL));
+        if local && !http {
+            return Err(format!("{} goes with {}: ask for both", caps::NET_HTTP_LOCAL, caps::NET_HTTP));
+        }
+        match (&self.net, http) {
+            (None, true) => return Err(format!("{} needs a [net] section with allow = [...]: the hosts it may reach", caps::NET_HTTP)),
+            (Some(_), false) => return Err(format!("[net] needs the capability {}: add it to plugin.capabilities", caps::NET_HTTP)),
+            _ => {}
+        }
+        if let Some(net) = &self.net {
+            if net.allow.is_empty() || net.allow.len() > 16 {
+                return Err("net.allow: 1 to 16 patterns".into());
+            }
+            for pattern in &net.allow {
+                crate::plugins::net::Pattern::parse(pattern, local)?;
+            }
+            if net.allow.iter().collect::<BTreeSet<_>>().len() != net.allow.len() {
+                return Err("net.allow lists one twice".into());
+            }
+            if net.timeout_ms.is_some_and(|t| t == 0 || t > crate::plugins::limits::MAX_HTTP_TIMEOUT_MS) {
+                return Err(format!("net.timeout_ms: 1 to {}", crate::plugins::limits::MAX_HTTP_TIMEOUT_MS));
+            }
+            if net.max_response_bytes.is_some_and(|t| t == 0 || t > crate::plugins::limits::MAX_HTTP_RESPONSE) {
+                return Err(format!("net.max_response_bytes: 1 to {}", crate::plugins::limits::MAX_HTTP_RESPONSE));
+            }
+        }
+        if self.config.len() > 8 {
+            return Err("at most 8 [[config]] keys".into());
+        }
+        let mut seen = BTreeSet::new();
+        for c in &self.config {
+            let ok = !c.key.is_empty() && c.key.len() <= 32 && c.key.starts_with(|ch: char| ch.is_ascii_lowercase()) && c.key.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_');
+            if !ok {
+                return Err(format!("config key {:?}: a lowercase letter, then lowercase letters, digits and _, 32 at most", c.key));
+            }
+            if !seen.insert(&c.key) {
+                return Err(format!("config key {:?} is declared twice", c.key));
+            }
         }
         Ok(())
     }
@@ -193,7 +273,7 @@ impl Manifest {
 }
 
 fn names_without_command() -> String {
-    Kind::ALL.iter().filter(|k| **k != Kind::Command).map(|k| k.name()).collect::<Vec<_>>().join(", ")
+    Kind::ALL.iter().filter(|k| **k != Kind::Command && **k != Kind::HttpDone).map(|k| k.name()).collect::<Vec<_>>().join(", ")
 }
 
 #[cfg(test)]
@@ -233,11 +313,56 @@ mod tests {
         assert!(bad("\"event.chat\", ", "").contains("needs the capability event.chat"));
         assert!(bad("\"world.read\"", "\"world.write\"").contains("not a capability"));
         assert!(bad("[\"tick\"]", "[\"tock\"]").contains("not an event"));
+        assert!(bad("[\"tick\"]", "[\"http_done\"]").contains("not an event to subscribe to"));
         assert!(bad("plugin.wasm", "../plugin.wasm").contains("plugin.entry"));
         assert!(bad("name = \"stats\"", "name = \"two words\"").contains("command name"));
         assert!(bad("abi = 1", "abi = 1\nsurprise = 2").contains("unknown field"));
         assert!(bad("subscribe = [\"tick\"]", "subscribe = [\"tick\"]\nrpc = [\"A.B\"]").contains("go together"));
         assert!(Manifest::parse(&format!("{GOOD}\n[budget]\ntick_every_ms = 1")).unwrap_err().contains("tick_every_ms"));
+    }
+
+    const NET: &str = r#"
+        [plugin]
+        id = "notify"
+        name = "Notify"
+        version = "0.1.0"
+        kind = "wasm"
+        entry = "plugin.wasm"
+        abi = 1
+        capabilities = ["event.chat", "net.http"]
+
+        [events]
+        subscribe = ["chat"]
+
+        [net]
+        allow = ["https://discord.com", "https://*.example.com:8443"]
+        timeout_ms = 5000
+        max_response_bytes = 4096
+
+        [[config]]
+        key = "hook"
+        description = "the webhook's path"
+    "#;
+
+    #[test]
+    fn net_access_is_declared_with_its_hosts_and_its_keys() {
+        let m = Manifest::parse(NET).unwrap();
+        assert_eq!(m.net.as_ref().unwrap().allow.len(), 2);
+        assert!(m.config[0].secret, "a key is a secret unless the manifest says otherwise");
+        let bad = |from: &str, to: &str| Manifest::parse(&NET.replace(from, to)).unwrap_err();
+        assert!(bad("\"event.chat\", \"net.http\"", "\"event.chat\"").contains("[net] needs the capability net.http"));
+        assert!(bad("\n        [net]\n", "\n        [nnet]\n").contains("unknown field"));
+        assert!(Manifest::parse(&NET.replace("\"net.http\"]", "\"net.http\", \"net.http.local\"]").replace("\"https://discord.com\", ", "")).is_ok());
+        assert!(bad("\"net.http\"]", "\"net.http.local\"]").contains("goes with net.http"));
+        assert!(Manifest::parse(NET.split("[net]").next().unwrap()).unwrap_err().contains("needs a [net] section"));
+        assert!(bad("allow = [\"https://discord.com\", ", "allow = [\"https://127.0.0.1\", ").contains("net.http.local"));
+        assert!(bad("allow = [\"https://discord.com\", ", "allow = [\"https://*.com\", ").contains("public suffix"));
+        assert!(bad("allow = [\"https://discord.com\", ", "allow = [\"https://discord.com\", \"https://discord.com\", ").contains("twice"));
+        assert!(bad("allow = [\"https://discord.com\", \"https://*.example.com:8443\"]", "allow = []").contains("1 to 16"));
+        assert!(bad("timeout_ms = 5000", "timeout_ms = 999999").contains("timeout_ms"));
+        assert!(bad("max_response_bytes = 4096", "max_response_bytes = 0").contains("max_response_bytes"));
+        assert!(bad("key = \"hook\"", "key = \"Hook\"").contains("config key"));
+        assert!(bad("key = \"hook\"", "key = \"hook\"\n[[config]]\nkey = \"hook\"").contains("twice"));
     }
 
     #[test]

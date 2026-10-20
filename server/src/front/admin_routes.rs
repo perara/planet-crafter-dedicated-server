@@ -134,7 +134,13 @@ pub const ROUTES: &[Route] = &[
     route("POST", "/api/plugins/reload", Owner::Bank, "", "Reads the plugins' folder again."),
     route("POST", "/api/plugins/enable", Owner::Bank, "`{\"id\", \"grant\"?: [...]}`", "Approves a plugin (all it asks for, by default) and reloads."),
     route("POST", "/api/plugins/disable", Owner::Bank, "`{\"id\"}`", "Disables a plugin."),
-    route("POST", "/api/plugins/events", Owner::Bank, "`{\"after\"?, \"types\"?, \"limit\"?}`", "The plugin event stream."),
+    route("POST", "/api/plugins/config", Owner::Bank, "`{\"id\", \"key\", \"value\"?: \"...\"}`", "Sets a config key the plugin declares (an empty or missing value clears it) and reloads."),
+    route("POST", "/api/plugins/trust", Owner::Bank, "`{\"publicKey\", \"name\"?, \"grant\"?: [...], \"force\"?: bool}`", "Trusts a publisher's Ed25519 key: plugins signed by it load without approving each file's digest, with the capabilities granted."),
+    route("POST", "/api/plugins/untrust", Owner::Bank, "`{\"id\"}`", "Revokes a trusted key (its id or name) and reloads."),
+    route("GET", "/api/plugins/tokens", Owner::Bank, "", "The scoped tokens (never the token itself), the scopes there are and the rate limits."),
+    route("POST", "/api/plugins/tokens", Owner::Bank, "`{\"name\", \"scopes\": [...], \"ratePerMinute\"?}`", "Makes a scoped token for an out-of-process plugin; the answer's `token` is shown this once."),
+    route("POST", "/api/plugins/tokens/revoke", Owner::Bank, "`{\"id\"}` (the id or the name)", "Revokes a scoped token at once."),
+    route("POST", "/api/plugins/events", Owner::Bank, "`{\"after\"?, \"types\"?, \"limit\"?, \"consumer\"?, \"unregister\"?, \"wait\"?: SECONDS}`", "The plugin event stream; with `wait` (at most 25 s; at most 8 polls wait at once) the front holds the request until an event comes or the wait is over."),
 ];
 
 /// The route the HTTP thread answers itself for a request: the first line of the table that
@@ -174,7 +180,7 @@ impl Admin {
     }
 
     /// Starts the HTTP listener (PCDS_ADMIN, with PCDS_ADMIN_TOKEN), serving the chat feed.
-    pub fn start(&mut self, feed: std::sync::Arc<super::Feed>) {
+    pub fn start(&mut self, feed: std::sync::Arc<super::Feed>, save: &str) {
         let addr = crate::env("PCDS_ADMIN").unwrap_or_else(|| "127.0.0.1:7782".into());
         if addr == "off" {
             return;
@@ -183,7 +189,9 @@ impl Admin {
             eprintln!("admin: PCDS_ADMIN_TOKEN is not set: the admin API and web page are off (pcds setup writes one)");
             return;
         };
-        match admin::start(&addr, token, self.web.clone(), feed) {
+        // Scoped tokens (run/plugins/tokens.json, beside the plugins the bank hosts) may make the requests of their scopes.
+        let tokens = std::sync::Arc::new(crate::tokens::Checker::new(std::path::PathBuf::from(crate::config::installation_file(&crate::env, save, "plugins"))));
+        match admin::start_with(&addr, token, self.web.clone(), feed, tokens) {
             Ok(rx) => {
                 println!("admin: http://{addr}/");
                 // Plain HTTP: off this machine the token and every action travel in the clear.
@@ -342,7 +350,7 @@ mod tests {
         let mut files = Vec::new();
         rust_files(&src, &mut files);
         let mut found = BTreeSet::new();
-        for file in files.iter().filter(|f| (!f.starts_with(src.join("front")) || f.ends_with("chat_hooks.rs")) && !f.starts_with(src.join("cli")) && !f.ends_with("coverage.rs")) {
+        for file in files.iter().filter(|f| (!f.starts_with(src.join("front")) || f.ends_with("chat_hooks.rs")) && !f.starts_with(src.join("cli")) && !f.ends_with("coverage.rs") && !f.ends_with("tokens.rs") && !f.ends_with("src/admin.rs")) {
             let text = std::fs::read_to_string(file).unwrap();
             for method in ["GET", "POST"] {
                 let pattern = format!("(\"{method}\", \"/api/");

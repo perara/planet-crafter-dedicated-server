@@ -39,7 +39,7 @@ paid (so the list only gets shorter). `scripts/check-layers` runs that test alon
 
 | Layer | Modules | May use | What it is |
 |---|---|---|---|
-| base | `wire` `idmap` `geometry` `world` `save` `oldsave` `data` `protocol` `rpcspec` `transform` `gamedata` `model` `ipc` `msg` `worlds` `utp` `routes` `bincodec` `util` `dotnet_sort` `tessera` | base | Bytes, ids, the game's tables as data, the framing of the transports, the typed bodies of the frames between the front and the banks (`msg`), the world files' names and places (`worlds`), the lookup of a route table (`routes`: the bank's admin requests and the front's use one type), the game's algorithms that need no game (the .NET sort, the Tessera solver). No game, no process, no sockets of their own. |
+| base | `wire` `idmap` `geometry` `world` `save` `oldsave` `data` `protocol` `rpcspec` `transform` `gamedata` `model` `ipc` `msg` `worlds` `utp` `routes` `bincodec` `util` `dotnet_sort` `tessera` `tokens` | base | Bytes, ids, the game's tables as data, the framing of the transports, the typed bodies of the frames between the front and the banks (`msg`), the world files' names and places (`worlds`), the lookup of a route table (`routes`: the bank's admin requests and the front's use one type), the game's algorithms that need no game (the .NET sort, the Tessera solver), the store of scoped tokens (`tokens`). No game, no process, no sockets of their own. |
 | world | `net` | base | The game's network state: objects, variables, RPC messages. |
 | core | `game` `handlers` `hooks` `ext` `scene` `status` `gauges` `units` `energy` `water` `machines` `logistics` `meteo` `rockets` `planets` `animals` `genetics` `players` `inventories` `instances` `objects` `panels` `deconstruct` `equipment` `toxic` `unlocks` `access` `rules` `config` `chathooks` `handoff` | base, world, core, extension | The game logic, ported class by class, with no I/O: files and sockets are not in it, and the only thread is the wreck solver's (`instances`: a pure function of the tables and a seed, answered between ticks). A subsystem is free functions over `&mut Game`, reached through `hooks.rs`. |
 | extension | `events` `plugins` | base, world, core, extension | What the world tells the outside (`events`) and the host of the plugins that listen (`plugins`). |
@@ -175,6 +175,12 @@ for anything but the log lines the server already prints, an environment variabl
 - The bank prepares the plugins (reads, validates, compiles) while it loads its tables and
   before it says HELLO, so a hot update spends its time in the world's stop only on starting
   them, not on compiling them.
+- Inside `plugins/`: `net.rs` (a plugin's outbound HTTP: the allow list, the address checks, the
+  worker threads; answers come back as `http_done` events through `plugins::poll`), `config.rs` (the
+  values the admin sets for a plugin), `sign.rs` (signatures and the keys the admin trusts) and
+  `approvals::standing` (what an approval, a signature and the keys make of a plugin). `tokens.rs`
+  (base layer: scoped tokens for programs) is checked by the front's admin thread and made by the
+  bank and the command line; the stream's doorbell (`ipc::STREAM`) lets the front hold a long poll.
 - `ext.plugins` is the one thing the snapshot carries: the plugins' saved state and the event
   stream's ring. How it stays compatible is in docs/plugins.md ("Plugin state in a flip").
 
@@ -288,6 +294,8 @@ change, or the test says so.
 
 It added two modules (`events`, `plugins`), a field in `Ext`, a handful of one-line calls to
 `events::*` (in `hooks.rs`, `game.rs`, `players.rs`, `handlers.rs`, `rules.rs`) and a few lines in
-the bank (now `bank/plugins_glue.rs`). It did not touch the front, the transports, the snapshot's format number or the
+the bank (now `bank/plugins_glue.rs`). The later work (`net.http`, signing, scoped tokens, the stream's long poll) added the module
+`tokens` and, in the bank, four lines (the doorbell, `bank/serve.rs`); in the front, the admin thread's token check and long
+poll (`admin.rs`) and one arm of `front/bank_link.rs`'s frame handling, each in a commit of its own. It did not touch the front's loop, the transports, the snapshot's format number or the
 files the other refactors are changing (`config.rs`, `handoff.rs`), and it adds no edge to the
 debt list. The splits of `front.rs`, `bank.rs` and `chathooks.rs` are done ("The front" above).

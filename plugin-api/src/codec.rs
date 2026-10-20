@@ -65,8 +65,12 @@ impl Writer {
         self
     }
     pub fn str(&mut self, v: &str) -> &mut Self {
+        self.bytes(v.as_bytes())
+    }
+    /// A `u32` length and the bytes (a string is the same, checked to be UTF-8 on reading).
+    pub fn bytes(&mut self, v: &[u8]) -> &mut Self {
         self.u32(v.len() as u32);
-        self.0.extend_from_slice(v.as_bytes());
+        self.0.extend_from_slice(v);
         self
     }
 }
@@ -112,6 +116,10 @@ impl<'a> Reader<'a> {
     pub fn str(&mut self) -> Result<&'a str, DecodeError> {
         let n = self.u32()? as usize;
         core::str::from_utf8(self.take(n)?).map_err(|_| DecodeError::Utf8)
+    }
+    pub fn bytes(&mut self) -> Result<&'a [u8], DecodeError> {
+        let n = self.u32()? as usize;
+        self.take(n)
     }
     pub fn string(&mut self) -> Result<String, DecodeError> {
         self.str().map(String::from)

@@ -94,6 +94,11 @@ impl Ring {
         self.consumers.iter().map(|(name, c)| json!({"name": name, "kinds": Kind::ALL.iter().filter(|k| c.kinds & k.bit() != 0).map(|k| k.name()).collect::<Vec<_>>(), "lastPollSecondsAgo": c.last.elapsed().as_secs(), "polls": c.polls, "after": c.after})).collect()
     }
 
+    /// The id of the newest event (0: none yet).
+    pub fn last(&self) -> u64 {
+        self.next - 1
+    }
+
     pub fn push(&mut self, event: &Event<'_>) {
         let Some(mut v) = event_json(event) else { return };
         v["id"] = self.next.into();
@@ -130,7 +135,7 @@ pub fn event_json(event: &Event<'_>) -> Option<Value> {
         Event::ObjectPlaced { id, group, position } | Event::ObjectDestroyed { id, group, position } => json!({"object": id, "group": group, "position": position}),
         Event::WorldSaved { game_ms, ok } => json!({"gameSeconds": *game_ms as f64 / 1000.0, "ok": ok}),
         Event::RuleChange { changes_json } => json!({"changes": serde_json::from_str::<Value>(changes_json).unwrap_or(Value::Null)}),
-        Event::Tick { .. } | Event::Command { .. } | Event::RpcBefore { .. } | Event::RpcAfter { .. } => return None,
+        Event::Tick { .. } | Event::Command { .. } | Event::RpcBefore { .. } | Event::RpcAfter { .. } | Event::HttpDone { .. } => return None,
     })
 }
 

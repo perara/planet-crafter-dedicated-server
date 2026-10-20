@@ -1422,6 +1422,78 @@ fn a_plugins_state_goes_through_hot_updates_and_a_restart() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A scoped token through a real front and bank: it makes the requests of its scope and no other,
+/// a poll of the event stream with a wait is held in the front and answered when a player chats (the
+/// bank rings the front's bell), and a revoked token is refused at its next request.
+#[test]
+fn a_scoped_token_long_polls_the_event_stream_through_a_real_front_and_bank() {
+    let Some(data) = tables() else { return };
+    let dir = std::env::temp_dir().join(format!("pcds-tokens-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    assert!(Command::new(PCDS).arg("new-save").arg(dir.join("world.json")).arg(&data).stdout(Stdio::null()).status().unwrap().success());
+    let cli = |args: &[&str]| {
+        let out = Command::new(PCDS).arg("plugin").args(args).env("PCDS_HOME", &dir).env("HOME", dir.join("home")).env_remove("PCDS_UNIT").env_remove("PCDS_CONTAINER").output().unwrap();
+        assert!(out.status.success(), "plugin {args:?}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    let made = cli(&["token", "create", "e2e", "--scope", "events.read"]);
+    let token = made.split_whitespace().find(|w| w.starts_with("pcdst_")).unwrap().to_string();
+    let banks = banks(&dir);
+    let server = start(&dir, &data, &banks, "http://127.0.0.1:9/releases");
+    // A request with the token: (status, body, seconds).
+    let as_token = |token: &str, method: &str, path: &str, body: Value| -> (u16, Value, f64) {
+        let started = Instant::now();
+        let body = body.to_string();
+        let mut s = TcpStream::connect(("127.0.0.1", server.admin)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(40))).unwrap();
+        write!(s, "{method} {path} HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        let mut answer = String::new();
+        let _ = s.read_to_string(&mut answer);
+        let status = answer.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let json = answer.split_once("\r\n\r\n").and_then(|(_, b)| serde_json::from_str(b).ok()).unwrap_or(Value::Null);
+        (status, json, started.elapsed().as_secs_f64())
+    };
+    // What the scope does not cover is the admin token's.
+    for (method, path) in [("GET", "/api/status"), ("GET", "/api/plugins"), ("GET", "/api/plugins/tokens"), ("POST", "/api/stop")] {
+        assert_eq!(as_token(&token, method, path, json!({})).0, 403, "{method} {path}\n{}", server.log());
+    }
+    assert_eq!(as_token("pcdst_nobody", "POST", "/api/plugins/events", json!({})).0, 401);
+    // It registers as a consumer and reads where the stream is.
+    let (status, first, _) = as_token(&token, "POST", "/api/plugins/events", json!({"consumer": "e2e", "types": ["chat"]}));
+    assert_eq!(status, 200, "{first}\n{}", server.log());
+    let last = first["last"].as_u64().unwrap();
+    // A long poll waits; a player chats; it is answered with that line, while the probe is still running.
+    let poll = {
+        let (admin, token) = (server.admin, token.clone());
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let body = json!({"consumer": "e2e", "types": ["chat"], "after": last, "wait": 25}).to_string();
+            let mut s = TcpStream::connect(("127.0.0.1", admin)).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(40))).unwrap();
+            write!(s, "POST /api/plugins/events HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            let mut answer = String::new();
+            let _ = s.read_to_string(&mut answer);
+            (answer, Instant::now(), started)
+        })
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    let said = say_in_chat(&server, &data, &dir, "Chatty", &["hello from a player"]);
+    let probe_ended = Instant::now();
+    let (answer, answered, started) = poll.join().unwrap();
+    let body: Value = answer.split_once("\r\n\r\n").and_then(|(_, b)| serde_json::from_str(b).ok()).unwrap_or(Value::Null);
+    assert!(answer.starts_with("HTTP/1.1 200") && body["events"][0]["type"] == "chat" && body["events"][0]["text"] == "hello from a player", "{answer}\n{said}\n{}", server.log());
+    assert!(answered < probe_ended && answered.duration_since(started) < Duration::from_secs(15), "the poll was answered when the player chatted, not at its end");
+    // Revoked: refused at once.
+    cli(&["token", "revoke", "e2e"]);
+    assert_eq!(as_token(&token, "POST", "/api/plugins/events", json!({})).0, 401);
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Waits until `GET /api/plugins` satisfies `ok` (the folder scan runs every two seconds and acts
 /// on a change it has seen twice), at most `secs`; the listing it last saw.
 fn wait_for_plugins(server: &Server, secs: u64, ok: impl Fn(&Value) -> bool) -> Value {

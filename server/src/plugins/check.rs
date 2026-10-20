@@ -21,7 +21,11 @@ pub struct Report {
 }
 
 /// A world of two players on Prime, for the smoke test.
-struct Canned;
+#[derive(Default)]
+struct Canned {
+    /// HTTP requests the samples made the plugin ask for (none is sent).
+    http_asked: u32,
+}
 
 impl World for Canned {
     fn info(&self) -> WorldInfo {
@@ -37,6 +41,7 @@ impl World for Canned {
 
 impl Sink for Canned {
     fn apply(&mut self, _: &str, actions: Vec<Action>) -> Applied {
+        self.http_asked += actions.iter().filter(|a| matches!(a, Action::Http(_))).count() as u32;
         Applied { done: actions.len() as u32, refused: 0 }
     }
     fn command_prefix(&self) -> String {
@@ -52,6 +57,7 @@ fn import_cap(import: &str) -> Option<&'static str> {
         "kick" => caps::PLAYER_KICK,
         "teleport" => caps::PLAYER_TELEPORT,
         "rules_patch" => caps::RULES_WRITE,
+        "http_request" => caps::NET_HTTP,
         _ => return None,
     })
 }
@@ -69,6 +75,7 @@ fn sample(kind: Kind, command: Option<&str>, rpc: Option<&str>) -> Event<'static
         Kind::ObjectDestroyed => Event::ObjectDestroyed { id: 100, group: "Drill1", position: [1.0, 2.0, 3.0] },
         Kind::WorldSaved => Event::WorldSaved { game_ms: 3_725_000, ok: true },
         Kind::RuleChange => Event::RuleChange { changes_json: "{\"speed.growth\":2.0}" },
+        Kind::HttpDone => Event::HttpDone { ticket: 1, status: 200, error: "", body: b"{}", headers: vec![("content-type", "application/json")] },
     }
 }
 
@@ -78,7 +85,8 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
     let mut report = Report::default();
     let engine = super::wasm::engine();
     // As an approved plugin with everything granted, so what the host would do with it is done.
-    let mut found = Loaded::inspect(&engine, folder, None);
+    let keys = installed.and_then(|d| super::sign::Keys::load(d).ok()).unwrap_or_default();
+    let mut found = Loaded::inspect(&engine, folder, None, None, &keys);
     let Some(m) = found.manifest.clone() else {
         report.errors.push(found.status.detail().unwrap_or("not a plugin").to_string());
         return report;
@@ -91,6 +99,23 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
     report.facts.push(format!("{} {} ({}, plugin ABI {})", p.name, p.version, p.kind.name(), p.abi));
     for (name, allows) in caps::ALL.iter().filter(|(n, _)| p.capabilities.iter().any(|c| c == n)) {
         report.facts.push(format!("asks for {name}: {allows}"));
+    }
+    if let Some(net) = &m.net {
+        report.facts.push(format!("may send HTTP requests to: {}", net.allow.join(", ")));
+        if net.allow.iter().any(|a| a.contains("://*.")) {
+            report.warnings.push("net.allow has a wildcard: the plugin may reach every name below it, whoever runs them".into());
+        }
+        if net.allow.iter().any(|a| a.starts_with("http://")) {
+            report.warnings.push("net.allow has a plain http:// pattern: those requests (and what they carry) can be read on the way".into());
+        }
+    }
+    for k in &m.config {
+        report.facts.push(format!("config {}: {}{}", k.key, if k.description.is_empty() { "(no description)" } else { &k.description }, if k.secret { " (a secret)" } else { "" }));
+    }
+    match &found.signed {
+        super::sign::Signed::No => report.facts.push("unsigned".into()),
+        super::sign::Signed::Broken(why) => report.warnings.push(format!("{why}: it will be judged as if unsigned")),
+        other => report.facts.push(other.describe(&p.capabilities)),
     }
     if p.capabilities.is_empty() {
         report.facts.push("asks for no capability: it can read nothing and change nothing".into());
@@ -154,7 +179,7 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
     if let Some(dir) = installed {
         let this = std::fs::canonicalize(folder).ok();
         for other in std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|f| f.is_dir() && std::fs::canonicalize(f).ok() != this) {
-            let o = Loaded::inspect(&engine, &other, None);
+            let o = Loaded::inspect(&engine, &other, None, None, &keys);
             for c in o.commands.iter().filter(|c| found.commands.contains(c)) {
                 report.warnings.push(format!("the command !{c} is also declared by the installed plugin {}: the one first by id gets it", o.id));
             }
@@ -165,7 +190,7 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
         match rt.start(None) {
             Err(f) => report.errors.push(format!("start: {f}")),
             Ok(()) => {
-                let mut world = Canned;
+                let mut world = Canned::default();
                 for kind in &kinds {
                     if !grant.has(caps::for_event(*kind)) {
                         continue;
@@ -196,6 +221,38 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
                         let _ = world.apply(&p.id, queued);
                     }
                 }
+                // A plugin that may send requests is shown answers of each sort (it hears them in the host
+                // whatever it subscribed to); what it asks for in return is not sent from here.
+                if grant.has(caps::NET_HTTP) {
+                    let answers: [(&str, Event<'static>); 3] = [
+                        ("an answer of 200", Event::HttpDone { ticket: 1, status: 200, error: "", body: b"{}", headers: vec![("content-type", "application/json")] }),
+                        ("an answer of 500", Event::HttpDone { ticket: 1, status: 500, error: "", body: b"oops", headers: vec![] }),
+                        ("a request that failed", Event::HttpDone { ticket: 1, status: 0, error: "timed out", body: &[], headers: vec![] }),
+                    ];
+                    for (what, event) in answers {
+                        let mut payload = pcds_plugin_api::Writer::new();
+                        event.encode(&mut payload);
+                        rt.ctx().begin(&world);
+                        let result = rt.event(&event, &payload.0);
+                        let (queued, denied) = {
+                            let c = rt.ctx();
+                            (c.end(), std::mem::take(&mut c.denied))
+                        };
+                        let asked = queued.iter().filter(|a| matches!(a, Action::Http(_))).count();
+                        world.http_asked += asked as u32;
+                        match result {
+                            Ok((_, cost)) => report.facts.push(format!("http_done sample ({what}): ok, {} fuel, {asked} requests asked (check sends none)", cost.fuel)),
+                            Err(f) => report.errors.push(format!("http_done sample ({what}): {f}")),
+                        }
+                        if denied > 0 {
+                            report.warnings.push(format!("http_done sample: {denied} calls were refused for a missing capability"));
+                        }
+                    }
+                    let asked = world.http_asked;
+                    if asked > 0 {
+                        report.facts.push(format!("the samples made it ask for {asked} HTTP requests; check sends none (a request is sent only by a running server, to the hosts it lists)"));
+                    }
+                }
                 match rt.save() {
                     Ok(Some(b)) => report.facts.push(format!("state: {} bytes, version {}", b.bytes.len(), b.version)),
                     Ok(None) => report.facts.push("keeps no state".into()),
@@ -208,5 +265,5 @@ pub fn check_folder(folder: &Path, installed: Option<&Path>) -> Report {
 }
 
 fn import_cap_needed(cap: &str) -> bool {
-    [caps::WORLD_READ, caps::CHAT_SAY, caps::PLAYER_KICK, caps::PLAYER_TELEPORT, caps::RULES_WRITE].contains(&cap)
+    [caps::WORLD_READ, caps::CHAT_SAY, caps::PLAYER_KICK, caps::PLAYER_TELEPORT, caps::RULES_WRITE, caps::NET_HTTP].contains(&cap)
 }

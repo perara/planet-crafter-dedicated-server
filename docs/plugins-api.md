@@ -10,7 +10,7 @@ Versions in this release:
 
 | What | Version |
 |---|---|
-| plugin ABI | 1.1 (`ABI 1.1`; `pcds_plugin_api::ABI`, `0x0001_0001`) |
+| plugin ABI | 1.2 (`ABI 1.2`; `pcds_plugin_api::ABI`, `0x0001_0002`) |
 | `pcds-plugin-api` crate | 0.1.0 |
 | manifest (`plugin.toml`) | the keys below; unknown keys are refused |
 | snapshot | `handoff::FORMAT` 6, with the `ext.plugins` part (docs/plugins.md, "The compatibility rule") |
@@ -46,7 +46,7 @@ The `export!` macro of `pcds-plugin-api` makes all of these from a type that imp
 A module for another language implements them by hand; the table is the whole contract.
 
 The host accepts a module whose `pcds_abi` has the same major and a minor no newer than the
-server's (`ABI 1.1` today). It refuses a module that imports anything but the seven functions
+server's (`ABI 1.2` today). It refuses a module that imports anything but the eight functions
 below, with the name of the import in the message.
 
 ## The module's imports (module `pcds`)
@@ -65,12 +65,15 @@ negative code (below).
 | `pcds.kick` | `(client: i64, ptr: i32, len: i32) -> i32` | `player.kick` | kicks a client with the reason as the player's message (128 characters) |
 | `pcds.teleport` | `(client: i64, x: f32, y: f32, z: f32) -> i32` | `player.teleport` | moves a player; finite numbers within 100,000 of the origin |
 | `pcds.rules_patch` | `(ptr: i32, len: i32) -> i32` | `rules.write` | a JSON merge patch of the rules, as `pcds rules set` sends it, limited to the gameplay sections; two a second |
+| `pcds.http_request` | `(ptr: i32, len: i32) -> i64` | `net.http` | ABI 1.2. Starts an HTTP request (an encoded `HttpRequest`, at most `MAX_HTTP_REQUEST` bytes) and returns its ticket, a positive number; the answer comes later as the event `http_done`. Returns a code (below) when the request is turned down at once. See "`net.http`" |
 
 Codes: `0` done, `-1` denied (the capability is not granted), `-2` bad arguments, `-3` the action
-queue is full (16 per call, 200 per second), `-4` unsupported (the host does not have it, or there
-is no world to read now: inside `pcds_save` and `pcds_load`).
+queue is full (16 per call, 200 per second; for `http_request`: too many requests alive, or in this
+second), `-4` unsupported (the host does not have it, or there is no world to read now: inside
+`pcds_save` and `pcds_load`), `-5` not allowed (ABI 1.2; `http_request`: the host is not on the
+manifest's `[net] allow` list).
 
-Actions (`say`, `tell`, `kick`, `teleport`, `rules_patch`) are **queued**: the host applies them
+Actions (`say`, `tell`, `kick`, `teleport`, `rules_patch`, `http_request`) are **queued**: the host applies them
 after the call, through the admin API's code, and checks again then (the player may have left). A
 call that faults has its queued actions dropped.
 
@@ -95,7 +98,9 @@ know.
 | 9 | `object_destroyed` | `event.object` | `id: i32`, `group: str`, `x: f32`, `y: f32`, `z: f32` |
 | 10 | `world_saved` | `event.world` | `game_ms: i64`, `ok: bool` |
 | 11 | `rule_change` | `event.world` | `changes_json: str` (an object of dotted rule names to values, the ones that differ from the defaults, gameplay sections only) |
+| 12 | `http_done` | `net.http` | ABI 1.2. `ticket: u64`, `status: u32` (the HTTP status; 0 when there was no answer), `error: str` (empty when there was an answer; else a short fixed phrase), `body: bytes` (a `u32` length and the bytes), `headers`: `count: u32`, then `count` times `name: str`, `value: str` (names in lowercase) |
 
+- `http_done` is not in `events.subscribe` either: it is delivered to the plugin that made the request, whatever it subscribed to, and to nobody else.
 - `command` is not in `events.subscribe`: the manifest's `[[command]]` entries declare it, and
   only the plugin that owns a command is called for it. A chat message is a command when it
   begins with the command prefix (the `chat.commandPrefix` rule, else `!`) followed at once by
@@ -134,6 +139,8 @@ know.
 | `player.kick` | kick players |
 | `player.teleport` | move players |
 | `rules.write` | change the server rules (gameplay sections only: `meteo`, `gauges`, `speed`, `death`, `loot`, `limits`, `world`) |
+| `net.http` | send HTTP requests to the hosts its manifest lists |
+| `net.http.local` | let those requests reach this machine and the local network |
 
 A subscription needs the capability of its event kind; the manifest is refused if it subscribes
 without asking. The admin may grant less than was asked; events whose capability is not granted
@@ -168,6 +175,16 @@ rpc = ["ChatHandler.SendChatMessageServerRpc"]   # with rpc_before / rpc_after
 [[command]]                    # wasm only; a data plugin's commands are in its rules file
 name = "stats"
 help = "the world's numbers"
+
+[net]                          # only with the capability net.http (see "net.http")
+allow = ["https://discord.com", "https://*.example.org:8443"]   # scheme://host[:port]; the only places it may go
+timeout_ms = 10000             # optional: the wall clock of a request (30000 at most)
+max_response_bytes = 65536     # optional: the most of an answer it takes (1048576 at most)
+
+[[config]]                     # values the admin sets (pcds plugin config set ID KEY), put into requests as ${config.KEY}
+key = "webhook"
+description = "the path of the Discord webhook"
+secret = true                  # the default: never shown, never logged, never in the plugin's memory
 ```
 
 Unknown keys are an error. The id must be the folder's name. `abi` must equal the server's major;
@@ -183,8 +200,50 @@ Written by `pcds plugin enable` and the admin API; the server only reads it.
                  "limits": {"fuelPerEvent": 250000}, "approvedAt": 1760781234}}
 ```
 
-`limits` (optional) lowers the plugin's budget (`fuelPerEvent`, `fuelPerSave`, `memoryPages`) or
+`signer` (optional) is the id of the trusted key that had signed the plugin when it was approved (see
+"Signing"). `limits` (optional) lowers the plugin's budget (`fuelPerEvent`, `fuelPerSave`, `memoryPages`) or
 lengthens its tick (`tickEveryMs`); it can not raise anything.
+
+## Signing
+
+Digest pinning is the default: an approval holds for the files whose digest it recorded. A
+publisher can sign a plugin so that an admin who trusts the publisher's key does not approve each
+file. A signature only ever adds trust; a plugin whose signature is missing or does not hold is
+judged by its pinned digest as before.
+
+- **`plugin.sig`**, in the plugin's folder (`pcds plugin sign --key NAME.key DIR` writes it):
+  ```json
+  {"publicKey": "9f2c... (64 hex)", "signature": "ab01... (128 hex)", "digest": "5e7d... (the plugin's digest)"}
+  ```
+  The signature is Ed25519 over the text `pcds-plugin-v1:` and the digest, the sha256 of the manifest,
+  a zero byte and the entry file (the `digest` of `approved.json` and of the listing). It is checked
+  against the files as they are when they are read, at every start and every reload, so a changed
+  manifest (another capability, another allow list) or module is a signature that does not hold.
+  At most 4096 bytes are read.
+- **`trusted-keys.json`**, beside `approved.json` (`pcds plugin trust`, `untrust`, `keys`, the
+  admin API; the server only reads it):
+  ```json
+  {"keys": [{"id": "ab12...", "publicKey": "9f2c...", "name": "Acme", "grant": ["event.chat", "chat.say"], "addedAt": 1760781234}],
+   "revoked": [{"id": "cd34...", "name": "Old key", "at": 1760781300}]}
+  ```
+  `id` is the first 16 bytes of sha256 of the public key, in hex. `grant` is the key's **trust
+  grant**: the most it vouches for. A file that does not read trusts nobody (`keysError`).
+- **The rule** (`approvals::standing`). The admin's own `disable` beats everything. A plugin whose
+  signature holds and whose key is trusted needs no approval for the capabilities in the key's grant:
+  if it asks for nothing else, it runs with no entry in `approved.json` at all, and every new
+  version the key signs runs as soon as it is read. What it asks for beyond the grant waits for the
+  admin as for any plugin (`pending`); `enable` then records the signer, and from then on a version
+  the same key signs runs without a new approval while it asks for nothing beyond the approved
+  grant and the key's. A different key, no signature, a signature that does not hold, a key
+  untrusted or revoked: the digest is all there is, and the running version of a plugin whose new
+  files do not hold goes on with a notice, or stops (a key taken away) at the next look at the folder.
+  A key's trust grant is a floor: the admin can switch the plugin off, but not grant it less than the
+  key vouches for.
+- **Revocation.** `pcds plugin untrust KEY` (or the admin API) removes the key and records it as
+  revoked; the plugins that ran only because of it stop within seconds (two looks at the folder), with
+  their state saved. Trusting a revoked key again takes `--force`.
+- **Keys.** `pcds plugin keygen NAME` writes `NAME.key` (0600; the publisher keeps it) and `NAME.pub`.
+  `trust` takes the `.pub` file or its 64 hex digits and shows the key's id.
 
 ## Rules files (`kind = "data"`)
 
@@ -218,6 +277,63 @@ and your `[vars]`; `{{` and `}}` are braces. `{players}`, `{planet}` and `{time}
 needs (events, `chat.say` for any saying, `rules.write` for `when_players`) are worked out from its
 content, and the manifest must ask for all of them.
 
+## `net.http`
+
+A plugin that asks for `net.http` may send HTTP and HTTPS requests to the places its manifest lists,
+and only those. It does it with `pcds.http_request` (`Host::http_request` in the crate), which takes
+an encoded `HttpRequest` (`method`, `url`, `headers`, `body`: the codec's `str`, `str`, a header
+count and pairs of `str`, and `bytes`) and returns a **ticket**. Nothing is sent from inside the
+call: the host's worker threads send it, and the answer is delivered some milliseconds to seconds
+later as the event `http_done` (kind 12) to the same plugin, in a later call, between two game ticks.
+A request in flight when the server restarts or is hot-updated is lost without an event (keep your
+own deadline in `tick`).
+
+*Where.* `[net] allow` is a list of patterns `scheme://host[:port]` (the port is the scheme's own if
+left out). A host is a lowercase DNS name; `*.` in front covers every name below it but not the
+name itself, and never a public suffix (`*.com`, `*.co.uk`, `*.github.io` are refused when the
+manifest is read; the host knows a short list of those, and the approval screen shows every
+pattern). An IP address in a pattern is refused unless the plugin also asks for `net.http.local`.
+The list is part of the manifest, so the approval's digest pins it: a plugin that changes its list
+waits for the admin again. The URL of every request, and of every redirect, is matched against it; a
+URL with a user name, a fragment or a character outside ASCII is refused. A redirect is followed (up
+to `HTTP_REDIRECTS`) only if its target matches too, and then without `Authorization` and `Cookie`
+when it leaves the first host.
+
+*Which machine.* The host resolves the name itself and connects to what it resolved. Loopback,
+private (RFC 1918 and unique-local), link-local (the cloud metadata address among them), shared
+(`100.64.0.0/10`), documentation, multicast, reserved and unspecified addresses, the IPv6 ranges
+outside `2000::/3`, and 6to4 are refused, unless the admin granted `net.http.local` as well (and
+unspecified, multicast and the reserved ranges even then). A name with one such address among its
+answers is refused whole; the lookup is done again for every connection and every redirect, and no
+connection is kept for the next request. There is no proxy, and TLS is always verified against the
+Mozilla roots.
+
+*How much.* A request is at most `MAX_HTTP_REQUEST` bytes (a URL of `MAX_HTTP_URL`, 32 headers,
+a header value of `MAX_HTTP_HEADER_BYTES`, a body of `MAX_HTTP_BODY`). `Host`, `Content-Length`,
+`Connection`, `Transfer-Encoding`, `Upgrade`, `Expect`, `TE`, `Trailer` and `Proxy-Authorization`
+are the host's: a request that sets one is refused. The methods are GET, HEAD, POST, PUT, PATCH and
+DELETE. The answer's body is cut at `max_response_bytes` (an answer over it is an error, never a short
+body). One wall clock (`timeout_ms`, `HTTP_TIMEOUT_MS` by default) covers the lookup, the connection,
+TLS, sending and reading, so a server that trickles bytes is let go at the timeout. A plugin has
+`HTTP_IN_FLIGHT` requests alive and starts `HTTP_PER_SECOND` in a second; `HTTP_WORKERS` threads serve
+all plugins behind a queue of `HTTP_QUEUE`; a request the queue has no room for is answered at
+once with the error "the server is busy with other requests".
+
+*What the plugin is told.* `http_request` returns at once for what can be known without the network:
+`-1` (not granted), `-2` (the request is no good: method, URL, headers, size, a `${config.KEY}`
+that is not set), `-5` (not on the list), `-3` (too many alive, or this second). The rest arrives in
+`http_done`: `status` is the server's, or 0 and `error` one of a few fixed phrases (`timed out`,
+`host not found`, `connection refused`, `connection reset`, `TLS failed ...`, `the answer is larger
+than the limit`, `redirected to a host that is not on the allow list`, `too many redirects`, `the
+name resolves to an address the plugin may not reach ...`). Never the URL, never an address.
+
+*Values and secrets.* The manifest declares `[[config]]` keys; the admin sets them with `pcds plugin
+config set ID KEY` (stored 0600 in `config.json` beside `approved.json`). A request may hold
+`${config.KEY}` in the path, the query and header values (not the host); the host puts the value in
+after the plugin's call. The plugin never has the value, and a secret (the default) is in no log
+line, listing, event or stream. One line of the log for each request: `plugin ID: http METHOD
+scheme://host[:port] -> HTTP 204 (12 ms, 0 bytes)`, never the path or query.
+
 ## Limits
 
 The host's numbers; a manifest may ask for less (or more, up to the maximum), the admin may lower
@@ -245,6 +361,20 @@ them (`approved.json`).
 | `MAX_PAYLOAD` | 1048576 | an event payload or a query answer |
 | `MAX_FAULTS` | 5 | faults within the window that switch a plugin off |
 | `MAX_PLUGINS` | 64 | plugins loaded |
+| `HTTP_IN_FLIGHT` | 2 | `net.http` requests of one plugin alive (queued or running) |
+| `HTTP_PER_SECOND` | 10 | requests one plugin starts in a second |
+| `HTTP_WORKERS` | 4 | threads that send the requests of all plugins |
+| `HTTP_QUEUE` | 32 | requests waiting for a thread, all plugins |
+| `HTTP_REDIRECTS` | 3 | redirects followed |
+| `HTTP_DELIVER` | 8 | answers handed to plugins between two ticks |
+| `HTTP_TIMEOUT_MS` | 10000 | wall clock of a request by default |
+| `MAX_HTTP_TIMEOUT_MS` | 30000 | the most a manifest may ask for |
+| `HTTP_RESPONSE_BYTES` | 65536 | the answer's body a plugin takes by default |
+| `MAX_HTTP_RESPONSE` | 1048576 | the most a manifest may ask for |
+| `MAX_HTTP_URL` | 2048 | bytes of a URL |
+| `MAX_HTTP_HEADER_BYTES` | 8192 | bytes of a header value (and of all the answer's headers) |
+| `MAX_HTTP_BODY` | 1048576 | bytes of a request's body |
+| `MAX_HTTP_REQUEST` | 1179648 | bytes of an encoded request |
 
 Times: all plugins together may use `TICK_BUDGET` (2 ms) of a game tick and `FLIP_BUDGET` (25 ms)
 in a hot update; a call over `SLOW_CALL` (5 ms) is counted slow; `FAULT_WINDOW` is 60 seconds.
@@ -255,11 +385,17 @@ All answer JSON; the bearer token is the admin token (docs/hot-update.md, README
 
 | Request | Body | Answer |
 |---|---|---|
-| `GET /api/plugins` | | `{"plugins": [...], "folder", "approvalsError", "capabilities": [{"name","allows"}], "abi": {"major","minor"}, "stream": {"epoch"}}`. Each plugin: `id name version description authors license kind status detail requested granted notGranted commands events warnings limits stats digest`; `stats`: `calls faults restarts slow shed denied refused actions vetoes fuel averageMicros maxMicros lastError lastFaultAt` |
+| `GET /api/plugins` | | `{"plugins": [...], "folder", "approvalsError", "capabilities": [{"name","allows"}], "abi": {"major","minor"}, "stream": {"epoch"}}`. Each plugin: `id name version description authors license kind status detail requested granted notGranted commands events warnings limits stats digest net config signature`; `stats`: `calls faults restarts slow shed denied refused actions vetoes fuel averageMicros maxMicros lastError lastFaultAt http`; `stats.http`: `requests answered failed bytesOut bytesIn inFlight`; `net` (null without `[net]`): `allow wildcards local localGranted timeoutMs maxResponseBytes`; `signature`: `state` (`none`, `invalid`, `untrusted`, `revoked`, `trusted`), `keyId`, `keyName`, `vouches` (what the key covers of what the plugin asks) and `detail` (why an invalid one is); the listing also has `trustedKeys`, `revokedKeys` and `keysError`; `config`: the declared keys, `key description secret set`, and the `value` of a key that is not a secret |
 | `POST /api/plugins/reload` | | `{"ok": true, "message"}`: the folder is read again; a plugin whose files and approval did not change keeps running |
 | `POST /api/plugins/enable` | `{"id", "grant": [...]}` (grant optional: everything asked) | `{"ok": true, "plugin": {...}}`; 400 for an unknown plugin, a grant above what is asked, or a plugin that does not hold up |
 | `POST /api/plugins/disable` | `{"id"}` | `{"ok": true, "plugin": {...}}` |
-| `POST /api/plugins/events` | `{"consumer": "relay", "after": 0, "types": ["chat","player_join"], "limit": 200}` or `{"consumer": "relay", "unregister": true}` | `{"epoch", "events": [...], "last", "dropped"}`, or `{"ok", "registered": false, "was"}` |
+| `POST /api/plugins/config` | `{"id", "key", "value"}` (`value` null or left out removes it) | `{"ok": true, "plugin": {...}}`; 400 for a plugin or key that does not exist, or a value that is not one line. The plugin is restarted with it. A secret's value is in no answer |
+| `POST /api/plugins/trust` | `{"publicKey": "(64 hex or a .pub file's text)", "name", "grant": [...], "force"}` | `{"ok": true, "key": {...}}`; 400 for a key that is none, a grant that is no capability, or a revoked key without `force`. The plugins are read again |
+| `POST /api/plugins/untrust` | `{"id"}` (the id, or its first 8 characters or more) | `{"ok": true, "revoked": {...}}`; 400 for a key that is not trusted |
+| `GET /api/plugins/tokens` | | `{"tokens": [{"id","name","scopes","ratePerMinute","createdAt"}], "scopes": [{"name","allows"}], "defaultRatePerMinute", "maxRatePerMinute"}`: never a token or its hash |
+| `POST /api/plugins/tokens` | `{"name", "scopes": [...], "ratePerMinute"}` | `{"ok": true, "token": "pcdst_...", "info": {...}}`: **the only time the token is shown**; 400 for a name used, an unknown scope, a rate out of range |
+| `POST /api/plugins/tokens/revoke` | `{"id"}` (the id or the name) | `{"ok": true, "revoked": {...}}`; the token is refused from its next request |
+| `POST /api/plugins/events` | `{"consumer": "relay", "after": 0, "types": ["chat","player_join"], "limit": 200, "wait": 25}` or `{"consumer": "relay", "unregister": true}` | `{"epoch", "events": [...], "last", "dropped"}`, or `{"ok", "registered": false, "was"}`. With `wait` (seconds, 25 at most) the front holds the request until there is an event or the wait is over (see "The event stream") |
 
 Status values: `running`, `pending` (discovered, never approved), `disabled`, `changed` (files differ
 from the approved ones, and nothing is running), `unloading` (its last call and save are running;
@@ -271,6 +407,30 @@ running modules hold; it is zero once they are all unloaded. `scanEverySeconds` 
 bank looks at the folder by itself (2); a change is acted on when two looks in a row see it.
 
 `GET /api/status` has a `plugins` object: `loaded`, `running`, `faults`.
+
+### Scoped tokens
+
+A program that reads the stream or says something in the chat should not hold the admin token. A
+**scoped token** (`pcds plugin token create NAME --scope events.read,chat.send`, or the dashboard) is
+sent as `Authorization: Bearer pcdst_...` and opens the requests of its scopes and nothing else:
+
+| Scope | Allows |
+|---|---|
+| `events.read` | read the plugin event stream (`POST /api/plugins/events`) |
+| `chat.read` | read the chat (`GET /api/chat/events`) |
+| `chat.send` | write to the chat as the server (`POST /api/chat`) |
+| `player.kick` | kick a player (`POST /api/kick`) |
+| `player.teleport` | move a player (`POST /api/teleport`) |
+
+Every other request, the endpoints that manage tokens, keys and approvals among them, takes the
+admin token only; a token asking for one is answered `403` and the scope it lacks. `401`: no such
+token (or revoked, or the list does not read: then none is valid). `429` with `Retry-After`: the
+token is over its rate (`ratePerMinute`, 600 by default, 6000 at most; a window of a minute). The
+server keeps only the sha256 of a token in `tokens.json` (0600, beside `approved.json`), compares
+it in constant time, and never writes a token to the log, a listing or an answer. A revocation is
+read from the file at the token's next request. The admin thread of the front checks tokens, so a
+front that was started before this change does not know them: they work after `pcds upgrade
+--restart` (docs/hot-update.md).
 
 ### The event stream
 
@@ -294,6 +454,19 @@ event is `{"id", "time" (Unix ms), "type", ...}`:
 
 Ids go on across hot updates; `epoch` (when the ring began, Unix ms) changes when the server
 restarts and the ids begin again: start from `after: 0` when it does.
+
+**Waiting for events (long poll).** Add `"wait": SECONDS` (a number up to 25) to the request and it
+is answered when the ring holds an event after `after` of your kinds, or, empty, when the wait is
+over: loop on it with the `last` of each answer as the next `after`, and events reach you in the
+time the bank takes to say so (a few milliseconds), without asking every second. The waiting is
+done by the front (a thread and a connection for each, at most 8 at once: more are answered `503`
+at once, poll without `wait` or try again), not by the game loop. The bank rings a bell (`ipc::STREAM`)
+when the ring has a newer id; the front then asks the bank again. When no bell comes (a bank older than
+this feature) the front asks every second, so the latency is at most one. A consumer is registered by each
+ask, so a long poll keeps it listed. Without `wait`, as before: answered at once, empty or not. This is in the
+front, which a hot update does not replace: it works after `pcds upgrade --restart`; an older front
+ignores `wait` and answers at once, which a loop written as above handles (add a pause when the answer is
+empty and came at once).
 
 ## Versioning and compatibility
 
@@ -322,7 +495,7 @@ the world and the other plugins go on.
 
 **Loading and unloading** are not versioned: a plugin of the right ABI major is loaded and unloaded
 at any time, with the folder scanned every 2 seconds (docs/plugins.md, "Loading and unloading while
-the world runs"). `pcds_unload` is ABI 1.1; a module built for 1.0 has none and loses nothing.
+the world runs"). `pcds_unload` is ABI 1.1 and `net.http` (`pcds.http_request`, the event `http_done`, the code `-5`) is ABI 1.2; a module built for 1.0 or 1.1 loses nothing.
 
 **The snapshot.** The plugins' state is part of the current snapshot format (`ext.plugins`). A
 change to its shape that an older reader cannot read bumps `handoff::FORMAT`, which means the

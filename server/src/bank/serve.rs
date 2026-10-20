@@ -20,7 +20,7 @@ use crate::game::Game;
 use crate::idmap::FxHashMap;
 use crate::ipc::{self, Frame, Link};
 use crate::msg::{self, AdminCall, Connected, Ops, SnapshotNote};
-use crate::{chathooks, wire};
+use crate::{chathooks, plugins, wire};
 
 pub(super) struct Bank {
     pub game: Game,
@@ -224,6 +224,10 @@ impl Bank {
             self.link.send(ipc::KICK, client, &[]);
         }
         forward_chat(game, &mut self.link);
+        // The plugin event stream's doorbell, for the front's long polls (ipc::STREAM).
+        if let Some(bell) = plugins::stream_bell(game) {
+            self.link.send(ipc::STREAM, 0, bell.as_bytes());
+        }
         forward_ops(game, &mut self.link, &mut t.last_ops);
     }
 }

@@ -292,6 +292,125 @@ fn plugin(dir: &Path, cwd: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
+fn a_publisher_signs_a_plugin_and_an_admin_trusts_the_key_instead_of_the_digest() {
+    let dir = test_dir("plugin-sign");
+    let work = dir.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    assert!(plugin(&dir, &work, &["new", "demo", "--kind", "data"]).status.success());
+    // The publisher makes a key (the private half is for nobody else) and signs.
+    let out = plugin(&dir, &work, &["keygen", "acme"]);
+    assert!(out.status.success(), "{}", text(&out));
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(work.join("acme.key")).unwrap().permissions().mode() & 0o777, 0o600);
+    assert!(!plugin(&dir, &work, &["keygen", "acme"]).status.success(), "no key is overwritten");
+    let out = plugin(&dir, &work, &["sign", "--key", "acme.key", "demo"]);
+    assert!(out.status.success() && work.join("demo/plugin.sig").is_file(), "{}", text(&out));
+    let out = plugin(&dir, &work, &["check", "demo"]);
+    assert!(text(&out).contains("signed by the key") && text(&out).contains("which you do not trust"), "{}", text(&out));
+    assert!(plugin(&dir, &work, &["install", "demo"]).status.success());
+    assert!(dir.join("run/plugins/demo/plugin.sig").is_file(), "the signature is installed with the files");
+    // Not trusted: pending, and the admin is told who signed.
+    let out = plugin(&dir, &work, &["enable", "demo", "--grant", "chat.say", "--yes"]);
+    assert!(text(&out).contains("which you do not trust"), "{}", text(&out));
+    assert!(plugin(&dir, &work, &["disable", "demo"]).status.success());
+    std::fs::remove_file(dir.join("run/plugins/approved.json")).unwrap();
+    assert!(text(&plugin(&dir, &work, &["list"])).contains("pending"));
+    // Trusting the key for what the plugin asks: it runs with no approval.
+    let out = plugin(&dir, &work, &["trust", "acme.pub", "--name", "Acme", "--grant", "event.chat,event.player,chat.say"]);
+    assert!(out.status.success() && text(&out).contains("trusting Acme"), "{}", text(&out));
+    let listed = text(&plugin(&dir, &work, &["list"]));
+    assert!(listed.contains("running") && listed.contains("signed by Acme"), "{listed}");
+    assert!(!dir.join("run/plugins/approved.json").exists(), "nothing was approved: the key vouched");
+    let keys = text(&plugin(&dir, &work, &["keys"]));
+    assert!(keys.contains("Acme") && keys.contains("event.chat event.player chat.say"), "{keys}");
+    // A file changed after signing: the signature no longer holds; the plugin waits.
+    std::fs::write(dir.join("run/plugins/demo/rules.toml"), "[[command]]\nname = \"hello\"\nreply = \"changed\"\n").unwrap();
+    let listed = text(&plugin(&dir, &work, &["list"]));
+    assert!(listed.contains("pending") && listed.contains("other files than these"), "{listed}");
+    // The key is taken away and cannot come back by accident.
+    std::fs::copy(work.join("demo/rules.toml"), dir.join("run/plugins/demo/rules.toml")).unwrap();
+    assert!(text(&plugin(&dir, &work, &["list"])).contains("running"));
+    let id = keys.split_whitespace().next().unwrap().to_string();
+    let out = plugin(&dir, &work, &["untrust", &id[..12]]);
+    assert!(out.status.success() && text(&out).contains("no longer trusted"), "{}", text(&out));
+    let listed = text(&plugin(&dir, &work, &["list"]));
+    assert!(listed.contains("pending") && listed.contains("which was revoked"), "{listed}");
+    assert!(text(&plugin(&dir, &work, &["keys"])).contains("REVOKED"));
+    let out = plugin(&dir, &work, &["trust", "acme.pub"]);
+    assert!(!out.status.success() && text(&out).contains("--force"), "{}", text(&out));
+    assert!(plugin(&dir, &work, &["trust", "acme.pub", "--force"]).status.success());
+    // A private key that is not one, a plugin that is not one.
+    assert!(!plugin(&dir, &work, &["sign", "--key", "acme.pub", "demo"]).status.success());
+    assert!(!plugin(&dir, &work, &["sign", "--key", "acme.key", "no-such-folder"]).status.success());
+}
+
+#[test]
+fn a_scoped_token_is_made_shown_once_listed_and_revoked_from_the_command_line() {
+    let dir = test_dir("plugin-token");
+    let work = dir.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    assert!(text(&plugin(&dir, &work, &["tokens"])).contains("no scoped tokens"));
+    let out = plugin(&dir, &work, &["token", "create", "relay", "--scope", "events.read,chat.send", "--rate", "90"]);
+    let shown = text(&out);
+    assert!(out.status.success() && shown.contains("shown this once"), "{shown}");
+    let token = shown.split_whitespace().find(|w| w.starts_with("pcdst_")).unwrap().to_string();
+    let listed = text(&plugin(&dir, &work, &["tokens"]));
+    assert!(listed.contains("relay") && listed.contains("90/min") && listed.contains("chat.send events.read") && !listed.contains(&token), "{listed}");
+    assert!(!std::fs::read_to_string(dir.join("run/plugins/tokens.json")).unwrap().contains(&token));
+    // Wrong forms: no scope, an unknown scope, the same name again.
+    for args in [vec!["token", "create", "x"], vec!["token", "create", "x", "--scope", "root"], vec!["token", "create", "relay", "--scope", "events.read"], vec!["token", "create", "x", "--scope", "events.read", "--rate", "0"]] {
+        assert!(!plugin(&dir, &work, &args).status.success(), "{args:?}");
+    }
+    let out = plugin(&dir, &work, &["token", "revoke", "relay"]);
+    assert!(out.status.success() && text(&out).contains("is revoked"), "{}", text(&out));
+    assert!(!plugin(&dir, &work, &["token", "revoke", "relay"]).status.success());
+    assert!(text(&plugin(&dir, &work, &["tokens"])).contains("no scoped tokens"));
+}
+
+#[test]
+fn a_plugins_config_values_are_set_without_the_command_line_and_a_secret_is_never_shown() {
+    use std::io::Write;
+    let dir = test_dir("plugin-config");
+    let work = dir.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    assert!(plugin(&dir, &work, &["new", "demo", "--kind", "data"]).status.success());
+    let manifest = work.join("demo/plugin.toml");
+    let text_of = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(&manifest, format!("{text_of}\n[[config]]\nkey = \"hook\"\ndescription = \"a webhook\"\n\n[[config]]\nkey = \"region\"\nsecret = false\n")).unwrap();
+    assert!(plugin(&dir, &work, &["install", "demo"]).status.success());
+    // Approving says which values the plugin needs.
+    let out = plugin(&dir, &work, &["enable", "demo", "--yes"]);
+    assert!(text(&out).contains("needs a value you set: pcds plugin config set demo hook") && text(&out).contains("a secret"), "{}", text(&out));
+    // A secret is not taken from the command line; a key the manifest does not declare is refused.
+    let out = plugin(&dir, &work, &["config", "set", "demo", "hook", "https://example.org/hook/abc"]);
+    assert!(!out.status.success() && text(&out).contains("is a secret"), "{}", text(&out));
+    assert!(!dir.join("run/plugins/config.json").exists());
+    let out = plugin(&dir, &work, &["config", "set", "demo", "nothing", "x"]);
+    assert!(!out.status.success() && text(&out).contains("declares no config key nothing"), "{}", text(&out));
+    // From standard input (no terminal here).
+    let mut cmd = Command::new(PCDS);
+    cmd.args(["plugin", "config", "set", "demo", "hook"]).current_dir(&work).env("PCDS_HOME", dir.join("run")).env("HOME", dir.join("home")).env_remove("PCDS_CONTAINER").env_remove("PCDS_UNIT").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    child.stdin.take().unwrap().write_all(b"https://example.org/hook/abc\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!text(&out).contains("hook/abc"), "the value is not echoed: {}", text(&out));
+    assert!(plugin(&dir, &work, &["config", "set", "demo", "region", "eu-1"]).status.success());
+    let out = plugin(&dir, &work, &["config", "list", "demo"]);
+    let listed = text(&out);
+    assert!(listed.contains("demo hook: set (a secret: not shown)") && listed.contains("demo region: eu-1") && !listed.contains("hook/abc"), "{listed}");
+    let file = dir.join("run/plugins/config.json");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    assert!(std::fs::read_to_string(&file).unwrap().contains("hook/abc"));
+    assert!(plugin(&dir, &work, &["config", "unset", "demo", "hook"]).status.success());
+    assert!(text(&plugin(&dir, &work, &["config", "list"])).contains("demo hook: not set"));
+}
+
+#[test]
 fn a_plugin_is_made_checked_installed_approved_and_listed_without_a_server() {
     let dir = test_dir("plugin");
     let work = dir.join("work");

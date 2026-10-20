@@ -46,4 +46,10 @@ thread, never held by the game loop), the front's loop (the process: updates, st
 | `POST /api/plugins/reload` | bank | nothing | Reads the plugins' folder again. |
 | `POST /api/plugins/enable` | bank | `{"id", "grant"?: [...]}` | Approves a plugin (all it asks for, by default) and reloads. |
 | `POST /api/plugins/disable` | bank | `{"id"}` | Disables a plugin. |
-| `POST /api/plugins/events` | bank | `{"after"?, "types"?, "limit"?}` | The plugin event stream. |
+| `POST /api/plugins/config` | bank | `{"id", "key", "value"?: "..."}` | Sets a config key the plugin declares (an empty or missing value clears it) and reloads. |
+| `POST /api/plugins/trust` | bank | `{"publicKey", "name"?, "grant"?: [...], "force"?: bool}` | Trusts a publisher's Ed25519 key: plugins signed by it load without approving each file's digest, with the capabilities granted. |
+| `POST /api/plugins/untrust` | bank | `{"id"}` | Revokes a trusted key (its id or name) and reloads. |
+| `GET /api/plugins/tokens` | bank | nothing | The scoped tokens (never the token itself), the scopes there are and the rate limits. |
+| `POST /api/plugins/tokens` | bank | `{"name", "scopes": [...], "ratePerMinute"?}` | Makes a scoped token for an out-of-process plugin; the answer's `token` is shown this once. |
+| `POST /api/plugins/tokens/revoke` | bank | `{"id"}` (the id or the name) | Revokes a scoped token at once. |
+| `POST /api/plugins/events` | bank | `{"after"?, "types"?, "limit"?, "consumer"?, "unregister"?, "wait"?: SECONDS}` | The plugin event stream; with `wait` (at most 25 s; at most 8 polls wait at once) the front holds the request until an event comes or the wait is over. |

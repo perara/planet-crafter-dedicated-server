@@ -38,9 +38,10 @@ fn chat_out(g: &Game) -> Vec<(crate::net::Target, String)> {
 
 #[test]
 fn with_no_plugin_nobody_listens() {
-    let Some((g, _)) = world() else { return };
+    let Some((mut g, _)) = world() else { return };
     assert_eq!(g.ext.plugins.interest, 0);
     assert!(g.ext.plugins.host.is_none());
+    assert!(stream_bell(&mut g).is_none(), "and no bell rings");
 }
 
 #[test]
@@ -122,6 +123,13 @@ fn a_data_plugin_changes_the_rules_with_the_players_online_and_the_stream_hears_
     assert!(types.iter().filter(|t| **t == "rule_change").count() == 2 && types.contains(&"chat") && types.iter().filter(|t| **t == "player_join").count() == 5, "{types:?}");
     let chat = answer["events"].as_array().unwrap().iter().find(|e| e["type"] == "chat").unwrap();
     assert_eq!((chat["name"].as_str(), chat["text"].as_str(), chat["client"].as_u64()), (Some("Ann"), Some("hello all"), Some(1)));
+    // The front's long polls wait on a doorbell: rung when the stream has something newer, once.
+    let bell: Value = serde_json::from_str(&stream_bell(&mut g).expect("new events: the bell rings")).unwrap();
+    assert_eq!((bell["epoch"].as_u64(), bell["last"].as_u64()), (Some(g.ext.plugins.saved.stream.epoch), Some(answer["last"].as_u64().unwrap())));
+    assert!(stream_bell(&mut g).is_none(), "nothing new, no bell");
+    send_scene(&mut g, 1, "ChatHandler.SendChatMessageServerRpc", &[json!("again")]);
+    let rung: Value = serde_json::from_str(&stream_bell(&mut g).unwrap()).unwrap();
+    assert_eq!(rung["last"].as_u64(), Some(bell["last"].as_u64().unwrap() + 1));
     let rule = answer["events"].as_array().unwrap().iter().find(|e| e["type"] == "rule_change").unwrap();
     assert_eq!(rule["changes"]["speed.growth"], 2.0);
     // The ring's ids and epoch are in the snapshot.
@@ -320,4 +328,107 @@ fn stream_consumers_register_through_the_api_and_leave_cleanly() {
     assert!(g.ext.plugins.interest & Kind::Chat.bit() == 0 && g.ext.plugins.interest & Kind::PlayerJoin.bit() != 0);
     poll(&mut g, json!({"consumer": "metrics", "unregister": true}));
     assert_eq!(g.ext.plugins.interest, 0);
+}
+
+#[test]
+fn the_admin_api_trusts_a_key_and_takes_it_away_and_the_listing_says_who_signed() {
+    let Some((mut g, _)) = world() else { return };
+    let dir = fresh_dir("keys");
+    // A signed copy of an example, not approved by anyone.
+    let from = example("welcome-rules");
+    let to = dir.join("welcome-rules");
+    std::fs::create_dir_all(&to).unwrap();
+    for file in [manifest::FILE, "rules.toml"] {
+        std::fs::copy(from.join(file), to.join(file)).unwrap();
+    }
+    let (private, public) = sign::generate().unwrap();
+    std::fs::write(to.join(sign::FILE), sign::sign(&private, &read_folder(&to).digest).unwrap()).unwrap();
+    start(&mut g, &dir);
+    let plugin = |g: &mut Game| -> Value {
+        let (_, body) = admin::request(g, "GET", "/api/plugins", &json!({}));
+        serde_json::from_str::<Value>(&body).unwrap()
+    };
+    let listing = plugin(&mut g);
+    assert_eq!((listing["plugins"][0]["status"].as_str(), listing["plugins"][0]["signature"]["state"].as_str()), (Some("pending"), Some("untrusted")));
+    let asked = listing["plugins"][0]["requested"].clone();
+    // Trust it for what the plugin asks: it starts, with no approval.
+    assert_eq!(admin::request(&mut g, "POST", "/api/plugins/trust", &json!({"publicKey": "nonsense"})).0, 400);
+    assert_eq!(admin::request(&mut g, "POST", "/api/plugins/trust", &json!({"publicKey": public, "grant": ["fly"]})).0, 400);
+    let (status, body) = admin::request(&mut g, "POST", "/api/plugins/trust", &json!({"publicKey": public, "name": "Acme", "grant": asked}));
+    assert_eq!(status, 200, "{body}");
+    let id = serde_json::from_str::<Value>(&body).unwrap()["key"]["id"].as_str().unwrap().to_string();
+    let listing = plugin(&mut g);
+    assert_eq!((listing["plugins"][0]["status"].as_str(), listing["plugins"][0]["signature"]["state"].as_str(), listing["plugins"][0]["signature"]["keyName"].as_str()), (Some("running"), Some("trusted"), Some("Acme")));
+    assert_eq!(listing["trustedKeys"][0]["id"].as_str(), Some(id.as_str()));
+    assert!(g.ext.plugins.interest & Kind::Chat.bit() != 0);
+    assert!(!dir.join("approved.json").exists());
+    // Taken away: the plugin stops, the key is listed as revoked.
+    assert_eq!(admin::request(&mut g, "POST", "/api/plugins/untrust", &json!({"id": "00000000"})).0, 400);
+    assert_eq!(admin::request(&mut g, "POST", "/api/plugins/untrust", &json!({})).0, 400);
+    let (status, _) = admin::request(&mut g, "POST", "/api/plugins/untrust", &json!({"id": &id[..10]}));
+    assert_eq!(status, 200);
+    let listing = plugin(&mut g);
+    assert_eq!((listing["plugins"][0]["status"].as_str(), listing["plugins"][0]["signature"]["state"].as_str()), (Some("pending"), Some("revoked")));
+    assert_eq!(listing["revokedKeys"][0]["id"].as_str(), Some(id.as_str()));
+    assert!(listing["trustedKeys"].as_array().unwrap().is_empty());
+    assert_eq!(g.ext.plugins.interest & Kind::Chat.bit(), 0);
+}
+
+#[test]
+fn the_admin_api_makes_lists_and_revokes_scoped_tokens_and_shows_a_token_once() {
+    let Some((mut g, _)) = world() else { return };
+    let dir = fresh_dir("tokens");
+    start(&mut g, &dir);
+    let (status, body) = admin::request(&mut g, "POST", "/api/plugins/tokens", &json!({"name": "relay", "scopes": ["events.read", "chat.send"], "ratePerMinute": 120}));
+    assert_eq!(status, 200, "{body}");
+    let made: Value = serde_json::from_str(&body).unwrap();
+    let token = made["token"].as_str().unwrap().to_string();
+    assert!(token.starts_with("pcdst_") && made["info"]["name"] == "relay" && made["info"]["ratePerMinute"] == 120);
+    // The listing has the scopes the server knows, the tokens without their hash, and never the token.
+    let (_, body) = admin::request(&mut g, "GET", "/api/plugins/tokens", &json!({}));
+    let hash = crate::tokens::Tokens::load(&dir).unwrap().tokens[0].hash.clone();
+    assert!(!body.contains(&token) && !body.contains(&hash), "{body}");
+    let listed: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!((listed["tokens"][0]["name"].as_str(), listed["tokens"][0]["scopes"].as_array().map(Vec::len), listed["scopes"].as_array().map(Vec::len)), (Some("relay"), Some(2), Some(5)));
+    assert!(!std::fs::read_to_string(dir.join("tokens.json")).unwrap().contains(&token), "the file keeps the hash only");
+    // A bad request is a 400 that says what is wrong; a name is used once.
+    for bad in [json!({}), json!({"name": "x"}), json!({"name": "x", "scopes": ["root"]}), json!({"name": "relay", "scopes": ["events.read"]}), json!({"name": "x", "scopes": ["events.read"], "ratePerMinute": 0})] {
+        assert_eq!(admin::request(&mut g, "POST", "/api/plugins/tokens", &bad).0, 400, "{bad}");
+    }
+    assert_eq!(admin::request(&mut g, "POST", "/api/plugins/tokens/revoke", &json!({})).0, 400);
+    assert_eq!(admin::request(&mut g, "POST", "/api/plugins/tokens/revoke", &json!({"id": "nobody"})).0, 400);
+    let (status, _) = admin::request(&mut g, "POST", "/api/plugins/tokens/revoke", &json!({"id": "relay"}));
+    assert_eq!(status, 200);
+    let (_, body) = admin::request(&mut g, "GET", "/api/plugins/tokens", &json!({}));
+    assert!(serde_json::from_str::<Value>(&body).unwrap()["tokens"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn the_admin_api_sets_a_plugins_config_value_and_never_shows_a_secret() {
+    let Some((mut g, _)) = world() else { return };
+    let dir = fresh_dir("config-api");
+    // A plugin that declares a secret key and a plain one.
+    let to = dir.join("greeter");
+    std::fs::create_dir_all(&to).unwrap();
+    std::fs::copy(example("welcome-rules").join("rules.toml"), to.join("rules.toml")).unwrap();
+    let manifest = std::fs::read_to_string(example("welcome-rules").join(manifest::FILE)).unwrap().replace("id = \"welcome-rules\"", "id = \"greeter\"");
+    std::fs::write(to.join(manifest::FILE), format!("{manifest}\n[[config]]\nkey = \"hook\"\ndescription = \"a secret\"\n[[config]]\nkey = \"region\"\nsecret = false\n")).unwrap();
+    approve(&dir, "greeter", None).unwrap();
+    start(&mut g, &dir);
+    let (status, body) = admin::request(&mut g, "POST", "/api/plugins/config", &json!({"id": "greeter", "key": "hook", "value": "TOP-SECRET"}));
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.contains("TOP-SECRET"));
+    admin::request(&mut g, "POST", "/api/plugins/config", &json!({"id": "greeter", "key": "region", "value": "eu-1"}));
+    let (_, listing) = admin::request(&mut g, "GET", "/api/plugins", &json!({}));
+    let config: Value = serde_json::from_str::<Value>(&listing).unwrap()["plugins"][0]["config"].clone();
+    assert!(!listing.contains("TOP-SECRET"), "{listing}");
+    assert_eq!((config[0]["key"].as_str(), config[0]["set"].as_bool(), config[0]["value"].is_null()), (Some("hook"), Some(true), true));
+    assert_eq!((config[1]["key"].as_str(), config[1]["value"].as_str()), (Some("region"), Some("eu-1")));
+    assert!(std::fs::read_to_string(dir.join("config.json")).unwrap().contains("TOP-SECRET"));
+    // Removed; a key the plugin does not declare, a plugin that is not there, a bad value.
+    admin::request(&mut g, "POST", "/api/plugins/config", &json!({"id": "greeter", "key": "hook"}));
+    assert!(!std::fs::read_to_string(dir.join("config.json")).unwrap().contains("TOP-SECRET"));
+    for bad in [json!({"id": "greeter", "key": "nothing", "value": "x"}), json!({"id": "nobody", "key": "hook", "value": "x"}), json!({"id": "greeter"}), json!({"id": "greeter", "key": "hook", "value": "a\nb"})] {
+        assert_eq!(admin::request(&mut g, "POST", "/api/plugins/config", &bad).0, 400, "{bad}");
+    }
 }
