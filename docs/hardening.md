@@ -30,14 +30,14 @@ and `steamcmd` logged in anonymously.
 | `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK` | every other kind of socket (raw packets, Bluetooth, ...). `AF_NETLINK` stays: it is how a program lists the machine's network interfaces, which Steam's networking and many tools do |
 | `RestrictNamespaces=yes` | making new namespaces (containers inside the server) |
 | `RestrictRealtime=yes`, `RestrictSUIDSGID=yes`, `LockPersonality=yes` | realtime scheduling, files with the setuid bit, changing the execution domain |
-| `CapabilityBoundingSet=` | every Linux capability, for the server and all it starts |
+| `CapabilityBoundingSet=` | every Linux capability, for the server and all it starts (with the options that need a mount namespace: a user manager can drop capabilities only inside the user namespace they come in) |
 | `SystemCallFilter=@system-service`, `SystemCallErrorNumber=EPERM` | the system calls a service has no use for (mounting, rebooting, kernel modules, swap, raw I/O, debugging other processes); a refused call returns an error, it does not kill the process |
 | `UMask=0077` | files the server and its hook programs make are for your user only |
 | `LimitNOFILE=65536`, `TasksMax=1024` | room for the players, the admin connections and the hooks; a runaway cannot make the machine run out of processes |
 
 The unit that checks for game updates (`pcds-update.service`) gets the subset that needs no
-mount: no new privileges, no capabilities, only the socket families above, no realtime, no setuid
-files, no namespaces, the system call filter and the umask. It runs `steamcmd`, which keeps its
+mount: no new privileges, only the socket families above, no realtime, no setuid files, no
+namespaces, no personality changes, the system call filter and the umask. It runs `steamcmd`, which keeps its
 state in `~/Steam` and writes the game, so it has no read-only file system.
 
 ### What a hook program or a plugin sees
@@ -86,8 +86,8 @@ restricts unprivileged user namespaces with AppArmor, some containers) would fai
 unit with `status=226/NAMESPACE`. This was not seen on the machine the sandbox was tried on
 (Arch, systemd 262), so the handling below was tried with a stand-in that refuses. `pcds install-service` therefore tries a one-second throw-away unit
 with the mount options first. If it cannot run, it writes the unit with the options above that
-need no namespace (no new privileges, no capabilities, the socket families, the system call
-filter, the umask, the limits), says so, and `pcds doctor` keeps saying so (a `WARN` on `service`).
+need no namespace (no new privileges, the socket families, no namespaces, the system call
+filter, the umask, the limits), says so, and `pcds doctor` keeps saying so (a `WARN` on `service`). The server runs under that unit (tried: a stand-in that refuses the namespace made it, and it ran; it scores 6.4 MEDIUM where the full sandbox scores 2.1).
 To run the full sandbox there, allow unprivileged user namespaces (the kernel setting that
 applies is named in `systemd-run --user --wait -p PrivateTmp=yes true`'s message), or run the
 server as a system service you write yourself (`User=` in a unit under `/etc/systemd/system`; a

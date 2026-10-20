@@ -325,24 +325,26 @@ WantedBy=timers.target
 
 /// What the server's unit and the update check's unit both carry: nothing here needs a mount
 /// namespace, so it holds on every machine. Tried on systemd 262 with the real server and with
-/// steamcmd (docs/hardening.md): NoNewPrivileges, no capabilities, the socket families a server
-/// uses (AF_NETLINK for the network interface list Steam and many tools read), no realtime
-/// scheduling, no setuid files, no namespaces, no personality changes, the service system
-/// calls (a refused call returns EPERM), files private to the user.
+/// steamcmd (docs/hardening.md): NoNewPrivileges, the socket families a server uses (AF_NETLINK for
+/// the network interface list Steam and many tools read), no realtime scheduling, no setuid
+/// files, no namespaces, no personality changes, the service system calls (a refused call returns
+/// EPERM), files private to the user. Not CapabilityBoundingSet=: a user manager can drop
+/// capabilities only inside a user namespace, which the mount options bring, and the unit would
+/// fail to start (status 218/CAPABILITIES) without one; a user's service has none to lose.
 const SANDBOX_COMMON: &str = "NoNewPrivileges=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-CapabilityBoundingSet=
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 UMask=0077
 ";
 
 /// The sandbox of the server's unit: SANDBOX_COMMON, the limits, and with `mounts` the file
-/// system and kernel protections that need a mount namespace: everything outside `run` read-only
+/// system and kernel protections that need a mount namespace (and the user namespace it comes in, which is
+/// also what lets the capabilities be dropped): everything outside `run` read-only
 /// (`run` is the path, already quoted), $HOME readable and not writable, a private /tmp (left
 /// out when `run` itself is under /tmp), no devices, no writing /proc/sys, /sys or the cgroups.
 fn sandbox_options(run: &str, run_in_tmp: bool, mounts: bool) -> String {
@@ -350,7 +352,7 @@ fn sandbox_options(run: &str, run_in_tmp: bool, mounts: bool) -> String {
     out += SANDBOX_COMMON;
     out += "LimitNOFILE=65536\nTasksMax=1024\n";
     if mounts {
-        out += &format!("ProtectSystem=strict\nReadWritePaths=\"{run}\"\nProtectHome=read-only\n");
+        out += &format!("CapabilityBoundingSet=\nProtectSystem=strict\nReadWritePaths=\"{run}\"\nProtectHome=read-only\n");
         out += if run_in_tmp { "" } else { "PrivateTmp=yes\n" };
         out += "PrivateDevices=yes\nProtectKernelTunables=yes\nProtectKernelModules=yes\nProtectKernelLogs=yes\nProtectControlGroups=yes\nProtectClock=yes\nProtectHostname=yes\n";
     }
@@ -484,13 +486,14 @@ mod tests {
         }
         // The update check keeps the home folder writable for steamcmd: the options without a mount namespace only.
         assert!(update.1.contains("\nNoNewPrivileges=yes\n") && update.1.contains("\nSystemCallFilter=@system-service\n"));
-        for mount in ["ProtectSystem", "ProtectHome", "ReadWritePaths", "PrivateTmp", "PrivateDevices", "ProtectKernel"] {
+        for mount in ["ProtectSystem", "ProtectHome", "ReadWritePaths", "PrivateTmp", "PrivateDevices", "ProtectKernel", "CapabilityBoundingSet"] {
             assert!(!update.1.contains(mount), "{mount} in the update unit:\n{}", update.1);
         }
         // A machine that cannot make the namespace gets the options that need none, and no file is half a sandbox.
         let [plain_server, ..] = ctx.unit_files_with(false).unwrap();
         assert!(plain_server.1.contains("\nNoNewPrivileges=yes\n") && plain_server.1.contains("\nLimitNOFILE=65536\n"));
-        for mount in ["ProtectSystem", "ProtectHome", "ReadWritePaths", "PrivateTmp", "PrivateDevices", "ProtectKernel", "ProtectControlGroups", "ProtectClock", "ProtectHostname"] {
+        // (CapabilityBoundingSet= too: a user manager drops capabilities only inside a user namespace, and the unit fails with 218/CAPABILITIES.)
+        for mount in ["ProtectSystem", "ProtectHome", "ReadWritePaths", "PrivateTmp", "PrivateDevices", "ProtectKernel", "ProtectControlGroups", "ProtectClock", "ProtectHostname", "CapabilityBoundingSet"] {
             assert!(!plain_server.1.contains(mount), "{mount} needs a mount namespace:\n{}", plain_server.1);
         }
         // Every line is a section, a comment, or Key=value.
