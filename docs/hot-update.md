@@ -29,7 +29,7 @@ installed with `pcds upgrade --restart`, which disconnects every player).
  run/bin/active    "a" or "b": the bank the front starts (written beside, renamed over)
 ```
 
-**Modules.** `front.rs` (the front), `bank.rs` (the game process), `ipc.rs` (frames, the
+**Modules.** `front.rs` (the front), `bank/` (the game process: `run.rs` the lifecycle, `serve.rs` the loop, `start.rs` the world), `ipc.rs` (frames, the
 non-blocking queue, SCM_RIGHTS, the memfd), `updater.rs` (releases into a bank),
 `cli/upgrade.rs` (`pcds upgrade`, the banks in `pcds status`). `split.rs` is gone. The state
 module of (e) is not split out: the state types stay where they are, and `handoff.rs` holds the
@@ -764,7 +764,7 @@ the logic modules with their derives; `handoff.rs` (the head, `FORMAT`, `snapsho
 autosave countdown and setting from `main.rs`. The logic keeps `impl` blocks and functions
 over these types, so moving a type is a change of its path, not of its code.
 
-Logic (the game process; built as `bank.rs`, from `main.rs`, not `gameproc.rs`):
+Logic (the game process; built as `bank/`, from `main.rs`, not `gameproc.rs`):
 - From `main.rs`: `tables`, `network_tables`, the save loading, rules and access setup,
   `persist`, `backups_kept`, `guarded`, the tick and its panic guard, `post`, `send_mail` (now
   DATA frames), the movement and urgent policy, kicks (the reason batch, then GONE),

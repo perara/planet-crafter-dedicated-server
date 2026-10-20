@@ -4,13 +4,18 @@
 //! code is fanned out by). This is the other direction: a notification for whoever listens, with
 //! the same typed events (`pcds_plugin_api::Event`) for all of them:
 //!
-//! - the chat hooks (`chathooks`, in the front: webhooks, the exec program, GET /api/chat/events)
-//!   take every chat message, always;
+//! - the chat hooks (`chathooks`: queued for the front, which delivers them to webhooks, the exec
+//!   program and GET /api/chat/events) take every chat message, always;
 //! - the plugins (`plugins`) and the event stream for integrations take the kinds they asked for.
 //!
+//! Those are the **subscribers**, in this order, and `emit` is the only place that calls them: each
+//! has a `wants(kind)` and takes the event. A new listener is a third line in `emit` and in `wants`,
+//! not a call from the game.
+//!
 //! **Nobody listening costs one load and one test.** `wants` reads a bit mask in the game's
-//! `ext.plugins` slot; every function below returns at once when the kind's bit is clear, before
-//! it builds anything. With no plugin loaded and nobody polling the stream the mask is zero.
+//! `ext.plugins` slot (and asks the chat hooks, which is a constant for every kind but chat); every
+//! function below returns at once when the kind's bit is clear, before it builds anything. With no
+//! plugin loaded and nobody polling the stream the mask is zero.
 //!
 //! A call site names what happened and passes what it already has; this module builds the event.
 //! Nothing here changes what the game does, except `rpc_before`, which lets a plugin that holds
@@ -21,9 +26,15 @@ use pcds_plugin_api::{Event, Kind, Verdict};
 use crate::game::Game;
 use crate::model::WorldObject;
 
-/// Whether anyone wants events of this kind.
+/// Whether anyone wants events of this kind: the chat hooks or a plugin.
 #[inline(always)]
 pub fn wants(game: &Game, kind: Kind) -> bool {
+    crate::chathooks::wants(kind) || plugins_want(game, kind)
+}
+
+/// Whether a plugin (or the event stream) asked for events of this kind.
+#[inline(always)]
+fn plugins_want(game: &Game, kind: Kind) -> bool {
     game.ext.plugins.interest & kind.bit() != 0
 }
 
@@ -31,8 +42,16 @@ fn online(game: &Game) -> u32 {
     game.clients.values().filter(|c| c.ready.is_some()).count() as u32
 }
 
+/// The event to its subscribers, each only for the kinds it wants; the verdict is the plugins'.
 fn emit(game: &mut Game, event: &Event<'_>) -> Verdict {
-    crate::plugins::dispatch(game, event)
+    let kind = event.kind();
+    if crate::chathooks::wants(kind) {
+        crate::chathooks::on_event(game, event);
+    }
+    if plugins_want(game, kind) {
+        return crate::plugins::dispatch(game, event);
+    }
+    Verdict::Continue
 }
 
 /// Every game tick (the plugins that asked are called every so often, not at each).
@@ -63,10 +82,6 @@ pub fn player_left(game: &mut Game, client: u64, name: &str) {
 
 /// ChatHandler.SendChatMessageServerRpc: the chat hooks always get it; the plugins when they want it.
 pub fn chat(game: &mut Game, client: u64, text: &str) {
-    crate::chathooks::chat(game, client, text);
-    if !wants(game, Kind::Chat) {
-        return;
-    }
     let name = game.clients.get(&client).and_then(|c| c.ready.as_ref()).map(|s| s.name.clone()).unwrap_or_default();
     emit(game, &Event::Chat { client, name: &name, text });
 }
