@@ -361,10 +361,6 @@ impl WorldObject {
         self.unit_generation[unit] * self.energy * if m < f32::EPSILON { 1.0 } else { m }
     }
 
-    pub fn has_unit_generation(&self, data: &GameData) -> bool {
-        data.groups[self.group].constructible && self.unit_generation.iter().any(|v| *v > 0.0)
-    }
-
     pub fn from_json(o: &Value, data: &GameData, default_planet: i32) -> Option<WorldObject> {
         let group = data.group(o["gId"].as_str()?)?;
         let mut wo = WorldObject::new(o["id"].as_i64()? as i32, group, data);

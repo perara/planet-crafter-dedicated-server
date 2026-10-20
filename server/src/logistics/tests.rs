@@ -245,12 +245,9 @@ fn drones_pick_up_produce_lying_in_the_world() {
     assert!(!game.wos[&produce].is_placed());
 }
 
-/// A drone carrying iron whose demand container is taken down loses its load, even with
-/// another demand for iron there: the game's FindDemandForDroneOrDestroyContent looks for one,
-/// but CreateNewTaskForWorldObject refuses a drone's own inventory as the source, so the load is
-/// always destroyed.
+/// An interrupted delivery preserves its cargo, with or without another demand.
 #[test]
-fn a_drone_whose_demand_goes_loses_its_load() {
+fn a_drone_whose_demand_goes_preserves_its_load() {
     for second_demand in [true, false] {
         let Some(mut game) = game() else { return };
         build(&mut game, "EnergyGenerator6", [40.0, 2.0, 0.0]);
@@ -286,9 +283,10 @@ fn a_drone_whose_demand_goes_loses_its_load() {
             frame(&mut game, start + t);
         }
         if let Some(inv) = other {
-            assert!(items(&game, inv).is_empty());
+            assert!(items(&game, inv).contains(&item) || game.wos[&item].is_placed());
         }
-        assert!(!game.wos.contains_key(&item), "destroyed");
+        assert!(game.wos.contains_key(&item), "cancelled delivery must preserve the cargo");
+        assert!(!game.wos[&item].dont_save);
         assert!(items(&game, game.ext.logistics.drones[&drone].inventory).is_empty());
     }
 }
@@ -626,8 +624,8 @@ fn the_search_for_tasks_makes_the_tasks_the_first_search_made_in_the_same_order(
 }
 
 #[test]
-fn audit_drone_preserves_cargo_if_destination_fills_during_flight() {
-    let Some(mut game) = game() else { panic!("real game tables required") };
+fn a_drone_preserves_cargo_if_destination_fills_during_flight() {
+    let Some(mut game) = game() else { return };
     build(&mut game, "EnergyGenerator6", [40.0, 2.0, 0.0]);
     let station = build(&mut game, "DroneStation1", [10.0, 2.0, 10.0]);
     let supply = build(&mut game, "Container1", [25.0, 2.0, 10.0]);
@@ -652,4 +650,27 @@ fn audit_drone_preserves_cargo_if_destination_fills_during_flight() {
     }
     assert!(filled, "control: the drone picked up the iron before the destination filled");
     assert!(game.wos.contains_key(&cargo), "iron was deleted after the destination filled during delivery");
+    assert!(game.wos[&cargo].net.is_some() && game.wos[&cargo].is_placed(), "undelivered cargo is dropped for recovery");
+    assert!(!game.is_held(cargo));
+    assert!(items(&game, station).contains(&drone), "drone still returns home");
+}
+
+#[test]
+fn cancelled_drone_cargo_is_saved_on_its_own_planet() {
+    let Some(mut g) = game() else { return };
+    let drone = build(&mut g, "Drone1", [40.0, 6.0, 30.0]);
+    add_to_fleet(&mut g, drone, false);
+    let inventory = g.ext.logistics.drones[&drone].inventory;
+    let cargo = add(&mut g, "Iron", inventory);
+    let planet = stable_hash("Humble");
+    g.wos.get_mut(&drone).unwrap().planet = planet;
+    let position = g.ext.logistics.drones[&drone].position;
+    end_assignment(&mut g, drone);
+    assert!(items(&g, inventory).is_empty());
+    assert!(!g.is_held(cargo));
+    assert_eq!(g.wos[&cargo].planet_hash(), planet);
+    assert_eq!(g.wos[&cargo].position, position);
+    assert!(!g.wos[&cargo].dont_save);
+    let net = g.wos[&cargo].net.unwrap();
+    assert!(matches!(g.net.get(net, "GroupNetworkContainer", "_active"), Some(crate::net::VarValue::Plain(v)) if *v == enc::bool(false)));
 }

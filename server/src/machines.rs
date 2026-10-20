@@ -566,7 +566,7 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, _behaviour: u16, name: &st
 /// its machine components start as the game wires them.
 pub fn on_instantiated(game: &mut Game, wo: i32) {
     let Some(w) = game.wos.get(&wo) else { return };
-    let (group, linked, position) = (w.group, w.linked_inventory, w.position);
+    let (group, linked) = (w.group, w.linked_inventory);
     let mut m = Machine::new();
     // MachineGrowerBase and its subclasses on the root, in component order (growth fuses).
     for ty in game.data.group_prefabs.root_types(&game.data.groups[group].id) {
@@ -685,9 +685,13 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     if wants_start {
         game.ext.machines.starting.push(wo);
     }
-    // ConstructibleProxy.OnNetworkSpawn: WorldObjectsHandler.onConstructibleInstantiated.
-    if game.ext.machines.loaded && net_has(game, wo, "ConstructibleProxy") && game.data.groups[group].constructible {
-        production::constructible_instantiated(game, wo, position);
+}
+
+/// Notify optimizers after every subsystem has initialized the new target's components.
+pub fn constructible_instantiated(game: &mut Game, wo: i32) {
+    let Some(w) = game.wos.get(&wo) else { return };
+    if game.ext.machines.loaded && game.data.groups[w.group].constructible && net_has(game, wo, "ConstructibleProxy") {
+        production::constructible_instantiated(game, wo, w.position);
     }
 }
 
@@ -787,15 +791,17 @@ pub fn add_growth_speed_to_all(game: &mut Game, add: f32) {
 
 /// Rules: a joining client hears the growth speed of every grower (its own copies start at 1).
 pub fn client_approved(game: &mut Game, client: u64) {
-    let add = game.rules.speed.growth - 1.0;
-    if add == 0.0 {
-        return;
-    }
-    let growers: Vec<(u64, usize)> = game.ext.machines.list.iter().filter(|(_, m)| m.growers.iter().any(|g| *g)).filter_map(|(wo, m)| Some((game.wos.get(wo)?.net?, m.growers.len()))).collect();
-    for (net, count) in growers {
+    let growers: Vec<(u64, usize, f32)> = game.ext.machines.list.iter().filter(|(_, m)| m.growers.contains(&true) && m.grow_multiplier != 1.0).filter_map(|(wo, m)| Some((game.wos.get(wo)?.net?, m.growers.len(), m.grow_multiplier - 1.0))).collect();
+    for (net, count, add) in growers {
         for _ in 0..count {
             game.net.rpc(Target::Only(client), net, "ConstructibleProxy.SetGrowerSpeedMultiplierClientRpc", &[json!(add)]);
         }
+    }
+}
+
+pub fn setting_changed(game: &mut Game, wo: i32) {
+    if game.ext.machines.list.get(&wo).is_some_and(|m| m.destruct_if_full) {
+        production::try_to_clean(game, wo);
     }
 }
 

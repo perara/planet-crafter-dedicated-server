@@ -260,6 +260,19 @@ mod tests {
         let (f, _) = place(&mut g, [800.0 - 8.0 * 0.70710677, 10.0, 500.0 + 8.0 * 0.70710677], 45.0);
         assert_eq!((g.wos[&e].panels.clone(), g.wos[&f].panels.clone()), (None, None));
         crate::deconstruct::deconstruct(&mut g, 1, b_net, 0.0);
+        assert_eq!(g.wos[&a].panels, Some(vec![1, 1, 1, 2, 5, 7]), "panels stay intact until deconstruction succeeds");
+        g.time += 0.1;
+        crate::scene::tick(&mut g);
+        assert!(!g.wos.contains_key(&b));
         assert_eq!(g.wos[&a].panels, Some(vec![1, 1, 1, 1, 5, 7]), "taking one apart closes the other");
+        let (b, b_net) = place(&mut g, [592.0, 10.0, 500.0], 0.0);
+        crate::deconstruct::deconstruct(&mut g, 1, b_net, 2.0);
+        assert!(g.ext.deconstructing.contains(&b));
+        crate::testkit::place(&mut g, "Container1", [592.0, 10.0, 500.0]);
+        assert_ne!(crate::machines::deconstruct_status(&g, b), 0, "control: something was placed inside during the animation");
+        g.time += 3.0;
+        crate::scene::tick(&mut g);
+        assert!(g.wos.contains_key(&b), "deconstruction was cancelled");
+        assert_eq!(g.wos[&a].panels, Some(vec![1, 1, 1, 2, 5, 7]), "cancelled deconstruction keeps the corridor");
     }
 }

@@ -570,7 +570,10 @@ pub fn optimizer_update(game: &mut Game, wo: i32) {
 /// MachineOptimizer.OnConstructibleInstantiated: a producing building came in range.
 pub fn constructible_instantiated(game: &mut Game, wo: i32, position: [f32; 3]) {
     let Some(w) = game.wos.get(&wo) else { return };
-    if position == [0.0; 3] || !w.has_unit_generation(&game.data) {
+    let eligible = game.data.groups[w.group].units.iter().any(|v| *v > 0.0)
+        || game.ext.machines.list.get(&wo).is_some_and(|m| m.generator.is_some() || m.growers.contains(&true))
+        || super::is_rocket_platform(game, w.group);
+    if position == [0.0; 3] || !eligible {
         return;
     }
     let optimizers: Vec<i32> = game.ext.machines.list.iter().filter(|(_, m)| m.optimizer.is_some()).map(|(k, _)| *k).collect();
@@ -648,6 +651,7 @@ pub fn recycle_content(game: &mut Game, wo: i32, center: [f32; 3], size: [f32; 3
 mod tests {
     use super::*;
     use crate::machines::tests::{build, game};
+    use crate::testkit::{one, place, send_on, send_scene};
 
     #[test]
     fn generation_speed_rounds_halves_to_even() {
@@ -908,4 +912,106 @@ mod tests {
         let sent = crate::machines::tests::sent(&game);
         assert!(sent.iter().any(|(name, _)| name == "ConstructibleProxy.SetRocketBackAndForthSpeedMultiplierClientRpc"), "{sent:?}");
     }
+    #[test]
+    fn new_rocket_is_boosted_without_reinserting_optimizer_fuse() {
+        for platform in ["TradePlatform1", "InterplanetaryExchangePlatform1"] {
+            let Some((mut g, _)) = crate::testkit::world() else { return };
+            let (optimizer, _) = place(&mut g, "Optimizer2", [570.0, 3.0, 500.0]);
+            let inv = g.wos[&optimizer].linked_inventory;
+            let fuse = g.data.group("FuseTradeRocketsSpeed1").unwrap();
+            let (ok, item) = g.add_new_item(fuse, inv, 0); assert!(ok);
+            let (_, net) = place(&mut g, platform, [580.0, 3.0, 500.0]);
+            g.net.out.clear();
+            send_on(&mut g, 1, net, "ConstructibleProxy.RetrieveRocketBackAndForthSpeedMultiplierServerRpc", &[]);
+            let before = one(&g, "ConstructibleProxy.SetRocketBackAndForthSpeedMultiplierClientRpc")[0].as_f64().unwrap();
+            send_scene(&mut g, 1, "InventoriesHandler.RemoveItemFromInventoryServerRpc", &[json!(item), json!(inv), json!(true)]);
+            assert!(g.add_new_item(fuse, inv, 0).0);
+            g.net.out.clear();
+            send_on(&mut g, 1, net, "ConstructibleProxy.RetrieveRocketBackAndForthSpeedMultiplierServerRpc", &[]);
+            let after = one(&g, "ConstructibleProxy.SetRocketBackAndForthSpeedMultiplierClientRpc")[0].as_f64().unwrap();
+            assert!(after > 1.0, "control: reinserting the fuse must boost the rocket");
+            assert!((before - after).abs() < 1e-6, "newly built rocket multiplier was {before}; after reinserting the same fuse it is {after}");
+        }
+    }
+
+    #[test]
+    fn joiners_receive_current_growth_speed_including_rules_and_fuses() {
+        for growth in [1.0, 2.0] {
+            use crate::testkit::*;
+            let Some((mut g, _)) = world() else { return };
+            g.rules.speed.growth = growth;
+            let (optimizer, _) = place(&mut g, "Optimizer2", [570.0, 3.0, 500.0]);
+            let (grower, net) = place(&mut g, "Vegetube1", [580.0, 3.0, 500.0]);
+            let inv = g.wos[&optimizer].linked_inventory;
+            let fuse = g.data.group("FuseGrowth1").unwrap();
+            let (ok, item) = g.add_new_item(fuse, inv, 0);
+            assert!(ok);
+            let m = &g.ext.machines.list[&grower];
+            let (count, boosted) = (m.growers.len(), m.grow_multiplier);
+            assert!(boosted > growth);
+            g.net.out.clear();
+            join(&mut g, 2, "Bob");
+            let sync = sent(&g, "ConstructibleProxy.SetGrowerSpeedMultiplierClientRpc");
+            assert_eq!(sync.len(), count);
+            assert!(sync.iter().all(|m| m.object == net && m.to == Target::Only(2) && (m.args[0].as_f64().unwrap() - (boosted - 1.0) as f64).abs() < 1e-6));
+            send_scene(&mut g, 1, "InventoriesHandler.RemoveItemFromInventoryServerRpc", &[json!(item), json!(inv), json!(true)]);
+            g.net.out.clear();
+            join(&mut g, 3, "Cal");
+            let sync = sent(&g, "ConstructibleProxy.SetGrowerSpeedMultiplierClientRpc");
+            assert_eq!(sync.len(), if growth == 1.0 { 0 } else { count });
+            assert!(sync.iter().all(|m| m.to == Target::Only(3) && m.args == vec![json!(growth - 1.0)]));
+            crate::machines::add_growth_speed_to_all(&mut g, 1.0 - growth);
+            g.rules.speed.growth = 1.0;
+            g.net.out.clear();
+            join(&mut g, 4, "Dee");
+            assert!(sent(&g, "ConstructibleProxy.SetGrowerSpeedMultiplierClientRpc").is_empty());
+        }
+    }
+
+    #[test]
+    fn enabling_full_destructor_clears_its_inventory() {
+        let Some((mut g, _)) = crate::testkit::world() else { return };
+        let (destructor, net) = place(&mut g, "Destructor1", [570.0, 3.0, 500.0]);
+        let inv = g.wos[&destructor].linked_inventory;
+        let iron = g.data.group("Iron").unwrap();
+        let size = g.inventories[&inv].size;
+        for _ in 0..size { assert!(g.add_new_item(iron, inv, 0).0); }
+        assert!(g.inventories[&inv].is_full());
+        send_on(&mut g, 1, net, "SettingProxy.SetSettingServerRpc", &[json!(1)]);
+        assert_eq!(g.wos[&destructor].setting, 1);
+        assert!(g.inventories[&inv].items.is_empty());
+        send_on(&mut g, 1, net, "SettingProxy.SetSettingServerRpc", &[json!(1)]);
+        assert!(g.add_new_item(iron, inv, 0).0);
+        assert_eq!(g.inventories[&inv].items.len(), 1, "enabled but not full stays intact");
+        send_on(&mut g, 1, net, "SettingProxy.SetSettingServerRpc", &[json!(0)]);
+        for _ in 1..size { assert!(g.add_new_item(iron, inv, 0).0); }
+        assert!(g.inventories[&inv].is_full(), "disabled mode does not destroy a full inventory");
+    }
+
+    #[test]
+    fn newly_built_generators_and_growers_receive_existing_fuses() {
+        for (fuse, target) in [("FuseProduction1", "WaterCollector1"), ("FuseGrowth1", "Vegetube1"), ("FuseOxygen1", "Vegetube1")] {
+            let Some(mut g) = game() else { return };
+            let optimizer = build(&mut g, "Optimizer2", [570.0, 3.0, 500.0]);
+            let inv = g.wos[&optimizer].linked_inventory;
+            let fuse = g.data.group(fuse).unwrap();
+            assert!(g.add_new_item(fuse, inv, 0).0);
+            let target = build(&mut g, target, [580.0, 3.0, 500.0]);
+            assert!(g.ext.machines.list[&optimizer].optimizer.as_ref().unwrap().modified.contains(&(target, fuse)));
+            let m = &g.ext.machines.list[&target];
+            match g.data.groups[fuse].str("itemSubCategory") {
+                "FuseProduction" => {
+                    assert!(m.generator.as_ref().unwrap().speed > 1.0);
+                    let next = g.time + 1234.0;
+                    g.ext.machines.get_mut(&target).unwrap().parts_mut().generator.as_mut().unwrap().next = next;
+                    build(&mut g, "Container1", [575.0, 3.0, 500.0]);
+                    assert_eq!(g.ext.machines.list[&target].generator.as_ref().unwrap().next, next, "unrelated construction must not reset the production timer");
+                }
+                "FuseGrowth" => assert!(m.grow_multiplier > 1.0),
+                "FuseOxygen" => assert!(g.wos[&target].unit_multiplier[crate::model::unit_index("Oxygen").unwrap()] > 0.0),
+                _ => unreachable!(),
+            }
+        }
+    }
+
 }

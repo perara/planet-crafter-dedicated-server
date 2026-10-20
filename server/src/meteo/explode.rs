@@ -195,11 +195,11 @@ fn go_off(game: &mut Game, wo: i32, net: u64) {
 
 /// Exploded.ProcessExplosion, server side.
 fn exploded(game: &mut Game, target: i32, d: Explodable) {
-    let Some(w) = game.wos.get_mut(&target) else { return };
+    let Some(w) = game.wos.get(&target) else { return };
     if !w.dont_save {
-        w.dont_save = true;
+        let (group, p) = (w.group, w.position);
+        game.set_save_state(target, false);
         if d.drop {
-            let (group, p) = (w.group, w.position);
             game.create_and_drop_on_floor(group, [p[0], p[1] + 1.0, p[2]], 0.0, true, true, 0.0, 0);
         }
     }

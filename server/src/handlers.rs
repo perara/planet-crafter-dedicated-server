@@ -261,6 +261,7 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
             }
             if let Some(wo) = wo {
                 crate::rockets::launch_if_full(game, wo);
+                crate::machines::setting_changed(game, wo);
             }
         }
         "LinkedGroupsProxy.SetLinkedGroupsServerRpc" => set_linked_groups(game, object, &a.ints(0).unwrap_or_default()),

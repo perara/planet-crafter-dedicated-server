@@ -49,6 +49,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     crate::rockets::on_instantiated(game, wo);
     crate::planets::on_instantiated(game, wo);
     crate::animals::on_instantiated(game, wo);
+    crate::machines::constructible_instantiated(game, wo);
     crate::events::object_placed(game, wo);
 }
 

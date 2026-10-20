@@ -171,9 +171,8 @@ fn add_world_object_to_inventory(game: &mut Game, wo: i32, inventory: i32) {
         return;
     }
     game.propagate(inventory, wo, true);
-    let w = game.wos.get_mut(&wo).unwrap();
-    let was_unsaved = std::mem::replace(&mut w.dont_save, false);
-    game.update_save_state(wo);
+    let was_unsaved = game.wos[&wo].dont_save;
+    game.set_save_state(wo, true);
     if was_unsaved {
         crate::scene::on_world_object_from_scene_retrieved(game, wo);
     }

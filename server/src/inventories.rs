@@ -684,8 +684,7 @@ impl Game {
                     // The inventory's machine may have destroyed it already
                     // (MachineDestructInventoryIfFull).
                     if let Some(was_unsaved) = self.wos.get(&id).map(|w| w.dont_save) {
-                        self.wos.get_mut(&id).unwrap().dont_save = false;
-                        self.update_save_state(id);
+                        self.set_save_state(id, true);
                         if was_unsaved {
                             crate::scene::on_world_object_from_scene_retrieved(self, id);
                         }

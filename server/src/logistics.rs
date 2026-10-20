@@ -261,8 +261,7 @@ pub fn add_world_object_to_inventory(game: &mut Game, wo: i32, inventory: i32, g
         game.dirty_inventory(inventory, 0, false);
         return true;
     };
-    game.wos.get_mut(&wo).unwrap().dont_save = false;
-    game.update_save_state(wo);
+    game.set_save_state(wo, true);
     if was_unsaved {
         crate::scene::on_world_object_from_scene_retrieved(game, wo);
     }
@@ -959,7 +958,7 @@ fn manager_add_drone(game: &mut Game, d: i32) {
     }
     let inventory = game.ext.logistics.drones[&d].inventory;
     if !items(game, inventory).is_empty() {
-        find_demand_or_destroy_content(game, d);
+        drop_drone_cargo(game, d);
     }
 }
 
@@ -977,31 +976,13 @@ fn manager_remove_drone(game: &mut Game, d: i32) {
     l.fleet.shift_remove(&d);
 }
 
-/// FindDemandForDroneOrDestroyContent. A drone's own inventory never belongs to a constructed
-/// world object, so CreateNewTaskForWorldObject refuses it and the content is always destroyed.
-fn find_demand_or_destroy_content(game: &mut Game, d: i32) {
-    let planet = planet_of(game, d);
-    let inventory = game.ext.logistics.drones[&d].inventory;
-    let Some(&wo) = items(game, inventory).first() else { return };
-    set_task(game, d, None);
-    let group = game.wos.get(&wo).map(|w| w.group);
-    for demand in game.ext.logistics.demand.clone() {
-        let Some(inv) = game.inventories.get(&demand) else { continue };
-        if inv.is_full() || entity_planet(game, demand) != planet {
-            continue;
-        }
-        for g in inv.logistic.demand.clone() {
-            if Some(g) == group {
-                if let Some(task) = create_task(game, Some(inventory), demand, wo, false) {
-                    set_state(game, task, State::ToDemand);
-                    set_task(game, d, Some(task));
-                    return;
-                }
-            }
-        }
-    }
-    if drone_task(game, d).is_none() {
-        game.destroy_world_object(wo, false);
+/// A failed or interrupted delivery must not consume its cargo.
+fn drop_drone_cargo(game: &mut Game, d: i32) {
+    let Some(dr) = game.ext.logistics.drones.get(&d) else { return };
+    let (inventory, position, planet) = (dr.inventory, dr.position, planet_of(game, d));
+    for wo in items(game, inventory) {
+        remove_item(game, wo, inventory);
+        game.drop_cargo_on_floor(wo, position, planet);
     }
 }
 
@@ -1270,13 +1251,12 @@ fn drone_unload(game: &mut Game, d: i32, uid: u32) {
     end_assignment(game, d);
 }
 
-/// Drone.EndAssignement: whatever is still aboard is destroyed; next task or back to a
-/// station.
+/// Drone.EndAssignement: preserve undelivered cargo, then take the next task or return home.
 fn end_assignment(game: &mut Game, d: i32) {
-    let Some(inventory) = game.ext.logistics.drones.get(&d).map(|dr| dr.inventory) else { return };
-    if let Some(&wo) = items(game, inventory).first() {
-        game.destroy_world_object(wo, false);
+    if !game.ext.logistics.drones.contains_key(&d) {
+        return;
     }
+    drop_drone_cargo(game, d);
     if let Some(uid) = drone_task(game, d) {
         set_state(game, uid, State::Done);
         if let Some(dr) = game.ext.logistics.drones.get_mut(&d) {

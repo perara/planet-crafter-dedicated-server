@@ -282,7 +282,7 @@ fn load_instance_from_scene(game: &mut Game, client: u64, id: i32, position: [f3
         let Some(group) = game.data.group_of_ref(game.data.singletons["ProceduralInstancesHandler"]["_proceduralInstanceGeneratorGroup"].as_str().unwrap_or("")) else { return };
         game.create_world_object(group, id, true);
     }
-    game.wos.get_mut(&id).unwrap().dont_save = false;
+    game.set_save_state(id, true);
     load_instance(game, 0, position, rotation, difficulty, seed);
 }
 

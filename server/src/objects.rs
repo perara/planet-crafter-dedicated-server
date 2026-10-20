@@ -31,9 +31,13 @@ impl Game {
         if fresh && self.data.groups[group].id == crate::genetics::TRAIT_GROUP {
             crate::genetics::randomize_trait(self, &mut wo);
         }
-        if let Some(old) = self.wos.insert(id, wo) {
+        if let Some(old) = self.wos.remove(&id) {
+            self.remove_from_count_lists(&old);
+            self.constructed.remove(&id);
+            self.pickables.remove(&id);
             crate::meteo::explode::net_changed(self, old.group, old.net.is_some(), false);
         }
+        self.wos.insert(id, wo);
         self.add_to_specific_lists(id);
         self.change_state_index(id);
         id
@@ -72,9 +76,26 @@ impl Game {
         }
     }
 
-    /// UpdateWorldObjectSaveState.
-    pub fn update_save_state(&mut self, id: i32) {
-        self.add_to_specific_lists(id);
+    /// Change save membership once; moving or picking up an already saved item is not a new object.
+    pub fn set_save_state(&mut self, id: i32, save: bool) {
+        let Some(w) = self.wos.get_mut(&id) else { return };
+        let dont_save = !save;
+        if w.dont_save == dont_save {
+            return;
+        }
+        w.dont_save = dont_save;
+        let hash = self.data.groups[w.group].hash;
+        self.count_list(save, "_allWorldObjectsGroups", hash);
+    }
+
+    fn remove_from_count_lists(&mut self, wo: &WorldObject) {
+        let hash = self.data.groups[wo.group].hash;
+        if self.is_constructed_kind(wo.group) && !is_from_scene(wo.id) {
+            self.count_list(false, "_constructedWorldObjectsGroups", hash);
+        }
+        if !wo.dont_save {
+            self.count_list(false, "_allWorldObjectsGroups", hash);
+        }
     }
 
     /// Increment/DecrementNetworkList on a GroupCountData list of the handler.
@@ -250,11 +271,7 @@ impl Game {
         crate::meteo::explode::net_changed(self, wo.group, wo.net.is_some(), false);
         self.constructed.remove(&id);
         self.pickables.remove(&id);
-        let hash = self.data.groups[wo.group].hash;
-        if !wo.dont_save {
-            self.count_list(false, "_constructedWorldObjectsGroups", hash);
-            self.count_list(false, "_allWorldObjectsGroups", hash);
-        }
+        self.remove_from_count_lists(&wo);
         crate::hooks::on_destroyed(self, &wo);
         if self.data.groups[wo.group].constructible && self.data.groups[wo.group].unit("Energy") != 0.0 {
             crate::energy::update_all_energy_requesters(self);
@@ -321,15 +338,20 @@ impl Game {
     /// DropOnFloorImplentation.
     #[allow(clippy::too_many_arguments)]
     pub fn drop_on_floor(&mut self, id: i32, position: [f32; 3], rotation: [f32; 4], drop_size: f32, sound: bool, nearest: bool, setting: i32, despawn: f32, disolve: bool, sender: u64) {
-        self.drop_on_floor_told(id, position, rotation, drop_size, sound, nearest, setting, despawn, disolve, sender, true);
+        self.drop_on_floor_told(id, position, rotation, drop_size, sound, nearest, setting, despawn, disolve, sender, true, self.planet_hash());
+    }
+
+    /// Recover a drone's undelivered cargo on its own planet, including while that planet is inactive.
+    pub fn drop_cargo_on_floor(&mut self, id: i32, position: [f32; 3], planet: i32) {
+        self.set_save_state(id, true);
+        self.drop_on_floor_told(id, position, [0.0, 0.0, 0.0, 1.0], 0.0, false, true, 0, 0.0, false, 0, true, planet);
     }
 
     /// `tell_server_kept`: whether an object with a physics body of its own (a drone, a rover)
     /// is announced with StartAndStopPhysicsAfterDelay: DropOnFloor and what the server creates
     /// itself (a recycler's output) do, a client's CreateAndDropOnFloor does not.
     #[allow(clippy::too_many_arguments)]
-    fn drop_on_floor_told(&mut self, id: i32, position: [f32; 3], rotation: [f32; 4], drop_size: f32, sound: bool, nearest: bool, setting: i32, despawn: f32, disolve: bool, sender: u64, tell_server_kept: bool) {
-        let planet = self.planet_hash();
+    fn drop_on_floor_told(&mut self, id: i32, position: [f32; 3], rotation: [f32; 4], drop_size: f32, sound: bool, nearest: bool, setting: i32, despawn: f32, disolve: bool, sender: u64, tell_server_kept: bool, planet: i32) {
         let Some(wo) = self.wos.get_mut(&id) else { return };
         wo.position = position;
         wo.rotation = rotation;
@@ -337,7 +359,6 @@ impl Game {
         if setting != 0 {
             wo.setting = setting;
         }
-        self.update_save_state(id);
         crate::instances::check_dropped_object(self, id);
         // A host's own drops (sender 0) are simulated by the host's client; here the nearest
         // client stands in for it.
@@ -367,7 +388,7 @@ impl Game {
 
     pub fn create_and_drop_on_floor(&mut self, group: usize, position: [f32; 3], drop_size: f32, save: bool, nearest: bool, despawn: f32, sender: u64) -> i32 {
         let id = self.create_world_object(group, 0, save);
-        self.drop_on_floor_told(id, position, [0.0, 0.0, 0.0, 1.0], drop_size, false, nearest, 0, despawn, false, sender, true);
+        self.drop_on_floor_told(id, position, [0.0, 0.0, 0.0, 1.0], drop_size, false, nearest, 0, despawn, false, sender, true, self.planet_hash());
         id
     }
 
@@ -376,8 +397,7 @@ impl Game {
     /// be built first returns the materials whatever the client took for it.)
     fn over_building_limit(&mut self, client: u64, id: i32, group: usize) {
         let Some(&max) = self.rules.limits.buildings.get(&self.data.groups[group].id) else { return };
-        // The buildings that stand: the game's count of them (group_count) stays one too high for good
-        // for each one made without being saved, and so would block the limit for everyone.
+        // Limits count placed buildings; the group list also counts unplaced buildable objects.
         let standing = self.wos.values().filter(|w| w.group == group && w.is_placed() && !is_from_scene(w.id)).count();
         if !self.wos.contains_key(&id) || standing <= max as usize {
             return;
@@ -477,8 +497,8 @@ impl Game {
                 }
                 let mut success = false;
                 if self.wos.get(&id).is_some_and(|w| created || w.is_placed()) {
+                    self.set_save_state(id, true);
                     let w = self.wos.get_mut(&id).unwrap();
-                    w.dont_save = false;
                     w.reset_position();
                     self.destroy_go_on_all_clients(id, disolve);
                     success = true;
@@ -486,7 +506,7 @@ impl Game {
                 self.net.rpc_scene(me, "WorldObjectsHandler.DestroyWorldObjectFromSceneResultClientRpc", &[json!(success)]);
             }
             "WorldObjectsHandler.DisableWorldObjectFromSceneServerRpc" => {
-                let (id, hash, update_lists, generate_at) = (a.i(0), a.i(1), a.b(2), a.v3(3));
+                let (id, hash, _update_lists, generate_at) = (a.i(0), a.i(1), a.b(2), a.v3(3));
                 let mut created = false;
                 // Scene world objects have positive ids; 0 would make a fresh one.
                 if id > 0 && !self.wos.contains_key(&id) {
@@ -496,13 +516,10 @@ impl Game {
                     }
                 }
                 if self.wos.get(&id).is_some_and(|w| created || w.is_placed()) {
+                    self.set_save_state(id, true);
                     let w = self.wos.get_mut(&id).unwrap();
-                    w.dont_save = false;
                     w.reset_position();
                     let group = w.group;
-                    if update_lists {
-                        self.update_save_state(id);
-                    }
                     if generate_at.iter().map(|v| v * v).sum::<f32>().sqrt() > f32::EPSILON {
                         self.create_and_drop_on_floor(group, generate_at, 0.0, true, true, 0.0, client);
                     }
@@ -539,7 +556,7 @@ impl Game {
                     let despawn = a.f(5);
                     // A client creating a rover or a drone on the floor is told nothing of its physics.
                     let id = self.create_world_object(group, 0, a.b(3));
-                    self.drop_on_floor_told(id, a.v3(1), [0.0, 0.0, 0.0, 1.0], a.f(2), false, a.b(4), 0, despawn, false, client, false);
+                    self.drop_on_floor_told(id, a.v3(1), [0.0, 0.0, 0.0, 1.0], a.f(2), false, a.b(4), 0, despawn, false, client, false, self.planet_hash());
                     // Rules: what the game drops with a despawn time is a meteor's material.
                     if let Some(seconds) = self.rules.meteo.material_despawn_seconds.filter(|_| despawn > f32::EPSILON) {
                         crate::scene::set_despawn(self, id, seconds);
@@ -572,7 +589,7 @@ impl Game {
                     let Some(g) = self.data.group_by_hash(hash) else { return true };
                     self.create_world_object(g, id, true);
                 }
-                self.wos.get_mut(&id).unwrap().dont_save = false;
+                self.set_save_state(id, true);
                 if chance >= self.rng.rangef(1.0, 100.0) {
                     let planet = self.planet_hash();
                     let w = self.wos.get_mut(&id).unwrap();
@@ -951,4 +968,69 @@ mod tests {
         send_scene(&mut g, 1, "WorldObjectsHandler.RetrieveResourcesFromDeconstructionServerRpc", &[json!(built), json!(group_hash), json!(inventory), json!([600.0, 3.0, 500.0]), json!(1)]);
         assert_eq!(g.wos.len(), before);
     }
+
+    #[test]
+    fn drops_pickups_and_save_transitions_count_each_object_once() {
+        let Some((mut g, _)) = crate::testkit::world() else { return };
+        let (bag, _) = backpack(&g, 1);
+        let iron = g.data.group("Iron").unwrap();
+        let before = g.group_count(false, iron);
+        let id = g.create_and_drop_on_floor(iron, [570.0, 3.0, 500.0], 0.0, true, false, 0.0, 1);
+        assert_eq!(g.group_count(false, iron), before + 1);
+        let hash = g.data.groups[iron].hash;
+        send_scene(&mut g, 1, "InventoriesHandler.AddWorldObjectToInventoryServerRpc", &[json!(id), json!(hash), json!(bag), json!(true)]);
+        assert!(g.inventories[&bag].items.contains(&id));
+        assert_eq!(g.group_count(false, iron), before + 1, "one saved object must count once after pickup");
+        g.set_save_state(id, true);
+        assert_eq!(g.group_count(false, iron), before + 1);
+        g.set_save_state(id, false);
+        g.set_save_state(id, false);
+        assert_eq!(g.group_count(false, iron), before);
+        g.set_save_state(id, true);
+        assert_eq!(g.group_count(false, iron), before + 1);
+        g.destroy_world_object(id, true);
+        assert_eq!(g.group_count(false, iron), before);
+        let unsaved = g.create_world_object(iron, 0, false);
+        assert_eq!(g.group_count(false, iron), before);
+        g.set_save_state(unsaved, true);
+        g.set_save_state(unsaved, true);
+        assert_eq!(g.group_count(false, iron), before + 1);
+        g.destroy_world_object(unsaved, false);
+        assert_eq!(g.group_count(false, iron), before);
+    }
+
+    #[test]
+    fn group_counts_balance_replacements_unsaved_buildings_and_restores() {
+        let Some((mut g, _)) = world() else { return };
+        let group = g.data.group("EnergyGenerator1").unwrap();
+        let before = g.group_count(true, group);
+        let all = g.group_count(false, group);
+        let id = g.create_world_object(group, 0, false);
+        assert_eq!(g.group_count(true, group), before + 1);
+        assert_eq!(g.group_count(false, group), all);
+        g.destroy_world_object(id, false);
+        assert_eq!(g.group_count(true, group), before);
+        let id = g.create_world_object(group, 0, true);
+        g.create_world_object(group, id, true);
+        assert_eq!(g.group_count(true, group), before + 1, "replacement counts once");
+        assert_eq!(g.group_count(false, group), all + 1);
+        let iron = g.data.group("Iron").unwrap();
+        let iron_before = g.group_count(false, iron);
+        g.create_world_object(iron, id, true);
+        assert_eq!(g.group_count(true, group), before);
+        assert_eq!(g.group_count(false, group), all);
+        assert_eq!(g.group_count(false, iron), iron_before + 1);
+        let snapshot = crate::handoff::snapshot(&mut g).unwrap();
+        let (n, d, s, scenes) = crate::game::test_tables().unwrap();
+        let mut restored = crate::handoff::restore(n, d, s, &snapshot, scenes).unwrap();
+        restored.set_save_state(id, true);
+        assert_eq!(restored.group_count(false, iron), iron_before + 1);
+        restored.destroy_world_object(id, false);
+        assert_eq!(restored.group_count(false, iron), iron_before);
+        let saved = g.snapshot();
+        let mut loaded = crate::game::test_game(saved).unwrap();
+        loaded.set_save_state(id, true);
+        assert_eq!(loaded.group_count(false, iron), iron_before + 1, "save reload registers each item once");
+    }
+
 }

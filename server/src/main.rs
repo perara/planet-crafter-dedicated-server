@@ -446,6 +446,3 @@ fn main() {
     }
 }
 
-
-#[cfg(test)]
-mod audit_regressions;

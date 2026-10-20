@@ -91,7 +91,7 @@ fn start(game: &mut Game, wo: i32, speed: f32, direction: i32) {
     game.ext.animals.interpolation.active.insert(wo, Interpolation { speed, direction, start_value: current, start_time: time });
     let w = game.wos.get_mut(&wo).unwrap();
     w.setting = direction;
-    w.dont_save = false;
+    game.set_save_state(wo, true);
     game.net.rpc_scene(Target::All, "SceneInterpolationHandler.StartInterpolationClientRpc", &[json!(wo), json!(current), json!(speed), json!(direction), json!(time.f32())]);
 }
 
