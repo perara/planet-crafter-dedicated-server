@@ -106,7 +106,7 @@ impl Front {
                 return Err(format!("no world {name}"));
             }
             readable(&save, &name)?;
-            let lock = crate::cli::hold(std::path::Path::new(&format!("{save}.lock")), "another server runs that world")?;
+            let lock = crate::util::hold(std::path::Path::new(&format!("{save}.lock")), "another server runs that world")?;
             moved = Some((std::mem::replace(&mut self.save, save), self.world_lock.replace(lock), name));
         }
         let started = self.start_bank();
@@ -117,7 +117,7 @@ impl Front {
             }
             (Ok(world), Some((_, _, name))) => {
                 if let Some(home) = crate::env("PCDS_HOME")
-                    && let Err(e) = crate::cli::set_env_file(&std::path::Path::new(&home).join("server.env"), "PCDS_WORLD", &name)
+                    && let Err(e) = crate::config::set_env_file(&std::path::Path::new(&home).join("server.env"), "PCDS_WORLD", &name)
                 {
                     eprintln!("world {name}: not remembered for the next start ({e})");
                 }
@@ -174,7 +174,7 @@ mod tests {
         unsafe { std::env::set_var("PCDS_HOME", &dir) };
         let mut front = Front::new("data", &a.to_string_lossy(), Some(dir.join("banks")), None, 0, Arc::new(AtomicBool::new(false)));
         front.phase = Phase::Stopped;
-        front.world_lock = Some(crate::cli::hold(&dir.join("a.json.lock"), "busy").unwrap());
+        front.world_lock = Some(crate::util::hold(&dir.join("a.json.lock"), "busy").unwrap());
         // A world in an old layout is refused before any bank is started or lock taken.
         let e = front.start_world(Some("c")).unwrap_err();
         assert!(e.contains("world c") && e.contains("pcds world import") && !dir.join("c.json.lock").exists(), "{e}");
@@ -183,8 +183,8 @@ mod tests {
         assert_eq!((front.world_name(), front.phase), ("a".to_string(), Phase::Stopped));
         assert_eq!(std::fs::read_to_string(&env).unwrap(), "PCDS_WORLD=a\n");
         // The lock of a is still this server's; b's is free again.
-        assert!(crate::cli::hold(&dir.join("a.json.lock"), "busy").is_err());
-        assert!(crate::cli::hold(&dir.join("b.json.lock"), "busy").is_ok());
+        assert!(crate::util::hold(&dir.join("a.json.lock"), "busy").is_err());
+        assert!(crate::util::hold(&dir.join("b.json.lock"), "busy").is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -20,7 +20,7 @@ impl Ctx {
         let to = super::free_path(&backups, &crate::worlds::kept_stem(name, why, std::time::SystemTime::now()));
         let from = self.worlds.join(format!("{name}.json"));
         let bytes = fs::read(&from).map_err(|e| format!("{}: {e}", from.display()))?;
-        super::replace_file(&to, &bytes, 0o644)?;
+        crate::util::replace_file(&to, &bytes, 0o644)?;
         let modified = fs::metadata(&from).and_then(|m| m.modified()).map_err(|e| e.to_string())?;
         fs::File::options().write(true).open(&to).and_then(|f| f.set_modified(modified)).map_err(|e| format!("{}: {e}", to.display()))
     }
@@ -128,7 +128,7 @@ impl Ctx {
                 let seed = crate::game::Rng::seeded().range(0, i32::MAX) as u32;
                 let converted = crate::oldsave::import(&text, seed, &self.game_version()).map_err(|e| format!("{}: {e}", save.display()))?;
                 super::mkdir(&self.worlds)?;
-                super::replace_file(&file(&name), converted.as_bytes(), 0o644)?;
+                crate::util::replace_file(&file(&name), converted.as_bytes(), 0o644)?;
                 let how = if converted == text { "" } else { " (converted from the game's old save format)" };
                 say(format!("world {name} imported{how}; 'pcds world use {name}' plays it"));
                 Ok(())

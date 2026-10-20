@@ -63,7 +63,6 @@ the work" that removes it.
 | Edge | Why it is there | Step |
 |---|---|---|
 | `bank → cli`, `native → cli`, `native → net` | the tables folder's contract (build id, finding tables, an encoder) is defined in `cli` and `net`; the bank asks it in `bank/status.rs` (the installed game) | 7 |
-| `front → cli`, `updater → cli` | file primitives (`hold`, `replace_file`, `set_env_file`) live in `cli` | 13 |
 | `front → config`, `front → rules` | settings read by name; the chat rules' struct | 8 |
 
 ## The front
@@ -317,7 +316,7 @@ the audit's list (the ones not done here are another agent's or later).
 | 8 | typed settings accessor | later | removes `front → config`, `front → rules` |
 | 9 | one worlds module | done for the names, the paths and the listing (`worlds.rs`) | `worlds::tests`, `tests/cli.rs`, `tests/admin_golden.rs` |
 | 11 | one admin route table | done: the table, `docs/admin-api.md`, the test against the source, the golden test; not done: typed requests and answers, one timeout table, dropping routes | `front::admin_routes::tests`, `tests/admin_golden.rs` |
-| 13 | one place for the file primitives | later | removes `front → cli`, `updater → cli` |
+| 13 | one place for the file primitives | done for the lock (`util::hold`) and the whole-file writer (`util::replace_file`) and the server.env text (`config::parse_env`, `set_env_text`, `set_env_file`); not done: `save::write_atomic` (its own temp names for concurrent writers) and `updater::lock` stay beside them | removed `front → cli`, `updater → cli`; `util::tests`, `tests/layers.rs` |
 | 14 | a workspace, with the crates above, one at a time, base first | after 4, 7, 13 | each crate: the build, the tests and the flip |
 | 15 | the flip and recovery as a state machine with its own tests | last, and the owner's call | `tests/hot_update.rs` first extended |
 

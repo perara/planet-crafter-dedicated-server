@@ -54,10 +54,6 @@ only plugins <- events bank ext cli
 debt bank -> cli
 debt native -> cli
 debt native -> net
-# Files of the filesystem (hold, replace_file, set_env_file) live in cli (13: one place for the
-# file primitives).
-debt front -> cli
-debt updater -> cli
 # The front reads settings and rules by name (8: typed settings).
 debt front -> config
 debt front -> rules

@@ -446,7 +446,7 @@ pub fn active(banks: &Path) -> Result<String, String> {
 /// lock), so it is one or the other, also after a crash.
 pub fn set_active(banks: &Path, bank: &str) -> Result<(), String> {
     let _lock = lock(banks)?;
-    crate::cli::replace_file(&banks.join("active"), format!("{bank}\n").as_bytes(), 0o644)
+    crate::util::replace_file(&banks.join("active"), format!("{bank}\n").as_bytes(), 0o644)
 }
 
 /// The bank the owner rolled back from, and its release (banks/rolled-back: {"bank", "tag"}).
@@ -475,7 +475,7 @@ fn note_rolled_back(banks: &Path, bank: &str, why: Option<&str>) -> Result<(), S
     let tag = held.tag.or_else(|| held.version.as_deref().map(tag));
     let note = RolledBack { bank: bank.to_string(), tag, reason: why.map(str::to_string), at: why.map(|_| SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)) };
     let _lock = lock(banks)?;
-    crate::cli::replace_file(&banks.join("rolled-back"), (crate::msg::text(&note) + "\n").as_bytes(), 0o644)
+    crate::util::replace_file(&banks.join("rolled-back"), (crate::msg::text(&note) + "\n").as_bytes(), 0o644)
 }
 
 /// The bank a release that keeps ending the game is given up for: the other one. Err (why not):
@@ -509,7 +509,7 @@ pub fn note_fallback(banks: &Path, from: &str, to: &str, reason: &str) -> Result
     let at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let note = Fallback { from: from.to_string(), to: to.to_string(), reason: reason.to_string(), at: Some(at) };
     let _lock = lock(banks)?;
-    crate::cli::replace_file(&banks.join("fallback"), (crate::msg::text(&note) + "\n").as_bytes(), 0o644)
+    crate::util::replace_file(&banks.join("fallback"), (crate::msg::text(&note) + "\n").as_bytes(), 0o644)
 }
 
 /// The fallback note, while the bank it started is the active one.

@@ -189,13 +189,13 @@ impl Ctx {
             let bytes = fs::read(from.join(name)).map_err(|e| format!("{}: {e}", from.join(name).display()))?;
             let target = to.join(name);
             super::mkdir(target.parent().unwrap_or(&to))?;
-            super::replace_file(&target, &bytes, 0o644)?;
+            crate::util::replace_file(&target, &bytes, 0o644)?;
         }
         // A signature goes with the files it was made for; one that no longer holds is not copied.
         let sig = from.join(sign::FILE);
         if sig.is_file() {
             let bytes = fs::read(&sig).map_err(|e| format!("{}: {e}", sig.display()))?;
-            super::replace_file(&to.join(sign::FILE), &bytes, 0o644)?;
+            crate::util::replace_file(&to.join(sign::FILE), &bytes, 0o644)?;
         } else {
             let _ = fs::remove_file(to.join(sign::FILE));
         }
@@ -474,8 +474,8 @@ fn plugin_keygen(name: &str) -> Result {
         return Err(format!("{} or {} exists already", private.display(), public.display()));
     }
     let (private_text, public_text) = sign::generate()?;
-    super::replace_file(&private, private_text.as_bytes(), 0o600)?;
-    super::replace_file(&public, public_text.as_bytes(), 0o644)?;
+    crate::util::replace_file(&private, private_text.as_bytes(), 0o600)?;
+    crate::util::replace_file(&public, public_text.as_bytes(), 0o644)?;
     println!("pcds: made {} (keep it secret: whoever has it can sign as you) and {} (give it to the admins who should trust you: pcds plugin trust {})", private.display(), public.display(), public.display());
     Ok(())
 }
@@ -488,7 +488,7 @@ fn plugin_sign(key: &str, dir: &str) -> Result {
     }
     let private = fs::read_to_string(key).map_err(|e| format!("{key}: {e}"))?;
     let text = sign::sign(&private, &found.digest)?;
-    super::replace_file(&PathBuf::from(dir).join(sign::FILE), text.as_bytes(), 0o644)?;
+    crate::util::replace_file(&PathBuf::from(dir).join(sign::FILE), text.as_bytes(), 0o644)?;
     // Read back as a server would.
     match sign::check(folder, &found.digest, &sign::Keys::default()) {
         sign::Signed::Unknown { id } => println!("pcds: signed {dir} with the key {id}: {} (change a file of it and the signature no longer holds)", folder.join(sign::FILE).display()),

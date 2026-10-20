@@ -4,52 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{say, Ctx, Result, APP_ID};
+use crate::config::{parse_env, set_env_text};
 use crate::updater;
-
-/// The KEY=VALUE lines of a settings file, in order; comments and blank lines left out, quotes
-/// around a value taken off (as systemd's EnvironmentFile= reads it).
-pub fn parse_env(text: &str) -> Vec<(String, String)> {
-    text.lines()
-        .filter_map(|line| {
-            let (key, value) = line.trim().split_once('=')?;
-            let key = key.trim();
-            if key.is_empty() || key.starts_with('#') || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-                return None;
-            }
-            let value = value.trim();
-            let unquoted = ['"', '\''].iter().find_map(|q| value.strip_prefix(*q)?.strip_suffix(*q)).unwrap_or(value);
-            Some((key.to_string(), unquoted.to_string()))
-        })
-        .collect()
-}
-
-/// The text with KEY set to VALUE: every KEY= line replaced, else one added at the end.
-pub fn set_env_text(text: &str, key: &str, value: &str) -> String {
-    let prefix = format!("{key}=");
-    let mut found = false;
-    let mut out: Vec<String> = text
-        .lines()
-        .map(|line| {
-            if line.starts_with(&prefix) {
-                found = true;
-                format!("{key}={value}")
-            } else {
-                line.to_string()
-            }
-        })
-        .collect();
-    if !found {
-        out.push(format!("{key}={value}"));
-    }
-    out.join("\n") + "\n"
-}
-
-/// One setting of a settings file changed (written beside and moved over, mode 600: it holds
-/// the admin token).
-pub fn set_env_file(path: &Path, key: &str, value: &str) -> Result {
-    let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    super::replace_file(path, set_env_text(&text, key, value).as_bytes(), 0o600)
-}
 
 /// The game build: a hash of the game's code, which changes with every game update. One way
 /// for every installation (Steam, steamcmd or a copied folder).
@@ -85,7 +41,7 @@ impl Ctx {
     /// the admin token) and moved over, so a crash leaves the old one or the new one.
     pub fn set_env(&self, key: &str, value: &str) -> Result {
         let text = fs::read_to_string(&self.env_file).map_err(|e| format!("{}: {e}", self.env_file.display()))?;
-        super::replace_file(&self.env_file, set_env_text(&text, key, value).as_bytes(), 0o600)
+        crate::util::replace_file(&self.env_file, set_env_text(&text, key, value).as_bytes(), 0o600)
     }
 
     /// The direct-IP port (PCDS_LISTEN's).
@@ -130,7 +86,7 @@ PCDS_ADMIN_TOKEN={token}
 PCDS_WORLD=world
 "
         );
-        super::replace_file(&self.env_file, text.as_bytes(), 0o600)?;
+        crate::util::replace_file(&self.env_file, text.as_bytes(), 0o600)?;
         say(format!("settings written to {}", self.env_file.display()));
         Ok(())
     }

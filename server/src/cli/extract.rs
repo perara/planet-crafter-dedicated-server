@@ -50,7 +50,7 @@ impl Ctx {
         let build = build_id(&game)?;
         super::mkdir(&self.run.join("data"))?;
         // One extraction at a time (the hourly update and a manual one).
-        let _lock = super::hold(&self.run.join(".extract.lock"), "another extraction is running")?;
+        let _lock = crate::util::hold(&self.run.join(".extract.lock"), "another extraction is running")?;
         // Earlier extractions that failed (none runs: the lock is ours).
         for e in fs::read_dir(self.run.join("data")).into_iter().flatten().flatten() {
             if e.file_name().to_string_lossy().starts_with(".new-") {

@@ -163,7 +163,7 @@ pub fn run(args: &[String]) {
         std::process::exit(2);
     }
     // One server per world, for this front's life (released when the process ends).
-    let world = crate::cli::hold(std::path::Path::new(&format!("{save}.lock")), "another server runs this world").unwrap_or_else(|e| {
+    let world = crate::util::hold(std::path::Path::new(&format!("{save}.lock")), "another server runs this world").unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1)
     });

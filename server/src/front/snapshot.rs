@@ -54,7 +54,7 @@ impl Front {
         let path = snapshot_path(&self.save);
         let kept = ipc::read_memfd(fd)
             .map_err(|e| e.to_string())
-            .and_then(|bytes| crate::cli::replace_file(std::path::Path::new(&path), &bytes, 0o600))
+            .and_then(|bytes| crate::util::replace_file(std::path::Path::new(&path), &bytes, 0o600))
             .and_then(|_| std::fs::File::options().write(true).open(&path).and_then(|f| f.set_modified(*at)).map_err(|e| e.to_string()));
         match kept {
             Ok(()) => eprintln!("the world is in no bank: the last flip's snapshot (newer than the save) is kept in {path}; the next start runs it"),
