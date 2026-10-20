@@ -27,7 +27,7 @@ pcds-plugin-api = { path = "../plugin-api", features = ["std"] }
 # ring is rustls' own crypto (no new crate): HMAC-SHA256 for signed chat webhooks.
 ring = "0.17"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.154", features = ["preserve_order", "raw_value"] }
+serde_json = { version = "1.0.154", features = ["preserve_order", "raw_value", "float_roundtrip"] }
 steamworks = "0.13.1"
 # NFKC for the names the access lists compare (access.rs fold_name): fullwidth letters, ligatures
 # and the like are the letters they stand for. Pure Rust; its only dependency is tinyvec.

@@ -591,6 +591,33 @@ mod tests {
         }
     }
 
+    /// A number written to a save reads back as it was. serde_json's default float parsing is within
+    /// an ulp of the right value, not the right value: one f64 in ten did not come back as written
+    /// (the totals of the world's units, a planet's level), so every load of a save moved some of them
+    /// and a save was not a fixpoint of load and save. The `float_roundtrip` feature of serde_json is
+    /// what makes it exact.
+    #[test]
+    fn a_float_in_a_save_reads_back_as_it_was_written() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut save = SaveFile::empty();
+        save.world = json!({"terraTokens": 1});
+        save.planets = (0..2000).map(|i| json!({"planetId": "Prime", "unitOxygenLevel": (next() >> 11) as f64 / (1u64 << 53) as f64 * 10f64.powi((i % 30) - 6), "unitHeatLevel": f64::from_bits(next() >> 2 | 0x3000_0000_0000_0000)})).collect();
+        save.settings = json!({"modifierGaugeDrain": 0.800000011920929, "planetId": "Prime", "dyingConsequencesLabel": "DropSomeItems", "mode": "Standard"});
+        let back = SaveFile::parse(&save.to_text()).unwrap();
+        for (a, b) in save.planets.iter().zip(&back.planets) {
+            for key in ["unitOxygenLevel", "unitHeatLevel"] {
+                assert_eq!(a[key].as_f64().map(f64::to_bits), b[key].as_f64().map(f64::to_bits), "{key}: {} against {}", a[key], b[key]);
+            }
+        }
+        assert_eq!(back.to_text(), save.to_text(), "a save written, read and written again is the same text");
+    }
+
     /// Two writers of one save at once: every write lands whole, nothing is left beside it.
     #[test]
     fn saves_written_at_once_never_mix() {
