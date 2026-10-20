@@ -459,8 +459,9 @@ resolver reads as addresses (`127.1`, `0x7f.1`, `2130706433`) are not host names
 label begins with a letter), and one that reaches the resolver anyway is judged by the address it
 becomes. `net.http.local` (asked for in the manifest, granted by the admin as its own line in the
 approval) opens loopback, the private ranges, link-local and shared address space, for a plugin
-whose job is the local network (a bridge on the same machine); unspecified, multicast and the
-reserved ranges stay closed.
+whose job is the local network (a bridge on the same machine); unspecified, multicast, the
+reserved ranges and the cloud metadata addresses (169.254.169.254, 100.100.100.200, fd00:ec2::254:
+they hand out the machine's credentials) stay closed.
 
 **Limits that need no goodwill.** One wall clock from the lookup to the last byte (so a server
 that trickles one byte a second is let go: `timeout_ms`, 10 s by default, 30 s at most); the answer

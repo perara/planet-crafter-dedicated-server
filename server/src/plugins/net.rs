@@ -9,7 +9,7 @@
 //! - **Which machine**: the host resolves the name itself, once for each connection, and the
 //!   addresses it connects to are exactly the ones it checked: loopback, private, link-local,
 //!   shared (CGNAT), documentation, multicast, reserved and the non-global IPv6 ranges are refused
-//!   unless `net.http.local` is granted. A name with one such address among its answers is refused
+//!   unless `net.http.local` is granted (the cloud metadata addresses, never). A name with one such address among its answers is refused
 //!   whole. A second check in the connector looks at the addresses ureq is about to use. So a name
 //!   that points at the local network (or changes its mind between two lookups) reaches nothing.
 //! - **How much**: a request is at most `MAX_HTTP_REQUEST` bytes; the answer is cut at the
@@ -253,6 +253,10 @@ fn classify(ip: IpAddr) -> Class {
 fn classify_v4(a: Ipv4Addr) -> Class {
     let o = a.octets();
     match o {
+        // The cloud metadata services (AWS, Azure, GCP, OpenStack: 169.254.169.254; Alibaba: 100.100.100.200)
+        // hand the machine's credentials to whoever asks from it: not a "local network" a plugin may be
+        // granted, whatever net.http.local says.
+        [169, 254, 169, 254] | [100, 100, 100, 200] => Class::Never,
         [127, ..] | [10, ..] | [169, 254, ..] | [192, 168, ..] => Class::Local,
         [172, b, ..] if (16..32).contains(&b) => Class::Local,
         [100, b, ..] if (64..128).contains(&b) => Class::Local,
@@ -268,6 +272,10 @@ fn classify_v6(a: Ipv6Addr) -> Class {
         return Class::Local;
     }
     let s = a.segments();
+    // AWS's IPv6 metadata address (see classify_v4).
+    if s == [0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254] {
+        return Class::Never;
+    }
     // fc00::/7 unique-local, fe80::/10 link-local: this network.
     if s[0] & 0xfe00 == 0xfc00 || s[0] & 0xffc0 == 0xfe80 {
         return Class::Local;
@@ -862,12 +870,12 @@ mod tests {
             let ip: IpAddr = ip.parse().unwrap();
             assert!(public.ip_ok(ip) && local.ip_ok(ip), "{ip}");
         }
-        for ip in ["127.0.0.1", "127.255.255.254", "10.0.0.1", "172.16.0.1", "172.31.255.255", "192.168.1.1", "169.254.169.254", "100.64.0.1", "100.127.255.255", "::1", "fc00::1", "fd12:3456::1", "fe80::1", "::ffff:127.0.0.1", "::ffff:10.1.2.3", "::ffff:169.254.169.254"] {
+        for ip in ["127.0.0.1", "127.255.255.254", "10.0.0.1", "172.16.0.1", "172.31.255.255", "192.168.1.1", "169.254.169.253", "100.64.0.1", "100.127.255.255", "::1", "fc00::1", "fd12:3456::1", "fe80::1", "::ffff:127.0.0.1", "::ffff:10.1.2.3", "100.100.100.199", "fd00:ec2::253"] {
             let ip: IpAddr = ip.parse().unwrap();
             assert!(!public.ip_ok(ip), "{ip} is local and must be refused");
             assert!(local.ip_ok(ip), "{ip} is local and net.http.local allows it");
         }
-        for ip in ["0.0.0.0", "0.1.2.3", "224.0.0.1", "239.255.255.255", "255.255.255.255", "240.0.0.1", "192.0.2.1", "198.51.100.7", "203.0.113.9", "198.18.0.1", "192.88.99.1", "::", "ff02::1", "2001:db8::1", "2001::1", "2002:7f00:1::1", "64:ff9b::7f00:1", "::ffff:224.0.0.1", "3fff::1", "1::1"] {
+        for ip in ["169.254.169.254", "::ffff:169.254.169.254", "100.100.100.200", "fd00:ec2::254", "0.0.0.0", "0.1.2.3", "224.0.0.1", "239.255.255.255", "255.255.255.255", "240.0.0.1", "192.0.2.1", "198.51.100.7", "203.0.113.9", "198.18.0.1", "192.88.99.1", "::", "ff02::1", "2001:db8::1", "2001::1", "2002:7f00:1::1", "64:ff9b::7f00:1", "::ffff:224.0.0.1", "3fff::1", "1::1"] {
             let ip: IpAddr = ip.parse().unwrap();
             assert!(!public.ip_ok(ip) && !local.ip_ok(ip), "{ip} is never a peer");
         }
