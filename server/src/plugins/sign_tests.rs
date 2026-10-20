@@ -233,3 +233,33 @@ fn the_standing_of_a_plugin_is_the_approval_the_signature_and_the_keys_together(
         assert_eq!(standing(Some(&approval(true, "d0", &["player.kick"], Some("k1"))), "d1", &req, &s).0, Standing::Changed);
     }
 }
+
+#[test]
+fn the_signed_example_is_current() {
+    // The example key is public on purpose (examples/plugins/README.md); an Ed25519 signature is the
+    // same bytes every time, so the one in the repository must be the one the files make today.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins");
+    let key = std::fs::read_to_string(root.join("example-publisher.key")).unwrap();
+    let public = sign::parse_public(&std::fs::read_to_string(root.join("example-publisher.pub")).unwrap()).unwrap();
+    let folder = root.join("discord-notify");
+    let digest = read_folder(&folder).digest;
+    let committed = std::fs::read_to_string(folder.join(sign::FILE)).unwrap();
+    assert_eq!(sign::sign(&key, &digest).unwrap(), committed, "plugin.sig is not what the files make: scripts/build-plugin-examples, then scripts/sign-plugin-examples");
+    let mut keys = Keys::default();
+    assert_eq!(sign::check(&folder, &digest, &keys), Signed::Unknown { id: sign::key_id(&public) }, "nobody trusts the example key by default");
+    keys.trust(&public, "Examples", ["event.player", "event.chat", "event.tick", "chat.say"].iter().map(|s| s.to_string()).collect(), false).unwrap();
+    // Trusted for all but net.http: the plugin waits for the admin to approve that one, and then runs.
+    let dir = fresh_dir("sign-example");
+    let to = dir.join("discord-notify");
+    std::fs::create_dir_all(&to).unwrap();
+    for f in ["plugin.toml", "plugin.wasm", sign::FILE] {
+        std::fs::copy(folder.join(f), to.join(f)).unwrap();
+    }
+    keys.save(&dir).unwrap();
+    assert_eq!(the(&boot(&dir)).status, Status::Pending);
+    let approval = approve(&dir, "discord-notify", None).unwrap();
+    assert_eq!(approval.signer, Some(sign::key_id(&public)));
+    let host = boot(&dir);
+    assert!(the(&host).running(), "{:?}", the(&host).status);
+    assert_eq!(the(&host).grant.names().len(), 5);
+}

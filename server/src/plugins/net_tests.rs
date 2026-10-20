@@ -659,3 +659,75 @@ fn the_connector_refuses_an_address_the_resolver_let_through() {
     let agent = net::agent_with(&local, Lax(server.addr), Instant::now() + Duration::from_secs(5), "probe");
     assert_eq!(agent.get(server.url("/")).call().unwrap().status().as_u16(), 200);
 }
+
+/// The Discord example, as compiled: its module is the one in examples/plugins, with the host of its
+/// URL swapped for a server on the loopback (same length, so the module is the same module), and the
+/// manifest pointed at it.
+#[test]
+fn the_discord_example_batches_its_lines_retries_a_failure_and_keeps_the_webhook_out_of_sight() {
+    let from = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins/discord-notify");
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counted = attempts.clone();
+    // The first request is answered 500, the next 204.
+    let server = serve(move |s, _| {
+        if counted.fetch_add(1, Ordering::SeqCst) == 0 { respond(s, "500 Internal Server Error", &[], b"oops") } else { respond(s, "204 No Content", &[], b"") }
+    });
+    let mut wasm = std::fs::read(from.join("plugin.wasm")).unwrap_or_else(|e| panic!("{e}: scripts/build-plugin-examples builds the module"));
+    let old = b"https://discord.com/api/webhooks/${config.webhook}".to_vec();
+    let start = format!("http://127.0.0.1:{}/", server.addr.port());
+    let tail = "/${config.webhook}";
+    let fill = old.len() - start.len() - tail.len();
+    let new = format!("{start}{}{tail}", "w".repeat(fill));
+    assert_eq!(new.len(), old.len());
+    let at: Vec<usize> = wasm.windows(old.len()).enumerate().filter(|(_, w)| *w == old.as_slice()).map(|(i, _)| i).collect();
+    assert_eq!(at.len(), 1, "the URL is in the module once");
+    wasm[at[0]..at[0] + old.len()].copy_from_slice(new.as_bytes());
+    let dir = fresh_dir("net-discord");
+    let folder = dir.join("discord-notify");
+    std::fs::create_dir_all(&folder).unwrap();
+    let manifest = std::fs::read_to_string(from.join("plugin.toml")).unwrap();
+    let manifest = manifest.replace("allow = [\"https://discord.com\"]", &format!("allow = [\"{}\"]", server.pattern())).replace("\"net.http\"]", "\"net.http\", \"net.http.local\"]");
+    std::fs::write(folder.join("plugin.toml"), manifest).unwrap();
+    std::fs::write(folder.join("plugin.wasm"), wasm).unwrap();
+    config::set(&dir, "discord-notify", "webhook", Some("123456/SECRET-TOKEN")).unwrap();
+    approve(&dir, "discord-notify", None).unwrap();
+    let mut host = boot(&dir);
+    assert!(host.plugins[0].running(), "{:?} {:?}", host.plugins[0].status, host.plugins[0].warnings);
+    let mut world = Mock::default();
+    let tick = |ms: i64| Event::Tick { game_ms: ms, tick: 1, players: 1, since_ms: 5000 };
+    let run = |host: &mut Host, world: &mut Mock, e: &Event<'_>| host.run(world, e, if let Event::Tick { game_ms, .. } = e { *game_ms } else { 5000 });
+    run(&mut host, &mut world, &Event::PlayerJoin { client: 1, name: "Ann", steam_id: "" });
+    run(&mut host, &mut world, &Event::PlayerLeave { client: 1, name: "Bo \"B\"" });
+    run(&mut host, &mut world, &Event::Command { client: 1, name: "Ann", command: "report", args: vec!["the", "door"], text: "!report the door is stuck" });
+    assert_eq!(world.applied.len(), 1, "!report answered the asker");
+    assert_eq!(server.hits(), 0, "nothing is sent before the tick");
+    let pump = |host: &mut Host, world: &mut Mock, hits: usize| {
+        let t = Instant::now();
+        while server.hits() < hits || host.net_waiting() {
+            host.deliver_http(world, 5000);
+            assert!(t.elapsed() < Duration::from_secs(10), "no answer");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    run(&mut host, &mut world, &tick(5000));
+    pump(&mut host, &mut world, 1);
+    let head = server.heads.lock().unwrap()[0].clone();
+    assert!(head.starts_with(&format!("POST /{}/123456/SECRET-TOKEN ", "w".repeat(fill))), "{head}");
+    assert!(head.to_ascii_lowercase().contains("content-type: application/json"), "{head}");
+    // The 500 left the lines for the next tick; that one's 204 takes them.
+    run(&mut host, &mut world, &tick(10_000));
+    pump(&mut host, &mut world, 2);
+    run(&mut host, &mut world, &tick(15_000));
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(server.hits(), 2, "nothing left to send");
+    let p = &host.plugins[0];
+    assert_eq!((p.stats.http_requests, p.stats.http_answered, p.stats.http_failed, p.stats.faults), (2, 2, 0, 0));
+    // What the server got the second time is the same message: joins, leaves, the report, escaped.
+    let mut saved = Default::default();
+    host.checkpoint(&mut saved, None);
+    let blob = &saved.states["discord-notify"];
+    assert_eq!((blob.version, &blob.bytes[..4]), (1, &[0, 0, 0, 0][..]), "the buffer is empty and part of the state");
+    // The webhook is in no listing.
+    let listing = admin::plugin_json(&host.plugins[0]).to_string();
+    assert!(!listing.contains("SECRET-TOKEN") && listing.contains("\"webhook\""), "{listing}");
+}

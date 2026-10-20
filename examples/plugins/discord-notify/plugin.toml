@@ -1,0 +1,34 @@
+[plugin]
+id = "discord-notify"
+name = "Discord notify"
+version = "0.1.0"
+description = "Posts joins, leaves and !report messages to a Discord webhook, five seconds at a time"
+authors = ["Planet Crafter dedicated server contributors"]
+license = "MIT"
+kind = "wasm"
+entry = "plugin.wasm"
+abi = 1
+# net.http is the way out of the sandbox: only to the hosts under [net], approved by you.
+capabilities = ["event.player", "event.chat", "event.tick", "chat.say", "net.http"]
+
+[budget]
+tick_every_ms = 5000
+
+[events]
+subscribe = ["player_join", "player_leave", "tick"]
+
+[[command]]
+name = "report"
+help = "tell the admins something: !report the door is stuck"
+
+[net]
+allow = ["https://discord.com"]
+timeout_ms = 10000
+max_response_bytes = 4096
+
+# The webhook is a secret: you set it (pcds plugin config set discord-notify webhook), the server
+# puts it in the request, and the plugin never sees it.
+[[config]]
+key = "webhook"
+description = "the end of the webhook's URL, ID/TOKEN: https://discord.com/api/webhooks/ID/TOKEN"
+secret = true

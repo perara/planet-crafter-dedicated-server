@@ -1,0 +1,14 @@
+#!/bin/sh
+# Signs the example plugins that ship with a plugin.sig (docs/plugins.md, "Signing"), with the example
+# publisher's key in examples/plugins/. That key is published on purpose, for the examples and the
+# tests: nobody should trust example-publisher.pub on a real server. Run it after
+# scripts/build-plugin-examples (a signature covers the module); the test
+# plugins::sign_tests::the_signed_example_is_current fails when a signature is not current.
+#
+#   scripts/sign-plugin-examples [PCDS]     PCDS: the program to sign with (default: pcds in PATH)
+set -eu
+cd "$(dirname "$0")/.."
+pcds=${1:-pcds}
+for dir in examples/plugins/discord-notify; do
+  "$pcds" plugin sign --key examples/plugins/example-publisher.key "$dir"
+done

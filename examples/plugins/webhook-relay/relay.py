@@ -6,13 +6,17 @@ admin API (POST /api/plugins/events) and posts text to a webhook. It needs only 
 library, can run on another machine (reach the admin API through an SSH tunnel), and a crash of it
 never touches the game.
 
-  PCDS_ADMIN_TOKEN=... WEBHOOK_URL=https://discord.com/api/webhooks/... ./relay.py
+  PCDS_TOKEN=pcdst_... WEBHOOK_URL=https://discord.com/api/webhooks/... ./relay.py
 
   PCDS_API        the admin API's address                       (default http://127.0.0.1:7782)
-  PCDS_ADMIN_TOKEN  the admin token (`pcds token`)
+  PCDS_TOKEN      a scoped token that may read the stream: `pcds plugin token create relay --scope
+                  events.read`. The admin token (`pcds token`) works too, and may do far more than
+                  this program needs: use a scoped one.
   WEBHOOK_URL     where the lines go: a Discord webhook, or any URL taking {"content": "..."}
   RELAY_TYPES     events to relay, comma separated             (default chat,player_join,player_leave)
-  RELAY_POLL      seconds between polls                         (default 2)
+  RELAY_WAIT      seconds the server may hold a poll until there is an event (long poll; default 25,
+                  at most 25, 0: poll every RELAY_POLL seconds)
+  RELAY_POLL      seconds between polls when the server answers at once   (default 2)
 
   ./relay.py --dry-run   print the lines instead of posting them
   ./relay.py --self-test run against a fake server and a fake webhook, and check what arrives
@@ -57,13 +61,18 @@ CONSUMER = "webhook-relay"
 
 
 class Relay:
-    def __init__(self, api, token, webhook, types, send):
-        self.api, self.token, self.webhook, self.types, self.send = api, token, webhook, types, send
+    def __init__(self, api, token, webhook, types, send, wait=25):
+        self.api, self.token, self.webhook, self.types, self.send, self.wait = api, token, webhook, types, send, wait
         self.after, self.epoch = 0, None
 
     def poll(self):
         """One poll; the number of lines sent."""
-        answer = post(self.api + "/api/plugins/events", {"consumer": CONSUMER, "after": self.after, "types": self.types}, {"Authorization": "Bearer " + self.token})
+        body = {"consumer": CONSUMER, "after": self.after, "types": self.types}
+        if self.wait:
+            # The server holds the request until there is an event or the wait is over (a front that does
+            # not know "wait" answers at once; run() then paces the loop).
+            body["wait"] = self.wait
+        answer = post(self.api + "/api/plugins/events", body, {"Authorization": "Bearer " + self.token}, timeout=self.wait + 15)
         # The server restarted (a new epoch): its ids began again.
         if self.epoch not in (None, answer["epoch"]):
             self.after = 0
@@ -92,8 +101,12 @@ class Relay:
         failures = 0
         while True:
             try:
-                self.poll()
+                started = time.monotonic()
+                sent = self.poll()
                 failures = 0
+                # An answer at once with nothing in it (no long poll, or a wait of 0): do not spin.
+                if not sent and time.monotonic() - started < 0.5:
+                    time.sleep(interval)
             except (urllib.error.URLError, OSError, ValueError) as e:
                 failures += 1
                 # Never the URLs or the token: only what went wrong.
@@ -139,12 +152,15 @@ def self_test():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = "http://127.0.0.1:%d" % server.server_port
     relay = Relay(base, "secret-token", base + "/hook", ["chat", "player_join"], lambda t: post(base + "/hook", {"content": t}))
+    # A poll without the long wait asks as before.
+    plain = Relay(base, "secret-token", base + "/hook", ["chat"], lambda t: None, wait=0)
     assert relay.poll() == 2
     assert relay.poll() == 0, "the second poll starts after the first's last event"
+    assert plain.poll() == 2 and "wait" not in seen[-1], seen
     relay.leave()
     server.shutdown()
     assert [h["content"] for h in hooked] == ["Ann joined the game", "**Ann**: hello"], hooked
-    assert seen[0] == {"consumer": "webhook-relay", "after": 0, "types": ["chat", "player_join"]} and seen[1]["after"] == 3, seen
+    assert seen[0] == {"consumer": "webhook-relay", "after": 0, "types": ["chat", "player_join"], "wait": 25} and seen[1]["after"] == 3, seen
     assert left == ["webhook-relay"], left
     print("self-test ok")
 
@@ -152,13 +168,13 @@ def self_test():
 def main(argv):
     if "--self-test" in argv:
         return self_test()
-    token = os.environ.get("PCDS_ADMIN_TOKEN")
+    token = os.environ.get("PCDS_TOKEN")
     webhook = os.environ.get("WEBHOOK_URL")
     dry = "--dry-run" in argv
     if not token or not (webhook or dry):
-        sys.exit("set PCDS_ADMIN_TOKEN and WEBHOOK_URL (or use --dry-run); see the top of this file")
+        sys.exit("set PCDS_TOKEN and WEBHOOK_URL (or use --dry-run); see the top of this file")
     send = print if dry else (lambda text: post(webhook, {"content": text[:1900]}))
-    relay = Relay(os.environ.get("PCDS_API", "http://127.0.0.1:7782"), token, webhook, os.environ.get("RELAY_TYPES", "chat,player_join,player_leave").split(","), send)
+    relay = Relay(os.environ.get("PCDS_API", "http://127.0.0.1:7782"), token, webhook, os.environ.get("RELAY_TYPES", "chat,player_join,player_leave").split(","), send, min(int(os.environ.get("RELAY_WAIT", "25")), 25))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:
         relay.run(float(os.environ.get("RELAY_POLL", "2")))

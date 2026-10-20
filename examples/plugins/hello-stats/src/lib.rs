@@ -113,6 +113,9 @@ mod tests {
         fn rules_patch(&self, _: &str) -> Result<(), Error> {
             Err(Error::Denied)
         }
+        fn http_request(&self, _: &HttpRequest<'_>) -> Result<u64, Error> {
+            Err(Error::Denied)
+        }
     }
 
     fn command<'a>(name: &'a str) -> Event<'a> {
