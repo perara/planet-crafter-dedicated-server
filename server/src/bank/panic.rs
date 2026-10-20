@@ -70,7 +70,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("world.json").to_string_lossy().to_string();
         let before_path = format!("{path}.before-panic");
-        super::super::persist(&mut game, &path).unwrap();
+        crate::bank::persist::persist(&mut game, &path).unwrap();
         let whole = std::fs::read(&path).unwrap();
         assert!(!std::path::Path::new(&before_path).exists(), "no panic yet, nothing kept");
         // The work changes the world and panics half way.
@@ -84,16 +84,16 @@ mod tests {
         assert_eq!(game.wos.len(), objects + 1, "the world holds what the work did before it panicked");
         assert_eq!(std::fs::read(&path).unwrap(), whole, "the half-done world was not written over the whole save");
         // The next save keeps the whole one first, and writes the world as it is.
-        super::super::persist(&mut game, &path).unwrap();
+        crate::bank::persist::persist(&mut game, &path).unwrap();
         assert_eq!(std::fs::read(&before_path).unwrap(), whole);
         assert_ne!(std::fs::read(&path).unwrap(), whole);
         assert_eq!(SaveFile::load(&path).unwrap().objects.len(), objects + 1);
         // Once per panic: a later save does not replace the kept one with a save made after it.
-        super::super::persist(&mut game, &path).unwrap();
+        crate::bank::persist::persist(&mut game, &path).unwrap();
         assert_eq!(std::fs::read(&before_path).unwrap(), whole);
         // An admin or hook panic taints the same way.
         contained("a test", || panic!("again"));
-        super::super::persist(&mut game, &path).unwrap();
+        crate::bank::persist::persist(&mut game, &path).unwrap();
         assert_ne!(std::fs::read(&before_path).unwrap(), whole, "the save before the second panic is kept now");
         std::fs::remove_dir_all(dir).unwrap();
     }
