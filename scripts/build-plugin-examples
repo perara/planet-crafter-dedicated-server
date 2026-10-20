@@ -5,16 +5,38 @@
 #
 #   scripts/build-plugin-examples          build and copy
 #   scripts/build-plugin-examples --check  build and fail if a plugin.wasm in the repository is not what the source builds
+#
+# The bytes do not depend on where the checkout is. Cargo hashes a path dependency outside the
+# plugin's own folder (plugin-api) by its absolute path, and that hash orders the functions of
+# the module; so each plugin is built in a temporary folder with plugin-api inside it, at the
+# same relative place whatever the checkout's path, and the paths rustc would write into the
+# module (panic locations) are remapped. Still the compiler's version that decides the bytes:
+# --check compares on the maintainer's toolchain, not on another.
 set -eu
 cd "$(dirname "$0")/.."
+root=$(pwd)
 check=no
 [ "${1:-}" = "--check" ] && check=yes
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
 status=0
 for dir in examples/plugins/*/; do
+  dir=${dir%/}
   [ -f "$dir/Cargo.toml" ] || continue
   name=$(sed -n 's/^name = "\(.*\)"/\1/p' "$dir/Cargo.toml" | head -1 | tr - _)
-  (cd "$dir" && cargo build --release --locked --target wasm32-unknown-unknown --target-dir target)
-  built="$dir/target/wasm32-unknown-unknown/release/$name.wasm"
+  build="$work/$name"
+  mkdir "$build"
+  cp -R "$dir/." "$build/"
+  rm -rf "$build/target"
+  cp -R plugin-api "$build/plugin-api"
+  sed 's|path = "../../../plugin-api"|path = "plugin-api"|' "$dir/Cargo.toml" > "$build/Cargo.toml.new"
+  mv "$build/Cargo.toml.new" "$build/Cargo.toml"
+  (
+    cd "$build"
+    RUSTFLAGS="--remap-path-prefix=$work=/build --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$root=/repo" \
+      cargo build --release --locked --target wasm32-unknown-unknown --target-dir "$work/target-$name"
+  )
+  built="$work/target-$name/wasm32-unknown-unknown/release/$name.wasm"
   if [ "$check" = yes ]; then
     cmp -s "$built" "$dir/plugin.wasm" || { echo "$dir/plugin.wasm is not what the source builds: run scripts/build-plugin-examples" >&2; status=1; }
   else
