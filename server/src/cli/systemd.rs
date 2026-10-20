@@ -13,7 +13,7 @@ impl Ctx {
         format!("{}.service", self.unit_name)
     }
 
-    fn timer(&self) -> String {
+    pub(super) fn timer(&self) -> String {
         format!("{}-update.timer", self.unit_name)
     }
 
@@ -88,9 +88,48 @@ impl Ctx {
         })
     }
 
+    /// Whether systemd can give a user service a mount namespace here (ProtectSystem=, PrivateTmp=
+    /// and the like need one, made through an unprivileged user namespace, which some machines
+    /// forbid: the unit would then fail to start with status 226/NAMESPACE). Tried once per
+    /// process with a throw-away unit that does nothing. Err says why not.
+    pub fn sandbox_check(&self) -> std::result::Result<(), String> {
+        static PROBED: std::sync::OnceLock<std::result::Result<(), String>> = std::sync::OnceLock::new();
+        PROBED
+            .get_or_init(|| {
+                // The unit tests do not start units on the machine they run on.
+                if cfg!(test) {
+                    return Ok(());
+                }
+                if !super::have("systemd-run") {
+                    return Err("systemd-run is not installed".into());
+                }
+                let mut probe = Command::new("systemd-run");
+                probe.args(["--user", "--wait", "--collect", "--quiet", "-p", "ProtectSystem=strict", "-p", "ProtectHome=read-only", "-p", "PrivateTmp=yes", "-p", "PrivateDevices=yes", "-p", "ProtectKernelTunables=yes", "-p", "ProtectControlGroups=yes", "-p", "ProtectHostname=yes"]);
+                probe.arg(&self.exe).arg("--version").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+                let mut child = probe.spawn().map_err(|e| format!("systemd-run: {e}"))?;
+                let stderr = child.stderr.take();
+                match super::wait_for(&mut child, std::time::Duration::from_secs(30)) {
+                    Some(status) if status.success() => Ok(()),
+                    Some(status) => {
+                        let said = stderr.map(|mut s| { let mut t = String::new(); let _ = std::io::Read::read_to_string(&mut s, &mut t); t }).unwrap_or_default();
+                        Err(format!("a test unit with the sandbox did not run ({status}): {}", said.trim().lines().last().unwrap_or("no reason given")))
+                    }
+                    None => Err("a test unit with the sandbox did not run within 30 s".into()),
+                }
+            })
+            .clone()
+    }
+
     /// The units' files: the server, the update check and its timer.
     pub(super) fn unit_files(&self) -> Result<[(String, String); 3]> {
+        self.unit_files_with(self.sandbox_check().is_ok())
+    }
+
+    /// The units' files, with the mount sandbox (`mounts`) or without it.
+    pub(super) fn unit_files_with(&self, mounts: bool) -> Result<[(String, String); 3]> {
         let (run, env, exe) = (quoted(&self.run.display().to_string())?, plain(&self.env_file.display().to_string())?, quoted(&self.installed().display().to_string())?.replace('$', "$$"));
+        let sandbox = sandbox_options(&run, self.run.starts_with("/tmp") || self.run.starts_with("/var/tmp"), mounts);
+        let light = SANDBOX_COMMON;
         let unit = quoted(&self.unit_name)?;
         let environment = format!("Environment=\"PCDS_HOME={run}\" \"PCDS_UNIT={unit}\"");
         Ok([
@@ -118,7 +157,7 @@ RestartSec=15
 # What is still there after the timeout is killed.
 KillMode=mixed
 TimeoutStopSec=90
-
+{sandbox}
 [Install]
 WantedBy=default.target
 "
@@ -135,7 +174,8 @@ Type=oneshot
 {environment}
 TimeoutStartSec=1h
 ExecStart=\"{exe}\" update
-"
+# steamcmd keeps its login and the game in ~ and run/: the sandbox without a read-only file system.
+{light}"
                 ),
             ),
             (
@@ -159,8 +199,12 @@ WantedBy=timers.target
     pub fn write_unit(&self) -> Result {
         self.check_owner()?;
         super::mkdir(&self.unit_dir)?;
-        for (name, text) in self.unit_files()? {
+        let sandbox = self.sandbox_check();
+        for (name, text) in self.unit_files_with(sandbox.is_ok())? {
             super::write(&self.unit_dir.join(name), text)?;
+        }
+        if let Err(why) = sandbox {
+            say(format!("this machine does not let a user service have its own file system view ({why}), so the unit has the sandbox options that need none: docs/hardening.md says how to allow it"));
         }
         check(&mut self.systemctl(&["daemon-reload"]))
     }
@@ -205,6 +249,8 @@ WantedBy=timers.target
         if self.container {
             say("restart the container for it to take effect (docker restart CONTAINER)");
         } else if self.active()? {
+            // A release that writes the unit differently (the sandbox, the limits) is in force from this start.
+            self.refresh_unit()?;
             // systemd counts every start toward the unit's limit (5 in 10 minutes): an upgrade, a
             // rollback and an upgrade again must not leave the server failed and down.
             quiet(&mut self.systemctl(&["reset-failed", &self.unit()]));
@@ -275,6 +321,42 @@ WantedBy=timers.target
         }
         Ok(true)
     }
+}
+
+/// What the server's unit and the update check's unit both carry: nothing here needs a mount
+/// namespace, so it holds on every machine. Tried on systemd 262 with the real server and with
+/// steamcmd (docs/hardening.md): NoNewPrivileges, the socket families a server uses (AF_NETLINK for
+/// the network interface list Steam and many tools read), no realtime scheduling, no setuid
+/// files, no namespaces, no personality changes, the service system calls (a refused call returns
+/// EPERM), files private to the user. Not CapabilityBoundingSet=: a user manager can drop
+/// capabilities only inside a user namespace, which the mount options bring, and the unit would
+/// fail to start (status 218/CAPABILITIES) without one; a user's service has none to lose.
+const SANDBOX_COMMON: &str = "NoNewPrivileges=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+";
+
+/// The sandbox of the server's unit: SANDBOX_COMMON, the limits, and with `mounts` the file
+/// system and kernel protections that need a mount namespace (and the user namespace it comes in, which is
+/// also what lets the capabilities be dropped): everything outside `run` read-only
+/// (`run` is the path, already quoted), $HOME readable and not writable, a private /tmp (left
+/// out when `run` itself is under /tmp), no devices, no writing /proc/sys, /sys or the cgroups.
+fn sandbox_options(run: &str, run_in_tmp: bool, mounts: bool) -> String {
+    let mut out = String::from("# The sandbox (docs/hardening.md).\n");
+    out += SANDBOX_COMMON;
+    out += "LimitNOFILE=65536\nTasksMax=1024\n";
+    if mounts {
+        out += &format!("CapabilityBoundingSet=\nProtectSystem=strict\nReadWritePaths=\"{run}\"\nProtectHome=read-only\n");
+        out += if run_in_tmp { "" } else { "PrivateTmp=yes\n" };
+        out += "PrivateDevices=yes\nProtectKernelTunables=yes\nProtectKernelModules=yes\nProtectKernelLogs=yes\nProtectControlGroups=yes\nProtectClock=yes\nProtectHostname=yes\n";
+    }
+    out
 }
 
 /// The pid of the supervisor of the server `front` (its parent) when that is `pcds container`,
@@ -379,6 +461,49 @@ mod tests {
         assert!(units[0].1.contains("KillMode=mixed\n"));
         assert!(units[1].1.contains("TimeoutStartSec="));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The sandbox of the server's unit, with and without the mount options; the unit that checks
+    /// for game updates gets the part that needs no mount.
+    #[test]
+    fn the_server_unit_is_sandboxed_and_the_update_unit_lightly() {
+        let dir = super::super::test_dir("unit-sandbox");
+        let ctx = super::super::test_ctx(&dir);
+        let [server, update, _] = ctx.unit_files_with(true).unwrap();
+        for option in ["NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=read-only", "PrivateDevices=yes", "ProtectKernelTunables=yes", "ProtectControlGroups=yes", "RestrictNamespaces=yes", "CapabilityBoundingSet=\n", "SystemCallFilter=@system-service", "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK", "UMask=0077", "LimitNOFILE=65536", "TasksMax=1024"] {
+            assert!(server.1.contains(&format!("\n{option}")), "{option}\n{}", server.1);
+        }
+        // Only the run folder is writable.
+        assert!(server.1.contains(&format!("\nReadWritePaths=\"{}\"\n", dir.join("run").display())), "{}", server.1);
+        // A run folder under /tmp would be hidden by a private /tmp: that one option is left out then.
+        for (run, private) in [("/home/per/pcds/run", true), ("/tmp/pcds/run", false), ("/var/tmp/pcds/run", false), ("/srv/tmpfiles/run", true)] {
+            let ctx = Ctx { run: std::path::PathBuf::from(run), ..ctx.clone() };
+            assert_eq!(ctx.unit_files_with(true).unwrap()[0].1.contains("\nPrivateTmp=yes\n"), private, "{run}");
+        }
+        // Not the options that break what the server starts (docs/hardening.md).
+        for broken in ["MemoryDenyWriteExecute", "SystemCallArchitectures"] {
+            assert!(!server.1.contains(broken) && !update.1.contains(broken), "{broken} breaks node, java and steamcmd");
+        }
+        // The update check keeps the home folder writable for steamcmd: the options without a mount namespace only.
+        assert!(update.1.contains("\nNoNewPrivileges=yes\n") && update.1.contains("\nSystemCallFilter=@system-service\n"));
+        for mount in ["ProtectSystem", "ProtectHome", "ReadWritePaths", "PrivateTmp", "PrivateDevices", "ProtectKernel", "CapabilityBoundingSet"] {
+            assert!(!update.1.contains(mount), "{mount} in the update unit:\n{}", update.1);
+        }
+        // A machine that cannot make the namespace gets the options that need none, and no file is half a sandbox.
+        let [plain_server, ..] = ctx.unit_files_with(false).unwrap();
+        assert!(plain_server.1.contains("\nNoNewPrivileges=yes\n") && plain_server.1.contains("\nLimitNOFILE=65536\n"));
+        // (CapabilityBoundingSet= too: a user manager drops capabilities only inside a user namespace, and the unit fails with 218/CAPABILITIES.)
+        for mount in ["ProtectSystem", "ProtectHome", "ReadWritePaths", "PrivateTmp", "PrivateDevices", "ProtectKernel", "ProtectControlGroups", "ProtectClock", "ProtectHostname", "CapabilityBoundingSet"] {
+            assert!(!plain_server.1.contains(mount), "{mount} needs a mount namespace:\n{}", plain_server.1);
+        }
+        // Every line is a section, a comment, or Key=value.
+        for unit in [&server.1, &update.1, &plain_server.1] {
+            assert!(unit.lines().all(|l| l.is_empty() || l.starts_with(['#', '[']) || l.split_once('=').is_some_and(|(k, _)| k.bytes().all(|b| b.is_ascii_alphanumeric()))), "{unit}");
+        }
+        // The run folder's name is escaped like the other paths of the unit.
+        let odd = Ctx { run: std::path::PathBuf::from("/srv/50%/a b\"c/run"), ..ctx.clone() };
+        assert!(odd.unit_files_with(true).unwrap()[0].1.contains("ReadWritePaths=\"/srv/50%%/a b\\\"c/run\""), "{}", odd.unit_files_with(true).unwrap()[0].1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The restart in place goes only to `pcds container`, the front's parent.

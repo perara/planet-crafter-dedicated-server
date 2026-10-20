@@ -300,7 +300,7 @@ fn generate_network_objects(game: &mut Game, object: u64) {
         return;
     }
     if state(game).queue.len() >= MAX_QUEUE {
-        eprintln!("wreck {}: {MAX_QUEUE} wrecks already wait for their layout; ignored", g.index);
+        warn!("wreck {}: {MAX_QUEUE} wrecks already wait for their layout; ignored", g.index);
         return;
     }
     if g.seed == 0 {
@@ -322,7 +322,7 @@ fn pump(game: &mut Game) {
             state(game).queue.pop_front();
             match answer {
                 Ok(result) => complete(game, job, result),
-                Err(_) => eprintln!("wreck {} (seed {}): the Tessera thread died", job.index, job.seed),
+                Err(_) => warn!("wreck {} (seed {}): the Tessera thread died", job.index, job.seed),
             }
         }
         None => {}
@@ -346,7 +346,7 @@ fn pump(game: &mut Game) {
         match spawned {
             Ok(_) => state(game).job = Some(Job { net, index, seed, position: g.position, rotation: g.rotation, prepared, result: Mutex::new(result) }),
             Err(e) => {
-                eprintln!("wreck {index} (seed {seed}): no thread for Tessera: {e}");
+                warn!("wreck {index} (seed {seed}): no thread for Tessera: {e}");
                 state(game).queue.pop_front();
             }
         }
@@ -357,7 +357,7 @@ fn pump(game: &mut Game) {
 fn complete(game: &mut Game, job: Job, result: Result<generate::Layout, String>) {
     let layout = match result {
         Ok(layout) => layout,
-        Err(e) => return eprintln!("wreck {} (seed {}): {e}", job.index, job.seed),
+        Err(e) => return warn!("wreck {} (seed {}): {e}", job.index, job.seed),
     };
     let (made, ignored) = generate::finish(game, job.index, job.seed, job.position, job.rotation, job.prepared, &layout);
     state(game).ignored = ignored;
@@ -602,7 +602,7 @@ fn open_from_rpc(game: &mut Game, a: &Args) {
     // The data goes whole to every client and stays: a scene is named in 23 characters at most
     // and a recipe lists a handful of props.
     if data.as_ref().is_some_and(|d| d.scene.len() > MAX_SCENE_NAME || d.recipe.len() > MAX_RECIPE) {
-        eprintln!("world instance: a scene name or recipe over {MAX_SCENE_NAME} bytes or {MAX_RECIPE} entries; ignored");
+        warn!("world instance: a scene name or recipe over {MAX_SCENE_NAME} bytes or {MAX_RECIPE} entries; ignored");
         return;
     }
     set_and_open(game, data);

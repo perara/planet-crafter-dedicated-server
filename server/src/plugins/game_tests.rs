@@ -396,7 +396,7 @@ fn the_admin_api_makes_lists_and_revokes_scoped_tokens_and_shows_a_token_once() 
     let hash = crate::tokens::Tokens::load(&dir).unwrap().tokens[0].hash.clone();
     assert!(!body.contains(&token) && !body.contains(&hash), "{body}");
     let listed: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!((listed["tokens"][0]["name"].as_str(), listed["tokens"][0]["scopes"].as_array().map(Vec::len), listed["scopes"].as_array().map(Vec::len)), (Some("relay"), Some(2), Some(5)));
+    assert_eq!((listed["tokens"][0]["name"].as_str(), listed["tokens"][0]["scopes"].as_array().map(Vec::len), listed["scopes"].as_array().map(Vec::len)), (Some("relay"), Some(2), Some(6)));
     assert!(!std::fs::read_to_string(dir.join("tokens.json")).unwrap().contains(&token), "the file keeps the hash only");
     // A bad request is a 400 that says what is wrong; a name is used once.
     for bad in [json!({}), json!({"name": "x"}), json!({"name": "x", "scopes": ["root"]}), json!({"name": "relay", "scopes": ["events.read"]}), json!({"name": "x", "scopes": ["events.read"], "ratePerMinute": 0})] {

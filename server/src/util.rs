@@ -8,6 +8,19 @@ pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// UTC date and time of a Unix time: (year, month, day, hour, minute, second). Days to civil date:
+/// Howard Hinnant's algorithm.
+pub fn utc(unix: u64) -> (i64, i64, i64, i64, i64, i64) {
+    let s = unix as i64;
+    let (z, secs) = (s.div_euclid(86_400) + 719_468, s.rem_euclid(86_400));
+    let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+    (yoe + era * 400 + (m <= 2) as i64, m, d, secs / 3600, secs / 60 % 60, secs % 60)
+}
+
 /// Bytes as lower-case hex.
 pub fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()

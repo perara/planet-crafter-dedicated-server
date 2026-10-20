@@ -27,9 +27,10 @@ fn fail_for_test(what: &str) -> bool {
 
 pub fn run(args: &[String]) {
     let [dir, save_path] = args else {
-        eprintln!("usage: pcds bank DATA_DIR SAVE.json (the front starts it)");
+        error!("usage: pcds bank DATA_DIR SAVE.json (the front starts it)");
         std::process::exit(2);
     };
+    crate::logging::start("bank", &crate::config::installation_file(&crate::env, save_path, "rules.json"));
     let mut link = open_link();
     // The tables load before the hello: the front stops the old bank only once they are in.
     let (net_data, data, spec) = crate::tables(dir);
@@ -46,7 +47,7 @@ pub fn run(args: &[String]) {
         Some(f) if f.kind == ipc::RESTORE => {
             took = Restore { started: Instant::now(), got_at: ipc::now_ns(), faults_before: minor_faults(), ..Restore::default() };
             if fail_for_test("restore") {
-                eprintln!("bank: dying on the restore (PCDS_DEV=bank-fail=restore)");
+                warn!("bank: dying on the restore (PCDS_DEV=bank-fail=restore)");
                 std::process::exit(3);
             }
             let (restored, checked) = start::restore(&f, net_data, data, spec, scenes, save_path);
@@ -74,7 +75,7 @@ fn open_link() -> Link {
         libc::signal(libc::SIGTERM, libc::SIG_IGN);
     }
     let fd: i32 = crate::env("PCDS_IPC_FD").and_then(|v| v.parse().ok()).unwrap_or_else(|| {
-        eprintln!("pcds bank: no PCDS_IPC_FD (the front starts banks)");
+        error!("pcds bank: no PCDS_IPC_FD (the front starts banks)");
         std::process::exit(2)
     });
     // SAFETY: the front put our end of the socket at this descriptor; nothing else owns it.
@@ -86,7 +87,7 @@ fn hello(link: &mut Link, game_version: &str) {
     let hello = Hello { info: info(), game_version: Some(game_version.to_string()) };
     let protocol = if fail_for_test("protocol") { 999 } else { ipc::PROTOCOL };
     if fail_for_test("slow-hello") {
-        println!("bank: holding its hello for 4 s (PCDS_DEV=bank-fail=slow-hello)");
+        info!("bank: holding its hello for 4 s (PCDS_DEV=bank-fail=slow-hello)");
         std::thread::sleep(Duration::from_secs(4));
     }
     link.send(ipc::HELLO, protocol, &msg::body(&hello));
@@ -113,12 +114,12 @@ fn ready(link: &mut Link, took: &Restore) {
     // gotAt and readyAt (the monotonic clock, ns) put the restore on the flip's timeline in the front.
     let ready = Ready { restore_ms: Some(took.started.elapsed().as_secs_f64() * 1000.0 - took.verify_ms), verify_ms: Some(took.verify_ms), verified: took.verified, got_at: took.got_at, ready_at: ipc::now_ns(), faults: Some(minor_faults() - took.faults_before) };
     if fail_for_test("slow-ready") {
-        println!("bank: holding its ready for 2 s (PCDS_DEV=bank-fail=slow-ready)");
+        info!("bank: holding its ready for 2 s (PCDS_DEV=bank-fail=slow-ready)");
         std::thread::sleep(Duration::from_secs(2));
     }
     link.send(ipc::READY, 0, &msg::body(&ready));
     if fail_for_test("die-after-ready") {
-        println!("bank: ending 1 s after its ready (PCDS_DEV=bank-fail=die-after-ready)");
+        info!("bank: ending 1 s after its ready (PCDS_DEV=bank-fail=die-after-ready)");
         std::thread::spawn(|| {
             std::thread::sleep(Duration::from_secs(1));
             std::process::exit(3)

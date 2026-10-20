@@ -52,7 +52,7 @@ pub fn apply(game: &mut Game, plugin: &str, actions: Vec<Action>) -> Applied {
             Action::Kick(client, reason) => {
                 let there = game.clients.contains_key(&client) && !game.kicks.iter().any(|(c, _)| *c == client);
                 if there {
-                    println!("plugin {plugin}: kicks client {client} ({reason})");
+                    info!("plugin {plugin}: kicks client {client} ({reason})");
                     game.kick(client, &reason);
                 }
                 there
@@ -61,7 +61,7 @@ pub fn apply(game: &mut Game, plugin: &str, actions: Vec<Action>) -> Applied {
             Action::Give(client, group, count) => give(game, plugin, client, &group, count),
             Action::Tokens(amount) => {
                 crate::handlers::gain_tokens(game, amount);
-                println!("plugin {plugin}: {} Terra tokens {}", amount.unsigned_abs(), if amount > 0 { "added" } else { "taken away" });
+                info!("plugin {plugin}: {} Terra tokens {}", amount.unsigned_abs(), if amount > 0 { "added" } else { "taken away" });
                 true
             }
             Action::RulesPatch(patch) => match game.rules.patched(&patch).and_then(|new| if new == game.rules { Ok(false) } else { crate::rules::set(game, new).map(|()| true) }) {
@@ -69,12 +69,12 @@ pub fn apply(game: &mut Game, plugin: &str, actions: Vec<Action>) -> Applied {
                 Ok(changed) => {
                     if changed {
                         // Only the gameplay sections can be in it: no secret.
-                        println!("plugin {plugin}: changed the rules: {patch}");
+                        info!("plugin {plugin}: changed the rules: {patch}");
                     }
                     true
                 }
                 Err(e) => {
-                    eprintln!("plugin {plugin}: its rules change was refused: {e}");
+                    warn!("plugin {plugin}: its rules change was refused: {e}");
                     false
                 }
             },
@@ -96,12 +96,12 @@ pub fn apply(game: &mut Game, plugin: &str, actions: Vec<Action>) -> Applied {
 fn give(game: &mut Game, plugin: &str, client: u64, group: &str, count: u32) -> bool {
     let Some(inventory) = game.clients.get(&client).and_then(|c| c.ready.as_ref()).map(|s| s.inventory) else { return false };
     let Some(index) = game.data.group(group) else {
-        eprintln!("plugin {plugin}: it gave {group}, which is not an item of this game");
+        warn!("plugin {plugin}: it gave {group}, which is not an item of this game");
         return false;
     };
     // Keys and quest items cannot be destroyed: they are not for handing out either.
     if game.data.groups[index].bool("cantBeDestroyed") {
-        eprintln!("plugin {plugin}: it gave {group}, which cannot be given");
+        warn!("plugin {plugin}: it gave {group}, which cannot be given");
         return false;
     }
     let mut all = true;

@@ -31,12 +31,13 @@ pub const MAX_RATE: u32 = 6000;
 pub const MAX_TOKENS: usize = 32;
 
 /// The scopes, and the requests each allows.
-pub const SCOPES: [(&str, &str); 5] = [
+pub const SCOPES: [(&str, &str); 6] = [
     ("events.read", "read the plugin event stream (POST /api/plugins/events)"),
     ("chat.read", "read the chat (GET /api/chat/events)"),
     ("chat.send", "write to the chat as the server (POST /api/chat)"),
     ("player.kick", "kick a player (POST /api/kick)"),
     ("player.teleport", "move a player (POST /api/teleport)"),
+    ("metrics.read", "read the numbers for a monitor (GET /api/metrics)"),
 ];
 
 /// The scope a request needs, if a token may make it at all.
@@ -47,6 +48,7 @@ pub fn scope_for(method: &str, path: &str) -> Option<&'static str> {
         ("POST", "/api/chat") => "chat.send",
         ("POST", "/api/kick") => "player.kick",
         ("POST", "/api/teleport") => "player.teleport",
+        ("GET", "/api/metrics") => "metrics.read",
         _ => return None,
     })
 }
@@ -223,7 +225,7 @@ impl Checker {
                     // Fail closed, say so once.
                     cache.tokens.clear();
                     if !std::mem::replace(&mut cache.error_said, true) {
-                        eprintln!("admin: {e}: no scoped token is valid until that is fixed");
+                        warn!("admin: {e}: no scoped token is valid until that is fixed");
                     }
                 }
             }
@@ -368,7 +370,7 @@ mod tests {
     fn the_scope_table_matches_what_a_token_can_reach() {
         for (name, what) in SCOPES {
             assert!(!what.is_empty());
-            assert!(["POST /api/plugins/events", "GET /api/chat/events", "POST /api/chat", "POST /api/kick", "POST /api/teleport"].iter().any(|r| {
+            assert!(["POST /api/plugins/events", "GET /api/chat/events", "POST /api/chat", "POST /api/kick", "POST /api/teleport", "GET /api/metrics"].iter().any(|r| {
                 let (m, p) = r.split_once(' ').unwrap();
                 scope_for(m, p) == Some(name) && what.contains(r)
             }), "{name}");

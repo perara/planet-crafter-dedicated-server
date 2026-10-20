@@ -322,19 +322,33 @@ Unicode-3.0, Zlib OR Apache-2.0 OR MIT); dev only: `wat`, `wast`, `wasm-encoder`
 compatible with GPL-3.0-or-later. Build scripts: `wasmi`, `wasmi_ir`, `wasmparser` 0.228 and `libm`
 (read: code generation and compiler feature probes; no network, no process but `rustc --version`).
 `cargo deny` is not installed; the licences were read from `cargo metadata`. Actions are now pinned
-by commit (H4). The Docker bases (`rust:1-trixie`, `debian:trixie-slim`) are tags, not digests:
-open (I1). Both the updater and S3 take the operator's `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`
+by commit (H4). The Docker bases (`rust:1-trixie`, `debian:trixie-slim`) were tags, not digests;
+they are pinned by digest now (I1). Both the updater and S3 take the operator's `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`
 (ureq's default: a corporate proxy is a use of the feature; TLS is end to end); the plugins and
 the chat webhooks set `proxy(None)` and never do.
 
+### Fixed after 0.8.0
+
+* **I1** Docker base images pinned by tag only: fixed. The Dockerfile pins `rust:1-trixie` and `debian:trixie-slim` by digest
+  (the tag stays for the reader), and Dependabot's `docker` entry proposes the new digest. The build and `docker/test.sh` ran on
+  the pinned images.
+* **I2** The systemd unit without sandboxing, `setpriv` without `--no-new-privs`: fixed. The unit carries a sandbox that scores 2.1
+  (OK) in `systemd-analyze --user security` where the old one scored 9.4 (UNSAFE), tried against the real server, Steam, hot
+  updates, S3, webhooks, hook programs, a plugin with `net.http` and `steamcmd`; the options that break `steamcmd` or Node and Java
+  hooks (`MemoryDenyWriteExecute`, `SystemCallArchitectures=native`) are documented, not set. The entrypoint runs the server with
+  `setpriv --no-new-privs`, `compose.yaml` turns on `read_only`, `no-new-privileges`, dropped capabilities and a process limit, and
+  `docker/test.sh` runs its hot update with them. [hardening.md](hardening.md).
+* **I9** The admin port exposed past the loopback can be held by slow connections: fixed as far as one address goes. The server
+  gives other machines 48 of the 64 slots and one address 16, answers a connection over its share `503` with `Retry-After` at once,
+  waits 2 seconds (was 3) for a request head, warns at every start (and says the token can run programs through `chat.exec`), and
+  `pcds doctor` warns; [reverse-proxy.md](reverse-proxy.md) has a Caddy and an nginx configuration tried against the server. Many
+  addresses together can still take the 48: a firewall or the proxy's own limits answer that, and behind a proxy on the same machine
+  every client is the loopback, so the proxy has to tell them apart (the document gives the nginx lines). A Host-header check was not
+  added: a DNS-rebinding page reads only the HTML. Binding past the loopback stays allowed (a container, a private network); making it
+  an error is the owner's decision.
+
 ### Open
 
-* **I1** Docker base images are pinned by tag only. Next: pin by digest in the Dockerfile and let
-  dependabot (`package-ecosystem: docker`) propose updates.
-* **I2** The systemd user unit has no sandboxing options (`NoNewPrivileges`, `RestrictSUIDSGID`,
-  `PrivateTmp`); `setpriv` in the entrypoint has no `--no-new-privs`. Next: add them and run
-  `docker/test.sh` and a unit start on a test machine (steamcmd's 32-bit program and `chat.exec`
-  programs are the risk of breaking).
 * **I3** The trust root of an update is the release feed (S22): the sha256 comes from the same place
   as the tarball, and `pcds` of the new bank is run (`bank-info`) before it is installed. A feed that
   is compromised runs code as the server's user. Next: sign releases (the plugin keys' Ed25519 would
@@ -354,10 +368,6 @@ the chat webhooks set `proxy(None)` and never do.
   again; no seed that fails is known. Next: a persisted `failed` flag (the snapshot format changes).
 * **I8** A plugin with `rules.write` can set `limits.bankWatchdogSeconds` (an operational setting,
   not gameplay) and `limits.maxPlayers`. Next: take the watchdog out of `PLUGIN_RULES` by key.
-* **I9** The admin port, when it is exposed past loopback, can be held by 64 slow connections (the
-  head limit is 3 s); it is plain HTTP and says so in the log. By design: bind loopback, use an
-  SSH tunnel or an HTTPS proxy. A Host-header check was not added: a DNS-rebinding page reads only
-  the HTML.
 * **I10** Unchanged from the audits: S11 (the memfd seal result of the front's own bank), U10.
 
 ## Open

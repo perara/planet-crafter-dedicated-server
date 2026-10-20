@@ -780,7 +780,7 @@ impl Net {
                 }
             });
             if let Err(e) = spawned {
-                eprintln!("plugins: no thread for an HTTP worker ({e})");
+                warn!("plugins: no thread for an HTTP worker ({e})");
                 if n == 0 {
                     return None;
                 }

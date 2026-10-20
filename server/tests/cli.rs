@@ -23,6 +23,9 @@ fn fake_systemctl(dir: &Path, script: &str) -> PathBuf {
     let path = fake.join("systemctl");
     std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // The test unit that asks whether this machine can sandbox a user service: it can.
+    std::fs::write(fake.join("systemd-run"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(fake.join("systemd-run"), std::fs::Permissions::from_mode(0o755)).unwrap();
     fake
 }
 
@@ -202,7 +205,8 @@ fn a_start_falls_back_to_the_other_bank() {
     for f in ["format", "build"] {
         std::fs::copy(dir.join("run/bin/a").join(f), dir.join("run/bin/b").join(f)).unwrap();
     }
-    // A unit that differs from this release's (a shorter stop timeout): pcds run writes this release's in its place.
+    // A unit that differs from this release's (a shorter stop timeout): the server never writes its own
+    // unit (its sandbox makes the home folder read-only to it); pcds restart writes this release's.
     let units = dir.join("home/.config/systemd/user");
     std::fs::create_dir_all(&units).unwrap();
     let old = format!("[Service]\nEnvironmentFile={}\nExecStart=\"{}/pcds\" run\nTimeoutStopSec=60\n", dir.join("run/server.env").display(), dir.display());
@@ -211,7 +215,10 @@ fn a_start_falls_back_to_the_other_bank() {
     let said = text(&out);
     assert_eq!(out.status.code(), Some(0), "{said}");
     let unit = std::fs::read_to_string(units.join("pcds-cli-itest.service")).unwrap();
-    assert!(unit.contains("KillMode=mixed") && unit.contains("TimeoutStopSec=90") && said.contains("written again"), "{unit}\n{said}");
+    assert!(unit.contains("TimeoutStopSec=60") && !unit.contains("KillMode") && !said.contains("written again"), "{unit}\n{said}");
+    let restarted = pcds(&dir, &fake, &["restart"]);
+    let unit = std::fs::read_to_string(units.join("pcds-cli-itest.service")).unwrap();
+    assert!(unit.contains("KillMode=mixed") && unit.contains("TimeoutStopSec=90") && unit.contains("\nNoNewPrivileges=yes\n") && unit.contains("\nProtectSystem=strict\n") && text(&restarted).contains("written again"), "{unit}\n{}", text(&restarted));
     assert!(said.contains("bank a could not start the world: its front (pcds 9.0.0) ended without running it (exit 75") && said.contains("Starting bank b"), "{said}");
     assert!(said.contains(&format!("bank b runs {}", dir.join("run/worlds/world.json").display())), "{said}");
     assert_eq!(std::fs::read_to_string(dir.join("run/bin/active")).unwrap().trim(), "b");
@@ -544,6 +551,148 @@ fn a_port_in_use_stops_the_start_in_words() {
     let said = text(&out);
     assert_eq!(out.status.code(), Some(1), "{said}");
     assert!(said.contains("direct IP 127.0.0.1:") && said.contains("PCDS_LISTEN") && !said.contains("panicked"), "{said}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `pcds doctor` on an installation with nothing in it: every check that cannot pass says FAIL with
+/// a line to type, the exit code is 1, and `--json` prints the same list as JSON. With a server.env
+/// that turns the network checks off and a free port, the ones that can pass do.
+#[test]
+fn doctor_says_what_is_wrong_and_exits_nonzero() {
+    let dir = test_dir("doctor");
+    let fake = fake_systemctl(&dir, "echo inactive");
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    let held = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    std::fs::write(dir.join("run/server.env"), format!("PCDS_LISTEN={}\nPCDS_STEAM=off\nPCDS_ADMIN=off\nPCDS_RELEASES=http://127.0.0.1:9\n", held.local_addr().unwrap())).unwrap();
+    std::fs::set_permissions(dir.join("run/server.env"), std::fs::Permissions::from_mode(0o600)).unwrap();
+    let out = pcds(&dir, &fake, &["doctor"]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(said.contains("FAIL  game folder") && said.contains("fix: pcds up --game") && said.contains("FAIL  world") && said.contains("FAIL  game port") && said.contains("PASS  server.env"), "{said}");
+    assert!(said.contains("the server is not running") && said.contains("FAIL, "), "{said}");
+    let out = pcds(&dir, &fake, &["doctor", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    assert_eq!((json["ok"].as_bool(), json["serverRunning"].as_bool()), (Some(false), Some(false)));
+    let level = |id: &str| json["checks"].as_array().unwrap().iter().find(|c| c["id"] == id).map(|c| c["level"].as_str().unwrap().to_string());
+    assert_eq!((level("game folder").as_deref(), level("server.env").as_deref(), level("admin port").as_deref()), (Some("fail"), Some("pass"), Some("pass")), "{json}");
+    assert!(json["checks"].as_array().unwrap().iter().all(|c| c["fix"].is_string() == (c["level"] != "pass")), "every WARN and FAIL has a fix line, no PASS has: {json}");
+    let out = pcds(&dir, &fake, &["doctor", "--fast"]);
+    assert!(text(&out).contains("usage: pcds doctor [--json]") && out.status.code() == Some(1), "{}", text(&out));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The game tables the tests run on (PCDS_TEST_DATA, else run/data/2.103 of the checkout); None when
+/// there are none (CI): the tests that need a world to load skip.
+fn test_tables() -> Option<PathBuf> {
+    let dir = match std::env::var("PCDS_TEST_DATA").ok().filter(|v| !v.is_empty()) {
+        Some(v) if v == "none" => return None,
+        Some(dir) => PathBuf::from(dir),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../run/data/2.103"),
+    };
+    dir.join("netdata.json").is_file().then_some(dir)
+}
+
+/// An installation in dir/run on a stand-in game folder, whose tables are those of the tests (linked,
+/// with the build id of the stand-in), and a world made by `pcds new-save`.
+fn with_tables(dir: &Path, tables: &Path) -> PathBuf {
+    let game = dir.join("game");
+    std::fs::create_dir_all(game.join("Planet Crafter_Data/Managed")).unwrap();
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    std::fs::write(game.join("Planet Crafter.exe"), "").unwrap();
+    std::fs::write(game.join("Planet Crafter_Data/Managed/Assembly-CSharp.dll"), "code").unwrap();
+    let data = dir.join("run/data/2.103");
+    std::fs::create_dir_all(&data).unwrap();
+    for entry in std::fs::read_dir(tables).unwrap().flatten() {
+        let name = entry.file_name();
+        if name != "buildid" {
+            std::os::unix::fs::symlink(entry.path(), data.join(&name)).unwrap();
+        }
+    }
+    std::fs::write(data.join("buildid"), format!("{:016x}", xxhash_rust::xxh64::xxh64(b"code", 0))).unwrap();
+    std::fs::create_dir_all(dir.join("run/worlds")).unwrap();
+    assert!(Command::new(PCDS).arg("new-save").arg(dir.join("run/worlds/world.json")).arg(&data).stdout(std::process::Stdio::null()).status().unwrap().success());
+    game
+}
+
+/// `pcds backup`: the backups listed, loaded the way the server loads a world (a file that does not load
+/// is told apart and the exit code is 1), restored as a new world, and over the world only with a
+/// yes, only while the server is stopped, and only when the backup loads; the world it replaces is kept.
+#[test]
+fn backups_are_listed_verified_and_restored() {
+    let Some(tables) = test_tables() else { return };
+    let dir = test_dir("backups");
+    let fake = fake_systemctl(&dir, "echo inactive");
+    let game = with_tables(&dir, &tables);
+    std::fs::write(dir.join("run/game-dir"), format!("{}\n", game.display())).unwrap();
+    let world = std::fs::read_to_string(dir.join("run/worlds/world.json")).unwrap();
+    let backups = dir.join("run/worlds/backups");
+    std::fs::create_dir_all(&backups).unwrap();
+    // Three backups: one good, one older that is cut short, one newest that is good.
+    std::fs::write(backups.join("world-20261001-120000.json"), &world).unwrap();
+    std::fs::write(backups.join("world-20261002-120000.json"), &world[..world.len() / 2]).unwrap();
+    std::fs::write(backups.join("world-20261003-120000.json"), &world).unwrap();
+    std::fs::write(backups.join("world-2-20261004-120000.json"), "another world's").unwrap();
+    let out = pcds(&dir, &fake, &["backup", "list"]);
+    let listed = text(&out);
+    assert!(out.status.success() && listed.find("20261003-120000") < listed.find("20261002-120000") && listed.find("20261002-120000") < listed.find("20261001-120000") && !listed.contains("world-2-"), "{listed}");
+    // The newest two: the newest loads; with --all the cut one is named, and the exit code is 1.
+    let out = pcds(&dir, &fake, &["backup", "verify", "--count", "1"]);
+    assert!(out.status.success() && text(&out).contains("ok   world-20261003-120000") && text(&out).contains("1 of 3 backups loaded"), "{}", text(&out));
+    let out = pcds(&dir, &fake, &["backup", "verify", "--all"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("FAIL world-20261002-120000") && text(&out).contains("ok   world-20261001-120000") && text(&out).contains("pcds backup restore NAME"), "{}", text(&out));
+    // A backup that does not load is not restored, and nothing changes.
+    let out = pcds(&dir, &fake, &["backup", "restore", "20261002-120000", "--yes"]);
+    assert!(!out.status.success() && text(&out).contains("does not load") && text(&out).contains("Nothing was changed"), "{}", text(&out));
+    assert_eq!(std::fs::read_to_string(dir.join("run/worlds/world.json")).unwrap(), world);
+    // No yes, no terminal: asked to say it.
+    let out = pcds(&dir, &fake, &["backup", "restore", "20261003-120000"]);
+    assert!(!out.status.success() && text(&out).contains("pass --yes"), "{}", text(&out));
+    // As a new world: no yes needed, and not over one.
+    let out = pcds(&dir, &fake, &["backup", "restore", "world-20261003-120000.json", "--as", "second"]);
+    assert!(out.status.success() && std::fs::read_to_string(dir.join("run/worlds/second.json")).unwrap() == world, "{}", text(&out));
+    assert!(text(&pcds(&dir, &fake, &["backup", "restore", "20261003-120000", "--as", "second"])).contains("exists already"));
+    assert!(text(&pcds(&dir, &fake, &["backup", "restore", "20261003-120000", "--as", "../x"])).contains("not a world name"));
+    // Over the world: the one it replaces is kept; a running server is refused.
+    std::fs::write(dir.join("run/worlds/world.json"), "changed since").unwrap();
+    let running = fake_systemctl(&dir, &format!("case \"$*\" in *EnvironmentFiles*) echo {} ;; *ActiveState*) echo active ;; esac", dir.join("run/server.env").display()));
+    let out = pcds(&dir, &running, &["backup", "restore", "20261003-120000", "--yes"]);
+    assert!(!out.status.success() && text(&out).contains("stop the server first"), "{}", text(&out));
+    assert_eq!(std::fs::read_to_string(dir.join("run/worlds/world.json")).unwrap(), "changed since");
+    let fake = fake_systemctl(&dir, "echo inactive");
+    let out = pcds(&dir, &fake, &["backup", "restore", "20261003-120000", "--yes"]);
+    assert!(out.status.success() && text(&out).contains("restored: "), "{}", text(&out));
+    assert_eq!(std::fs::read_to_string(dir.join("run/worlds/world.json")).unwrap(), world);
+    let kept: Vec<String> = std::fs::read_dir(&backups).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.starts_with("world-replaced-")).collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(std::fs::read_to_string(backups.join(&kept[0])).unwrap(), "changed since");
+    // A backup named by a path (a file brought from another machine) works too.
+    let from = dir.join("from-elsewhere.json");
+    std::fs::write(&from, &world).unwrap();
+    let out = pcds(&dir, &fake, &["backup", "restore", from.to_str().unwrap(), "--as", "third"]);
+    assert!(out.status.success(), "{}", text(&out));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `pcds backup` with no backups, and with no tables, says what to do.
+#[test]
+fn backup_commands_say_what_to_do_when_there_is_nothing() {
+    let dir = test_dir("backups-none");
+    let fake = fake_systemctl(&dir, "echo inactive");
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    let out = pcds(&dir, &fake, &["backup", "list"]);
+    assert!(!out.status.success() && text(&out).contains("no backups of the world world"), "{}", text(&out));
+    std::fs::write(dir.join("run/rules.json"), r#"{"save": {"backupsKept": 0}}"#).unwrap();
+    assert!(text(&pcds(&dir, &fake, &["backup", "verify"])).contains("backups are off (the rule save.backupsKept is 0)"));
+    std::fs::write(dir.join("run/rules.json"), "{}").unwrap();
+    std::fs::create_dir_all(dir.join("run/worlds/backups")).unwrap();
+    std::fs::write(dir.join("run/worlds/backups/world-20261003-120000.json"), "{}").unwrap();
+    let out = pcds(&dir, &fake, &["backup", "verify"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("the game tables are needed to load a world"), "{}", text(&out));
+    assert!(text(&pcds(&dir, &fake, &["backup", "fetch"])).contains("no bucket: set the rules backup.s3Endpoint"));
+    assert!(text(&pcds(&dir, &fake, &["backup", "nonsense"])).contains("pcds backup list"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

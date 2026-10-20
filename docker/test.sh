@@ -118,7 +118,7 @@ make_feed
 # ---- Part 1: no game needed ---------------------------------------------------------------
 
 health="$(docker image inspect -f '{{json .Config.Healthcheck.Test}}' "$IMAGE")"
-case "$health" in *"/api/status"*) ok "the image has its health check" ;; *) fail "no health check on the admin API in the image: $health" ;; esac
+case "$health" in *"pcds health"*) ok "the image has its health check" ;; *) fail "no health check (pcds health) in the image: $health" ;; esac
 
 mkdir -p "$W/d1"
 given "$W/d1"
@@ -167,12 +167,13 @@ echo '{"save": {"backupsKept": 0}}' >"$W/d2/rules.json"
 
 C="$NAME"
 docker run -d --name "$C" --network host --read-only --tmpfs /tmp --restart unless-stopped --stop-timeout 90 \
+  --security-opt no-new-privileges:true --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_OVERRIDE --cap-add FOWNER --pids-limit 1024 \
   -e "PUID=$UID_" -e "PGID=$GID_" -v "$W/d2:/data" -v "$W/game:/game:ro" "$IMAGE" >/dev/null
 
 # Healthy: the health check's own command answers.
 healthy() {
   for _ in $(seq 1 120); do
-    docker exec "$C" pcds api GET /api/status >/dev/null 2>&1 && return 0
+    docker exec "$C" pcds health >/dev/null 2>&1 && return 0
     [ "$(docker inspect -f '{{.State.Running}}' "$C")" = true ] || fail "the container stopped"
     sleep 1
   done
@@ -198,7 +199,8 @@ $out" ;; esac
 [ "$(players)" = "3 online" ] || fail "players dropped by the hot update ($(players))"
 status | grep -q "^bank .: .*($TAG).*\[active, running" || fail "the new bank does not run:
 $(status)"
-ok "the new bank runs the world with all three players connected"
+docker exec "$C" pcds health >/dev/null || fail "the health check failed after the hot update"
+ok "the new bank runs the world with all three players connected, and the health check says so"
 wait "$LOAD_PID" || true
 LOAD_PID=""
 grep -q "load: 3 players" "$W/load.log" && ! grep -q "failed" "$W/load.log" || fail "the scripted players did not stay connected through the update:

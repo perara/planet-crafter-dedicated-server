@@ -227,7 +227,7 @@ pub fn request(game: &mut Game, method: &str, path: &str, body: &Value) -> (u16,
             match crate::tokens::create(&dir, body["name"].as_str().unwrap_or(""), &scopes, rate) {
                 // The one time the token is shown: it is kept nowhere (the file holds its hash).
                 Ok((made, token)) => {
-                    println!("plugins: scoped token {} ({}) made: {}", made.name, made.id, made.scopes.join(" "));
+                    info!("plugins: scoped token {} ({}) made: {}", made.name, made.id, made.scopes.join(" "));
                     (200, json!({"ok": true, "token": token, "info": made.public()}).to_string())
                 }
                 Err(e) => error(400, e),
@@ -238,7 +238,7 @@ pub fn request(game: &mut Game, method: &str, path: &str, body: &Value) -> (u16,
             let Some(id) = body["id"].as_str().map(str::trim).filter(|s| !s.is_empty()) else { return error(400, "'id' is required (the id or the name)") };
             match crate::tokens::revoke(&dir, id) {
                 Ok(gone) => {
-                    println!("plugins: scoped token {} ({}) revoked", gone.name, gone.id);
+                    info!("plugins: scoped token {} ({}) revoked", gone.name, gone.id);
                     (200, json!({"ok": true, "revoked": gone.public()}).to_string())
                 }
                 Err(e) => error(400, e),

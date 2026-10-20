@@ -11,7 +11,7 @@
 //! - the bank, for everything about the world: the front passes the request on (ADMIN) and the
 //!   answer back (ANSWER), and adds its part to `GET /api/status`.
 //!
-//! Every route but the web page needs "Authorization: Bearer <token>".
+//! Every route but the web page and the health route needs "Authorization: Bearer <token>".
 
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
@@ -56,6 +56,10 @@ pub enum Handler {
     WorldSwitch,
     Status,
     Worlds,
+    /// GET /api/health: no token.
+    Health,
+    /// GET /api/metrics while the world is stopped.
+    Metrics,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -80,9 +84,10 @@ pub struct Entry {
 pub type Route = crate::routes::Route<Entry>;
 
 impl Route {
-    /// Whether a token is needed.
+    /// Whether a token is needed: not for the web page, which asks for it itself, nor for the
+    /// health route, which says only whether the server serves a world.
     pub fn needs_token(&self) -> bool {
-        self.handler.owner != Owner::Http(Http::Page)
+        !matches!(self.handler.owner, Owner::Http(Http::Page) | Owner::Loop(Handler::Health, _))
     }
 }
 
@@ -108,9 +113,12 @@ pub const ROUTES: &[Route] = &[
     route("POST", "/api/world/stop", Owner::Loop(Handler::WorldStop, ALWAYS), "", "Tells every player, saves the world and ends its bank; the page and API stay."),
     route("POST", "/api/world/start", Owner::Loop(Handler::WorldStart, ALWAYS), "`{\"world\"?: \"name\"}`", "Starts the world that ran, or another one, in the active bank."),
     route("POST", "/api/world/switch", Owner::Loop(Handler::WorldSwitch, ALWAYS), "`{\"world\": \"name\"}`", "Stops the world that runs, if any, and starts another."),
+    route("GET", "/api/health", Owner::Loop(Handler::Health, ALWAYS), "", "Liveness for container probes and uptime monitors, no token: 200 `{\"ok\":true}` while the server serves a world (a hot update does not change that: the old game serves until the new one takes over), 503 `{\"ok\":false}` while there is no game process to serve one (the world is stopped, still starting, or starting again after a crash) or the loop does not answer within 3 s. Nothing else is said."),
+    route("GET", "/api/metrics", Owner::Loop(Handler::Metrics, STOPPED), "", "While the world is stopped: the front's numbers alone, in the Prometheus text format."),
     route("GET", "/api/status", Owner::Loop(Handler::Status, STOPPED), "", "While the world is stopped: the front's part of the status, and which world it was."),
     route("GET", "/api/worlds", Owner::Loop(Handler::Worlds, STOPPED), "", "While the world is stopped: the worlds and the backups."),
     route("GET", "/api/status", Owner::Bank, "", "The server's state: world, planet, the DLC planets stated as owned, players, rules changed, loop times, save and backup state, tables, plugins; the front adds the network, the invite code, the process, the banks and the update state."),
+    route("GET", "/api/metrics", Owner::Bank, "", "The numbers for a monitor in the Prometheus text format (version 0.0.4, `text/plain`), not JSON: players online and the limit, tick times, loop load, memory of the front and the game, objects, saves, backups, the off-site copies, hand-overs, crashes, the watchdog, the waiting queue, plugins by state and what each costs. The scoped token scope `metrics.read` allows this route alone (docs/monitoring.md)."),
     route("GET", "/api/ping", Owner::Bank, "", "Any answer is a game loop that runs (the front's watchdog asks it)."),
     route("POST", "/api/save", Owner::Bank, "", "Saves the world now (and its backup, when they are on)."),
     route("POST", "/api/kick", Owner::Bank, "`{\"id\": N}` or `{\"name\": \"...\"}`", "Kicks a player."),
@@ -148,6 +156,12 @@ pub const ROUTES: &[Route] = &[
 /// matches (the table puts exact paths before prefixes).
 pub fn find_http(method: &str, path: &str) -> Option<&'static Route> {
     ROUTES.iter().find(|r| r.matches(method, path) && matches!(r.handler.owner, Owner::Http(_)))
+}
+
+/// Whether a request needs no token: the route the table matches first says so (the web page and
+/// the health route). An unknown path needs one, so a stranger learns nothing about what exists.
+pub fn is_open(method: &str, path: &str) -> bool {
+    ROUTES.iter().find(|r| r.matches(method, path)).is_some_and(|r| !r.needs_token())
 }
 
 /// The front's handler for a request in this phase, if the front answers it itself.
@@ -189,20 +203,20 @@ impl Admin {
             return Ok(());
         }
         let Some(token) = crate::env("PCDS_ADMIN_TOKEN") else {
-            eprintln!("admin: PCDS_ADMIN_TOKEN is not set: the admin API and web page are off (pcds setup writes one)");
+            warn!("admin: PCDS_ADMIN_TOKEN is not set: the admin API and web page are off (pcds setup writes one)");
             return Ok(());
         };
         // Scoped tokens (run/plugins/tokens.json, beside the plugins the bank hosts) may make the requests of their scopes.
         let tokens = std::sync::Arc::new(crate::tokens::Checker::new(std::path::PathBuf::from(crate::config::installation_file(&crate::env, save, "plugins"))));
         match admin::start_with(&addr, token, self.web.clone(), feed, tokens) {
             Ok(rx) => {
-                println!("admin: http://{addr}/");
+                info!("admin: http://{addr}/");
                 // Plain HTTP: off this machine the token and every action travel in the clear.
                 // The container binds 0.0.0.0 inside its own network; its port is published on
                 // 127.0.0.1.
                 let loopback = addr.rsplit_once(':').and_then(|(h, _)| h.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok()).is_some_and(|ip| ip.is_loopback());
                 if !loopback && crate::env("PCDS_CONTAINER").is_none() {
-                    eprintln!("admin: WARNING: {addr} is reachable from other machines over plain HTTP; bind 127.0.0.1 and use an SSH tunnel or an HTTPS proxy");
+                    warn!("admin: WARNING: {addr} is reachable from other machines over plain HTTP. The admin token and every action travel in the clear, and whoever holds the token can have this machine run programs (the rule chat.exec). Bind 127.0.0.1 and reach it by an SSH tunnel or a TLS reverse proxy: docs/reverse-proxy.md; 'pcds doctor' keeps saying so");
                 }
                 self.rx = Some(rx);
                 Ok(())
@@ -281,6 +295,11 @@ impl Front {
             Handler::WorldSwitch => self.answer_world_switch(body),
             Handler::Status => (200, self.stopped_status().to_string()),
             Handler::Worlds => (200, crate::worlds::overview(&self.save).to_string()),
+            Handler::Health => {
+                let ok = self.live.is_some();
+                (if ok { 200 } else { 503 }, json!({"ok": ok}).to_string())
+            }
+            Handler::Metrics => (200, self.metrics_text(None)),
         }
     }
 
@@ -291,6 +310,9 @@ impl Front {
         let a: AdminAnswer = msg::parse(body).unwrap_or_default();
         let status = a.status.unwrap_or(500) as u16;
         let mut text = a.body.unwrap_or_else(|| "{}".to_string());
+        if path == "/api/metrics" && status == 200 {
+            text = self.metrics_text(serde_json::from_str(&text).ok());
+        }
         if path == "/api/status"
             && let Ok(mut s) = serde_json::from_str::<Value>(&text)
         {
@@ -312,7 +334,7 @@ mod tests {
     /// docs/admin-api.md, from the table.
     fn markdown() -> String {
         let mut out = String::from(
-            "# The admin API\n\nGenerated from the table in `server/src/front/admin_routes.rs` (a test keeps the two equal; the text below\nis what it expects). Every route but the web page needs `Authorization: Bearer <token>` (docs/hot-update.md, README).\nThe answers are JSON; an error is `{\"error\": \"...\"}` with the status. Who answers: the HTTP thread (admin.rs: its own\nthread, never held by the game loop), the front's loop (the process: updates, stopping, the world's controls), or the bank\n(the world; the front passes the request on and adds its part to `GET /api/status`).\n\n| Route | Answered by | Takes | Does |\n|---|---|---|---|\n",
+            "# The admin API\n\nGenerated from the table in `server/src/front/admin_routes.rs` (a test keeps the two equal; the text below\nis what it expects). Every route but the web page and `GET /api/health` needs `Authorization: Bearer <token>` (docs/hot-update.md, README).\nThe answers are JSON (`GET /api/metrics` is Prometheus text); an error is `{\"error\": \"...\"}` with the status. Who answers: the HTTP thread (admin.rs: its own\nthread, never held by the game loop), the front's loop (the process: updates, stopping, the world's controls), or the bank\n(the world; the front passes the request on and adds its part to `GET /api/status`).\n\n| Route | Answered by | Takes | Does |\n|---|---|---|---|\n",
         );
         for r in ROUTES {
             let by = match r.handler.owner {
@@ -475,11 +497,11 @@ mod tests {
     }
 
     /// Every route of the table, every method and the paths that could be mistaken for it, with a token of
-    /// each scope and a token that was never made: only the five requests the scopes name pass, and each
+    /// each scope and a token that was never made: only the six requests the scopes name pass, and each
     /// of them lands on the route that is meant (the first the table matches), so a scope cannot reach
     /// a route by a path the token check reads one way and the table another.
     #[test]
-    fn a_scoped_token_reaches_only_the_five_routes_of_its_scopes_and_each_lands_where_it_is_meant() {
+    fn a_scoped_token_reaches_only_the_six_routes_of_its_scopes_and_each_lands_where_it_is_meant() {
         use crate::tokens::{create, scope_for, Checker, Denied, SCOPES};
         let dir = std::env::temp_dir().join(format!("pcds-routes-scopes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -516,13 +538,14 @@ mod tests {
             ("POST", "/api/chat", "chat.send", Owner::Http(Http::Chat)),
             ("POST", "/api/kick", "player.kick", Owner::Bank),
             ("POST", "/api/teleport", "player.teleport", Owner::Bank),
+            ("GET", "/api/metrics", "metrics.read", Owner::Loop(Handler::Metrics, STOPPED)),
         ];
         for (method, path, scope, owner) in &want {
             assert!(passed.contains(&(method.to_string(), path.to_string(), scope.to_string())), "{scope} must pass {method} {path}");
             let first = ROUTES.iter().find(|r| r.matches(method, path)).unwrap();
             assert_eq!(first.handler.owner, *owner, "{method} {path} lands on {:?}", first.handler.owner);
         }
-        assert_eq!(passed.len(), want.len(), "only those five: {passed:?}");
+        assert_eq!(passed.len(), want.len(), "only those six: {passed:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

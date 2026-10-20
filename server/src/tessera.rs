@@ -564,7 +564,7 @@ impl Model {
         for &(ti, weight) in &entries {
             let t = &tiles[ti];
             if !contiguous(t) {
-                eprintln!("Tessera cannot use {} as it is not contiguous", t.name);
+                warn!("Tessera cannot use {} as it is not contiguous", t.name);
                 continue;
             }
             for rot in tile_rotations(t)? {

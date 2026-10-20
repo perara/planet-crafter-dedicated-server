@@ -153,6 +153,8 @@ impl Ctx {
     /// front's code once the front and its banks have ended (supervise). Returns only when it
     /// cannot start.
     pub fn run_server(&self) -> Result {
+        // This process is the unit's: what it says is the server's log (the format and level are the rules').
+        crate::logging::start("run", &self.run.join("rules.json").to_string_lossy());
         self.start_front(true)
     }
 
@@ -172,32 +174,29 @@ impl Ctx {
             settings.extend(parse_env(&fs::read_to_string(&self.env_file).map_err(|e| format!("{}: {e}", self.env_file.display()))?));
         }
         let get = |key: &str| settings.get(key).filter(|v| !v.is_empty()).cloned().or_else(|| crate::env(key));
+        // Tokens that server.env holds are never written to the log either (the environment's are known from the start).
+        ["PCDS_ADMIN_TOKEN", "PCDS_STEAM_TOKEN"].iter().filter_map(|key| get(key)).for_each(|token| crate::logging::secret(&token));
         self.check_settings_file()?;
         crate::config::check_env(get)?;
         // In server.env a retired setting stops the start (above); in the environment (a compose
         // file's `environment:`) it would be ignored without a word.
         let from_file = |key: &str| settings.contains_key(key);
         if let retired @ [_, ..] = crate::config::retired_in_env(|key| crate::env(key).filter(|_| !from_file(key))).as_slice() {
-            eprintln!("pcds: ignored in the environment: {} (docs/upgrading.md)", retired.join(", "));
+            warn!("ignored in the environment: {} (docs/upgrading.md)", retired.join(", "));
         }
         let world = self.world_file();
         if !world.is_file() {
             return Err(format!("no world at {}: 'pcds worlds', 'pcds world use NAME' or 'pcds world new NAME'", world.display()));
         }
-        // A unit this release would write differently (another program path, a changed stop
-        // timeout) is written again; systemd takes the new text at the next start.
-        if !self.container
-            && self.unit_dir.join(self.unit()).is_file()
-            && let Err(e) = self.refresh_unit()
-        {
-            eprintln!("pcds: the systemd units could not be written again ({e}); 'pcds install-service' writes them");
-        }
+        // The unit is written by `pcds start`, `pcds restart`, `pcds install-service` and `pcds
+        // upgrade --restart`, in your terminal: its sandbox makes the home folder read-only to the
+        // server, which therefore cannot rewrite the unit that limits it.
         // A newer build into a bank is not what the start needs: when it fails (a full disk),
         // the server starts from the banks as they are.
         if install
             && let Err(e) = self.install_beside(None)
         {
-            eprintln!("pcds: {} was not put into a bank ({e}); starting the server from the banks as they are", self.exe.display());
+            warn!("{} was not put into a bank ({e}); starting the server from the banks as they are", self.exe.display());
         }
         // The tables of the bank that runs (installing may have changed which one).
         let game = self.game_dir(None)?;
@@ -224,17 +223,17 @@ impl Ctx {
             match fallback_bank(&banks, &first) {
                 Ok(other) => {
                     let reason = format!("could not start the world: its front (pcds {}) ended without running it (exit {code}; see pcds logs)", updater::info(&banks, &first).map_or("?".into(), |i| i.version().to_string()));
-                    eprintln!("pcds: bank {first} {reason}. Starting bank {other}, which ran before");
+                    error!("bank {first} {reason}. Starting bank {other}, which ran before");
                     updater::note_fallback(&banks, &first, &other, &reason)?;
                     updater::set_active(&banks, &other)?;
                     code = supervise(front(&other), self.container).map_err(|e| format!("{}: {e}", banks.join(&other).display()))?;
                     if code == crate::front::BOOT_FAILED && !STOP_ASKED.load(Ordering::SeqCst) {
-                        eprintln!("pcds: bank {other} could not start the world either; bank {first} is the active one again");
+                        error!("bank {other} could not start the world either; bank {first} is the active one again");
                         updater::set_active(&banks, &first)?;
                         updater::clear_fallback(&banks)?;
                     }
                 }
-                Err(why) => eprintln!("pcds: the world did not start: the reason is in the lines above. Fix that, then 'pcds restart' (bank {first} failed, and bank {}: {why})", updater::other(&first)),
+                Err(why) => error!("the world did not start: the reason is in the lines above. Fix that, then 'pcds restart' (bank {first} failed, and bank {}: {why})", updater::other(&first)),
             }
         }
         // In the container: `pcds upgrade --restart` asked for a restart in place (restart_in_place).
@@ -444,6 +443,7 @@ impl Ctx {
     /// with STEAM_USER), a world (`new_world`: the options of the new one made when there is
     /// none), steamclient for invite codes, then the server as this process.
     pub fn container(&self, new_world: &[String]) -> Result {
+        crate::logging::start("run", &self.run.join("rules.json").to_string_lossy());
         super::mkdir(&self.worlds)?;
         self.write_env()?;
         self.install_server()?;
@@ -463,7 +463,7 @@ impl Ctx {
         // A game update that fails is said, and the server starts on the game as it is (a
         // Steam outage must not keep the container down; pcds update tries again).
         if let Err(e) = self.update_downloaded_game() {
-            eprintln!("pcds: {e}; starting on the game as it is");
+            warn!("{e}; starting on the game as it is");
         }
         // The game steamcmd downloaded, else the one mounted at /game.
         let game = if steam_user.is_some() || self.run.join("steam-user").is_file() { downloaded } else { PathBuf::from("/game") };
@@ -577,7 +577,7 @@ fn supervise(mut front: Command, restartable: bool) -> Result<i32> {
             continue;
         } else if ended == 0 {
             if deadline.is_some_and(|d| std::time::Instant::now() > d) {
-                eprintln!("pcds: the banks of the front did not end within {} s of it: killed", BANKS_GRACE.as_secs());
+                warn!("the banks of the front did not end within {} s of it: killed", BANKS_GRACE.as_secs());
                 // SAFETY: the front's process group, which only it and its banks are in.
                 unsafe { libc::kill(-pid, libc::SIGKILL) };
                 break;

@@ -86,7 +86,7 @@ pub fn world_new(game: &Game, save_path: &str, w: NewWorld) -> Result<Value, Str
     let o = crate::newworld::Options { planet: w.planet, start: w.start.unwrap_or_else(|| "Standard".into()), seed: w.seed, set };
     let save = crate::newworld::new_save(&game.net_data, &game.data, &name, &o, &mut crate::game::Rng::seeded())?;
     save.write(&path.to_string_lossy()).map_err(|e| format!("{}: {e}", path.display()))?;
-    println!("world {name} created (admin)");
+    info!("world {name} created (admin)");
     Ok(json!({"name": name, "planet": save.settings["planetId"], "seed": save.settings["worldSeed"]}))
 }
 
@@ -108,7 +108,7 @@ pub fn world_remove(save_path: &str, name: &str) -> Result<Value, String> {
         return Err("removed a moment ago: try again in a second".into());
     }
     std::fs::rename(&from, &to).map_err(|e| format!("{}: {e}", to.display()))?;
-    println!("world {name} removed (admin): kept as {}", to.display());
+    info!("world {name} removed (admin): kept as {}", to.display());
     Ok(json!({"kept": to.file_name().map(|f| f.to_string_lossy().to_string())}))
 }
 
@@ -141,7 +141,7 @@ pub fn world_restore(save_path: &str, backup: &str, name: &str) -> Result<Value,
     crate::save::SaveFile::load(&from.to_string_lossy()).map_err(|e| format!("backup {backup}: {e}"))?;
     let text = std::fs::read(&from).map_err(|e| format!("{}: {e}", from.display()))?;
     crate::save::write_atomic(&to.to_string_lossy(), &text).map_err(|e| format!("{}: {e}", to.display()))?;
-    println!("backup {backup} restored as world {name} (admin)");
+    info!("backup {backup} restored as world {name} (admin)");
     Ok(json!({"name": name}))
 }
 

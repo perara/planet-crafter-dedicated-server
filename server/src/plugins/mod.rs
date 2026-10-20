@@ -503,7 +503,7 @@ impl Loaded {
         if self.checkpoint.is_none() {
             match state::read(&state::path(&self.dir, world)) {
                 Ok(b) => self.checkpoint = b,
-                Err(e) => eprintln!("plugin {}: its saved state is not used: {e}", self.id),
+                Err(e) => warn!("plugin {}: its saved state is not used: {e}", self.id),
             }
         }
         self.checkpoint.clone()
@@ -540,7 +540,7 @@ impl Loaded {
                 self.boot_queue = queued;
             }
             Err(e) => {
-                eprintln!("plugin {}: {e}", self.id);
+                warn!("plugin {}: {e}", self.id);
                 self.status = Status::Failed(clean(&e));
             }
         }
@@ -568,9 +568,9 @@ impl Loaded {
         match rt.unload() {
             Ok(()) => match rt.save() {
                 Ok(blob) => self.checkpoint = blob,
-                Err(f) => eprintln!("plugin {}: its final save failed ({f}); the state of its last save is kept", self.id),
+                Err(f) => error!("plugin {}: its final save failed ({f}); the state of its last save is kept", self.id),
             },
-            Err(f) => eprintln!("plugin {}: its unload call failed ({f}); the state of its last save is kept", self.id),
+            Err(f) => error!("plugin {}: its unload call failed ({f}); the state of its last save is kept", self.id),
         }
         // Instance and memory go here; whatever it queued in the unload call is never applied.
         drop(rt);
@@ -589,7 +589,7 @@ impl Loaded {
                 None => std::fs::remove_file(&file).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }).map_err(|e| format!("{}: {e}", file.display())),
             };
             if let Err(e) = result {
-                eprintln!("plugin {}: its state was not written: {e}", self.id);
+                warn!("plugin {}: its state was not written: {e}", self.id);
             }
         }
         was
@@ -599,8 +599,8 @@ impl Loaded {
     fn note(&self, level: pcds_plugin_api::Level, text: &str) {
         let text = clean(text);
         match level {
-            pcds_plugin_api::Level::Error | pcds_plugin_api::Level::Warn => eprintln!("plugin {}: {text}", self.id),
-            _ => println!("plugin {}: {text}", self.id),
+            pcds_plugin_api::Level::Error | pcds_plugin_api::Level::Warn => warn!("plugin {}: {text}", self.id),
+            _ => info!("plugin {}: {text}", self.id),
         }
         self.logs.push(level, &text);
     }
@@ -750,7 +750,7 @@ fn scan(engine: &wasmi::Engine, dir: &Path) -> (Vec<Loaded>, Option<String>, Opt
     let approvals = match Approvals::load(dir) {
         Ok(a) => (a, None),
         Err(e) => {
-            eprintln!("plugins: {e}: no plugin runs until that is fixed");
+            warn!("plugins: {e}: no plugin runs until that is fixed");
             (Approvals::default(), Some(e))
         }
     };
@@ -759,7 +759,7 @@ fn scan(engine: &wasmi::Engine, dir: &Path) -> (Vec<Loaded>, Option<String>, Opt
     let values = match config::Configs::load(dir) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("plugins: {e}: plugins run without their config values until that is fixed");
+            warn!("plugins: {e}: plugins run without their config values until that is fixed");
             config::Configs::default()
         }
     };
@@ -767,13 +767,13 @@ fn scan(engine: &wasmi::Engine, dir: &Path) -> (Vec<Loaded>, Option<String>, Opt
     let (keys, keys_error) = match sign::Keys::load(dir) {
         Ok(k) => (k, None),
         Err(e) => {
-            eprintln!("plugins: {e}: no signing key is trusted until that is fixed");
+            warn!("plugins: {e}: no signing key is trusted until that is fixed");
             (sign::Keys::default(), Some(e))
         }
     };
     let mut folders = folders_of(dir);
     if folders.len() > limits::MAX_PLUGINS {
-        eprintln!("plugins: {} folders in {}; only the first {} (by name) are read", folders.len(), dir.display(), limits::MAX_PLUGINS);
+        warn!("plugins: {} folders in {}; only the first {} (by name) are read", folders.len(), dir.display(), limits::MAX_PLUGINS);
     }
     folders.truncate(limits::MAX_PLUGINS);
     let mut found = Vec::new();
@@ -842,13 +842,13 @@ impl Host {
             let now = format!("{}{}", p.status.name(), p.notice.as_deref().map_or(String::new(), |n| format!(" ({n})")));
             if before.get(&p.id) != Some(&now) {
                 match p.status.detail() {
-                    Some(d) if !matches!(p.status, Status::Running) => println!("plugin {}: {} ({d})", p.id, p.status.name()),
-                    _ => println!("plugin {}: {now}", p.id),
+                    Some(d) if !matches!(p.status, Status::Running) => info!("plugin {}: {} ({d})", p.id, p.status.name()),
+                    _ => info!("plugin {}: {now}", p.id),
                 }
             }
         }
         for id in before.keys().filter(|id| !self.plugins.iter().any(|p| &p.id == *id)) {
-            println!("plugin {id}: removed");
+            info!("plugin {id}: removed");
         }
     }
 
@@ -887,7 +887,7 @@ impl Host {
                 let handed = match prev.rt.as_mut().map(|rt| rt.save()) {
                     Some(Ok(blob)) => blob,
                     Some(Err(f)) => {
-                        eprintln!("plugin {}: its save for the reload failed ({f}); the state of its last save is used", p.id);
+                        error!("plugin {}: its save for the reload failed ({f}); the state of its last save is used", p.id);
                         prev.checkpoint.clone()
                     }
                     None => prev.checkpoint.clone(),
@@ -907,7 +907,7 @@ impl Host {
                         Status::Failed(w) => w.clone(),
                         other => other.detail().unwrap_or("it did not start").to_string(),
                     };
-                    eprintln!("plugin {}: the reload failed ({why}); the old version keeps running", p.id);
+                    error!("plugin {}: the reload failed ({why}); the old version keeps running", p.id);
                     prev.notice = Some(format!("a reload failed: {why}; the old version keeps running"));
                     next.push(prev);
                 }
@@ -1280,7 +1280,7 @@ impl Host {
     /// the method, `scheme://host[:port]`, the result: never the path, the query or a header.
     pub fn deliver_http(&mut self, sink: &mut dyn Sink, game_ms: i64) {
         for done in self.net.take(limits::HTTP_DELIVER) {
-            println!("{}", net::log_line(&done));
+            info!("{}", net::log_line(&done));
             let Some(i) = self.plugins.iter().position(|p| p.id == done.plugin && p.running() && p.grant.has(caps::NET_HTTP)) else { continue };
             let p = &mut self.plugins[i];
             let (mut status, mut error, mut body) = (done.status, done.error.as_str(), done.body.as_slice());
@@ -1308,7 +1308,7 @@ impl Host {
         let t = Instant::now();
         for p in self.plugins.iter_mut().filter(|p| p.running()) {
             if budget.is_some_and(|b| t.elapsed() > b) {
-                eprintln!("plugin {}: no time to save its state for the hand-over; the state of its last save goes on", p.id);
+                warn!("plugin {}: no time to save its state for the hand-over; the state of its last save goes on", p.id);
                 p.stats.shed += 1;
                 continue;
             }
@@ -1337,7 +1337,7 @@ impl Host {
                 None => std::fs::remove_file(&file).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }).map_err(|e| format!("{}: {e}", file.display())),
             };
             if let Err(e) = result {
-                eprintln!("plugin {}: its state was not written: {e}", p.id);
+                warn!("plugin {}: its state was not written: {e}", p.id);
             }
         }
     }
@@ -1360,7 +1360,7 @@ pub fn attach(game: &mut crate::game::Game, mut host: Host, flipped: bool) {
         // State of plugins that are gone is not carried on.
         let ids: HashSet<&str> = host.plugins.iter().map(|p| p.id.as_str()).collect();
         saved.states.retain(|id, _| ids.contains(id.as_str()));
-        println!("{}", host.summary_line());
+        info!("{}", host.summary_line());
         host.announce(&HashMap::new());
     }
     if changed {

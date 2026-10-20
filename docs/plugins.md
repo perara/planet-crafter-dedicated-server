@@ -597,7 +597,7 @@ removing a plugin's folder removes its state with it.
 The project has no legacy support (docs/plugins-api.md, "Versioning and compatibility"): the
 plugin part is a normal part of the current snapshot format, not a second format kept alive.
 
-- The plugin part is `ext.plugins` of the state in `handoff::FORMAT` 7 (the binary codec of
+- The plugin part is `ext.plugins` of the state in `handoff::FORMAT` 8 (the binary codec of
   bincodec.rs carries it in the REST part with the rest of `ext`): `{saved: {states: {ID:
   {version, bytes}}, stream: {epoch, next, events, dropped}}}`. Every field is written; nothing is
   skipped or defaulted on reading, and a snapshot of another format is not read at all.
@@ -863,9 +863,9 @@ bearer header with less in it.
   `run/plugins/tokens.json` (0600) with the name, the scopes and the rate. The dashboard lists them
   and makes and revokes them (`GET/POST /api/plugins/tokens`, admin token only); `pcds plugin tokens`
   lists. A token is high-entropy, so a fast hash is the right one, as for an API key.
-- **What a token opens.** Five scopes, each a (method, path) of the existing API: the stream
+- **What a token opens.** Six scopes, each a (method, path) of the existing API: the stream
   (`events.read`), the chat feed (`chat.read`), saying in the chat (`chat.send`), `player.kick`,
-  `player.teleport`. They are the endpoints a bridge needs and the ones that act on one player;
+  `player.teleport`, and `metrics.read` (the numbers for a monitor, docs/monitoring.md). They are the endpoints a bridge needs and the ones that act on one player;
   the settings, the rules, the world controls, the logs, the status (which holds the access lists),
   the plugins' approvals, keys and tokens are not scoped to anything: **admin token only**,
   and a test asks each of them with a token and expects 403 (no scope covers them, so whatever scopes the token has).
@@ -1055,9 +1055,9 @@ These are for the owner.
     2.2 MB for some speed; not measured.
 12. **Publishing `pcds-plugin-api`** to crates.io. It is ready (metadata, README, documentation without warnings, the file list); the
     owner decides. Until then a plugin takes it by path or Git tag.
-13. **Read-only scopes for the status and the plugin listing.** A metrics exporter needs `GET /api/status` and `GET /api/plugins`, which take the
-    admin token: the status holds the access lists and the listing holds settings that are not secrets. A scope for each needs a status without
-    the lists; the exporter has `--no-admin` for what the stream alone gives.
+13. **Read-only scopes for the status and the plugin listing.** A metrics exporter that wants the status or `GET /api/plugins` needs the admin token (the
+    status holds the access lists; the listing holds settings that are not secrets). The numbers a monitor needs are in `GET /api/metrics`
+    (scope `metrics.read`, with each plugin's cost by kind of event), so the example exporter only needs the stream.
 14. **What became of a queued action.** A plugin is not told that its `give` found a full backpack or that its `kick` found the player gone. An
     `action_done` event (or a result in the next call) would make rewards exact; today a plugin looks first (`inventory`) and says what it
     cannot know in its README.

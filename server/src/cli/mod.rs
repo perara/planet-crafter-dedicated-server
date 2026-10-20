@@ -3,6 +3,8 @@
 //! a systemd user service (or as the Docker container's own process).
 
 mod api;
+mod backup;
+mod doctor;
 mod env;
 mod extract;
 mod plugin;
@@ -41,10 +43,22 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
                          import also converts a save of the game's old layouts (2022, one
                          planet) as the game does when it opens one; setup --world, world
                          use and the start refuse such a save and say so
+  pcds backup list | verify [--count N | --all] | restore NAME [--as WORLD] [--yes] | fetch [NAME]
+                         the world's backups: load them the way the server does, put one back
+                         as the world (or as a new world), copy one from the S3 bucket
+                         (docs/disaster-recovery.md)
   pcds new [--planet ID] [--start LOCATION] [--seed N] [--set KEY=VALUE]... [--force]
                          replace the current world with a new one (kept in backups/)
-  pcds start | stop | restart | status [--json] | logs
+  pcds start | stop | restart | status [--json]
+  pcds logs [-n LINES] [--since TIME] [--grep PATTERN] [-f | --follow]
+                         the server's log (the systemd journal of its unit): the last 100 lines, then
+                         new ones as they come; with an option, only what it asks for (--follow
+                         adds the new ones). TIME is journalctl's: \"1 hour ago\", \"2026-10-20 14:00\"
   pcds check-settings         read server.env as the next start will, and say what stops it (nothing is restarted)
+  pcds health                 exit 0 when the server serves a world, else 1 (no token needed; the Docker health check)
+  pcds doctor [--json]        check everything the server needs (game, tables, world, settings, ports,
+                         disk, clock, service, Steam, banks, update feed, plugins, memory) and say
+                         how to fix each problem; exit 1 when something FAILs
   pcds upgrade [VERSION] [--restart] | --rollback | --check
                          a new server release from GitHub (the latest, or VERSION) into the
                          standby bank, and the running world handed over to it with nobody
@@ -87,7 +101,7 @@ PCDS_GAME_DIR, the one used last (run/game-dir), else the Steam library that lis
 /// The commands `pcds help` lists: one of these with arguments it does not take is not an unknown command.
 const COMMANDS: &[&str] = &[
     "up", "setup", "worlds", "world", "new", "start", "stop", "restart", "status", "logs", "upgrade", "install-service", "uninstall-service", "code", "players", "save", "kick", "ban", "unban", "gui", "token", "config", "api",
-    "rules", "plugin", "extract", "update", "selftest", "run", "container",
+    "rules", "plugin", "extract", "update", "selftest", "run", "container", "doctor", "health", "backup",
 ];
 
 /// Where this installation's files are.
@@ -222,14 +236,18 @@ impl Ctx {
                 self.check_settings()?;
                 say("server.env is fine for this release");
             }
+            ["health"] => self.health()?,
+            ["backup", ..] => return self.backup(&args[1..]),
+            ["doctor", rest @ ..] => return self.doctor(&rest.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
             ["status"] => self.status()?,
             ["status", "--json"] => self.status_json()?,
-            ["logs"] => {
+            ["logs", ..] => {
                 self.not_in_container("logs")?;
                 if !self.unit_dir.join(self.unit()).is_file() {
                     return Err("no service to show the log of: 'pcds up' sets one up ('pcds run' runs the server in this terminal)".into());
                 }
-                return passthrough(Command::new("journalctl").args(["--user", "-o", "cat", "-u", &self.unit(), "-n", "100", "-f"]));
+                let options = logs_options(&args[1..])?;
+                return passthrough(Command::new("journalctl").args(["--user", "-o", "cat", "-u", &self.unit()]).args(options));
             }
             ["install-service"] => self.install_service()?,
             ["uninstall-service"] => self.uninstall_service()?,
@@ -282,6 +300,44 @@ impl Ctx {
     }
 }
 
+/// The journalctl arguments for `pcds logs`: nothing but `logs` is the last 100 lines and then
+/// follows; any option prints what it asks for and ends, unless it has --follow.
+fn logs_options(args: &[String]) -> Result<Vec<String>> {
+    let (mut lines, mut since, mut grep, mut follow) = (None::<String>, None::<String>, None::<String>, args.is_empty());
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        let mut value = |what: &str| it.next().cloned().ok_or_else(|| format!("usage: pcds logs {what}"));
+        match arg.as_str() {
+            "-n" | "--lines" => {
+                let n = value("-n LINES")?;
+                n.parse::<u32>().map_err(|_| format!("-n takes a number of lines, not {n:?}"))?;
+                lines = Some(n);
+            }
+            "--since" => since = Some(value("--since TIME (\"1 hour ago\", \"2026-10-20 14:00\")")?),
+            "--grep" => grep = Some(value("--grep PATTERN")?),
+            "-f" | "--follow" => follow = true,
+            other => return Err(format!("unknown option {other} ('pcds help' shows what logs takes)")),
+        }
+    }
+    let mut out = Vec::new();
+    // The last 100 by default; with --since, everything since then unless -n says how many.
+    match (&lines, &since) {
+        (Some(n), _) => out.extend(["-n".to_string(), n.clone()]),
+        (None, None) => out.extend(["-n".to_string(), "100".to_string()]),
+        (None, Some(_)) => {}
+    }
+    if let Some(t) = since {
+        out.extend(["--since".to_string(), t]);
+    }
+    if let Some(p) = grep {
+        out.extend(["--grep".to_string(), p]);
+    }
+    if follow {
+        out.push("-f".into());
+    }
+    Ok(out)
+}
+
 /// `--game DIR`, the only option of extract and update.
 fn game_option(args: &[&str]) -> Result<Option<PathBuf>> {
     match args {
@@ -292,8 +348,14 @@ fn game_option(args: &[&str]) -> Result<Option<PathBuf>> {
     }
 }
 
+/// A line for the person who ran the command; in the server's own process (`pcds run`, the
+/// container's start) a line of its log.
 fn say(message: impl std::fmt::Display) {
-    println!("pcds: {message}");
+    if crate::logging::is_server() {
+        info!("{message}");
+    } else {
+        println!("pcds: {message}");
+    }
 }
 
 /// Whether a program is on the PATH.
@@ -489,6 +551,22 @@ mod tests {
         assert_eq!(human_size(1536), "1.5K");
         assert_eq!(human_size(3 << 20), "3.0M");
         assert_eq!(human_size(25 << 20), "25M");
+    }
+
+    #[test]
+    fn logs_take_a_number_a_time_and_a_pattern() {
+        let a = |args: &[&str]| logs_options(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        // Alone: as it always was, the last 100 lines and then new ones.
+        assert_eq!(a(&[]).unwrap(), ["-n", "100", "-f"]);
+        // With an option it prints and ends, unless it follows.
+        assert_eq!(a(&["--since", "1 hour ago", "--grep", "error"]).unwrap(), ["--since", "1 hour ago", "--grep", "error"]);
+        assert_eq!(a(&["-n", "20"]).unwrap(), ["-n", "20"]);
+        assert_eq!(a(&["-n", "20", "--follow"]).unwrap(), ["-n", "20", "-f"]);
+        assert_eq!(a(&["-f", "--grep", "saved"]).unwrap(), ["-n", "100", "--grep", "saved", "-f"]);
+        assert!(a(&["-n", "many"]).unwrap_err().contains("number of lines"));
+        assert!(a(&["--since"]).unwrap_err().contains("usage: pcds logs --since TIME"));
+        assert!(a(&["--grep"]).unwrap_err().contains("PATTERN"));
+        assert!(a(&["--json"]).unwrap_err().contains("unknown option --json"));
     }
 
     #[test]

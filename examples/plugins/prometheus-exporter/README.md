@@ -3,7 +3,12 @@
 An out-of-process plugin: a Python 3 program (standard library only) that serves a server's numbers to
 Prometheus on `http://127.0.0.1:9188/metrics`. It reads the plugin event stream (`POST /api/plugins/events`,
 a long poll) for counts of what happens, and `GET /api/status` and `GET /api/plugins` for the state.
-The server speaks no metrics format; see `docs/plugins.md`, "Out-of-process integrations".
+**The server now speaks the format itself:** `GET /api/metrics` with a token of the scope
+`metrics.read` (docs/monitoring.md) has the status numbers and, for each plugin, its calls, faults, fuel by kind of
+event, HTTP traffic and budget. Use that for the numbers. This program is for what the server does not count:
+what happened in the game since it started (chats, joins, leaves, buildings placed and taken apart, saves ok and
+failed), taken from the event stream with an `events.read` token. Run it beside the server's own endpoint, with
+`--no-admin` (then it needs no admin token at all). It also is the worked example of a program that reads the stream.
 
 ```bash
 ./exporter.py --self-test                                  # no server needed

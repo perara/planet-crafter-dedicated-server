@@ -298,8 +298,9 @@ time, and `load` reads both. The board is bounded (`board_size`), and the plugin
 ### A metrics exporter (prometheus-exporter)
 
 *Teaches: the out-of-process way.* A Python program (standard library only) long-polls `POST /api/plugins/events` with a scoped token that has
-`events.read`, counts chats, joins, leaves, builds and saves, reads `/api/status` and `/api/plugins` (they need the admin token today, so
-`--no-admin` exports only the stream), and serves them in Prometheus' text format on `/metrics`. `--replay FILE` renders a saved capture
+`events.read`, counts chats, joins, leaves, builds and saves, and, with the admin token, `/api/status` and `/api/plugins`, and serves them in Prometheus' text format on `/metrics`.
+The server has its own `GET /api/metrics` (scope `metrics.read`, docs/monitoring.md) with the numbers and each plugin's cost by kind of event, so the
+exporter runs with `--no-admin` beside it and adds what the server does not count: the stream's chats, joins, leaves, builds and saves. `--replay FILE` renders a saved capture
 without a network, which is how it is tested. A crash of the exporter never touches the game.
 
 ### Rewards (quest-rewards)

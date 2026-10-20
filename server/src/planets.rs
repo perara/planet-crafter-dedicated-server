@@ -132,11 +132,11 @@ fn landing_transform(game: &Game, platform: &WorldObject) -> ([f32; 3], [f32; 4]
 pub fn switch_to_planet(game: &mut Game, planet_hash: i32, rocket_wo: i32, spawn_index: i32) {
     let Some(index) = game.net_data.planets.iter().position(|p| stable_hash(&p.id) == planet_hash) else { return };
     if !crate::scene::available_planets(game).contains(&index) {
-        eprintln!("switch to planet {}: not available in this world (a DLC planet needs the rule world.dlcPlanets to list it: `pcds rules set world.dlcPlanets=NAME`)", game.net_data.planets[index].id);
+        warn!("switch to planet {}: not available in this world (a DLC planet needs the rule world.dlcPlanets to list it: `pcds rules set world.dlcPlanets=NAME`)", game.net_data.planets[index].id);
         return;
     }
     if let Some(why) = ground_missing(game, index) {
-        eprintln!("switch to planet {}: {why}", game.net_data.planets[index].id);
+        warn!("switch to planet {}: {why}", game.net_data.planets[index].id);
         return;
     }
     let planet_id = game.net_data.planets[index].id.clone();
@@ -144,7 +144,7 @@ pub fn switch_to_planet(game: &mut Game, planet_hash: i32, rocket_wo: i32, spawn
     if !is_unlocked(game, planet_hash) {
         let spawns = game.data.asset(&format!("PlanetData:PlanetData-{planet_id}")).map(|p| p["spawnPositions"][spawn_index.max(0) as usize]["positions"].clone());
         let Some(list) = spawns.as_ref().and_then(|s| s.as_array()).filter(|l| !l.is_empty() && spawn_index >= 0) else {
-            eprintln!("switch to planet {planet_id}: no spawn positions {spawn_index}");
+            warn!("switch to planet {planet_id}: no spawn positions {spawn_index}");
             return;
         };
         let spawn = &list[game.rng.range(0, list.len() as i32) as usize];

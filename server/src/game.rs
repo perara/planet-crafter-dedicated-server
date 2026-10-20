@@ -534,13 +534,13 @@ impl Game {
         let (version, session) = data.split_once('|').unwrap_or((data.as_str(), ""));
         let session: u32 = session.parse().unwrap_or(u32::MAX);
         if version != self.net_data.game_version || (session != 0 && session != self.session_number) {
-            println!("client {client}: refused (game {:?}, session {session})", version.chars().take(32).collect::<String>());
+            info!("client {client}: refused (game {:?}, session {session})", version.chars().take(32).collect::<String>());
             self.kick(client, "MENU_Network_Error_version_mismatch");
             return;
         }
         if let Some(ip) = self.clients.get(&client).and_then(|c| c.ip.clone()) {
             if !self.access.ip_allowed(&ip) {
-                println!("client {client}: refused ({ip})");
+                info!("client {client}: refused ({ip})");
                 self.kick(client, crate::access::REFUSED);
                 return;
             }
@@ -548,7 +548,7 @@ impl Game {
         // A banned SteamID never gets the world (names are only known at PlayerReady).
         let steam_id = self.clients.get(&client).and_then(|c| c.verified_steam_id);
         if let Some(id) = steam_id.filter(|id| self.access.steam_id_banned(*id)) {
-            println!("client {client}: refused (SteamID {id} is banned)");
+            info!("client {client}: refused (SteamID {id} is banned)");
             self.kick(client, crate::access::REFUSED);
             return;
         }
@@ -557,7 +557,7 @@ impl Game {
         let whitelist = &self.access.lists.whitelist;
         let steam_entry = |v: &String| v.parse::<u64>().ok().filter(|id| *id >= crate::players::FIRST_STEAM_ID);
         if !whitelist.is_empty() && whitelist.iter().all(|v| steam_entry(v).is_some_and(|id| Some(id) != steam_id)) {
-            println!("client {client}: refused (not on the whitelist)");
+            info!("client {client}: refused (not on the whitelist)");
             self.kick(client, crate::access::REFUSED);
             return;
         }
@@ -567,20 +567,20 @@ impl Game {
         if let Some(ip) = self.clients.get(&client).and_then(|c| c.ip.clone()).filter(|ip| !ip.parse().is_ok_and(crate::utp::is_loopback)) {
             let joining = self.clients.values().filter(|c| c.id != client && c.approved && c.ready.is_none() && c.ip.as_deref() == Some(ip.as_str())).count();
             if joining >= MAX_JOINING_PER_IP {
-                println!("client {client}: refused ({joining} others from {ip} are still joining)");
+                info!("client {client}: refused ({joining} others from {ip} are still joining)");
                 self.kick(client, "Another player from your address is still joining: try again in a moment");
                 return;
             }
         }
         let max = self.rules.max_players();
         if self.clients.values().filter(|c| c.approved).count() >= max {
-            println!("client {client}: refused (server full, {max} players)");
+            info!("client {client}: refused (server full, {max} players)");
             self.kick(client, "MULTIPLAYER_Game_Session_Full");
             return;
         }
         // The world is sent to a session at the rate a forged address could make the server reflect it.
         if self.clients.get(&client).and_then(|c| c.ip.clone()).is_some_and(|ip| !ip.parse().is_ok_and(crate::utp::is_loopback)) && !self.limits.join(std::time::Instant::now(), max) {
-            println!("client {client}: refused (worlds are being sent to new sessions as fast as they are allowed)");
+            info!("client {client}: refused (worlds are being sent to new sessions as fast as they are allowed)");
             self.kick(client, "Many players are joining at once: try again in a moment");
             return;
         }
@@ -627,7 +627,7 @@ impl Game {
                 return;
             }
             if self.rules.log.trace {
-                println!("trace client {client} -> {kind} {}", crate::util::to_hex(body));
+                trace!("trace client {client} -> {kind} {}", crate::util::to_hex(body));
             }
             let approved = self.clients.get(&client).is_some_and(|c| c.approved);
             let now = self.clock();
@@ -698,7 +698,7 @@ impl Game {
         let loading = self.clients.get(&client).is_none_or(|c| c.ready.is_none());
         if let Some(name) = self.net.spec.get(method).map(|r| r.name.as_str()).filter(|n| loading && !LOADING_RPCS.contains(n)) {
             if self.unhandled.insert(format!("{name} before PlayerReady")) {
-                eprintln!("client {client}: {name} before PlayerReady, dropped (logged once)");
+                warn!("client {client}: {name} before PlayerReady, dropped (logged once)");
             }
             return;
         }
@@ -728,26 +728,26 @@ impl Game {
             // Logged once for each RPC of the game's, not for each message (a client can send them by
             // the thousand) and not at all for a number that is none of them (nor kept: there are 2^32).
             if self.net.spec.get(method).is_some() && self.unhandled.insert(format!("undecodable {method}")) {
-                eprintln!("client {client}: undecodable RPC {method} (logged once)");
+                warn!("client {client}: undecodable RPC {method} (logged once)");
             }
             return;
         };
         let Some(name) = self.net.spec.get(method).map(|r| r.name.clone()) else { return };
         if self.rules.log.trace {
-            println!("trace client {client} rpc {name} on {object}/{behaviour} {}", Value::Array(args.clone()));
+            trace!("trace client {client} rpc {name} on {object}/{behaviour} {}", Value::Array(args.clone()));
         }
         // Netcode runs an RPC on a behaviour of the object it is sent to: one of the RPC's class
         // or a subclass. Sent to any other object it runs nowhere (handlers here go by name).
         let class = name.split('.').next().unwrap_or("");
         if !self.net.carries(object, class) {
             if self.misrouted.insert(name.clone()) {
-                eprintln!("client {client}: rpc {name} on object {object}, which has no {class}: ignored (logged once per RPC)");
+                warn!("client {client}: rpc {name} on object {object}, which has no {class}: ignored (logged once per RPC)");
             }
             return;
         }
         if OWNER_ONLY_RPCS.contains(&name.as_str()) && self.net.objects.get(&object).is_none_or(|o| o.owner != client) {
             if self.misrouted.insert(format!("{name} by a client that is not the owner")) {
-                eprintln!("client {client}: rpc {name} on object {object}, which it does not own: ignored (logged once per RPC)");
+                warn!("client {client}: rpc {name} on object {object}, which it does not own: ignored (logged once per RPC)");
             }
             return;
         }
@@ -764,7 +764,7 @@ impl Game {
         let Some(name) = self.net.spec.get(method).map(|r| r.name.clone()) else { return false };
         let Some(client_rpc) = name.strip_prefix("NetworkAnimator.").and_then(|m| m.strip_suffix("ServerRpc")).map(|m| format!("NetworkAnimator.{m}ClientRpc")) else { return false };
         let Some(hash) = self.net.spec.hash(&client_rpc) else {
-            eprintln!("rpc {name}: no {client_rpc} to pass it on");
+            warn!("rpc {name}: no {client_rpc} to pass it on");
             return true;
         };
         if self.net.objects.get(&object).is_some_and(|o| o.owner == client) && body.len() <= MAX_ANIMATOR_MESSAGE {
@@ -795,7 +795,7 @@ impl Game {
             crate::events::rpc_after(self, client, object, name, &a.0);
         }
         if !handled && self.unhandled.insert(name.to_string()) {
-            eprintln!("rpc {name} is not handled");
+            warn!("rpc {name} is not handled");
         }
         handled
     }
@@ -830,7 +830,7 @@ impl Game {
         // RPCs: they read the network tick, which must not jump and fall back.
         let stall = (clock - last - crate::clock::MAX_FRAME).max(0.0);
         if stall >= 1.0 {
-            println!("world: the game loop was away {:.1} s (a stopped process, a long save or a busy host): the world's time went on by {:.2} s only, as a game's does across a hitch", stall + crate::clock::MAX_FRAME, crate::clock::MAX_FRAME);
+            info!("world: the game loop was away {:.1} s (a stopped process, a long save or a busy host): the world's time went on by {:.2} s only, as a game's does across a hitch", stall + crate::clock::MAX_FRAME, crate::clock::MAX_FRAME);
         }
         self.paused += stall;
         section!("rpcs", crate::handlers::run_pending(self, |g, rpc| g.rpc_cost(rpc), |g, client, rpc| g.run_rpc(client, rpc)));
@@ -884,7 +884,7 @@ impl Game {
         // without the checks PlayerReady makes: give it two minutes.
         let stalled: Vec<u64> = self.clients.values().filter(|c| c.ready.is_none() && c.since.elapsed().as_secs() > 120).map(|c| c.id).collect();
         for client in stalled {
-            println!("client {client}: never became a player, disconnecting");
+            info!("client {client}: never became a player, disconnecting");
             self.kick(client, "MENU_Network_Error_Timeout");
         }
     }
