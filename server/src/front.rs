@@ -109,6 +109,8 @@ struct Bank {
     /// Its HELLO (Null until it came).
     hello: Value,
     started: Instant,
+    /// The last frame it sent: the watchdog's clock (watch_verdict).
+    heard: Instant,
 }
 
 #[derive(PartialEq, Debug, Clone, Copy)]
@@ -204,6 +206,9 @@ struct Front {
     /// when the live bank is the one the front started with. A release that ends the game over
     /// and over is given up (give_up) only when it came by a flip.
     flipped: Option<String>,
+    /// The rule limits.bankWatchdogSeconds (ipc::OPS), and when the live bank was last pinged.
+    watchdog: Duration,
+    pinged: Option<Instant>,
     exiting: Vec<(Child, Instant)>,
     /// Writes of the banks folder's files that a flip made (they flush to disk, which takes as
     /// long as the disk does): off the front's thread, joined at shutdown.
@@ -308,6 +313,8 @@ impl Front {
             recover_from: None,
             crashes: VecDeque::new(),
             flipped: None,
+            watchdog: Duration::from_secs(u64::from(rules.limits.bank_watchdog_seconds)),
+            pinged: None,
             exiting: Vec::new(),
             persisting: Vec::new(),
             admin: None,
@@ -364,7 +371,7 @@ impl Front {
             });
         }
         let child = command.spawn().map_err(|e| format!("{}: {e}", exe.display()))?;
-        Ok(Bank { name: bank.to_string(), child, link: Link::new(ours), hello: Value::Null, started: Instant::now() })
+        Ok(Bank { name: bank.to_string(), child, link: Link::new(ours), hello: Value::Null, started: Instant::now(), heard: Instant::now() })
     }
 
     /// The first bank, waited for (nobody is connected yet): the active one, else the other one
@@ -416,7 +423,7 @@ impl Front {
                     {
                         eprintln!("banks: {e}");
                     }
-                    self.live = Some(b);
+                    self.live = Some(Bank { heard: Instant::now(), ..b });
                     return;
                 }
                 Err(e) => tried.push(format!("bank {bank}: {e}")),
@@ -863,6 +870,9 @@ impl Front {
     }
 
     fn on_live(&mut self, f: Frame) -> bool {
+        if let Some(b) = self.live.as_mut() {
+            b.heard = Instant::now();
+        }
         match f.kind {
             ipc::DATA => return self.to_client(f.n, &f.body),
             ipc::KICK => {
@@ -989,7 +999,8 @@ impl Front {
             let _ = b.link.flush();
             self.exiting.push((b.child, Instant::now()));
         }
-        self.live = Some(new);
+        // Its loading was the flip's wait, not silence: the watchdog counts from here.
+        self.live = Some(Bank { heard: Instant::now(), ..new });
         let held = self.release_held();
         // The held frames go now: what follows waits for no disk.
         self.flush_banks();
@@ -1218,8 +1229,48 @@ impl Front {
         self.shutdown(1)
     }
 
+    /// The watchdog: a live bank whose game loop has been silent too long is killed and the
+    /// world starts again as after a crash (recover: it counts toward the crash limit). Its
+    /// clock is the last frame of any kind from the bank; a quiet bank is pinged (GET /api/ping,
+    /// an admin request every bank answers from its loop).
+    fn watch_bank(&mut self) {
+        let now = Instant::now();
+        let saving = self.answers.values().any(|(_, path)| saves(path));
+        let phase = self.phase;
+        let Some(live) = self.live.as_mut() else { return };
+        match watch_verdict(phase, now.saturating_duration_since(live.heard), self.watchdog, saving, self.pinged.map(|t| now.saturating_duration_since(t))) {
+            Watch::Rest => {
+                live.heard = now;
+                self.pinged = None;
+            }
+            Watch::Fine => {}
+            Watch::Ping => {
+                self.pinged = Some(now);
+                let id = self.next_request;
+                self.next_request += 1;
+                let ping = json!({"method": "GET", "path": "/api/ping", "body": {}});
+                live.link.queue(ipc::ADMIN, id, ping.to_string().as_bytes(), None, 0);
+            }
+            Watch::Kill(silent) => {
+                eprintln!("bank {} (pid {}) said nothing for {} s (the rule limits.bankWatchdogSeconds is {} s): it is hung; killed, and the world starts again from the last snapshot or save, as after a crash", live.name, live.child.id(), silent.as_secs(), self.watchdog.as_secs());
+                let mut b = self.live.take().expect("live bank");
+                let _ = b.child.kill();
+                // Killed, not waited for for ever: a process stuck in the disk dies when it returns.
+                let dead = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < dead && matches!(b.child.try_wait(), Ok(None)) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let name = b.name.clone();
+                self.exiting.push((b.child, Instant::now()));
+                self.pinged = None;
+                self.recover(&name);
+            }
+        }
+    }
+
     /// Timeouts and the old banks' ends.
     fn supervise(&mut self) {
+        self.watch_bank();
         if let Some(b) = &self.next {
             let late = match self.phase {
                 Phase::Starting | Phase::Recovering => b.started.elapsed() > LOAD_DEADLINE,
@@ -1335,6 +1386,9 @@ impl Front {
         }
         if let Some(hours) = o["updateCheckHours"].as_u64() {
             self.updates.every = check_every(hours);
+        }
+        if let Some(seconds) = o["bankWatchdogSeconds"].as_u64() {
+            self.watchdog = Duration::from_secs(seconds);
         }
     }
 
@@ -1710,7 +1764,7 @@ impl Front {
         }
         self.game_version = b.hello["gameVersion"].as_str().unwrap_or("").to_string();
         *self.web.write().unwrap_or_else(|e| e.into_inner()) = self.web_page(&bank);
-        self.live = Some(b);
+        self.live = Some(Bank { heard: Instant::now(), ..b });
         self.flipped = None;
         self.phase = Phase::Idle;
         self.next_save = Instant::now() + Duration::from_secs(self.autosave_minutes.max(1) * 60);
@@ -1754,6 +1808,49 @@ impl Front {
         }
         std::process::exit(code)
     }
+}
+
+/// What the watchdog does about the live bank.
+#[derive(Debug, PartialEq)]
+enum Watch {
+    /// Its clock does not run now (not playing): start counting again from here.
+    Rest,
+    Fine,
+    /// Quiet for a while: ask it something.
+    Ping,
+    /// Silent this long: kill it.
+    Kill(Duration),
+}
+
+/// How much longer than the watchdog a bank may be silent while an admin request that writes the
+/// world's files (a save, a backup, a world's file) waits for it: a save on a slow disk is slow,
+/// not hung. Past it a save that never ends is a hang too.
+const SAVE_WAIT: Duration = Duration::from_secs(600);
+
+/// An admin request that has the bank write the world's files.
+fn saves(path: &str) -> bool {
+    ["/api/save", "/api/backup", "/api/worlds"].iter().any(|p| path.starts_with(p))
+}
+
+/// The watchdog's decision. The bank's clock runs only while the world plays (Idle): never during
+/// a flip or a recovery (the front waits for those with deadlines of its own) and never when
+/// stopped (there is no bank). A paused world is playing as far as this goes: its loop still
+/// answers. `silent`: since the bank's last frame; `watchdog`: the rule (zero: off); `saving`: a
+/// request that writes files waits; `pinged`: since the last ping.
+fn watch_verdict(phase: Phase, silent: Duration, watchdog: Duration, saving: bool, pinged: Option<Duration>) -> Watch {
+    if phase != Phase::Idle || watchdog.is_zero() {
+        return Watch::Rest;
+    }
+    let allowed = if saving { watchdog + SAVE_WAIT } else { watchdog };
+    if silent > allowed {
+        return Watch::Kill(silent);
+    }
+    // Asked a quarter of the way in, then every quarter, until it speaks.
+    let every = (watchdog / 4).max(Duration::from_secs(1));
+    if silent >= every && pinged.is_none_or(|p| p >= every) {
+        return Watch::Ping;
+    }
+    Watch::Fine
 }
 
 /// The client a Steam disconnect is about: the one whose connection carries its id; one that
@@ -1978,7 +2075,7 @@ mod tests {
         let (ours, theirs) = UnixStream::pair().unwrap();
         ours.set_nonblocking(true).unwrap();
         let child = Command::new("sleep").arg("30").spawn().unwrap();
-        (Bank { name: name.into(), child, link: Link::new(ours), hello: Value::Null, started: Instant::now() }, Link::new(theirs))
+        (Bank { name: name.into(), child, link: Link::new(ours), hello: Value::Null, started: Instant::now(), heard: Instant::now() }, Link::new(theirs))
     }
 
     fn test_front() -> Front {
@@ -2020,6 +2117,60 @@ mod tests {
         front.updates.tx.send(UpdateDone::Failed { seq: 9, message: "x".into() }).unwrap();
         front.updates();
         assert!(front.updates.next_check <= Instant::now() + Duration::from_secs(1800));
+    }
+
+    /// The watchdog's clock runs only while the world plays; a flip, a recovery, a stop, the
+    /// rule at 0 and a save the admin waits for each stop it (or lengthen it), a pause does not.
+    #[test]
+    fn the_watchdog_kills_only_a_bank_that_is_silent_while_the_world_plays() {
+        let s = Duration::from_secs;
+        let verdict = |phase, silent, saving| watch_verdict(phase, s(silent), s(60), saving, None);
+        // Quiet banks are asked, silent ones are killed after the rule's time, not before.
+        assert_eq!(verdict(Phase::Idle, 5, false), Watch::Fine);
+        assert_eq!(verdict(Phase::Idle, 15, false), Watch::Ping);
+        assert_eq!(verdict(Phase::Idle, 60, false), Watch::Ping);
+        assert_eq!(verdict(Phase::Idle, 61, false), Watch::Kill(s(61)));
+        // A SIGSTOP of 10 s is nothing; one of 120 s is a hang.
+        assert!(matches!(verdict(Phase::Idle, 10, false), Watch::Fine));
+        assert!(matches!(verdict(Phase::Idle, 120, false), Watch::Kill(_)));
+        // Asked a quarter of the way in and every quarter after it, not at every loop.
+        assert_eq!(watch_verdict(Phase::Idle, s(20), s(60), false, Some(s(2))), Watch::Fine);
+        assert_eq!(watch_verdict(Phase::Idle, s(30), s(60), false, Some(s(15))), Watch::Ping);
+        // Never during a flip, a recovery or a stop, however long.
+        for phase in [Phase::Starting, Phase::Snapshotting, Phase::Restoring, Phase::Recovering, Phase::Stopped] {
+            assert_eq!(verdict(phase, 10_000, false), Watch::Rest, "{phase:?}");
+        }
+        // The rule 0 is off.
+        assert_eq!(watch_verdict(Phase::Idle, s(10_000), s(0), false, None), Watch::Rest);
+        // A save the admin waits for gets 10 minutes more; past them it is a hang too.
+        assert_eq!(verdict(Phase::Idle, 300, true), Watch::Ping);
+        assert_eq!(verdict(Phase::Idle, 660, true), Watch::Ping);
+        assert_eq!(verdict(Phase::Idle, 661, true), Watch::Kill(s(661)));
+        assert!(saves("/api/save") && saves("/api/backup/s3") && saves("/api/worlds/restore") && !saves("/api/status") && !saves("/api/pause"));
+        // The default is a minute.
+        assert_eq!(crate::rules::Rules::default().limits.bank_watchdog_seconds, 60);
+        assert_eq!(Front::new("d", "s", None, None, 0, Arc::new(AtomicBool::new(false))).watchdog, s(60));
+    }
+
+    /// A bank that took a minute and a half to load is not "silent for a minute and a half" the
+    /// moment it takes the world: the watchdog counts from when it became the live one.
+    #[test]
+    fn a_bank_that_loaded_for_long_is_not_silent_when_it_takes_over() {
+        let mut front = test_front();
+        let (mut next, _peer) = fake_bank("b");
+        next.heard = Instant::now().checked_sub(Duration::from_secs(300)).unwrap();
+        front.next = Some(next);
+        front.phase = Phase::Recovering;
+        front.promote(b"{}");
+        assert_eq!(front.phase, Phase::Idle);
+        let live = front.live.as_ref().expect("it is the live bank");
+        assert!(live.heard.elapsed() < Duration::from_secs(2), "{:?}", live.heard.elapsed());
+        let silent = live.heard.elapsed();
+        assert!(matches!(watch_verdict(front.phase, silent, front.watchdog, false, None), Watch::Fine), "not killed at once");
+        for mut child in [front.live.take()].into_iter().flatten().map(|b| b.child).chain(front.exiting.drain(..).map(|(c, _)| c)) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 
     /// A world that does not start leaves the server stopped on the world it stopped, with its
@@ -2171,6 +2322,11 @@ mod tests {
         ops(&mut front, "no");
         ops(&mut front, r#"{"somethingElse": 1}"#);
         assert_eq!((front.autosave_minutes, front.updates.auto), (10, true));
+        // The watchdog's rule comes the same way.
+        ops(&mut front, r#"{"bankWatchdogSeconds": 15}"#);
+        assert_eq!(front.watchdog, Duration::from_secs(15));
+        ops(&mut front, r#"{"bankWatchdogSeconds": 0}"#);
+        assert!(front.watchdog.is_zero());
     }
 
     #[test]

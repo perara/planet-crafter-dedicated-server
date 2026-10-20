@@ -419,7 +419,7 @@ fn forward_chat(game: &mut Game, link: &mut Link) {
 /// The rules the front acts on (autosave, updates): sent at the start and whenever they change.
 fn forward_ops(game: &Game, link: &mut Link, last: &mut Value) {
     let (save, update) = (&game.rules.save, &game.rules.update);
-    let ops = json!({"autosaveMinutes": save.autosave_minutes, "autoUpdate": update.auto, "updateCheckHours": update.check_hours});
+    let ops = json!({"autosaveMinutes": save.autosave_minutes, "autoUpdate": update.auto, "updateCheckHours": update.check_hours, "bankWatchdogSeconds": game.rules.limits.bank_watchdog_seconds});
     if *last != ops {
         link.send(ipc::OPS, 0, ops.to_string().as_bytes());
         *last = ops;
@@ -574,6 +574,8 @@ fn admin_request(game: &mut Game, method: &str, path: &str, body: &Value, ctx: &
             });
             (200, body.to_string())
         }
+        // The front's watchdog asks this of a bank that has been silent: any answer is a loop that runs.
+        ("GET", "/api/ping") => ok(),
         ("POST", "/api/save") => kept(persist(game, ctx.save_path)),
         (_, p) if p.starts_with("/api/plugins") => plugins::admin::request(game, method, path, body),
         ("POST", "/api/kick") => match who(body).and_then(|w| find_client(game, &w)) {
@@ -1286,8 +1288,8 @@ mod tests {
         assert_eq!(
             bodies,
             [
-                (ipc::OPS, r#"{"autosaveMinutes":5,"autoUpdate":false,"updateCheckHours":24}"#.to_string()),
-                (ipc::OPS, r#"{"autosaveMinutes":7,"autoUpdate":true,"updateCheckHours":24}"#.to_string()),
+                (ipc::OPS, r#"{"autosaveMinutes":5,"autoUpdate":false,"updateCheckHours":24,"bankWatchdogSeconds":60}"#.to_string()),
+                (ipc::OPS, r#"{"autosaveMinutes":7,"autoUpdate":true,"updateCheckHours":24,"bankWatchdogSeconds":60}"#.to_string()),
                 (ipc::GONE, String::new())
             ]
         );

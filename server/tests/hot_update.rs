@@ -1082,6 +1082,88 @@ fn a_crashing_release_is_not_given_up_for_the_bank_the_owner_rolled_back_from() 
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// The watchdog (rule limits.bankWatchdogSeconds, 10 s here; the default is 60): a bank stopped
+/// with SIGSTOP for a few seconds, a paused world and a stopped world are left alone; a bank that
+/// says nothing for longer than the rule is killed and the world starts again, as after a crash.
+#[test]
+fn a_hung_bank_is_replaced_but_a_slow_paused_or_stopped_one_is_not() {
+    let Some(data) = tables() else { return };
+    let dir = world_dir("watchdog", &data);
+    let banks = banks(&dir);
+    let server = start(&dir, &data, &banks, "http://127.0.0.1:9/releases");
+    assert_eq!(server.api("POST", "/api/config", json!({"limits.bankWatchdogSeconds": 10})).0, 200, "{}", server.log());
+    std::thread::sleep(Duration::from_secs(2));
+    let pid = server.live()["pid"].as_u64().unwrap();
+    let hung = "said nothing for";
+    // A freeze shorter than the rule: it goes on, with the same game.
+    signal(pid, libc::SIGSTOP);
+    std::thread::sleep(Duration::from_secs(4));
+    signal(pid, libc::SIGCONT);
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(server.live()["pid"].as_u64(), Some(pid), "{}", server.log());
+    // A paused world answers from its loop: left alone for longer than the rule.
+    assert_eq!(server.api("POST", "/api/pause", json!({"paused": true})).0, 200);
+    std::thread::sleep(Duration::from_secs(14));
+    assert_eq!(server.live()["pid"].as_u64(), Some(pid), "{}", server.log());
+    assert_eq!(server.api("POST", "/api/pause", json!({"paused": false})).0, 200);
+    assert!(!server.log().contains(hung), "{}", server.log());
+    // A freeze longer than the rule: killed, started again from the save, counted as a crash.
+    signal(pid, libc::SIGSTOP);
+    let log = server.wait_log(hung);
+    assert!(log.contains(&format!("bank a (pid {pid}) said nothing for")) && log.contains("limits.bankWatchdogSeconds is 10 s"), "{log}");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while server.live()["pid"].as_u64().is_none_or(|p| p == pid) {
+        assert!(Instant::now() < deadline, "no new bank\n{}", server.log());
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(survivors(&[pid]).is_empty(), "the hung bank is gone");
+    assert!(server.log().contains("restarting bank a") && server.log().contains("runs the world again"), "{}", server.log());
+    assert_eq!(server.api("GET", "/api/status", json!({})).1["banks"]["crashes"], 1);
+    // A stopped world has no bank to kill, however long it stands.
+    assert_eq!(server.api("POST", "/api/world/stop", json!({})).0, 200);
+    std::thread::sleep(Duration::from_secs(13));
+    assert_eq!(server.log().matches(hung).count(), 1, "{}", server.log());
+    assert_eq!(server.api("GET", "/api/status", json!({})).1["state"], "stopped");
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The watchdog at its default (60 s), as the audit asked: a SIGSTOP of 10 s is nothing, one of
+/// 120 s is a hang. Slow (2.5 minutes), so run by hand: cargo test --release --test hot_update -- --ignored default_watchdog
+#[test]
+#[ignore]
+fn default_watchdog_leaves_ten_seconds_alone_and_replaces_a_bank_hung_for_two_minutes() {
+    let Some(data) = tables() else { return };
+    let dir = world_dir("watchdog-default", &data);
+    let banks = banks(&dir);
+    let server = start(&dir, &data, &banks, "http://127.0.0.1:9/releases");
+    let pid = server.live()["pid"].as_u64().unwrap();
+    signal(pid, libc::SIGSTOP);
+    std::thread::sleep(Duration::from_secs(10));
+    signal(pid, libc::SIGCONT);
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(server.live()["pid"].as_u64(), Some(pid), "{}", server.log());
+    signal(pid, libc::SIGSTOP);
+    let frozen = Instant::now();
+    server.wait_log("said nothing for");
+    let killed_after = frozen.elapsed();
+    assert!(killed_after > Duration::from_secs(55) && killed_after < Duration::from_secs(90), "{killed_after:?}");
+    println!("a bank stopped for 120 s was killed after {killed_after:?}");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while server.live()["pid"].as_u64().is_none_or(|p| p == pid) {
+        assert!(Instant::now() < deadline, "no new bank\n{}", server.log());
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// What a player or the admin does while the world stands for a flip: held, then done.
 #[test]
 fn requests_and_players_during_a_flip_are_held_and_then_served() {

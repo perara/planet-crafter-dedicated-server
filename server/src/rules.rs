@@ -171,7 +171,7 @@ impl Default for Loot {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Limits {
     /// None: 16.
@@ -179,7 +179,21 @@ pub struct Limits {
     /// Building group id -> how many the world may have. One more is taken down at once and
     /// its materials go back to the builder.
     pub buildings: BTreeMap<String, u32>,
+    /// The front kills a bank whose game loop has said nothing (to a player, an admin request or
+    /// its ping) for this many seconds and starts the world again like after a crash (it counts
+    /// toward the crash limit); 0: never. See front::watch_verdict.
+    pub bank_watchdog_seconds: u32,
 }
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits { max_players: None, buildings: BTreeMap::new(), bank_watchdog_seconds: 60 }
+    }
+}
+
+/// The least a watchdog may be set to (a save, a plugin scan or a page fault storm must not
+/// look like a hang).
+pub const MIN_WATCHDOG_SECONDS: u32 = 10;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
@@ -310,6 +324,9 @@ impl Rules {
         }
         if chat.command_prefix.as_deref().is_some_and(|p| p.is_empty() || p.chars().count() > 8 || p.contains(char::is_whitespace)) {
             return Err("chat.commandPrefix: 1 to 8 characters, no spaces (null: no commands)".into());
+        }
+        if self.limits.bank_watchdog_seconds != 0 && self.limits.bank_watchdog_seconds < MIN_WATCHDOG_SECONDS {
+            return Err(format!("limits.bankWatchdogSeconds: 0 (off) or {MIN_WATCHDOG_SECONDS} to 3600 seconds (a shorter time would take a busy game loop for a hung one)"));
         }
         for group in self.limits.buildings.keys() {
             if !data.group(group).is_some_and(|g| data.groups[g].constructible) {
@@ -552,10 +569,16 @@ mod tests {
             serde_json::json!({"chat": {"commandPrefix": "a b"}}),
             serde_json::json!({"chat": {"timeoutSeconds": 0}}),
             serde_json::json!({"chat": {"retries": 11}}),
+            serde_json::json!({"limits": {"bankWatchdogSeconds": 5}}),
+            serde_json::json!({"limits": {"bankWatchdogSeconds": 3601}}),
         ] {
             assert!(Rules::default().patched(&patch).and_then(|r| r.validate(&data)).is_err(), "{patch}");
         }
         assert!(Rules::default().patched(&serde_json::json!({"limits": {"buildings": {"Drill1": 2}}})).unwrap().validate(&data).is_ok());
+        // The watchdog: off, or 10 s to an hour.
+        for seconds in [0, 10, 3600] {
+            assert!(Rules::default().patched(&serde_json::json!({"limits": {"bankWatchdogSeconds": seconds}})).unwrap().validate(&data).is_ok(), "{seconds}");
+        }
         let hooks = serde_json::json!({"chat": {"webhooks": ["https://example.com/hook", "http://127.0.0.1:8080/"], "secret": "s", "exec": ["/usr/local/bin/on-chat"], "commandPrefix": "!"}});
         assert!(Rules::default().patched(&hooks).unwrap().validate(&data).is_ok());
     }

@@ -386,6 +386,7 @@ reason in `./pcds logs`.
 | `death.dropChance` | `50` | with `DropSomeItems`: the percent chance each item drops (with 4 items or fewer, all drop) |
 | `loot.amount` | `1` | items in generated containers (wreck safes, crates), times this, up to the container's size |
 | `limits.maxPlayers` | `16` | players at once; more are refused with the game's session-full message |
+| `limits.bankWatchdogSeconds` | `60` | a game process that says nothing (to a player, an admin request or the front's ping) for this long is killed and the world starts again from the last snapshot or save, as after a crash (it counts toward the crash limit). Not during a flip, a world stop or a save you asked for. `0`: never; else `10` to `3600` |
 | `save.autosaveMinutes` | `5` | minutes between saves; `0` saves only on stop |
 | `save.backupsKept` | `24` | save backups kept in `run/worlds/backups/`; `0` keeps none |
 | `save.backupMinutes` | `60` | minutes between those backups |
