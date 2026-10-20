@@ -183,8 +183,9 @@ building is lost, the world does not save from the new bank, or the way back (a 
 update just made) does not work live. It needs the game's tables (`PCDS_TEST_DATA`), which no
 CI has: it is part of the release checklist below, not a CI job.
 
-**Release checklist** (by hand, before tagging):
-1. `server/Cargo.toml`'s version is the tag's (the release workflow checks).
+**Release checklist** (by hand, before tagging; the owner does the tagging, nothing else publishes):
+1. `server/Cargo.toml`'s version (and the `pcds-server` entry of `server/Cargo.lock`) is the tag's
+   (the release workflow checks).
 2. If the serialized state, the front protocol (`ipc::PROTOCOL`) or the tables format changed,
    `FORMAT`, `PROTOCOL` or `TABLES_FORMAT` is bumped, and the release notes say the update is
    `pcds upgrade --restart`.
@@ -194,6 +195,47 @@ CI has: it is part of the release checklist below, not a CI job.
 5. If a plugin or `plugin-api` changed: `scripts/build-plugin-examples --check` (on the toolchain the
    committed `plugin.wasm` files were built with; the check does not depend on the checkout's path),
    and `scripts/sign-plugin-examples` after a rebuild.
+6. **The release notes.** In `CHANGELOG.md` rename the `## [Unreleased]` entries to
+   `## [X.Y.Z] - YYYY-MM-DD` (the day of the tag), with a **Breaking changes** and an **Upgrade** part
+   (write "None." if there is nothing), and add a fresh empty `## [Unreleased]` above. Update the
+   link references at the bottom. `scripts/release-notes vX.Y.Z` prints the text the release will
+   have as its body; `scripts/release-notes --check` (CI runs it) checks every section. The release
+   workflow runs the first one on the tag before it builds anything and stops when there is no section.
+   The generated notes of GitHub (merged pull requests) are appended below it.
+7. `make licenses` (`scripts/third-party-licenses`) when `server/Cargo.lock` changed (CI checks that
+   `THIRD_PARTY_LICENSES` is current). Re-check Valve's terms for `libsteam_api.so` if the
+   `steamworks-sys` crate moved to another SDK version.
+8. The documents that name a version: the image tag in `docs/kubernetes.yaml`, the example version in
+   README's `gh attestation verify` line.
+9. `make dist VERSION=vX.Y.Z` on the commit to tag (with the version bump of step 1): the tarball holds
+   the program, `libsteam_api.so`, `web/`, `install.sh`, README, CHANGELOG, LICENSE,
+   THIRD_PARTY_LICENSES and `docs/`, owned by root, and no game data or saves; `sha256sum -c` on its
+   `.sha256`; install it into a scratch `PCDS_HOME` (`PCDS_UNIT=pcds-scratch`, free ports) and run `pcds up`.
+10. Tag and push the tag (`git tag -a vX.Y.Z`, `git push origin vX.Y.Z`); watch the Release workflow:
+    build, release (attestation, GitHub release), image (test, push, attestation). Then do
+    "Verifying a release" below on what was published, and run `install.sh` from the release once.
+11. A repository setting is not part of this list; see "Settings the owner makes once" below.
+
+**Verifying a release.** What a user can check, and what you check after the workflow ran:
+- The release page shows the CHANGELOG section as its text, the tarball, its `.sha256`, and (for a tag
+  with a hyphen, such as `v1.0.0-rc.1`) the "pre-release" mark.
+- `sha256sum -c pcds-vX.Y.Z-linux-x86_64.tar.gz.sha256` next to the downloaded tarball.
+- `gh attestation verify pcds-vX.Y.Z-linux-x86_64.tar.gz --repo perara/planet-crafter-dedicated-server`
+  names the workflow run, the tag and the commit that built it.
+- `gh attestation verify oci://ghcr.io/perara/planet-crafter-dedicated-server:X.Y.Z --repo perara/planet-crafter-dedicated-server`
+  for the image; `docker buildx imagetools inspect ghcr.io/perara/planet-crafter-dedicated-server:X.Y.Z`
+  lists the image and its BuildKit provenance and SBOM attestations. The tags are `X.Y.Z`, `X.Y` and
+  `latest`; a pre-release gets its own version tag only.
+- `docker run --rm --entrypoint pcds ghcr.io/perara/planet-crafter-dedicated-server:X.Y.Z --version`.
+
+**Settings the owner makes once** (they are not in the repository): the default branch `main` is
+protected (pull request or status checks required: the jobs `server`, `plugins`, `script` of CI);
+private vulnerability reporting is on (Settings, Code security: SECURITY.md sends reporters there);
+Dependabot alerts are on; tag protection for `v*` so only maintainers can create a release; the
+package `ghcr.io/perara/planet-crafter-dedicated-server` is public and linked to the repository
+(a package published by a workflow is private until it is changed once on its package page);
+Actions may create and approve nothing (workflow permissions "read" by default: the release workflow
+asks for what it needs per job).
 
 **Changes in the front** are the ones a flip does not bring: the front survives the flip, so what
 changed in `front/`, `admin.rs`, `ipc.rs`'s frames or the admin threads takes effect after
