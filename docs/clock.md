@@ -204,14 +204,18 @@ hour are those of the parent: 15c299165b6b3eb0 (walking) and 4e119fd2aacba604 (a
 * **The first hour of a world with a float total that has outgrown its step** (a total of 40 million with a
   step of 0.03 a tenth of a second): the game's float never moves; here it moves (in f64) from the first tick.
   That is a deviation from the game on purpose and only where the game stands still.
-* **A restart is not a continuation.** The game's clock restarts at 0 and every timer with it; the units'
-  totals come back as the save's floats (7 digits) and the next hour is the float arithmetic again, which
-  at a total of millions is biased (a step of 1.75 on 4.9 million, whose float step is 0.5, is added as 1.5
-  or 2.0: the bench world's Heat ends the 60 s 117 below the exact sum of about 1 050, and does so for the first
-  game hour after every restart, as it does in the game itself). The audit's restart bench (planet heat
-  0.06% apart after a restart at six hours) is this and the random state and the phase of every timer, which
-  the save does not hold. If an operator would rather the units be exact from the first tick, `add_young`
-  is the one place that says otherwise; the first hour's fingerprints would change.
+* **A restart is not a continuation, and the difference is the game's float.** The game's clock restarts at 0 and
+  every timer with it; the units' totals come back as the save's floats; and the first hour is the game's float
+  arithmetic again. At a total of millions that arithmetic does not add the nominal rate: a step of 1.75 on
+  4.9 million (float step 0.5) is added as 2.0 every time. Measured with `bench::restart` (an idle bench world,
+  Heat at 4.9 million, nominal 17.5 a second): the first game hour grows Heat by 71 958 (20.0 a second, +14%);
+  a straight run's second hour, in exact f64 sums, by 63 000 (17.5); a run restarted at one hour grows 71 958
+  in its next hour again. So a restart is 8 958 (0.18%) ahead of the run that went on at two hours, and 22
+  ahead at half an hour (the sub-step phase). The audit's restart bench (0.06% apart at 12 h) is this, plus the random
+  state and the partial cycle of every machine, which the save does not hold. The rate of the game itself
+  is the +14% one for as long as a session lasts; here it is so for the first hour of a run and nominal
+  after. If an operator would rather have the nominal rate from the first tick, `add_young` is the one place that
+  says otherwise (the first hour's fingerprints would change with it).
 * **A jump of the clock is caught up, not dropped.** A bank stopped for ten minutes (SIGSTOP) gets ten minutes
   of game time at its next tick: the units take their steps at once (in one sum), every other timer
   fires once and sets its next due time from now, the gauges take their 0.2 s steps one per tick until

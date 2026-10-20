@@ -386,6 +386,45 @@ fn short(v: &Value) -> String {
     if s.len() > 60 { format!("{}... ({} chars)", &s[..s.char_indices().nth(60).map(|(i, _)| i).unwrap_or(s.len())], s.len()) } else { s }
 }
 
+/// An idle world (no players: machines, growth, meteo, rockets) played PCDS_BENCH_SECONDS straight,
+/// and with the server stopped and started from its save text after half of it (the game's clock
+/// starts again at 0, as after a restart). What a restart changes is what the save does not hold:
+/// the partial cycle of every machine, the phase of every timer, the random state. The planet's
+/// unit levels at the end are printed for both.
+///
+///   PCDS_BENCH_SAVE=world.json PCDS_RNG_SEED=1 PCDS_BENCH_SECONDS=3600 cargo test --release bench::restart -- --ignored --nocapture
+#[test]
+#[ignore]
+fn restart() {
+    let Some(e) = env() else { return };
+    let levels = |g: &mut Game| {
+        let save = g.snapshot();
+        save.planets.iter().map(|p| format!("{} {}", p["planetId"].as_str().unwrap_or("?"), ["unitOxygenLevel", "unitHeatLevel", "unitPressureLevel", "unitPlantsLevel", "unitInsectsLevel", "unitAnimalsLevel"].map(|k| format!("{k}={}", p[k])).join(" "))).collect::<Vec<_>>()
+    };
+    let play = |g: &mut Game, from: f64, to: f64, origin: f64| {
+        let mut t = from;
+        while t < to {
+            t += 0.005;
+            g.sim_time = Some(t - origin);
+            g.tick();
+            g.net.out.clear();
+        }
+    };
+    let (net_data, data, spec) = crate::tables(e.dir);
+    let scenes = crate::scene_tables(e.dir, &net_data, &data);
+    let mut straight = load(&e);
+    play(&mut straight, 0.0, e.seconds, 0.0);
+    let mut first = load(&e);
+    play(&mut first, 0.0, e.seconds / 2.0, 0.0);
+    println!("restart: at the start {:?}", levels(&mut load(&e)));
+    println!("restart: at half {:?}", levels(&mut first));
+    let text = first.save_text();
+    let mut second = Game::with_clock(net_data, data, spec, SaveFile::from_text(&text), scenes, Some(0.0));
+    play(&mut second, e.seconds / 2.0, e.seconds, e.seconds / 2.0);
+    println!("restart: straight {:?}", levels(&mut straight));
+    println!("restart: restarted at {} s {:?}", e.seconds / 2.0, levels(&mut second));
+}
+
 #[test]
 #[ignore]
 fn handoff() {
