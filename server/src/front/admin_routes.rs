@@ -132,7 +132,7 @@ pub const ROUTES: &[Route] = &[
     route("GET", "/api/map", Owner::Bank, "", "The buildings on this planet, for the players' map."),
     route("GET", "/api/plugins", Owner::Bank, "", "Every plugin with its status, capabilities, budgets and counters."),
     route("POST", "/api/plugins/reload", Owner::Bank, "", "Reads the plugins' folder again."),
-    route("POST", "/api/plugins/enable", Owner::Bank, "`{\"id\", \"grant\"?: [...]}`", "Approves a plugin (all it asks for, by default) and reloads."),
+    route("POST", "/api/plugins/enable", Owner::Bank, "`{\"id\", \"grant\"?: [...], \"digest\"?}`", "Approves a plugin (all it asks for, by default) and reloads; with the `digest` the listing showed, only if the files are still those."),
     route("POST", "/api/plugins/disable", Owner::Bank, "`{\"id\"}`", "Disables a plugin."),
     route("POST", "/api/plugins/config", Owner::Bank, "`{\"id\", \"key\", \"value\"?: \"...\"}`", "Sets a config key the plugin declares (an empty or missing value clears it) and reloads."),
     route("POST", "/api/plugins/trust", Owner::Bank, "`{\"publicKey\", \"name\"?, \"grant\"?: [...], \"force\"?: bool}`", "Trusts a publisher's Ed25519 key: plugins signed by it load without approving each file's digest, with the capabilities granted."),

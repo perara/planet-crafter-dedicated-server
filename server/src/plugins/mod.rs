@@ -1232,6 +1232,14 @@ pub fn read_folder_with(folder: &Path, keys: &sign::Keys) -> Loaded {
 /// Approves a plugin: records `grant` (default: everything it asks for; never more) and the digest
 /// of the files as they are now, and enables it. The server reads it at the next reload.
 pub fn approve(dir: &Path, id: &str, grant: Option<Vec<String>>) -> Result<Approval, String> {
+    approve_digest(dir, id, grant, None)
+}
+
+/// `approve`, for the files whose digest the admin was shown (`expect`): the approval records the
+/// digest of the files it reads now, so files swapped between the screen and the answer (a folder a
+/// sync or a `git pull` keeps current, a plugin's author with the folder open) would be approved
+/// unseen. They are refused instead.
+pub fn approve_digest(dir: &Path, id: &str, grant: Option<Vec<String>>, expect: Option<&str>) -> Result<Approval, String> {
     if !manifest::valid_id(id) {
         return Err(format!("{id:?} is not a plugin id"));
     }
@@ -1242,6 +1250,10 @@ pub fn approve(dir: &Path, id: &str, grant: Option<Vec<String>>) -> Result<Appro
     }
     if found.id != id {
         return Err(format!("{id}: the manifest's id is {}: the folder's name is the id", found.id));
+    }
+    if let Some(shown) = expect.filter(|d| *d != found.digest) {
+        let short = |d: &str| d.chars().take(12).collect::<String>();
+        return Err(format!("{id}: its files changed after you looked at them (digest {} then, {} now): nothing approved; look at it again", short(shown), short(&found.digest)));
     }
     let grant = grant.unwrap_or_else(|| found.requested.clone());
     if let Some(extra) = grant.iter().find(|g| !found.requested.contains(g)) {

@@ -885,3 +885,22 @@ fn endless_recursion_ends_in_a_trap_and_the_plugin_goes_on() {
         assert!(t.elapsed() < Duration::from_millis(250) && p.stats.last_error.as_deref().unwrap().contains("call stack exhausted") && p.running(), "{what}: {:?} {:?}", t.elapsed(), p.stats.last_error);
     }
 }
+
+/// What the admin is shown is what is approved: files swapped after the screen was drawn (the digest on
+/// it) are refused, not approved unseen.
+#[test]
+fn files_swapped_between_the_screen_and_the_approval_are_not_approved() {
+    let dir = fresh_dir("toctou");
+    write_plugin(&dir, "p", &module("(i32.const 0)", ""), &CHAT_SAY, SUBSCRIBE_CHAT);
+    let shown = read_folder(&dir.join("p")).digest;
+    // The author's sync swaps the module while the admin reads the screen.
+    std::fs::write(dir.join("p/plugin.wasm"), wat::parse_str(module("(drop (call $kick (i64.const 1) (i32.const 0) (i32.const 3))) (i32.const 0)", "")).unwrap()).unwrap();
+    let e = approve_digest(&dir, "p", None, Some(&shown)).unwrap_err();
+    assert!(e.contains("changed after you looked") && !dir.join("approved.json").exists(), "{e}");
+    // The files as shown are approved; and with no digest to hold to (an old client) it works as it did.
+    let now = read_folder(&dir.join("p")).digest;
+    assert_ne!(shown, now);
+    approve_digest(&dir, "p", None, Some(&now)).unwrap();
+    assert_eq!(Approvals::load(&dir).unwrap().0["p"].digest, now);
+    approve(&dir, "p", None).unwrap();
+}

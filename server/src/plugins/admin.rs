@@ -3,7 +3,8 @@
 //! - `GET /api/plugins`: every plugin with its status, capabilities asked and granted, budgets,
 //!   counters and last error; the capabilities there are.
 //! - `POST /api/plugins/reload`: read the folder again.
-//! - `POST /api/plugins/enable {"id", "grant": [...]}`: approve (default: all it asks for) and reload.
+//! - `POST /api/plugins/enable {"id", "grant": [...], "digest"}`: approve (default: all it asks for) and
+//!   reload; with the `digest` the listing showed, only if the files are still those.
 //! - `POST /api/plugins/disable {"id"}`.
 //! - `POST /api/plugins/events {"after", "types", "limit"}`: the event stream (stream.rs).
 //! - `GET /api/plugins/tokens`, `POST /api/plugins/tokens {"name", "scopes", "ratePerMinute"}` (the
@@ -122,7 +123,7 @@ pub fn request(game: &mut Game, method: &str, path: &str, body: &Value) -> (u16,
                 Err(e) => return e,
             };
             let grant = body["grant"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>());
-            if let Err(e) = super::approve(&dir, &id, grant) {
+            if let Err(e) = super::approve_digest(&dir, &id, grant, body["digest"].as_str()) {
                 return error(400, e);
             }
             reload_answer(game, &id)

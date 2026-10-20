@@ -256,7 +256,8 @@ impl Ctx {
                 return Err("not approved".into());
             }
         }
-        plugins::approve(&dir, id, grant)?;
+        // The files that were shown are the files approved, or nothing is.
+        plugins::approve_digest(&dir, id, grant, Some(&found.digest))?;
         println!("pcds: {id} is approved");
         self.plugin_reload_running();
         let _ = approvals::FILE;

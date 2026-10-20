@@ -44,7 +44,7 @@ thread, never held by the game loop), the front's loop (the process: updates, st
 | `GET /api/map` | bank | nothing | The buildings on this planet, for the players' map. |
 | `GET /api/plugins` | bank | nothing | Every plugin with its status, capabilities, budgets and counters. |
 | `POST /api/plugins/reload` | bank | nothing | Reads the plugins' folder again. |
-| `POST /api/plugins/enable` | bank | `{"id", "grant"?: [...]}` | Approves a plugin (all it asks for, by default) and reloads. |
+| `POST /api/plugins/enable` | bank | `{"id", "grant"?: [...], "digest"?}` | Approves a plugin (all it asks for, by default) and reloads; with the `digest` the listing showed, only if the files are still those. |
 | `POST /api/plugins/disable` | bank | `{"id"}` | Disables a plugin. |
 | `POST /api/plugins/config` | bank | `{"id", "key", "value"?: "..."}` | Sets a config key the plugin declares (an empty or missing value clears it) and reloads. |
 | `POST /api/plugins/trust` | bank | `{"publicKey", "name"?, "grant"?: [...], "force"?: bool}` | Trusts a publisher's Ed25519 key: plugins signed by it load without approving each file's digest, with the capabilities granted. |

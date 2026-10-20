@@ -398,8 +398,10 @@ capability in plain words, and may grant less than was asked (`--grant event.cha
 `approved.json` records the grant and a **digest** (sha256 of the manifest and the entry file).
 At every start and reload the host recomputes it; a plugin whose files changed since the approval
 is `changed` and runs nothing until approved again, so an update or a swapped file cannot slip
-in. A file that cannot be read, or an `approved.json` that does not parse, means nothing is
-approved (never "everything is allowed").
+in. The approval is for the files that were shown: `pcds plugin enable` and the dashboard hold the
+digest they displayed, and the approval is refused if the files changed meanwhile (`digest` in
+`POST /api/plugins/enable`). A file that cannot be read, or an `approved.json` that does not parse,
+means nothing is approved (never "everything is allowed").
 
 The checks are at two places, so a missing capability shows up where it is used: **events** are
 only delivered if the capability for their kind is granted (a warning in the listing tells which
