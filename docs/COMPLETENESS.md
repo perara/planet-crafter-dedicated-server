@@ -7,8 +7,8 @@ at the end.
 
 ## Verdict
 
-**Done for a normal game on the free planets; done except the DLC planets, old saves and a few
-rough edges for a late-game world.** In ten lines:
+**Done for a normal game on the free planets; done except the DLC planets and a few rough edges
+for a late-game world.** In ten lines:
 
 1. Every one of the game's 732 groups and 124 server calls is handled in the code, and all but
    one server call (`NetworkTransform.SetStateServerRpc`, which no game code sends) have a unit test.
@@ -27,8 +27,10 @@ rough edges for a late-game world.** In ten lines:
 6. **A world that was saved on a DLC planet runs, but without that planet's ground:** the real
    save's own planet (Humble) has no ore veins, water or scene objects here, so its 29 ore
    extractors stay idle; Toxicity's toxic areas are not simulated at all.
-7. **Old saves are not usable:** the 2022 single-planet format loads as an empty world and is
-   then rewritten wrongly (another task fixes it); the game itself imports all of it.
+7. **Old saves: refused, and importable.** The 2022 single-planet format used to load as an empty
+   world and be rewritten wrongly. It is now refused by every path that reads a world, and
+   `pcds world import` converts it as the game does (same objects, inventories, planet Prime;
+   the differences from the game's own save are the ones in EXPECTED.md "Old saves").
 8. The autosave still holds the game thread for 0.3 s (up to 0.6 s with eight players) every time
    it runs; `integrate` writes it on a thread.
 9. Start 1.0 s, 94 MB, 3.9 % of a core idle, a join in about 0.1 s, thirty minutes with eight bots
@@ -194,7 +196,7 @@ Severity is how likely a normal player or server owner meets it times how bad it
 |---|---|---|---|
 | 1 | **Saving a big world took over a minute of the game thread. Fixed.** | `pcds serve` on the late-game save: the bank sat at 100 % CPU in `memmove` for 60 s after `stop`, was killed by the front, and wrote nothing. A 60 000-object test of the old code ran for more than two minutes. Cause: `SaveFile::to_text` cut each default field out of the 2 MB text in place, 250 000 times. | One pass per default (commit 9520160, test `save::tests::default_fields_of_a_large_world_are_cut_in_linear_time`). The same cause is fixed on `integrate` (d0d9607, c28a115): drop mine when merging. |
 | 2 | **A world saved on a DLC planet runs without that planet's ground.** The save's own planet (Humble) has no ore veins, water boxes or scene objects here; Toxicity's toxic areas are not simulated (the two `ToxicAreaHandler` client calls are never sent). | Humble run, five minutes: its 29 ore extractors went from 291 to 295 items (the same extractors on a free planet make one ore each 70 s); `veins.rs` and `water.rs` say "None on a DLC planet"; `toxic.rs` answers zeros. The reference cannot show the right answer (it owns no DLC and runs Humble's machines while the host is elsewhere). | Read the DLC scenes from an owner's install in `pcds extract` (like the free planets', for veins and water); the toxic areas are a feature (about one module). Until then refuse or warn when the saved planet is a DLC planet. |
-| 3 | **Old-format saves are destroyed on the first save.** The 2022 single-planet save loads as an empty world, silently; its 5 136 objects are kept as 5 136 "players" and the next save writes that. | The old-format save, loaded and stopped: `world: 0 world objects`, section 2 of the output holds 5 136 records. The real game imports all 5 136 objects (and makes 181 more), 358 inventories, planet Prime. `check_save_format` only looks at the `mode` field of what the new layout calls settings. | Another task is on it. Smallest: refuse a save whose section count is not 10 or 11 (an error naming the format), then port `ConvertOldFormatToNew`. |
+| 3 | **Old-format saves were destroyed on the first save. Fixed.** The 2022 single-planet save loaded as an empty world, silently; its 5 136 objects were kept as 5 136 "players" and the next save wrote that. | The old-format save, loaded and stopped: `world: 0 world objects`, section 2 of the output held 5 136 records. The real game imports all of it (5 129 distinct objects: seven ids are listed twice in the file; and 181 more made by the machines), 358 inventories, planet Prime. | Done in this branch: the loader refuses what it cannot read (`save::layout`), `pcds world import` ports the game's conversion (`oldsave.rs`), parity-checked against the game (EXPECTED.md "Old saves"). |
 | 4 | **The autosave holds the game for a third of a second or more.** | Soak: the slowest loop of the second was 250 to 620 ms at each autosave with eight bots, 3 to 27 ms in between; the 99th percentile of round trips is the autosave. | Write the autosave on a thread: done on `integrate` (ca4e517). |
 | 5 | **The clock is a 32-bit float.** After about 1.5 days of play the clock's step is 15 ms, after 97 days one second; timers of 0.1 and 0.2 s then run at the wrong rate. | `game.time` is `(clock - paused) as f32` (`game.rs`); the game has the same float but does not run for months. | Keep the due times in f64: done for gauges and units on `integrate` (40242e8, c318e13); machines and logistics still to do. |
 | 6 | **Drones serve equal-priority demands in another order than the game.** Over 5-minute runs honey ended 10 to 12 lower here than on the game in three runs (the game's own spread is 3 to 6): the first kind of beehive ends empty here and with 8 to 9 on the game. | `logistics.rs` sorts demand inventories with a stable sort and says in a `ponytail:` comment that .NET's introsort differs above 16 equal priorities; the save has 253 demand inventories, 159 at priority 0. Totals of everything else agree. | Port .NET's `Array.Sort` (introsort: insertion sort up to 16, heap sort at the depth limit): about 80 lines, then run the logistics script against the game. |
@@ -208,22 +210,23 @@ Severity is how likely a normal player or server owner meets it times how bad it
 | 14 | Documented limits: no physics (the nearest player owns what falls and drives), every player sees every animal, endings do not restart the session, sleeping does not skip the night, 64-layout wrecks. | README "Differences". | None planned. |
 | 15 | `NetworkTransform.SetStateServerRpc` is not handled. | No game code sends it. | None. |
 
-**Fixed in this branch:** gap 1 (commit 9520160) and a one-line change to the probe so a script can address
+**Fixed in this branch:** gap 3 (the `old-saves` branch: refusal and import) and gap 1 (commit 9520160) and a one-line change to the probe so a script can address
 the world's own objects (6f34b0a). Everything else above is listed with its smallest fix and not started.
 
-## The old-format save (informational)
+## The old-format save
 
 The old-format save (2022, Survival mode) is the game's format from before several planets: nine sections (world units,
 player, 5 136 world objects, 329 inventories, stats, messages, story events, settings, colour layers), no planet,
-no instances, no logistics. The real game opens it as Prime, keeps every object, adds 181 made by the machines,
-and writes the 11-section format. **This server: not importable** (empty world, rewritten wrongly, gap 3).
+no instances, no logistics. The real game opens it as Prime (it patches the file's text, JSONExport.LoadFromJson), keeps
+every object (5 129 distinct ids), adds 181 made by the machines (algae seeds on the water), and writes the
+10-section format. **This server** refuses it at every entry and imports it with `pcds world import` into the
+same world: 5 129 objects stay 5 129, 358 inventories after the load (329 plus the 29 the machines make, as on
+the game), a save then a load then a save changes nothing, and a probe player played it for four minutes.
 
 ## Big features that are open, with their scope
 
 * DLC planet support: scene dumps for Humble and Toxicity from an owner's install (extraction work, no new game
   logic), then the toxic areas (one module, the `ToxicArea` registrations and two client calls).
-* Old save import: `ConvertOldFormatToNew` and the single-planet to Prime mapping (one module, a test per
-  conversion), after the loader refuses what it cannot read.
 * Each wreck's own Tessera seed (the port exists in `native/tessera.rs`; it runs at extraction now).
 * The .NET sort for logistics (gap 6) and f64 clocks for machines and logistics (gap 5).
 
@@ -251,4 +254,5 @@ python3 gen.py DATA_DIR start.json OUT_DIR                       # the probe scr
 python3 classify.py OUT/lg_real.diff OUT/lg_real.noise            # the kinds of difference, and which the game makes against itself
 python3 aggdiff.py START REF.save OURS.save REF2.save             # what each group's count did in the run
 python3 loaddiff.py IN.json OUT.json                              # what a load and save changed
+python3 ../mkold.py SAVE.json OLD.json [--tokens | --settings-only]   # a save in an old layout, for pcds world import (EXPECTED.md "Old saves")
 ```

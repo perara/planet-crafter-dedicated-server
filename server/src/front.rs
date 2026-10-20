@@ -77,6 +77,12 @@ const READY_DEADLINE: Duration = Duration::from_secs(5);
 const CHECK_RETRY: Duration = Duration::from_secs(3600);
 const BUSY_RETRY: Duration = Duration::from_secs(600);
 
+/// A world file this server reads (an old layout, a file cut short and the like are refused,
+/// each saying what to do), checked before a world that runs is stopped for it.
+fn readable(save: &str, name: &str) -> Result<(), String> {
+    crate::save::SaveFile::load(save).map(drop).map_err(|e| format!("world {name}: {e}"))
+}
+
 /// The time between the automatic checks for hours (the rule update.checkHours); the hook
 /// PCDS_DEV=check-seconds=N makes them seconds (the end-to-end tests).
 fn check_every(hours: impl Into<u64>) -> Duration {
@@ -1259,6 +1265,9 @@ impl Front {
                         (409, json!({"error": format!("{name} is the world that runs")}).to_string())
                     } else if !std::path::Path::new(&self.save).with_file_name(format!("{name}.json")).is_file() || crate::dashboard::world_name(&name).is_err() {
                         (400, json!({"error": format!("no world {name}")}).to_string())
+                    } else if let Err(e) = readable(&std::path::Path::new(&self.save).with_file_name(format!("{name}.json")).to_string_lossy(), &name) {
+                        // Before the world that runs is stopped for it.
+                        (400, json!({"error": e}).to_string())
                     } else {
                         let stopped = if self.phase == Phase::Stopped { Ok(()) } else { self.stop_world(&format!("The server moves to another world ({name}): join again")) };
                         match stopped.and_then(|()| self.start_world(Some(&name))) {
@@ -1640,6 +1649,7 @@ impl Front {
             if !std::path::Path::new(&save).is_file() {
                 return Err(format!("no world {name}"));
             }
+            readable(&save, &name)?;
             let lock = crate::cli::hold(std::path::Path::new(&format!("{save}.lock")), "another server runs that world")?;
             moved = Some((std::mem::replace(&mut self.save, save), self.world_lock.replace(lock), name));
         }
@@ -1996,13 +2006,17 @@ mod tests {
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         let (a, b, env) = (dir.join("a.json"), dir.join("b.json"), dir.join("server.env"));
         std::fs::write(&a, "{}").unwrap();
-        std::fs::write(&b, "{}").unwrap();
+        std::fs::write(&b, crate::save::SaveFile::tiny_text("b")).unwrap();
+        std::fs::write(dir.join("c.json"), crate::save::SaveFile::old_format_text()).unwrap();
         std::fs::write(&env, "PCDS_WORLD=a\n").unwrap();
         // SAFETY: only start_world reads it, and no other test calls that.
         unsafe { std::env::set_var("PCDS_HOME", &dir) };
         let mut front = Front::new("data", &a.to_string_lossy(), Some(dir.join("banks")), None, 0, Arc::new(AtomicBool::new(false)));
         front.phase = Phase::Stopped;
         front.world_lock = Some(crate::cli::hold(&dir.join("a.json.lock"), "busy").unwrap());
+        // A world in an old layout is refused before any bank is started or lock taken.
+        let e = front.start_world(Some("c")).unwrap_err();
+        assert!(e.contains("world c") && e.contains("pcds world import") && !dir.join("c.json.lock").exists(), "{e}");
         let e = front.start_world(Some("b")).unwrap_err();
         assert!(e.contains("world b did not start") && e.contains("stays stopped on world a"), "{e}");
         assert_eq!((front.world_name(), front.phase), ("a".to_string(), Phase::Stopped));

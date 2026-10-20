@@ -111,6 +111,7 @@ mod model;
 mod net;
 mod newworld;
 mod objects;
+mod oldsave;
 mod panels;
 mod planets;
 mod plugins;

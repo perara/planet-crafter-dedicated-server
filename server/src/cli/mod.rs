@@ -38,6 +38,9 @@ pcds: install and run a Planet Crafter dedicated server on Linux.
                          settings and the systemd unit
   pcds worlds                 the worlds in run/worlds/ (* = the one the server runs)
   pcds world use NAME | new NAME [NEW OPTIONS] | import SAVE.json [NAME] | remove NAME
+                         import also converts a save of the game's old layouts (2022, one
+                         planet) as the game does when it opens one; setup --world, world
+                         use and the start refuse such a save and say so
   pcds new [--planet ID] [--start LOCATION] [--seed N] [--set KEY=VALUE]... [--force]
                          replace the current world with a new one (kept in backups/)
   pcds start | stop | restart | status [--json] | logs
@@ -439,6 +442,12 @@ fn same_file(a: &Path, b: &Path) -> bool {
 /// Whether a file is a save of the game (the bash pcds grepped for this).
 fn is_save(path: &Path) -> bool {
     fs::read(path).is_ok_and(|b| b.windows(15).any(|w| w == b"saveDisplayName"))
+}
+
+/// Whether a file is a world this server reads: the refusals of `SaveFile::load` (an old
+/// layout, a file cut short, no game settings), each naming the file.
+fn check_world(path: &Path) -> Result {
+    crate::save::SaveFile::load(&path.to_string_lossy()).map(drop).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// An installation in `dir` for tests: the program in build/, the home in home/, run/, and a

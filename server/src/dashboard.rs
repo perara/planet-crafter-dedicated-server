@@ -259,6 +259,8 @@ pub fn world_restore(save_path: &str, backup: &str, name: &str) -> Result<Value,
     if to.exists() {
         return Err(format!("world {name} exists: pick another name"));
     }
+    // A backup this server cannot read (an old layout, cut short) is not made a world.
+    crate::save::SaveFile::load(&from.to_string_lossy()).map_err(|e| format!("backup {backup}: {e}"))?;
     let text = std::fs::read(&from).map_err(|e| format!("{}: {e}", from.display()))?;
     crate::save::write_atomic(&to.to_string_lossy(), &text).map_err(|e| format!("{}: {e}", to.display()))?;
     println!("backup {backup} restored as world {name} (admin)");
@@ -277,6 +279,21 @@ pub fn map(game: &Game) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A backup in a layout this server does not read is not restored as a world.
+    #[test]
+    fn a_backup_the_server_cannot_read_is_not_restored() {
+        let dir = std::env::temp_dir().join(format!("pcds-restore-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("backups")).unwrap();
+        let save = dir.join("world.json").to_string_lossy().to_string();
+        std::fs::write(dir.join("backups/world-20261018-120000.json"), crate::save::SaveFile::old_format_text()).unwrap();
+        std::fs::write(dir.join("backups/world-20261018-130000.json"), crate::save::SaveFile::tiny_text("w")).unwrap();
+        let err = world_restore(&save, "world-20261018-120000", "old").unwrap_err();
+        assert!(err.contains("old save format") && err.contains("pcds world import"), "{err}");
+        assert!(!dir.join("old.json").exists());
+        assert!(world_restore(&save, "world-20261018-130000", "good").is_ok() && dir.join("good.json").is_file());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn worlds_lists_saves_and_this_worlds_backups() {
