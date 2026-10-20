@@ -373,3 +373,72 @@ fn drones_fly_at_the_same_pace_at_any_age_of_the_server() {
         assert!(f.abs_diff(frames) <= 1, "{days} days: {f} frames against {frames}: {rows:?}");
     }
 }
+
+/// A drone farm that runs for hours of game time (an ignored soak, not a check): PCDS_FARM_STATIONS stations of
+/// PCDS_FARM_DRONES drones each serve PCDS_FARM_PAIRS supply and demand containers; supply is
+/// topped up and demand emptied every game minute. Prints, per game minute, the worst tick and
+/// the sizes of what could grow (world objects, network objects, tasks, the fleet) and the
+/// process's memory.
+/// PCDS_FARM_SECONDS=3600 cargo test --release drone_farm -- --ignored --nocapture
+#[test]
+#[ignore]
+fn drone_farm_runs_for_hours() {
+    let Some(mut game) = game() else { return };
+    let env = |k: &str, d: usize| crate::env(k).and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (stations, drones, pairs, seconds) = (env("PCDS_FARM_STATIONS", 5), env("PCDS_FARM_DRONES", 4), env("PCDS_FARM_PAIRS", 20), env("PCDS_FARM_SECONDS", 3600));
+    let topup = 60;
+    for i in 0..4 + stations * 2 {
+        build(&mut game, "EnergyGenerator6", [60.0 + 10.0 * i as f32, 2.0, 0.0]);
+    }
+    let iron = game.data.group("Iron").unwrap();
+    let mut supplies = Vec::new();
+    let mut demands = Vec::new();
+    for s in 0..stations {
+        let station = build(&mut game, "DroneStation1", [10.0 + 15.0 * s as f32, 2.0, 10.0]);
+        let inv = game.wos[&station].linked_inventory;
+        for _ in 0..drones {
+            add(&mut game, "Drone1", inv);
+        }
+    }
+    for p in 0..pairs {
+        let supply = build(&mut game, "Container1", [20.0 + 6.0 * p as f32, 2.0, 40.0]);
+        let demand = build(&mut game, "Container1", [20.0 + 6.0 * p as f32, 2.0, 90.0]);
+        let (si, di) = (game.wos[&supply].linked_inventory, game.wos[&demand].linked_inventory);
+        game.inventories.get_mut(&si).unwrap().logistic.supply = vec![iron];
+        set_dirty(&mut game, si);
+        game.inventories.get_mut(&di).unwrap().logistic.demand = vec![iron];
+        set_dirty(&mut game, di);
+        supplies.push(si);
+        demands.push(di);
+    }
+    assert!(crate::energy::has_enough(&game, game.planet_hash()));
+    let rss = || std::fs::read_to_string("/proc/self/status").unwrap().lines().find(|l| l.starts_with("VmRSS")).map(|l| l.split_whitespace().nth(1).unwrap().to_string()).unwrap_or_default();
+    let (mut t, mut worst, mut all_worst, mut delivered) = (2.0, 0.0f64, 0.0f64, 0usize);
+    game.sim_time = Some(t);
+    game.tick();
+    for i in 0..seconds * 200 {
+        t += 0.005;
+        game.sim_time = Some(t);
+        let t0 = std::time::Instant::now();
+        game.tick();
+        let took = t0.elapsed().as_secs_f64();
+        worst = worst.max(took);
+        game.net.out.clear();
+        if i % (topup * 200) == topup * 200 - 1 {
+            for (si, di) in supplies.iter().zip(&demands) {
+                while items(&game, *si).len() < 3 {
+                    add(&mut game, "Iron", *si);
+                }
+                let got: Vec<i32> = items(&game, *di);
+                delivered += got.len();
+                game.destroy_world_objects(&got, false);
+            }
+        }
+        if i % (60 * 200) == 60 * 200 - 1 {
+            all_worst = all_worst.max(worst);
+            println!("minute {}: worst tick {:.1} ms; wos {} net {} inventories {} fleet {} tasks {} delivered so far {delivered}; rss {} kB", (i + 1) / 12000, worst * 1000.0, game.wos.len(), game.net.objects.len(), game.inventories.len(), game.ext.logistics.fleet.len(), game.ext.logistics.all_tasks.iter().count(), rss());
+            worst = 0.0;
+        }
+    }
+    println!("{seconds} s of game, {stations} stations x {drones} drones, {pairs} pairs: worst tick {:.1} ms, {delivered} items delivered", all_worst * 1000.0);
+}

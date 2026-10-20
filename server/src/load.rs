@@ -211,10 +211,23 @@ impl Bot<'_> {
                 self.mining = true;
                 self.call("PlayerShareState.StartMiningServerRpc", &[json!(0), json!(1.0), json!(0)], None);
             }
-            80..=89 => self.call("ChatHandler.SendChatMessageServerRpc", &[json!(format!("load {} {seq}", self.client))], Some("chat")),
+            80..=89 => {
+                let pad = if chat_pad() > 0 { format!(" {}", "x".repeat(chat_pad())) } else { String::new() };
+                self.call("ChatHandler.SendChatMessageServerRpc", &[json!(format!("load {} {seq}{pad}", self.client))], Some("chat"))
+            }
             _ => self.call("InventoriesHandler.SortInventoryServerRpc", &[json!(self.inventory)], None),
         }
     }
+}
+
+/// Bytes added to each chat line: the load tests' long-message runs; none in the release.
+#[cfg(test)]
+fn chat_pad() -> usize {
+    tests::chat_pad()
+}
+#[cfg(not(test))]
+const fn chat_pad() -> usize {
+    0
 }
 
 fn play(n: usize, server: SocketAddr, data: &NetData, spec: &Spec, request: &[u8], (seconds, action_ms): (f64, u64), prefix: &str) -> Report {
@@ -315,3 +328,6 @@ pub fn run(args: &[String]) {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests;

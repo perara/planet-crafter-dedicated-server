@@ -74,6 +74,18 @@ Read by test builds and tools, never by an installation. Set by hand for the ben
 | `PCDS_FLIPBENCH_SAVES` | flipbench: the worlds (comma-separated save files) whose flip it times (required). |
 | `PCDS_FLIPBENCH_N` | flipbench: flips per world (default 15 in tests/hot_update.rs, 20 in bench::flipbench). |
 | `PCDS_FLIPBENCH_PLAYERS` | flipbench: scripted players playing during the flips (default 8). |
+| `PCDS_LOAD_SERVER` | load::tests::churn and rejoin (ignored): the running server's HOST:PORT, a loopback address (required). |
+| `PCDS_LOAD_PLAYERS` | load::tests: workers or players (default 8). |
+| `PCDS_LOAD_SECONDS` | load::tests: seconds to run (default 60). |
+| `PCDS_LOAD_SEED` | load::tests::churn: the seed of the random stream the sessions are drawn from (default 1). |
+| `PCDS_LOAD_REUSE_NAMES` | load::tests::churn: set: each worker always joins under one name. |
+| `PCDS_LOAD_CHAT_BYTES` | load::tests: every chat line of the bots this long (default: short). |
+| `PCDS_REVIEW_STATIONS` | perf_logistics_and_destroy (ignored): drone stations (default 1). |
+| `PCDS_REVIEW_SECONDS` | perf_logistics_and_destroy (ignored): game seconds to run (default 20). |
+| `PCDS_FARM_STATIONS` | drone_farm_runs_for_hours (ignored): drone stations (default 5). |
+| `PCDS_FARM_DRONES` | drone_farm_runs_for_hours: drones per station (default 4). |
+| `PCDS_FARM_PAIRS` | drone_farm_runs_for_hours: pairs of supply and demand containers (default 20). |
+| `PCDS_FARM_SECONDS` | drone_farm_runs_for_hours: game seconds to run (default 3600). |
 | `PCDS_FUZZ_TARGET` | fuzz: the target a fuzz binary runs (server/fuzz/entry.rs). |
 | `PCDS_FUZZ_DATA` | fuzz: the game tables the targets that need them read. |
 | `PCDS_FUZZ_LOG` | fuzz: where the game target catalogues the sites of its panics (default panics.log). |

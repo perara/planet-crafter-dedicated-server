@@ -25,7 +25,10 @@ fn perf_logistics_and_destroy() {
     let (chests, loose, demands) = (1000, 2000, 30);
     g.sim_time = Some(1.0);
     g.tick();
-    crate::machines::tests::build(&mut g, "DroneStation1", [600.0, 5.0, 600.0]);
+    let env = |name: &str, default: usize| crate::env(name).and_then(|v| v.parse().ok()).unwrap_or(default);
+    for i in 0..env("PCDS_REVIEW_STATIONS", 1) {
+        crate::machines::tests::build(&mut g, "DroneStation1", [600.0 + 12.0 * i as f32, 5.0, 600.0]);
+    }
     let iron = g.data.group("Iron").unwrap();
     for _ in 0..chests {
         g.create_inventory(30, 0, 0, &[iron; 30], &[]);
@@ -51,16 +54,24 @@ fn perf_logistics_and_destroy() {
     println!("world: wos {} inventories {} stored items {} pickables {}", g.wos.len(), g.inventories.len(), items, g.pickables.len());
     let mut t = 2.0;
     let mut worst = 0.0f64;
+    let seconds = env("PCDS_REVIEW_SECONDS", 20);
     let started = std::time::Instant::now();
-    for _ in 0..20 * 200 {
+    let mut minute_worst = 0.0f64;
+    for i in 0..seconds * 200 {
         t += 0.005;
         g.sim_time = Some(t);
         let t0 = std::time::Instant::now();
         g.tick();
-        worst = worst.max(t0.elapsed().as_secs_f64());
+        let took = t0.elapsed().as_secs_f64();
+        worst = worst.max(took);
+        minute_worst = minute_worst.max(took);
         g.net.out.clear();
+        if i % (60 * 200) == 60 * 200 - 1 {
+            println!("game minute {}: worst tick {:.1} ms, wos {} inventories {}", (i + 1) / 12000, minute_worst * 1000.0, g.wos.len(), g.inventories.len());
+            minute_worst = 0.0;
+        }
     }
-    println!("20 s of game: {:.2} s wall, worst tick {:.1} ms", started.elapsed().as_secs_f64(), worst * 1000.0);
+    println!("{seconds} s of game: {:.2} s wall, worst tick {:.1} ms", started.elapsed().as_secs_f64(), worst * 1000.0);
     let some: Vec<i32> = g.inventories.values().flat_map(|i| i.items.iter().copied()).take(1000).collect();
     let t0 = std::time::Instant::now();
     g.destroy_world_objects(&some, false);

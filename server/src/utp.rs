@@ -45,6 +45,22 @@ const LAST: u16 = 0x4000;
 /// sent, datagrams read per poll, connections in all and per IP, and how long a handshake may
 /// go without data.
 const MAX_BATCH: usize = 1 << 20;
+/// The limit in force: MAX_BATCH. Test builds can lift it (the load tests' bots receive worlds
+/// over 1 MiB); the release has no such switch.
+#[cfg(not(test))]
+const fn max_batch() -> usize {
+    MAX_BATCH
+}
+#[cfg(test)]
+static BATCH_LIMIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(MAX_BATCH);
+#[cfg(test)]
+pub fn allow_big_batches() {
+    BATCH_LIMIT.store(256 << 20, std::sync::atomic::Ordering::Relaxed);
+}
+#[cfg(test)]
+fn max_batch() -> usize {
+    BATCH_LIMIT.load(std::sync::atomic::Ordering::Relaxed)
+}
 // Room for the world a late-game save sends on join (saves reach several MB); only approved
 // clients (the limits.maxPlayers rule) get that much sent.
 const MAX_QUEUED: usize = 64 << 20;
@@ -204,7 +220,7 @@ fn pop_batches(buffer: &mut Vec<u8>, out: &mut Vec<Vec<u8>>) -> bool {
     let mut at = 0;
     while buffer.len() - at >= 4 {
         let n = i32::from_le_bytes(buffer[at..at + 4].try_into().unwrap()).max(0) as usize;
-        if n > MAX_BATCH {
+        if n > max_batch() {
             return false;
         }
         if buffer.len() - at - 4 < n {
@@ -375,7 +391,7 @@ impl Utp {
                             c.receive_reliable(sequence, &body[16..]);
                             c.ack_due = true;
                             if !pop_batches(&mut c.stream, &mut batches) {
-                                eprintln!("utp: {from}: a batch over {} MiB, dropped", MAX_BATCH >> 20);
+                                eprintln!("utp: {from}: a batch over {} MiB, dropped", max_batch() >> 20);
                                 self.disconnect(&token);
                                 events.push(Event::Disconnected(token));
                                 return;
@@ -396,7 +412,7 @@ impl Utp {
                                 f.broken = true;
                             }
                             f.next = (sequence + 1) & 0x3FFF;
-                            f.broken |= f.buffer.len() + body.len() - 2 > MAX_BATCH;
+                            f.broken |= f.buffer.len() + body.len() - 2 > max_batch();
                             if f.broken {
                                 f.buffer = Vec::new();
                             } else {
