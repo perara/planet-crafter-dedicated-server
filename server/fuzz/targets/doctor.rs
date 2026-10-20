@@ -53,8 +53,9 @@ pub fn run(data: &[u8]) {
     let _ = std::fs::remove_dir_all(&dir);
     // The units for paths with whatever characters: as many lines as for a plain path.
     let text = |i: usize| String::from_utf8_lossy(part(6 + i)).into_owned();
-    let plain = ctx(Path::new("/srv/a"), Path::new("/srv/a/run"), "pcds");
     let hostile = ctx(Path::new("/srv/a"), Path::new(&text(0)), &text(1));
+    // (A run folder under /tmp has no private /tmp of its own to ask for: one line less, by design.)
+    let plain = ctx(Path::new("/srv/a"), Path::new(if hostile.run.starts_with("/tmp") || hostile.run.starts_with("/var/tmp") { "/tmp/a/run" } else { "/srv/a/run" }), "pcds");
     for mounts in [false, true] {
         let Ok(files) = hostile.unit_files_with(mounts) else { continue };
         let expect = plain.unit_files_with(mounts).unwrap();
