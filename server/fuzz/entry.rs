@@ -7,9 +7,10 @@ use std::sync::OnceLock;
 #[cfg(fuzzing)]
 static TARGET: OnceLock<String> = OnceLock::new();
 
-/// The tables directory the data-driven targets read.
+/// The tables directory the data-driven targets read: PCDS_FUZZ_DATA, else the installation's in
+/// this checkout (run/data/2.103).
 pub fn data_dir() -> String {
-    std::env::var("PCDS_FUZZ_DATA").unwrap_or_else(|_| "/home/per/pcds-handoff/scratch/full".into())
+    std::env::var("PCDS_FUZZ_DATA").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../run/data/2.103").into())
 }
 
 #[cfg(fuzzing)]
