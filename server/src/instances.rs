@@ -5,12 +5,16 @@
 //!
 //! What a wreck and an opened world instance hold is generated in generate.rs.
 //!
-//! What the server cannot do, and what stands in for it:
-//! - Wrecks get seeds `pcds read-game` laid out (generate::pool_seed).
+//! A wreck is laid out by Tessera from its own seed, as in the game. That takes up to a few
+//! seconds, so it runs on a thread between the walk before it and the walk after it
+//! (generate.rs), the wrecks one at a time in the order they were asked for, as the game
+//! generates them (ProceduralInstancesHandler's generating count): GenerateNetworkObjects
+//! queues one, tick finishes it, and the tick itself never waits for the solver.
 
 pub mod generate;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+use std::sync::{mpsc, Mutex};
 
 use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Value};
@@ -34,6 +38,10 @@ const GENERATOR_FLAGS: u16 = 0x68;
 const VERSION: i64 = 16;
 /// GenerateOnTrigger.Clear despawns 5 frames after unloading (the real game: 0.17 s).
 const DESPAWN_DELAY: f32 = 0.17;
+/// How many wrecks may wait for their layout at once. The game has no limit; a client that asked
+/// for a hundred (each one a few seconds of solver) would keep a core busy for minutes. Players
+/// in range of a wreck are the only ones to ask, so this is more than a server ever sees.
+const MAX_QUEUE: usize = 32;
 /// The player's CharacterController height, for what drops from a player dying in an instance.
 const PLAYER_HEIGHT: f32 = 2.0;
 
@@ -79,10 +87,30 @@ pub struct State {
     next_second: f32,
     /// Generators to despawn: (game time, network object).
     despawns: Vec<(f32, u64)>,
-    /// RandomizePropData.ignore of the wreck props (the game keeps it on the prefabs).
+    /// RandomizePropData.ignore of the wreck props (the game keeps it on the prefabs), as the
+    /// generations done so far left it: a wreck's walk starts from it.
     ignored: HashSet<(String, usize)>,
+    /// The generators (network objects) asked to generate their wreck, in order; the first
+    /// one is the one being laid out.
+    queue: VecDeque<u64>,
+    /// The first one's Tessera, running: not in a snapshot, started again from `ignored` and
+    /// the generator's seed by the process that restores it.
+    #[serde(skip)]
+    job: Option<Job>,
     /// The opened instance scene's PreventBuilding collider.
     prevent_building: Option<generate::Shape>,
+}
+
+/// A wreck's Tessera on its thread.
+struct Job {
+    net: u64,
+    index: usize,
+    seed: u32,
+    position: [f32; 3],
+    rotation: [f32; 4],
+    prepared: generate::Prepared,
+    /// (A Mutex only so that Game stays Sync.)
+    result: Mutex<mpsc::Receiver<Result<generate::Layout, String>>>,
 }
 
 fn state(game: &mut Game) -> &mut State {
@@ -218,7 +246,6 @@ fn save_opened(game: &mut Game) {
 pub fn load_instance(game: &mut Game, owner: i32, position: [f32; 3], rotation: [f32; 4], difficulty: i32, seed: i32) {
     let candidates: Vec<usize> = (0..GENERATORS.len()).filter(|i| GENERATORS[*i].1 == difficulty).collect();
     let index = if candidates.is_empty() { 0 } else { candidates[MathRandom::new(seed as u32).next_int(0, candidates.len() as i32) as usize] };
-    let seed = generate::pool_seed(game, seed as u32) as i32;
     let net = spawn_generator(game, index, position, rotation);
     let planet = game.planet_hash();
     game.net.set(net, GENERATOR, "_planetHash", enc::int(planet));
@@ -251,26 +278,80 @@ fn load_instance_from_scene(game: &mut Game, id: i32, position: [f32; 3], rotati
     load_instance(game, 0, position, rotation, difficulty, seed);
 }
 
-/// GenerateNetworkObjectsServerRpc: a client entered a wreck nobody generated yet.
+/// GenerateNetworkObjectsServerRpc: a client entered a wreck nobody generated yet. It joins the
+/// queue; `pump` lays it out and creates what it holds.
 fn generate_network_objects(game: &mut Game, object: u64) {
     let Some(g) = generators(game).find(|g| g.net == object).cloned() else { return };
-    if g.generated {
+    if g.generated || state(game).queue.contains(&object) {
         return;
     }
-    let seed = if g.seed == 0 {
-        let s = game.rng.range(1, 1_073_741_823) as u32;
-        let s = generate::pool_seed(game, s);
-        game.net.set(object, GENERATOR, "_seed", uint(s));
-        s
-    } else {
-        g.seed
+    if state(game).queue.len() >= MAX_QUEUE {
+        eprintln!("wreck {}: {MAX_QUEUE} wrecks already wait for their layout; ignored", g.index);
+        return;
+    }
+    if g.seed == 0 {
+        let seed = game.rng.range(1, 1_073_741_823) as u32;
+        game.net.set(object, GENERATOR, "_seed", uint(seed));
+        state(game).instances.values_mut().flatten().find(|g| g.net == object).unwrap().seed = seed;
+    }
+    state(game).queue.push_back(object);
+}
+
+/// Starts the first queued wreck's Tessera when none runs, and creates the wreck of the one
+/// that has finished (GenerateOnTrigger.Generate after the solver).
+fn pump(game: &mut Game) {
+    let polled = state(game).job.as_ref().map(|job| job.result.lock().unwrap().try_recv());
+    match polled {
+        Some(Err(mpsc::TryRecvError::Empty)) => return,
+        Some(answer) => {
+            let job = state(game).job.take().unwrap();
+            state(game).queue.pop_front();
+            match answer {
+                Ok(result) => complete(game, job, result),
+                Err(_) => eprintln!("wreck {} (seed {}): the Tessera thread died", job.index, job.seed),
+            }
+        }
+        None => {}
+    }
+    while state(game).job.is_none() {
+        let Some(net) = state(game).queue.front().copied() else { return };
+        let Some(g) = generators(game).find(|g| g.net == net && !g.generated).cloned() else {
+            state(game).queue.pop_front();
+            continue;
+        };
+        let ignored = state(game).ignored.clone();
+        let Some(prepared) = generate::prepare(game, g.index, g.seed, g.position, g.rotation, ignored) else {
+            state(game).queue.pop_front();
+            continue;
+        };
+        let (tx, result) = mpsc::channel();
+        let (wrecks, scene, index, seed) = (generate::wrecks(game), prepared.scene.clone(), g.index, g.seed);
+        let spawned = std::thread::Builder::new().name("pcds-tessera".into()).spawn(move || {
+            let _ = tx.send(generate::solve(&wrecks, index, seed, &scene));
+        });
+        match spawned {
+            Ok(_) => state(game).job = Some(Job { net, index, seed, position: g.position, rotation: g.rotation, prepared, result: Mutex::new(result) }),
+            Err(e) => {
+                eprintln!("wreck {index} (seed {seed}): no thread for Tessera: {e}");
+                state(game).queue.pop_front();
+            }
+        }
+    }
+}
+
+/// A wreck's layout is in: what Generate makes of it, saved with the generator.
+fn complete(game: &mut Game, job: Job, result: Result<generate::Layout, String>) {
+    let layout = match result {
+        Ok(layout) => layout,
+        Err(e) => return eprintln!("wreck {} (seed {}): {e}", job.index, job.seed),
     };
-    let made = generate::generate(game, g.index, seed, g.position, g.rotation);
-    let g = state(game).instances.values_mut().flatten().find(|g| g.net == object).unwrap();
-    g.seed = seed;
-    g.generated = true;
-    g.generated_ids.extend(made);
-    game.net.set(object, GENERATOR, "_networkObjectGenerated", enc::bool(true));
+    let (made, ignored) = generate::finish(game, job.index, job.seed, job.position, job.rotation, job.prepared, &layout);
+    state(game).ignored = ignored;
+    if let Some(g) = state(game).instances.values_mut().flatten().find(|g| g.net == job.net) {
+        g.generated = true;
+        g.generated_ids.extend(made);
+    }
+    game.net.set(job.net, GENERATOR, "_networkObjectGenerated", enc::bool(true));
     save(game);
 }
 
@@ -417,6 +498,11 @@ fn unload_instance(game: &mut Game, owner: i32, index: usize, respawn: [f32; 3],
     }
     let due = game.time + DESPAWN_DELAY;
     let s = state(game);
+    // A wreck unloaded while it is laid out is not made: its thread's answer is dropped.
+    s.queue.retain(|n| *n != g.net);
+    if s.job.as_ref().is_some_and(|j| j.net == g.net) {
+        s.job = None;
+    }
     s.despawns.push((due, g.net));
     s.instances.get_mut(&owner).unwrap().remove(index);
     save(game);
@@ -536,9 +622,7 @@ fn deserialize(game: &mut Game, instance_seed: i32) -> bool {
         for p in game.units.planets.iter().map(|p| p.hash).collect::<Vec<_>>() {
             game.units.force_reset(p);
         }
-        // A wreck not generated yet takes a seed the server has the layout of.
         let seed = int(&d["seed"]) as u32;
-        let seed = if generated { seed } else { generate::pool_seed(game, seed) };
         game.net.set(net, GENERATOR, "_seed", uint(seed));
         let owner = if d["version"].as_i64().unwrap_or(0) < 3 { instance_seed } else { int(&d["owner"]) };
         game.net.set(net, GENERATOR, "_owner", enc::int(owner));
@@ -579,6 +663,7 @@ pub fn init(game: &mut Game) {
 }
 
 pub fn tick(game: &mut Game) {
+    pump(game);
     let now = game.time;
     let s = state(game);
     let due: Vec<u64> = s.despawns.iter().filter(|(t, _)| *t <= now).map(|(_, n)| *n).collect();
@@ -634,6 +719,18 @@ mod tests {
     use super::*;
     use crate::world::hex;
 
+    /// Ticks until the wrecks asked for are laid out (their Tessera runs on a thread).
+    fn settle(g: &mut Game) {
+        for _ in 0..20_000 {
+            tick(g);
+            if g.ext.planets.instances.queue.is_empty() && g.ext.planets.instances.job.is_none() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("the wrecks were not laid out in 40 s");
+    }
+
     fn prime_instance(seed: i32) -> Option<WorldInstance> {
         let g = crate::planets::tests::game()?;
         Some(instance_via_seed(&g, seed, 1200, false).unwrap())
@@ -663,8 +760,8 @@ mod tests {
         rpc(&mut g, 1, 0, "ProceduralInstancesHandler.LoadInstanceFromSceneServerRpc", &Args(vec![json!(101000001), json!([300.0, 10.0, 400.0]), json!([0.0, 0.0, 0.0, 1.0]), json!(1)]));
         let generator = g.ext.planets.instances.instances[&0][0].clone();
         assert_eq!(generator.index, 1);
-        // The game's seed for it (world seed and position), as one this server has the layout of.
-        let seed = generate::pool_seed(&mut g, 310087328 + 500);
+        // The game's seed for it: the world seed and the position.
+        let seed = 310087328 + 500;
         assert_eq!(generator.seed, seed);
         // Spawned as the real game spawns it (defaults), the values follow as a delta.
         let create = g.net.out.iter().find(|(_, kind, _)| *kind == crate::protocol::CREATE_OBJECT).unwrap();
@@ -682,6 +779,8 @@ mod tests {
         rpc(&mut g, 1, 0, "ProceduralInstancesHandler.LoadInstanceFromSceneServerRpc", &Args(vec![json!(101000001), json!([300.0, 10.0, 400.0]), json!([0.0, 0.0, 0.0, 1.0]), json!(1)]));
         assert_eq!(g.ext.planets.instances.instances[&0].len(), 1);
         rpc(&mut g, 1, generator.net, "GenerateOnTrigger.GenerateNetworkObjectsServerRpc", &Args(vec![]));
+        assert!(!g.ext.planets.instances.instances[&0][0].generated, "laid out between ticks");
+        settle(&mut g);
         assert!(g.ext.planets.instances.instances[&0][0].generated);
         assert_eq!(g.save.procedural[0]["wrecksWOGenerated"], json!(true));
         // Saved and loaded again: the generator comes back.
@@ -706,7 +805,7 @@ mod tests {
             (2, 33, [2500.0, 50.0, -1500.0], 102, [[2592.2332, 50.52, -1470.9714], [2596.47, 50.52, -1459.47], [2572.0, 64.0, -1394.5]]),
         ];
         for (index, seed, position, count, samples) in real {
-            let made = generate::generate(&mut g, index, seed, position, [0.0, 0.0, 0.0, 1.0]);
+            let made = generate::generate_now(&mut g, index, seed, position, [0.0, 0.0, 0.0, 1.0]);
             let spawned: Vec<[f32; 3]> = made.iter().filter(|id| g.wos[*id].net.is_some()).map(|id| g.wos[id].position).collect();
             assert_eq!(spawned.len(), count, "wreck {index}");
             let close = |a: [f32; 3], b: [f32; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 0.001);
@@ -714,22 +813,102 @@ mod tests {
             // What the containers hold is generated with them.
             assert!(made.len() > count);
         }
-        assert_eq!(generate::pool_seed(&mut g, 64), 64);
-        assert_eq!(generate::pool_seed(&mut g, 310087828), 21);
+    }
+
+    /// Wrecks as the game lays them out from seeds that are not any pool's: the real game (2.103) hosting
+    /// a fresh world, six wrecks one after the other at these places (scene wrecks seed themselves from
+    /// the world seed and the place): how many network objects it spawned, the first two and the last.
+    #[test]
+    fn wrecks_of_any_seed_come_out_as_the_game_lays_them() {
+        let Some(mut g) = crate::planets::tests::game() else { return };
+        let real = [
+            (0, 843016137, [282.918, 61.804, -1843.231], [0.0, 0.0, 0.0, 1.0], 43, [[326.7124, 58.124, -1750.0889], [324.8632, 64.714, -1762.8931], [319.858, 67.787, -1784.574]]),
+            (1, 843014640, [319.715, 30.836, 180.666], [0.0, 0.7071068, 0.0, -0.7071068], 76, [[290.6864, 31.356, 272.8992], [279.185, 31.356, 277.136], [214.215, 32.836, 252.666]]),
+            (2, 843015679, [-964.9, -4.627, -1025.344], [0.0, 0.0, 0.0, 1.0], 91, [[-965.82, -4.627, -999.144], [-938.15, 7.373, -1010.944], [-982.35, 6.589, -937.768]]),
+            (0, 843015151, [-857.188, 57.818, 188.524], [-0.007738, 0.7070644, -0.0232104, -0.7067257], 42, [[-901.7588, 57.2035, 249.7594], [-896.2141, 57.4463, 249.7594], [-945.655, 55.1259, 242.5111]]),
+            (1, 843015244, [817.161, 67.852, 523.088], [0.0048036, 0.5986985, -0.0008654, 0.8009596], 73, [[871.9254, 64.4242, 426.4821], [870.1208, 70.9418, 439.3298], [938.7405, 69.2451, 483.9122]]),
+            (2, 843016662, [2390.863, 1.565, -23.737], [-0.0104618, 0.7070294, 0.0034874, 0.7070982], 122, [[2416.1575, -2.6834, -131.8376], [2417.8738, 4.0678, -119.0989], [2496.0806, 16.9327, -95.8716]]),
+        ];
+        for (index, seed, position, rotation, count, samples) in real {
+            let made = generate::generate_now(&mut g, index, seed, position, rotation);
+            let spawned: Vec<[f32; 3]> = made.iter().filter(|id| g.wos[*id].net.is_some()).map(|id| g.wos[id].position).collect();
+            let close = |a: [f32; 3], b: [f32; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 0.001);
+            assert_eq!(spawned.len(), count, "wreck {index} of seed {seed}: {} made", made.len());
+            assert!(close(spawned[0], samples[0]) && close(spawned[1], samples[1]) && close(spawned[count - 1], samples[2]), "wreck {index} of seed {seed}: {:?}", &spawned[..2]);
+        }
     }
 
     #[test]
-    fn empty_wrecks_of_older_saves_get_a_known_seed_and_are_generated_again() {
+    fn empty_wrecks_of_older_saves_are_generated_again_from_their_seed() {
         let Some(mut g) = crate::planets::tests::game() else { return };
         g.save.procedural = vec![json!({"owner": 0, "planet": -1140328421, "index": 0, "seed": 310087828, "pos": "2000,50,2000", "rot": "0,0,0,1",
                                         "wrecksWOGenerated": true, "woIdsGenerated": "", "woIdsDropped": "", "version": VERSION})];
         init(&mut g);
         let wreck = g.ext.planets.instances.instances[&0][0].clone();
-        assert_eq!((wreck.generated, wreck.seed), (false, 21));
+        assert_eq!((wreck.generated, wreck.seed), (false, 310087828));
         rpc(&mut g, 1, wreck.net, "GenerateOnTrigger.GenerateNetworkObjectsServerRpc", &Args(vec![]));
+        settle(&mut g);
         let wreck = &g.ext.planets.instances.instances[&0][0];
         assert!(wreck.generated && !wreck.generated_ids.is_empty());
         assert_eq!(g.save.procedural[0]["woIdsGenerated"].as_str().unwrap().split(',').count(), wreck.generated_ids.len());
+    }
+
+    /// A flip in the middle of a wreck's Tessera: the new process starts it again from the
+    /// snapshot (the queue and the prefabs' flags), and the wreck comes out as in the old one.
+    #[test]
+    fn a_wreck_asked_for_before_a_flip_is_laid_out_after_it() {
+        let Some(mut g) = crate::planets::tests::game() else { return };
+        rpc(&mut g, 1, 0, "ProceduralInstancesHandler.LoadInstanceFromSceneServerRpc", &Args(vec![json!(101000001), json!([300.0, 10.0, 400.0]), json!([0.0, 0.0, 0.0, 1.0]), json!(1)]));
+        let net = g.ext.planets.instances.instances[&0][0].net;
+        rpc(&mut g, 1, net, "GenerateOnTrigger.GenerateNetworkObjectsServerRpc", &Args(vec![]));
+        tick(&mut g);
+        assert!(g.ext.planets.instances.job.is_some(), "the solver runs");
+        let (net_data, data, spec, scenes) = crate::game::test_tables().unwrap();
+        let mut h = crate::handoff::restore(net_data, data, spec, &crate::handoff::snapshot(&mut g).unwrap(), scenes).unwrap();
+        assert!(h.ext.planets.instances.job.is_none() && h.ext.planets.instances.queue.len() == 1);
+        settle(&mut g);
+        settle(&mut h);
+        let wreck = |g: &Game| -> Vec<(i32, [f32; 3])> { g.ext.planets.instances.instances[&0][0].generated_ids.iter().map(|id| (*id, g.wos[id].position)).collect() };
+        assert!(h.ext.planets.instances.instances[&0][0].generated);
+        assert_eq!(wreck(&g), wreck(&h));
+        assert!(!wreck(&h).is_empty());
+    }
+
+    /// Wrecks are laid out one at a time, in the order they were asked for, and one unloaded
+    /// while it waits is not made.
+    #[test]
+    fn wrecks_wait_their_turn_and_an_unloaded_one_is_not_made() {
+        let Some(mut g) = crate::planets::tests::game() else { return };
+        for (id, x) in [(101000001, 300.0), (101000002, 900.0), (101000003, 1500.0)] {
+            rpc(&mut g, 1, 0, "ProceduralInstancesHandler.LoadInstanceFromSceneServerRpc", &Args(vec![json!(id), json!([x, 10.0, 400.0]), json!([0.0, 0.0, 0.0, 1.0]), json!(0)]));
+        }
+        let nets: Vec<u64> = g.ext.planets.instances.instances[&0].iter().map(|w| w.net).collect();
+        for net in &nets {
+            rpc(&mut g, 1, *net, "GenerateOnTrigger.GenerateNetworkObjectsServerRpc", &Args(vec![]));
+            rpc(&mut g, 2, *net, "GenerateOnTrigger.GenerateNetworkObjectsServerRpc", &Args(vec![]));
+        }
+        assert_eq!(g.ext.planets.instances.queue, VecDeque::from(nets.clone()), "asked twice, queued once");
+        tick(&mut g);
+        assert_eq!(g.ext.planets.instances.job.as_ref().map(|j| j.net), Some(nets[0]));
+        // The second leaves while it waits.
+        unload_instance(&mut g, 0, 1, [0.0; 3], false);
+        settle(&mut g);
+        let generated: Vec<u64> = g.ext.planets.instances.instances[&0].iter().filter(|w| w.generated).map(|w| w.net).collect();
+        assert_eq!(generated, vec![nets[0], nets[2]]);
+    }
+
+    /// A client that asks for wreck after wreck fills a queue of a few seconds of solver each: the
+    /// queue is as long as it is and no longer.
+    #[test]
+    fn a_client_cannot_queue_more_wrecks_than_the_cap() {
+        let Some(mut g) = crate::planets::tests::game() else { return };
+        for i in 0..MAX_QUEUE + 4 {
+            let id = 101_000_000 + i as i32;
+            rpc(&mut g, 1, 0, "ProceduralInstancesHandler.LoadInstanceFromSceneServerRpc", &Args(vec![json!(id), json!([100.0 + 50.0 * i as f64, 10.0, 400.0]), json!([0.0, 0.0, 0.0, 1.0]), json!(0)]));
+            let net = g.ext.planets.instances.instances[&0][i].net;
+            rpc(&mut g, 1, net, "GenerateOnTrigger.GenerateNetworkObjectsServerRpc", &Args(vec![]));
+        }
+        assert_eq!(g.ext.planets.instances.queue.len(), MAX_QUEUE);
     }
 
     #[test]

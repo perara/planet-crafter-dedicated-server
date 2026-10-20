@@ -5,24 +5,23 @@
 //! connected path constraint of colours with parity and count constraints. A port of the
 //! game's IL, call by call and in the same order (collections enumerate as .NET's do), so a
 //! seed lays out the tiles the game lays out. Settings the generators could have but do not
-//! fail when read (wrecks.rs).
+//! fail when read (native/wrecks.rs, which writes them into wrecks.json for this to solve).
 
 use std::collections::{HashMap, HashSet};
 
 use indexmap::{IndexMap, IndexSet};
 
-use super::unity::Id;
 use crate::geometry::{matrix_mul, trs, Matrix};
 
 /// FaceDetails of a Square face: the paint of its 3x3 cells (topLeft, top, topRight, left,
 /// center, right, bottomLeft, bottom, bottomRight). The hex fields are 0 for cube tiles.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct FaceDetails {
     pub paint: [i32; 9],
 }
 
 /// SylvesOrientedFace: a face of one of a tile's cells.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Face {
     pub offset: V3,
     /// Sylves CubeDir: Left, Right, Up, Down, Forward, Back.
@@ -31,11 +30,19 @@ pub struct Face {
 }
 
 /// A TesseraTile (cube).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TileDef {
-    pub id: Id,
+    /// Which tile component it is: one number per component, however many generators and
+    /// scenes hold it.
+    pub id: usize,
     pub name: String,
-    pub palette: Option<Id>,
+    /// The tile's TesseraPalette (read-game takes the first tile's for the generator).
+    #[serde(skip)]
+    pub palette: Option<usize>,
+    /// The key of the tile's own RandomizePropData list in wrecks.json (None: it has none).
+    #[serde(default)]
+    pub props: Option<String>,
     pub faces: Vec<Face>,
     pub offsets: Vec<V3>,
     pub center: [f32; 3],
@@ -48,22 +55,39 @@ pub struct TileDef {
 }
 
 /// A TesseraConstraint on the generator.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ConstraintDef {
-    /// CountConstraint: comparison AtLeast, AtMost, Exactly.
-    Count { tiles: Vec<Id>, comparison: i32, count: i32, eager: bool },
+    /// CountConstraint (tile ids): comparison AtLeast, AtMost, Exactly.
+    Count { tiles: Vec<usize>, comparison: i32, count: i32, eager: bool },
     /// PathConstraint with path colours, connected.
     Path { colors: Vec<i32>, parity: bool },
 }
 
-/// TesseraPalette.matchOverrides.
-#[derive(Clone, Debug, Default)]
+/// TesseraPalette.matchOverrides (written as a list of colour pairs and whether they match).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(from = "Vec<(i32, i32, bool)>", into = "Vec<(i32, i32, bool)>")]
 pub struct Palette {
     pub overrides: crate::idmap::FxHashMap<(i32, i32), bool>,
 }
 
+impl From<Vec<(i32, i32, bool)>> for Palette {
+    fn from(list: Vec<(i32, i32, bool)>) -> Palette {
+        Palette { overrides: list.into_iter().map(|(a, b, m)| ((a, b), m)).collect() }
+    }
+}
+
+impl From<Palette> for Vec<(i32, i32, bool)> {
+    fn from(p: Palette) -> Self {
+        let mut list: Vec<_> = p.overrides.into_iter().map(|((a, b), m)| (a, b, m)).collect();
+        list.sort();
+        list
+    }
+}
+
 /// A TesseraGenerator.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Generator {
     pub size: V3,
     pub center: [f32; 3],
@@ -540,7 +564,7 @@ impl Model {
         for &(ti, weight) in &entries {
             let t = &tiles[ti];
             if !contiguous(t) {
-                eprintln!("read-game: Tessera cannot use {} as it is not contiguous", t.name);
+                eprintln!("Tessera cannot use {} as it is not contiguous", t.name);
                 continue;
             }
             for rot in tile_rotations(t)? {
@@ -661,7 +685,7 @@ impl Model {
     }
 
     /// The model tiles of tiles (TesseraConstraint.GetModelTiles) at their first offset.
-    fn first_offsets(&self, ids: &[Id]) -> Result<Vec<ModelTile>, String> {
+    fn first_offsets(&self, ids: &[usize]) -> Result<Vec<ModelTile>, String> {
         let mut out = Vec::new();
         for id in ids {
             // A tile the generator does not use has no patterns.
@@ -1573,11 +1597,46 @@ fn parity_visit(w: &mut Wfc, v: &PathView, odd: &TileSet, odd_tracker: Option<us
 
 /// A TesseraTileBase in the scene (TesseraInitialConstraintBuilder): its faces and cells, and
 /// its matrix in the generator's space (generator.worldToLocalMatrix * tile.localToWorldMatrix).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SceneTile {
     pub faces: Vec<Face>,
     pub offsets: Vec<V3>,
     pub center: [f32; 3],
     pub matrix: Matrix,
+}
+
+/// What a scene tile needs of its TesseraTile.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TileShape {
+    pub faces: Vec<Face>,
+    pub offsets: Vec<V3>,
+    pub center: [f32; 3],
+}
+
+/// The game objects of a prefab that hold scene tiles, or have a child that does: each with its
+/// local pose, so the matrices come out of the same products as Transform.localToWorldMatrix.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TileNode {
+    pub p: [f32; 3],
+    pub q: [f32; 4],
+    pub s: [f32; 3],
+    #[serde(default)]
+    pub tiles: Vec<TileShape>,
+    #[serde(default)]
+    pub children: Vec<TileNode>,
+}
+
+impl TileNode {
+    /// The scene tiles at and under this node, whose matrix is `ltw`, in the generator's space
+    /// (`to_generator` is the generator's worldToLocalMatrix, in the same space as `ltw`).
+    pub fn scene_tiles(&self, ltw: &Matrix, to_generator: &Matrix, out: &mut Vec<SceneTile>) {
+        for t in &self.tiles {
+            out.push(SceneTile { faces: t.faces.clone(), offsets: t.offsets.clone(), center: t.center, matrix: matrix_mul(to_generator, ltw) });
+        }
+        for c in &self.children {
+            c.scene_tiles(&matrix_mul(ltw, &trs(c.p, c.q, c.s)), to_generator, out);
+        }
+    }
 }
 
 /// A TesseraTileInstance: the tile and its pose in the generator's space.

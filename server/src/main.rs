@@ -126,6 +126,7 @@ mod rpcspec;
 mod save;
 mod scene;
 mod status;
+mod tessera;
 mod toxic;
 mod transform;
 mod units;

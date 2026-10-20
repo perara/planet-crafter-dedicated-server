@@ -23,7 +23,7 @@ ConstructibleProxy.SetGrowerSpeedMultiplierClientRpc,ConstructibleProxy,client,s
 ConstructibleProxy.SetRocketBackAndForthSpeedMultiplierClientRpc,ConstructibleProxy,client,sent,rockets::back_and_forth,,,,
 ConstructibleProxy.StartCraftAnimationClientRpc,ConstructibleProxy,client,sent,machines machines::production,,,,
 ConstructibleProxy.StartCraftAnimationServerRpc,ConstructibleProxy,server,yes,machines,1,3,217,
-GenerateOnTrigger.GenerateNetworkObjectsServerRpc,GenerateOnTrigger,server,yes,instances,2,4,0,
+GenerateOnTrigger.GenerateNetworkObjectsServerRpc,GenerateOnTrigger,server,yes,instances,5,4,0,
 GeneticTraitHandler.CreateNewTraitWorldObjectServerRpc,GeneticTraitHandler,server,yes,machines,1,1,0,
 GroupNetworkBase.AddDeconstructIconClientRpc,GroupNetworkBase,client,sent,objects,,,,
 GroupNetworkBase.DeconstructClientRpc,GroupNetworkBase,client,sent,deconstruct,,,,
