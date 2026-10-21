@@ -172,6 +172,7 @@ pub static PROCESS_ENV: &[Var] = &[
 /// PCDS_DEV's hooks: what the end-to-end tests and the load and probe tools need from the
 /// production program. An unknown one stops the start.
 pub static DEV_HOOKS: &[(&str, &str)] = &[
+    ("server-rocket-flight", "Experimental server-driven rocket visual, temporary flare and craft sound; skips local rocket physics. Test clients only; not an installation setting."),
     ("flip-verify", "A bank that restores a snapshot checks its state equals the snapshot's (every flip)."),
     ("test-faults", "POST /api/update takes failForTest, to make the next bank fail on purpose."),
     ("trust-loopback", "Believe the SteamID a direct-IP client from 127.0.0.1 claims. Never behind a UDP relay, where every player comes from 127.0.0.1."),
