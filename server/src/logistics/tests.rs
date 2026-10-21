@@ -686,6 +686,7 @@ fn cancelled_drone_cargo_is_saved_on_its_own_planet() {
 #[test]
 fn supplies_are_chosen_nearest_the_destination() {
     let Some(mut game) = game() else { return };
+    game.rules.drones.nearest_first = true;
     build(&mut game, "DroneStation1", [10.0, 2.0, 10.0]);
     let far = build(&mut game, "Container1", [1000.0, 2.0, 20.0]);
     let near = build(&mut game, "Container1", [30.0, 2.0, 20.0]);
@@ -728,6 +729,7 @@ fn dispatch_scenario(game: &mut Game) -> (i32, u32, u32) {
 #[test]
 fn idle_drones_choose_nearby_work_and_preserve_priority_pause_and_reservations() {
     let Some(mut game) = game() else { return };
+    game.rules.drones.nearest_first = true;
     let (drone, far, near) = dispatch_scenario(&mut game);
     assign_idle_drones(&mut game);
     assert_eq!(drone_task(&game, drone), Some(near));
@@ -752,6 +754,7 @@ fn idle_drones_choose_nearby_work_and_preserve_priority_pause_and_reservations()
 #[test]
 fn an_idle_drone_on_another_planet_does_not_stop_dispatch() {
     let Some(mut game) = game() else { return };
+    game.rules.drones.nearest_first = true;
     let (first, _, _) = dispatch_scenario(&mut game);
     // This drone's planet has no work. The later access slot still must be considered.
     game.wos.get_mut(&first).unwrap().planet = stable_hash("Humble");
@@ -766,6 +769,7 @@ fn an_idle_drone_on_another_planet_does_not_stop_dispatch() {
 fn clearance_routes_deliver_cargo_and_rebuild_after_construction_and_snapshot() {
     use crate::geometry::navigation::{Bounds, Data};
     let Some(mut game) = game() else { return };
+    game.rules.drones.avoid_obstacles = true;
     build(&mut game, "EnergyGenerator6", [40.0, 2.0, 0.0]);
     let station = build(&mut game, "DroneStation1", [10.0, 2.0, 10.0]);
     let supply = build(&mut game, "Container1", [25.0, 2.0, 10.0]);
@@ -837,6 +841,7 @@ fn clearance_routes_deliver_cargo_and_rebuild_after_construction_and_snapshot() 
 #[test]
 fn mixed_drone_types_use_their_own_arrival_distance() {
     let Some(mut game) = game() else { return };
+    game.rules.drones.nearest_first = true;
     build(&mut game, "EnergyGenerator6", [40.0, 2.0, 0.0]);
     let a = build(&mut game, "Drone1", [10.0, 4.0, 10.0]);
     let b = build(&mut game, "Drone1", [20.0, 4.0, 10.0]);
@@ -858,6 +863,7 @@ fn mixed_drone_types_use_their_own_arrival_distance() {
 fn route_planning_is_bounded_and_fair_across_the_fleet() {
     use crate::geometry::navigation::Data;
     let Some(mut game) = game() else { return };
+    game.rules.drones.avoid_obstacles = true;
     build(&mut game,"EnergyGenerator6",[40.0,2.0,0.0]);
     game.data.drone_navigation=Some(std::sync::Arc::new(Data { planets:HashMap::from([(game.planet_hash(),vec![])]),..Default::default() }));
     let mut drones=Vec::new();
@@ -879,4 +885,45 @@ fn route_planning_is_bounded_and_fair_across_the_fleet() {
     assert_eq!(game.ext.logistics.drones[&drones[0]].route_goal,Some([1000.0,4.0,10.0]));
     for _ in 0..3 { update(&mut game); }
     assert!(game.ext.logistics.drones.values().all(|d| d.route_goal==Some(d.target)));
+}
+
+/// The rules drones.nearestFirst and drones.avoidObstacles are off by default, and then the
+/// game's order and the game's straight flight are what run.
+#[test]
+fn with_the_drone_rules_off_dispatch_and_flight_are_the_games() {
+    let Some(mut game) = game() else { return };
+    assert!(!game.rules.drones.nearest_first && !game.rules.drones.avoid_obstacles);
+    build(&mut game, "EnergyGenerator6", [40.0, 2.0, 0.0]);
+    // The first registered supply serves the demand, however far it is.
+    let far = build(&mut game, "Container1", [1000.0, 2.0, 20.0]);
+    let near = build(&mut game, "Container1", [30.0, 2.0, 20.0]);
+    let demand = build(&mut game, "Container1", [35.0, 2.0, 20.0]);
+    let [far, near, demand] = [far, near, demand].map(|w| game.wos[&w].linked_inventory);
+    let iron = game.data.group("Iron").unwrap();
+    for supply in [far, near] {
+        add(&mut game, "Iron", supply);
+        game.inventories.get_mut(&supply).unwrap().logistic.supply = vec![iron];
+        set_dirty(&mut game, supply);
+    }
+    game.inventories.get_mut(&demand).unwrap().size = 1;
+    game.inventories.get_mut(&demand).unwrap().logistic.demand = vec![iron];
+    set_dirty(&mut game, demand);
+    set_logistic_tasks(&mut game);
+    let supplies: Vec<_> = game.ext.logistics.all_tasks.iter().map(|(_, u)| game.ext.logistics.tasks[u].supply).collect();
+    assert_eq!(supplies, [Some(far)], "the game takes the supplies in their order");
+    // A drone takes the first free task, not the nearest.
+    let first = game.ext.logistics.all_tasks.iter().map(|(_, u)| *u).next().unwrap();
+    let drone = build(&mut game, "Drone1", [10.0, 4.0, 10.0]);
+    add_to_fleet(&mut game, drone, true);
+    assert_eq!(drone_task(&game, drone), Some(first));
+    // A collision map is not used while the rule is off: the drone flies straight.
+    use crate::geometry::navigation::{Bounds, Data};
+    let planet = game.planet_hash();
+    game.data.drone_navigation = Some(std::sync::Arc::new(Data { format: 1, build_id: "t".into(), planets: HashMap::from([(planet, vec![Bounds { min: [0.0; 3], max: [2000.0, 500.0, 2000.0] }])]), buildings: HashMap::new() }));
+    let start = game.ext.logistics.last_tick;
+    for t in 1..=10 {
+        frame(&mut game, start + t);
+        game.net.out.clear();
+    }
+    assert!(game.ext.logistics.navigation.is_empty() && game.ext.logistics.drones[&drone].route_goal.is_none());
 }

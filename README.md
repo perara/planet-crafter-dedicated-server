@@ -462,6 +462,8 @@ reason in `./pcds logs`.
 | `players.forgetAfterDays` | `0` | days away after which a saved player is forgotten (about 1.2 KB each). Only a player who never crafted or earned a token and holds no more than a new player is given (the starter items) is forgotten, with those items; anyone with more, the host and anyone in the game is kept for ever. `0`: every player is kept for ever. The days count from the day the rule is first on (players already saved have no time yet) |
 | `world.dlcPlanets` | none | the DLC planets (Humble, Toxicity) you own, as names: `./pcds rules set world.dlcPlanets=Humble,Toxicity`. The server cannot ask Steam about an account, so this is your statement of ownership, not a check. A world on a DLC planet does not start unless the planet is listed, and players can travel only to the DLC planets listed. `/api/status` shows them as `dlcPlanets` |
 | `world.pauseWhenEmpty` | `false` | with no player in the game the world stands still (time, day and night, growth, production, terraformation, meteo, timers and despawns, drones and vehicles) and goes on from there, with no catching up, when one is. A player counts once loaded in, as the game counts its players; one still loading sees the world as it stopped. An autosave of a world that stood still since the last one is skipped (no write, no backup) |
+| `drones.nearestFirst` | `false` | drones choose their work by distance, not in the game's task order: an idle drone takes the job of the highest priority and, among those, the nearest pickup; a demand takes from the supply nearest to it; the nearest station with a parked drone sends it; a drone arrives by its own distance (the game uses the last-added drone's for all); and a drone with nothing to do on one planet no longer stops the others from getting jobs. Off: the game's order (see "Differences from hosting in the game") |
+| `drones.avoidObstacles` | `false` | drones fly over the terrain and the buildings in their way (straight up, across, straight down) instead of through them, as the game's drones do. Needs the collision map that `pcds drone-map` makes from your own game; the rule is refused without it. Off: the game's straight flight |
 
 ## Chat hooks
 
@@ -716,6 +718,46 @@ into `run/worlds/backups/` (the newest of this world without a name), for a new 
   game; the loot in its containers is rolled at random, as there. A flip of the server in the
   middle of a solve starts that wreck again in the new process. A world from an older version of
   the game's generator loses its wrecks, as in the game.
+- **Drones fly and choose as the game's do, unless you ask for better.** The game's drones go
+  straight through terrain and buildings and take jobs in the order of a .NET dictionary. Two rules
+  change that, both off by default. `drones.nearestFirst` makes dispatch go by distance and priority
+  (the rule's row in the table above says how). `drones.avoidObstacles` makes drones climb
+  vertically, cross above the colliders on their route and descend vertically to dock. It needs a
+  collision map made once from your own game, with the same installation that made the tables:
+
+  ```bash
+  pcds drone-map "/path/to/The Planet Crafter" "/path/to/data/2.103"
+  ```
+
+  The map is `drone-navigation.json` beside `gamedata.json`. Its game build must match the tables,
+  a stale or malformed map is refused at start, and it must be made again after a game update or a
+  fresh `pcds extract`. It holds geometry read from the game: keep it with your private tables,
+  never in a repository. The map is conservative bounding boxes, including scene colliders that
+  are inactive and may appear as the planet is terraformed, and terrain heightmaps cut into
+  patches (holes stay covered), so a mountain can make a drone fly high and long. It is aerial
+  clearance, not a shortest-path or doorway navigation: indoor pickup and docking may still cross
+  walls, so enclosed storage works. Wreck interiors, moving scenery, vehicles, players and
+  meteor debris are not in it. Planning is limited to 16 drones per tick, rotating through the
+  fleet; a drone waits for its checked route instead of flying through an obstacle. The server
+  indexes the obstacles by place, rebuilds the building index only after a build or a
+  demolition, keeps the terrain index, and rebuilds the indexes after a hot update. Nothing of
+  this is in the saved world or the snapshot.
+- **A few slips of the game are fixed, because they lose items or leave clients stale.** The game
+  deletes what a drone carries when its delivery fails (the demand filled or went away); the
+  server drops the cargo on the ground, on the drone's own planet, to be picked up again. The
+  game checks a building's contents only when deconstruction starts; the server checks again
+  when the animation ends and cancels (with the game's "not empty" message) if something was put
+  in meanwhile. The game's optimizer boosts only buildings that stand when a fuse goes in; the
+  server also boosts a rocket platform, generator or grower built later in its range. A joining
+  client is told every grower's current growth boost. Switching a destructor, or a trading or
+  exchange rocket's automatic launch, on while it is already full acts at once (the game waits for
+  the next item to go in or out). A saved object picked up or moved is counted once in the object
+  totals (the game counts it again each time). Each of these is a separate commit in the history
+  and listed in docs/codex-integration.md with the game's own code.
+- **Remote players' map markers are refreshed after they join.** The game's client makes a
+  player's marker only when that player's proxy starts with its roster entry present. The server
+  restarts the other players' proxies for the joiner (and the joiner's for the others) once the
+  joiner's identity is known, never the owner's own player.
 - **Sleeping does not skip the night:** the game sends the server no signal for it.
 
 Where the server has to approximate what the game's physics would decide (positions on a
@@ -882,40 +924,3 @@ The Planet Crafter is a trademark of Miju Games. Steam and the Steamworks SDK be
 
 Reporting a vulnerability: [SECURITY.md](SECURITY.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
 Changes by release: [CHANGELOG.md](CHANGELOG.md).
-
-## Drone scheduling and optional obstacle clearance
-
-Drones choose nearby supplies for each destination, then give idle airborne drones the closest
-pickup at the highest demand priority. Supplies and tasks at equal distance retain their queue
-order. Station dispatch scans available stations without sorting the entire station list for
-every item. These changes run on the server with ordinary game clients.
-
-For terrain and building clearance, generate an optional collision map from your own game,
-using the same game installation that produced the tables:
-
-```bash
-pcds drone-map "/path/to/The Planet Crafter" "/path/to/data/2.103"
-```
-
-The map is loaded at server start from `drone-navigation.json` beside `gamedata.json`. Its game
-build must match the tables; a stale or malformed map is refused. Remove the map and restart to
-return to the game's original flight. The command leaves the ordinary tables unchanged and
-never writes a game save. The optional map must be generated again after a game update or a
-fresh table extraction. It contains game-derived geometry; keep it with your private tables.
-
-With a map, drones follow straight clearance segments: climb vertically, cruise above the
-collider bounds on the route, then descend vertically to dock. A clear route stays direct.
-Indoor pickup and docking deliberately permit passage through walls, so enclosed storage
-continues working. This uses conservative bounding boxes, including inactive scene colliders
-that may appear as terraformation progresses; large terrain meshes can therefore cause high,
-longer flights. This is aerial clearance, not a shortest-path or doorway navigation system.
-Terrain heightmaps are split into conservative patches; holes remain covered for clearance. Procedural
-wreck interiors, moving scenery, vehicles, players and temporary meteor debris are outside this map.
-
-The server indexes obstacles by location, caches each drone's route, and rebuilds only the
-building index after construction or destruction. The static terrain index is reused. Queries
-visit crossed grid cells and reuse obstacle visit stamps to avoid duplicate checks. Route planning is limited to 16 drones per tick
-and rotates through the fleet; drones wait for a checked route instead of flying through an
-obstacle while planning is pending. Navigation caches are rebuilt after snapshot
-restore and add no saved-world or snapshot-format fields. Collision maps are opt-in; without
-one the server keeps the original flight model, while using the improved scheduling.

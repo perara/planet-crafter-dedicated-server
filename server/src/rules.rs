@@ -26,6 +26,7 @@ pub struct Rules {
     pub loot: Loot,
     pub limits: Limits,
     pub world: World,
+    pub drones: Drones,
     pub players: Players,
     pub chat: Chat,
     pub backup: Backup,
@@ -221,6 +222,17 @@ pub struct World {
     pub pause_when_empty: bool,
 }
 
+/// Where this server's drones differ from the game's. The game's dispatch and its straight flights
+/// are what both rules keep when off.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct Drones {
+    /// Dispatch by distance and priority instead of the game's task order (logistics.rs).
+    pub nearest_first: bool,
+    /// Drones fly over terrain and buildings, by the collision map `pcds drone-map` makes.
+    pub avoid_obstacles: bool,
+}
+
 /// What the save keeps of the people who have been in the world.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
@@ -370,6 +382,9 @@ impl Rules {
             if self.world.dlc_planets[..i].contains(name) {
                 return Err(format!("world.dlcPlanets: {name} is listed twice"));
             }
+        }
+        if self.drones.avoid_obstacles && data.drone_navigation.is_none() {
+            return Err("drones.avoidObstacles: the game tables have no collision map (drone-navigation.json); make it with `pcds drone-map GAME_DIR TABLES_DIR`".into());
         }
         for group in self.limits.buildings.keys() {
             if !data.group(group).is_some_and(|g| data.groups[g].constructible) {
@@ -661,10 +676,17 @@ mod tests {
             serde_json::json!({"chat": {"retries": 11}}),
             serde_json::json!({"limits": {"bankWatchdogSeconds": 5}}),
             serde_json::json!({"limits": {"bankWatchdogSeconds": 3601}}),
+            // No collision map in the tables: flying around obstacles has nothing to fly by.
+            serde_json::json!({"drones": {"avoidObstacles": true}}),
         ] {
             assert!(Rules::default().patched(&patch).and_then(|r| r.validate(&data)).is_err(), "{patch}");
         }
         assert!(Rules::default().patched(&serde_json::json!({"limits": {"buildings": {"Drill1": 2}}})).unwrap().validate(&data).is_ok());
+        assert!(Rules::default().patched(&serde_json::json!({"drones": {"nearestFirst": true}})).unwrap().validate(&data).is_ok());
+        let mut mapped = data.clone();
+        mapped.drone_navigation = Some(Default::default());
+        let avoid = Rules::default().patched(&serde_json::json!({"drones": {"avoidObstacles": true}})).unwrap();
+        assert!(avoid.validate(&mapped).is_ok(), "with the map the rule is allowed");
         // The watchdog: off, or 10 s to an hour.
         for seconds in [0, 10, 3600] {
             assert!(Rules::default().patched(&serde_json::json!({"limits": {"bankWatchdogSeconds": seconds}})).unwrap().validate(&data).is_ok(), "{seconds}");

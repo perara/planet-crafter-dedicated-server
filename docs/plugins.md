@@ -599,7 +599,7 @@ removing a plugin's folder removes its state with it.
 The project has no legacy support (docs/plugins-api.md, "Versioning and compatibility"): the
 plugin part is a normal part of the current snapshot format, not a second format kept alive.
 
-- The plugin part is `ext.plugins` of the state in `handoff::FORMAT` 8 (the binary codec of
+- The plugin part is `ext.plugins` of the state in `handoff::FORMAT` 9 (the binary codec of
   bincodec.rs carries it in the REST part with the rest of `ext`): `{saved: {states: {ID:
   {version, bytes}}, stream: {epoch, next, events, dropped}}}`. Every field is written; nothing is
   skipped or defaulted on reading, and a snapshot of another format is not read at all.

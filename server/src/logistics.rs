@@ -472,9 +472,19 @@ fn frame(game: &mut Game, tick: u64) {
     visibility(game);
 }
 
-/// Rebuild only after construction/destruction; routes are cached between target changes.
+/// drones.avoidObstacles: rebuild only after construction/destruction; routes are cached between
+/// target changes. With the rule off the indexes are dropped.
 fn refresh_navigation(game: &mut Game) {
-    let Some(data) = game.data.drone_navigation.as_ref() else { return };
+    let Some(data) = game.data.drone_navigation.as_ref().filter(|_| game.rules.drones.avoid_obstacles) else {
+        let l = &mut game.ext.logistics;
+        if !l.navigation.is_empty() || !l.terrain_navigation.is_empty() {
+            (l.navigation, l.terrain_navigation, l.navigation_dirty) = Default::default();
+            for d in l.drones.values_mut() {
+                (d.route, d.route_goal) = Default::default();
+            }
+        }
+        return;
+    };
     if !game.ext.logistics.navigation_dirty && !game.ext.logistics.navigation.is_empty() { return; }
     if game.ext.logistics.terrain_navigation.is_empty() {
         game.ext.logistics.terrain_navigation = data.planets.iter().map(|(p,bounds)| (*p,crate::geometry::navigation::Grid::new(bounds.clone()))).collect();
@@ -519,6 +529,7 @@ fn update(game: &mut Game) {
         }
     }
     let dt = tick_seconds(game);
+    let (own_distance, avoid) = (game.rules.drones.nearest_first, game.rules.drones.avoid_obstacles);
     let l = &mut game.ext.logistics;
     let count = l.access.len();
     let start = l.navigation_cursor % count.max(1);
@@ -530,11 +541,13 @@ fn update(game: &mut Game) {
         if motion::length_sq(a.target) <= motion::EPSILON || !powered.contains(&a.planet) {
             continue;
         }
-        if motion::distance_sq(a.target, dr.position) < dr.distance_min * dr.distance_min {
+        // The game's job compares with the minimum distance of the drone added last, for every drone.
+        let arrived = if own_distance { motion::distance_sq(a.target, dr.position) < dr.distance_min * dr.distance_min } else { motion::distance(a.target, dr.position) < l.min_target_distance };
+        if arrived {
             l.at_target.push_back(i);
             continue;
         }
-        if let Some(grid) = l.terrain_navigation.get_mut(&a.planet) {
+        if let Some(grid) = l.terrain_navigation.get_mut(&a.planet).filter(|_| avoid) {
             if dr.route_goal != Some(a.target) || dr.route_epoch != l.navigation_epoch {
                 if routes_left == 0 { continue; }
                 routes_left -= 1;
@@ -821,28 +834,55 @@ fn set_logistic_tasks(game: &mut Game) {
                 continue;
             }
             // What a demand of this group on this planet may take, from the supplies and then from the ground.
-            let supplies = match from_supplies.entry((g, planet)) {
-                Entry::Occupied(o) => o.into_mut(),
-                Entry::Vacant(v) => {
-                    let mut list = Vec::new();
-                    for &(s, supply_planet, _) in &suppliers_of_g[g] {
-                        if supply_planet != planet {
-                            continue;
-                        }
-                        // The supply's items of the group, in its order (nothing the tasks do changes an
-                        // inventory or a group): its items sorted by group once per search.
-                        let by_group = item_groups.entry(s).or_insert_with(|| {
-                            let mut by_group: crate::idmap::FxHashMap<usize, Vec<i32>> = Default::default();
-                            for &wo in game.inventories.get(&s).map(|i| i.items.as_slice()).unwrap_or_default() {
-                                if let Some(w) = game.wos.get(&wo) {
-                                    by_group.entry(w.group).or_default().push(wo);
-                                }
+            // drones.nearestFirst: from the supplies nearest to the demand first, so the list is the demand's own.
+            let mut nearest_list;
+            let supplies = if game.rules.drones.nearest_first {
+                let to = wo_position(game, entity_wo(game, d).unwrap());
+                let mut order: Vec<(i32, f32)> = suppliers_of_g[g]
+                    .iter()
+                    .filter(|e| e.1 == planet && e.0 != d)
+                    .map(|e| (e.0, motion::distance_sq(wo_position(game, entity_wo(game, e.0).unwrap()), to)))
+                    .collect();
+                order.sort_by(|a, b| a.1.total_cmp(&b.1));
+                let mut list = Vec::new();
+                for (s, _) in order {
+                    let by_group = item_groups.entry(s).or_insert_with(|| {
+                        let mut by_group: crate::idmap::FxHashMap<usize, Vec<i32>> = Default::default();
+                        for &wo in game.inventories.get(&s).map(|i| i.items.as_slice()).unwrap_or_default() {
+                            if let Some(w) = game.wos.get(&wo) {
+                                by_group.entry(w.group).or_default().push(wo);
                             }
-                            by_group
-                        });
-                        list.extend(by_group.get(&g).into_iter().flatten().map(|&wo| (Some(s), wo)));
+                        }
+                        by_group
+                    });
+                    list.extend(by_group.get(&g).into_iter().flatten().map(|&wo| (Some(s), wo)));
+                }
+                nearest_list = Candidates::new(game, list);
+                &mut nearest_list
+            } else {
+                match from_supplies.entry((g, planet)) {
+                    Entry::Occupied(o) => o.into_mut(),
+                    Entry::Vacant(v) => {
+                        let mut list = Vec::new();
+                        for &(s, supply_planet, _) in &suppliers_of_g[g] {
+                            if supply_planet != planet {
+                                continue;
+                            }
+                            // The supply's items of the group, in its order (nothing the tasks do changes an
+                            // inventory or a group): its items sorted by group once per search.
+                            let by_group = item_groups.entry(s).or_insert_with(|| {
+                                let mut by_group: crate::idmap::FxHashMap<usize, Vec<i32>> = Default::default();
+                                for &wo in game.inventories.get(&s).map(|i| i.items.as_slice()).unwrap_or_default() {
+                                    if let Some(w) = game.wos.get(&wo) {
+                                        by_group.entry(w.group).or_default().push(wo);
+                                    }
+                                }
+                                by_group
+                            });
+                            list.extend(by_group.get(&g).into_iter().flatten().map(|&wo| (Some(s), wo)));
+                        }
+                        v.insert(Candidates::new(game, list))
                     }
-                    v.insert(Candidates::new(game, list))
                 }
             };
             available = supplies.take(game, d, available, false);
@@ -890,8 +930,81 @@ fn set_logistic_tasks(game: &mut Game) {
 
 /// SetLogisticTasks, second frame: drones already flying take free tasks.
 fn assign_idle_drones(game: &mut Game) {
+    if game.rules.drones.nearest_first {
+        assign_idle_drones_nearest(game);
+    } else {
+        assign_idle_drones_in_game_order(game);
+    }
+}
+
+/// SetLogisticTasks, last frame: each free task gets a drone from a station.
+fn release_drones(game: &mut Game) {
+    if game.rules.drones.nearest_first {
+        release_drones_nearest(game);
+    } else {
+        release_drones_in_game_order(game);
+    }
+}
+
+/// SetLogisticTasks, second frame: drones already flying take free tasks.
+fn assign_idle_drones_in_game_order(game: &mut Game) {
     if !game.ext.logistics.access_created {
-        release_drones(game);
+        release_drones_in_game_order(game);
+        return;
+    }
+    game.ext.logistics.updating = 2;
+    let mut i = 0;
+    while i < game.ext.logistics.access.len() {
+        if let Some(d) = game.ext.logistics.access[i] {
+            let Some(task) = non_attributed_task(game, planet_of(game, d)) else { break };
+            if drone_task(game, d).is_none() {
+                set_task(game, d, Some(task));
+            }
+        }
+        i += 1;
+    }
+}
+
+/// SetLogisticTasks, last frame: each free task gets a drone from the nearest station that
+/// has one.
+fn release_drones_in_game_order(game: &mut Game) {
+    game.ext.logistics.updating = 0;
+    if non_attributed_task(game, 0).is_none() {
+        return;
+    }
+    let tasks: Vec<u32> = game.ext.logistics.all_tasks.iter().map(|(_, uid)| *uid).collect();
+    for uid in tasks {
+        let Some(t) = game.ext.logistics.tasks.get(&uid).cloned() else { continue };
+        if t.state != State::NotAttributed || (!t.spawned && t.supply_wo.is_none()) {
+            continue;
+        }
+        let planet = task_planet(game, &t);
+        let from = wo_position(game, if t.spawned { t.wo } else { t.supply_wo.unwrap() });
+        let mut distances: Vec<(i32, i32)> = game
+            .ext
+            .logistics
+            .stations
+            .iter()
+            .filter(|(_, s)| s.planet == planet)
+            .map(|(st, _)| (*st, motion::distance(station_position(game, *st), from).round_ties_even() as i32))
+            .collect();
+        // _stationsDistancesBuffer.Sort(): LogisticStationDistanceToTask.CompareTo, nearest first.
+        let _ = crate::dotnet_sort::sort_by(&mut distances, |a, b| a.1.cmp(&b.1));
+        for (st, _) in distances {
+            if let Some(d) = release_one_drone(game, st) {
+                add_to_fleet(game, d, false);
+                set_task(game, d, Some(uid));
+                break;
+            }
+        }
+    }
+}
+
+/// drones.nearestFirst, second frame: every drone already flying with no task takes the best free one
+/// (next_task_for_drone), and a drone with nothing on its planet does not end the round.
+fn assign_idle_drones_nearest(game: &mut Game) {
+    if !game.ext.logistics.access_created {
+        release_drones_nearest(game);
         return;
     }
     game.ext.logistics.updating = 2;
@@ -906,9 +1019,9 @@ fn assign_idle_drones(game: &mut Game) {
     }
 }
 
-/// SetLogisticTasks, last frame: each free task gets a drone from the nearest station that
-/// has one.
-fn release_drones(game: &mut Game) {
+/// drones.nearestFirst, last frame: each free task gets a drone from the nearest station that has
+/// one, counting the parked drones once rather than sorting all stations for every item.
+fn release_drones_nearest(game: &mut Game) {
     game.ext.logistics.updating = 0;
     if non_attributed_task(game, 0).is_none() {
         return;
@@ -954,7 +1067,14 @@ fn non_attributed_task(game: &Game, planet: i32) -> Option<u32> {
     })
 }
 
-/// Explicit demand priority first, then shortest empty flight; ties retain task slot order.
+/// The task a drone takes when it is free: the game's first free task of its planet, or with
+/// drones.nearestFirst the best one (next_task_for_drone).
+fn next_task(game: &Game, d: i32) -> Option<u32> {
+    if game.rules.drones.nearest_first { next_task_for_drone(game, d) } else { non_attributed_task(game, planet_of(game, d)) }
+}
+
+/// drones.nearestFirst: explicit demand priority first, then shortest empty flight; ties retain
+/// task slot order.
 fn next_task_for_drone(game: &Game, d: i32) -> Option<u32> {
     let l = &game.ext.logistics;
     if l.paused { return None; }
@@ -1216,7 +1336,7 @@ fn add_to_fleet(game: &mut Game, d: i32, then_assign: bool) {
         manager_add_drone(game, d);
     }
     if then_assign && game.ext.logistics.drones.contains_key(&d) {
-        let task = next_task_for_drone(game, d);
+        let task = next_task(game, d);
         set_task(game, d, task);
     }
 }
@@ -1341,7 +1461,7 @@ fn end_assignment(game: &mut Game, d: i32) {
             dr.task = None;
         }
     }
-    let next = next_task_for_drone(game, d);
+    let next = next_task(game, d);
     set_task(game, d, next);
     if game.ext.logistics.drones.contains_key(&d) && drone_task(game, d).is_none() {
         go_to_station(game, d);

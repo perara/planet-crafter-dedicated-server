@@ -107,6 +107,8 @@ pub static KNOBS: &[Knob] = &[
     rule("limits.bankWatchdogSeconds", Type::Int, "s", "A game process that says nothing (no answer to a player, an admin request or the front's ping) for this long is killed and the world starts again from the last snapshot or save, as after a crash (and counts toward the crash limit). Not during a flip, a world stop or a save the admin asked for. 0: never; else 10 to 3600.").range(0.0, 3600.0),
     rule("world.pauseWhenEmpty", Type::Bool, "", "With no player in the game (past PlayerReady, as the game counts players), the world stands still: its clock, and with it every timer, day and night, growth, production, terraformation, meteo, drone and vehicle. It goes on from there when a player is in."),
     rule("world.dlcPlanets", Type::List, "", "The DLC planets (Humble, Toxicity) you own. The server cannot ask Steam about your account, so this is your statement of ownership, not a check: a world is on a DLC planet, or travels to one, only if it is listed here. Empty: none."),
+    rule("drones.nearestFirst", Type::Bool, "", "Drones choose their work by distance, not in the game's task order: an idle drone takes the job of the highest priority and, among those, the nearest pickup; a demand takes from the supply nearest to it; the nearest station with a parked drone sends it; a drone arrives by its own distance (the game uses the last drone's for all); a drone with nothing to do on one planet no longer stops the others from getting jobs. Off: the game's order."),
+    rule("drones.avoidObstacles", Type::Bool, "", "Drones fly over terrain and buildings in their way (straight up, across, straight down) instead of through them, as the game's drones do. Needs the collision map `pcds drone-map GAME_DIR TABLES_DIR` makes from your own game; without it the rule is refused. Off: the game's straight flight."),
     rule("players.forgetAfterDays", Type::Int, "days", "A player who has not been in for this many days, who never crafted anything or earned a token, and who holds no more than a new player is given, is forgotten: their saved record and their starter items go (about 1.2 KB each). Anyone who made or holds more is kept for ever, and so is anyone in the game. 0: every player is kept for ever.").range(0.0, 36_500.0),
     rule("chat.webhooks", Type::List, "", "http:// or https:// URLs every chat message is POSTed to as JSON (see the README's chat hooks).").secret(),
     rule("chat.secret", Type::String, "", "Signs every webhook POST: X-PCDS-Signature: sha256=<HMAC-SHA256 of the body, hex>. Unset: unsigned.").secret(),
@@ -931,7 +933,9 @@ mod tests {
     #[test]
     fn each_rule_validates_as_its_schema_entry_says() {
         let Some(dir) = crate::test_data() else { return };
-        let (_, data, _) = crate::tables(dir);
+        let (_, mut data, _) = crate::tables(dir);
+        // drones.avoidObstacles is refused without a collision map (rules::tests: out_of_range_rules_are_refused).
+        data.drone_navigation = Some(Default::default());
         for k in rule_knobs() {
             let takes = |v: Value| {
                 let (section, field) = k.key.split_once('.').unwrap();
