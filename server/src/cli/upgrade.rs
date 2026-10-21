@@ -103,9 +103,13 @@ impl Ctx {
     /// (a start that fails is retried by systemd, 15 s apart, and then left failed).
     fn wait_until_back(&self) -> Result {
         let started = Instant::now();
+        let expected = updater::active(&self.banks()).unwrap_or_default();
         while started.elapsed() < Duration::from_secs(300) {
             std::thread::sleep(Duration::from_secs(1));
-            if self.api_json("GET", "/api/status").is_ok_and(|s| s["state"] == "running") {
+            if let Ok(s) = self.api_json("GET", "/api/status") && s["state"] == "running" {
+                if let Some(why) = fell_back(&s, &expected) {
+                    return Err(why);
+                }
                 say(format!("the server is back after {} s", started.elapsed().as_secs()));
                 return Ok(());
             }
@@ -226,6 +230,14 @@ pub(super) fn api_error(e: String) -> String {
     e.find("{\"error\"").and_then(|i| serde_json::from_str::<Value>(&e[i..]).ok()).and_then(|v| v["error"].as_str().map(str::to_string)).unwrap_or(e)
 }
 
+/// A world that runs from another bank than the one just made the active one: the front could
+/// not start that release (for example it refuses the rules.json the later release wrote) and
+/// went back to the other bank. Not "back": the restart did not take.
+fn fell_back(status: &Value, expected: &str) -> Option<String> {
+    let live = status["banks"]["live"]["bank"].as_str()?;
+    (!expected.is_empty() && live != expected).then(|| format!("the server runs from bank {live}, not from bank {expected} that was just installed: the front could not start that release and went back ('pcds logs' says why, 'pcds status' shows the banks); fix what it names, then run the same command again"))
+}
+
 /// "pcds 0.6.0 (v0.6.0), front protocol 2, snapshot format 1, installed 2026-10-18 15:00".
 fn describe(info: &BankInfo) -> String {
     let tag = info.tag.as_ref().map(|t| format!(" ({t})")).unwrap_or_else(|| " (a local build)".into());
@@ -236,6 +248,17 @@ fn describe(info: &BankInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A restart that ends on the other bank (the new release refused the rules, the front went back) is not "back".
+    #[test]
+    fn a_restart_onto_the_other_bank_is_not_the_server_being_back() {
+        let status = |bank: &str| json!({"state": "running", "banks": {"live": {"bank": bank}}});
+        assert_eq!(fell_back(&status("b"), "b"), None);
+        let why = fell_back(&status("a"), "b").unwrap();
+        assert!(why.contains("runs from bank a, not from bank b") && why.contains("pcds logs"), "{why}");
+        assert_eq!(fell_back(&json!({"state": "running"}), "b"), None, "a status with no banks says nothing");
+        assert_eq!(fell_back(&status("a"), ""), None);
+    }
 
     #[test]
     fn options() {
