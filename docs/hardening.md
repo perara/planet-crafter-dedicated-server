@@ -111,7 +111,7 @@ with `docker/test.sh` (both parts: the hot update in the container, the restart 
     tmpfs: ["/tmp"]                       # Steam's crash dump folder
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
-    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]   # what the entrypoint needs to give /data away, then runs without
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER, KILL]   # what the entrypoint needs to give /data away, then runs without; KILL: tini (root) signals the server (another uid) at `docker stop`
     pids_limit: 1024
     ulimits: { nofile: { soft: 65536, hard: 65536 } }
 ```

@@ -120,7 +120,7 @@ Measured, each with a hot update and a restart:
   writable by that user already (an arbitrary uid 4242 on a world-writable folder worked; in
   Kubernetes `fsGroup` does it). The entrypoint says what to do when it is not.
 - **Dropped capabilities**: with `--user`, `--cap-drop ALL --security-opt no-new-privileges` needs
-  nothing more. Started as root (PUID/PGID), keep `CHOWN SETUID SETGID DAC_OVERRIDE FOWNER`. The
+  nothing more. Started as root (PUID/PGID), keep `CHOWN SETUID SETGID DAC_OVERRIDE FOWNER KILL` (without `KILL` tini cannot pass `docker stop` on to the server, which runs as another user: the container exits 1 and the world is not saved). The
   entrypoint then runs the server with `setpriv --no-new-privs`, so nothing the server starts (a
   chat hook program) can gain rights even where the container itself is not run with
   `no-new-privileges`. [compose.yaml](../compose.yaml) turns all of this on, and `docker/test.sh` runs

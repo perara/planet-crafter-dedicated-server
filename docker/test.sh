@@ -167,7 +167,7 @@ echo '{"save": {"backupsKept": 0}}' >"$W/d2/rules.json"
 
 C="$NAME"
 docker run -d --name "$C" --network host --read-only --tmpfs /tmp --restart unless-stopped --stop-timeout 90 \
-  --security-opt no-new-privileges:true --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_OVERRIDE --cap-add FOWNER --pids-limit 1024 \
+  --security-opt no-new-privileges:true --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add KILL --pids-limit 1024 \
   -e "PUID=$UID_" -e "PGID=$GID_" -v "$W/d2:/data" -v "$W/game:/game:ro" "$IMAGE" >/dev/null
 
 # Healthy: the health check's own command answers.
@@ -222,5 +222,14 @@ healthy
 status | grep -q "^bank a: .*\[active, running" || fail "after the restart in place:
 $(status)"
 ok "pcds upgrade --rollback --restart restarts the server inside the running container"
+
+# docker stop must save the world and end with 0 (tini needs KILL to signal the server's uid).
+docker exec "$C" pcds load "127.0.0.1:$UDP" /data/data/test 1 8 200 >/dev/null 2>&1 &
+sleep 4
+docker stop -t 90 "$C" >/dev/null
+[ "$(docker inspect -f '{{.State.ExitCode}}' "$C")" = 0 ] || fail "docker stop ended with exit code $(docker inspect -f '{{.State.ExitCode}}' "$C"):
+$(docker logs --tail 5 "$C" 2>&1)"
+docker logs "$C" 2>&1 | grep -q "saved /data/worlds/world.json" || fail "docker stop did not save the world"
+ok "docker stop saves the world and exits 0"
 
 say "PASS"

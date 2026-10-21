@@ -16,7 +16,7 @@ if [ "$(id -u)" = 0 ]; then
     exit 1
   }
   mkdir -p /data/home || {
-    echo "entrypoint: root cannot write /data (capabilities dropped?): start the container as that user instead (docker run --user UID:GID, a Kubernetes runAsUser), or keep CHOWN, SETUID, SETGID, DAC_OVERRIDE and FOWNER" >&2
+    echo "entrypoint: root cannot write /data (capabilities dropped?): start the container as that user instead (docker run --user UID:GID, a Kubernetes runAsUser), or keep CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER and KILL" >&2
     exit 1
   }
   # -h: symlinks themselves, never what they point to. A file it cannot give away (a

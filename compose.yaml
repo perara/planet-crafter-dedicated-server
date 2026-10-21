@@ -35,5 +35,5 @@ services:
     tmpfs: ["/tmp"]                       # Steam's crash dump folder; empty at every start
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
-    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]   # the entrypoint gives /data to PUID:PGID, then runs without them
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER, KILL]   # the entrypoint gives /data to PUID:PGID, then runs without them; KILL lets tini pass `docker stop` on to the server
     pids_limit: 1024
