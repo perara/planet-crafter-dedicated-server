@@ -114,8 +114,8 @@ pub fn rules_patch(args: &[String]) -> Result<Value> {
 impl Ctx {
     /// The admin API of this installation's server.
     pub fn api(&self, method: &str, path: &str, body: Option<&str>) -> Result<String> {
-        let addr = self.env_get("PCDS_ADMIN").filter(|a| a != "off");
-        let (Some(addr), Some(token)) = (addr, self.env_get("PCDS_ADMIN_TOKEN")) else {
+        let addr = self.effective("PCDS_ADMIN").filter(|a| a != "off");
+        let (Some(addr), Some(token)) = (addr, self.effective("PCDS_ADMIN_TOKEN")) else {
             return Err(self.no_admin());
         };
         let sock = crate::config::admin_loopback(&addr)?;
@@ -129,7 +129,7 @@ impl Ctx {
     /// `pcds health`: Ok when the server answers GET /api/health with ok, which needs no token; Err
     /// (exit 1) with what to do otherwise. The Docker image's health check runs this.
     pub fn health(&self) -> Result {
-        let addr = self.env_get("PCDS_ADMIN").filter(|a| a != "off").ok_or_else(|| self.no_admin())?;
+        let addr = self.effective("PCDS_ADMIN").filter(|a| a != "off").ok_or_else(|| self.no_admin())?;
         let sock = crate::config::admin_loopback(&addr)?;
         match request(sock, "", "GET", "/api/health", "", Duration::from_secs(10)) {
             Ok(_) => {
@@ -249,8 +249,24 @@ impl Ctx {
             ["reset"] => {
                 let rules = self.api_json("GET", "/api/rules")?;
                 let reset: Map<String, Value> = rules["defaults"].as_object().into_iter().flatten().map(|(k, _)| (k.clone(), Value::Null)).collect();
-                self.api("POST", "/api/rules", Some(&Value::Object(reset).to_string()))?;
-                println!("every rule is back to its default");
+                // A world standing on a DLC planet refuses to lose the statement that you own it: reset
+                // everything else and say so (world.dlcPlanets stays until you unset it by name).
+                match self.api("POST", "/api/rules", Some(&Value::Object(reset.clone()).to_string())) {
+                    Err(e) if e.contains("world.dlcPlanets") => {
+                        let mut world = Map::new();
+                        for key in rules["defaults"]["world"].as_object().into_iter().flatten().map(|(k, _)| k).filter(|k| *k != "dlcPlanets") {
+                            world.insert(key.clone(), Value::Null);
+                        }
+                        let mut keep = reset;
+                        keep.insert("world".into(), Value::Object(world));
+                        self.api("POST", "/api/rules", Some(&Value::Object(keep).to_string()))?;
+                        println!("every rule is back to its default except world.dlcPlanets: the world stands on a DLC planet you state you own ({e})");
+                    }
+                    other => {
+                        other?;
+                        println!("every rule is back to its default");
+                    }
+                }
             }
             _ => return Err("usage: pcds rules [set SECTION.RULE=VALUE ... | reset]".into()),
         }
@@ -385,6 +401,50 @@ mod tests {
         assert_eq!(explain("POST http://x/api/rules: HTTP 400: {\"error\":\"speed.growth: 0 is not a number from 0.01 to 100\"}".into(), "a"), "speed.growth: 0 is not a number from 0.01 to 100");
         let seen = server.join().unwrap();
         assert!(seen[0].starts_with("POST /api/save HTTP/1.1\r\n") && seen[0].contains("Authorization: Bearer secret\r\n") && seen[0].ends_with("Content-Length: 2\r\nConnection: close\r\n\r\n{}"));
+    }
+
+    /// `pcds rules reset` on a world that stands on a DLC planet resets every rule but the statement
+    /// that you own the planet (the server refuses to lose it), and says so.
+    #[test]
+    fn rules_reset_keeps_the_dlc_statement_when_the_world_needs_it() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let defaults = r#"{"defaults":{"speed":{"growth":1},"world":{"dlcPlanets":[],"pauseWhenEmpty":false}}}"#;
+            let refusal = r#"{"error":"world.dlcPlanets: the world is on Humble, a DLC planet"}"#;
+            let mut bodies = Vec::new();
+            for (status, answer) in [("200 OK", defaults), ("400 Bad Request", refusal), ("200 OK", "{}")] {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(s.try_clone().unwrap());
+                let (mut head, mut length) = (String::new(), 0usize);
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = n.trim().parse().unwrap();
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                    head += &line;
+                }
+                let mut body = vec![0u8; length];
+                reader.read_exact(&mut body).unwrap();
+                bodies.push(String::from_utf8(body).unwrap());
+                s.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{answer}", answer.len()).as_bytes()).unwrap();
+            }
+            bodies
+        });
+        let dir = super::super::test_dir("rules-reset");
+        let ctx = super::super::test_ctx(&dir);
+        std::fs::create_dir_all(&ctx.run).unwrap();
+        std::fs::write(&ctx.env_file, format!("PCDS_ADMIN={addr}\nPCDS_ADMIN_TOKEN=t\n")).unwrap();
+        ctx.rules(&["reset".to_string()]).unwrap();
+        let bodies = server.join().unwrap();
+        let second: Value = serde_json::from_str(&bodies[2]).unwrap();
+        assert_eq!(second, json!({"speed": null, "world": {"pauseWhenEmpty": null}}), "everything but world.dlcPlanets");
+        assert_eq!(serde_json::from_str::<Value>(&bodies[1]).unwrap(), json!({"speed": null, "world": null}));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

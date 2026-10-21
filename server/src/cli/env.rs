@@ -15,6 +15,13 @@ impl Ctx {
         parse_env(&text).into_iter().rev().find(|(k, _)| k == key).map(|(_, v)| v).filter(|v| !v.is_empty())
     }
 
+    /// A setting as the server reads it: server.env, else the process environment (the Docker image
+    /// sets some there), else the default (docs/env.md). The commands that talk to the running
+    /// server use this, so a server.env that lists only what differs works with them.
+    pub fn effective(&self, key: &str) -> Option<String> {
+        self.env_get(key).or_else(|| crate::env(key)).or_else(|| crate::config::knob_for(key).map(|k| k.default.to_string()).filter(|d| !d.is_empty()))
+    }
+
     /// server.env, and the environment under it, as the server will check them at its start: Err
     /// with what stops it (a name that is no setting, a value that is not what it takes). `pcds
     /// start` and `restart` say so at once, not in the journal of a unit that fails.
@@ -39,12 +46,12 @@ impl Ctx {
 
     /// The direct-IP port (PCDS_LISTEN's).
     pub fn port(&self) -> String {
-        let listen = self.env_get("PCDS_LISTEN").unwrap_or_default();
+        let listen = self.effective("PCDS_LISTEN").unwrap_or_default();
         listen.rsplit(':').next().unwrap_or_default().to_string()
     }
 
     pub fn gui_url(&self) -> String {
-        format!("http://{}/#token={}", self.env_get("PCDS_ADMIN").unwrap_or_default(), self.env_get("PCDS_ADMIN_TOKEN").unwrap_or_default())
+        format!("http://{}/#token={}", self.effective("PCDS_ADMIN").unwrap_or_default(), self.effective("PCDS_ADMIN_TOKEN").unwrap_or_default())
     }
 
     /// The settings with their defaults, once; the admin token makes it this user's only.
@@ -142,6 +149,22 @@ mod tests {
             let written = env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
             assert_eq!(written, Some(crate::config::knob_for(key).unwrap().default), "{key}");
         }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A server.env that lists only what differs (the Docker image's, a hand-written one) works with the
+    /// commands that talk to the server: the admin address and the game port are the documented defaults.
+    #[test]
+    fn a_server_env_without_the_addresses_means_the_defaults() {
+        let dir = super::super::test_dir("env-effective");
+        let ctx = super::super::test_ctx(&dir);
+        fs::create_dir_all(&ctx.run).unwrap();
+        fs::write(&ctx.env_file, "PCDS_STEAM=off\nPCDS_ADMIN_TOKEN=secret\n").unwrap();
+        assert_eq!(ctx.effective("PCDS_ADMIN").as_deref(), Some("127.0.0.1:7782"));
+        assert_eq!(ctx.port(), "7777");
+        assert_eq!(ctx.gui_url(), "http://127.0.0.1:7782/#token=secret");
+        fs::write(&ctx.env_file, "PCDS_ADMIN=127.0.0.1:9\nPCDS_LISTEN=off\n").unwrap();
+        assert_eq!((ctx.effective("PCDS_ADMIN").as_deref(), ctx.effective("PCDS_LISTEN").as_deref()), (Some("127.0.0.1:9"), Some("off")), "the file wins");
         fs::remove_dir_all(&dir).unwrap();
     }
 

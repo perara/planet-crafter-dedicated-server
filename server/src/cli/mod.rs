@@ -263,10 +263,10 @@ impl Ctx {
             ["unban", value] => println!("{}", self.api("POST", "/api/unban", Some(&serde_json::json!({"value": value}).to_string()))?),
             ["unban", ..] => return usage("usage: pcds unban NAME_OR_IP"),
             ["gui"] => {
-                self.env_get("PCDS_ADMIN").filter(|a| a != "off").zip(self.env_get("PCDS_ADMIN_TOKEN")).ok_or_else(|| self.no_admin())?;
+                self.effective("PCDS_ADMIN").filter(|a| a != "off").zip(self.effective("PCDS_ADMIN_TOKEN")).ok_or_else(|| self.no_admin())?;
                 println!("{}", self.gui_url())
             }
-            ["token"] => println!("{}", self.env_get("PCDS_ADMIN_TOKEN").ok_or_else(|| self.no_admin())?),
+            ["token"] => println!("{}", self.effective("PCDS_ADMIN_TOKEN").ok_or_else(|| self.no_admin())?),
             ["config"] => {
                 if !self.env_file.is_file() {
                     return Err(self.no_admin());

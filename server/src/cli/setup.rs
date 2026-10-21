@@ -409,7 +409,7 @@ impl Ctx {
             return Err("start the server first (pcds start)".into());
         }
         let data = self.data_dir()?;
-        let listen = self.env_get("PCDS_LISTEN").unwrap_or_default();
+        let listen = self.effective("PCDS_LISTEN").unwrap_or_default();
         if listen == "off" {
             return Err("direct IP is off (PCDS_LISTEN=off): nothing to test".into());
         }
