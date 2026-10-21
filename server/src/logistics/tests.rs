@@ -774,6 +774,176 @@ fn idle_drones_choose_nearby_work_and_preserve_priority_pause_and_reservations()
 }
 
 #[test]
+fn parked_drones_choose_the_nearest_job_before_the_first_registered_job() {
+    let Some(mut game) = game() else { return };
+    game.rules.drones.nearest_first = true;
+    let station = build(&mut game, "DroneStation1", [10.0, 2.0, 10.0]);
+    let (airborne, far, near) = dispatch_scenario(&mut game);
+    game.destroy_world_object(airborne, true);
+    let inventory = game.wos[&station].linked_inventory;
+    let drone = add(&mut game, "Drone1", inventory);
+    release_drones(&mut game);
+    assert_eq!(drone_task(&game, drone), Some(near), "a parked drone must also choose the nearby pickup");
+    assert_eq!(task_state(&game, far), Some(State::NotAttributed));
+}
+
+#[test]
+fn parked_dispatch_keeps_priority_and_reconsiders_distance_when_a_station_empties() {
+    for priority in [false, true] {
+        let Some(mut game) = game() else { return };
+        game.rules.drones.nearest_first = true;
+        let mut drones = Vec::new();
+        for x in [10.0, 110.0] {
+            let station = build(&mut game, "DroneStation1", [x, 2.0, 10.0]);
+            let inventory = game.wos[&station].linked_inventory;
+            drones.push(add(&mut game, "Drone1", inventory));
+        }
+        let mut tasks = Vec::new();
+        for (i, x) in [20.0, 25.0, 80.0].into_iter().enumerate() {
+            let supply = build(&mut game, "Container1", [x, 2.0, 10.0]);
+            let demand = build(&mut game, "Container1", [200.0 + i as f32 * 10.0, 2.0, 10.0]);
+            let (supply, demand) = (game.wos[&supply].linked_inventory, game.wos[&demand].linked_inventory);
+            if priority && i == 1 { game.inventories.get_mut(&demand).unwrap().logistic.priority = 2; }
+            for inv in [supply, demand] { set_dirty(&mut game, inv); }
+            let item = add(&mut game, "Iron", supply);
+            tasks.push(create_task(&mut game, Some(supply), demand, item, false).unwrap());
+        }
+        game.ext.logistics.paused = true;
+        release_drones(&mut game);
+        assert!(drones.iter().all(|d| drone_task(&game, *d).is_none()));
+        game.ext.logistics.paused = false;
+        release_drones(&mut game);
+        let first = usize::from(priority);
+        assert_eq!(drone_task(&game, drones[0]), Some(tasks[first]), "priority outranks pickup distance");
+        assert_eq!(drone_task(&game, drones[1]), Some(tasks[2]), "the second station must choose again after the first empties");
+        assert_eq!(task_state(&game, tasks[1 - first]), Some(State::NotAttributed));
+    }
+}
+
+#[test]
+fn building_only_detours_are_flown_and_sent_to_the_client() {
+    use crate::geometry::navigation::{Bounds, Data};
+    let Some((mut game, _)) = crate::testkit::world() else { return };
+    game.rules.drones.avoid_obstacles = true;
+    build(&mut game, "EnergyGenerator6", [10.0, 2.0, 0.0]);
+    build(&mut game, "Container1", [45.0, 2.0, 10.0]);
+    let planet = game.planet_hash();
+    game.data.drone_navigation = std::sync::Arc::new(crate::gamedata::DroneMap::of(Data {
+        planets: HashMap::from([(planet, Vec::new().into())]),
+        buildings: HashMap::from([("Container1".into(), vec![Bounds {
+            min: [-3.0, 0.0, -6.0], max: [3.0, 30.0, 6.0],
+        }])]),
+        ..Default::default()
+    }));
+    let drone = build(&mut game, "Drone1", [10.0, 4.0, 10.0]);
+    add_to_fleet(&mut game, drone, false);
+    set_target(&mut game, drone, [80.0, 2.0, 10.0]);
+    game.ext.logistics.drones.get_mut(&drone).unwrap().distance_min = 0.01;
+    game.ext.logistics.min_target_distance = 0.01;
+    game.ext.logistics.enabled = true;
+    let net = game.ext.logistics.drones[&drone].net.unwrap();
+    let mut client_position = [10.0, 4.0, 10.0];
+    let (mut server_crossed, mut client_crossed) = (false, false);
+    for tick in 0..1200 {
+        update(&mut game);
+        send_transforms(&mut game, tick);
+        let position = game.ext.logistics.drones[&drone].position;
+        if (42.0..=48.0).contains(&position[0]) {
+            assert!(position[1] > 35.0, "server crossed the building: {position:?}");
+            server_crossed = true;
+        }
+        for (_, kind, body) in std::mem::take(&mut game.net.out) {
+            if kind != NETWORK_TRANSFORM { continue; }
+            let mut r = Reader::new(&body);
+            if r.packed_u64() != Some(net) { continue; }
+            r.packed_i32().unwrap(); // behaviour
+            let flags = r.packed_u32().unwrap();
+            r.packed_i32().unwrap(); // tick
+            for (i, coordinate) in client_position.iter_mut().enumerate() {
+                if flags & (2 << i) != 0 { *coordinate = r.f32().unwrap(); }
+            }
+            if (42.0..=48.0).contains(&client_position[0]) {
+                assert!(client_position[1] > 32.0, "client was sent a flight through the building: {client_position:?}");
+                client_crossed = true;
+            }
+        }
+        if motion::distance(position, [80.0, 4.0, 10.0]) < 0.1 { break; }
+    }
+    assert!(server_crossed && client_crossed, "the detour must reach both server movement and client packets");
+    assert!(motion::distance(game.ext.logistics.drones[&drone].position, [80.0, 4.0, 10.0]) < 0.1);
+}
+
+#[test]
+#[ignore = "requires PCDS_BENCH_SAVE and the installed game's collision map"]
+fn deliveries_on_a_downloaded_world_clear_the_real_map() {
+    use crate::geometry::navigation::Bounds;
+    let text = std::fs::read_to_string(std::env::var("PCDS_BENCH_SAVE").expect("a private save copy required")).unwrap();
+    let (net, data, spec, scenes) = crate::game::test_tables().expect("game tables required");
+    let imported = crate::oldsave::import(&text, 1, &net.game_version).unwrap();
+    let mut game = Game::with_clock(net, data, spec, SaveFile::from_text(&imported), scenes, Some(0.0));
+    game.rules.drones = crate::rules::Drones { nearest_first: true, avoid_obstacles: true, keep_cargo: true };
+    let map = game.data.drone_navigation.get().expect("extracted collision map required");
+    build(&mut game, "EnergyGenerator6", [560.0, 20.0, 600.0]);
+    let station = build(&mut game, "DroneStation1", [580.0, 20.0, 600.0]);
+    let supply = build(&mut game, "Container1", [600.0, 20.0, 600.0]);
+    let demand = build(&mut game, "Container1", [600.0, 20.0, 680.0]);
+    let [station, supply, demand] = [station, supply, demand].map(|w| game.wos[&w].linked_inventory);
+    let iron = game.data.group("Iron").unwrap();
+    let cargo = add(&mut game, "Iron", supply);
+    let drone = add(&mut game, "Drone1", station);
+    game.inventories.get_mut(&supply).unwrap().logistic.supply = vec![iron];
+    game.inventories.get_mut(&demand).unwrap().logistic.demand = vec![iron];
+    for inv in [supply, demand] { set_dirty(&mut game, inv); }
+    let terrain = map.planets[&game.planet_hash()].clone();
+    let buildings: Vec<_> = game.constructed.iter().filter_map(|id| game.wos.get(id)).filter(|w| w.planet_hash() == game.planet_hash())
+        .flat_map(|w| map.buildings.get(&game.data.groups[w.group].id).into_iter().flatten().map(move |b| b.transformed(w.position, w.rotation))).collect();
+    // Independent double-precision physical-bounds oracle, without the route planner's grid.
+    let hits = |b: &Bounds, a: V3, z: V3| {
+        let (mut lo, mut hi) = (0.0f64, 1.0f64);
+        for i in 0..3 {
+            let delta = f64::from(z[i]) - f64::from(a[i]);
+            if delta == 0.0 {
+                if a[i] < b.min[i] || a[i] > b.max[i] { return false; }
+            } else {
+                let (p, q) = ((f64::from(b.min[i]) - f64::from(a[i])) / delta, (f64::from(b.max[i]) - f64::from(a[i])) / delta);
+                lo = lo.max(p.min(q));
+                hi = hi.min(p.max(q));
+                if lo > hi { return false; }
+            }
+        }
+        true
+    };
+    let mut last = None;
+    let mut checked = 0;
+    for tick in 1..=60_000 {
+        game.sim_time = Some(tick as f64 * 0.005);
+        game.tick();
+        if let Some(d) = game.ext.logistics.drones.get(&drone) {
+            let key = (d.route_goal, d.route_epoch);
+            if d.route_goal.is_some() && last != Some(key) {
+                last = Some(key);
+                let mut previous = d.position;
+                for &next in &d.route {
+                    // The allowed vertical pickup/docking shafts may cross walls.
+                    if (previous[0] - next[0]).abs() + (previous[2] - next[2]).abs() > 0.001 {
+                        assert!(!terrain.iter().chain(&buildings).any(|b| hits(b, previous, next)), "flight {previous:?} -> {next:?} crosses a real collider");
+                        checked += 1;
+                    }
+                    previous = next;
+                }
+                println!("real-world drone route: {:?}", d.route);
+            }
+        }
+        game.net.out.clear();
+        if items(&game, demand).contains(&cargo) && items(&game, station).contains(&drone) { break; }
+    }
+    assert!(checked >= 2, "must check real flights, not an idle world");
+    assert!(items(&game, demand).contains(&cargo), "cargo never arrived");
+    assert!(items(&game, station).contains(&drone), "drone never returned to its station");
+    println!("downloaded world: {checked} cruise segments cleared all {} terrain and {} constructed-building bounds; cargo delivered and drone returned", terrain.len(), buildings.len());
+}
+
+#[test]
 fn an_idle_drone_on_another_planet_does_not_stop_dispatch() {
     let Some(mut game) = game() else { return };
     game.rules.drones.nearest_first = true;

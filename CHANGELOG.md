@@ -19,6 +19,13 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+### Fixed
+
+* With `drones.nearestFirst` enabled, parked drones now choose jobs by demand priority and
+  shortest available pickup distance. Previously only airborne idle drones chose the nearest
+  job; parked drones took jobs in registration order. Distances are reconsidered when a
+  station releases its last drone. The rule remains off by default.
+
 ## [0.8.2] - 2026-10-21
 
 ### Breaking changes
