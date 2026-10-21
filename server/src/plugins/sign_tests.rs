@@ -108,6 +108,26 @@ fn what_the_key_does_not_vouch_for_is_approved_once_and_the_publishers_updates_f
     assert!(the(&host).notice.as_deref().is_some_and(|n| n.contains("wait for approval")), "{:?}", the(&host).notice);
 }
 
+/// A key untrusted while a plugin approved by its digest runs: the plugin goes on (a signature only adds
+/// trust), and its listing says that the signature no longer holds, without waiting for a restart.
+#[test]
+fn a_running_plugin_lists_the_signature_that_holds_now() {
+    let dir = fresh_dir("sign-untrust-listing");
+    let (private, public) = pair();
+    publish(&dir, "mod", &say(5), &CHAT_SAY, &private);
+    approve(&dir, "mod", None).unwrap();
+    trust(&dir, &public, &CHAT_SAY);
+    let mut host = boot(&dir);
+    assert!(the(&host).running());
+    assert_eq!(admin::plugin_json(the(&host))["signature"]["state"].as_str(), Some("trusted"));
+    let mut keys = Keys::load(&dir).unwrap();
+    keys.revoke(&sign::key_id(&public)).unwrap();
+    keys.save(&dir).unwrap();
+    host.rescan(&mut Default::default(), true);
+    assert!(the(&host).running(), "approved by its digest: it goes on");
+    assert_eq!(admin::plugin_json(the(&host))["signature"]["state"].as_str(), Some("revoked"));
+}
+
 #[test]
 fn files_changed_after_signing_are_caught_when_loaded_and_when_reloaded() {
     let dir = fresh_dir("sign-tamper");

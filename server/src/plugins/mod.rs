@@ -876,7 +876,9 @@ impl Host {
             };
             let mut prev = old.swap_remove(i);
             if prev.same_files(&p) && (prev.running() || (!explicit && matches!(prev.status, Status::Failed(_)))) {
-                // Nothing changed for it: the running one stays, with its counters.
+                // Nothing changed for it: the running one stays, with its counters. Who signed it may have
+                // (a key trusted or untrusted since): the listing says what holds now.
+                prev.signed = p.signed;
                 prev.notice = None;
                 prev.incoming = None;
                 next.push(prev);
