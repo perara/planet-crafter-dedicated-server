@@ -60,7 +60,7 @@ pub fn tick(game: &mut Game) {
     if !wants(game, Kind::Tick) {
         return;
     }
-    let event = Event::Tick { game_ms: (game.time.secs() * 1000.0) as i64, tick: game.tick_number(), players: online(game), since_ms: 0 };
+    let event = Event::Tick { game_ms: (game.time.secs() * 1000.0) as i64, tick: game.tick_number(), players: online(game), since_ms: 0, unix_ms: crate::plugins::stream::unix_ms() as i64 };
     emit(game, &event);
 }
 
@@ -70,20 +70,20 @@ pub fn player_joined(game: &mut Game, client: u64) {
         return;
     }
     let Some(c) = game.clients.get(&client) else { return };
-    let (name, steam_id) = (c.ready.as_ref().map(|s| s.name.clone()).unwrap_or_default(), c.verified_steam_id.map(|i| i.to_string()).unwrap_or_default());
-    emit(game, &Event::PlayerJoin { client, name: &name, steam_id: &steam_id });
+    let (name, steam_id, player_id) = (c.ready.as_ref().map(|s| s.name.clone()).unwrap_or_default(), c.verified_steam_id.map(|i| i.to_string()).unwrap_or_default(), c.ready.as_ref().map_or(0, |s| s.id));
+    emit(game, &Event::PlayerJoin { client, name: &name, steam_id: &steam_id, player_id });
 }
 
-pub fn player_left(game: &mut Game, client: u64, name: &str) {
+pub fn player_left(game: &mut Game, client: u64, name: &str, player_id: u64) {
     if wants(game, Kind::PlayerLeave) {
-        emit(game, &Event::PlayerLeave { client, name });
+        emit(game, &Event::PlayerLeave { client, name, player_id });
     }
 }
 
 /// ChatHandler.SendChatMessageServerRpc: the chat hooks always get it; the plugins when they want it.
 pub fn chat(game: &mut Game, client: u64, text: &str) {
-    let name = game.clients.get(&client).and_then(|c| c.ready.as_ref()).map(|s| s.name.clone()).unwrap_or_default();
-    emit(game, &Event::Chat { client, name: &name, text });
+    let (name, player_id) = game.clients.get(&client).and_then(|c| c.ready.as_ref()).map(|s| (s.name.clone(), s.id)).unwrap_or_default();
+    emit(game, &Event::Chat { client, name: &name, text, player_id });
 }
 
 fn rpc_event(game: &mut Game, kind: Kind, client: u64, object: u64, name: &str, args: &[serde_json::Value]) -> Verdict {
@@ -111,14 +111,16 @@ pub fn object_placed(game: &mut Game, id: i32) {
     }
     let Some(wo) = game.wos.get(&id) else { return };
     let (group, position) = (game.data.groups[wo.group].id.clone(), wo.position);
-    emit(game, &Event::ObjectPlaced { id, group: &group, position });
+    let client = game.ext.plugins.actor;
+    emit(game, &Event::ObjectPlaced { id, group: &group, position, client });
 }
 
 /// A world object was destroyed (already out of `wos`).
 pub fn object_destroyed(game: &mut Game, wo: &WorldObject) {
     if wants(game, Kind::ObjectDestroyed) {
         let group = game.data.groups[wo.group].id.clone();
-        emit(game, &Event::ObjectDestroyed { id: wo.id, group: &group, position: wo.position });
+        let client = game.ext.plugins.actor;
+        emit(game, &Event::ObjectDestroyed { id: wo.id, group: &group, position: wo.position, client });
     }
 }
 

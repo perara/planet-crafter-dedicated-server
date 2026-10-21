@@ -208,7 +208,7 @@ impl Rig {
     fn ask(&mut self, requests: Vec<Vec<u8>>) -> Vec<i64> {
         self.results.lock().unwrap().clear();
         *self.to_send.lock().unwrap() = requests;
-        self.host.run(&mut self.world, &Event::Chat { client: 1, name: "Ann", text: "go" }, 0);
+        self.host.run(&mut self.world, &Event::Chat { client: 1, name: "Ann", text: "go", player_id: 1 }, 0);
         self.results.lock().unwrap().clone()
     }
 
@@ -613,7 +613,7 @@ fn a_module_asks_for_a_request_and_hears_its_answer_through_the_abi() {
     let mut host = boot(&dir);
     assert!(host.plugins[0].running(), "{:?}", host.plugins[0].status);
     let mut world = Mock::default();
-    host.run(&mut world, &Event::Chat { client: 1, name: "Ann", text: "go" }, 0);
+    host.run(&mut world, &Event::Chat { client: 1, name: "Ann", text: "go", player_id: 1 }, 0);
     assert_eq!(host.plugins[0].stats.http_requests, 1);
     let t = Instant::now();
     while world.applied.is_empty() {
@@ -630,7 +630,7 @@ fn a_module_asks_for_a_request_and_hears_its_answer_through_the_abi() {
     let dir2 = fresh_dir("net-abi2");
     install(&dir2, "big", &big, &["event.chat", "net.http"], "[events]\nsubscribe = [\"chat\"]\n[net]\nallow = [\"https://discord.com\"]", None);
     let mut host2 = boot(&dir2);
-    host2.run(&mut world, &Event::Chat { client: 1, name: "Ann", text: "go" }, 0);
+    host2.run(&mut world, &Event::Chat { client: 1, name: "Ann", text: "go", player_id: 1 }, 0);
     assert_eq!((host2.plugins[0].stats.faults, host2.plugins[0].stats.refused), (0, 1));
 }
 
@@ -694,11 +694,11 @@ fn the_discord_example_batches_its_lines_retries_a_failure_and_keeps_the_webhook
     let mut host = boot(&dir);
     assert!(host.plugins[0].running(), "{:?} {:?}", host.plugins[0].status, host.plugins[0].warnings);
     let mut world = Mock::default();
-    let tick = |ms: i64| Event::Tick { game_ms: ms, tick: 1, players: 1, since_ms: 5000 };
+    let tick = |ms: i64| Event::Tick { game_ms: ms, tick: 1, players: 1, since_ms: 5000, unix_ms: 0 };
     let run = |host: &mut Host, world: &mut Mock, e: &Event<'_>| host.run(world, e, if let Event::Tick { game_ms, .. } = e { *game_ms } else { 5000 });
-    run(&mut host, &mut world, &Event::PlayerJoin { client: 1, name: "Ann", steam_id: "" });
-    run(&mut host, &mut world, &Event::PlayerLeave { client: 1, name: "Bo \"B\"" });
-    run(&mut host, &mut world, &Event::Command { client: 1, name: "Ann", command: "report", args: vec!["the", "door"], text: "!report the door is stuck" });
+    run(&mut host, &mut world, &Event::PlayerJoin { client: 1, name: "Ann", steam_id: "", player_id: 1 });
+    run(&mut host, &mut world, &Event::PlayerLeave { client: 1, name: "Bo \"B\"", player_id: 1 });
+    run(&mut host, &mut world, &Event::Command { client: 1, name: "Ann", command: "report", args: vec!["the", "door"], text: "!report the door is stuck", player_id: 1 });
     assert_eq!(world.applied.len(), 1, "!report answered the asker");
     assert_eq!(server.hits(), 0, "nothing is sent before the tick");
     let pump = |host: &mut Host, world: &mut Mock, hits: usize| {

@@ -12,7 +12,16 @@
 //! (a `cdylib` for `wasm32-unknown-unknown` with `panic = "abort"` is a module of a few tens of
 //! kilobytes), or bring your own in a `no_std` plugin.
 //!
-//! ```ignore
+//! Also here: [`json`], a small JSON reader and writer for RPC arguments, rules and HTTP bodies,
+//! and (with the `testing` feature) `testing`, a mock host and a harness that run a plugin in
+//! plain `cargo test`, with no server and no WebAssembly.
+//!
+//! # Features
+//!
+//! - `std`: links the standard library. Nothing in the API needs it.
+//! - `testing`: the `testing` module. Turns `std` on. Use it as a dev-dependency only.
+//!
+//! ```
 //! use pcds_plugin_api::*;
 //!
 //! struct Hello;
@@ -29,6 +38,7 @@
 //! ```
 
 #![no_std]
+#![warn(missing_docs)]
 
 extern crate alloc;
 
@@ -37,13 +47,16 @@ pub mod codec;
 pub mod event;
 pub mod host;
 pub mod http;
+pub mod json;
 pub mod query;
+#[cfg(feature = "testing")]
+pub mod testing;
 
 pub use codec::{DecodeError, Reader, Writer};
 pub use event::{Event, Kind, Verdict};
 pub use host::{Error, Host, Level};
 pub use http::HttpRequest;
-pub use query::{PlayerInfo, WorldInfo};
+pub use query::{InventoryInfo, Nearby, ObjectInfo, ObjectRef, PlayerInfo, WorldInfo};
 
 #[cfg(target_arch = "wasm32")]
 pub use host::Wasm;
@@ -53,25 +66,36 @@ pub use host::Wasm;
 /// the server's own. Additive changes (a new event kind, a new host function, a field at the end
 /// of an event) raise the minor; anything else raises the major.
 pub const ABI_MAJOR: u32 = 1;
-pub const ABI_MINOR: u32 = 2;
+/// The minor part of `ABI`.
+pub const ABI_MINOR: u32 = 3;
+/// The ABI as one number: `major << 16 | minor`.
 pub const ABI: u32 = ABI_MAJOR << 16 | ABI_MINOR;
 
 /// What a plugin keeps across a restart, a reload and a hot update: opaque bytes the server
 /// stores with the world, and the version the plugin wrote them with (its own migrate hook is
 /// `load`: it gets the version of the bytes it is given).
 pub struct State<'a> {
+    /// The version the bytes were written with (`SavedState::version` of the call that saved them).
     pub version: u32,
+    /// The bytes `save` returned.
     pub bytes: &'a [u8],
 }
 
+/// The state a plugin hands back from `Plugin::save`.
 pub struct SavedState {
+    /// A number of the plugin's own choosing. `load` gets it back with the bytes, so a new
+    /// version of the plugin can tell old bytes from new ones and migrate them.
     pub version: u32,
+    /// The state itself. At most 1 MiB; empty means nothing to keep.
     pub bytes: alloc::vec::Vec<u8>,
 }
 
+/// A plugin. Implement it and call `export!` with the type.
 pub trait Plugin: Sized {
     /// Once when the plugin starts (a server start, a reload, or after a hot update): `state` is
-    /// what `save` returned last time, if anything.
+    /// what `save` returned last time, if anything. World queries (`world()`, `players()`,
+    /// `inventory()`...) work here: the host answers them from the world at that moment. A timer
+    /// set here starts counting at the first game tick after it.
     fn load(host: &dyn Host, state: Option<State<'_>>) -> Self;
 
     /// An event the manifest subscribed to. Keep it short: it has a fuel budget. Answer
@@ -86,8 +110,9 @@ pub trait Plugin: Sized {
 
     /// Once when the plugin is switched off, removed, or switched off for faults: the last call,
     /// with a budget (as `save`'s), after which the instance and its memory are dropped and `save`
-    /// is asked one more time. Nothing queued during it is applied. A reload (a new version taking
-    /// over) does not call it: `save` and the new version's `load` hand the state over. (ABI 1.1.)
+    /// is asked one more time. It has no `Host`: there is nothing to ask or to do then but tidy up
+    /// your own state. A reload (a new version taking over) does not call it: `save` and the new
+    /// version's `load` hand the state over. (ABI 1.1.)
     fn unload(&mut self) {}
 }
 
@@ -280,7 +305,7 @@ mod host_unavailable {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(feature = "std", test))]
 extern crate std;
 
 #[cfg(test)]
@@ -291,21 +316,23 @@ mod tests {
 
     fn samples() -> alloc::vec::Vec<Event<'static>> {
         vec![
-            Event::Tick { game_ms: 123_456, tick: 7, players: 3, since_ms: 1000 },
-            Event::PlayerJoin { client: 4, name: "Ann", steam_id: "76561198000000000" },
-            Event::PlayerLeave { client: 4, name: "Ann" },
-            Event::Chat { client: 9, name: "Bo", text: "hej på deg \u{1F680}" },
-            Event::Command { client: 9, name: "Bo", command: "tp", args: vec!["home", "now"], text: "!tp home now" },
-            Event::Command { client: 9, name: "Bo", command: "stats", args: vec![], text: "!stats" },
+            Event::Tick { game_ms: 123_456, tick: 7, players: 3, since_ms: 1000, unix_ms: 1_760_000_000_000 },
+            Event::PlayerJoin { client: 4, name: "Ann", steam_id: "76561198000000000", player_id: 76561198000000000 },
+            Event::PlayerLeave { client: 4, name: "Ann", player_id: 76561198000000000 },
+            Event::Chat { client: 9, name: "Bo", text: "hej på deg \u{1F680}", player_id: 5 },
+            Event::Command { client: 9, name: "Bo", command: "tp", args: vec!["home", "now"], text: "!tp home now", player_id: 5 },
+            Event::Command { client: 9, name: "Bo", command: "stats", args: vec![], text: "!stats", player_id: 5 },
             Event::RpcBefore { client: 1, rpc: "InventoriesHandler.Move", object: 77, args_json: "[1,2]" },
             Event::RpcAfter { client: 1, rpc: "InventoriesHandler.Move", object: 77, args_json: "[1,2]" },
-            Event::ObjectPlaced { id: -5, group: "Drill1", position: [1.0, -2.5, 3.25] },
-            Event::ObjectDestroyed { id: 5, group: "Drill1", position: [0.0, 0.0, 0.0] },
+            Event::ObjectPlaced { id: -5, group: "Drill1", position: [1.0, -2.5, 3.25], client: 3 },
+            Event::ObjectDestroyed { id: 5, group: "Drill1", position: [0.0, 0.0, 0.0], client: 0 },
             Event::WorldSaved { game_ms: 99, ok: true },
             Event::RuleChange { changes_json: "{\"speed.growth\":2}" },
             Event::HttpDone { ticket: 41, status: 204, error: "", body: &[], headers: vec![] },
             Event::HttpDone { ticket: 42, status: 200, error: "", body: b"{\"ok\":true}", headers: vec![("content-type", "application/json"), ("etag", "\"x\"")] },
             Event::HttpDone { ticket: 43, status: 0, error: "timed out", body: &[0, 255, 7], headers: vec![] },
+            Event::Timer { id: 7, game_ms: 99_000, late_ms: 12 },
+            Event::Flip { game_ms: 99_000, server_version: "0.9.0" },
         ]
     }
 
@@ -351,7 +378,7 @@ mod tests {
             x ^= x << 17;
             let len = (x % 48) as usize;
             let bytes: alloc::vec::Vec<u8> = (0..len).map(|i| (x >> (i % 8 * 8)) as u8).collect();
-            for k in 0..16 {
+            for k in 0..20 {
                 let _ = Event::decode(k, &bytes);
             }
         }
@@ -359,11 +386,11 @@ mod tests {
 
     #[test]
     fn query_answers_round_trip() {
-        let world = WorldInfo { game_ms: 5, planet: "Prime".to_string(), players: 2, world_objects: 9, network_objects: 11, terraformation: 1234.5, standing_still: true };
+        let world = WorldInfo { game_ms: 5, planet: "Prime".to_string(), players: 2, world_objects: 9, network_objects: 11, terraformation: 1234.5, standing_still: true, unix_ms: 1_760_000_000_000, command_prefix: "!".to_string() };
         let mut w = Writer::new();
         world.encode(&mut w);
         assert_eq!(WorldInfo::decode(&w.0).unwrap(), world);
-        let players = vec![PlayerInfo { client: 3, name: "Ann".to_string(), steam_id: String::new(), position: [1.0, 2.0, 3.0], gauges: [100.0, 90.0, 80.0, 0.0] }];
+        let players = vec![PlayerInfo { client: 3, name: "Ann".to_string(), steam_id: String::new(), position: [1.0, 2.0, 3.0], gauges: [100.0, 90.0, 80.0, 0.0], player_id: 77, operator: true }];
         let mut w = Writer::new();
         query::encode_players(&players, &mut w);
         assert_eq!(query::decode_players(&w.0).unwrap(), players);
@@ -371,8 +398,41 @@ mod tests {
     }
 
     #[test]
+    fn the_abi_1_3_queries_round_trip_and_short_answers_are_errors() {
+        use query::*;
+        let inventory = InventoryInfo { slots_used: 3, slots_total: 30, items: vec![ItemCount { group: "Iron".to_string(), count: 5 }, ItemCount { group: "ice".to_string(), count: 1 }] };
+        let mut w = Writer::new();
+        inventory.encode(&mut w);
+        assert_eq!(InventoryInfo::decode(&w.0).unwrap(), inventory);
+        assert_eq!(inventory.count("Iron"), 5);
+        assert_eq!(inventory.count("gold"), 0);
+        for cut in 0..w.0.len() {
+            assert!(InventoryInfo::decode(&w.0[..cut]).is_err());
+        }
+        let found = vec![Nearby { object: ObjectInfo { id: -4, net: 9, group: "Drill1".to_string(), position: [1.0, 2.0, 3.0] }, distance: 4.5 }];
+        let mut w = Writer::new();
+        encode_nearby(&found, &mut w);
+        assert_eq!(decode_nearby(&w.0).unwrap(), found);
+        assert!(decode_nearby(&[255, 255, 255, 255]).is_err());
+        let args = NearbyArgs { center: [1.0, 2.0, 3.0], radius: 50.0, max: 8 };
+        let mut w = Writer::new();
+        args.encode(&mut w);
+        assert_eq!(NearbyArgs::decode(&w.0).unwrap(), args);
+        for which in [ObjectRef::World(-12), ObjectRef::World(7), ObjectRef::Net(u64::MAX)] {
+            let mut w = Writer::new();
+            which.encode(&mut w);
+            assert_eq!(ObjectRef::decode(&w.0).unwrap(), which);
+        }
+        let settings = vec![("afk_minutes".to_string(), "10".to_string())];
+        let mut w = Writer::new();
+        encode_settings(&settings, &mut w);
+        assert_eq!(decode_settings(&w.0).unwrap(), settings);
+        assert!(decode_settings(&[255, 255, 255, 255]).is_err());
+    }
+
+    #[test]
     fn a_request_round_trips_and_a_bad_one_is_an_error_never_a_panic() {
-        let request = HttpRequest { method: "POST", url: "https://discord.com/api/webhooks/${secret.hook}", headers: vec![("Content-Type", "application/json"), ("X-Empty", "")], body: b"{\"content\":\"hi\"}" };
+        let request = HttpRequest { method: "POST", url: "https://discord.com/api/webhooks/${config.hook}", headers: vec![("Content-Type", "application/json"), ("X-Empty", "")], body: b"{\"content\":\"hi\"}" };
         let mut w = Writer::new();
         request.encode(&mut w);
         assert_eq!(HttpRequest::decode(&w.0).unwrap(), request);

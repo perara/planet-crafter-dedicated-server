@@ -8,7 +8,7 @@ is docs/architecture.md.
 ## The decision in ten lines
 
 1. **Logic that runs inside the world is a WebAssembly module**, a plain core module (no WASI, no
-   component model) with eight imports and nine exports, run by **wasmi**, an interpreter in
+   component model) with twelve imports and nine exports, run by **wasmi**, an interpreter in
    pure Rust. Rust, C, C++, Zig, AssemblyScript and TinyGo can all make one.
 2. **Small jobs are data**: a `rules.toml` of chat commands, welcome messages, announcements and
    rule switches that the host runs itself. No code, nothing to sandbox, nothing that can loop.
@@ -47,10 +47,12 @@ The game's clients are unmodified copies of The Planet Crafter. They have their 
 own recipes, their own idea of what exists. So a server-side plugin can do what the *server*
 decides:
 
-- **Can**: add chat commands and replies; react to joins, leaves, chat, builds, saves and rule
-  changes; read the world (time, players, positions, gauges, terraformation, object counts);
-  message, kick and move players; change the gameplay rules (`speed.*`, `gauges.*`, `limits.*`...);
-  refuse a client request; keep its own state; talk to the outside world through the event stream.
+- **Can**: add chat commands and replies (with a shape and a permission the host checks); react to joins,
+  leaves, chat, builds and who built them, saves, rule changes and hot updates; read the world (time, the wall
+  clock, players with a stable id and their positions and gauges, a player's backpack, the objects near a
+  point, terraformation, object counts); message, kick and move players; give items and Terra tokens; change the
+  gameplay rules (`speed.*`, `gauges.*`, `limits.*`...); refuse a client request; set timers; keep its own
+  state and read its own settings; talk to the outside world with `net.http` or through the event stream.
 - **Cannot**: add an item, a building or a recipe the client does not know (the client would
   craft it by its own tables and the server's answer would not match: that is what the parity rule
   forbids); draw a user interface in the game (chat and kick messages are the whole channel);
@@ -276,9 +278,9 @@ reader ignores bytes after the fields it knows.
 | `world_saved` | after a save | `event.world` | |
 | `rule_change` | the server rules changed | `event.world` | |
 
-Not built, described in the API's versioning as additive: `machine_cycle` (a machine finished a
-production), `flip` (the plugin was reloaded after a hot update: `Plugin::load` covers it today),
-`world_created`.
+Added in ABI 1.3: `timer` (a timer the plugin set is due) and `flip` (the world was handed over to a new
+server program). Not built, described in the API's versioning as additive: `machine_cycle` (a machine
+finished a production), `world_created`.
 
 **Queries** (capability `world.read`; read-only copies, taken at the moment of the call): the
 world (time, planet, players online, object counts, terraformation, whether it stands still), the
@@ -286,7 +288,8 @@ players (name, SteamID if verified, position, gauges), the rules that differ fro
 (without the chat, backup and access sections: those hold webhook URLs, keys and ban lists).
 
 **Actions** (queued, applied after the call, by the host): `say` and `tell` (`chat.say`), `kick`
-(`player.kick`), `teleport` (`player.teleport`), `rules_patch` (`rules.write`; only the `meteo`,
+(`player.kick`), `teleport` (`player.teleport`), `give` (`player.give`: items into a backpack, 50 at most in a call) and
+`tokens` (`world.tokens`: Terra tokens added or taken, 10,000 at most in a call), `rules_patch` (`rules.write`; only the `meteo`,
 `gauges`, `speed`, `death`, `loot`, `limits` and `world` rules: never `chat`, whose exec program
 would run code outside the sandbox, nor `backup`, nor `access`, nor `players`, nor `world.dlcPlanets`, which is
 the operator's statement of what they own). Each is checked again when
@@ -461,8 +464,10 @@ label begins with a letter), and one that reaches the resolver anyway is judged 
 becomes. `net.http.local` (asked for in the manifest, granted by the admin as its own line in the
 approval) opens loopback, the private ranges, link-local and shared address space, for a plugin
 whose job is the local network (a bridge on the same machine); unspecified, multicast, the
-reserved ranges and the cloud metadata addresses (169.254.169.254, 100.100.100.200, fd00:ec2::254:
-they hand out the machine's credentials) stay closed.
+reserved ranges and the cloud metadata addresses (169.254.169.254, 100.100.100.200, fd00:ec2::254,
+fd20:ce::254, Azure's WireServer 168.63.129.16, the container credentials of AWS ECS and EKS at
+169.254.170.2 and 169.254.170.23 and Tencent's 169.254.0.23: they hand out the machine's credentials
+or its extensions' secrets) stay closed, with or without the capability.
 
 **Limits that need no goodwill.** One wall clock from the lookup to the last byte (so a server
 that trickles one byte a second is let go: `timeout_ms`, 10 s by default, 30 s at most); the answer
@@ -537,6 +542,10 @@ The change is in `front/` and `admin.rs`, which a hot update does not replace: i
 | all plugins' ticks together | 2 ms per game tick | the rest wait for the next tick and take turns (`shed` counts) |
 | all plugins' saves in a hot update | 25 ms | a plugin not reached keeps the state of its last save |
 | actions | 16 per call, 200 per second per plugin | refused, counted |
+| gives, token changes | 10 and 2 a second per plugin; 50 items and 10,000 tokens at most in a call | refused (`-3`), counted |
+| timers | 16 per plugin, a repeat of 100 ms at least, seven days at most; 4 events per plugin per game tick | refused (`-2`, `-3`); the rest wait for the next tick |
+| `Q_NEARBY` | 8 fuel for each object in the world, 64 objects, 1000 units | the call runs out of fuel: a fault |
+| log kept, faults kept | 200 lines, 20 faults per plugin | the oldest go |
 | log lines | 20 per second per plugin, 240 characters | dropped, counted and said once a second |
 | a data plugin's rules file | 64 commands, 16 each of on_join and on_leave, 64 every, 32 when_players, 64 vars; a text 2000 bytes, a variable 1000 | not loaded (`invalid`, with the count) |
 | state | 1 MiB | a fault |
@@ -608,6 +617,49 @@ The change to the files another agent is rewriting is small and isolated in its 
 lines; now all the bank's calls into the host are in `bank/plugins_glue.rs`). If the snapshot becomes a binary format, `Saved` is `Serialize`/`Deserialize` and works in
 any serde format; only the hex text of the states (`state.rs`, `hex_blobs`) should become raw bytes.
 
+## Fault isolation: what a plugin can do to the server
+
+Each row is something a plugin (or a program of the plugin's author) can do, what the host does about it, and the test that does it.
+
+| A plugin... | The host | Test |
+|---|---|---|
+| loops for ever | stops the call when the fuel is spent (a fault); the other plugins in the round are called; five faults in 60 s switch it off | `plugins::tests::a_plugin_that_loops_forever_is_stopped_by_its_fuel_and_the_host_goes_on` |
+| recurses without end | a trap on the stack limit | `endless_recursion_ends_in_a_trap_and_the_plugin_goes_on` |
+| traps, divides by zero, panics (`unreachable`) | a fault, the instance is made again from the last saved state; the message names a Rust panic | `five_faults_in_a_minute_switch_the_plugin_off_until_it_is_reloaded`, `a_fault_says_what_ran_out...` |
+| grows its memory without end (a leak) | growth stops at `memory_pages` (the module sees -1); a module that needs more at its start does not start | `memory_is_limited_and_a_module_that_asks_for_too_much_does_not_start` |
+| names a pointer or a length outside its memory | a trap; the host never reads outside the module | `nonsense_answers_and_pointers_are_faults_not_crashes`, the generated modules below |
+| answers with nonsense (a pointer in `pcds_alloc`, a verdict that is none, state over the limit) | a fault | the same |
+| floods actions, log lines, HTTP requests, gives, tokens, timers | refused past the limit with a code, counted | `actions_are_bounded_per_call_and_applied_after_it`, `a_flood_is_limited_per_call_per_plugin_and_for_the_whole_server`, `give_and_tokens_check_their_arguments...`, `the_timer_calls_check...` |
+| asks for big buffers or scans the world over and over | the host's work is charged to the plugin's fuel | `a_host_call_with_a_megabyte_buffer_is_paid_for_in_fuel`, `a_scan_of_the_world_costs_fuel...` |
+| takes the whole tick | all plugins together get 2 ms of a tick; the rest take turns; a call over 5 ms is counted and logged | `a_crowd_of_plugins_cannot_stretch_a_tick_and_takes_turns` |
+| loops in `pcds_unload` or `pcds_save` | the call is bounded by the fuel of a save; the state of the last good save is kept | `a_hostile_unload_cannot_stop_the_unloading`, `the_flip_budget_leaves_a_slow_saver_with_its_last_state` |
+| is a file that is a pipe or a device | read as a regular file of bounded size or not at all | `a_plugin_folder_with_a_pipe_or_a_device_in_place_of_a_file_does_not_hold_the_host` |
+| triggers a bug in the host's own code (a panic in a host function or in the world's view) | that is the plugin's fault: it is caught around the call, the plugin is restarted, the game goes on | `a_panic_in_the_hosts_own_code_while_it_serves_a_plugin...` |
+| anything at all, generated | 300 random modules calling every host function with edge-case arguments, with random exports and capabilities: no panic of the host, no event over 0.5 s, a neighbouring plugin always answered | `fuzz_tests::generated_modules_calling_the_host_with_hostile_arguments...` |
+| reloads, switches off, is removed | a hundred reloads with 16 players chatting leave the same instances and (within a few pages) the same memory; a plugin switched off in the middle of a hot update keeps its state | `production_tests::a_hundred_reloads...`, `a_plugin_switched_off_while_the_world_is_handed_over...` |
+
+What is not contained: a panic in the game's own code when the host applies a plugin's action (a kick, a give) is the bank's to
+handle as any panic in the game is (the policy in `bank/panic.rs`: a client's request kicks the client, the tick ends the bank
+after a last save). A plugin cannot make one happen that a player or an admin could not; the actions go through the same code.
+
+## The upgrade story
+
+*A plugin changes.* A new version of an approved plugin is started first and replaces the old one only when it has started. The old one's
+`pcds_save` bytes go to the new one's `pcds_load(bytes, version)` with the version they were written with. The plugin owns its migration:
+`examples/plugins/playtime-board` writes version 2 and reads version 1 (its test loads version 1 bytes written byte by byte);
+`hello-stats` reads versions 1 and 2. A version that is newer than the plugin knows (a rollback) should log and start empty, not guess.
+If the new version cannot start, the old one keeps running and the listing says why. If it asks for more than was approved, the old one
+runs on and the dashboard and `pcds plugin enable` show what is new. Timers are not carried (set them in `load`).
+
+*The server changes.* The ABI's minor only adds: a module built for 1.0 runs on 1.3 and will run on 1.4 (`production_tests::a_module_built_for_any_older_minor...`
+loads one of each minor and refuses one of a newer minor and one of another major, with both versions in the message). A hot update hands the
+plugins' state over in the snapshot and tells the plugins that asked (`flip`); a release that changes the snapshot format is installed with a
+restart (the state is also in each plugin's file beside it, written at every world save, so nothing is lost). A release with another ABI
+major starts its plugins that do not fit as `incompatible`, and the world and the other plugins go on.
+
+*The state's file.* `plugins/<id>/data/<world>.state` holds the version and the bytes; removing the plugin removes it. It is the plugin's
+own format; the host never reads inside it.
+
 ## Parity and fairness
 
 - **Nothing the game does changes, with no plugin.** The events module adds calls that return at
@@ -629,12 +681,18 @@ any serde format; only the hex text of the states (`state.rs`, `hex_blobs`) shou
 | Task | Command | Also |
 |---|---|---|
 | list, with state, capabilities, cost | `pcds plugin list` | `GET /api/plugins`, dashboard "Plugins" |
-| make a plugin | `pcds plugin new ID [--kind wasm\|data]` | docs/plugins-guide.md |
-| check, with a test run on sample events | `pcds plugin check PATH_OR_ID` | |
-| install (copies the manifest and the entry; waits) | `pcds plugin install PATH [--force]` | |
+| make a plugin | `pcds plugin new ID [--kind wasm\|data] [--lang rust\|c]` | docs/plugins-guide.md |
+| check, with a test run on sample events and the fuel of each | `pcds plugin check PATH_OR_ID` | |
+| run it against made-up worlds (no game needed) | `pcds plugin test PATH [--scenario FILE]` | scenarios/*.toml |
+| the loop while writing | `pcds plugin watch PATH [--approve]` | installs each new build, keeps the state |
+| install (copies the manifest and the entry; waits) | `pcds plugin install SOURCE [--force]` | a folder, a `.pcdsplugin` file, an https address (`--sha256`), an index entry (`--index`) |
+| make and find packages | `pcds plugin pack DIR`, `pcds plugin search TERM --index SOURCE` | |
 | approve | `pcds plugin enable ID [--grant ...] [--yes]` | `POST /api/plugins/enable`, dashboard |
 | switch off | `pcds plugin disable ID` | `POST /api/plugins/disable`, dashboard |
 | read the folder again now; start one that failed | `pcds plugin reload` | `POST /api/plugins/reload`, dashboard (the bank also looks every 2 s by itself) |
+| a plugin's log | `pcds plugin logs ID [-n N] [-f]` | `POST /api/plugins/logs`, dashboard |
+| what each plugin costs, by event | `pcds plugin stats [ID]` | dashboard |
+| a plugin's settings | `pcds plugin config list\|set\|unset` | dashboard |
 
 For each plugin the listing shows: its state (`running`, `pending`, `disabled`, `changed`,
 `invalid`, `incompatible`, `failed`), the capabilities asked, granted and not granted, its limits,
@@ -684,12 +742,116 @@ asks for nothing more. Verification is of the files as they are, at every load a
   is announced the way any lost key is.
 - *No chain of keys, no expiry, no registry.* A key is trusted or it is not; rotating is trusting
   the new key and untrusting the old. A list of plugins somebody curates is a social problem before
-  a technical one and is not started; `pcds plugin install URL` for a release asset with a
-  published sha256 (as `pcds upgrade` does) is not either.
+  a technical one, and no list is run by this project; the file format a community can host
+  itself is described under "Sharing plugins" below.
 
 Plugins that are programs have no manifest and no capabilities; what they may do is what their token
 may do. The admin token may do everything, so a program should hold a **scoped token** instead
 (next section).
+
+## Sharing plugins
+
+A plugin is a folder. To give it to somebody it is either handed over as that folder or packed into one file,
+a **`.pcdsplugin` package**, and anyone can host that file anywhere. There is no store, no account and no server of
+this project in between: what is built is the smallest thing that lets the admin know what they are installing.
+
+*The package.* `pcds plugin pack DIR` writes `ID-VERSION.pcdsplugin`: a plain tar file (not compressed, sorted, no
+owners or times, so the same plugin always packs to the same bytes) with `plugin.toml`, the entry file, `plugin.sig` if
+the plugin is signed, `README.md`, the licence files and `scenarios/*.toml`. It prints the file's sha256, and the entry
+for an index. The package is read by this program itself, never by `tar`, and only regular files with plain names
+(letters, digits, `.`, `_`, `-`, at most one folder deep, `scenarios/`) are accepted: a link, a `..`, a name with a space,
+a file twice, more than 64 files, a file over 8 MiB or a package over 12 MiB is refused with the reason.
+
+*Installing.* `pcds plugin install SOURCE` takes a folder (as before), a package file, an https address of one, or the id
+of a plugin in an index (`--index`). A package from the Internet is shown first: the plugin's name, version, author and
+licence, where it came from, **its sha256**, whether it is signed and by whom (and whether that key is trusted here),
+and what it asks for. The admin pins it, or is asked:
+
+- `--sha256 HEX` says "this is the package I was told about": the download must have that hash, and nothing else is asked;
+- without it, a terminal answer (`y`) is asked for, or `--yes` is given: a package whose hash nobody checked is
+  never installed silently;
+- from an index, the index's hash is the pin, and the admin is asked as above, because the index is only as honest as who hosts it.
+
+Nothing runs at install. The plugin is `pending` like any other, and what it asks for is approved (or not) with
+`pcds plugin enable`, which shows the capabilities and the hosts it wants to reach, and, for a new version of a plugin that
+was approved before, **what is new** since the version that was approved. Only https addresses are fetched (plain http only
+for 127.0.0.1, which the tests use), at most 12 MiB, with a timeout. A package that asks for more than its index entry
+lists, or whose id or version differ from the entry's, is refused: an index that does not describe its packages is wrong or
+hostile.
+
+*The index.* `plugins-index.json` is a list of packages that a community can host as a file (a Git repository's raw file
+will do) and that `pcds plugin search TERM --index URL_OR_FILE` and `install ID --index ...` read. This program has no index of its
+own and no default address: nobody is made the registry of plugins by being first.
+
+```json
+{"format": 1, "name": "Planet Crafter community plugins",
+ "plugins": [{"id": "afk-guard", "name": "AFK guard", "version": "1.2.0", "description": "Kicks players who stand still",
+              "author": "Ann", "license": "MIT", "url": "afk-guard-1.2.0.pcdsplugin", "sha256": "ba78...(64 hex)",
+              "signer": "d6d9b10b298c53f9fe73f4c9d8570e69", "capabilities": ["event.player", "world.read", "player.kick"]}]}
+```
+
+`url` is an https address, or a path relative to the index's own address. An index is at most 4 MiB and 2000 entries and is
+read strictly (an unknown field is an error, so a typo is found). What an index entry says about trust is informational;
+what decides is the package: its own manifest, its signature, and the admin's approval.
+
+*What is not here.* No automatic updates and no checks for newer versions (`pcds plugin install ID --index ... --force` and
+`enable` are the update, and `watch` is for the author's own server). No ratings, no download counts, no review by the
+project: a package from an index has been looked at by nobody here. The honest advice is the one of any code you run: read
+what it asks for, prefer plugins that ask for little, prefer signed ones from a publisher you know, and keep a plugin that
+reaches the Internet to the hosts you recognise.
+
+## Writing a plugin: the licence
+
+The words here are the project's position, not legal advice, and no court has decided how a licence applies to
+WebAssembly.
+
+- **The API crate `pcds-plugin-api` is licensed MIT or Apache-2.0**, at your choice. It is what you link into your
+  plugin (`export!`, the codec, the `Host` trait, `testing`). Because it is permissive, linking it does not put your
+  plugin under the GPL: you may license your plugin as you like, open or closed, free or sold. Keep the crate's licence
+  and notices where the licence asks you to (they travel with the crate in the usual way).
+- **The server is GPL-3.0-or-later.** A plugin is, in the project's view, a separate work: it is a WebAssembly module run in
+  its own memory that exchanges bytes through twelve small functions, or a program in another process. The Free Software
+  Foundation's own FAQ treats a pipe, a socket or command-line arguments as normally between separate programs, and
+  says that exchanging complex internal data structures weighs towards one program; here nothing internal is exchanged. This
+  is why the interface is small, public and versioned.
+- **What would make a plugin part of the server:** copying the server's code into it (that is GPL), or a native library
+  loaded into the server's process (not offered, see "Why not each of the others").
+- **The example plugins** (`examples/plugins/`) are MIT and may be copied into your own, whatever your licence. The C header
+  `pcds.h` is MIT or Apache-2.0 like the crate.
+- **Game data.** A plugin must not carry or publish the game's files or tables (the README's rule for the server).
+- **What a user may do:** run any plugin they like next to the server. If you distribute a plugin together with a modified
+  server, the GPL's duties are for the server.
+
+If you want the question settled for your own plugin, ask the licence's author or a lawyer; the sentence above that the owner
+may add to the server's licence (an additional permission for plugins) is described under "Licensing".
+
+## Versions and what breaks
+
+Three numbers, and what each promises:
+
+| What | Looks like | Breaks a plugin when |
+|---|---|---|
+| plugin ABI | `1.3` (`pcds_abi` in the module, `abi = 1` in the manifest) | the **major** changes. The minor only adds |
+| the crate `pcds-plugin-api` | `0.2.0` | any `0.x` change may change a Rust signature; its minor follows the ABI's additions (ABI 1.3 is crate 0.2). From the day the ABI major is 2, the crate's major is 2 |
+| the server | `0.8.0` | never by itself: a plugin states the oldest server it needs (`min_server`) and the ABI it speaks |
+
+*A minor never breaks a plugin.* A server speaking 1.3 runs modules built for 1.0, 1.1, 1.2 and 1.3 (tests load one of each,
+and the new fields at the end of events are ignored by the old code). A module built for a newer minor than the server's is
+refused with both versions in the message: `built for plugin ABI 1.4; this server speaks 1.3`. The author rebuilds against an older
+crate, or the admin updates the server.
+
+*A major breaks, on purpose.* There is no shim, no deprecation period and no second reader of the old shape: a major
+bump (the plugin ABI, or the snapshot format, `handoff::FORMAT`) means plugins are rebuilt (and, for the snapshot, the server is
+restarted instead of hot-updated). The plugin is `incompatible` with a message that says so, and the world and the other plugins go on.
+
+*Rust and the crate.* The crate's `rust-version` (the MSRV) is **1.85**, the first with edition 2024, and is raised only with a
+crate minor, never in a patch. It is tested on the toolchains the maintainers have (1.92 and newer); 1.85 itself was not run.
+The crate has no dependencies and is `no_std` with `alloc`; a plugin built for `wasm32-unknown-unknown` with `panic = "abort"`
+is some tens of kilobytes.
+
+*Publishing.* The crate is not published to crates.io; its metadata, README, documentation and file list are ready
+(`cargo package --list`, `cargo doc` without warnings), and publishing it is the owner's decision. Until then a plugin
+takes it by path or by Git tag, which is what `pcds plugin new` writes.
 
 ## Scoped tokens
 
@@ -811,6 +973,52 @@ program that nobody asks for any of it pays: once a frame, `plugins::poll` tests
 out (one load of a counter when a host exists, one test of `None` when none does), and once a loop the
 bank compares two numbers for the stream's bell.
 
+## The performance budget (ABI 1.3)
+
+What a plugin costs, measured on the development machine (32 cores, a load of about 90 for the whole session). Since wall time on such a
+host mostly measures the queue, every figure below is **CPU time of the measuring thread**, the best of 3 to 5 rounds; the noise that is left (cache
+and hyper-thread neighbours) is about 40 microseconds on a tick, and the table says when a figure is under it. `make plugin-bench` prints all of
+this (`PCDS_BENCH_SAVE=world.json PCDS_BENCH_PLAYERS=16`, with the game tables).
+
+*One event through the host alone* (no game; a mock world):
+
+| Delivered to | time | per second |
+|---|---|---|
+| 1 module that does nothing | 0.40 us | 2.5 million |
+| 1 module that says a line (an action) | 0.54 us | 1.9 million |
+| 1 module that reads the world | 0.57 us | 1.7 million |
+| 10 modules, all wanting the event | 3.1 us | 0.32 million |
+| 10 modules, a tick each | 4.1 us | 0.25 million |
+| a command, with 10 modules owning one each | 0.51 us | 2.0 million |
+| 1 rules file, a command that replies | 0.75 us | 1.3 million |
+
+*The tick on a late-game world* (a save of a long game, 16 players; the game's own tick is 215 to 245 us there, 4 to 5 % of the 5 ms), with plugins called at
+**every** tick, which is the most a plugin can ask for:
+
+| Plugins | tick | added |
+|---|---|---|
+| 0 | 244 us | the reference |
+| 1 or 10 that do nothing | 226 and 225 us | under the noise (-18 and -20 us) |
+| 1 or 10 that read the world | 206 and 206 us | under the noise |
+| 50 that do nothing | 251 us | +6 us (0.13 % of the tick) |
+| 50 that read the world | 286 us | +42 us (0.83 % of the tick) |
+
+*The example plugins on that world*, each on its own interval (1 to 5 s): none of them, one of them, or all eight WebAssembly ones together change the tick by
+less than the noise (-31 to +13 us). A chat message that is a command (`!top`) with all eight installed costs 10.6 us in all; a deconstruct request that `claims`
+looks at, with no claim made, 1.5 us. `pcds plugin check` prints each example's fuel per event as a share of its budget; the dearest ordinary events are
+a tick of `afk-guard` or `quest-rewards` with 16 players online (100,000 to 230,000 fuel, 15 to 30 % of the budget they ask for) and `!claim` (110,000 fuel, 36 % of 300,000).
+
+*Nobody listening*: `events::tick` 0.50 ns a call against an empty loop's 0.33 ns; `events::rpc_before` 2.0 ns. The bench's fingerprint and the handoff comparison are equal with the plugin
+code compiled in and no plugin (below).
+
+*Starting a plugin*: reading, validating and translating a 44 KB module takes 1.8 ms (the whole module is translated when it is read, since ABI 1.3; the
+new bank does it before the world stops), a new instance 53 us. The idle scan of a folder of 10 plugins: 50 us every 2 s.
+
+*What this means for a server*: the cost of a plugin is its events. A call is about 0.4 us plus what the plugin does. Asking for the player list costs about
+6,000 fuel (2 us) for each player online, so ask for one player (`Host::player`) when you need one. All plugins together may spend 2 ms of a 5 ms tick; at most
+64 plugins are loaded, so do-nothing plugins (64 times 0.4 us) are nowhere near it, and the budget is for the plugin that does real work in every tick
+(`shed` counts the ticks it had to leave for the next).
+
 **Reproducing.** `make plugin-bench` prints the host's numbers (`PCDS_BENCH_SAVE=...` adds the tick
 cost on a world). The fingerprint and the handoff comparison are `make bench`. The engine
 comparison is `tools/plugin-engine-bench/` (two small programs; not part of the server's build,
@@ -828,8 +1036,9 @@ These are for the owner.
    workflows at once (docs/architecture.md, "Target: crates"). Do it with the refactors, or now?
 3. **Long-polling the stream in the front**: built (section "Long-polling the stream"), as a bell
    frame (`ipc::STREAM`) rather than the events themselves; it takes effect with a restart of the front.
-4. **Signed plugins**: built (section "Distribution, signing, permissions"). A list of them
-   somebody curates, and `pcds plugin install URL`, are not.
+4. **Signed plugins**: built (section "Distribution, signing, permissions"). `pcds plugin install URL`, the
+   `.pcdsplugin` package and the index file format are built (section "Sharing plugins"); a list somebody curates is not, and this
+   project will not host one unless the owner decides to.
 5. **Scoped tokens** for out-of-process plugins: built (section "Scoped tokens").
 6. **The component model.** Trigger: wasmi implements it, or a plugin appears that needs
    wasmtime's speed. Then a WIT file and `Runtime` for components.
@@ -846,3 +1055,19 @@ These are for the owner.
     compile to a thread is a small change; it was left out for its extra state.
 11. **`opt-level = "s"` for wasmi** (`[profile.release.package.wasmi]`) would save some of the
     2.2 MB for some speed; not measured.
+12. **Publishing `pcds-plugin-api`** to crates.io. It is ready (metadata, README, documentation without warnings, the file list); the
+    owner decides. Until then a plugin takes it by path or Git tag.
+13. **Read-only scopes for the status and the plugin listing.** A metrics exporter that wants the status or `GET /api/plugins` needs the admin token (the
+    status holds the access lists; the listing holds settings that are not secrets). The numbers a monitor needs are in `GET /api/metrics`
+    (scope `metrics.read`, with each plugin's cost by kind of event), so the example exporter only needs the stream.
+14. **What became of a queued action.** A plugin is not told that its `give` found a full backpack or that its `kick` found the player gone. An
+    `action_done` event (or a result in the next call) would make rewards exact; today a plugin looks first (`inventory`) and says what it
+    cannot know in its README.
+15. **A wall-clock timer.** Timers count game time, so a world that stands still delivers none, and a plugin about the wall clock (restart-notice)
+    re-arms its timers from `unix_ms`. A timer at a Unix time would remove that code, and also make the host deliver one while the world is held.
+16. **Known players who are offline.** `players()` lists the ones online; a plugin that wants to trust a name that is not online keeps its own
+    names. A query over the world's saved players would help `!trust` and `!pardon`.
+17. **Stream drops per consumer.** `dropped` is the ring's, not a reader's; a reader cannot tell whether it lost events.
+18. **A `rpc_before` carries no `player_id` or operator flag**: a plugin that vetoes asks `Host::player(client)` (a lookup, 5 to 10 times cheaper than
+    `players()`); putting both in the event would save the call.
+

@@ -41,7 +41,7 @@ pub fn unlock_globally(game: &mut Game, hash: i32, immediate: bool, popup: bool)
 /// the clients from the settings; the server has nothing to unlock for them.
 pub fn add_unlocked_groups(game: &mut Game) {
     let s = &game.data.singletons["GameSettingsHandler"];
-    let refs = |key: &str| -> Vec<serde_json::Value> { s[key].as_array().cloned().unwrap_or_else(|| vec![s[key].clone()]) };
+    let refs = |key: &str| -> Vec<crate::doc::Doc> { s[key].as_array().map(<[crate::doc::Doc]>::to_vec).unwrap_or_else(|| vec![s[key].clone()]) };
     let mut groups = Vec::new();
     for (setting, key) in [("unlockedOreExtrators", "groupsExtractors"), ("unlockedDrones", "groupDrones"), ("unlockedAutocrafter", "groupAutocrafter"), ("unlockedTeleporters", "groupTeleporters"), ("unlockedSpaceTrading", "groupSpaceTrading")] {
         if game.save.settings[setting].as_bool() == Some(true) {

@@ -1,0 +1,73 @@
+[plugin]
+id = "afk-guard"
+name = "AFK guard"
+version = "0.1.0"
+description = "Kicks players who are away from the keyboard and calls out players who take buildings apart too fast"
+authors = ["Planet Crafter dedicated server contributors"]
+license = "MIT"
+kind = "wasm"
+entry = "plugin.wasm"
+abi = 1
+capabilities = ["event.player", "event.object", "event.tick", "event.chat", "world.read", "chat.say", "player.kick"]
+
+[budget]
+fuel_per_event = 800000
+tick_every_ms = 5000
+
+[events]
+subscribe = ["player_join", "player_leave", "object_destroyed", "tick"]
+
+[[command]]
+name = "guard"
+help = "who is idle and who has strikes (operators)"
+usage = ""
+max_args = 0
+permission = "operator"
+
+[[command]]
+name = "pardon"
+help = "clear the strikes of a player (operators)"
+usage = "<player name>"
+min_args = 1
+permission = "operator"
+
+[[config]]
+key = "afk_minutes"
+description = "minutes without moving more than 1 unit before a player is kicked"
+type = "int"
+default = 15
+min = 1
+max = 240
+
+[[config]]
+key = "afk_warn_seconds"
+description = "seconds before the kick that the player is warned (at most half of afk_minutes)"
+type = "int"
+default = 60
+min = 0
+max = 600
+
+[[config]]
+key = "destroy_limit"
+description = "a player who destroys more objects than this inside the window gets a strike"
+type = "int"
+default = 25
+min = 1
+max = 500
+
+[[config]]
+key = "destroy_window_seconds"
+description = "the window of destroy_limit, in seconds"
+type = "int"
+default = 60
+min = 5
+max = 3600
+
+[[config]]
+key = "grief_action"
+description = "what happens besides the strike: warn (tell the player and the operators) or kick"
+type = "string"
+secret = false
+default = "warn"
+choices = ["warn", "kick"]
+max_len = 8

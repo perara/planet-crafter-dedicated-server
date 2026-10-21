@@ -164,7 +164,7 @@ fn run_one(tables: &Tables, names: &[String], data: &[u8], reset: u32) {
     STATE.with(|s| {
         let mut s = s.borrow_mut();
         if s.as_ref().is_none_or(|(_, n, _)| *n >= reset) {
-            *s = Some((world(tables, save()), 0, Vec::new()));
+            *s = Some((world(tables, base_save()), 0, Vec::new()));
         }
         let (g, n, history) = s.as_mut().unwrap();
         *n += 1;
@@ -190,6 +190,15 @@ fn run_one(tables: &Tables, names: &[String], data: &[u8], reset: u32) {
     });
 }
 
+/// `n` ticks of `dt` game seconds each, on the game's own clock.
+fn pass(g: &mut Game, n: usize, dt: f64) {
+    for _ in 0..n {
+        g.sim_time = Some(g.clock() + dt);
+        g.tick();
+        g.net.out.clear();
+    }
+}
+
 fn finite_world(g: &Game) -> Option<String> {
     let bad = |v: &[f32]| v.iter().any(|x| !x.is_finite());
     g.net.objects.values().find(|o| bad(&o.position) || bad(&o.rotation)).map(|o| format!("network object {} ({:?}) at {:?} {:?}", o.id, o.behaviours.iter().map(|b| b.class.as_str()).collect::<Vec<_>>(), o.position, o.rotation))
@@ -197,6 +206,11 @@ fn finite_world(g: &Game) -> Option<String> {
 }
 
 fn step(g: &mut Game, names: &[String], data: &[u8]) {
+    step_with(g, names, data, &mut |_| {});
+}
+
+/// `step`, telling `observe` what the game sent after each input (before it is dropped).
+fn step_with(g: &mut Game, names: &[String], data: &[u8], observe: &mut dyn FnMut(&Game)) {
     let trace = std::env::var_os("PCDS_FUZZ_TRACE").is_some();
     let mut c = Cur(data);
     let mut ops = 0;
@@ -281,16 +295,19 @@ fn step(g: &mut Game, names: &[String], data: &[u8]) {
                 }
                 g.receive(client, &wire::batch(&[(NETWORK_VARIABLE_DELTA, w.0)]));
             }
-            // Time passes; one client leaves and comes back.
+            // Time passes (on the game's clock: sim_time; `g.time += x` is overwritten by the tick, which
+            // reads the clock, so the game's timers never came due in this target); one client leaves and
+            // comes back.
             _ => {
-                g.time += c.u8() as f32 / 16.0;
-                g.tick();
+                let n = 1 + c.u8() as usize % 64;
+                pass(g, n, 0.2);
                 if c.u8() % 4 == 0 {
                     g.disconnect(2);
                     g.connect(2, None, false, Some("127.0.0.1".into()));
                 }
             }
         }
+        observe(g);
         g.net.out.clear();
         if trace {
             if let Some(what) = finite_world(g) {
@@ -302,3 +319,149 @@ fn step(g: &mut Game, names: &[String], data: &[u8]) {
 
 #[path = "savesweep.rs"]
 pub mod savesweep;
+
+
+/// The base world of the targets that want more than the two-player test world: PCDS_FUZZ_SAVE, a
+/// save of this server (a mid-game world, with machines, drones and logistics).
+fn base_save() -> SaveFile {
+    static TEXT: OnceLock<String> = OnceLock::new();
+    let text = TEXT.get_or_init(|| match std::env::var("PCDS_FUZZ_SAVE") {
+        Ok(p) => SaveFile::load(&p).expect("PCDS_FUZZ_SAVE").to_text(),
+        Err(_) => save().to_text(),
+    });
+    SaveFile::parse(text).expect("the base save")
+}
+
+/// A restored game goes on exactly as the one it was restored from: both are given the same
+/// inputs and the same ticks, and every message they send (to whom, which kind, which bytes) is the
+/// same, for a thousand ticks and more. The strongest check of a flip's exactness.
+pub fn twin(data: &[u8]) {
+    let (tables, names) = tables();
+    let mut c = Cur(data);
+    let split = c.u8() as usize % (data.len().max(1));
+    let (before, after) = data.split_at(split.min(data.len()));
+    let mut original = world(tables, base_save());
+    for chunk in before.chunks(24) {
+        step(&mut original, names, chunk);
+    }
+    let mut snapshot = Vec::new();
+    crate::handoff::snapshot_to(&mut original, &mut snapshot).unwrap_or_else(|e| panic!("a world cannot be snapshotted: {e}"));
+    let (nd, d, sp, sc) = tables.clone();
+    let mut restored = crate::handoff::restore_bytes(nd, d, sp, &snapshot, sc).unwrap_or_else(|e| panic!("a snapshot cannot be restored: {e}"));
+    if let Err(e) = crate::handoff::verify(&restored, &snapshot) {
+        panic!("a restored world differs from its snapshot: {e}");
+    }
+    // Both games read the same clock from here: the real one would tick them at different times.
+    let at = original.clock();
+    original.sim_time = Some(at);
+    restored.sim_time = Some(at);
+    let mut sent_original: Vec<(crate::net::Target, u32, Vec<u8>)> = Vec::new();
+    let mut sent_restored: Vec<(crate::net::Target, u32, Vec<u8>)> = Vec::new();
+    // Inputs from the rest of the data, then plain time: 1000 ticks in all.
+    let mut ticks = 0;
+    let chunks: Vec<&[u8]> = after.chunks(24).collect();
+    for round in 0..40 {
+        let chunk = chunks.get(round).copied().unwrap_or(&[]);
+        step_with(&mut original, names, chunk, &mut |g| sent_original.extend(g.net.out.iter().cloned()));
+        step_with(&mut restored, names, chunk, &mut |g| sent_restored.extend(g.net.out.iter().cloned()));
+        for _ in 0..25 {
+            let at = original.clock() + 0.2;
+            for (g, sent) in [(&mut original, &mut sent_original), (&mut restored, &mut sent_restored)] {
+                g.sim_time = Some(at);
+                g.tick();
+                sent.extend(g.net.out.drain(..));
+            }
+            ticks += 1;
+        }
+        if sent_original != sent_restored {
+            let at = sent_original.iter().zip(&sent_restored).position(|(a, b)| a != b).unwrap_or(sent_original.len().min(sent_restored.len()));
+            let show = |m: Option<&(crate::net::Target, u32, Vec<u8>)>| m.map(|m| format!("{:?} kind {} {:02x?}", m.0, m.1, &m.2[..m.2.len().min(48)]));
+            panic!("the restored game diverged after {ticks} ticks (round {round}): message {at} of {} and {}: {:?} against {:?}", sent_original.len(), sent_restored.len(), show(sent_original.get(at)), show(sent_restored.get(at)));
+        }
+        sent_original.clear();
+        sent_restored.clear();
+    }
+    // And their saves are the same world.
+    let (a, b) = (original.save_text(), restored.save_text());
+    if a != b {
+        let at = a.bytes().zip(b.bytes()).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
+        panic!("the saves of the original and the restored game differ at byte {at} of {} and {}: {:?} against {:?}", a.len(), b.len(), &a[at.saturating_sub(40)..(at + 40).min(a.len())], &b[at.saturating_sub(40)..(at + 40).min(b.len())]);
+    }
+}
+
+/// A save damaged one field at a time (a deleted or doubled entry, a field of another type, a
+/// reference to nothing): the load is a refusal or a game that ticks, saves and snapshots, never a
+/// panic. The base is a save of this server (PCDS_FUZZ_SAVE; the test world without it).
+pub fn loadsave(data: &[u8]) {
+    let (tables, _) = tables();
+    let mut save = base_save();
+    let mut c = Cur(data);
+    let values = [json!(null), json!(true), json!(-1), json!(0), json!(i64::MAX), json!(u64::MAX), json!(1.0e30), json!(f64::MIN), json!("x"), json!(""), json!("1,,2"), json!("1,1,1"), json!("99999999999"), json!("-5"), json!("nan,nan,nan"), json!("1e999,0,0"), json!([]), json!([1, 2]), json!({}), json!({"a": 1}), json!(2147483647), json!(-2147483648i64)];
+    let keys = ["id", "gId", "liId", "siIds", "liGrps", "pos", "rot", "planet", "liPlanet", "pnls", "color", "text", "grwth", "set", "trtInd", "trtVal", "hunger", "count", "linkedWo", "woIds", "size", "demandGrps", "supplyGrps", "priority", "name", "inventoryId", "equipmentId", "playerPosition", "playerRotation", "terraTokens", "unlockedGroups", "planetId", "stringId", "isRead", "owner", "seed", "mode", "worldSeed", "unitOxygenLevel", "playerGaugeOxygen", "host"];
+    for _ in 0..1 + c.u8() % 8 {
+        let section = c.u8() % 10;
+        let entries: &mut Vec<Value> = match section {
+            0 => &mut save.planets,
+            1 => &mut save.players,
+            2 | 3 | 4 | 5 => &mut save.objects,
+            6 | 7 => &mut save.inventories,
+            8 => &mut save.messages,
+            _ => &mut save.procedural,
+        };
+        let n = entries.len();
+        if n == 0 {
+            continue;
+        }
+        let i = c.pick(n);
+        match c.u8() % 8 {
+            0 => {
+                entries.remove(i);
+            }
+            1 => {
+                let copy = entries[i].clone();
+                entries.push(copy);
+            }
+            2 | 3 | 4 => {
+                let (key, value) = (keys[c.pick(keys.len())], values[c.pick(values.len())].clone());
+                if let Some(o) = entries[i].as_object_mut() {
+                    o.insert(key.to_string(), value);
+                }
+            }
+            5 => {
+                let key = keys[c.pick(keys.len())];
+                if let Some(o) = entries[i].as_object_mut() {
+                    o.shift_remove(key);
+                }
+            }
+            6 => entries[i] = values[c.pick(values.len())].clone(),
+            _ => {
+                let j = c.pick(n);
+                entries.swap(i, j);
+            }
+        }
+    }
+    if c.u8() % 5 == 0 {
+        let (key, value) = (keys[c.pick(keys.len())], values[c.pick(values.len())].clone());
+        for target in [&mut save.world, &mut save.stats, &mut save.settings] {
+            if c.u8() % 2 == 0 {
+                if let Some(o) = target.as_object_mut() {
+                    o.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+    }
+    // As the start does: the file, the layout, the content.
+    let Ok(save) = SaveFile::parse(&save.to_text()) else { return };
+    let (n, d, s, scenes) = tables.clone();
+    if crate::save::check_settings(&save.settings).is_err() || check_save_content(&save, &d, &n).is_err() {
+        return;
+    }
+    let mut g = Game::new(n, d, s, save, scenes);
+    pass(&mut g, 30, 0.2);
+    let text = g.save_text();
+    assert!(SaveFile::parse(&text).is_ok(), "a world loaded from a damaged save wrote a save that does not load");
+    let mut out = Vec::new();
+    if let Err(e) = crate::handoff::snapshot_to(&mut g, &mut out) {
+        panic!("a world loaded from a damaged save cannot be snapshotted: {e}");
+    }
+}

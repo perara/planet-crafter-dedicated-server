@@ -146,9 +146,10 @@ pub(super) fn verified() -> Option<Verified> {
 /// A backup file as a restore would read it: the layout, then the content against the tables.
 /// Returns its world objects.
 fn check_backup(path: &std::path::Path, data: &crate::gamedata::GameData, net: &crate::data::NetData) -> Result<usize, String> {
-    let save = save::SaveFile::load(&path.to_string_lossy()).map_err(|e| e.to_string())?;
+    let save = save::SaveFile::load_deferred(&path.to_string_lossy()).map_err(|e| e.to_string())?;
     crate::game::check_save_content(&save, data, net)?;
-    Ok(save.objects.len())
+    save.check_entries()?;
+    Ok(save.object_count())
 }
 
 /// After a backup was made: it is read back when the rule save.verifyBackups is on. The newest

@@ -1,0 +1,1 @@
+{"keys": [{"id": "d6d9b10b298c53f9fe73f4c9d8570e69", "publicKey": "0000000000000000000000000000000000000000000000000000000000000000", "name": "Acme", "grant": ["chat.say"], "addedAt": 1}], "revoked": [{"id": "x", "name": "Old", "at": 2}]}

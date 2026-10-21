@@ -73,7 +73,7 @@ fn explosive_type(name: Option<&str>) -> u8 {
 }
 
 pub fn init(game: &mut Game) {
-    let f = |c: &serde_json::Value, k: &str| c[k].as_f64().unwrap_or(0.0) as f32;
+    let f = |c: &crate::doc::Doc, k: &str| c[k].as_f64().unwrap_or(0.0) as f32;
     let mut e = Explode::default();
     for (i, g) in game.data.groups.iter().enumerate() {
         if let Some(c) = game.data.prefab_components(&g.id, "Explode").first() {
@@ -321,6 +321,8 @@ mod tests {
                 _ => {}
             }
             assert_eq!(g.ext.meteo.explode.live, found(&g), "after step {step}");
+            // The set a scan of what stands in the scene looks at holds every world object that has a network object.
+            assert!(g.wos.values().filter(|w| w.net.is_some()).all(|w| g.net_wos.contains(&w.id)), "net_wos after step {step}");
         }
         assert!(restored >= 3 && g.ext.meteo.explode.live <= g.wos.len());
     }

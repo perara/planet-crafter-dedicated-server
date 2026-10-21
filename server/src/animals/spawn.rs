@@ -9,6 +9,7 @@ use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Value};
 
 use super::{distance2, nearest, player_distance2};
+use crate::doc::Doc;
 use crate::clock::GameTime;
 use crate::data::{BehaviourDef, VarDef};
 use crate::game::{Args, Game};
@@ -89,7 +90,7 @@ impl Params {
         Params { distance: 200.0, hunger_rate: 0.1, hunger_eat: 25.0, feeder: None, feeder_range: 50.0, growth_rate: 0.01, growth_min: 30.0 }
     }
 
-    fn of(game: &Game, c: &Value) -> Params {
+    fn of(game: &Game, c: &Doc) -> Params {
         let f = |k: &str, d: f32| c[k].as_f64().map(|v| v as f32).unwrap_or(d);
         let d = Params::wild();
         Params {
@@ -189,13 +190,13 @@ fn random_color(game: &mut Game) -> [f32; 4] {
     [r, g, b, 1.0]
 }
 
-fn component<'a>(game: &'a Game, group: usize, ty: &str) -> Option<&'a Value> {
+fn component<'a>(game: &'a Game, group: usize, ty: &str) -> Option<&'a Doc> {
     game.data.prefab_components(&game.data.groups[group].id, ty).into_iter().next()
 }
 
 /// AnimalList: (species id, prefab name).
 pub(crate) fn animal_list(data: &crate::gamedata::GameData) -> Vec<(i32, String)> {
-    let list = data.asset("AnimalList:AnimalList").and_then(|a| a["animals"].as_array()).cloned().unwrap_or_default();
+    let list = data.asset("AnimalList:AnimalList").and_then(|a| a["animals"].as_array()).unwrap_or_default();
     list.iter().map(|a| (a["id"].as_i64().unwrap_or(0) as i32, a["prefab"].as_str().unwrap_or("").trim_start_matches("GameObject:").to_string())).collect()
 }
 
@@ -482,7 +483,7 @@ fn animal_layout(hash: u32, tick: i32) -> Layout {
     tail.bytes(&state.0);
     let animator = crate::world::hex(ANIMATOR_SYNC);
     tail.u16(ANIMATOR).i32(animator.len() as i32).bytes(&animator);
-    Layout { hash, flags: FLAGS, scale: [1.0; 3], behaviours, tail: tail.0, tail_position: Some(tail_position) }
+    Layout::new(hash, FLAGS, &behaviours, tail.0, Some(tail_position))
 }
 
 /// SpawnWorldObject: the sequence's animal, owned by `owner` (0: the first animal's owner, or
@@ -739,13 +740,13 @@ fn pet(game: &mut Game, client: u64, object: u64) {
 }
 
 /// GeneticTraitHandler.GetRandomGeneticTraitWithRarity.
-fn random_lootable_trait(game: &mut Game) -> Option<Value> {
-    let lootable: Vec<Value> = game.data.assets.iter().filter(|(k, v)| k.starts_with("GeneticTraitData:") && v["canBeLooted"].as_bool() == Some(true)).map(|(_, v)| (**v).clone()).collect();
+fn random_lootable_trait(game: &mut Game) -> Option<Doc> {
+    let lootable: Vec<&Doc> = game.data.assets.iter().filter(|(k, v)| k.starts_with("GeneticTraitData:") && v["canBeLooted"].as_bool() == Some(true)).map(|(_, v)| &**v).collect();
     if lootable.is_empty() {
         return None;
     }
     for _ in 0..1000 {
-        let t = &lootable[game.rng.range(0, lootable.len() as i32) as usize];
+        let t = lootable[game.rng.range(0, lootable.len() as i32) as usize];
         if game.rng.range(0, 100) as i64 >= t["lootChance"].as_i64().unwrap_or(0) {
             return Some(t.clone());
         }

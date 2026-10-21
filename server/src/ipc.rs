@@ -267,8 +267,8 @@ impl Link {
             return false;
         }
         self.inbox.drain(..std::mem::take(&mut self.taken));
-        // A burst of large frames left its room; given back once the inbox is empty.
-        if self.inbox.is_empty() && self.inbox.capacity() > (8 << 20) {
+        // A burst of large frames (a world joined) left its room; given back once the inbox is empty.
+        if self.inbox.is_empty() && self.inbox.capacity() > (1 << 20) {
             self.inbox = Vec::new();
         }
         let mut buf = std::mem::take(&mut self.scratch);

@@ -1,0 +1,51 @@
+[plugin]
+id = "restart-notice"
+name = "Restart notice"
+version = "0.1.0"
+description = "Warns the chat before the daily restart your own scheduler does, and tells about saves that failed and updates without a restart"
+authors = ["Planet Crafter dedicated server contributors"]
+license = "MIT"
+kind = "wasm"
+entry = "plugin.wasm"
+abi = 1
+# event.timer: the warnings are timers. world.read: the wall clock (a module has none of its own).
+capabilities = ["event.timer", "event.world", "event.chat", "world.read", "chat.say"]
+
+[budget]
+fuel_per_event = 150000
+
+[events]
+subscribe = ["world_saved", "flip"]
+
+[[command]]
+name = "restart"
+help = "how long until the next scheduled restart"
+max_args = 0
+
+[[config]]
+key = "restart_at"
+description = "time of the daily restart, HH:MM in UTC, as 04:00; empty: no scheduled restart"
+type = "string"
+secret = false
+default = ""
+max_len = 5
+
+[[config]]
+key = "warn_minutes"
+description = "minutes before the restart to warn at, up to 8 numbers of 1 to 1439, as 30,10,5,1; none: no warnings"
+type = "string"
+secret = false
+default = "15,5,1"
+max_len = 40
+
+[[config]]
+key = "announce_saves"
+description = "say World saved. in the chat at every successful save (a failed save is always told)"
+type = "bool"
+default = false
+
+[[config]]
+key = "announce_updates"
+description = "tell the chat when the server was updated to a new version without a restart"
+type = "bool"
+default = true

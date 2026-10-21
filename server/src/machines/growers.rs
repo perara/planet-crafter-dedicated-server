@@ -2,10 +2,12 @@
 //! manipulator, incubator), MachineGrowerVegetationStatic (vegetubes, spreaders, planters) and
 //! MachineGrowerVegetationHarvestable (vegetable growers, farms, algae).
 
-use serde_json::{json, Value};
+use serde_json::json;
 
 use super::{f32_of, group_of_game_object, group_ref, has_energy, is_active, is_full, items, net_has, remove_item, Game};
+use crate::doc::Doc;
 use crate::clock::GameTime;
+use crate::compact::Sym;
 use crate::geometry::MathRandom;
 use crate::net::{enc, Target};
 
@@ -136,20 +138,20 @@ pub fn tick(game: &mut Game, wo: i32, now: GameTime) {
         linked_grower_update(game, wo, now);
     }
     if convert_due {
-        game.ext.machines.get_mut(&wo).unwrap().converter = Some(now + 2.0);
+        game.ext.machines.get_mut(&wo).unwrap().parts_mut().converter = Some(now + 2.0);
         convert_if_fully_grown(game, wo);
     }
     match vegetation {
         Some(Coroutine::Waiting(t)) if now >= t => launch_growing(game, wo),
         Some(Coroutine::Growing(t)) if now >= t => {
-            let v = game.ext.machines.get_mut(&wo).unwrap().vegetation.as_mut().unwrap();
+            let v = game.ext.machines.get_mut(&wo).unwrap().parts_mut().vegetation.as_mut().unwrap();
             v.coroutine = Coroutine::Growing(now + v.interval);
             grow(game, wo);
         }
         _ => {}
     }
     if harvest_due {
-        let h = game.ext.machines.get_mut(&wo).and_then(|m| m.harvestable.as_mut()).unwrap();
+        let h = game.ext.machines.get_mut(&wo).and_then(|m| m.existing_parts_mut().and_then(|p| p.harvestable.as_mut())).unwrap();
         h.next = Some(now + h.interval);
         update_content_growth(game, wo);
     }
@@ -166,12 +168,12 @@ pub struct LinkedGrower {
 const LINKED_UPDATE_EVERY: f32 = 2.0;
 
 impl LinkedGrower {
-    pub fn refresh(&mut self, f: &Value) {
+    pub fn refresh(&mut self, f: &Doc) {
         self.rate = LinkedGrower::new(f, GameTime::ZERO).rate;
     }
 
     /// Awake: the update loop starts once the local player has (on the server: at once).
-    pub fn new(f: &Value, now: GameTime) -> LinkedGrower {
+    pub fn new(f: &Doc, now: GameTime) -> LinkedGrower {
         let time_to_grow = f32_of(f, "timeToGrow");
         LinkedGrower { next: now, rate: 100.0 / (time_to_grow * 60.0 / LINKED_UPDATE_EVERY) }
     }
@@ -183,7 +185,7 @@ fn linked_groups(game: &Game, wo: i32) -> Vec<usize> {
 
 /// MachineGrowerIfLinkedGroup.UpdateGrowth, every 2 s.
 fn linked_grower_update(game: &mut Game, wo: i32, now: GameTime) {
-    let g = game.ext.machines.get_mut(&wo).unwrap().linked_grower.as_mut().unwrap();
+    let g = game.ext.machines.get_mut(&wo).unwrap().parts_mut().linked_grower.as_mut().unwrap();
     g.next = now + LINKED_UPDATE_EVERY;
     let rate = g.rate;
     if !has_energy(game, wo) || !net_has(game, wo, "GrowthProxy") || !net_has(game, wo, "LinkedGroupsProxy") {
@@ -231,8 +233,8 @@ pub enum Coroutine {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Vegetation {
     random: MathRandom,
-    original: Vec<String>,
-    things: Vec<String>,
+    original: Vec<Sym>,
+    things: Vec<Sym>,
     grow_speed: f32,
     interval: f32,
     min_growth: f32,
@@ -242,15 +244,15 @@ pub struct Vegetation {
 impl Vegetation {
     /// The table's values, set again after a restore (machines::refresh_from_tables); what the
     /// seeds inside make it grow (things), the random sequence and the coroutine are state.
-    pub fn refresh(&mut self, f: &Value) {
+    pub fn refresh(&mut self, f: &Doc) {
         let fresh = Vegetation::new(f, 0, GameTime::ZERO);
         (self.original, self.grow_speed, self.interval, self.min_growth) = (fresh.original, fresh.grow_speed, fresh.interval, fresh.min_growth);
     }
 
     /// SetWorldObjectForGrower: the random sequence seeded by the world object id, the growth
     /// from the world object, then the first LaunchGrowingProcess (wait 2 s for init).
-    pub fn new(f: &Value, wo: i32, now: GameTime) -> Vegetation {
-        let things: Vec<String> = f["thingsToGrow"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+    pub fn new(f: &Doc, wo: i32, now: GameTime) -> Vegetation {
+        let things: Vec<Sym> = f["thingsToGrow"].as_array().into_iter().flatten().filter_map(Doc::as_str).map(Sym::new).collect();
         Vegetation {
             random: MathRandom::new(wo as u32),
             original: things.clone(),
@@ -271,11 +273,11 @@ fn update_things(game: &mut Game, wo: i32) {
         let Some(g) = game.wos.get(&item).map(|w| w.group) else { continue };
         if let Some(go) = group_ref(game, g, "growableGroup").and_then(|grown| game.data.groups[grown].fields["associatedGameObject"].as_str()) {
             if !things.iter().any(|t| t == go) {
-                things.push(go.to_string());
+                things.push(Sym::new(go));
             }
         }
     }
-    game.ext.machines.get_mut(&wo).unwrap().vegetation.as_mut().unwrap().things = things;
+    game.ext.machines.get_mut(&wo).unwrap().parts_mut().vegetation.as_mut().unwrap().things = things;
 }
 
 /// SetGrowerInventory.
@@ -289,7 +291,7 @@ pub fn vegetation_inventory_set(game: &mut Game, wo: i32) {
 /// LaunchGrowingProcess after the first: the growing loop restarts if there is something to grow.
 fn launch_growing(game: &mut Game, wo: i32) {
     let now = game.time;
-    let v = game.ext.machines.get_mut(&wo).unwrap().vegetation.as_mut().unwrap();
+    let v = game.ext.machines.get_mut(&wo).unwrap().parts_mut().vegetation.as_mut().unwrap();
     if v.interval <= 0.1 {
         v.interval = 0.1;
     }
@@ -302,7 +304,7 @@ fn grow(game: &mut Game, wo: i32) {
         return;
     }
     let multiplier = game.ext.machines.list[&wo].grow_multiplier;
-    let v = game.ext.machines.get_mut(&wo).unwrap().vegetation.as_mut().unwrap();
+    let v = game.ext.machines.get_mut(&wo).unwrap().parts_mut().vegetation.as_mut().unwrap();
     if v.things.is_empty() {
         return;
     }
@@ -355,25 +357,25 @@ pub struct Harvestable {
     /// From the tables, so not in a snapshot: `refresh` sets it again after a restore.
     #[serde(skip)]
     water_only: bool,
-    things: Vec<String>,
-    model_to_override: Option<String>,
+    things: Vec<Sym>,
+    model_to_override: Option<Sym>,
 }
 
 impl Harvestable {
-    fn water_only_of(f: &Value) -> bool {
+    fn water_only_of(f: &Doc) -> bool {
         f["allowedLayers"].as_i64() == Some(1 << 4)
     }
 
     /// What comes from the tables, set again after a restore (machines::refresh_from_tables):
     /// the flag a snapshot does not have, and the values it has from the release that wrote it,
     /// which this release may read differently. What is state (growings, next) stays.
-    pub fn refresh(&mut self, f: &Value) {
+    pub fn refresh(&mut self, f: &Doc) {
         let state = (self.second, std::mem::take(&mut self.growings), self.next);
         *self = Harvestable::new(f);
         (self.second, self.growings, self.next) = state;
     }
 
-    pub fn new(f: &Value) -> Harvestable {
+    pub fn new(f: &Doc) -> Harvestable {
         Harvestable {
             second: None,
             growings: Vec::new(),
@@ -386,14 +388,14 @@ impl Harvestable {
             spawn_on_this: f["spawnOnThis"].is_string(),
             down_value: f32_of(f, "downValue"),
             water_only: Self::water_only_of(f),
-            things: f["thingsToGrow"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect(),
-            model_to_override: f["modelToOverride"].as_str().map(str::to_string),
+            things: f["thingsToGrow"].as_array().into_iter().flatten().filter_map(Doc::as_str).map(Sym::new).collect(),
+            model_to_override: f["modelToOverride"].as_str().map(Sym::new),
         }
     }
 }
 
 fn harvestable(game: &mut Game, wo: i32) -> Option<&mut Harvestable> {
-    game.ext.machines.get_mut(&wo)?.harvestable.as_mut()
+    game.ext.machines.get_mut(&wo)?.existing_parts_mut()?.harvestable.as_mut()
 }
 
 /// Init (a frame after Awake, once the local player started): watch the second inventory,
@@ -445,7 +447,7 @@ pub fn second_inventory_modified(game: &mut Game, wo: i32, item: i32, added: boo
     let Some(net) = game.wos.get(&item).and_then(|w| w.net) else { return };
     let value = growth(game, item);
     // SetupObjectOverride: the item shows as another group.
-    if let Some(model) = harvestable(game, wo).and_then(|h| h.model_to_override.clone()) {
+    if let Some(model) = harvestable(game, wo).and_then(|h| h.model_to_override) {
         if let Some(g) = group_of_game_object(game, &model) {
             let hash = game.data.groups[g].hash;
             game.net.set(net, "GroupNetworkContainer", "_groupHashOverride", enc::int(hash));
@@ -705,6 +707,10 @@ mod tests {
         game.inventories_rpc(0, "InventoriesHandler.RemoveAndDestroyAllItemsFromInventoryServerRpc", &crate::game::Args(vec![json!(second)]));
         assert!(!game.wos.contains_key(&plant));
         assert!(game.net.objects.contains_key(&net), "the game sends no destroy for it");
+        // The plant is the machine's child: it goes with the machine, or it would stand in every join
+        // for a world object that is gone.
+        game.destroy_world_object(grower, true);
+        assert!(!game.net.objects.contains_key(&net), "the machine takes its plants along");
     }
 
     #[test]

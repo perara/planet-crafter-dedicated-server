@@ -6,8 +6,7 @@
 
 use std::collections::HashMap;
 
-use serde_json::Value;
-
+use crate::doc::Doc;
 use crate::game::Game;
 use crate::geometry::{conj, mul, q, rotate, sub, v3};
 
@@ -19,11 +18,11 @@ struct Volume {
     local_rotation: [f32; 4],
     root_position: [f32; 3],
     root_rotation: [f32; 4],
-    #[serde(with = "crate::bincodec::json_value")]
-    positioning: Value,
+    #[serde(with = "crate::doc::json")]
+    positioning: Doc,
     active: bool,
-    #[serde(with = "crate::bincodec::json_value")]
-    activators: Value,
+    #[serde(with = "crate::doc::json")]
+    activators: Doc,
     /// WaterVolume.ignoreForEnergyDetection: not water for IsUnderWater, still on the Water layer.
     ignored: bool,
     /// Moved by a SceneInterpolationFromStoryEvent: its world object, starting offset, eased.
@@ -74,9 +73,9 @@ fn load(game: &Game, planet: &str) -> Vec<Volume> {
 /// A scene object's state when its scene loads: active in the scene, and not hidden by its
 /// HideDependingOnTerraStage components (on it and its parents, "activators" in the dump),
 /// which decide once and can only hide (an inactive object runs none of its own).
-pub fn shown_at_load(game: &Game, object: &Value) -> bool {
+pub fn shown_at_load(game: &Game, object: &Doc) -> bool {
     let active = object["active"].as_bool().unwrap_or(true);
-    let activators = object["activators"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let activators = object["activators"].as_array().unwrap_or_default();
     active && !activators.iter().filter(|a| a["type"] == "HideDependingOnTerraStage").any(|a| {
         let f = &a["fields"];
         let (unit, start) = (stage_unit(game, &f["terraformStage"]), stage_value(game, &f["terraformStage"]).unwrap_or(0.0));
@@ -86,7 +85,7 @@ pub fn shown_at_load(game: &Game, object: &Value) -> bool {
 
 /// Whether a WorldUnitPositioning among the activators hides the object now (hideBefore /
 /// hideAfter, UpdateEvolutionPositioning).
-pub fn hidden_by_positioning(game: &Game, activators: &Value) -> bool {
+pub fn hidden_by_positioning(game: &Game, activators: &Doc) -> bool {
     activators.as_array().into_iter().flatten().filter(|a| a["type"] == "WorldUnitPositioning").any(|a| {
         let p = &a["fields"];
         let before = stage_value(game, &p["hideBefore"]).is_some_and(|start| (stage_unit(game, &p["hideBefore"]) as f32 as f64) < start);
@@ -95,11 +94,11 @@ pub fn hidden_by_positioning(game: &Game, activators: &Value) -> bool {
     })
 }
 
-fn stage_value(game: &Game, reference: &Value) -> Option<f64> {
+fn stage_value(game: &Game, reference: &Doc) -> Option<f64> {
     game.data.asset(reference.as_str()?)?["startValue"].as_f64()
 }
 
-fn stage_unit(game: &Game, reference: &Value) -> f64 {
+fn stage_unit(game: &Game, reference: &Doc) -> f64 {
     let unit = reference.as_str().and_then(|r| game.data.asset(r)).and_then(|s| s["unitType"].as_str()).and_then(crate::units::Kind::from_name);
     unit.map(|k| crate::units::value(game, k, 0)).unwrap_or(0.0)
 }
@@ -240,7 +239,7 @@ mod tests {
     #[test]
     fn story_interpolated_water_starts_offset_and_ends_at_its_scene_position() {
         let Some(mut g) = crate::game::test_game(crate::game::tests::save()) else { return };
-        let v = Volume { local_center: [0.0; 3], half: [1.0; 3], local_rotation: [0.0, 0.0, 0.0, 1.0], root_position: [10.0, 20.0, 30.0], root_rotation: [0.0, 0.0, 0.0, 1.0], positioning: Value::Null, active: true, activators: Value::Null, ignored: false, story: Some((123, [0.0, -400.0, 0.0], true)) };
+        let v = Volume { local_center: [0.0; 3], half: [1.0; 3], local_rotation: [0.0, 0.0, 0.0, 1.0], root_position: [10.0, 20.0, 30.0], root_rotation: [0.0, 0.0, 0.0, 1.0], positioning: Doc::Null, active: true, activators: Doc::Null, ignored: false, story: Some((123, [0.0, -400.0, 0.0], true)) };
         // Before the story event made its world object: the starting offset.
         assert_eq!(box_now(&g, &v).unwrap().0, [10.0, -380.0, 30.0]);
         let group = g.data.singletons["SceneInterpolationHandler"]["_interpolationGroup"].as_str().and_then(|r| g.data.group_of_ref(r)).unwrap();
@@ -264,8 +263,8 @@ mod tests {
         p.units[k].total = 10.0;
         volumes(&mut g);
         let planet = g.planet_id().to_string();
-        let positioning = serde_json::json!({"startTerraformStage": stage});
-        g.ext.water.planets.get_mut(&planet).unwrap().push(Volume { local_center: [0.0; 3], half: [5.0; 3], local_rotation: [0.0, 0.0, 0.0, 1.0], root_position: [570.0, 3.0, 500.0], root_rotation: [0.0, 0.0, 0.0, 1.0], positioning, active: true, activators: Value::Null, ignored: false, story: None });
+        let positioning = serde_json::json!({"startTerraformStage": stage}).into();
+        g.ext.water.planets.get_mut(&planet).unwrap().push(Volume { local_center: [0.0; 3], half: [5.0; 3], local_rotation: [0.0, 0.0, 0.0, 1.0], root_position: [570.0, 3.0, 500.0], root_rotation: [0.0, 0.0, 0.0, 1.0], positioning, active: true, activators: Doc::Null, ignored: false, story: None });
         let (generator, _) = crate::testkit::place(&mut g, "EnergyGenerator1", [570.0, 1.0, 500.0]);
         assert_eq!(g.wos[&generator].energy, 0.0);
         assert!(crate::energy::energy_group_data(&g).iter().all(|e| e[0] != serde_json::json!(g.data.groups[g.wos[&generator].group].hash)));
@@ -275,8 +274,8 @@ mod tests {
     fn an_inactive_object_stays_hidden_whatever_its_activators() {
         let Some(g) = crate::game::test_game(crate::game::tests::save()) else { return };
         let positioning = serde_json::json!([{"type": "WorldUnitPositioning", "fields": {}}]);
-        assert!(!shown_at_load(&g, &serde_json::json!({"active": false, "activators": positioning})));
-        assert!(shown_at_load(&g, &serde_json::json!({"active": true, "activators": positioning})));
+        assert!(!shown_at_load(&g, &serde_json::json!({"active": false, "activators": positioning}).into()));
+        assert!(shown_at_load(&g, &serde_json::json!({"active": true, "activators": positioning}).into()));
     }
 
     #[test]

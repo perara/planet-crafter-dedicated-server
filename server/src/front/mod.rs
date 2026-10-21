@@ -62,6 +62,8 @@ mod history;
 mod metrics;
 mod ops;
 mod prometheus;
+#[cfg(any(fuzzing, pcds_corpus))]
+pub use prometheus::fuzz as fuzz_prom;
 mod queue;
 mod snapshot;
 mod status;
@@ -96,7 +98,7 @@ pub const BOOT_FAILED: i32 = 75;
 pub const LOAD_DEADLINE: Duration = Duration::from_secs(120);
 
 /// The front's frame while it is quiet (Front::quiet): a request on the admin API waits for it.
-const IDLE_FRAME: Duration = Duration::from_millis(20);
+const IDLE_FRAME: Duration = Duration::from_millis(50);
 /// Kicked: the reason first, the connection closed this much later.
 const KICK_DELAY: Duration = Duration::from_millis(300);
 /// More crashes than this within CRASH_WINDOW and the front gives up (systemd restarts it).
@@ -161,6 +163,7 @@ pub fn run(args: &[String]) {
         error!("usage: pcds serve DATA_DIR SAVE.json (settings are environment variables: docs/env.md; 'pcds run' is what the service runs)");
         std::process::exit(2);
     };
+    crate::util::fix_malloc_threshold();
     crate::logging::start("front", &crate::config::installation_file(&crate::env, save, "rules.json"));
     // Settings that are not what they should be stop the start, before anything is opened.
     if let Err(e) = crate::config::check_env(crate::env) {

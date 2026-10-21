@@ -1,0 +1,52 @@
+name = "quests: the world milestone, a hot update, an hour of play, !rewards"
+
+[config]
+world_milestones = "500,5000"
+
+[[player]]
+client = 1
+name = "Root"
+operator = true
+
+[[player]]
+client = 2
+name = "Ann"
+
+# Buildings are counted from the build request heard AFTER it ran (rpc_after); the scenario runner
+# can only send rpc_before, so the building milestones are tested in the unit tests (cargo test).
+# This step shows that a request about to run, not yet run, pays nothing.
+[[step]]
+note = "a build request that has not run yet counts for nothing"
+rpc = { client = 2, name = "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc", args = "[1,[0,0,0]]" }
+expect = [{ give = 2, count = 0 }, { tokens = true, count = 0 }]
+
+[[step]]
+note = "the sim's terraformation is 1000: the world milestone 500 is passed at the first look (every 30 s), 5000 is not"
+advance = "31s"
+expect = [
+  { say = true, equals = "World milestone: terraformation passed 500! The colony receives 500 Terra tokens.", count = 1 },
+  { tokens = true, equals = "500", count = 1 },
+]
+
+[[step]]
+note = "a hot update: what was paid is remembered (the host's count of token changes starts again too)"
+flip = true
+
+[[step]]
+note = "an hour of play: both players earn it"
+advance = "1h"
+expect = [
+  { give = 1, equals = "10 Iron", count = 1 },
+  { give = 2, equals = "10 Iron", count = 1 },
+  { tokens = true, equals = "100", count = 2 },
+  { tell = 2, equals = "Quest reward for 1 hour of play: +10 Iron, +100 Terra tokens.", count = 1 },
+  { say = true, count = 0 },
+]
+
+[[step]]
+chat = { client = 2, text = "!rewards" }
+expect = [
+  { tell = 2, equals = "You have placed 0 buildings and played 1h 00m. Milestones done: 1 of 6." },
+  { tell = 2, equals = "Next: your first building (1 more), 10 hours of play (8h 59m more). Each gives +10 Iron, +100 Terra tokens." },
+  { tell = 2, equals = "World: terraformation 1000; the next milestone is 5000." },
+]

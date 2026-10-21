@@ -465,6 +465,40 @@ fn the_world_moves_between_banks_with_nobody_disconnected() {
 /// A stop whose save fails (the save's path made a folder): the bank keeps the world as a
 /// snapshot beside the save and ends with 1, the front says so and ends with 1, and the next
 /// start runs that snapshot.
+/// How often the threads of a process gave up the processor to wait (the kernel's count of their
+/// voluntary context switches): each is a wake-up of the server, and an idle one costs a few
+/// microseconds of the processor each, on a processor that was asleep.
+fn voluntary_switches(pid: u64) -> u64 {
+    let status = |t: std::fs::DirEntry| std::fs::read_to_string(t.path().join("status")).ok();
+    std::fs::read_dir(format!("/proc/{pid}/task")).map(|d| d.flatten().filter_map(status).map(|s| s.lines().find_map(|l| l.strip_prefix("voluntary_ctxt_switches:")?.trim().parse::<u64>().ok()).unwrap_or(0)).sum()).unwrap_or(0)
+}
+
+/// An idle server (nobody connected, nothing under way) wakes up rarely: the front 20 times a
+/// second at most (its 50 ms quiet frame), the bank 200 (the 5 ms frame of the game's loop). The
+/// budgets of docs/performance.md; a thread that polls, or a frame made shorter, shows here.
+#[test]
+fn an_idle_server_wakes_up_within_its_budget() {
+    let Some(data) = tables() else { return };
+    let dir = std::env::temp_dir().join(format!("pcds-idle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(Command::new(PCDS).arg("new-save").arg(dir.join("world.json")).arg(&data).stdout(Stdio::null()).status().unwrap().success());
+    let banks = banks(&dir);
+    let server = start_with(Path::new(PCDS), &dir, &data, &banks, "http://127.0.0.1:9/releases", false);
+    let (front, bank) = (u64::from(server.child.id()), server.live()["pid"].as_u64().expect("a live bank"));
+    // The start is over: the tables are loaded, the first frames have run.
+    std::thread::sleep(Duration::from_secs(4));
+    let (f0, b0, t0) = (voluntary_switches(front), voluntary_switches(bank), Instant::now());
+    std::thread::sleep(Duration::from_secs(6));
+    let secs = t0.elapsed().as_secs_f64();
+    let (f, b) = ((voluntary_switches(front) - f0) as f64 / secs, (voluntary_switches(bank) - b0) as f64 / secs);
+    println!("idle: the front wakes up {f:.1} times a second, the bank {b:.1}");
+    assert!(f <= 40.0, "an idle front woke up {f:.0} times a second, the budget is 40 (docs/performance.md)");
+    assert!(b <= 260.0, "an idle bank woke up {b:.0} times a second, the budget is 260 (docs/performance.md)");
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_stop_whose_save_fails_keeps_the_world() {
     let Some(data) = tables() else { return };

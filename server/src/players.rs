@@ -51,7 +51,7 @@ pub fn player_data(client: u64, name: &str, light: (bool, i16), backpack: i16, j
 impl Game {
     /// PlayerMainController._joiningPlayersInventory, one entry per item, in the game's order.
     fn joining_kit(&self) -> Vec<usize> {
-        let dumped = self.data.singletons["PlayerMainController"]["_joiningPlayersInventory"].as_array().cloned();
+        let dumped = self.data.singletons["PlayerMainController"]["_joiningPlayersInventory"].as_array();
         let pairs: Vec<(String, i64)> = match dumped {
             Some(pairs) => pairs.iter().filter_map(|p| Some((self.data.assets.get(p[0].as_str()?)?["id"].as_str()?.to_string(), p[1].as_i64()?))).collect(),
             // As the 2.103 server gave it (before the data dump carried dictionaries).
@@ -202,7 +202,7 @@ impl Game {
             self.saved_players.retain(|p| p["id"].as_u64() != Some(state.id));
             self.saved_players.push(entry);
             self.net.rpc_scene(Target::Except(c.id), "ChatHandler.ReceiveServicePlayerLeftMessageClientRpc", &[json!(state.name)]);
-            crate::events::player_left(self, c.id, &state.name);
+            crate::events::player_left(self, c.id, &state.name, state.id);
         }
         if let Some(object) = c.player {
             self.net.despawn(object);

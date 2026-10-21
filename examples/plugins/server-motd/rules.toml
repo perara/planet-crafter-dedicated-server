@@ -1,0 +1,52 @@
+# A message of the day, the rules and rotating tips, all data: no code runs, nothing can loop.
+# Edit the texts, then `pcds plugin install . --force` (or watch: pcds plugin watch . --approve).
+# A text may use {name} {client} {players} {planet} {time} {args} {arg1} {arg2} {arg3} and your [vars].
+
+[vars]
+discord = "https://discord.gg/your-invite"
+admin = "ask in the chat or on Discord"
+
+# Each player who joins is told the message of the day, in three lines (said to that player only).
+[[on_join]]
+tell = "Welcome to the server, {name}! {players} online on {planet}."
+
+[[on_join]]
+tell = "!rules has the rules, !motd repeats this, !help lists the commands."
+
+[[on_join]]
+tell = "Today: the new base area is open east of the landing pod. Chat and events: {discord}"
+
+[[command]]
+name = "motd"
+reply = "Today: the new base area is open east of the landing pod. Chat and events: {discord}"
+cooldown_seconds = 10
+
+[[command]]
+name = "rules"
+reply = "1. Be kind. 2. Do not take apart what others built. 3. {admin} when unsure."
+cooldown_seconds = 10
+
+[[command]]
+name = "help"
+reply = "Commands: !motd !rules !help !online. More on {discord}"
+cooldown_seconds = 10
+
+[[command]]
+name = "online"
+say = "{name} asks: {players} players on {planet} after {time}"
+cooldown_seconds = 30
+
+# Tips rotate: the first, the second, the third, the first again. Not said to an empty server.
+[[every]]
+seconds = 600
+min_players = 1
+say = [
+  "Tip: a Container next to a Drill collects what it mines.",
+  "Tip: water and oxygen run down while you work; keep a bottle and a capsule in the backpack.",
+  "Tip: the terraformation index rises with every plant and machine you keep running.",
+]
+
+[[every]]
+seconds = 1800
+min_players = 1
+say = "Join the community: {discord}"

@@ -216,7 +216,14 @@ fn a_start_falls_back_to_the_other_bank() {
     assert_eq!(out.status.code(), Some(0), "{said}");
     let unit = std::fs::read_to_string(units.join("pcds-cli-itest.service")).unwrap();
     assert!(unit.contains("TimeoutStopSec=60") && !unit.contains("KillMode") && !said.contains("written again"), "{unit}\n{said}");
-    let restarted = pcds(&dir, &fake, &["restart"]);
+    // restart puts this release into the banks first, and for that the program has its library and
+    // page beside it (a test binary has not: a copy that has).
+    let prog = dir.join("prog");
+    std::fs::create_dir_all(prog.join("web")).unwrap();
+    std::fs::copy(PCDS, prog.join("pcds")).unwrap();
+    std::fs::write(prog.join("libsteam_api.so"), "x").unwrap();
+    std::fs::write(prog.join("web/index.html"), "<html></html>").unwrap();
+    let restarted = pcds_at(&prog.join("pcds"), &dir, &fake, &["restart"]);
     let unit = std::fs::read_to_string(units.join("pcds-cli-itest.service")).unwrap();
     assert!(unit.contains("KillMode=mixed") && unit.contains("TimeoutStopSec=90") && unit.contains("\nNoNewPrivileges=yes\n") && unit.contains("\nProtectSystem=strict\n") && text(&restarted).contains("written again"), "{unit}\n{}", text(&restarted));
     assert!(said.contains("bank a could not start the world: its front (pcds 9.0.0) ended without running it (exit 75") && said.contains("Starting bank b"), "{said}");
@@ -458,10 +465,10 @@ fn a_plugin_is_made_checked_installed_approved_and_listed_without_a_server() {
     assert!(out.status.success(), "{}", text(&out));
     assert!(work.join("demo/plugin.toml").is_file() && work.join("demo/rules.toml").is_file());
     let out = plugin(&dir, &work, &["check", "demo"]);
-    assert!(out.status.success() && text(&out).contains("command sample: ok"), "{}", text(&out));
+    assert!(out.status.success() && text(&out).contains("command !hello sample: ok"), "{}", text(&out));
     // From inside the folder, as the guide does.
     let out = plugin(&dir, &work.join("demo"), &["check", "."]);
-    assert!(out.status.success() && text(&out).contains("command sample: ok"), "{}", text(&out));
+    assert!(out.status.success() && text(&out).contains("command !hello sample: ok"), "{}", text(&out));
     let out = plugin(&dir, &work, &["install", "demo"]);
     assert!(out.status.success() && text(&out).contains("it does nothing until you approve it"), "{}", text(&out));
     assert!(dir.join("run/plugins/demo/plugin.toml").is_file() && !dir.join("run/plugins/approved.json").exists());
@@ -500,13 +507,12 @@ fn the_wasm_template_builds_against_the_api_crate() {
     let out = plugin(&dir, &work, &["new", "my-plugin", "--api-path", api.to_str().unwrap()]);
     assert!(out.status.success(), "{}", text(&out));
     let made = work.join("my-plugin");
-    for f in ["Cargo.toml", "plugin.toml", "src/lib.rs", ".cargo/config.toml", "README.md"] {
+    for f in ["Cargo.toml", "plugin.toml", "src/lib.rs", "Makefile", "scenarios/basic.toml", "README.md"] {
         assert!(made.join(f).is_file(), "{f}");
     }
     let toml = std::fs::read_to_string(made.join("Cargo.toml")).unwrap();
     assert!(toml.contains("name = \"my_plugin\"") && toml.contains("pcds-plugin-api = { path = "), "{toml}");
     // The template compiles (for this machine: the wasm target is not needed to know it is right).
-    std::fs::remove_dir_all(made.join(".cargo")).unwrap();
     let check = Command::new("cargo").args(["check", "--offline", "--manifest-path"]).arg(made.join("Cargo.toml")).env("CARGO_TARGET_DIR", dir.join("target")).output().unwrap();
     assert!(check.status.success(), "{}", text(&check));
     // The id must be one.
@@ -694,5 +700,186 @@ fn backup_commands_say_what_to_do_when_there_is_nothing() {
     assert!(text(&out).contains("the game tables are needed to load a world"), "{}", text(&out));
     assert!(text(&pcds(&dir, &fake, &["backup", "fetch"])).contains("no bucket: set the rules backup.s3Endpoint"));
     assert!(text(&pcds(&dir, &fake, &["backup", "nonsense"])).contains("pcds backup list"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ---- sharing and developing plugins ---------------------------------------------------------------
+
+/// A tiny HTTP server on 127.0.0.1 (a port from 8580 to 8599) that serves these files, for the install-by-address tests.
+/// It stops when the guard is dropped.
+struct Files {
+    port: u16,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for Files {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+    }
+}
+
+fn serve(files: Vec<(&'static str, Vec<u8>)>) -> Files {
+    use std::io::{Read, Write};
+    let listener = (8580..8600).find_map(|p| std::net::TcpListener::bind(("127.0.0.1", p)).ok()).expect("a free port from 8580 to 8599");
+    let port = listener.local_addr().unwrap().port();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = stop.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let Ok(mut stream) = stream else { continue };
+            let mut buf = [0u8; 2048];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let path = request.split_whitespace().nth(1).unwrap_or("/").to_string();
+            match files.iter().find(|(p, _)| *p == path) {
+                Some((_, body)) => {
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                    let _ = stream.write_all(body);
+                }
+                None => {
+                    let _ = write!(stream, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                }
+            }
+        }
+    });
+    Files { port, stop }
+}
+
+#[test]
+fn a_new_plugin_of_each_kind_has_its_files_and_a_data_one_passes_its_own_scenario() {
+    let dir = test_dir("plugin-new");
+    let work = dir.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let api = Path::new(env!("CARGO_MANIFEST_DIR")).join("../plugin-api");
+    for (args, files) in [
+        (vec!["new", "w-rust", "--api-path", api.to_str().unwrap()], vec!["plugin.toml", "Cargo.toml", "src/lib.rs", "Makefile", "justfile", "scenarios/basic.toml", ".gitignore", "README.md"]),
+        (vec!["new", "w-c", "--lang", "c"], vec!["plugin.toml", "plugin.c", "pcds.h", "Makefile", "scenarios/basic.toml", "README.md"]),
+        (vec!["new", "w-data", "--kind", "data"], vec!["plugin.toml", "rules.toml", "scenarios/basic.toml", "README.md"]),
+    ] {
+        let out = plugin(&dir, &work, &args);
+        assert!(out.status.success(), "{}", text(&out));
+        let folder = work.join(args[1]);
+        for f in &files {
+            assert!(folder.join(f).is_file(), "{} lacks {f}", args[1]);
+        }
+        // No placeholder is left in any file.
+        for f in files {
+            let t = std::fs::read_to_string(folder.join(f)).unwrap();
+            assert!(!t.contains("{id}") && !t.contains("{crate}") && !t.contains("{api}"), "{}/{f}", args[1]);
+        }
+    }
+    // The Rust template builds the exact way the guide says (cargo build --target wasm32-unknown-unknown --release) when the target is there.
+    assert!(std::fs::read_to_string(work.join("w-rust/Makefile")).unwrap().contains("cargo build --target wasm32-unknown-unknown --release"));
+    assert!(std::fs::read_to_string(work.join("w-rust/Cargo.toml")).unwrap().contains("opt-level = \"z\""));
+    // The data template passes its scenario in the real host; a wrong word in it fails with the line that is wrong.
+    let out = plugin(&dir, &work, &["test", "w-data"]);
+    assert!(out.status.success() && text(&out).contains("1 scenarios passed"), "{}", text(&out));
+    let scenario = work.join("w-data/scenarios/basic.toml");
+    let wrong = std::fs::read_to_string(&scenario).unwrap().replace("Hello Ann!", "Goodbye");
+    std::fs::write(&scenario, wrong).unwrap();
+    let out = plugin(&dir, &work, &["test", "w-data"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("FAILED: step 2") && text(&out).contains("Hello Ann!"), "{}", text(&out));
+    // A mistyped key in a scenario or a manifest names the key that was meant.
+    std::fs::write(&scenario, "name = \"x\"\n[[step]]\nchatt = { client = 1, text = \"hi\" }\n").unwrap();
+    assert!(text(&plugin(&dir, &work, &["test", "w-data"])).contains("did you mean `chat`"));
+    let manifest = work.join("w-data/plugin.toml");
+    let bad = std::fs::read_to_string(&manifest).unwrap().replace("capabilities = [\"event.chat\"", "capabilities = [\"event.chatt\"");
+    std::fs::write(&manifest, bad).unwrap();
+    let out = plugin(&dir, &work, &["check", "w-data"]);
+    assert!(text(&out).contains("did you mean `event.chat`"), "{}", text(&out));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_package_is_made_pinned_installed_found_in_an_index_and_a_changed_one_is_refused() {
+    let dir = test_dir("plugin-pack");
+    let work = dir.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    assert!(plugin(&dir, &work, &["new", "greeter", "--kind", "data"]).status.success());
+    let out = plugin(&dir, &work, &["pack", "greeter", "--out", "greeter.pcdsplugin"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let sha = text(&out).lines().find_map(|l| l.strip_prefix("sha256 ")).unwrap().trim().to_string();
+    let package = work.join("greeter.pcdsplugin");
+    let bytes = std::fs::read(&package).unwrap();
+    assert_eq!(sha.len(), 64);
+    // The same bytes every time.
+    plugin(&dir, &work, &["pack", "greeter", "--out", "again.pcdsplugin"]);
+    assert_eq!(std::fs::read(work.join("again.pcdsplugin")).unwrap(), bytes);
+    // Pinned with the wrong hash: nothing is installed. Pinned right: installed, and still waiting for approval.
+    let out = plugin(&dir, &work, &["install", "greeter.pcdsplugin", "--sha256", &"0".repeat(64)]);
+    assert!(!out.status.success() && text(&out).contains("sha256") && !dir.join("run/plugins/greeter").exists(), "{}", text(&out));
+    // Without a pin and without a terminal or --yes it asks, and does not install.
+    let out = plugin(&dir, &work, &["install", "greeter.pcdsplugin"]);
+    assert!(!out.status.success() && text(&out).contains("needs your answer") && !dir.join("run/plugins/greeter").exists(), "{}", text(&out));
+    let out = plugin(&dir, &work, &["install", "greeter.pcdsplugin", "--sha256", &sha]);
+    assert!(out.status.success() && dir.join("run/plugins/greeter/plugin.toml").is_file(), "{}", text(&out));
+    assert!(text(&out).contains(&sha) && text(&out).contains("it does nothing until you approve"), "the package is shown with its hash: {}", text(&out));
+    assert!(text(&plugin(&dir, &work, &["list"])).contains("pending"));
+    // A damaged package, a package with a link in it, and a tar of something else.
+    let mut damaged = bytes.clone();
+    damaged[10] ^= 1;
+    std::fs::write(work.join("damaged.pcdsplugin"), &damaged).unwrap();
+    let out = plugin(&dir, &work, &["install", "damaged.pcdsplugin", "--yes"]);
+    assert!(!out.status.success() && text(&out).contains("not a plugin package"), "{}", text(&out));
+    // The index: searched from a file, installed by id from an address, the entry's hash being the pin.
+    let entry = serde_json::json!({"format": 1, "name": "test index", "plugins": [{"id": "greeter", "name": "greeter", "version": "0.1.0", "description": "says hello", "url": "greeter.pcdsplugin", "sha256": sha, "capabilities": ["event.chat", "event.player", "chat.say"]}]});
+    std::fs::write(work.join("plugins-index.json"), entry.to_string()).unwrap();
+    let out = plugin(&dir, &work, &["search", "hello", "--index", "plugins-index.json"]);
+    assert!(out.status.success() && text(&out).contains("greeter") && text(&out).contains("1 of 1"), "{}", text(&out));
+    let out = plugin(&dir, &work, &["search", "nothing-like-it", "--index", "plugins-index.json"]);
+    assert!(text(&out).contains("0 of 1"), "{}", text(&out));
+    assert!(!plugin(&dir, &work, &["search", "x"]).status.success(), "no index, no search");
+    std::fs::remove_dir_all(dir.join("run/plugins/greeter")).unwrap();
+    // (A folder of that name in the working directory would be installed as a folder: the id is looked up when there is none.)
+    std::fs::remove_dir_all(work.join("greeter")).unwrap();
+    let server = serve(vec![("/plugins-index.json", std::fs::read(work.join("plugins-index.json")).unwrap()), ("/greeter.pcdsplugin", bytes.clone())]);
+    let index = format!("http://127.0.0.1:{}/plugins-index.json", server.port);
+    let out = plugin(&dir, &work, &["install", "greeter", "--index", &index, "--yes"]);
+    assert!(out.status.success() && dir.join("run/plugins/greeter/rules.toml").is_file(), "{}", text(&out));
+    // An unknown id names the near one; a hash in the index that is not the package's refuses it.
+    let out = plugin(&dir, &work, &["install", "greeter2", "--index", &index, "--yes"]);
+    assert!(text(&out).contains("is not in the index") && text(&out).contains("did you mean `greeter`"), "{}", text(&out));
+    drop(server);
+    let wrong = entry.to_string().replace(&sha, &"a".repeat(64));
+    let server = serve(vec![("/plugins-index.json", wrong.into_bytes()), ("/greeter.pcdsplugin", bytes)]);
+    let index = format!("http://127.0.0.1:{}/plugins-index.json", server.port);
+    std::fs::remove_dir_all(dir.join("run/plugins/greeter")).unwrap();
+    let out = plugin(&dir, &work, &["install", "greeter", "--index", &index, "--yes"]);
+    assert!(!out.status.success() && text(&out).contains("not the package that was listed"), "{}", text(&out));
+    assert!(!dir.join("run/plugins/greeter").exists());
+    // Only https is fetched, apart from 127.0.0.1.
+    let out = plugin(&dir, &work, &["install", "http://example.com/a.pcdsplugin", "--yes"]);
+    assert!(!out.status.success() && text(&out).contains("only https"), "{}", text(&out));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn watch_installs_a_new_build_and_approves_it_again_only_when_it_asks_for_nothing_new() {
+    let dir = test_dir("plugin-watch");
+    let work = dir.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    assert!(plugin(&dir, &work, &["new", "live", "--kind", "data"]).status.success());
+    assert!(plugin(&dir, &work, &["install", "live"]).status.success());
+    assert!(plugin(&dir, &work, &["enable", "live", "--yes"]).status.success());
+    let rules = work.join("live/rules.toml");
+    std::fs::write(&rules, std::fs::read_to_string(&rules).unwrap().replace("Hello {name}!", "Hi {name}!")).unwrap();
+    // A changed build that asks for nothing new is installed and approved with the grant it had.
+    let out = plugin(&dir, &work, &["watch", "live", "--approve", "--once"]);
+    assert!(out.status.success() && text(&out).contains("approved again with the same grant"), "{}", text(&out));
+    assert!(std::fs::read_to_string(dir.join("run/plugins/live/rules.toml")).unwrap().contains("Hi {name}!"));
+    assert!(text(&plugin(&dir, &work, &["list"])).contains("running") || text(&plugin(&dir, &work, &["list"])).contains("live"));
+    // One that asks for more is installed, not approved, and says what is new.
+    let manifest = work.join("live/plugin.toml");
+    std::fs::write(&manifest, std::fs::read_to_string(&manifest).unwrap().replace("\"chat.say\"]", "\"chat.say\", \"rules.write\", \"event.tick\"]")).unwrap();
+    std::fs::write(&rules, std::fs::read_to_string(&rules).unwrap() + "\n[[when_players]]\nat_least = 2\nset_rules = { speed = { growth = 2.0 } }\n").unwrap();
+    let out = plugin(&dir, &work, &["watch", "live", "--approve", "--once"]);
+    assert!(text(&out).contains("now also asks for rules.write, event.tick") || text(&out).contains("now also asks for event.tick, rules.write") && text(&out).contains("pcds plugin enable live"), "{}", text(&out));
+    let approved = std::fs::read_to_string(dir.join("run/plugins/approved.json")).unwrap();
+    assert!(!approved.contains("rules.write"), "not approved: {approved}");
     std::fs::remove_dir_all(&dir).unwrap();
 }

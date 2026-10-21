@@ -138,7 +138,7 @@ Tools were run on the whole source; each real hit was fixed with a test. The rel
 | S12 | The S3 uploader stayed busy for ever after a panic, and a failed thread start panicked the game loop | fixed in 0.7.0. A backup made in the microseconds before the uploader finishes waits for the next one, harmless | `s3::tests::a_panicking_upload_does_not_keep_the_next_ones_out` |
 | S13 | The admin acceptor spun at 100% CPU on accept errors, ended if a thread could not start, and `/api/logs` could wait for ever on `journalctl` | fixed in 0.7.0: it backs off, survives, and `journalctl` has a 6 s limit | `admin::tests::an_acceptor_that_keeps_failing_backs_off_and_recovers`, `LOGS_WAIT` in `admin.rs` |
 | S14 | If the chat hooks' delivery thread ever panics, the hooks stay off with no message | unverified: no known trigger since S5 | `front/chat_hooks.rs` |
-| S15 | Two sets grow by one entry per hostile connection id over the server's life (`game.unhandled`, `Limits.warned`) | unverified: the memory clients can make the server hold is bounded in bytes since 0.7.0, these two sets were not checked | `game.rs` (`unhandled`) |
+| S15 | Two sets grow by one entry per hostile connection id over the server's life (`game.unhandled`, `Limits.warned`) | checked in the memory work: `unhandled` and `misrouted` hold names the RPC tables list (a few for each RPC: about 600 in all, whoever connects); `Limits.warned` goes with its client (`Limits::forget`); the third such set, `refused_inventories`, grew by one id per connection and is dropped when the client leaves | `game::tests::a_client_that_leaves_is_forgotten_by_the_set_of_refused_inventories` |
 | S16 | The Steam path had none of the caps the direct-IP path has | fixed in 0.7.0 | `front::transport::steam::tests::steam_connections_have_the_udp_caps` |
 | S17 | After a panic in one client's RPC the bank saved the half-changed world | fixed in 0.7.0: the last whole save is kept | `bank::panic::tests::a_panicking_client_is_kicked_and_the_save_on_disk_is_kept_not_replaced_by_its_half_done_work` |
 | S18 | Release profile: no overflow checks, `panic = "unwind"` | by design: the parity ports rely on the game's unchecked arithmetic; the overflow-checked fuzz build found one wrap (S7) | `Cargo.toml` has no `[profile]` |
@@ -228,6 +228,12 @@ in the same commit.
 | P8 | The system's name lookup cannot be interrupted, so a request that gives up leaves its thread until the resolver does (tens of seconds against a name server that never answers); a manifest may ask for `timeout_ms = 1`, a plugin starts ten requests a second: 300 requests made 300 threads | Low | fixed (269a5de): 16 lookups waiting at once for all plugins | `plugins::net::tests::lookups_that_cannot_be_given_up_are_few` (measured: 2 to 302 threads with the cap off) |
 | P9 | A scoped `events.read` token chooses the `consumer` name of every poll: each new name was a table entry, a journal line and a row of `GET /api/plugins` | Low | fixed (0867462): 16 consumers, then 429 | `plugins::stream::tests::the_consumers_are_few` |
 | P10 | The README's command trusts the example publisher's key, whose private half is in the repository, with `chat.say` and the event capabilities: every plugin anybody signs with it then runs without approval | Low | fixed (11e8864): a warning in the listing, the approval text and when the key is trusted (`pcds plugin trust`, `POST /api/plugins/trust`) | `plugins::sign_tests::a_plugin_signed_by_the_published_example_key_carries_a_warning` |
+| P11 | ABI 1.3, found by its own hostile test: `tokens(i32::MIN)`: `abs()` wraps in a release build, so the bound of 10,000 let the most negative number through | Low | fixed (this work): `unsigned_abs` | `plugins::abi13_tests::give_and_tokens_check_their_arguments_their_capability_and_their_rate` |
+| P12 | wasmi translated a function the first time it was called and charged the translation to that call: the first call of an instance cost up to 5 times the next ones (a 90 KB module: 170,000 extra fuel), so a budget that held the steady state faulted the first call after each start, and the restart after the fault did it again until the breaker switched the plugin off | Medium | fixed (this work): the module is translated when it is read (`CompilationMode::Eager`), before the world stops in a hot update | `plugins::abi13_tests::a_module_is_translated_when_read_so_its_first_call_costs_what_the_next_does` |
+| P13 | A panic in the host's own code inside a host function (a bug in the world's view, say) would unwind into the interpreter's frame, which cannot unwind: the process aborts ("panic in a function that cannot unwind"), i.e. the bank, the world's last tick and every player. None is known; this is the boundary a plugin author can reach by arguments | Medium (depth) | fixed (this work): every host function runs under `catch_unwind` and a panic is a trap of that call (the plugin's fault, restarted); the call itself is guarded too | `plugins::abi13_tests::a_panic_in_the_hosts_own_code_while_it_serves_a_plugin_is_that_plugins_fault_and_the_game_goes_on` (aborted the test binary before) |
+| P14 | New in 1.3: `Q_NEARBY` looks at every object of the world (100,000 on a late-game world) for a plugin that asked | Low | by design: 8 fuel for each object looked at, 64 results, 1000 units; a world too big for the budget faults the plugin | `plugins::abi13_tests::a_scan_of_the_world_costs_fuel_in_proportion_to_the_world` |
+| P15 | New in 1.3: `give`, `tokens`, timers and typed settings are new ways for a plugin to act | Low | by design: capabilities with their own rates (10 gives, 2 token changes a second; 50 items, 10,000 tokens), applied after the call through the game's add path (a key or quest item is refused), 16 timers; a setting is checked on set and again on load; a secret is never readable | `plugins::abi13_tests`, the 300 generated modules in `plugins::fuzz_tests` |
+| P16 | New in this work: `pcds plugin install` reads a tar file and fetches an address | Low | by design: the package is parsed by this program (regular files, plain names, 64 files, 8 MiB each, 12 MiB all, no links), https only (plain http only for 127.0.0.1), a download pinned by `--sha256` or confirmed, nothing runs at install; an index entry cannot ask for more than the package does | `plugins::pack::tests::a_hostile_package_is_refused`, `tests/cli.rs` (`a_package_is_made_pinned_installed_found_in_an_index...`) |
 | H1 | The admin HTTP head was read leniently: `X: a` followed by ` Authorization: Bearer T` (a folded line) was an Authorization header, `Authorization : Bearer T` too, the last of two Content-Lengths won, a 70 KB header was cut and the request went on. A proxy in front reads each of these another way. One request a connection, so nothing was smuggled | Low | fixed (20325ba): 400 for each, 431 for a head over 64 KiB | `admin::tests::a_head_that_can_be_read_two_ways_is_refused_not_guessed` |
 | H2 | The page and the API had no policy besides framing: JSON with the status and the plugin listing was cacheable by a proxy in front, and a script that got into the page (none can: no `innerHTML`, `eval` or other sink anywhere in it) could have sent the token anywhere | Low (depth) | fixed (b878920): CSP (`connect-src 'self'`, nothing else loaded, no `<base>`), `nosniff`, `no-referrer`, `no-store` | `admin::tests::the_page_has_a_policy_of_its_own_and_the_api_does_not_need_it`; the nine views opened in a browser against a scratch server, no violation |
 | H3 | A hard link in a release tarball passed the post-unpack check (S23) | Low | fixed (0136ab7) | `updater::tests::releases_come_over_https_with_plain_tags_and_files` |
@@ -364,6 +370,169 @@ the chat webhooks set `proxy(None)` and never do.
   not gameplay) and `limits.maxPlayers`. Next: take the watchdog out of `PLUGIN_RULES` by key.
 * **I10** Unchanged from the audits: S11 (the memfd seal result of the front's own bank), U10.
 
+## Round 3: fuzzing, properties, sanitizers (v0.8.0)
+
+A search for what the audits above did not find, with other methods than reading: long fuzzing
+runs under AddressSanitizer with persistent corpora, differential and property tests against a
+reference, the sanitizers and overflow checks on the whole suite, a fresh reading of the riskiest
+modules and fault injection. Made in October 2026 on `main` at c5ca29e (v0.8.0). The rules were
+those of the other sections: a finding is proved by a failing test or run, fixed in its own commit
+with the regression test, and no protection is weakened. Ids: R.
+
+### Findings
+
+| Id | Finding | Sev. | Status | Evidence |
+|---|---|---|---|---|
+| R1 | `net.http` reached Azure's WireServer: 168.63.129.16 is a **public** address, so a plugin with `net.http` and no `net.http.local` could read an Azure VM's extension settings and secrets through any allowed name that resolved to it (P7 closed only the link-local metadata addresses). The container credentials of AWS ECS and EKS (169.254.170.2, 169.254.170.23, fd00:ec2::23), Tencent's metadata (169.254.0.23) and Google's IPv6 metadata (fd20:ce::254) were open to `net.http.local` | Medium | fixed (76579b4): never reachable by any plugin | `plugins::net::tests` (the address-class test fails for 168.63.129.16 without the change); found by the `pluginnet` target against a reference from the IANA registries |
+| R2 | The plants of a Farm or a VegetableGrower whose items were destroyed (`RemoveAndDestroyAllItemsFromInventory`, which the game itself calls when a Farm is deconstructed) keep their network objects, as the game's clients do, but nothing removed them when the machine went: a network object for a world object that is gone stayed for good in every client's scene, every join and every snapshot | Medium | fixed (88ffaab): the machine's destruction takes them along | `machines::growers::tests::a_growers_plants_keep_their_network_objects_when_their_inventory_is_destroyed` (fails before: "the machine takes its plants along"); the hostile-RPC test on the late-game world failed on seeds 7, 8 and 9 before it and passes with it |
+| R3 | A save whose planets, players, world objects, inventories, messages or story events held a string, number, array or null after the first entry loaded (the loader looked at the first entry of each list only); the game's code sets fields on these entries and serde_json panics on any value but an object, so the world played and then **could never save**: the panic came at the first autosave and every one after it | Medium | fixed (e259acc): every entry is a record or the file is refused at the start | `save::tests::an_entry_that_is_no_record_is_refused_not_kept_to_panic_a_save_later`; found by the `loadsave` target (`cannot access key "host" in JSON string`) |
+| R4 | serde_json's default float parsing is an ulp off for about one f64 in ten (91,000 to 105,000 of a million written and read back differed): the planets' unit totals of a loaded save moved, and load and save was not a fixpoint (the soak's "save fixpoint: 1 lines differ" was this); the same in the messages between the front and the banks | Low | fixed (6aa6e24, d38e0f7): `float_roundtrip`; a number past f32 in a rules file is now refused when it is read | `save::tests::a_float_in_a_save_reads_back_as_it_was_written`; `rules::tests::a_rules_file_number_past_f32_is_refused` |
+| R5 | A rules file or a rules change that is a JSON array was read by position: `[[0.5]]` set `meteo.eventChance` | Low | fixed (9ba1624) | `rules::tests::rules_are_an_object_of_sections_never_an_array_read_by_position` |
+| R6 | A toxic area's match used `(id - key).abs()` on a key any client may send (before PlayerReady): the key `i32::MIN` matched the area at the origin, `i32::MIN + 1` the one at `i32::MAX`; with overflow checks the subtraction panicked in the tick | Low | fixed (e9a1c1a): `abs_diff` | `toxic::tests::a_key_far_from_every_area_finds_none_whatever_the_numbers` |
+| R7 | The admin HTTP reader ended the head at any line that was empty after trimming (a proxy that reads such a line as the fold of the line before sees another head), and read `Content-Length: +5` as 5 | Low | fixed (d2e0f54): the head ends at an empty line only, a line of blanks is a 400, a length is digits | `admin::tests::a_head_that_can_be_read_two_ways_is_refused_not_guessed` |
+| R8 | `libraryfolders.vdf` and the game's app manifest were parsed by recursion without a bound: a file of `"a" {` 250,000 times ended `pcds setup` and `up` with a stack overflow | Low | fixed (12f4594): 32 levels | `cli::steam::tests::a_file_nested_without_end_is_refused_not_recursed_into` |
+| R9 | The fuzz crate had not compiled since the game tables became raw JSON (8 errors): none of the 15 targets of the earlier audits could be run again | Process | fixed (341c6cb): it builds, and CI and `make fuzz-check` type-check it | CI job `fuzz` |
+| R10 | The snapshot reader set the length of the world objects and inventories it read to `capacity()`; a `Vec` has at least the room asked for, not exactly that | Hardening | changed (25cf37c): the count read | no behaviour changes; not triggered |
+| R11 | The text format of the log wrote a message as it came: a carriage return in it (a name, a bucket's error text, a release feed's message) moved the cursor back over the line's own time and level, an escape sequence cleared or recoloured the screen of `pcds logs`, `journalctl` and `docker logs` (line breaks were already marked line by line) | Low | fixed (0c80ad5): control characters are written as `\u{..}` | `logging::tests::a_message_cannot_steer_a_terminal_through_the_log` (fails before with the raw `\r` and `\u{1b}` in the line) |
+| R12 | The error text of a failed S3 request took the XML `Code` and `Message` raw: control characters to the admin's terminal (`pcds backup fetch`), the status and the log, entities unread, up to 16 KiB | Low | fixed (d006c59): plain text, 200 characters a field | `s3::tests::an_error_body_is_plain_text_and_a_listing_reads_back_its_keys` |
+| R13 | Two advisories of 19 and 20 October against the TLS stack of the updater, the S3 copies and `net.http`: rustls-webpki 0.103.15 accepted chains through distrusted intermediates (RUSTSEC-2026-0382), webpki-roots 1.0.9 bundled the emSign roots with them trusted (RUSTSEC-2026-0381) | Medium | fixed (c4851a3): 0.103.16 and 1.0.10 | `cargo audit`: 2 vulnerabilities before, none after |
+
+R11 and R12 are in code that came with the operability release (`pcds doctor`, the metrics, the
+structured log, `pcds backup`), merged into this branch from `integrate` after the first findings.
+
+### Coverage
+
+**Fuzzing** (libFuzzer with AddressSanitizer and overflow checks on, one process per target, corpora
+kept between runs, seeds from `server/fuzz/seeds.py` and, for `utp`, from the real traffic of a bot
+session on the late-game world recorded through a UDP proxy). Executions are the sum of every run
+of a target on this branch; the corpus is what libFuzzer kept (not minimised).
+
+| Target | Executions | Runs | Corpus files |
+|---|---|---|---|
+| `access` | 4,084,352 | 3 | 2,903 |
+| `adminhttp` | 2,927,221 | 3 | 4,363 |
+| `adminroutes` | 193,963 | 3 | 2,229 |
+| `backup` | 676,421 | 3 | 1,438 |
+| `bincodec` | 29,809,283 | 3 | 7,568 |
+| `chathooks` | 15,673,354 | 3 | 13,507 |
+| `config` | 9,999,666 | 3 | 3,287 |
+| `doctor` | 216,675 | 3 | 3,092 |
+| `front` | 26,257,000 | 3 | 11,072 |
+| `game` | 108,623 | 4 | 1,884 |
+| `handoff` | 34,673 | 3 | 917 |
+| `ipc` | 29,488,993 | 3 | 162 |
+| `loadsave` | 9,725 | 4 | 948 |
+| `logline` | 7,754,878 | 3 | 6,005 |
+| `manifest` | 11,359,161 | 3 | 37,720 |
+| `msg` | 27,357,285 | 3 | 18,661 |
+| `names` | 40,099,227 | 3 | 118 |
+| `oldsave` | 9,537,181 | 3 | 14,148 |
+| `pluginnet` | 40,793,396 | 3 | 2,378 |
+| `pluginsign` | 12,035,291 | 3 | 3,948 |
+| `prom` | 7,965,688 | 3 | 7,180 |
+| `rpcspec` | 26,668,265 | 3 | 10,567 |
+| `rules` | 16,759,873 | 3 | 10,708 |
+| `s3resp` | 1,837,897 | 3 | 2,432 |
+| `save` | 503,089 | 3 | 3,190 |
+| `savelayout` | 2,166,900 | 3 | 5,897 |
+| `tessera` | 670 | 3 | 218 |
+| `toxic` | 66,558,613 | 3 | 46 |
+| `transform` | 38,047,111 | 3 | 121 |
+| `twin` | 3,729 | 4 | 340 |
+| `updater` | 18,056,136 | 3 | 9,007 |
+| `utp` | 11,244,189 | 3 | 3,912 |
+| `wasmhost` | 179,851 | 3 | 2,415 |
+| `wire` | 44,906,309 | 3 | 861 |
+| 34 targets | 503,314,688 | | 193,242 |
+
+The last run of every target (15 to 45 minutes each) was on the final code but for the last three commits (a JSON line of the log, the S3 error text and the doctor target; the five targets of the operability surfaces ran again after them). The `game`, `twin` and
+`loadsave` targets run on the late-game save (`PCDS_FUZZ_SAVE`) and execute a few executions a
+second: their number is small on purpose; a "tiny" corpus of a small world ran beside them.
+`tessera` found no defect: the slowest seed (2644773, generator 2) takes 1.2 s in the release build
+(47 s under ASan). An earlier version of the `game` target let no game time pass (its "time passes"
+input added to a clock the tick overwrites), so no machine, gauge or unit timer had ever come due in
+the fuzzing of the earlier audits; it moves the game's own clock now.
+
+**Differential and property tests** (all in the suite, seeded, no new dependency): the range rules of
+`access` against a bit-by-bit reference for both address families and every prefix length (200,000
+cases); `clock::take_due` against the loop it replaces (20,000 cases around the hour where the rule
+changes); rules patches (a merge patch sets what it names, null puts the default back, for every
+rule; what is accepted reads back from `rules.json`); every RPC of the game's table written and read
+back as it was (40 bodies each, a body cut anywhere does not panic); a rotation survives its Euler
+angles everywhere (200,000 cases); the UTP layer through a relay that loses 10 %, duplicates 10 %
+and reorders by up to 40 ms (150 batches each way arrive once, in order, byte for byte, the window
+never passes 64). The save writer's fixpoint, the snapshot round trip and "the game restored from
+its snapshot sends the same bytes for 1000 ticks" are the `savelayout`, `bincodec` and `twin`
+targets and the bench's handoff run (EQUAL); inventory algebra and the logistics invariants are the
+invariants of the hostile-RPC test below, not separate property tests.
+
+**The hostile-RPC test on the late-game world** (`hostile_rpcs_on_a_real_world_keep_it_whole`, 18,900
+RPCs of every kind with random arguments to two clients and a tick every seventh round, invariants
+after each: holders, inventories, network objects, constructed and pickable lists, a world loaded from
+its own save): seeds 1 to 11, all pass at the final code. Seeds 7, 8 and 9 failed before R2 was fixed.
+With overflow checks on, seeds 1 to 6 at 30,000 rounds, the whole suite, the late-game bench and a
+3600 s soak find no overflow in what a client can reach.
+
+**Sanitizers**: AddressSanitizer on the whole suite (the unit tests, `cli`, `admin_golden`,
+`hot_update` with the front and the banks as ASan processes): no memory error; three tests failed,
+all explained (R4's rules test, which found the float feature's effect, and two timing assertions
+that a sanitizer's slowdown breaks). ThreadSanitizer on the unit suite and on `hot_update` with
+the reports of the child processes collected: no data race. **Miri** on 32 tests of the pure modules
+(`wire geometry transform protocol clock toxic bincodec idmap msg worlds`, the plugin address, manifest
+and data tests, `access`, the Steam parser, `rules`, `config`): no undefined behaviour; the other 41
+tests selected are property tests too slow for Miri and were stopped after two hours without a failure.
+**cargo audit**: R13. **clippy**: `cargo clippy --all-targets` did not compile (a deny lint on a
+quaternion constant in three tests, fixed in a94552d); `-W clippy::pedantic` gives 3,590 warnings,
+551 of them narrowing casts, and was not read line by line.
+
+**Fault injection**: `tools/chaos/diskfull.sh` (an 8 MB tmpfs, the world of the bench, four rejoining
+players) passes: a save on a full disk fails with the error and keeps the last good file, the autosave
+says so in `lastSave`, the final save on stop fails without losing the acknowledged one, a `kill -9` of
+the bank on a full disk is answered by the front within 0.5 s (the lead of the dynamic audit, an 8 s
+refusal, does not reproduce), and a save works again after freeing the space.
+
+### Checked and found sound
+
+* **The save and the snapshot**: load and save are a fixpoint on the late-game save (after R4); the
+  snapshot restored in a new game continues byte for byte for 1000 ticks (`twin`); a damaged save one
+  field at a time is refused or loads and saves (`loadsave`, after R3); the handoff reader refuses a
+  cut or lying directory (W1), and the length it sets is the count it read (R10).
+* **The exposition of the metrics** (`front/prometheus.rs`): any JSON the front puts together gives text
+  a strict reader of the format accepts (labels escaped, only finite numbers, one family at a time,
+  counters named `_total`); the documentation lists every name.
+* **The secrets of the log**: a registered secret of six characters or more, a scoped token and a
+  bearer token never appear in either format; masking twice is masking once.
+* **`pcds doctor` and `pcds backup` on hostile files**: no panic on any server.env, rules.json,
+  access.json, world, approvals or backup file name; the list holds this world's backups only, newest
+  first; a name resolves to a file that exists; the unit files for a path with quotes, percent signs,
+  spaces or a dollar have the lines of a plain path (a path with a line break is refused).
+* **The admin API's routes** with hostile bodies on a game with the example plugins: no 500 but the
+  ones that report a disk, the answer is JSON, the game still snapshots (`adminroutes`).
+* **The wasm host boundary**: a module made from the input calls every host function with pointers on
+  the edge of its memory; every one traps or is refused (`wasmhost`).
+* **The plugin host's network classes** against a reference from the IANA registries (`pluginnet`),
+  after R1; **the signing** and the key files (`pluginsign`); the manifests and data plugins' files
+  (`manifest`).
+* **Read, nothing found**: the flip state machine and the supervisor, the bank's persistence, the serve
+  loop and the panic guard, the codec, the updater, the token store, `access`, the S3 client's signer
+  (AWS's own examples) and its uploads, `replace_file`'s fixed temporary name (a local attacker in the
+  same directory is outside the model: the directory is the user's), the install script, the Docker
+  entrypoint and Dockerfile.
+
+### Not done, and leads
+
+* **`clock::take_due`** loops for ever on a timer of negative infinity; nothing in the server makes
+  one. Not changed.
+* **`PCDS_UNIT`** is not validated: a name with `/` writes the unit files beside, not in, the unit
+  folder. It is the operator's own environment; noted in case units are ever written for a name
+  from elsewhere.
+* **Miri** did not run the 41 slow property tests or anything with sockets, `ring`, fsync or memfd.
+* **The fuzz targets that need a world** (`game`, `twin`, `loadsave`, `adminroutes`) run a few
+  executions a second; a cluster of long runs would find more.
+* **Clippy pedantic** was not read through.
+* **The chaos tools** (`chaos.py`, `churn.py`, `limits.py`, `stress.py`, `soak.py`) were not run again
+  by this round; the long soak and chaos of the final build is a separate task.
+
 ## Open
 
 Everything below is still open at 0.7.0. Each line gives the reason and the smallest next step.
@@ -394,7 +563,7 @@ Static:
 
 Dynamic:
 
-* **D7** Large worlds still produce long flips and joins (90,000 objects: a flip over 100 ms from 11,000 network objects; a join takes seconds at 200,000). The explosives' scan is fixed (see the table). Next: re-measure with `tools/perf/` at 90,000 objects and take the longest phase of the flip.
+* **D7** Re-measured after 0.8.0 (docs/performance.md, docs/hot-update.md "Flip speed"): at 200,000 objects a join is 12 ms of the game thread (2.4 MB sent), a flip stands 95 to 129 ms (real front and banks, no players; 162 ms in process), the idle tick on a late-game save went from 196 to 24 M instructions a second. The longest phase of the flip was the restore's re-reading of the machines' tables, now once for each group; what is left is the decoding of the world objects.
 
 Lead from the tools' smoke runs, not a finding: in two of three disk-full runs against 0.6.2,
 `GET /api/status` was refused for 8 s after a `kill -9` of the bank on a full disk although the

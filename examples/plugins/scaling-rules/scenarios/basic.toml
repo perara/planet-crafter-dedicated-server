@@ -1,0 +1,54 @@
+name = "bands of player counts"
+
+[[player]]
+client = 1
+name = "Ann"
+
+[[step]]
+note = "the first tick: one player is the first band"
+advance = "1s"
+expect = [{ rules_patch = true, contains = "\"growth\":2.0", count = 1 }]
+
+[[step]]
+note = "nothing changes while the band stays"
+advance = "30s"
+expect = [{ rules_patch = true, count = 0 }]
+
+[[step]]
+join = { client = 2, name = "Bo" }
+
+[[step]]
+join = { client = 3, name = "Cy" }
+
+[[step]]
+note = "three players: the second band"
+advance = "2s"
+expect = [{ rules_patch = true, contains = "\"growth\":1.5", count = 1 }]
+
+[[step]]
+join = { client = 4, name = "Di" }
+
+[[step]]
+join = { client = 5, name = "Ed" }
+
+[[step]]
+join = { client = 6, name = "Flo" }
+
+[[step]]
+note = "six players: the game's own speed"
+advance = "2s"
+expect = [{ rules_patch = true, contains = "\"growth\":1.0", count = 1 }]
+
+[[step]]
+note = "three leave: back to the second band"
+leave = 4
+
+[[step]]
+leave = 5
+
+[[step]]
+leave = 6
+
+[[step]]
+advance = "2s"
+expect = [{ rules_patch = true, contains = "\"growth\":1.5", count = 1 }]

@@ -31,6 +31,27 @@ pub struct SaveFile {
     pub settings: Value,
     #[serde(with = "crate::bincodec::json_values")]
     pub procedural: Vec<Value>,
+    /// The world objects and inventories of a save read for a start, still as text (`objects` and
+    /// `inventories` are empty then): see `parse_deferred`. Never in a snapshot.
+    #[serde(skip)]
+    pub(crate) pending: Option<Box<Pending>>,
+}
+
+/// The file's text and where the entries of the world objects' and the inventories' sections
+/// are in it.
+pub(crate) struct Pending {
+    text: String,
+    objects: Vec<(u32, u32)>,
+    inventories: Vec<(u32, u32)>,
+}
+
+impl Pending {
+    fn entries<'a>(&'a self, places: &'a [(u32, u32)]) -> impl Iterator<Item = Result<Value, String>> + 'a {
+        places.iter().map(|&(from, to)| {
+            let entry = &self.text[from as usize..to as usize];
+            serde_json::from_str(entry).map_err(|e| format!("{e} in {}", entry.chars().take(80).collect::<String>()))
+        })
+    }
 }
 
 /// Splits on `delimiter` outside JSON strings: a name or a sign text may contain '@' or '|'
@@ -160,6 +181,31 @@ fn layout(sections: &[&str], save: &SaveFile) -> Result<(), String> {
     Ok(())
 }
 
+/// An entry of a list read one at a time: a record, as `records` asks of the lists read whole.
+fn record_of(name: &str, at: usize, entry: Result<Value, String>) -> Result<Value, String> {
+    let v = entry?;
+    if v.is_object() {
+        return Ok(v);
+    }
+    let shown: String = v.to_string().chars().take(40).collect();
+    Err(format!("{name}: entry {} is no record ({shown}): the file is damaged or was edited", at + 1))
+}
+
+/// Every entry of the lists is a record (a JSON object). `layout` looks at the first entry of each
+/// section; an entry after it that is a string, a number or an array is a file damaged or edited, and
+/// the game's code assigns fields to its entries (`p["host"] = ...` when the save is written): it would
+/// panic in the game loop at the first autosave and every one after it, with the world unsaved.
+fn records(save: &SaveFile) -> Result<(), String> {
+    let lists = [("planets", &save.planets), ("players", &save.players), ("world objects", &save.objects), ("inventories", &save.inventories), ("messages", &save.messages), ("story events", &save.story_events), ("procedural instances", &save.procedural)];
+    for (name, entries) in lists {
+        if let Some((at, bad)) = entries.iter().enumerate().find(|(_, v)| !v.is_object()) {
+            let shown: String = bad.to_string().chars().take(40).collect();
+            return Err(format!("{name}: entry {} is no record ({shown}): the file is damaged or was edited", at + 1));
+        }
+    }
+    Ok(())
+}
+
 /// A file with no game settings is no save, or one cut short (a copy still under way): read as an
 /// empty world, the next save would write over what it held. Settings of the game's older
 /// versions (a game mode, no dying consequences) are the game's to convert, which `pcds world
@@ -274,6 +320,7 @@ impl SaveFile {
             story_events: Vec::new(),
             settings: Value::Null,
             procedural: Vec::new(),
+            pending: None,
         }
     }
 
@@ -325,24 +372,125 @@ impl SaveFile {
 
     /// The sections of a save in the current layout; anything else is refused (`layout`).
     pub fn parse(text: &str) -> Result<SaveFile, String> {
+        SaveFile::parse_text(text, false)
+    }
+
+    /// `load`, with the world objects and the inventories left in the text (`parse_deferred`).
+    pub fn load_deferred(path: &str) -> std::io::Result<SaveFile> {
+        let bad = |e: String| std::io::Error::new(std::io::ErrorKind::InvalidData, e);
+        let save = SaveFile::parse_deferred(std::fs::read_to_string(path)?).map_err(bad)?;
+        check_settings(&save.settings).map_err(bad)?;
+        Ok(save)
+    }
+
+    /// `parse`, but the entries of the world objects' and the inventories' sections stay in the
+    /// text, which the save keeps: a world of 200,000 objects is 12 MB of text and 100 MB as a
+    /// tree of values, and the game turns each entry into what it keeps one at a time
+    /// (`world_objects`, `inventory_entries`: a damaged entry is an error there, as it is in `parse`).
+    pub fn parse_deferred(text: String) -> Result<SaveFile, String> {
+        let mut save = SaveFile::parse_text(&text, true)?;
+        let body = text.trim_start_matches('\u{feff}');
+        let sections = split_outside_strings(body, '@');
+        let places = |i: usize| -> Vec<(u32, u32)> {
+            let section = sections.get(i).copied().unwrap_or("");
+            let base = text.as_ptr() as usize;
+            split_outside_strings(section, '|')
+                .into_iter()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    let from = s.as_ptr() as usize - base;
+                    (from as u32, (from + s.len()) as u32)
+                })
+                .collect()
+        };
+        if text.len() >= u32::MAX as usize {
+            return Err("a save of 4 GB or more".into());
+        }
+        let (objects, inventories) = (places(3), places(4));
+        save.pending = Some(Box::new(Pending { text, objects, inventories }));
+        Ok(save)
+    }
+
+    /// The world objects: the entries of section 3, parsed one at a time when the save was read
+    /// deferred. An Err is a damaged entry.
+    pub fn world_objects(&self) -> Box<dyn Iterator<Item = Result<Value, String>> + '_> {
+        match &self.pending {
+            Some(p) => Box::new(p.entries(&p.objects).enumerate().map(|(at, v)| record_of("world objects", at, v))),
+            None => Box::new(self.objects.iter().cloned().map(Ok)),
+        }
+    }
+
+    /// The inventories (section 4), as `world_objects`.
+    pub fn inventory_entries(&self) -> Box<dyn Iterator<Item = Result<Value, String>> + '_> {
+        match &self.pending {
+            Some(p) => Box::new(p.entries(&p.inventories).enumerate().map(|(at, v)| record_of("inventories", at, v))),
+            None => Box::new(self.inventories.iter().cloned().map(Ok)),
+        }
+    }
+
+    /// How many world objects the save has.
+    pub fn object_count(&self) -> usize {
+        self.pending.as_ref().map_or(self.objects.len(), |p| p.objects.len())
+    }
+
+    /// `load`'s refusals for a save read deferred: every world object and inventory entry is read and
+    /// let go, and a damaged one is the error `parse` would have given.
+    pub fn check_entries(&self) -> Result<(), String> {
+        for (section, entries) in [(3, self.world_objects()), (4, self.inventory_entries())] {
+            for entry in entries {
+                entry.map_err(|e| format!("section {section}: {e}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `load`, for a caller that only asks whether the file is a save this server reads (a world to
+    /// start or restore): the entries are checked one at a time, not kept as a tree.
+    pub fn check_file(path: &str) -> std::io::Result<SaveFile> {
+        let save = SaveFile::load_deferred(path)?;
+        save.check_entries().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        Ok(save)
+    }
+
+    /// Lets go of the world objects and inventories, and of the text they were in: the game has them.
+    pub fn release_world(&mut self) {
+        self.objects = Vec::new();
+        self.inventories = Vec::new();
+        self.pending = None;
+    }
+
+    fn parse_text(text: &str, defer: bool) -> Result<SaveFile, String> {
         let text = text.trim_start_matches('\u{feff}');
         let sections = split_outside_strings(text, '@');
         let section = |i: usize| sections.get(i).copied().unwrap_or("");
         let list = |i: usize| entries(section(i)).map_err(|e| format!("section {i}: {e}"));
         let first = |i: usize| list(i).map(|v| v.into_iter().next().unwrap_or(Value::Null));
-        let save = SaveFile {
+        // Deferred: only the first entry of the two sections is read now, for the check of the layout.
+        let head = |i: usize| -> Result<Vec<Value>, String> {
+            let section = section(i);
+            let first = split_outside_strings(section, '|').into_iter().map(str::trim).find(|s| !s.is_empty());
+            first.map(|s| serde_json::from_str(s).map(|v| vec![v]).map_err(|e| format!("section {i}: {e} in {}", s.chars().take(80).collect::<String>()))).unwrap_or(Ok(Vec::new()))
+        };
+        let mut save = SaveFile {
             world: first(0)?,
             planets: list(1)?,
             players: list(2)?,
-            objects: list(3)?,
-            inventories: list(4)?,
+            objects: if defer { head(3)? } else { list(3)? },
+            inventories: if defer { head(4)? } else { list(4)? },
             stats: first(5)?,
             messages: list(6)?,
             story_events: list(7)?,
             settings: first(8)?,
             procedural: list(9)?,
+            pending: None,
         };
         layout(&sections, &save)?;
+        records(&save)?;
+        if defer {
+            save.objects.clear();
+            save.inventories.clear();
+        }
         Ok(save)
     }
 
@@ -584,6 +732,51 @@ mod tests {
         }
     }
 
+    /// An entry of a list that is no record is refused at the load, naming the list: the entries after
+    /// the first are not looked at by `layout`, and a string in `players` panicked the bank at its first
+    /// autosave (found by the loadsave fuzz target).
+    #[test]
+    fn an_entry_that_is_no_record_is_refused_not_kept_to_panic_a_save_later() {
+        let good = SaveFile::tiny_text("w");
+        assert!(SaveFile::parse(&good).is_ok());
+        let sections: Vec<&str> = good.split("\r@").collect();
+        // The players' section (the third) with a record, then a string / a number / an array / a null.
+        for bad in ["\"x\"", "5", "[1]", "null", "true"] {
+            let mut s = sections.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+            s[2] = format!("\r{{\"id\":1,\"playerPosition\":\"0,0,0\"}}|\n{bad}\r");
+            let text = s.join("\r@");
+            let e = SaveFile::parse(&text).err().unwrap_or_else(|| panic!("{bad} was taken"));
+            assert!(e.contains("players: entry 2 is no record"), "{bad}: {e}");
+        }
+    }
+
+    /// A number written to a save reads back as it was. serde_json's default float parsing is within
+    /// an ulp of the right value, not the right value: one f64 in ten did not come back as written
+    /// (the totals of the world's units, a planet's level), so every load of a save moved some of them
+    /// and a save was not a fixpoint of load and save. The `float_roundtrip` feature of serde_json is
+    /// what makes it exact.
+    #[test]
+    fn a_float_in_a_save_reads_back_as_it_was_written() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut save = SaveFile::empty();
+        save.world = json!({"terraTokens": 1});
+        save.planets = (0..2000).map(|i| json!({"planetId": "Prime", "unitOxygenLevel": (next() >> 11) as f64 / (1u64 << 53) as f64 * 10f64.powi((i % 30) - 6), "unitHeatLevel": f64::from_bits(next() >> 2 | 0x3000_0000_0000_0000)})).collect();
+        save.settings = json!({"modifierGaugeDrain": 0.800000011920929, "planetId": "Prime", "dyingConsequencesLabel": "DropSomeItems", "mode": "Standard"});
+        let back = SaveFile::parse(&save.to_text()).unwrap();
+        for (a, b) in save.planets.iter().zip(&back.planets) {
+            for key in ["unitOxygenLevel", "unitHeatLevel"] {
+                assert_eq!(a[key].as_f64().map(f64::to_bits), b[key].as_f64().map(f64::to_bits), "{key}: {} against {}", a[key], b[key]);
+            }
+        }
+        assert_eq!(back.to_text(), save.to_text(), "a save written, read and written again is the same text");
+    }
+
     /// Two writers of one save at once: every write lands whole, nothing is left beside it.
     #[test]
     fn saves_written_at_once_never_mix() {
@@ -695,6 +888,45 @@ mod tests {
         assert_eq!(back.objects.len(), 3);
         assert_eq!(back.objects[0]["text"], "a@b|c");
         assert_eq!(back.settings["planetId"], "Prime");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A save read deferred has the same world objects and inventories as one read whole, and
+    /// parses them one at a time: a damaged entry is an error where it is read, naming the section.
+    #[test]
+    fn a_deferred_save_has_the_entries_of_the_whole_one_and_a_damaged_entry_is_an_error() {
+        let mut save = SaveFile::empty();
+        save.world = json!({"terraTokens": 1});
+        save.objects = (0..50).map(|i| json!({"id": 200_000_000 + i, "gId": "Iron", "text": format!("a|b@{i}"), "pos": "1,2,3"})).collect();
+        save.inventories = (0..20).map(|i| json!({"id": i, "woIds": "1,2", "size": 12})).collect();
+        save.settings = json!({"planetId": "Prime", "mode": "Standard", "dyingConsequencesLabel": "DropSomeItems"});
+        let text = save.to_text();
+        let whole = SaveFile::parse(&text).unwrap();
+        let deferred = SaveFile::parse_deferred(text.clone()).unwrap();
+        assert!(deferred.objects.is_empty() && deferred.inventories.is_empty());
+        assert_eq!(deferred.world_objects().collect::<Result<Vec<_>, _>>().unwrap(), whole.objects);
+        assert_eq!(deferred.inventory_entries().collect::<Result<Vec<_>, _>>().unwrap(), whole.inventories);
+        assert_eq!(whole.world_objects().collect::<Result<Vec<_>, _>>().unwrap(), whole.objects);
+        assert_eq!(deferred.world, whole.world);
+        let mut released = SaveFile::parse_deferred(text.clone()).unwrap();
+        released.release_world();
+        assert_eq!(released.world_objects().count(), 0);
+        // The same refusals: an old layout, and a damaged entry (found where it is read).
+        let old = SaveFile::old_format_text();
+        assert_eq!(SaveFile::parse(&old).err(), SaveFile::parse_deferred(old).err());
+        let damaged = text.replacen("\"id\":200000007", "\"id\":", 1);
+        let (whole_error, deferred_error) = (SaveFile::parse(&damaged).err().unwrap(), SaveFile::parse_deferred(damaged).unwrap());
+        let found = deferred_error.world_objects().find_map(Result::err).unwrap();
+        assert!(whole_error.starts_with("section 3: ") && whole_error.contains(&found), "{whole_error} / {found}");
+        // A caller that only asks whether a file is a save reads the entries one at a time, with the same answers.
+        let dir = std::env::temp_dir().join(format!("pcds-check-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (good, bad) = (dir.join("good.json"), dir.join("bad.json"));
+        std::fs::write(&good, &text).unwrap();
+        std::fs::write(&bad, text.replacen("\"id\":200000007", "\"id\":", 1)).unwrap();
+        assert_eq!(SaveFile::check_file(&good.to_string_lossy()).unwrap().object_count(), 50);
+        let (refused, loaded) = (SaveFile::check_file(&bad.to_string_lossy()).err().unwrap(), SaveFile::load(&bad.to_string_lossy()).err().unwrap());
+        assert_eq!((refused.kind(), refused.to_string()), (loaded.kind(), loaded.to_string()));
         std::fs::remove_dir_all(dir).ok();
     }
 

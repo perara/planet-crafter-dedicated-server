@@ -125,7 +125,6 @@ fn session(n: usize, name: &str, server: SocketAddr, tables: (&NetData, &Spec), 
 fn target() -> Option<(SocketAddr, NetData, Spec, Vec<u8>)> {
     let dir = crate::test_data()?;
     let server: SocketAddr = crate::env("PCDS_LOAD_SERVER").expect("PCDS_LOAD_SERVER=HOST:PORT").parse().expect("HOST:PORT");
-    crate::utp::allow_big_batches();
     let (data, spec) = crate::network_tables(dir);
     let request = crate::world::hex(std::fs::read_to_string(format!("{dir}/connection-request.hex")).expect("connection-request.hex").trim());
     Some((server, data, spec, request))

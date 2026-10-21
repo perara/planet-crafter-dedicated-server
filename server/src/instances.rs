@@ -192,23 +192,17 @@ pub fn instance_via_seed(game: &Game, seed: i32, time_left: i32, loaded_from_db:
 
 fn spawn_generator(game: &mut Game, index: usize, position: [f32; 3], rotation: [f32; 4]) -> u64 {
     let var = |name: &str, ty: &str, bytes: &str| crate::data::VarDef { name: name.into(), ty: ty.into(), bytes: Some(bytes.into()) };
-    let layout = Layout {
-        hash: GENERATORS[index].0,
-        flags: GENERATOR_FLAGS,
-        scale: [1.0; 3],
-        behaviours: vec![BehaviourDef {
-            class: GENERATOR.into(),
-            behaviour_id: 0,
-            vars: vec![
-                var("_seed", "NetworkVariable<UInt32>", "01"),
-                var("_owner", "NetworkVariable<Int32>", "09"),
-                var("_networkObjectGenerated", "NetworkVariable<Boolean>", "00"),
-                var("_planetHash", "NetworkVariable<Int32>", "01"),
-            ],
-        }],
-        tail: Vec::new(),
-        tail_position: None,
-    };
+    let behaviours = [BehaviourDef {
+        class: GENERATOR.into(),
+        behaviour_id: 0,
+        vars: vec![
+            var("_seed", "NetworkVariable<UInt32>", "01"),
+            var("_owner", "NetworkVariable<Int32>", "09"),
+            var("_networkObjectGenerated", "NetworkVariable<Boolean>", "00"),
+            var("_planetHash", "NetworkVariable<Int32>", "01"),
+        ],
+    }];
+    let layout = Layout::new(GENERATORS[index].0, GENERATOR_FLAGS, &behaviours, Vec::new(), None);
     let mut o = NetObj::from_layout(&layout);
     o.position = position;
     o.rotation = rotation;
@@ -767,7 +761,7 @@ mod tests {
             g.planet = g.net_data.planet_index(&planet).unwrap();
             let listed: Vec<String> = {
                 let data = g.data.asset(&format!("PlanetData:PlanetData-{planet}")).unwrap();
-                let names = g.data.asset(data["instanceScenesData"].as_str().unwrap()).unwrap()["instanceSceneNames"].as_array().unwrap().clone();
+                let names = g.data.asset(data["instanceScenesData"].as_str().unwrap()).unwrap()["instanceSceneNames"].as_array().unwrap();
                 names.iter().map(|n| n.as_str().unwrap().to_string()).collect()
             };
             assert_eq!(listed.iter().filter(|n| !scene.instance_scenes.contains_key(*n)).count(), 0, "{planet}: a listed scene is not in the dump");
@@ -873,6 +867,8 @@ mod tests {
     /// a fresh world, six wrecks one after the other at these places (scene wrecks seed themselves from
     /// the world seed and the place): how many network objects it spawned, the first two and the last.
     #[test]
+    // The game's own numbers (0.7071068 is a quaternion's component, not 1/sqrt(2) by choice).
+    #[allow(clippy::approx_constant)]
     fn wrecks_of_any_seed_come_out_as_the_game_lays_them() {
         let Some(mut g) = crate::planets::tests::game() else { return };
         let real = [

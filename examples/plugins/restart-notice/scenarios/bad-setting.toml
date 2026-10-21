@@ -1,0 +1,17 @@
+name = "a malformed restart_at is logged"
+
+[config]
+restart_at = "4pm"
+
+[[player]]
+client = 1
+name = "Ann"
+
+[[step]]
+note = "the load logged a warning"
+reload = true
+expect = [{ log = true, contains = "restart_at" }]
+
+[[step]]
+chat = { client = 1, text = "!restart" }
+expect = [{ tell = 1, equals = "The restart time is not set up right, tell an admin." }]

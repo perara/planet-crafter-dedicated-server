@@ -20,3 +20,6 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[dev-dependencies]
+pcds-plugin-api = { path = "../../../plugin-api", features = ["testing"] }

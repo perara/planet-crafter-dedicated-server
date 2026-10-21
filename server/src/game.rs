@@ -190,6 +190,10 @@ pub struct Game {
     /// WorldObjectsHandler._constructedWorldObjects / _itemsPickablesWorldObjects.
     pub constructed: SlotSet<i32>,
     pub pickables: SlotSet<i32>,
+    /// Every world object that has a network object, and perhaps some that had (set_wo_net keeps
+    /// it; a scan for what stands in the scene looks at these, not at every world object).
+    #[serde(skip)]
+    pub net_wos: crate::idmap::FxHashSet<i32>,
     /// World object -> (the inventory holding it, in how many inventories it is): the
     /// inventories' content indexed (inventories.rs hold/release), rebuilt from them on load.
     #[serde(skip)]
@@ -293,10 +297,21 @@ fn connection_data(body: &[u8]) -> Option<String> {
 /// hand. The start stops instead, saying which.
 pub fn check_save_content(save: &SaveFile, data: &GameData, net_data: &NetData) -> Result<(), String> {
     world_planet(save, net_data)?;
-    let unknown: Vec<&str> = save.objects.iter().filter(|o| WorldObject::from_json(o, data, 0).is_none()).map(|o| o["gId"].as_str().unwrap_or("(no group)")).collect();
-    match unknown.first() {
-        None => Ok(()),
-        Some(first) => Err(format!("{} world objects of groups these game tables do not know (the first: {first}): a save from a newer game version, or edited? Update the server or its game data (`pcds update`), then try again", unknown.len())),
+    // The entries one at a time: a save read deferred has them as text, and holding the unknown ones
+    // beyond a count and the first would hold a tree for each.
+    let (mut unknown, mut first) = (0, String::new());
+    for o in save.world_objects() {
+        let o = o.map_err(|e| format!("section 3: {e}"))?;
+        if WorldObject::from_json(&o, data, 0).is_none() {
+            if unknown == 0 {
+                first = o["gId"].as_str().unwrap_or("(no group)").to_string();
+            }
+            unknown += 1;
+        }
+    }
+    match unknown {
+        0 => Ok(()),
+        n => Err(format!("{n} world objects of groups these game tables do not know (the first: {first}): a save from a newer game version, or edited? Update the server or its game data (`pcds update`), then try again")),
     }
 }
 
@@ -359,6 +374,7 @@ impl Game {
             inventories: Slots::default(),
             constructed: SlotSet::default(),
             pickables: SlotSet::default(),
+            net_wos: Default::default(),
             holders: Default::default(),
             watchers: HashMap::new(),
             tmp_inventory_id: -2,
@@ -441,16 +457,20 @@ impl Game {
     /// scene's network objects and every placed world object of the current planet.
     fn load(&mut self) {
         let default_planet = stable_hash(self.started_planet());
-        for o in std::mem::take(&mut self.save.objects) {
+        // The entries come one at a time from the text of a save read deferred, and a tree of values each.
+        for o in self.save.world_objects() {
+            let o = o.unwrap_or_else(|e| panic!("a save the start would have refused (check_save_content): section 3: {e}"));
             if let Some(wo) = WorldObject::from_json(&o, &self.data, default_planet) {
                 self.wos.insert(wo.id, wo);
             }
         }
-        for inv in std::mem::take(&mut self.save.inventories) {
+        for inv in self.save.inventory_entries() {
+            let inv = inv.unwrap_or_else(|e| panic!("a save the start would have refused (check_save_content): section 4: {e}"));
             if let Some(inv) = Inventory::from_json(&inv, &self.data, |id| self.wos.contains_key(&id)) {
                 self.inventories.insert(inv.id, inv);
             }
         }
+        self.save.release_world();
         self.rebuild_holders();
         self.saved_players = self.save.players.clone();
         let crafted = self.save.stats["craftedObjects"].as_u64().unwrap_or(0);
@@ -511,6 +531,8 @@ impl Game {
     pub fn disconnect(&mut self, client: u64) {
         let Some(c) = self.clients.shift_remove(&client) else { return };
         self.limits.forget(client);
+        // Client ids are never used twice: what was told once about this one need not be remembered.
+        self.refused_inventories.remove(&client);
         if !c.approved {
             return;
         }
@@ -781,6 +803,8 @@ impl Game {
         if crate::events::rpc_before(self, client, object, name, &a.0) {
             return true;
         }
+        // Whatever this request builds or destroys is its client's doing (events::object_placed).
+        self.ext.plugins.actor = client;
         let handled = self.world_objects_rpc(client, name, &a)
             || self.inventories_rpc(client, name, &a)
             || self.players_rpc(client, name, &a)
@@ -788,6 +812,7 @@ impl Game {
             || crate::unlocks::rpc(self, client, name, &a)
             || crate::handlers::rpc(self, client, object, behaviour, name, &a)
             || crate::hooks::rpc(self, client, object, behaviour, name, &a);
+        self.ext.plugins.actor = 0;
         if handled {
             crate::events::rpc_after(self, client, object, name, &a.0);
         }
@@ -910,6 +935,7 @@ impl Game {
             story_events: self.save.story_events.clone(),
             settings: self.save.settings.clone(),
             procedural: self.save.procedural.clone(),
+            pending: None,
         };
         save.world["pcdsCurrentPlanet"] = json!(self.planet_id());
         crate::players::mark_host(&mut save.players, self.planet_id());
@@ -1148,6 +1174,18 @@ pub mod tests {
         g.disconnect(99);
     }
 
+    /// What the game remembers about a client it has told once (a refused inventory) goes with the
+    /// client: ids are never used twice, so the set would only grow with every connection.
+    #[test]
+    fn a_client_that_leaves_is_forgotten_by_the_set_of_refused_inventories() {
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        join(&mut g, 2, "Bob");
+        g.refused_inventories.extend([1, 2]);
+        g.disconnect(1);
+        assert_eq!(g.refused_inventories.iter().copied().collect::<Vec<_>>(), [2]);
+    }
+
     /// Every animator ServerRpc an owner sends goes out as its ClientRpc.
     #[test]
     fn every_animator_server_rpc_is_relayed() {
@@ -1319,9 +1357,9 @@ pub mod tests {
         let b = g.net.objects[&object].behaviour(class).unwrap();
         let mut w = Writer::new();
         w.packed_u64(object).packed_u16(b.index).i32(4);
-        for v in &b.vars {
-            w.bool(v.name == var);
-            if v.name == var {
+        for (name, _, _) in b.vars() {
+            w.bool(name == var);
+            if name == var {
                 w.bytes(bytes);
             }
         }
@@ -1551,7 +1589,7 @@ pub mod tests {
         assert!(g.net.out.is_empty(), "nothing passed on");
         let d = delta(&g, player, "PlayerShareState", "_emote", &crate::net::enc::short(3));
         g.receive(1, &wire::batch(&[(NETWORK_VARIABLE_DELTA, d.clone())]));
-        assert_eq!(var(&g, "PlayerShareState", "_emote"), format!("{:?}", Some(crate::net::VarValue::Plain(crate::net::enc::short(3)))));
+        assert_eq!(var(&g, "PlayerShareState", "_emote"), format!("{:?}", Some(crate::net::VarValue::Plain(crate::net::enc::short(3).into()))));
         assert!(matches!(&g.net.out[..], [(Target::Except(1), NETWORK_VARIABLE_DELTA, body)] if *body == d));
         g.net.out.clear();
         let d = delta(&g, bob, "PlayerShareState", "_emote", &crate::net::enc::short(3));

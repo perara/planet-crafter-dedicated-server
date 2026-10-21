@@ -209,6 +209,37 @@ mod tests {
         assert!(yaw.applied([0.0; 3], [0.0, 0.0, 0.0, 1.0]).is_some());
     }
 
+    /// Euler angles and quaternions agree as rotations for any angles, the poles (pitch of +-90
+    /// degrees, where the three angles are no longer unique) and their neighbourhood included:
+    /// the quaternion of the angles read back from a quaternion is that quaternion (up to sign).
+    #[test]
+    fn a_rotation_survives_its_euler_angles_everywhere() {
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut worst = 1.0f32;
+        for i in 0..200_000 {
+            let pitch = match i % 4 {
+                0 => 90.0 - (next() % 2000) as f32 * 1e-4,
+                1 => 270.0 + (next() % 2000) as f32 * 1e-4,
+                _ => (next() % 72_000) as f32 / 100.0 - 360.0,
+            };
+            let e = [pitch, (next() % 72_000) as f32 / 100.0 - 360.0, (next() % 72_000) as f32 / 100.0 - 360.0];
+            let q = from_euler(e);
+            let norm = q.iter().map(|v| v * v).sum::<f32>().sqrt();
+            assert!((norm - 1.0).abs() < 1e-4, "{e:?} -> {q:?} has length {norm}");
+            let back = from_euler(euler_angles(q));
+            let same = q.iter().zip(back).map(|(a, b)| a * b).sum::<f32>().abs();
+            worst = worst.min(same);
+            assert!(same > 1.0 - 2e-3, "{e:?}: {q:?} comes back as {back:?} (agreement {same})");
+        }
+        assert!(worst > 0.99, "{worst}");
+    }
+
     #[test]
     fn euler_round_trips() {
         for e in [[0.0, 73.0, 0.0], [30.0, -120.0, 45.0], [-60.0, 10.0, 170.0]] {

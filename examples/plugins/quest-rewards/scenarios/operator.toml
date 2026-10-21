@@ -1,0 +1,35 @@
+name = "!givetokens is for operators, 1 to 10000"
+
+[[player]]
+client = 1
+name = "Root"
+operator = true
+
+[[player]]
+client = 2
+name = "Ann"
+
+[[step]]
+chat = { client = 2, text = "!givetokens 5" }
+expect = [{ tell = 2, contains = "is for the server's operators" }, { tokens = true, count = 0 }]
+
+[[step]]
+chat = { client = 1, text = "!givetokens 250" }
+expect = [{ tokens = true, equals = "250" }, { tell = 1, equals = "Added 250 Terra tokens." }]
+
+[[step]]
+chat = { client = 1, text = "!givetokens 10001" }
+expect = [{ tokens = true, count = 0 }, { tell = 1, equals = "Use: !givetokens <number from 1 to 10000>" }]
+
+[[step]]
+chat = { client = 1, text = "!givetokens lots" }
+expect = [{ tokens = true, count = 0 }, { tell = 1, equals = "Use: !givetokens <number from 1 to 10000>" }]
+
+[[step]]
+note = "the host checks the argument count before the plugin is called"
+chat = { client = 1, text = "!givetokens" }
+expect = [{ tell = 1, equals = "Use: !givetokens <number from 1 to 10000>" }]
+
+[[step]]
+chat = { client = 1, text = "!rewards" }
+expect = [{ tell = 1, contains = "Milestones done: 0 of 6." }]

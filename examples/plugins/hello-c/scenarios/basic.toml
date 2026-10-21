@@ -1,0 +1,52 @@
+name = "hello and roll from C"
+
+[[player]]
+client = 1
+name = "Ann"
+
+[[step]]
+note = "the first greeting"
+chat = { client = 1, text = "!hello" }
+expect = [{ tell = 1, equals = "Hello Ann from C! I have said hello 1 time." }]
+
+[[step]]
+note = "a second player joins, and the generator is stirred with their id"
+join = { client = 2, name = "Bo" }
+
+[[step]]
+note = "game time passes: a tick every ten seconds stirs it again"
+advance = "35s"
+
+[[step]]
+note = "a die is 1 to 6, never 0 or 7"
+chat = { client = 2, text = "!roll" }
+expect = [
+  { tell = 2, contains = "Bo rolled a " },
+  { tell = 2, contains = "rolled a 0", count = 0 },
+  { tell = 2, contains = "rolled a 7", count = 0 },
+]
+
+[[step]]
+chat = { client = 1, text = "!roll" }
+expect = [{ tell = 1, contains = "Ann rolled a " }]
+
+[[step]]
+note = "a hot update: the counter goes through save and load"
+flip = true
+
+[[step]]
+chat = { client = 1, text = "!hello" }
+expect = [{ tell = 1, equals = "Hello Ann from C! I have said hello 2 times." }]
+
+[[step]]
+note = "a plain reload keeps it too"
+reload = true
+
+[[step]]
+chat = { client = 2, text = "!hello" }
+expect = [{ tell = 2, equals = "Hello Bo from C! I have said hello 3 times." }]
+
+[[step]]
+note = "arguments are refused by the host before the plugin hears of them"
+chat = { client = 1, text = "!roll 20" }
+expect = [{ tell = 1, equals = "Use: !roll" }]

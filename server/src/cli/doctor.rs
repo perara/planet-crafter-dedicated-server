@@ -209,7 +209,7 @@ impl Ctx {
             }
         };
         let dlc: Vec<String> = net.planets.iter().filter(|p| p.steam_app_id != 0).map(|p| p.id.clone()).collect();
-        let with_scenes: Vec<&str> = dlc.iter().map(String::as_str).filter(|p| scenes.planets.contains_key(*p)).collect();
+        let with_scenes: Vec<&str> = dlc.iter().map(String::as_str).filter(|p| scenes.planets.contains_key(p)).collect();
         r.pass(
             "game tables",
             format!("game {} in {path}, format {format}, {} planets, DLC ground for {}", net.game_version, net.planets.len(), if with_scenes.is_empty() { "none of the DLC planets".to_string() } else { with_scenes.join(", ") }),
@@ -267,7 +267,7 @@ impl Ctx {
                 r.pass("DLC planet", format!("{planet}: the ground is in the tables and world.dlcPlanets states it"));
             }
         }
-        for p in stated.iter().filter(|p| t.dlc.contains(p) && !t.scenes.planets.contains_key(*p)) {
+        for p in stated.iter().filter(|p| t.dlc.contains(p) && !t.scenes.planets.contains_key(p)) {
             r.warn("DLC planet", format!("world.dlcPlanets lists {p}, and the tables have no ground for it: a world sent there would run empty"), "install the DLC in the game folder, then pcds extract");
         }
     }
@@ -1065,3 +1065,7 @@ mod tests {
         assert!(mb(1) == "1B" && mb(3 << 20) == "3.0MB" && mb(25 << 20) == "25MB");
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../../fuzz/targets/doctor.rs"]
+pub mod fuzz;

@@ -19,6 +19,7 @@ Commands are run from the repository root unless a `cd` is shown. On a shared ma
 | [Parity sweep](#parity-with-the-game-the-sweep) | yes, and the game | no | `server/tests/parity/sweep.sh` |
 | [Completeness map](#completeness-map) | `check`: no | `check` only | `map.py check` |
 | [Benchmarks](#benchmarks-and-fingerprints) | yes, and a save | no | `make bench` and `cargo test ... -- --ignored` |
+| [Efficiency budgets](#efficiency-budgets) | most of them | yes, without the tables (the transport's) | with the unit tests |
 | [Load, chaos, soak and churn](#load-chaos-soak-and-churn) | yes, and a built server | no | `tools/chaos`, `tools/perf` |
 | [Docker](#docker) | part 2 | no | `make docker-test` |
 | [The flip gate](#the-flip-gate-and-the-release-checklist) | yes | no | `make gate` |
@@ -139,7 +140,19 @@ python3 fuzz/seeds.py                         # (re)writes the small seed corpus
 PCDS_FUZZ_TARGET=wire cargo fuzz run pcds_fuzz fuzz/corpus/wire
 ```
 
-Targets: `wire utp rpcspec transform ipc config chathooks updater access rules save handoff game front`.
+`make fuzz-check` (CI runs it) type-checks the fuzz crate without a nightly toolchain: it is the server's code built another way, and it
+had stopped compiling unnoticed.
+
+Targets: `wire utp rpcspec transform ipc config chathooks updater access rules save handoff game front`, and
+since round 3 ([audits.md](audits.md)) `oldsave savelayout manifest pluginnet pluginsign wasmhost bincodec adminhttp
+adminroutes names msg toxic loadsave twin tessera`, and for the operability release (`pcds doctor`, metrics, the
+structured log, `pcds backup`, the S3 reads) `prom logline s3resp backup doctor` (each is described in the header of `server/fuzz/Cargo.toml`).
+`twin` is the check of a flip's exactness: a game and the game restored from its snapshot are given the same inputs and
+the same ticks (on the game's own clock, `sim_time`), and every message they send must be the same.
+`PCDS_FUZZ_SAVE=SAVE` makes `game`, `twin` and `loadsave` start from a save of this server (a mid-game world with
+machines and drones finds more than the two-player test world; it is slower). `wasmhost` builds wasmi with
+`portable-dispatch`: the default dispatch relies on the compiler turning calls into jumps, which AddressSanitizer's
+instrumentation prevents (a loop of the module then overflows the native stack).
 The targets `rpcspec`, `handoff` and `game` read the game tables from `PCDS_FUZZ_DATA` (default:
 `run/data/2.103` of the checkout). `handoffsweep` and `savesweep` are not fuzzers: each puts awkward
 numbers and strings, one at a time, into a real snapshot or save (`PCDS_FUZZ_SWEEP_FILE`, `_STEP`, `_OFFSET`;
@@ -171,13 +184,25 @@ change to the transport, the save code or anything `unsafe`. All need a nightly 
   rpcspec parse, save text, rules, config, access) and on corpus replays (above, a few dozen files per
   target: a directory of thousands is slow under Miri). It cannot run what uses sockets (utp, ipc, front),
   `ring`, fsync, mmap or memfd. Result at v0.6.1: no undefined behaviour.
-- **AddressSanitizer** (`RUSTFLAGS=-Zsanitizer=address` with `--target x86_64-unknown-linux-gnu`) on the whole unit
-  suite and on `cli` and `hot_update`. Setting `RUSTFLAGS` drops the `-rpath $ORIGIN` that
-  `.cargo/config.toml` adds, so a bank started with a clean environment cannot find `libsteam_api.so`:
-  add `-C link-arg=-Wl,-rpath,$ORIGIN` to your flags. `hot_update` has timing assertions that a
-  sanitizer's slowdown can break (a failed craft round trip, not a memory error).
-- **ThreadSanitizer** (`-Zsanitizer=thread -Zbuild-std`) on the unit suite: the admin threads, the chat-hook
-  worker, S3 uploads and concurrent save writes. `hot_update` was not run under it.
+- **AddressSanitizer** (`RUSTFLAGS=-Zsanitizer=address` with `--target x86_64-unknown-linux-gnu`) on the whole test
+  suite: the unit tests, `cli`, `admin_golden` and `hot_update` (the front and the banks run as ASan processes).
+  Setting `RUSTFLAGS` drops the `-rpath $ORIGIN` that `.cargo/config.toml` adds, so a bank started with a clean
+  environment cannot find `libsteam_api.so`: add `-C link-arg=-Wl,-rpath,$ORIGIN` to your flags. **Add
+  `--features portable-dispatch`** (this and the next): wasmi's default dispatch needs the optimizer to turn
+  calls into jumps, which the sanitizers' instrumentation prevents, and a loop in a plugin then overflows the
+  native stack (SIGSEGV in `plugins::tests` without it). Timing assertions that a sanitizer's slowdown breaks
+  (`a_crowd_of_plugins_cannot_stretch_a_tick_and_takes_turns`, `a_hostile_unload_cannot_stop_the_unloading`,
+  `hot_update`'s craft round trips) are not memory errors.
+- **ThreadSanitizer** (`RUSTFLAGS="-Zsanitizer=thread -C link-arg=-Wl,-rpath,\$ORIGIN"`, `-Zbuild-std`, `--target
+  x86_64-unknown-linux-gnu`) on the unit suite (the admin threads, the chat-hook worker, S3 uploads, concurrent
+  save writes, the plugins' network workers, the autosave thread) and on `hot_update` (set
+  `TSAN_OPTIONS=log_path=DIR/r` to collect the reports of the front and banks it starts: they print to
+  files nobody reads otherwise). Result at v0.8.0 (round 3): no report of a data race.
+- **Overflow checks** (`CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true cargo test --release`): the release build wraps
+  (S18), so an arithmetic overflow a client could reach is silent there; with the checks on, the whole suite,
+  the late-game bench, a 3600 s soak of the late-game save and the hostile RPCs on it (`PCDS_FUZZ_SEED` 1 to 6,
+  30,000 rounds) find none at v0.8.0. The same RPCs without the checks, seeds 1 to 11 (18,900 rounds each, about
+  5 to 14 minutes a seed), hold the invariants once the grower's plants (audits.md R2) are fixed.
 
 ## Parity with the game: the sweep
 
@@ -237,10 +262,10 @@ PCDS_BENCH_SAVE=run/worlds/world.json PCDS_RNG_SEED=1 \
 
 | Test | What it does | Variables |
 |---|---|---|
-| `bench::bench` (`make bench SAVE=... PLAYERS=4`) | The tick on a real save with a fixed clock and seed, 4 scripted players by default: microseconds per tick (mean, p50, p99), allocations per tick, and a **fingerprint** of every message the server sends and every byte it saves. | `PCDS_BENCH_SECONDS` (300), `PCDS_BENCH_PLAYERS`, `PCDS_BENCH_ACTION_MS` (players act that often; default they only walk), `PCDS_BENCH_START_DAYS` (the game's clock starts that many days in: the save hash must not depend on it), `PCDS_BENCH_DUMP` (every message and the final save, to a file, to compare two runs), `PCDS_BENCH_SECTIONS=1` (time per part of the tick) |
+| `bench::bench` (`make bench SAVE=... PLAYERS=4`) | The tick on a real save with a fixed clock and seed, 4 scripted players by default: microseconds per tick (mean, p50, p99), user instructions per tick (where the kernel lets the process count them), allocations per tick, and a **fingerprint** of every message the server sends and every byte it saves. | `PCDS_BENCH_SECONDS` (300), `PCDS_BENCH_PLAYERS`, `PCDS_BENCH_ACTION_MS` (players act that often; default they only walk), `PCDS_BENCH_START_DAYS` (the game's clock starts that many days in: the save hash must not depend on it), `PCDS_BENCH_DUMP` (every message and the final save, to a file, to compare two runs), `PCDS_BENCH_SECTIONS=1` (time per part of the tick, and the sections of the slowest ticks), `PCDS_BENCH_ALLOC_SITES=N` (the places in the code that allocate in the tick) |
 | `bench::handoff` | The same run straight, and with the game snapshotted and rebuilt from the snapshot every N seconds (what a hot update does). The two fingerprints must be `EQUAL`. | the same, and `PCDS_BENCH_HANDOFF` |
 | `bench::restart` | An idle world run straight and with the process restarted from its save at half time (the clock starts at 0 again); prints the units' levels of both. What differs is what the save does not hold. | the same |
-| `bench::scale` | Load, save and memory of a world of any size: the time of each step of a start and of an autosave. | `PCDS_BENCH_SAVE` |
+| `bench::scale` | Load, save and memory of a world of any size: the time of each step of a start and of an autosave, and the byte accounting of docs/performance.md: the heap by part of the game (world objects, network objects, machines, inventories...) and of the tables, how many world objects hold only an id and a group, the machines' census, the process's peak, the anonymous part of its RSS after a trim and what malloc holds free. | `PCDS_BENCH_SAVE` |
 | `bench::tables_memory` | The memory each of the game tables takes. | `PCDS_TEST_DATA` |
 | `bench::flipbench` | The stand of a hot-update flip on worlds of several sizes, phase by phase (p50, p95, max). | `PCDS_FLIPBENCH_SAVES=a.json,b.json`, `PCDS_FLIPBENCH_N`, `PCDS_FLIPBENCH_PLAYERS`. `tools/grow-world.py SAVE OUT N` grows a save to about N world objects. |
 | `bench::dirtybench` | How much of a big world changes while a pre-copy would run (entries and 2048-entry chunks that differ after 0.25, 1 and 5 s). | `PCDS_FLIPBENCH_*` |
@@ -263,14 +288,42 @@ resolution ([clock.md](clock.md)).
 `pcds load` and `pcds probe` (the scripted clients) and `GET /api/status` (`busyPercent`,
 `longestLoopMicros`) are the live equivalents; see [Load, chaos, soak and churn](#load-chaos-soak-and-churn).
 
-Ignored soak tests in the same spirit: `soak_growth` (`PCDS_SOAK_SECONDS`, `PCDS_SOAK_STEP` (at most a third
-of a second: the loop's longest frame, docs/clock.md), `PCDS_SOAK_REPORT`, `PCDS_SOAK_PLAYERS`, `PCDS_BENCH_START_DAYS`, `PCDS_SOAK_ONLY`, `PCDS_SOAK_PARTS`: what
-grows over a long game; each report prints the age in days, the heap, the save and the snapshot size and the wire tick. On the 2,565-object bench
-world with 2 players a game year takes about an hour; on the late-game world a game day takes about an hour), `drone_farm_runs_for_hours` (`PCDS_FARM_STATIONS`,
+Times on a shared machine are not the code's: compare **instructions** (the bench prints them;
+`perf stat -e instructions:u` for a process) and allocations. docs/performance.md has the numbers of
+a build, how to profile and the budgets below.
+
+Ignored soak tests in the same spirit: `soak_growth` (`PCDS_SOAK_SECONDS`, `PCDS_SOAK_STEP` (at most a third of a
+second: the loop's longest frame, docs/clock.md), `PCDS_SOAK_REPORT`, `PCDS_SOAK_PLAYERS`, `PCDS_BENCH_START_DAYS` (the age of the server),
+`PCDS_SOAK_ONLY` (which actions), `PCDS_SOAK_PARTS` (the heap each part holds): what grows over a long game; each report prints the age
+in days, the heap, the resident memory, the save and the snapshot size and the wire tick. On the 2,565-object bench world with 2 players a game year takes
+under two hours; on the late-game world a game day takes more than an hour), `drone_farm_runs_for_hours` (`PCDS_FARM_STATIONS`,
 `_DRONES`, `_PAIRS`, `_SECONDS`: stations, drones and a supply and demand that never end; prints per game
 minute the worst tick, the sizes of what could grow and the memory) and `perf_logistics_and_destroy`
 (`PCDS_REVIEW_STATIONS`, `PCDS_REVIEW_SECONDS`: the cost of the logistics search in a world with tens of
 thousands of stored items). Run each with `cargo test --release NAME -- --ignored --nocapture`.
+
+## Efficiency budgets
+
+Tests that fail when the server gets dearer (docs/performance.md has the table of budgets and what
+they were when set). They count what does not depend on the machine's load: allocations, bytes and
+user instructions (the kernel's counter, `perf_event_open`; where the process may not count, the
+instruction budgets say so and are skipped, the allocation and byte budgets still run).
+
+- `bench::budget::*`: a world of about 0, 400 and 1,600 buildings that anyone can build (containers
+  that supply and demand, water collectors, autocrafters, a drone station) with 0 and 4 players:
+  allocations and instructions per tick, the growth of the tick with the world, the bytes per world
+  object of a hot update's snapshot, the save and a join, the instructions of a snapshot and its
+  restore, and the memory the world's parts keep (a world object, a network object, a machine, an
+  inventory: the bytes malloc holds for each, counted by the test allocator). `cargo test --release bench::budget::numbers -- --ignored --nocapture` prints the
+  measured numbers to set a budget from.
+- `utp::tests::polling_idle_sessions_and_sending_a_batch_allocate_a_bounded_number_of_times`:
+  allocations of the transport; needs no tables, CI runs it.
+- `tests/hot_update.rs`, `an_idle_server_wakes_up_within_its_budget`: the wake-ups a second of an idle
+  front and bank (the kernel's count of voluntary context switches).
+
+A budget is about one and a half times what the build measured. A failure says which and by how much;
+if the cost is the point of the change, raise the budget in the test and in docs/performance.md in
+the same commit.
 
 ## Load, chaos, soak and churn
 
@@ -294,8 +347,8 @@ clients the program has:
   ```
 
   Variables: `PCDS_LOAD_SERVER` (required), `PCDS_LOAD_PLAYERS`, `PCDS_LOAD_SECONDS`, `PCDS_LOAD_SEED`,
-  `PCDS_LOAD_REUSE_NAMES`, `PCDS_LOAD_CHAT_BYTES`. The bots receive worlds of any size here (the 1 MiB
-  limit on a message is lifted in test builds only).
+  `PCDS_LOAD_REUSE_NAMES`, `PCDS_LOAD_CHAT_BYTES`. The bots receive worlds of any size (a client takes
+  batches up to 256 MiB; the server's own limit on the batches it receives is 1 MiB), so `pcds load` joins a 200,000-object world.
 
 The scripts that start a scratch server, run these and check the server afterwards are in
 `tools/chaos/` (chaos, soak, long soak, pressure, Docker memory, churn, stress, stall, limits, disk full) and `tools/perf/` (load runs

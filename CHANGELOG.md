@@ -26,6 +26,12 @@ and restored from the command line, and limits on the admin port. Five new docum
 [disaster-recovery.md](docs/disaster-recovery.md), [reverse-proxy.md](docs/reverse-proxy.md), and the
 dashboard [grafana/pcds.json](docs/grafana/pcds.json).
 
+Plugins grew up by being used (the plugin parts below). Fourteen example plugins were written and tested against the real game, and what
+hurt while writing them is fixed: plugin ABI 1.3 (a stable player id, the wall clock, who built or destroyed
+something, timers, a backpack and nearby-objects query, giving items and Terra tokens, typed settings, operator
+commands), a runner that tests a plugin in the real host without a game, a log and a cost table for each plugin, a way
+to share a plugin as one file, and a dashboard page that shows what a plugin did and what a new version asks for.
+
 ### Breaking changes
 
 * **Snapshot format 8.** The rules are part of the state a hot update hands over, and three rules
@@ -37,6 +43,16 @@ dashboard [grafana/pcds.json](docs/grafana/pcds.json).
   matched the start of a line. `log.format=json` is the format for programs.
 * **`pcds run` and the server no longer rewrite the systemd unit.** `pcds restart`, `start`, `install-service`
   and `upgrade --restart` do.
+
+* **Plugin ABI 1.3, crate `pcds-plugin-api` 0.2.0.** A module built for 1.0, 1.1 or 1.2 runs unchanged. Rust source that
+  names every field of `Event::Tick`, `PlayerJoin`, `PlayerLeave`, `Chat`, `Command`, `ObjectPlaced`, `ObjectDestroyed`
+  or builds a `WorldInfo`/`PlayerInfo` must add the new fields (or use `..`); the bytes an old module receives are
+  unchanged apart from fields at the end that it ignores.
+* **`Event::Command::command` is lower case**, whatever the player typed.
+* **A string setting in `[[config]]` is a secret unless it says `secret = false`** (it was always the default); a number or a
+  yes/no is never a secret. A setting of type `int`, `float`, `bool` or with `choices` is checked when it is set, and a stored value that
+  no longer fits makes the plugin `invalid` instead of running with a value nobody meant.
+* **`[[every]]` in a rules file** takes a text or a list; **`[[when_players]]`** has `at_most`. Files that worked still work.
 
 ### Upgrade
 
@@ -51,6 +67,10 @@ dashboard [grafana/pcds.json](docs/grafana/pcds.json).
    `MemoryDenyWriteExecute` set by you, is affected by the sandbox: docs/hardening.md, "What a hook
    program or a plugin sees".
 5. Back to 0.8.0: `pcds upgrade v0.8.0 --restart`; the unit of 0.8.0 is written again by it.
+
+Nothing to do for a server that runs no plugin, or plugins built for ABI 1.0 to 1.2: they load as they were. `POST /api/plugins/logs` is
+a route of the front (which a hot update does not replace): `pcds plugin logs` and the dashboard's log work after `pcds upgrade --restart`. Rebuild a Rust plugin that
+matches on `Event` fields by name. The plugin changes add nothing to the snapshot (format 8 in this release comes from the rules being part of the state).
 
 ### Added
 
@@ -105,6 +125,42 @@ dashboard [grafana/pcds.json](docs/grafana/pcds.json).
 * **A scoped token for the scraper.** The scope `metrics.read` opens `GET /api/metrics` and nothing
   else (`pcds plugin token create prometheus --scope metrics.read`), so a monitor does not hold the
   admin token.
+* **docs/performance.md**: what the server costs (instructions, allocations, bytes, wake-ups), the
+  budgets a test holds the build to, how to profile it and read the tick histogram of `/api/status`, how
+  big a machine a world and its players need, the limits of the transport, and what was tried and left out.
+* **Efficiency budgets as tests** (docs/testing.md): allocations and user instructions per tick on a
+  world anyone can build (0, 400 and 1,600 buildings, 0 and 4 players), their growth with the world, the
+  bytes per world object of a snapshot, a save and a join, the instructions of a hot update's stand,
+  the transport's allocations (needs no game tables: CI runs it) and the wake-ups of an idle server.
+* `GET /api/status` `traffic.wire`: datagrams and bytes in and out, how many datagrams only
+  acknowledged, heartbeats and resends. `bench::bench` and `bench::flipbench` print user instructions
+  (where the kernel lets the process count them); `PCDS_BENCH_ALLOC_SITES` names where a tick allocates.
+  `tools/perf/loadrun.py` prints the wire; `PCDS_TOOLS_RULES` gives the tools' servers rules (a DLC planet).
+
+* **Plugins can** (ABI 1.3): read the world in `load`; know a player by a stable `player_id`; read the wall clock (`unix_ms`);
+  see who built or took apart an object (`client` on `object_placed` and `object_destroyed`); look up one player, a
+  player's backpack, the objects near a point, one object (a network object id from an RPC resolves to its position),
+  and their own settings; give items (`player.give`) and Terra tokens (`world.tokens`); set timers (`event.timer`);
+  hear that the world was handed over by a hot update (`flip`); declare commands with a usage line, an argument count and
+  a permission (`permission = "operator"`, the players in the new rule `access.operators`).
+* **`pcds plugin test`**: a scenario file (TOML) drives a plugin in the real host against a made-up world, with no game tables;
+  exit code 1 when an expectation fails. `scenario.rs` describes the format.
+* **`pcds plugin check`** shows the fuel of each event as a share of the budget, in a world of 16 players, and warns about a
+  secret setting the plugin cannot read.
+* **`pcds plugin watch`** (install each new build, approve it again if it asks for nothing new, state kept), **`logs`**, **`stats`**,
+  **`pack`**, **`search`**, **`install`** from a `.pcdsplugin` file, an https address (with `--sha256`) or an index entry; `plugin new`
+  has a C template, a Makefile and a justfile, and a scenario.
+* **`pcds-plugin-api`**: a `testing` feature (`MockHost`, `Harness`: ordinary `cargo test` for a plugin), a small `json` module, docs for every
+  item, package metadata and a README. It is not published.
+* **The dashboard's Plugins page** shows each plugin's log, faults, cost by event and settings (typed controls), a per-row
+  reload, and what a new version asks for beyond what you approved.
+* **`POST /api/plugins/logs`**; `GET /api/plugins` has `byEvent`, `faultLog`, `deniedCapabilities`, `changes`, typed settings and
+  `commandPrefix`; the event stream's chat and player events have `playerId`.
+* **Examples** (`examples/plugins/`): `afk-guard`, `playtime-board`, `quest-rewards`, `claims`, `restart-notice`, `chat-bridge`,
+  `prometheus-exporter`, `hello-c`, `server-motd`, `scaling-rules`, each with a README, scenarios and a test in the real game
+  (`server/src/plugins/cookbook_tests.rs`).
+* **Documentation**: docs/plugins-guide.md is a tutorial and a cookbook; docs/plugins-api.md has the host functions with their costs and
+  the delivery and ordering rules; docs/plugins.md has sharing, the licence, the versions, the measurements.
 
 ### Changed
 
@@ -124,6 +180,64 @@ dashboard [grafana/pcds.json](docs/grafana/pcds.json).
   [docs/kubernetes.yaml](docs/kubernetes.yaml) probes `GET /api/health` over HTTP. The liveness
   probe now waits five minutes for a world, since a crash is healed in seconds.
 * **The admin port waits 2 seconds, not 3,** for a request head.
+* **The world's tick costs a fraction on a big world.** The late-game save (33,000 world objects,
+  hundreds of machines, drones and logistics inventories), user instructions per simulated second:
+  idle 196 -> 24 M (8x), 4 players 203 -> 32 M, 32 players 226 -> 54 M, 100 players 329 -> 108 M, with
+  the same messages and the same save, byte for byte (the bench's fingerprints, every case). The
+  logistics search for tasks went through every supply for every demand and every dropped item; it
+  goes through the items left. The machines' walk reads a flat array of due times instead of every
+  machine. Scans of every world object (the machines' range, the autocrafters' items) look at the
+  few that have a network object, and de-duplicate by set. A message to one client is no longer looked
+  for by every client, and the drones' hiding is sets, not lists (100 players and the drones). Idle,
+  the live bank on that save used 380 M instructions a second and uses 45 M. On the bench world
+  and the grown 100k and 200k worlds the gain is 10 to 50% (they have little logistics).
+* **The hot update stands for 40% less work** (user instructions of a snapshot and its restore, all
+  threads): 385 -> 223 M at 33k objects, 1,080 -> 625 M at 100k, 2,130 -> 1,239 M at 200k. The
+  restore read the tables of every machine again, six lookups each, which was the largest part of it
+  (52 / 172 / 342 ms of the stand); it reads them once for each group. In time, in process on a loaded
+  host: 102 -> 32 ms at 33k, 276 -> 76 at 100k, 513 -> 162 at 200k (p50 of the better of two runs); with
+  the real front and two banks and no players: 105 to 118 -> 62 to 67 ms at 100k, 277 to 306 -> 95 to
+  129 ms at 200k.
+* **A start is faster**: the game from the save 341 -> 197 ms (33k), 508 -> 334 (100k), 973 -> 739
+  (200k) of CPU (the prefab components are found by an index, a group's authorized items worked out
+  once).
+* **The front costs a third at 64 players** (89 M of 266 M user instructions a second: a chunk of
+  the send queue was copied byte by byte; the sessions' timers are looked at when one can be silent,
+  not at every 5 ms frame) and wakes up 20 times a second idle, not 50 (its quiet frame is 50 ms; an
+  admin request waits up to that).
+* **`pcds load` and `pcds probe` take a batch of any size** (up to 256 MiB), as the game's client does,
+  so a world of 200,000 objects (a join of 2.4 MB) can be joined by them. The server's own limit on a
+  batch it receives is still 1 MiB. The test-only switch for it is gone.
+* **Left out, because the numbers did not support them**: the save text on several threads, a
+  two-level array for the machines' walk, delayed acknowledgements (docs/performance.md).
+
+* **A module is translated when it is read**, not when each function is first called. Translation was charged to the call as fuel,
+  so the first call of an instance cost up to five times the next ones and a budget that held the steady state could fault it, again and
+  again after each restart. Now translation is never charged to a call (the first call can still cost a little more, for the heap it grows), and a reload does its translation before it starts the plugin.
+* **A fault says what happened and what to do**: the event, the budget used and the knob that raises it (`chat: out of fuel: the call used all
+  500000 fuel...`), a Rust panic is named as such, a capability a plugin used without having it is named once in its log, and a manifest key,
+  capability or event that is misspelled names the one meant.
+* The first `tick` of an instance says `since_ms` 0 (it was the whole game time).
+* **The server uses a third of the memory.** The bank's resident memory, on the same worlds, with the
+  same messages, the same saves and the same snapshots, byte for byte (the bench's fingerprints, every
+  case; the hot update's snapshot is the same bytes): the bench world 43.8 -> 21.4 MiB, the late-game save
+  (33,000 world objects) 77 -> 33, 100,000 objects 122 -> 43, 200,000 objects 199 -> 66 MiB (a world object
+  beyond the bench world: 0.81 -> 0.23 KiB). The start peaks at 298 -> 87 MiB on 200,000 objects, and a hot update holds 437 -> 179 MiB
+  at its largest (264 -> 114 at 100,000). The tick costs the same (the late save: 32.7 against 32.8 M
+  instructions a second with 4 players; 100,000 objects 28.7 against 35.5) and a hot update's stand costs
+  no more (9,500 instructions a world object, 9,700 before). Where it went: nine in ten world objects of a big
+  world are items in an inventory and are 24 bytes (304 before), a machine without components is 48
+  bytes (584), a network object shares the names, types and order of its variables with every other of its
+  kind (1.7 KB -> 0.55), and the game's tables, parsed, are a quarter of what they were (26 -> 8 MiB; the
+  start also keeps a planet's scene dump as text until a planet needs it). The start reads the world from
+  the save's text one entry at a time (a tree of values of the whole save was 100 MB at 200,000 objects),
+  checking a backup or a world does the same, and malloc's mmap threshold is fixed at 128 KiB, so that
+  the frames of a world joined (2.4 MB) go back to the system (the front with 16 players on the 200,000-object
+  world: 21.5 -> 10.5 MiB, its anonymous memory 13.2 -> 1.4). A player costs the bank 6 KB (25 before) and
+  the front 35 to 50 KB. docs/performance.md has the byte accounting, the sizing
+  guide (a container for a hot update: three times the bank and the front still holds) and what was tried
+  and left out; `bench::budget` has a test of the memory of a world object, a network object, a machine
+  and an inventory.
 
 ### Fixed
 
@@ -172,6 +286,64 @@ dashboard [grafana/pcds.json](docs/grafana/pcds.json).
   keys are replaced by `***` wherever they appear in a line, and so is anything that looks like a
   bearer token or a scoped token. The code did not print them; this is the net under it, with
   tests in both formats and a check on a real server's log.
+
+* **`net.http` never reaches more of the cloud services that hand out credentials.** Besides
+  169.254.169.254, 100.100.100.200 and fd00:ec2::254 it now never reaches Azure's WireServer
+  (168.63.129.16: a *public* address, so a plugin with `net.http` and no `net.http.local` could
+  reach it through any name that resolved to it), the container credentials of AWS ECS and EKS
+  (169.254.170.2, 169.254.170.23, fd00:ec2::23), Tencent's metadata (169.254.0.23) and Google's
+  IPv6 metadata server (fd20:ce::254).
+* **TLS: rustls-webpki 0.103.16 and webpki-roots 1.0.10** (RUSTSEC-2026-0382, RUSTSEC-2026-0381, of
+  19 and 20 October): the chain check accepted intermediates that the root programs distrust (emSign).
+  The updater, the S3 copies and the plugins' `net.http` use them. `cargo audit` is clean again but
+  for the known `paste` warning.
+* **The admin API's HTTP reader is stricter about the head.** A line of blanks no longer ends the
+  head (a proxy in front reads it as a folded line), and a `Content-Length` with a sign
+  (`+5`) is refused.
+
+### Fixed
+
+* `world.tokens` accepted an amount of `i32::MIN`: `abs()` wraps in a release build, so the bound let it through. It is checked with `unsigned_abs`.
+* `pcds plugin check` no longer reports an error for a plugin that reads its settings without `world.read`.
+* A panic in the server's own code inside a plugin host function would have ended the whole process (the interpreter's frame cannot unwind).
+  Every host function now runs under `catch_unwind` and a panic is that plugin's fault: counted, the plugin restarted, the game goes on. No such
+  panic is known; 300 generated hostile modules in the tests found none.
+* A rules file's command with `cooldown_seconds` silently had no cooldown without `world.read` (the clock is the world's); the check now says the
+  rules need `world.read`, and a command without a cooldown no longer asks the world for the time.
+* **The fuzz crate (`server/fuzz`) compiles again.** It had stopped building when the game tables
+  became raw JSON (a missing `raw_value` feature) and when two test-only functions were used by
+  the targets, so none of the fuzz targets could run. CI now type-checks it (`make fuzz-check`).
+  Fifteen targets are new (`docs/testing.md`), and the game targets let game time pass.
+* **A toxic area's key can no longer overflow.** The key a client registers an area under is any
+  number; `i32::MIN` matched the area at the origin and `i32::MIN + 1` the one at `i32::MAX`
+  (a build with overflow checks panicked in the tick).
+* **Numbers in a save and in the messages between the front and the banks read back as they were
+  written.** serde_json's default float parsing is an ulp off for one f64 in ten, so a load moved
+  some of the world units' totals by an ulp and a save was not a fixpoint of load and save
+  (`float_roundtrip`). The late-game bench save's fingerprint moves with it; the bench world's
+  does not.
+* **A deconstructed grower takes the network objects of its destroyed plants along.** The plants
+  of a Farm or a VegetableGrower keep their network object when the items of the machine's
+  inventory are destroyed (as the game does: they are the machine's children), but nothing
+  removed them afterwards: they stayed in every client's scene, in every join and in every
+  snapshot for a world object that was gone, for good.
+* **A save whose lists hold something that is no record is refused at the start.** A string, a
+  number or an array after the first entry of the players, world objects, messages... loaded, and
+  the game's code that sets a field of such an entry panicked at the first autosave and every one
+  after it: a world that plays and can never save.
+* **A rules file or a rules change that is a JSON array is refused.** It was read as the sections'
+  fields in order (`[[0.5]]` set `meteo.eventChance`).
+* **A Steam library file nested without end** (`"a" {` a quarter of a million times) is refused
+  with an error; it ended the process with a stack overflow.
+* **The log cannot be used to steer a terminal.** The text format wrote a message as it came: a
+  carriage return in it (a name, a bucket's error text, a release feed's message) moved the cursor
+  over the line's own time and level, an escape sequence cleared or recoloured the screen of
+  `pcds logs`, `journalctl` and `docker logs`. Control characters other than line breaks and tabs are
+  now written as `\u{..}`. The error text of an S3 request is plain text too (control characters
+  `?`, entities read, 200 characters a field).
+* `make fuzz-check` and the CI job for it; `--features portable-dispatch` for the sanitizer
+  builds (wasmi's default dispatch needs the optimizer's tail calls, which the sanitizers
+  prevent).
 
 ## [0.8.0] - 2026-10-20
 

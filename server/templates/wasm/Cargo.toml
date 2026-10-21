@@ -13,6 +13,11 @@ crate-type = ["cdylib"]
 [dependencies]
 pcds-plugin-api = { {api} }
 
+# `cargo test` runs your plugin on this computer against a mock server (pcds_plugin_api::testing).
+[dev-dependencies]
+pcds-plugin-api = { {api}, features = ["testing"] }
+
+# A small module: size first, no unwinding (a panic becomes a trap the server counts as a fault).
 [profile.release]
 opt-level = "z"
 lto = true

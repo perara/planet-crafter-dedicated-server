@@ -15,6 +15,7 @@
 use serde_json::Value;
 
 use crate::clock::GameTime;
+use crate::doc::Doc;
 use crate::game::{Args, Game};
 use crate::net::enc;
 use crate::units::Kind;
@@ -55,25 +56,26 @@ pub struct Meteo {
 }
 
 /// The f32 field of an asset (0 when absent).
-fn num(v: &Value, key: &str) -> f32 {
+fn num(v: &Doc, key: &str) -> f32 {
     v[key].as_f64().unwrap_or(0.0) as f32
 }
 
 /// An asset reference list; missing entries stay as "" so indices match the game's lists.
-fn refs(v: &Value) -> Vec<String> {
+fn refs(v: &Doc) -> Vec<String> {
     v.as_array().into_iter().flatten().map(|r| r.as_str().unwrap_or("").to_string()).collect()
 }
 
 /// A nullable asset reference field.
-fn reference<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+fn reference<'a>(v: &'a Doc, key: &str) -> Option<&'a str> {
     v[key].as_str()
 }
 
-fn planet_data(game: &Game) -> Value {
-    game.data.asset(&format!("PlanetData:PlanetData-{}", game.planet_id())).cloned().unwrap_or(Value::Null)
+fn planet_data(game: &Game) -> &Doc {
+    static NULL: Doc = Doc::Null;
+    game.data.asset(&format!("PlanetData:PlanetData-{}", game.planet_id())).unwrap_or(&NULL)
 }
 
-fn singleton<'a>(game: &'a Game, class: &str) -> &'a Value {
+fn singleton<'a>(game: &'a Game, class: &str) -> &'a Doc {
     &game.data.singletons[class]
 }
 
@@ -363,7 +365,7 @@ pub fn between_stages(game: &Game, start: Option<&str>, stop: Option<&str>) -> b
     if value < 0.0 {
         return true;
     }
-    let at = |s: &Value| s["startValue"].as_f64().unwrap_or(0.0);
+    let at = |s: &Doc| s["startValue"].as_f64().unwrap_or(0.0);
     start.is_none_or(|s| value >= at(s)) && stop.is_none_or(|s| value < at(s))
 }
 
@@ -381,14 +383,16 @@ fn system_terraformation(game: &Game) -> f64 {
 /// current planet's terraformation has reached.
 pub fn current_global_stage(game: &Game) -> Option<String> {
     let value = crate::units::value(game, Kind::Terraformation, 0);
-    let mut best: Option<(f64, String)> = None;
-    for key in refs(&planet_data(game)["allTerraStages"]) {
-        let start = game.data.asset(&key).and_then(|s| s["startValue"].as_f64()).unwrap_or(0.0);
+    let planet = game.data.asset(&format!("PlanetData:PlanetData-{}", game.planet_id()));
+    let mut best: Option<(f64, &str)> = None;
+    // The asset references of allTerraStages ("" for a missing entry, as `refs` has it).
+    for key in planet.into_iter().filter_map(|p| p["allTerraStages"].as_array()).flatten().map(|r| r.as_str().unwrap_or("")) {
+        let start = game.data.asset(key).and_then(|s| s["startValue"].as_f64()).unwrap_or(0.0);
         if value >= start && start >= best.as_ref().map_or(0.0, |b| b.0) {
             best = Some((start, key));
         }
     }
-    best.map(|b| b.1)
+    best.map(|b| b.1.to_string())
 }
 
 /// The current planet's terraformation stages for the admin page: each stage's key, unit and
@@ -438,7 +442,7 @@ const FLIGHT_SECONDS: f32 = 18.0;
 
 impl Asteroids {
     /// AddAsteroidEvent(Instantiate(asteroidEventData)).
-    fn add(&mut self, data: &Value, now: GameTime) -> u32 {
+    fn add(&mut self, data: &Doc, now: GameTime) -> u32 {
         self.next_id += 1;
         let max_total = data["maxAsteroidsTotal"].as_i64().unwrap_or(0) as i32;
         self.events.push(AsteroidEvent {
@@ -572,7 +576,7 @@ pub(crate) mod tests {
     pub(crate) fn var(game: &Game, class: &str, name: &str) -> Vec<u8> {
         let (object, _) = game.net.find_class(class).unwrap();
         match game.net.get(object, class, name) {
-            Some(crate::net::VarValue::Plain(b)) => b.clone(),
+            Some(crate::net::VarValue::Plain(b)) => b.to_vec(),
             _ => panic!("{class}.{name}"),
         }
     }

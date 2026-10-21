@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 const SIGNATURE: [u8; 4] = [b'U', b'T', b'P', 1];
@@ -45,30 +46,19 @@ const LAST: u16 = 0x4000;
 /// sent, datagrams read per poll, connections in all and per IP, and how long a handshake may
 /// go without data.
 const MAX_BATCH: usize = 1 << 20;
-/// The limit in force: MAX_BATCH. Test builds can lift it (the load tests' bots receive worlds
-/// over 1 MiB); the release has no such switch.
-#[cfg(not(test))]
-const fn max_batch() -> usize {
-    MAX_BATCH
-}
-#[cfg(test)]
-static BATCH_LIMIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(MAX_BATCH);
-#[cfg(test)]
-pub fn allow_big_batches() {
-    BATCH_LIMIT.store(256 << 20, std::sync::atomic::Ordering::Relaxed);
-}
-#[cfg(test)]
-fn max_batch() -> usize {
-    BATCH_LIMIT.load(std::sync::atomic::Ordering::Relaxed)
-}
+/// What a client (`Utp::connect`: the load test's and the probe's bots) takes from its server: the
+/// game's own client takes any size (the world comes as one batch on the reliable stream: about 12
+/// bytes per world object, 2.4 MB at 200,000), so a bot's cap is only a bound on memory.
+const CLIENT_MAX_BATCH: usize = 256 << 20;
 // Room for the world a late-game save sends on join (saves reach several MB); only approved
 // clients (the limits.maxPlayers rule) get that much sent.
 const MAX_QUEUED: usize = 64 << 20;
 /// And in all, over every connection: 128 clients at MAX_QUEUED each would be eight gigabytes.
 /// Past it the connection with the most waiting (the slowest to read) is dropped.
 const MAX_QUEUED_TOTAL: usize = 256 << 20;
-/// The room an emptied send queue keeps.
-const QUEUE_KEPT: usize = 256 << 10;
+/// The room an emptied send queue keeps: a few batches of a busy frame. (It was 256 KiB for every
+/// player that ever joined a world of a few KB; a batch of 32 players is 25 KB.)
+const QUEUE_KEPT: usize = 32 << 10;
 const MAX_DATAGRAMS: usize = 4096;
 pub const MAX_CONNECTIONS: usize = 128;
 const MAX_PER_IP: usize = 8;
@@ -215,12 +205,12 @@ impl Connection {
 }
 
 /// Splits off every complete length-prefixed batch at the front of `buffer`; false when one
-/// claims more than MAX_BATCH (the caller drops what is left).
-fn pop_batches(buffer: &mut Vec<u8>, out: &mut Vec<Vec<u8>>) -> bool {
+/// claims more than `max_batch` (the caller drops what is left).
+fn pop_batches(buffer: &mut Vec<u8>, out: &mut Vec<Vec<u8>>, max_batch: usize) -> bool {
     let mut at = 0;
     while buffer.len() - at >= 4 {
         let n = i32::from_le_bytes(buffer[at..at + 4].try_into().unwrap()).max(0) as usize;
-        if n > max_batch() {
+        if n > max_batch {
             return false;
         }
         if buffer.len() - at - 4 < n {
@@ -236,6 +226,30 @@ fn pop_batches(buffer: &mut Vec<u8>, out: &mut Vec<Vec<u8>>) -> bool {
     true
 }
 
+/// What went over the wire, all sessions together, since the start (the front's status page
+/// reads it): datagrams and bytes with the headers of UTP (not IP's and UDP's), and of the
+/// datagrams out how many carried only an acknowledgement, a heartbeat, or a resend.
+#[derive(Default)]
+pub struct Wire {
+    pub datagrams_in: std::sync::atomic::AtomicU64,
+    pub bytes_in: std::sync::atomic::AtomicU64,
+    pub datagrams_out: std::sync::atomic::AtomicU64,
+    pub bytes_out: std::sync::atomic::AtomicU64,
+    pub acks_out: std::sync::atomic::AtomicU64,
+    pub heartbeats_out: std::sync::atomic::AtomicU64,
+    pub resends_out: std::sync::atomic::AtomicU64,
+}
+
+pub static WIRE: Wire = Wire {
+    datagrams_in: std::sync::atomic::AtomicU64::new(0),
+    bytes_in: std::sync::atomic::AtomicU64::new(0),
+    datagrams_out: std::sync::atomic::AtomicU64::new(0),
+    bytes_out: std::sync::atomic::AtomicU64::new(0),
+    acks_out: std::sync::atomic::AtomicU64::new(0),
+    heartbeats_out: std::sync::atomic::AtomicU64::new(0),
+    resends_out: std::sync::atomic::AtomicU64::new(0),
+};
+
 pub struct Utp {
     socket: UdpSocket,
     connections: crate::idmap::FxHashMap<Token, Connection>,
@@ -244,6 +258,11 @@ pub struct Utp {
     /// Datagrams to send, all in one system call at the end of flush.
     outbox: Vec<(SocketAddr, Vec<u8>)>,
     inbox: mmsg::Inbox,
+    /// The biggest batch a peer may send (MAX_BATCH for a server).
+    max_batch: usize,
+    /// No connection can have gone silent before this (a lower bound, made by the last look at
+    /// all of them): `poll` looks at them again only then. None: look.
+    look_at: Option<Instant>,
     /// New sessions per IP: since when, how many.
     handshakes: HashMap<IpAddr, (Instant, u32)>,
 }
@@ -252,7 +271,7 @@ impl Utp {
     pub fn bind(addr: SocketAddr) -> std::io::Result<Utp> {
         let socket = UdpSocket::bind(addr)?;
         socket.set_nonblocking(true)?;
-        Ok(Utp { socket, connections: Default::default(), dropped: Vec::new(), outbox: Vec::new(), inbox: mmsg::Inbox::new(), handshakes: HashMap::new() })
+        Ok(Utp { socket, connections: Default::default(), dropped: Vec::new(), outbox: Vec::new(), inbox: mmsg::Inbox::new(), max_batch: MAX_BATCH, look_at: None, handshakes: HashMap::new() })
     }
 
     fn transmit(&mut self, token: &Token, kind: u8, body: &[u8]) {
@@ -265,6 +284,7 @@ impl Utp {
     /// token.
     pub fn connect(local: SocketAddr, server: SocketAddr, timeout: Duration) -> std::io::Result<(Utp, Token)> {
         let mut utp = Utp::bind(local)?;
+        utp.max_batch = CLIENT_MAX_BATCH;
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
         let port = utp.socket.local_addr().map(|a| a.port() as u64).unwrap_or(0);
         let token: Token = (seed ^ (std::process::id() as u64).rotate_left(32) ^ port.rotate_left(16)).to_le_bytes();
@@ -301,24 +321,33 @@ impl Utp {
         while read < MAX_DATAGRAMS {
             let n = inbox.receive(&self.socket);
             for (d, from) in (0..n).filter_map(|i| inbox.get(i)) {
+                WIRE.bytes_in.fetch_add(d.len() as u64, Ordering::Relaxed);
                 self.datagram(d, from, now, &mut events);
             }
+            WIRE.datagrams_in.fetch_add(n as u64, Ordering::Relaxed);
             read += n;
             if n < inbox.capacity() {
                 break;
             }
         }
         self.inbox = inbox;
-        let stalled = |c: &Connection| c.closing.is_none() && !c.in_flight.is_empty() && now - c.progress > STALL;
-        let silent = |c: &Connection| now - c.last_receive > TIMEOUT || (!c.data_seen && now - c.opened > DATA_WITHIN) || stalled(c);
-        let silent: Vec<Token> = if self.connections.values().any(silent) { self.connections.iter().filter(|(_, c)| silent(c)).map(|(t, _)| *t).collect() } else { Vec::new() };
-        for token in silent {
-            if self.connections.get(&token).is_some_and(stalled) {
-                warn!("utp: {}: nothing acknowledged for {} s, dropped", self.connections[&token].addr, STALL.as_secs());
-                self.disconnect(&token);
+        if self.look_at.is_none_or(|t| now >= t) {
+            let stalled = |c: &Connection| c.closing.is_none() && !c.in_flight.is_empty() && now - c.progress > STALL;
+            let silent = |c: &Connection| now - c.last_receive > TIMEOUT || (!c.data_seen && now - c.opened > DATA_WITHIN) || stalled(c);
+            let silent: Vec<Token> = if self.connections.values().any(silent) { self.connections.iter().filter(|(_, c)| silent(c)).map(|(t, _)| *t).collect() } else { Vec::new() };
+            for token in silent {
+                if self.connections.get(&token).is_some_and(stalled) {
+                    warn!("utp: {}: nothing acknowledged for {} s, dropped", self.connections[&token].addr, STALL.as_secs());
+                    self.disconnect(&token);
+                }
+                self.connections.remove(&token);
+                events.push(Event::Disconnected(token));
             }
-            self.connections.remove(&token);
-            events.push(Event::Disconnected(token));
+            // The earliest a connection left can be silent: by its last datagram, its handshake
+            // without data, or the stall of what it sends from now on (a packet not yet in flight
+            // is sent after this look, so it stalls after STALL from now at the soonest).
+            let soonest = self.connections.values().map(|c| (c.last_receive + TIMEOUT).min(if c.data_seen { now + STALL } else { c.opened + DATA_WITHIN }).min(if c.closing.is_none() && !c.in_flight.is_empty() { c.progress + STALL } else { now + STALL })).min();
+            self.look_at = Some(soonest.unwrap_or(now + STALL).min(now + STALL));
         }
         events
     }
@@ -353,6 +382,7 @@ impl Utp {
                         }
                     }
                     self.connections.insert(token, Connection::new(from, now));
+                    self.look_at = self.look_at.map(|t| t.min(now + DATA_WITHIN));
                     events.push(Event::Connected(token, from));
                 }
             }
@@ -366,6 +396,7 @@ impl Utp {
             return;
         }
         let token: Token = d[1..9].try_into().unwrap();
+        let max_batch = self.max_batch;
         let Some(c) = self.connections.get_mut(&token).filter(|c| c.addr == from) else { return };
         c.last_receive = now;
         c.data_seen |= d[0] == DATA;
@@ -390,8 +421,8 @@ impl Utp {
                         if body[0] == PAYLOAD {
                             c.receive_reliable(sequence, &body[16..]);
                             c.ack_due = true;
-                            if !pop_batches(&mut c.stream, &mut batches) {
-                                warn!("utp: {from}: a batch over {} MiB, dropped", max_batch() >> 20);
+                            if !pop_batches(&mut c.stream, &mut batches, max_batch) {
+                                warn!("utp: {from}: a batch over {} MiB, dropped", max_batch >> 20);
                                 self.disconnect(&token);
                                 events.push(Event::Disconnected(token));
                                 return;
@@ -412,14 +443,14 @@ impl Utp {
                                 f.broken = true;
                             }
                             f.next = (sequence + 1) & 0x3FFF;
-                            f.broken |= f.buffer.len() + body.len() - 2 > max_batch();
+                            f.broken |= f.buffer.len() + body.len() - 2 > max_batch;
                             if f.broken {
                                 f.buffer = Vec::new();
                             } else {
                                 f.buffer.extend_from_slice(&body[2..]);
                                 if header & LAST != 0 {
                                     let mut whole = std::mem::take(&mut f.buffer);
-                                    pop_batches(&mut whole, &mut batches);
+                                    pop_batches(&mut whole, &mut batches, max_batch);
                                 }
                             }
                         }
@@ -471,6 +502,7 @@ impl Utp {
     pub fn flush(&mut self) {
         let now = Instant::now();
         let mut done = Vec::new();
+        let (mut resends, mut acks, mut heartbeats) = (0u64, 0u64, 0u64);
         for (token, c) in self.connections.iter_mut() {
             if !c.data_seen {
                 continue;
@@ -486,6 +518,7 @@ impl Utp {
                     c.in_flight[i].2 = now;
                     let header = c.reliable_header(PAYLOAD, c.in_flight[i].0);
                     self.outbox.push((c.addr, packet(token, DATA, &[&[RELIABLE], &header, &c.in_flight[i].1])));
+                    resends += 1;
                 }
             }
             if self.outbox.len() > before {
@@ -499,7 +532,12 @@ impl Utp {
                 if c.in_flight.is_empty() {
                     c.progress = now;
                 }
-                let payload: Vec<u8> = c.queued.drain(..CHUNK.min(c.queued.len())).collect();
+                let take = CHUNK.min(c.queued.len());
+                let mut payload = Vec::with_capacity(take);
+                let (front, back) = c.queued.as_slices();
+                payload.extend_from_slice(&front[..take.min(front.len())]);
+                payload.extend_from_slice(&back[..take - take.min(front.len())]);
+                c.queued.drain(..take);
                 let sequence = c.sequence;
                 c.sequence = c.sequence.wrapping_add(1);
                 let header = c.reliable_header(PAYLOAD, sequence);
@@ -509,6 +547,7 @@ impl Utp {
             if c.ack_due && self.outbox.len() == before {
                 let header = c.reliable_header(ACK, 0);
                 self.outbox.push((c.addr, packet(token, DATA, &[&[RELIABLE], &header, &[0]])));
+                acks += 1;
             }
             c.ack_due = false;
             // The world a joiner was sent (megabytes) leaves its room in the queue: give it back
@@ -518,11 +557,15 @@ impl Utp {
             }
             if self.outbox.len() == before && now - c.last_send > HEARTBEAT_AFTER {
                 self.outbox.push((c.addr, packet(token, HEARTBEAT, &[])));
+                heartbeats += 1;
             }
             if self.outbox.len() > before {
                 c.last_send = now;
             }
         }
+        WIRE.resends_out.fetch_add(resends, Ordering::Relaxed);
+        WIRE.acks_out.fetch_add(acks, Ordering::Relaxed);
+        WIRE.heartbeats_out.fetch_add(heartbeats, Ordering::Relaxed);
         mmsg::send(&self.socket, &self.outbox);
         self.outbox.clear();
         for token in done {
@@ -611,6 +654,8 @@ mod mmsg {
 
     /// Sends every datagram; one the socket refuses is dropped, as a failed send_to drops it.
     pub fn send(socket: &UdpSocket, datagrams: &[(SocketAddr, Vec<u8>)]) {
+        super::WIRE.datagrams_out.fetch_add(datagrams.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        super::WIRE.bytes_out.fetch_add(datagrams.iter().map(|(_, d)| d.len() as u64).sum(), std::sync::atomic::Ordering::Relaxed);
         for chunk in datagrams.chunks(BATCH) {
             let mut names: Vec<_> = chunk.iter().map(|(a, _)| raw(a)).collect();
             let mut iovs: Vec<libc::iovec> = chunk.iter().map(|(_, d)| libc::iovec { iov_base: d.as_ptr() as *mut libc::c_void, iov_len: d.len() }).collect();
@@ -833,7 +878,7 @@ mod tests {
         stream.extend_from_slice(&2i32.to_le_bytes());
         stream.extend_from_slice(b"ok");
         let mut out = Vec::new();
-        assert!(pop_batches(&mut stream, &mut out));
+        assert!(pop_batches(&mut stream, &mut out, MAX_BATCH));
         assert_eq!((out, stream.len()), (vec![b"ok".to_vec()], 0));
     }
 
@@ -876,6 +921,171 @@ mod tests {
         }
         server.datagram(&fragment(LAST | 800), from, Instant::now(), &mut events);
         assert!(events.is_empty() && server.connections[&token].fragments[0].buffer.is_empty());
+    }
+
+    /// A UDP relay between a client and a server that loses, duplicates and delays datagrams: what
+    /// the open internet does to a game's packets, on loopback. Stopped when dropped.
+    struct Lossy {
+        front: SocketAddr,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Lossy {
+        /// `loss` and `dup` in percent, `delay` the most a datagram waits (so they overtake each other).
+        fn start(server: SocketAddr, loss: u64, dup: u64, delay: Duration) -> Lossy {
+            let front = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let back = UdpSocket::bind("127.0.0.1:0").unwrap();
+            for s in [&front, &back] {
+                s.set_nonblocking(true).unwrap();
+            }
+            let addr = front.local_addr().unwrap();
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = stop.clone();
+            let thread = std::thread::spawn(move || {
+                let mut x = 0x2545_f491_4f6c_dd1du64;
+                let mut random = move |n: u64| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    x % n
+                };
+                let mut client: Option<SocketAddr> = None;
+                // (due, to the server?, bytes), delivered when due.
+                let mut waiting: Vec<(Instant, bool, Vec<u8>)> = Vec::new();
+                let mut buffer = [0u8; 2048];
+                while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    for (socket, to_server) in [(&front, true), (&back, false)] {
+                        while let Ok((n, from)) = socket.recv_from(&mut buffer) {
+                            if to_server {
+                                client = Some(from);
+                            }
+                            if random(100) < loss {
+                                continue;
+                            }
+                            for _ in 0..1 + (random(100) < dup) as usize {
+                                waiting.push((Instant::now() + Duration::from_micros(random(delay.as_micros() as u64 + 1)), to_server, buffer[..n].to_vec()));
+                            }
+                        }
+                    }
+                    let now = Instant::now();
+                    let (due, later): (Vec<_>, Vec<_>) = waiting.drain(..).partition(|(t, _, _)| *t <= now);
+                    waiting = later;
+                    for (_, to_server, bytes) in due {
+                        let _ = if to_server { back.send_to(&bytes, server) } else { client.map_or(Ok(0), |c| front.send_to(&bytes, c)) };
+                    }
+                    std::thread::sleep(Duration::from_micros(300));
+                }
+            });
+            Lossy { front: addr, stop, thread: Some(thread) }
+        }
+    }
+
+    impl Drop for Lossy {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+
+    /// What a network does to datagrams (loss, duplication, reordering) changes nothing in what
+    /// arrives: every batch each way, once, in order, byte for byte, with the window never past
+    /// its 64 packets and nothing left buffered; no session is dropped on the way.
+    #[test]
+    fn data_crosses_a_network_that_loses_duplicates_and_reorders() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let relay = Lossy::start(server.socket.local_addr().unwrap(), 10, 10, Duration::from_millis(40));
+        // The client connects as Utp::connect does, but with the server polled meanwhile (one thread:
+        // a Utp is not Send). The request is repeated until the accept comes through the relay.
+        let mut client = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let client_token: Token = [9, 8, 7, 6, 5, 4, 3, 2];
+        let request = [SIGNATURE.as_slice(), &[REQUEST], &client_token].concat();
+        let mut early = Vec::new();
+        let connect_by = Instant::now() + Duration::from_secs(60);
+        let mut buffer = [0u8; 2048];
+        'connect: loop {
+            assert!(Instant::now() < connect_by, "no handshake through the relay");
+            client.socket.send_to(&request, relay.front).unwrap();
+            let wait = Instant::now() + Duration::from_millis(200);
+            while Instant::now() < wait {
+                early.extend(server.poll());
+                if let Ok((n, from)) = client.socket.recv_from(&mut buffer) {
+                    if from == relay.front && n >= 13 && buffer[..4] == SIGNATURE && buffer[4] == ACCEPT && buffer[5..13] == client_token {
+                        let mut c = Connection::new(relay.front, Instant::now());
+                        c.data_seen = true;
+                        client.connections.insert(client_token, c);
+                        break 'connect;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        let mut server_token = early.iter().find_map(|e| if let Event::Connected(t, _) = e { Some(*t) } else { None });
+        // Batch i: its number, then bytes that depend on both.
+        let batch = |side: u8, i: u32| -> Vec<u8> {
+            let len = 1 + (i as usize * 977 + side as usize * 131) % 3000;
+            let mut b = i.to_le_bytes().to_vec();
+            b.extend((0..len).map(|k| (k as u32 * 31 + i * 7 + side as u32) as u8));
+            b
+        };
+        const BATCHES: u32 = 150;
+        let (mut sent, mut sent_back) = (0u32, 0u32);
+        let (mut at_server, mut at_client) = (0u32, 0u32);
+        let started = Instant::now();
+        while (at_server < BATCHES || at_client < BATCHES) && started.elapsed() < Duration::from_secs(120) {
+            for event in server.poll() {
+                match event {
+                    Event::Connected(t, _) => server_token = Some(t),
+                    Event::Data(_, b) => {
+                        assert_eq!(b, batch(0, at_server), "batch {at_server} from the client");
+                        at_server += 1;
+                    }
+                    Event::Disconnected(_) => panic!("the server dropped the session after {at_server} + {at_client} batches"),
+                }
+            }
+            for event in client.poll() {
+                match event {
+                    Event::Data(_, b) => {
+                        assert_eq!(b, batch(1, at_client), "batch {at_client} from the server");
+                        at_client += 1;
+                    }
+                    Event::Disconnected(_) => panic!("the client was dropped after {at_server} + {at_client} batches"),
+                    Event::Connected(..) => {}
+                }
+            }
+            // A few batches are queued at a time, as a game sends them.
+            while sent < BATCHES && client.connections[&client_token].queued.len() < 8000 {
+                client.send(&client_token, &batch(0, sent));
+                sent += 1;
+            }
+            if let Some(t) = server_token {
+                while sent_back < BATCHES && server.connections.get(&t).is_some_and(|c| c.queued.len() < 8000) {
+                    server.send(&t, &batch(1, sent_back));
+                    sent_back += 1;
+                }
+            }
+            server.flush();
+            client.flush();
+            for c in server.connections.values().chain(client.connections.values()) {
+                assert!(c.in_flight.len() <= WINDOW && c.early.len() < WINDOW, "{} in flight, {} early", c.in_flight.len(), c.early.len());
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!((at_server, at_client), (BATCHES, BATCHES), "everything crossed within {:?}", started.elapsed());
+        // Quiet: whatever was duplicated or late is acknowledged, nothing is left to resend or buffer.
+        let settle = Instant::now();
+        while settle.elapsed() < Duration::from_secs(5) && server.connections.values().chain(client.connections.values()).any(|c| !c.in_flight.is_empty()) {
+            server.poll();
+            client.poll();
+            server.flush();
+            client.flush();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        for c in server.connections.values().chain(client.connections.values()) {
+            assert!(c.in_flight.is_empty() && c.early.is_empty() && c.queued.is_empty(), "{} in flight, {} early, {} queued", c.in_flight.len(), c.early.len(), c.queued.len());
+        }
     }
 
     #[test]
@@ -977,6 +1187,7 @@ mod tests {
         assert_eq!(sent, 6 * INITIAL_WINDOW);
         let c = server.connections.get_mut(&token).unwrap();
         c.progress -= STALL + Duration::from_secs(1);
+        server.look_at = None;
         assert!(matches!(server.poll().as_slice(), [Event::Disconnected(t)] if *t == token));
         assert!(server.connections.is_empty());
 
@@ -1022,6 +1233,37 @@ mod tests {
 
     /// Sequence numbers are 16 bits: a session that lasts past 65536 packets each way (80 MB
     /// at the full size) goes on delivering and acknowledging across the wrap.
+    /// The cost of the transport in allocations (the test build's allocator counts them; no game
+    /// tables needed, so CI runs this): polling sessions with nothing to say allocates nothing, a
+    /// datagram of a big batch two buffers (its payload, kept for a resend, and the packet). Budgets
+    /// of docs/performance.md.
+    #[test]
+    fn polling_idle_sessions_and_sending_a_batch_allocate_a_bounded_number_of_times() {
+        let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        for i in 0..64u16 {
+            let (from, token) = (SocketAddr::from(([127, 0, 0, 1], 20_000 + i)), [i as u8 + 1; 8]);
+            handshake(&mut server, from, token);
+            server.datagram(&[[DATA].as_slice(), &token].concat(), from, Instant::now(), &mut Vec::new());
+        }
+        // The first poll looks at every session; the polls after it need not.
+        assert!(server.poll().is_empty());
+        let before = crate::bench::allocations();
+        for _ in 0..100 {
+            assert!(server.poll().is_empty());
+        }
+        let polled = crate::bench::allocations() - before;
+        assert_eq!(polled, 0, "100 polls of 64 idle sessions allocated {polled} times");
+        let token = [1; 8];
+        server.send(&token, &vec![0; 8 * CHUNK]);
+        let before = crate::bench::allocations();
+        server.flush();
+        let sent = server.connections[&token].in_flight.len();
+        let allocated = crate::bench::allocations() - before;
+        assert_eq!(sent, INITIAL_WINDOW);
+        eprintln!("a flush of {sent} datagrams allocated {allocated} times");
+        assert!(allocated <= 4 * sent as u64 + 8, "a flush of {sent} datagrams allocated {allocated} times");
+    }
+
     #[test]
     fn sequences_wrap_around() {
         let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -1124,6 +1366,7 @@ mod tests {
         let mute = [7; 8];
         handshake(&mut server, "127.0.0.1:9".parse().unwrap(), mute);
         server.connections.get_mut(&mute).unwrap().opened -= DATA_WITHIN + Duration::from_secs(1);
+        server.look_at = None;
         assert!(matches!(server.poll().as_slice(), [Event::Disconnected(t)] if *t == mute));
     }
 

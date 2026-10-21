@@ -13,74 +13,325 @@ pub fn is_from_scene(id: i32) -> bool {
     id < FIRST_PLAYER_MADE_ID
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// A world object. Nine in ten are items in an inventory with nothing but an id and a group; those
+/// are 16 bytes, and everything else a world object can have lives behind `detail`, made when a
+/// field first holds something but its fresh value. The object reads and writes as if the fields
+/// were its own (`wo.position`, `wo.text = ...`): it derefs to `Detail`, which derefs to `Cold`,
+/// and a write through `DerefMut` makes what it needs. A write of a fresh value to an object that
+/// has no detail would make it for nothing: those go through `set_fresh_unless` and the like.
+#[derive(Clone, Debug)]
 pub struct WorldObject {
     pub id: i32,
     pub group: usize,
-    #[serde(with = "crate::bincodec::floats")]
+    pub dont_save: bool,
+    pub from_db: bool,
+    detail: Option<Box<Detail>>,
+}
+
+/// The fields of a world object that most have fresh: where it stands, what it is linked to, how it
+/// grows. Behind `Detail::cold`, the rarer ones.
+#[derive(Clone, Debug)]
+pub struct Detail {
     pub position: [f32; 3],
-    #[serde(with = "crate::bincodec::floats")]
     pub rotation: [f32; 4],
-    #[serde(with = "crate::bincodec::floats")]
+    pub linked_inventory: i32,
+    pub growth: f32,
+    pub setting: i32,
+    pub count: [i32; 2],
+    pub linked_wo: i32,
+    pub lock_time: GameTime,
+    pub energy: f32,
+    pub planet: i32,
+    pub planet_linked: i32,
+    /// The network object standing for this world object in the scene (the game's GameObject).
+    pub net: Option<u64>,
+    cold: Option<Box<Cold>>,
+}
+
+/// The fields few world objects have: a color, a sign's text, linked groups, a plant's traits and
+/// hunger, the units a building makes.
+#[derive(Clone, Debug)]
+pub struct Cold {
     pub color: [f32; 4],
     pub text: String,
     pub linked_groups: Option<Vec<usize>>,
-    pub linked_inventory: i32,
     pub secondary_inventories: Vec<i32>,
     pub panels: Option<Vec<i32>>,
-    pub growth: f32,
-    pub setting: i32,
     pub trait_type: i32,
     pub trait_value: i32,
     pub hunger: f32,
     pub pet_time: GameTime,
-    pub count: [i32; 2],
-    pub linked_wo: i32,
-    pub dont_save: bool,
-    pub lock_time: GameTime,
-    pub energy: f32,
-    pub from_db: bool,
-    pub planet: i32,
-    pub planet_linked: i32,
-    #[serde(with = "crate::bincodec::floats")]
     pub unit_generation: [f32; 8],
-    #[serde(with = "crate::bincodec::floats")]
     pub unit_multiplier: [f32; 8],
-    /// The network object standing for this world object in the scene (the game's GameObject).
-    pub net: Option<u64>,
+}
+
+impl Cold {
+    const FRESH: Cold = Cold {
+        color: [0.0; 4],
+        text: String::new(),
+        linked_groups: None,
+        secondary_inventories: Vec::new(),
+        panels: None,
+        trait_type: 0,
+        trait_value: 0,
+        hunger: 0.0,
+        pet_time: GameTime::ZERO,
+        unit_generation: [0.0; 8],
+        unit_multiplier: [0.0; 8],
+    };
+
+    /// Whether every field is what a new world object has, to the last bit.
+    fn is_fresh(&self) -> bool {
+        let zero = |v: &[f32]| v.iter().all(|f| f.to_bits() == 0);
+        zero(&self.color)
+            && self.text.is_empty()
+            && self.linked_groups.is_none()
+            && self.secondary_inventories.is_empty()
+            && self.panels.is_none()
+            && self.trait_type == 0
+            && self.trait_value == 0
+            && self.hunger.to_bits() == 0
+            && self.pet_time.bits() == 0
+            && zero(&self.unit_generation)
+            && zero(&self.unit_multiplier)
+    }
+}
+
+impl Detail {
+    const FRESH: Detail = Detail {
+        position: [0.0; 3],
+        rotation: [0.0; 4],
+        linked_inventory: 0,
+        growth: 0.0,
+        setting: 0,
+        count: [0, 0],
+        linked_wo: 0,
+        lock_time: GameTime::ZERO,
+        energy: 1.0,
+        planet: 0,
+        planet_linked: 0,
+        net: None,
+        cold: None,
+    };
+
+    /// Whether every field is what a new world object has, to the last bit.
+    fn is_fresh(&self) -> bool {
+        let zero = |v: &[f32]| v.iter().all(|f| f.to_bits() == 0);
+        zero(&self.position)
+            && zero(&self.rotation)
+            && self.linked_inventory == 0
+            && self.growth.to_bits() == 0
+            && self.setting == 0
+            && self.count == [0, 0]
+            && self.linked_wo == 0
+            && self.lock_time.bits() == 0
+            && self.energy.to_bits() == 1.0f32.to_bits()
+            && self.planet == 0
+            && self.planet_linked == 0
+            && self.net.is_none()
+            && self.cold.is_none()
+    }
+}
+
+static FRESH_DETAIL: Detail = Detail::FRESH;
+static FRESH_COLD: Cold = Cold::FRESH;
+
+impl std::ops::Deref for WorldObject {
+    type Target = Detail;
+    fn deref(&self) -> &Detail {
+        self.detail.as_deref().unwrap_or(&FRESH_DETAIL)
+    }
+}
+
+impl std::ops::DerefMut for WorldObject {
+    fn deref_mut(&mut self) -> &mut Detail {
+        self.detail.get_or_insert_with(|| Box::new(Detail::FRESH))
+    }
+}
+
+impl std::ops::Deref for Detail {
+    type Target = Cold;
+    fn deref(&self) -> &Cold {
+        self.cold.as_deref().unwrap_or(&FRESH_COLD)
+    }
+}
+
+impl std::ops::DerefMut for Detail {
+    fn deref_mut(&mut self) -> &mut Cold {
+        self.cold.get_or_insert_with(|| Box::new(Cold::FRESH))
+    }
+}
+
+// The size of the 90% (a world of 200,000 objects holds 180,000 of them) and of a placed one's
+// detail: a change that makes them dearer is a decision, not an accident.
+const _: () = assert!(std::mem::size_of::<WorldObject>() == 24 && std::mem::size_of::<Detail>() <= 112);
+
+/// The fields in the order and shape the snapshot always wrote them (bincodec.rs: back to back, no
+/// names): what `Serialize` and `Deserialize` of a world object stand for.
+#[derive(serde::Deserialize)]
+struct Flat {
+    id: i32,
+    group: usize,
+    #[serde(with = "crate::bincodec::floats")]
+    position: [f32; 3],
+    #[serde(with = "crate::bincodec::floats")]
+    rotation: [f32; 4],
+    #[serde(with = "crate::bincodec::floats")]
+    color: [f32; 4],
+    text: String,
+    linked_groups: Option<Vec<usize>>,
+    linked_inventory: i32,
+    secondary_inventories: Vec<i32>,
+    panels: Option<Vec<i32>>,
+    growth: f32,
+    setting: i32,
+    trait_type: i32,
+    trait_value: i32,
+    hunger: f32,
+    pet_time: GameTime,
+    count: [i32; 2],
+    linked_wo: i32,
+    dont_save: bool,
+    lock_time: GameTime,
+    energy: f32,
+    from_db: bool,
+    planet: i32,
+    planet_linked: i32,
+    #[serde(with = "crate::bincodec::floats")]
+    unit_generation: [f32; 8],
+    #[serde(with = "crate::bincodec::floats")]
+    unit_multiplier: [f32; 8],
+    net: Option<u64>,
+}
+
+struct Floats<'a, const N: usize>(&'a [f32; N]);
+
+impl<const N: usize> serde::Serialize for Floats<'_, N> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        crate::bincodec::floats::serialize(self.0, s)
+    }
+}
+
+impl serde::Serialize for WorldObject {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut t = s.serialize_struct("WorldObject", 27)?;
+        t.serialize_field("id", &self.id)?;
+        t.serialize_field("group", &self.group)?;
+        t.serialize_field("position", &Floats(&self.position))?;
+        t.serialize_field("rotation", &Floats(&self.rotation))?;
+        t.serialize_field("color", &Floats(&self.color))?;
+        t.serialize_field("text", &self.text)?;
+        t.serialize_field("linked_groups", &self.linked_groups)?;
+        t.serialize_field("linked_inventory", &self.linked_inventory)?;
+        t.serialize_field("secondary_inventories", &self.secondary_inventories)?;
+        t.serialize_field("panels", &self.panels)?;
+        t.serialize_field("growth", &self.growth)?;
+        t.serialize_field("setting", &self.setting)?;
+        t.serialize_field("trait_type", &self.trait_type)?;
+        t.serialize_field("trait_value", &self.trait_value)?;
+        t.serialize_field("hunger", &self.hunger)?;
+        t.serialize_field("pet_time", &self.pet_time)?;
+        t.serialize_field("count", &self.count)?;
+        t.serialize_field("linked_wo", &self.linked_wo)?;
+        t.serialize_field("dont_save", &self.dont_save)?;
+        t.serialize_field("lock_time", &self.lock_time)?;
+        t.serialize_field("energy", &self.energy)?;
+        t.serialize_field("from_db", &self.from_db)?;
+        t.serialize_field("planet", &self.planet)?;
+        t.serialize_field("planet_linked", &self.planet_linked)?;
+        t.serialize_field("unit_generation", &Floats(&self.unit_generation))?;
+        t.serialize_field("unit_multiplier", &Floats(&self.unit_multiplier))?;
+        t.serialize_field("net", &self.net)?;
+        t.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for WorldObject {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<WorldObject, D::Error> {
+        Flat::deserialize(d).map(WorldObject::from)
+    }
+}
+
+impl From<Flat> for WorldObject {
+    fn from(f: Flat) -> WorldObject {
+        let cold = Cold {
+            color: f.color,
+            text: f.text,
+            linked_groups: f.linked_groups,
+            secondary_inventories: f.secondary_inventories,
+            panels: f.panels,
+            trait_type: f.trait_type,
+            trait_value: f.trait_value,
+            hunger: f.hunger,
+            pet_time: f.pet_time,
+            unit_generation: f.unit_generation,
+            unit_multiplier: f.unit_multiplier,
+        };
+        let detail = Detail {
+            position: f.position,
+            rotation: f.rotation,
+            linked_inventory: f.linked_inventory,
+            growth: f.growth,
+            setting: f.setting,
+            count: f.count,
+            linked_wo: f.linked_wo,
+            lock_time: f.lock_time,
+            energy: f.energy,
+            planet: f.planet,
+            planet_linked: f.planet_linked,
+            net: f.net,
+            cold: (!cold.is_fresh()).then(|| Box::new(cold)),
+        };
+        WorldObject { id: f.id, group: f.group, dont_save: f.dont_save, from_db: f.from_db, detail: (!detail.is_fresh()).then(|| Box::new(detail)) }
+    }
 }
 
 impl WorldObject {
     pub fn new(id: i32, group: usize, data: &GameData) -> WorldObject {
         let g = &data.groups[group];
-        WorldObject {
-            id,
-            group,
-            position: [0.0; 3],
-            rotation: [0.0; 4],
-            color: [0.0; 4],
-            text: String::new(),
-            linked_groups: None,
-            linked_inventory: 0,
-            secondary_inventories: Vec::new(),
-            panels: None,
-            growth: 0.0,
-            setting: 0,
-            trait_type: 0,
-            trait_value: 0,
-            hunger: 0.0,
-            pet_time: GameTime::ZERO,
-            count: [0, 0],
-            linked_wo: 0,
-            dont_save: false,
-            lock_time: GameTime::ZERO,
-            energy: 1.0,
-            from_db: false,
-            planet: 0,
-            planet_linked: 0,
-            unit_generation: if g.constructible { g.units } else { [0.0; 8] },
-            unit_multiplier: [0.0; 8],
-            net: None,
+        let mut wo = WorldObject { id, group, dont_save: false, from_db: false, detail: None };
+        if g.constructible && g.units.iter().any(|u| u.to_bits() != 0) {
+            wo.unit_generation = g.units;
+        }
+        wo
+    }
+
+    /// An object with nothing but an id and a group.
+    #[cfg(test)]
+    pub fn bare(id: i32, group: usize) -> WorldObject {
+        WorldObject { id, group, dont_save: false, from_db: false, detail: None }
+    }
+
+    /// Whether the object holds nothing but its id and group (and the two flags): what the 90%
+    /// that sit in an inventory are.
+    #[cfg(test)]
+    pub fn is_bare(&self) -> bool {
+        self.detail.is_none()
+    }
+
+    /// Frees the detail again when everything in it is fresh (an item picked up off the ground).
+    fn trim(&mut self) {
+        let Some(d) = self.detail.as_deref_mut() else { return };
+        if d.cold.as_deref().is_some_and(Cold::is_fresh) {
+            d.cold = None;
+        }
+        if d.is_fresh() {
+            self.detail = None;
+        }
+    }
+
+    /// `wo.net = net`, but clearing a bare object's network object makes no detail to say so.
+    pub fn set_net(&mut self, net: Option<u64>) {
+        if net.is_some() || self.detail.is_some() {
+            self.net = net;
+        }
+    }
+
+    /// The time since which the object is locked, fresh again: no detail is made to say so.
+    pub fn clear_lock_time(&mut self) {
+        if self.detail.is_some() {
+            self.lock_time = GameTime::ZERO;
         }
     }
 
@@ -94,8 +345,11 @@ impl WorldObject {
     }
 
     pub fn reset_position(&mut self) {
-        self.position = [0.0; 3];
-        self.rotation = [0.0; 4];
+        if self.detail.is_some() {
+            self.position = [0.0; 3];
+            self.rotation = [0.0; 4];
+            self.trim();
+        }
     }
 
     pub fn is_locked_in_inventory(&self, time: GameTime) -> bool {
@@ -115,23 +369,31 @@ impl WorldObject {
         let group = data.group(o["gId"].as_str()?)?;
         let mut wo = WorldObject::new(o["id"].as_i64()? as i32, group, data);
         let int = |k: &str| o[k].as_i64().unwrap_or(0) as i32;
-        wo.position = parse_floats(o["pos"].as_str().unwrap_or("")).unwrap_or([0.0; 3]);
-        wo.rotation = parse_floats(o["rot"].as_str().unwrap_or("")).unwrap_or([0.0; 4]);
-        wo.planet = if wo.is_placed() && int("planet") == 0 { default_planet } else { int("planet") };
-        wo.planet_linked = int("liPlanet");
-        wo.color = parse_color(o["color"].as_str().unwrap_or(""));
-        wo.text = o["text"].as_str().unwrap_or("").to_string();
-        wo.linked_groups = o["liGrps"].as_str().map(|s| groups_of(s, data));
-        wo.linked_inventory = int("liId");
-        wo.secondary_inventories = int_list(o["siIds"].as_str()).unwrap_or_default();
-        wo.panels = int_list(o["pnls"].as_str());
-        wo.growth = int("grwth") as f32;
-        wo.setting = int("set");
-        wo.trait_type = int("trtInd");
-        wo.trait_value = int("trtVal");
-        wo.hunger = o["hunger"].as_f64().unwrap_or(0.0) as f32;
-        wo.count = parse_ints(o["count"].as_str().unwrap_or("")).unwrap_or([0, 0]);
-        wo.linked_wo = int("linkedWo");
+        // What the object has besides an id and a group is made whole and boxed only if it differs
+        // from a new object's: nine in ten saved objects say no more than that.
+        let mut d = Detail::FRESH;
+        d.position = parse_floats(o["pos"].as_str().unwrap_or("")).unwrap_or([0.0; 3]);
+        d.rotation = parse_floats(o["rot"].as_str().unwrap_or("")).unwrap_or([0.0; 4]);
+        let placed = d.position.iter().map(|v| v * v).sum::<f32>() > 0.0;
+        d.planet = if placed && int("planet") == 0 { default_planet } else { int("planet") };
+        d.planet_linked = int("liPlanet");
+        d.linked_inventory = int("liId");
+        d.growth = int("grwth") as f32;
+        d.setting = int("set");
+        d.count = parse_ints(o["count"].as_str().unwrap_or("")).unwrap_or([0, 0]);
+        d.linked_wo = int("linkedWo");
+        let mut c = Cold::FRESH;
+        c.unit_generation = wo.unit_generation;
+        c.color = parse_color(o["color"].as_str().unwrap_or(""));
+        c.text = o["text"].as_str().unwrap_or("").to_string();
+        c.linked_groups = o["liGrps"].as_str().map(|s| groups_of(s, data));
+        c.secondary_inventories = int_list(o["siIds"].as_str()).unwrap_or_default();
+        c.panels = int_list(o["pnls"].as_str());
+        c.trait_type = int("trtInd");
+        c.trait_value = int("trtVal");
+        c.hunger = o["hunger"].as_f64().unwrap_or(0.0) as f32;
+        d.cold = (!c.is_fresh()).then(|| Box::new(c));
+        wo.detail = (!d.is_fresh()).then(|| Box::new(d));
         Some(wo)
     }
 
@@ -555,6 +817,8 @@ mod tests {
     }
 
     #[test]
+    // The game's own numbers (0.7071068 is a quaternion's component, not 1/sqrt(2) by choice).
+    #[allow(clippy::approx_constant)]
     fn push_g7_writes_what_g7_always_wrote() {
         let mut rng = Xorshift(0x9e37_79b9_7f4a_7c15);
         let mut values = vec![0.0, -0.0, 1.0, -1.0, 9.9999995, 0.99999999, 9999999.5, 1234567.0, 12345678.0, 0.00001, 0.000009999999, 1e-5, 1e7, 1e-6, f32::MAX, f32::MIN_POSITIVE, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 558.2, 0.7071068, 100.0, 1e6, 1e-45];
@@ -579,6 +843,8 @@ mod tests {
     /// JSON route gives, whatever the fields hold: odd floats, texts that need escaping, every
     /// default and near miss.
     #[test]
+    // The game's own numbers (0.7071068 is a quaternion's component, not 1/sqrt(2) by choice).
+    #[allow(clippy::approx_constant)]
     fn save_entries_written_directly_are_the_json_routes_bytes() {
         let Some((_, data, _, _)) = crate::game::test_tables() else { return };
         let mut rng = Xorshift(0x2545_f491_4f6c_dd1d);

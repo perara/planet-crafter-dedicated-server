@@ -42,7 +42,9 @@ pub fn finish(game: &mut Game, wo: i32, client: u64) {
     let backpack = game.clients.get(&client).and_then(|c| c.ready.as_ref()).map(|s| s.inventory).unwrap_or(-1);
     let position = game.wos[&wo].net.and_then(|n| game.net.objects.get(&n)).map(|o| o.position).unwrap_or(position);
     game.retrieve_resources_from_deconstruction(wo, hash, backpack, position, client);
+    game.ext.plugins.actor = client;
     game.destroy_world_object(wo, true);
+    game.ext.plugins.actor = 0;
 }
 
 #[cfg(test)]

@@ -41,6 +41,32 @@ pub struct Approval {
     /// as long as it asks for nothing beyond what was granted and what the key vouches for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<String>,
+    /// What the plugin asked for when it was approved (the grant may be less), and the hosts its
+    /// `[net] allow` listed: a later version is compared with these, so the admin is shown what is new.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asked: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+}
+
+/// What a version asks for that the approved one did not, and what it no longer asks for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Diff {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub added_hosts: Vec<String>,
+    pub removed_hosts: Vec<String>,
+}
+
+impl Approval {
+    /// The version asking for `requested` and `allow`, against what was approved. An approval made
+    /// before these were recorded compares with its grant.
+    pub fn diff(&self, requested: &[String], allow: &[String]) -> Diff {
+        let before = if self.asked.is_empty() { &self.grant } else { &self.asked };
+        let minus = |a: &[String], b: &[String]| a.iter().filter(|x| !b.contains(x)).cloned().collect::<Vec<_>>();
+        Diff { added: minus(requested, before), removed: minus(before, requested), added_hosts: minus(allow, &self.allow), removed_hosts: minus(&self.allow, allow) }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

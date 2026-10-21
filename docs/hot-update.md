@@ -53,7 +53,7 @@ for `limits.bankWatchdogSeconds` (60) is killed and restarted like after a crash
 only while the world plays (not during a flip, a recovery or a stop).
 The bank writes blocking: a front that stopped reading stalls the world, which loses nothing.
 The frames queued together go out in one write (writev; a frame with a descriptor alone). The
-front loops every 5 ms; with nobody connected and no flip under way it loops every 20 ms (a
+front loops every 5 ms; with nobody connected and no flip under way it loops every 50 ms (a
 datagram or a bank frame wakes it at once; an admin request, a chat reply, a stop signal and
 Steam's callbacks wait for the frame).
 
@@ -370,6 +370,19 @@ is nothing to take. A persistent thread pool and a pre-faulted heap in the new b
 (the restore takes 347 page faults at 2.6k and 8k to 15k at 99.5k; not measured what pre-faulting
 saves).
 
+**Since then** (branch `perf-final`; the numbers of the table above are the old ones). The stand was measured on the
+late-game save (33k world objects) and on the bench world grown to 100k and 200k, with the user instructions of
+the whole stand (snapshot, memfd, restore, all threads), which do not move with a loaded host's load:
+385 / 1,080 / 2,130 M before, 223 / 625 / 1,239 M now (11,500 -> 6,300 instructions a world object). The
+largest piece was the restore's `refresh_from_tables` (six prefab lookups for every machine, 52 / 172 /
+342 ms p50), now one set for each group of a machine. In process, p50 (min) of the better of two runs on a
+host with a load of 100: 102 (44) -> 32 (16) ms at 33k, 276 (154) -> 76 (43) at 100k, 513 (226) -> 162 (115)
+at 200k; with a real front, two banks and no players 105 to 118 -> 62 to 67 ms at 100k and 277 to 306 -> 95 to
+129 ms at 200k. What is left, by CPU: reading the world objects (53 ms of CPU at 200k), the network objects
+(25), the machines (18), the slot indexes (14 to 25, one thread) and the holders (9). The new bank's peak
+memory is 80 MiB at 200k (the old bank 66 MiB, the snapshot 23, the front 10: 2.7 times the bank in all; 437 MiB and 2.2 times before the memory work, which made the bank a third of what it was and left the snapshot as it was; docs/performance.md).
+With 16 `pcds load` players joined (a build before this one cannot: its bots take no join over 1 MiB), the stand of the real front and banks was p50 / p95 36.5 / 42.3 ms at 100k and 63.3 / 76.4 ms at 200k in one run of ten flips; the same build without players stood 62 and 102 ms p50 in the next run, so on a host this busy a live stand is known to a factor of two, and the instruction counts above are the figure to compare. A save of the same world takes the game thread 10 / 28 / 53 ms; a join 2 / 6 / 12 ms.
+
 **Pre-copy** (the old bank streams a full snapshot while it runs, only the changes follow at the
 stand) was evaluated, not built. `bench::dirtybench`, 8 players acting every 200 ms: in 0.25 s 1
 of 99549 world objects, 3 of 10312 inventories and 11 of 14852 network objects differ (1 of 49,
@@ -386,9 +399,9 @@ thousand objects, or if the stand must stay under 20 ms at 100k.
 
 **Around the stand** (not part of it): downloading v0.6.2 from GitHub 1.2 s (4.6 MB), its sha256
 0.01 s, unpacking 0.1 s, `bank-info` 0.01 s. The new bank is up and says HELLO 69 ms after the
-front spawns it (tables and scenes: 66 MiB resident; the live bank with the 99.5k world holds
-181 MiB). The 120 s load deadline is not near. A standby bank kept ready would save those 70 ms
-of an update that takes seconds and cost 66 MiB all the time: not worth it.
+front spawns it (tables and scenes: 66 MiB resident, 21 after the memory work; the live bank with the 99.5k
+world holds 181 MiB, 43 after). The 120 s load deadline is not near. A standby bank kept ready would save those 70 ms
+of an update that takes seconds and cost 21 MiB all the time: not worth it.
 
 ### Not verified
 

@@ -6,8 +6,8 @@ description = "What this plugin does, in one sentence"
 authors = ["You"]
 license = "MIT"
 kind = "wasm"
-# What `cargo build --release` writes (see .cargo/config.toml); `pcds plugin install .` copies it.
-entry = "target/wasm32-unknown-unknown/release/{crate}.wasm"
+# `make build` copies the module here, next to this file (`pcds plugin install .` and `pack` take it from here).
+entry = "plugin.wasm"
 abi = 1
 # Ask for what you use and nothing more: the admin sees this list and approves it.
 capabilities = ["event.chat", "chat.say"]
@@ -20,3 +20,15 @@ fuel_per_event = 500000
 [[command]]
 name = "hello"
 help = "says hello"
+# usage = "[name]"      how it is typed: the player is told when they get it wrong
+# max_args = 1
+# permission = "operator"   only the players in access.operators may use it
+
+# Settings the admin gives you (pcds plugin config set {id} greeting "Hi"). Read them with host.config("greeting").
+[[config]]
+key = "greeting"
+description = "the word the plugin greets with"
+type = "string"
+secret = false
+default = "Hello"
+max_len = 40

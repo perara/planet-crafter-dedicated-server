@@ -1,0 +1,25 @@
+[package]
+name = "playtime-board"
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Not part of the server's build: its own folder, its own lock file (scripts/build-plugin-examples).
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+pcds-plugin-api = { path = "../../../plugin-api" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dev-dependencies]
+pcds-plugin-api = { path = "../../../plugin-api", features = ["testing"] }

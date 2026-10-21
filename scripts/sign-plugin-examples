@@ -9,6 +9,11 @@
 set -eu
 cd "$(dirname "$0")/.."
 pcds=${1:-pcds}
-for dir in examples/plugins/discord-notify; do
+# Every example that has a plugin.toml is signed, except the two that show an unsigned plugin (a data
+# plugin and a module): the first examples a reader meets.
+for dir in examples/plugins/*/; do
+  dir=${dir%/}
+  [ -f "$dir/plugin.toml" ] || continue
+  case "$(basename "$dir")" in hello-stats|welcome-rules) rm -f "$dir/plugin.sig"; continue ;; esac
   "$pcds" plugin sign --key examples/plugins/example-publisher.key "$dir"
 done

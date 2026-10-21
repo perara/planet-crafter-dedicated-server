@@ -1,0 +1,28 @@
+[plugin]
+id = "hello-c"
+name = "Hello from C"
+version = "0.1.0"
+description = "The plugin interface from C, with no libc: !hello counts greetings across restarts, !roll rolls a die"
+authors = ["Planet Crafter dedicated server contributors"]
+license = "MIT"
+kind = "wasm"
+entry = "plugin.wasm"
+abi = 1
+capabilities = ["event.chat", "event.player", "event.tick", "chat.say"]
+
+[budget]
+fuel_per_event = 100000
+tick_every_ms = 10000
+
+[events]
+subscribe = ["player_join", "tick"]
+
+[[command]]
+name = "hello"
+help = "greets you and counts the greetings"
+max_args = 0
+
+[[command]]
+name = "roll"
+help = "rolls a die, 1 to 6"
+max_args = 0

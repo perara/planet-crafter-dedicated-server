@@ -32,7 +32,7 @@ fn trust(dir: &Path, public: &[u8], grant: &[&str]) {
 }
 
 fn chat() -> Event<'static> {
-    Event::Chat { client: 1, name: "Ann", text: "hi" }
+    Event::Chat { client: 1, name: "Ann", text: "hi", player_id: 1 }
 }
 
 fn the(host: &Host) -> &Loaded {
@@ -206,7 +206,7 @@ fn the_standing_of_a_plugin_is_the_approval_the_signature_and_the_keys_together(
     use approvals::{Approval, Standing, standing};
     let key = |grant: &[&str]| sign::TrustedKey { id: "k1".into(), public_key: String::new(), name: "Acme".into(), grant: grant.iter().map(|g| g.to_string()).collect(), added_at: 0 };
     let req: Vec<String> = ["event.chat", "chat.say", "player.kick"].iter().map(|s| s.to_string()).collect();
-    let approval = |enabled: bool, digest: &str, grant: &[&str], signer: Option<&str>| Approval { enabled, grant: grant.iter().map(|g| g.to_string()).collect(), digest: digest.into(), limits: Default::default(), approved_at: 0, signer: signer.map(str::to_string) };
+    let approval = |enabled: bool, digest: &str, grant: &[&str], signer: Option<&str>| Approval { enabled, grant: grant.iter().map(|g| g.to_string()).collect(), digest: digest.into(), limits: Default::default(), approved_at: 0, signer: signer.map(str::to_string), asked: Vec::new(), allow: Vec::new() };
     let names = |g: Vec<String>| g.iter().map(String::as_str).collect::<Vec<_>>().join(",");
     let none = Signed::No;
     // Digest pinning: no approval, pending; a match, running; another digest, changed.
@@ -232,6 +232,28 @@ fn the_standing_of_a_plugin_is_the_approval_the_signature_and_the_keys_together(
         assert_eq!(standing(None, "d1", &req, &s).0, Standing::Pending);
         assert_eq!(standing(Some(&approval(true, "d0", &["player.kick"], Some("k1"))), "d1", &req, &s).0, Standing::Changed);
     }
+}
+
+/// Every example that ships a plugin.sig has the one its files make today (scripts/sign-plugin-examples).
+#[test]
+fn every_signed_example_is_current_and_the_unsigned_ones_stay_so() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins");
+    let key = std::fs::read_to_string(root.join("example-publisher.key")).unwrap();
+    let mut signed = 0;
+    for entry in std::fs::read_dir(&root).unwrap().flatten().filter(|e| e.path().join("plugin.toml").is_file()) {
+        let folder = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let found = read_folder(&folder);
+        assert!(matches!(found.status, Status::Pending | Status::Running), "{name}: {:?}", found.status);
+        if matches!(name.as_str(), "hello-stats" | "welcome-rules") {
+            assert!(!folder.join(sign::FILE).exists(), "{name} is the unsigned example");
+            continue;
+        }
+        let committed = std::fs::read_to_string(folder.join(sign::FILE)).unwrap_or_else(|_| panic!("{name} has no plugin.sig: scripts/sign-plugin-examples"));
+        assert_eq!(sign::sign(&key, &found.digest).unwrap(), committed, "{name}: plugin.sig is not what the files make: scripts/build-plugin-examples, then scripts/sign-plugin-examples");
+        signed += 1;
+    }
+    assert!(signed >= 10, "{signed} signed examples");
 }
 
 #[test]

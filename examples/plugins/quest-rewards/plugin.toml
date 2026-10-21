@@ -1,0 +1,75 @@
+[plugin]
+id = "quest-rewards"
+name = "Quest rewards"
+version = "0.1.0"
+description = "Gives items and Terra tokens for milestones: buildings built, hours played, and the world's terraformation. Each once, remembered per player"
+authors = ["Planet Crafter dedicated server contributors"]
+license = "MIT"
+kind = "wasm"
+entry = "plugin.wasm"
+abi = 1
+capabilities = ["event.rpc", "event.tick", "event.chat", "world.read", "chat.say", "player.give", "world.tokens"]
+
+[budget]
+fuel_per_event = 800000
+tick_every_ms = 5000
+
+[events]
+subscribe = ["rpc_after", "tick"]
+# The build request, heard after it ran: its client is the player who built. (A dropped item or a
+# crafted one is another request and does not count.)
+rpc = ["WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc"]
+
+[[command]]
+name = "rewards"
+help = "your progress towards the rewards, and the next milestones"
+usage = ""
+max_args = 0
+
+[[command]]
+name = "givetokens"
+help = "add Terra tokens to the world (operators)"
+usage = "<number from 1 to 10000>"
+min_args = 1
+max_args = 1
+permission = "operator"
+
+[[config]]
+key = "item_group"
+description = "the item every personal milestone gives, by its group id in the game's tables (Iron, Cobalt, ...)"
+type = "string"
+secret = false
+default = "Iron"
+max_len = 60
+
+[[config]]
+key = "item_count"
+description = "how many of the item each personal milestone gives (the host allows 50 in one go)"
+type = "int"
+default = 10
+min = 1
+max = 50
+
+[[config]]
+key = "token_amount"
+description = "Terra tokens each personal milestone adds to the world; 0 for none"
+type = "int"
+default = 100
+min = 0
+max = 10000
+
+[[config]]
+key = "world_token_amount"
+description = "Terra tokens added to the world each time its terraformation passes a world milestone; 0 for none"
+type = "int"
+default = 500
+min = 0
+max = 10000
+
+[[config]]
+key = "world_milestones"
+description = "the terraformation values that are world milestones, as numbers separated by commas (at most 8)"
+type = "string"
+secret = false
+default = "10000,100000,1000000,10000000"
+max_len = 120

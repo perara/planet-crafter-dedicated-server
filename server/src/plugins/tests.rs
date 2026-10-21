@@ -95,7 +95,7 @@ pub(super) fn boot(dir: &Path) -> Host {
 }
 
 fn chat(text: &str) -> Event<'_> {
-    Event::Chat { client: 1, name: "Ann", text }
+    Event::Chat { client: 1, name: "Ann", text, player_id: 1 }
 }
 
 fn plugin<'a>(host: &'a Host, id: &str) -> &'a Loaded {
@@ -206,7 +206,7 @@ fn a_module_with_imports_the_server_does_not_have_is_refused_by_name() {
 fn a_module_built_for_another_abi_does_not_run() {
     let dir = fresh_dir("abi");
     install(&dir, "future", &module("(i32.const 0)", "").replace("(i32.const 65536)", "(i32.const 131072)"), &CHAT_SAY, SUBSCRIBE_CHAT, None);
-    install(&dir, "newer-minor", &module("(i32.const 0)", "").replace("(i32.const 65536)", "(i32.const 65539)"), &CHAT_SAY, SUBSCRIBE_CHAT, None);
+    install(&dir, "newer-minor", &module("(i32.const 0)", "").replace("(i32.const 65536)", "(i32.const 65540)"), &CHAT_SAY, SUBSCRIBE_CHAT, None);
     let host = boot(&dir);
     for id in ["future", "newer-minor"] {
         assert!(matches!(&plugin(&host, id).status, Status::Failed(why) if why.contains("plugin ABI")), "{id}: {:?}", plugin(&host, id).status);
@@ -242,7 +242,7 @@ fn an_installed_folder_is_named_for_the_plugin_id_and_a_source_folder_may_be_nam
     std::fs::copy(dir.join("right/plugin.wasm"), dir.join("src/plugin.wasm")).unwrap();
     // (The check has its say about the imports of this test module, which the manifest does not ask for; not about the name.)
     let report = check::check_folder(&dir.join("src"), None);
-    assert!(report.errors.iter().all(|e| !e.contains("folder")) && report.errors.iter().any(|e| e.contains("needs world.read")), "{:?}", report.errors);
+    assert!(report.errors.iter().all(|e| !e.contains("folder")) && report.errors.iter().any(|e| e.contains("needs player.kick")), "{:?}", report.errors);
     assert_eq!(read_folder(&dir.join("src")).id, "right");
     std::fs::remove_dir_all(dir.join("src")).unwrap();
     // Installed under another name it is not run, and says why.
@@ -312,7 +312,7 @@ fn a_crowd_of_plugins_cannot_stretch_a_tick_and_takes_turns() {
     }
     let mut host = boot(&dir);
     let mut world = Mock::default();
-    let tick = |ms: i64| Event::Tick { game_ms: ms, tick: 0, players: 0, since_ms: 0 };
+    let tick = |ms: i64| Event::Tick { game_ms: ms, tick: 0, players: 0, since_ms: 0, unix_ms: 0 };
     let t = Instant::now();
     host.run(&mut world, &tick(1000), 1000);
     let spent = t.elapsed();
@@ -335,7 +335,7 @@ fn commands_go_to_their_owner_only_and_a_second_claim_is_told() {
     let mut host = boot(&dir);
     assert!(plugin(&host, "bbb").warnings.iter().any(|w| w.contains("belongs to aaa")));
     let mut world = Mock::default();
-    let command = |c| Event::Command { client: 1, name: "Ann", command: c, args: vec![], text: "!x" };
+    let command = |c| Event::Command { client: 1, name: "Ann", command: c, args: vec![], text: "!x", player_id: 1 };
     host.run(&mut world, &command("stats"), 0);
     host.run(&mut world, &command("Other"), 0);
     host.run(&mut world, &command("nope"), 0);
@@ -477,11 +477,11 @@ fn the_api_document_matches_the_code() {
     for (name, allows) in pcds_plugin_api::caps::ALL {
         assert!(has_row(&format!("| `{name}` | {allows}")), "the capability table lacks `{name}` | {allows}");
     }
-    for import in ["log", "query", "say", "tell", "kick", "teleport", "rules_patch", "http_request"] {
+    for import in ["log", "query", "say", "tell", "kick", "teleport", "rules_patch", "http_request", "give", "tokens", "timer_set", "timer_cancel"] {
         assert!(has_row(&format!("| `pcds.{import}` |")), "pcds.{import}");
         assert!(super::wasm::IMPORTS.contains(&import));
     }
-    assert_eq!(super::wasm::IMPORTS.len(), 8);
+    assert_eq!(super::wasm::IMPORTS.len(), 12);
     for export in ["memory", "pcds_abi", "pcds_alloc", "pcds_free", "pcds_event", "pcds_load", "pcds_save", "pcds_state_version", "pcds_unload"] {
         assert!(has_row(&format!("| `{export}` |")), "export {export}");
     }
@@ -508,6 +508,19 @@ fn the_api_document_matches_the_code() {
         ("MAX_PAYLOAD", limits::MAX_PAYLOAD as u64),
         ("MAX_FAULTS", limits::MAX_FAULTS as u64),
         ("MAX_PLUGINS", limits::MAX_PLUGINS as u64),
+        ("MAX_GIVE_COUNT", limits::MAX_GIVE_COUNT as u64),
+        ("GIVES_PER_SECOND", limits::GIVES_PER_SECOND as u64),
+        ("MAX_TOKENS_PER_ACTION", limits::MAX_TOKENS_PER_ACTION as u64),
+        ("TOKEN_CHANGES_PER_SECOND", limits::TOKEN_CHANGES_PER_SECOND as u64),
+        ("MAX_TIMERS", limits::MAX_TIMERS as u64),
+        ("MIN_TIMER_REPEAT_MS", limits::MIN_TIMER_REPEAT_MS as u64),
+        ("MAX_TIMER_DELAY_MS", limits::MAX_TIMER_DELAY_MS as u64),
+        ("TIMER_EVENTS_PER_TICK", limits::TIMER_EVENTS_PER_TICK as u64),
+        ("FUEL_PER_SCANNED_OBJECT", limits::FUEL_PER_SCANNED_OBJECT),
+        ("MAX_QUERY_ARG", limits::MAX_QUERY_ARG as u64),
+        ("MAX_ITEM_NAME_BYTES", limits::MAX_ITEM_NAME_BYTES as u64),
+        ("LOG_KEPT", limits::LOG_KEPT as u64),
+        ("FAULTS_KEPT", limits::FAULTS_KEPT as u64),
         ("HTTP_IN_FLIGHT", limits::HTTP_IN_FLIGHT as u64),
         ("HTTP_PER_SECOND", limits::HTTP_PER_SECOND as u64),
         ("HTTP_WORKERS", limits::HTTP_WORKERS as u64),
@@ -537,7 +550,7 @@ fn the_api_document_matches_the_code() {
     assert!(doc.contains("`SLOW_CALL` (5 ms)") && limits::SLOW_CALL.as_millis() == 5);
     assert!(doc.contains("`FAULT_WINDOW` is 60 seconds") && limits::FAULT_WINDOW.as_secs() == 60);
     let admin = include_str!("admin.rs");
-    for route in ["GET /api/plugins", "POST /api/plugins/reload", "POST /api/plugins/enable", "POST /api/plugins/disable", "POST /api/plugins/events", "POST /api/plugins/trust", "POST /api/plugins/untrust", "GET /api/plugins/tokens", "POST /api/plugins/tokens", "POST /api/plugins/tokens/revoke", "POST /api/plugins/config"] {
+    for route in ["GET /api/plugins", "POST /api/plugins/reload", "POST /api/plugins/enable", "POST /api/plugins/disable", "POST /api/plugins/events", "POST /api/plugins/logs", "POST /api/plugins/trust", "POST /api/plugins/untrust", "GET /api/plugins/tokens", "POST /api/plugins/tokens", "POST /api/plugins/tokens/revoke", "POST /api/plugins/config"] {
         assert!(doc.contains(&format!("`{route}`")), "{route} in the document");
         let (method, path) = route.split_once(' ').unwrap();
         assert!(admin.contains(&format!("(\"{method}\", \"{path}\")")), "{route} in admin.rs");
@@ -545,14 +558,14 @@ fn the_api_document_matches_the_code() {
     for status in ["running", "pending", "disabled", "changed", "invalid", "incompatible", "failed"] {
         assert!(doc.contains(&format!("`{status}`")), "status {status}");
     }
-    for key in ["id", "name", "version", "description", "authors", "license", "kind", "entry", "abi", "min_server", "capabilities", "fuel_per_event", "fuel_per_save", "memory_pages", "tick_every_ms", "subscribe", "rpc", "allow", "timeout_ms", "max_response_bytes", "key", "secret"] {
+    for key in ["id", "name", "version", "description", "authors", "license", "kind", "entry", "abi", "min_server", "capabilities", "fuel_per_event", "fuel_per_save", "memory_pages", "tick_every_ms", "subscribe", "rpc", "allow", "timeout_ms", "max_response_bytes", "key", "secret", "usage", "min_args", "max_args", "permission", "type", "default", "min", "max", "choices"] {
         assert!(doc.contains(&format!("\n{key} = ")) || doc.contains(&format!("\n{key} =")), "manifest key {key}");
     }
     for var in ["name", "client", "players", "planet", "time", "args", "arg1", "arg2", "arg3"] {
         assert!(doc.contains(&format!("`{{{var}}}`")), "variable {var}");
     }
     // The guide's steps use commands that exist.
-    for cmd in ["list", "check", "install", "enable", "disable", "reload", "new"] {
+    for cmd in ["list", "check", "install", "enable", "disable", "reload", "new", "test", "logs", "stats", "watch", "pack", "search"] {
         assert!(include_str!("../cli/plugin.rs").contains(&format!("[\"{cmd}\"")) || include_str!("../cli/plugin.rs").contains(&format!("[\"{cmd}\",")), "pcds plugin {cmd}");
     }
 }
@@ -716,7 +729,7 @@ fn a_hundred_loads_and_unloads_leave_nothing_and_cost_no_tick_time() {
     let mut host = boot(&dir);
     let mut saved = Saved::default();
     let mut world = Mock::default();
-    let tick = |ms: i64| Event::Tick { game_ms: ms, tick: 0, players: 0, since_ms: 5 };
+    let tick = |ms: i64| Event::Tick { game_ms: ms, tick: 0, players: 0, since_ms: 5, unix_ms: 0 };
     let mut clock = 0i64;
     let measure = |host: &mut Host, world: &mut Mock, clock: &mut i64| {
         let t = Instant::now();

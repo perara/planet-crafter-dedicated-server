@@ -7,7 +7,9 @@ copy of a save it starts the front with its two banks, measures an idle window, 
 steady part of the load. Reported per process (front, bank): CPU as % of one core split into
 user and system, context switches per second, and, with --perf, user/kernel instructions and
 cycles from `perf stat`. Also: the memory (RSS) before, during and after, the round trips and
-bytes per player that `pcds load` prints, and the tick times the status reports (p50, p99, max).
+bytes per player that `pcds load` prints, the tick times the status reports (p50, p99, max), and what went
+over the wire in the steady window (datagrams and bytes out and in, how many datagrams only acknowledged,
+GET /api/status traffic.wire). A save on a DLC planet needs PCDS_TOOLS_RULES='{"world":{"dlcPlanets":["Humble"]}}'.
 
 Requirements: python3 (3.9+), a built `pcds` (make build), the game tables, a save to run on
 (copied, never written; the bigger and older the world, the more the numbers mean), Linux
@@ -108,13 +110,20 @@ def main():
     steady = args.seconds - 12
     ps = [perf_stat(p, steady, os.path.join(srv.home, f"{n}-load.txt")) for n, p in (("front", front), ("bank", bank))] if args.perf else []
     a = (snap(front), snap(bank))
+    traffic0 = (srv.status()[1] or {}).get("traffic")
     time.sleep(steady / 2)
     res["rss_during"] = mem()
     time.sleep(steady / 2)
     b = (snap(front), snap(bank))
+    traffic1 = (srv.status()[1] or {}).get("traffic")
     for p in ps:
         p.wait()
     res["load"] = {"front": rate(a[0], b[0], steady), "bank": rate(a[1], b[1], steady)}
+    if isinstance(traffic0, dict) and isinstance(traffic1, dict) and "wire" in traffic1:
+        # What went over the wire in the steady window (UTP's headers counted, IP's and UDP's not).
+        w0, w1 = traffic0["wire"], traffic1["wire"]
+        per = lambda k: round((w1[k] - w0[k]) / steady, 1)
+        res["wire_per_second"] = {"datagramsOut": per("datagramsOut"), "bytesOut": per("bytesOut"), "ackOnlyOut": per("ackOnlyOut"), "heartbeatsOut": per("heartbeatsOut"), "resendsOut": per("resendsOut"), "datagramsIn": per("datagramsIn"), "bytesIn": per("bytesIn"), "batchBytesOut": round((traffic1["bytesOut"] - traffic0["bytesOut"]) / steady, 1)}
     if args.perf:
         res["load"]["instructions_M_per_s"] = {n: perf_read(os.path.join(srv.home, f"{n}-load.txt"), steady) for n in ("front", "bank")}
     out, _ = load.communicate(timeout=args.seconds + 60)
@@ -131,6 +140,9 @@ def main():
             r = res[k][who]
             print(f"{k.upper():5} {who:5} user {r['user_pct']:6.2f}% sys {r['sys_pct']:6.2f}% of a core, {r['ctx_per_s']} context switches/s")
     print("rss MB:", json.dumps({k: res[k] for k in ("rss_before", "rss_during", "rss_after")}))
+    if "wire_per_second" in res:
+        w = res["wire_per_second"]
+        print(f"wire per second, all {args.players} players: out {w['bytesOut'] / 1024:.1f} KB in {w['datagramsOut']:.0f} datagrams ({w['ackOnlyOut']:.0f} only acknowledging, {w['resendsOut']:.0f} resends; the batches inside {w['batchBytesOut'] / 1024:.1f} KB), in {w['bytesIn'] / 1024:.1f} KB in {w['datagramsIn']:.0f} datagrams")
     print("status:", json.dumps(res.get("status")))
     print(json.dumps(res))
     bad = []

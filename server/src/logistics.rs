@@ -10,11 +10,13 @@
 
 mod motion;
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Value};
 
+use crate::doc::Doc;
 use crate::clock::GameTime;
 use crate::data::stable_hash;
 use crate::game::{Args, Game};
@@ -213,7 +215,13 @@ fn send_to_observers(game: &mut Game, hidden: &[u64], kind: u32, body: Vec<u8>) 
         game.net.out.push((Target::All, kind, body));
         return;
     }
-    let clients: Vec<u64> = game.clients.values().filter(|c| c.approved && !hidden.contains(&c.id)).map(|c| c.id).collect();
+    // A drone far from many players is hidden from many: a set, not a list searched for every client.
+    let clients: Vec<u64> = if hidden.len() > 8 {
+        let hidden: crate::idmap::FxHashSet<u64> = hidden.iter().copied().collect();
+        game.clients.values().filter(|c| c.approved && !hidden.contains(&c.id)).map(|c| c.id).collect()
+    } else {
+        game.clients.values().filter(|c| c.approved && !hidden.contains(&c.id)).map(|c| c.id).collect()
+    };
     for c in clients {
         game.net.out.push((Target::Only(c), kind, body.clone()));
     }
@@ -346,7 +354,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     let Some(w) = game.wos.get(&wo) else { return };
     let id = game.data.groups[w.group].id.clone();
     if let Some(c) = game.data.prefab_components(&id, "Drone").first().map(|c| (*c).clone()) {
-        let vis = game.data.prefab_components(&id, "DroneNetworkVibility").first().map(|c| (*c).clone()).unwrap_or(Value::Null);
+        let vis = game.data.prefab_components(&id, "DroneNetworkVibility").first().map(|c| (*c).clone()).unwrap_or(Doc::Null);
         awake_drone(game, wo, &c, &vis);
     }
     if let Some(c) = game.data.prefab_components(&id, "MachineDroneStation").first() {
@@ -461,8 +469,16 @@ fn update(game: &mut Game) {
     if game.ext.logistics.fleet.is_empty() {
         return;
     }
-    let planets: HashSet<i32> = game.ext.logistics.access_data.iter().map(|a| a.planet).collect();
-    let powered: HashSet<i32> = planets.into_iter().filter(|p| *p != 0 && crate::energy::has_enough(game, *p)).collect();
+    // The planets drones fly on (a few), and which of them have the energy.
+    let mut powered: Vec<i32> = Vec::new();
+    let mut unpowered: Vec<i32> = Vec::new();
+    for a in &game.ext.logistics.access_data {
+        let p = a.planet;
+        if p != 0 && !powered.contains(&p) && !unpowered.contains(&p) {
+            let list = if crate::energy::has_enough(game, p) { &mut powered } else { &mut unpowered };
+            list.push(p);
+        }
+    }
     let dt = tick_seconds(game);
     let l = &mut game.ext.logistics;
     for i in 0..l.access.len() {
@@ -590,13 +606,80 @@ fn can_grab(game: &Game, w: &WorldObject) -> bool {
     w.growth >= 100.0 || !game.is_held(w.id)
 }
 
+/// What demands of one group on one planet may take in a search for tasks (SetLogisticTasks), in
+/// the order the game meets it: the items of the supplies in the supplies' order, or the dropped items
+/// in theirs. An item that has a task is taken for good, so each demand goes through the items left,
+/// not through all of them again.
+struct Candidates {
+    /// (the supply it is in, the world object).
+    list: Vec<(Option<i32>, i32)>,
+    taken: Vec<bool>,
+    /// Everything before this is taken.
+    first: usize,
+}
+
+impl Candidates {
+    fn new(game: &Game, list: Vec<(Option<i32>, i32)>) -> Candidates {
+        let taken = list.iter().map(|(_, wo)| game.ext.logistics.all_tasks.contains_key(wo)).collect();
+        let mut c = Candidates { list, taken, first: 0 };
+        c.skip_taken();
+        c
+    }
+
+    fn skip_taken(&mut self) {
+        while self.first < self.list.len() && self.taken[self.first] {
+            self.first += 1;
+        }
+    }
+
+    /// Tasks for the demand `demand`, which wants `available` more (above 0): each item that gets a
+    /// task is one less, and it stops at none. Returns what it still wants. create_task refuses an
+    /// item that has a task, which is then taken for the rest of the search. The demand's own
+    /// items are not for it.
+    fn take(&mut self, game: &mut Game, demand: i32, mut available: i32, spawned: bool) -> i32 {
+        let mut i = self.first;
+        while i < self.list.len() {
+            let (supply, wo) = self.list[i];
+            if !self.taken[i] && supply != Some(demand) {
+                self.taken[i] = true;
+                if create_task(game, supply, demand, wo, spawned).is_some() {
+                    available -= 1;
+                    if available == 0 {
+                        break;
+                    }
+                }
+            }
+            i += 1;
+        }
+        self.skip_taken();
+        available
+    }
+}
+
 /// SetLogisticTasks, first frame: tasks for every demand that supplies or the ground can
 /// fill, by priority, then the tasks that are over. The next two frames follow in
 /// assign_idle_drones and release_drones. (The game also pauses every 400 iterations; one
 /// frame does it all here.)
 fn set_logistic_tasks(game: &mut Game) {
     game.ext.logistics.updating = 1;
-    let pickables: Vec<i32> = game.pickables.iter().copied().collect();
+    // The ground's items by group, in the pickables' order: a demand asks for a few groups, and
+    // asked of every pickable it was the whole list for each (no task changes a world object's group).
+    let mut pickables: crate::idmap::FxHashMap<usize, Vec<i32>> = Default::default();
+    for &wo in game.pickables.iter() {
+        if let Some(w) = game.wos.get(&wo) {
+            pickables.entry(w.group).or_default().push(wo);
+        }
+    }
+    // The supplies that supply a group, with their planet (nothing the loop does changes either).
+    let mut wanted = vec![false; game.data.groups.len()];
+    for i in game.ext.logistics.demand.iter().filter_map(|d| game.inventories.get(d)) {
+        for &g in &i.logistic.demand {
+            wanted[g] = true;
+        }
+    }
+    let mut suppliers: Option<Vec<Vec<(i32, i32, usize)>>> = None;
+    let mut item_groups: crate::idmap::FxHashMap<i32, crate::idmap::FxHashMap<usize, Vec<i32>>> = Default::default();
+    let (mut from_supplies, mut from_ground): (crate::idmap::FxHashMap<(usize, i32), Candidates>, crate::idmap::FxHashMap<(usize, i32), Candidates>) = Default::default();
     for p in game.ext.logistics.priorities.values_mut() {
         p.clear();
     }
@@ -617,39 +700,106 @@ fn set_logistic_tasks(game: &mut Game) {
             if game.ext.logistics.priorities[&planet].get(&hash).is_some_and(|v| priority < *v) {
                 continue;
             }
-            for s in game.ext.logistics.supply.clone() {
-                let supplies = game.inventories.get(&s).is_some_and(|i| i.logistic.supply.contains(&g));
-                if s == d || entity_wo(game, s).is_none() || entity_planet(game, s) != planet || !supplies {
+            let suppliers_of_g = suppliers.get_or_insert_with(|| {
+                // Per wanted group, in the order of `supply`: (inventory, its planet, its place in `supply`).
+                let mut by_group: Vec<Vec<(i32, i32, usize)>> = vec![Vec::new(); wanted.len()];
+                for (place, &s) in game.ext.logistics.supply.iter().enumerate() {
+                    let (Some(inv), Some(_)) = (game.inventories.get(&s), entity_wo(game, s)) else { continue };
+                    let planet = entity_planet(game, s);
+                    for &g in &inv.logistic.supply {
+                        // A group listed twice by one inventory is one supplier.
+                        if wanted[g] && by_group[g].last().is_none_or(|e| e.2 != place) {
+                            by_group[g].push((s, planet, place));
+                        }
+                    }
+                }
+                by_group
+            });
+            // The game's loops count `available` down to none and stop there: a group met with none left
+            // (an earlier group of the demand took the last) takes all it finds, and its first supply is
+            // the only one looked at when it finds nothing. That is done as the game does it.
+            if available <= 0 {
+                for i in 0..suppliers_of_g[g].len() {
+                    let (s, supply_planet, _) = suppliers_of_g[g][i];
+                    if s == d || supply_planet != planet {
+                        continue;
+                    }
+                    let by_group = item_groups.entry(s).or_insert_with(|| {
+                        let mut by_group: crate::idmap::FxHashMap<usize, Vec<i32>> = Default::default();
+                        for &wo in game.inventories.get(&s).map(|i| i.items.as_slice()).unwrap_or_default() {
+                            if let Some(w) = game.wos.get(&wo) {
+                                by_group.entry(w.group).or_default().push(wo);
+                            }
+                        }
+                        by_group
+                    });
+                    for &wo in by_group.get(&g).map(Vec::as_slice).unwrap_or_default() {
+                        if create_task(game, Some(s), d, wo, false).is_some() {
+                            available -= 1;
+                            if available == 0 {
+                                break;
+                            }
+                        }
+                    }
+                    if available == 0 {
+                        break;
+                    }
+                }
+                if available == 0 {
                     continue;
                 }
-                for wo in items(game, s) {
-                    if game.wos.get(&wo).is_some_and(|w| w.group == g) && create_task(game, Some(s), d, wo, false).is_some() {
+                for &wo in pickables.get(&g).map(Vec::as_slice).unwrap_or_default() {
+                    if game.ext.logistics.all_tasks.contains_key(&wo) {
+                        continue;
+                    }
+                    let ok = game.wos.get(&wo).is_some_and(|w| w.net.is_some() && motion::length_sq(w.position) >= 1e-10 && can_grab(game, w) && w.planet_hash() == planet);
+                    if ok && create_task(game, None, d, wo, true).is_some() {
                         available -= 1;
                         if available == 0 {
                             break;
                         }
                     }
                 }
-                if available == 0 {
-                    break;
-                }
+                continue;
             }
+            // What a demand of this group on this planet may take, from the supplies and then from the ground.
+            let supplies = match from_supplies.entry((g, planet)) {
+                Entry::Occupied(o) => o.into_mut(),
+                Entry::Vacant(v) => {
+                    let mut list = Vec::new();
+                    for &(s, supply_planet, _) in &suppliers_of_g[g] {
+                        if supply_planet != planet {
+                            continue;
+                        }
+                        // The supply's items of the group, in its order (nothing the tasks do changes an
+                        // inventory or a group): its items sorted by group once per search.
+                        let by_group = item_groups.entry(s).or_insert_with(|| {
+                            let mut by_group: crate::idmap::FxHashMap<usize, Vec<i32>> = Default::default();
+                            for &wo in game.inventories.get(&s).map(|i| i.items.as_slice()).unwrap_or_default() {
+                                if let Some(w) = game.wos.get(&wo) {
+                                    by_group.entry(w.group).or_default().push(wo);
+                                }
+                            }
+                            by_group
+                        });
+                        list.extend(by_group.get(&g).into_iter().flatten().map(|&wo| (Some(s), wo)));
+                    }
+                    v.insert(Candidates::new(game, list))
+                }
+            };
+            available = supplies.take(game, d, available, false);
             if available == 0 {
                 continue;
             }
-            for &wo in &pickables {
-                // A task for it already: create_task refuses it, so its checks can wait.
-                if game.ext.logistics.all_tasks.contains_key(&wo) {
-                    continue;
+            let ground = match from_ground.entry((g, planet)) {
+                Entry::Occupied(o) => o.into_mut(),
+                Entry::Vacant(v) => {
+                    // A task for it already: create_task refuses it, so its checks can wait.
+                    let list = pickables.get(&g).into_iter().flatten().copied().filter(|wo| !game.ext.logistics.all_tasks.contains_key(wo)).filter(|wo| game.wos.get(wo).is_some_and(|w| w.net.is_some() && motion::length_sq(w.position) >= 1e-10 && can_grab(game, w) && w.planet_hash() == planet)).map(|wo| (None, wo)).collect();
+                    v.insert(Candidates::new(game, list))
                 }
-                let ok = game.wos.get(&wo).is_some_and(|w| w.group == g && w.net.is_some() && motion::length_sq(w.position) >= 1e-10 && can_grab(game, w) && w.planet_hash() == planet);
-                if ok && create_task(game, None, d, wo, true).is_some() {
-                    available -= 1;
-                    if available == 0 {
-                        break;
-                    }
-                }
-            }
+            };
+            available = ground.take(game, d, available, true);
         }
         if available > 0 {
             let hashes: Vec<i32> = groups.iter().map(|g| game.data.groups[*g].hash).collect();
@@ -917,7 +1067,7 @@ fn respawn_drone(game: &mut Game, d: i32) -> bool {
     let Some(mut o) = dr.parked.take() else { return false };
     o.position = dr.position;
     o.rotation = dr.rotation;
-    o.tail = motion::Transform::sync_tail(dr.behaviour, dr.position, dr.rotation, tick);
+    o.tail = motion::Transform::sync_tail(dr.behaviour, dr.position, dr.rotation, tick).into();
     // Spawn() without destroyWithScene, unlike InstantiateWorldObject's first spawn.
     o.flags &= !DESTROY_WITH_SCENE;
     dr.transform = motion::Transform::default();
@@ -930,11 +1080,11 @@ fn respawn_drone(game: &mut Game, d: i32) -> bool {
 // ---- Drone ------------------------------------------------------------------------------------
 
 /// Drone.Awake: the drone's container just spawned. CheckBusy runs next frame.
-fn awake_drone(game: &mut Game, wo: i32, c: &Value, vis: &Value) {
-    let f = |v: &Value, k: &str, default: f32| v[k].as_f64().map(|x| x as f32).unwrap_or(default);
+fn awake_drone(game: &mut Game, wo: i32, c: &Doc, vis: &Doc) {
+    let f = |v: &Doc, k: &str, default: f32| v[k].as_f64().map(|x| x as f32).unwrap_or(default);
     let Some(net) = game.wos.get(&wo).and_then(|w| w.net) else { return };
     let Some(o) = game.net.objects.get(&net) else { return };
-    let behaviour = o.behaviours.iter().find(|b| b.class == "ClientNetworkTransform").map(|b| b.index).unwrap_or(0);
+    let behaviour = o.behaviours().find(|b| b.class == "ClientNetworkTransform").map(|b| b.index).unwrap_or(0);
     let rotation = if o.rotation.iter().all(|v| *v == 0.0) { motion::IDENTITY } else { o.rotation };
     let (position, owner) = (o.position, o.owner);
     // GroupNetworkContainer keeps server ownership of a child with a Rigidbody, as drones are.
@@ -968,7 +1118,7 @@ fn awake_drone(game: &mut Game, wo: i32, c: &Value, vis: &Value) {
     let handle = game.net.scene_handle;
     let o = game.net.objects.get_mut(&net).unwrap();
     o.rotation = rotation;
-    o.tail = motion::Transform::sync_tail(behaviour, position, rotation, tick);
+    o.tail = motion::Transform::sync_tail(behaviour, position, rotation, tick).into();
     o.tail_position = None;
     let body = [vec![1], o.scene_object(handle)].concat();
     let spawned = |b: &[u8]| {
@@ -1214,7 +1364,7 @@ fn send_transforms(game: &mut Game, tick: i32) {
         let Some(o) = game.net.objects.get_mut(&net) else { continue };
         o.position = dr.position;
         o.rotation = dr.rotation;
-        o.tail = motion::Transform::sync_tail(dr.behaviour, dr.position, dr.rotation, tick);
+        o.tail = motion::Transform::sync_tail(dr.behaviour, dr.position, dr.rotation, tick).into();
         if !active || o.owner != 0 {
             continue;
         }
@@ -1230,6 +1380,9 @@ fn send_transforms(game: &mut Game, tick: i32) {
 /// on another planet are hidden from that player. The real server leaves its own (host)
 /// player out; every player here is a remote one.
 fn visibility(game: &mut Game) {
+    if game.ext.logistics.drones.is_empty() {
+        return;
+    }
     let count = game.ext.logistics.drones.len() as f32;
     let current = game.planet_hash();
     let players: Vec<(u64, V3)> = game
@@ -1238,18 +1391,24 @@ fn visibility(game: &mut Game) {
         .filter(|c| c.approved)
         .filter_map(|c| Some((c.id, game.net.objects.get(&c.player?)?.position)))
         .collect();
+    // Who is a player and who a drone is hidden from, as sets: every drone is asked about every player at
+    // every frame, and a list searched for each pair is players squared per drone.
+    let player_ids: crate::idmap::FxHashSet<u64> = players.iter().map(|p| p.0).collect();
+    let mut hidden_from: crate::idmap::FxHashSet<u64> = Default::default();
     let ids: Vec<i32> = game.ext.logistics.drones.keys().copied().collect();
     for d in ids {
         let active = planet_of(game, d) == current;
         let dr = game.ext.logistics.drones.get_mut(&d).unwrap();
         let Some(net) = dr.net else { continue };
-        dr.hidden.retain(|c| players.iter().any(|p| p.0 == *c));
+        dr.hidden.retain(|c| player_ids.contains(c));
+        hidden_from.clear();
+        hidden_from.extend(dr.hidden.iter().copied());
         let [min, max, most] = dr.visibility;
         let range = min + (max - min) * (1.0 - (count / most).min(1.0));
         let mut changes = Vec::new();
         for (c, p) in &players {
             let far = !active || motion::distance_sq(dr.position, *p) > range * range;
-            let hidden = dr.hidden.contains(c);
+            let hidden = hidden_from.contains(c);
             if far && !hidden {
                 dr.hidden.push(*c);
                 changes.push((*c, false));

@@ -16,9 +16,10 @@ mod veins;
 
 use std::collections::HashMap;
 
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::clock::GameTime;
+use crate::doc::Doc;
 use crate::game::{Args, Game};
 use crate::model::WorldObject;
 use crate::net::Target;
@@ -49,13 +50,80 @@ pub struct Machines {
     /// No machine has anything due before this (a lower bound; every change to a machine
     /// resets it, and tick skips its walk until then).
     next_due: GameTime,
+    /// `next_due(m)` of every machine, in list order, so that the walk reads a flat array and
+    /// looks at a machine only when it is due or changed. Valid while `dues_ok`; a machine got
+    /// through `get_mut` is in `dirty` (its place in the list) until its entry is made again.
+    /// Adding or removing a machine makes the whole array again at the next walk.
+    #[serde(skip)]
+    dues: Vec<GameTime>,
+    #[serde(skip)]
+    dues_ok: bool,
+    #[serde(skip)]
+    dirty: Vec<usize>,
+    /// Counts the machines added and removed (a walk in progress compares it).
+    #[serde(skip)]
+    structure: u64,
+    /// The authorized and unauthorized item groups of a building's inventory (and whether it is
+    /// equipment), per building group: worked out from the tables once.
+    #[serde(skip)]
+    authorized: crate::idmap::FxHashMap<usize, (Vec<usize>, Vec<usize>, bool)>,
 }
 
 impl Machines {
     /// A machine to change (its timers may move earlier: tick walks all machines again).
     fn get_mut(&mut self, wo: &i32) -> Option<&mut Machine> {
         self.next_due = GameTime::PAST;
+        if self.dues_ok {
+            self.dirty.extend(self.list.get_index_of(wo));
+        }
         self.list.get_mut(wo)
+    }
+
+    /// A machine added (at the end of the list, or in place of the one of the same world object).
+    fn insert(&mut self, wo: i32, m: Machine) {
+        self.next_due = GameTime::PAST;
+        self.structure += 1;
+        let due = (self.dues_ok).then(|| due_of(&m));
+        let (i, replaced) = self.list.insert_full(wo, m);
+        if let Some(due) = due {
+            if replaced.is_some() {
+                self.dues[i] = due;
+            } else {
+                self.dues.push(due);
+            }
+        }
+    }
+
+    /// A machine taken out; whether there was one.
+    fn remove(&mut self, wo: &i32) -> bool {
+        let Some((i, _, _)) = self.list.shift_remove_full(wo) else { return false };
+        self.structure += 1;
+        if self.dues_ok {
+            self.dues.remove(i);
+            self.dirty.retain(|d| *d != i);
+            for d in self.dirty.iter_mut().filter(|d| **d > i) {
+                *d -= 1;
+            }
+        }
+        true
+    }
+
+    /// The array of due times as the machines are now.
+    fn refresh_dues(&mut self, next_due: impl Fn(&Machine) -> GameTime) {
+        if self.dues_ok {
+            let mut dirty = std::mem::take(&mut self.dirty);
+            for i in dirty.drain(..) {
+                if let Some((_, m)) = self.list.get_index(i) {
+                    self.dues[i] = next_due(m);
+                }
+            }
+            self.dirty = dirty;
+        } else {
+            self.dirty.clear();
+            self.dues.clear();
+            self.dues.extend(self.list.values().map(next_due));
+            self.dues_ok = true;
+        }
     }
 
     pub fn with_energy(&self) -> Vec<i32> {
@@ -63,14 +131,86 @@ impl Machines {
     }
 }
 
-/// One world object's machine components.
-#[derive(serde::Serialize, serde::Deserialize)]
+/// One world object's machine components. Nine in ten machines have none of the parts a building
+/// can make (a container, a wall light): those are 48 bytes, and the parts (584) are made when the
+/// first is set. They read through `Deref` (`m.generator`); the writes say what they mean:
+/// `parts_mut` makes the parts, `existing_parts_mut` changes them if the machine has any.
 struct Machine {
     /// The inventory InventoryAssociated.SetInventory gave the machines (0: none).
     linked: i32,
     /// MachineGrowerBase._growSpeedMultiplier (optimizers' growth fuses).
     grow_multiplier: f32,
     /// MachineGrowerBase components on the root: (counts for growth fuses).
+    growers: Vec<bool>,
+    destruct_if_full: bool,
+    parts: Option<Box<Parts>>,
+}
+
+/// The components a machine may have. All of them none: no `Parts`.
+struct Parts {
+    generator: Option<production::Generator>,
+    linked_grower: Option<growers::LinkedGrower>,
+    converter: Option<GameTime>,
+    vegetation: Option<growers::Vegetation>,
+    harvestable: Option<growers::Harvestable>,
+    autocrafter: Option<production::AutoCrafter>,
+    disintegrator: Option<production::Disintegrator>,
+    optimizer: Option<production::Optimizer>,
+    /// WorldUnitGenerationViaInventory unit indices.
+    unit_generation: Vec<&'static str>,
+    /// WorldUnitMultiplierViaInventory: (unit, influencedByHunger).
+    unit_multipliers: Vec<(&'static str, bool)>,
+    /// MachineFloater on water: (updateWaterSurfaceInterval, next update).
+    floater: Option<(f32, GameTime)>,
+}
+
+static NO_PARTS: Parts = Parts {
+    generator: None,
+    linked_grower: None,
+    converter: None,
+    vegetation: None,
+    harvestable: None,
+    autocrafter: None,
+    disintegrator: None,
+    optimizer: None,
+    unit_generation: Vec::new(),
+    unit_multipliers: Vec::new(),
+    floater: None,
+};
+
+const _: () = assert!(std::mem::size_of::<Machine>() == 48);
+
+impl std::ops::Deref for Machine {
+    type Target = Parts;
+    fn deref(&self) -> &Parts {
+        self.parts.as_deref().unwrap_or(&NO_PARTS)
+    }
+}
+
+impl Machine {
+    fn new() -> Machine {
+        Machine { linked: 0, grow_multiplier: 1.0, growers: Vec::new(), destruct_if_full: false, parts: None }
+    }
+
+    /// The parts to set one: made if the machine has none yet.
+    fn parts_mut(&mut self) -> &mut Parts {
+        self.parts.get_or_insert_with(|| {
+            Box::new(Parts { generator: None, linked_grower: None, converter: None, vegetation: None, harvestable: None, autocrafter: None, disintegrator: None, optimizer: None, unit_generation: Vec::new(), unit_multipliers: Vec::new(), floater: None })
+        })
+    }
+
+    /// The parts to change what the machine has; None for a machine without any (nothing is made).
+    fn existing_parts_mut(&mut self) -> Option<&mut Parts> {
+        self.parts.as_deref_mut()
+    }
+}
+
+/// A snapshot's machine: the fields in the order they were written when they were the struct's
+/// own (bincodec.rs writes a struct as its fields back to back).
+#[derive(serde::Deserialize)]
+struct Flat {
+    linked: i32,
+    grow_multiplier: f32,
     growers: Vec<bool>,
     generator: Option<production::Generator>,
     linked_grower: Option<growers::LinkedGrower>,
@@ -81,14 +221,105 @@ struct Machine {
     disintegrator: Option<production::Disintegrator>,
     optimizer: Option<production::Optimizer>,
     destruct_if_full: bool,
-    /// WorldUnitGenerationViaInventory unit indices.
     #[serde(with = "unit_names")]
     unit_generation: Vec<&'static str>,
-    /// WorldUnitMultiplierViaInventory: (unit, influencedByHunger).
     #[serde(with = "unit_names")]
     unit_multipliers: Vec<(&'static str, bool)>,
-    /// MachineFloater on water: (updateWaterSurfaceInterval, next update).
     floater: Option<(f32, GameTime)>,
+}
+
+struct Named<'a, T>(&'a T);
+
+impl<T: unit_names::Names> serde::Serialize for Named<'_, T> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        unit_names::serialize(self.0, s)
+    }
+}
+
+impl serde::Serialize for Machine {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let p: &Parts = self;
+        let mut t = s.serialize_struct("Machine", 15)?;
+        t.serialize_field("linked", &self.linked)?;
+        t.serialize_field("grow_multiplier", &self.grow_multiplier)?;
+        t.serialize_field("growers", &self.growers)?;
+        t.serialize_field("generator", &p.generator)?;
+        t.serialize_field("linked_grower", &p.linked_grower)?;
+        t.serialize_field("converter", &p.converter)?;
+        t.serialize_field("vegetation", &p.vegetation)?;
+        t.serialize_field("harvestable", &p.harvestable)?;
+        t.serialize_field("autocrafter", &p.autocrafter)?;
+        t.serialize_field("disintegrator", &p.disintegrator)?;
+        t.serialize_field("optimizer", &p.optimizer)?;
+        t.serialize_field("destruct_if_full", &self.destruct_if_full)?;
+        t.serialize_field("unit_generation", &Named(&p.unit_generation))?;
+        t.serialize_field("unit_multipliers", &Named(&p.unit_multipliers))?;
+        t.serialize_field("floater", &p.floater)?;
+        t.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Machine {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Machine, D::Error> {
+        let f = Flat::deserialize(d)?;
+        let parts = Parts {
+            generator: f.generator,
+            linked_grower: f.linked_grower,
+            converter: f.converter,
+            vegetation: f.vegetation,
+            harvestable: f.harvestable,
+            autocrafter: f.autocrafter,
+            disintegrator: f.disintegrator,
+            optimizer: f.optimizer,
+            unit_generation: f.unit_generation,
+            unit_multipliers: f.unit_multipliers,
+            floater: f.floater,
+        };
+        let any = parts.generator.is_some()
+            || parts.linked_grower.is_some()
+            || parts.converter.is_some()
+            || parts.vegetation.is_some()
+            || parts.harvestable.is_some()
+            || parts.autocrafter.is_some()
+            || parts.disintegrator.is_some()
+            || parts.optimizer.is_some()
+            || !parts.unit_generation.is_empty()
+            || !parts.unit_multipliers.is_empty()
+            || parts.floater.is_some();
+        Ok(Machine { linked: f.linked, grow_multiplier: f.grow_multiplier, growers: f.growers, destruct_if_full: f.destruct_if_full, parts: any.then(|| Box::new(parts)) })
+    }
+}
+
+impl Machines {
+    /// (machines, machines with a component), for the memory tests.
+    #[cfg(test)]
+    pub fn census(&self) -> (usize, usize) {
+        (self.list.len(), self.list.values().filter(|m| m.parts.is_some()).count())
+    }
+}
+
+/// How many machines have each component: where the machines' memory goes (bench::scale).
+#[cfg(test)]
+pub fn census(machines: &Machines) -> String {
+    let n = machines.list.len();
+    let count = |f: &dyn Fn(&Machine) -> bool| machines.list.values().filter(|m| f(m)).count();
+    format!(
+        "{n} machines ({} bytes each): generator {}, linked_grower {}, converter {}, vegetation {}, harvestable {}, autocrafter {}, disintegrator {}, optimizer {}, floater {}, growers {}, unit_generation {}, unit_multipliers {}",
+        std::mem::size_of::<Machine>(),
+        count(&|m| m.generator.is_some()),
+        count(&|m| m.linked_grower.is_some()),
+        count(&|m| m.converter.is_some()),
+        count(&|m| m.vegetation.is_some()),
+        count(&|m| m.harvestable.is_some()),
+        count(&|m| m.autocrafter.is_some()),
+        count(&|m| m.disintegrator.is_some()),
+        count(&|m| m.optimizer.is_some()),
+        count(&|m| m.floater.is_some()),
+        count(&|m| !m.growers.is_empty()),
+        count(&|m| !m.unit_generation.is_empty()),
+        count(&|m| !m.unit_multipliers.is_empty()),
+    )
 }
 
 /// DataConfig.WorldUnitType names world objects keep generation for.
@@ -136,18 +367,12 @@ mod unit_names {
 
 /// Serialized fields of a group's prefab components of one type; `root` keeps those on the
 /// prefab's root object only (GetComponent rather than GetComponentInChildren).
-fn components<'a>(game: &'a Game, group: usize, ty: &str, root: bool) -> Vec<&'a Value> {
-    game.data.group_prefabs[&game.data.groups[group].id]["components"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|c| c["type"] == ty && (!root || c["path"] == ""))
-        .map(|c| &c["fields"])
-        .collect()
+fn components<'a>(game: &'a Game, group: usize, ty: &str, root: bool) -> Vec<&'a Doc> {
+    game.data.group_prefabs.components(&game.data.groups[group].id, ty, root)
 }
 
 /// The first such component on the prefab root.
-fn root(game: &Game, group: usize, ty: &str) -> Option<Value> {
+fn root(game: &Game, group: usize, ty: &str) -> Option<Doc> {
     components(game, group, ty, true).first().map(|v| (*v).clone())
 }
 
@@ -159,27 +384,33 @@ fn root(game: &Game, group: usize, ty: &str) -> Option<Value> {
 /// (spawn_every, speed, groups) mixes both and is not refreshed.
 pub fn refresh_from_tables(game: &mut Game) {
     let machines: Vec<i32> = game.ext.machines.list.keys().copied().collect();
+    game.ext.machines.dues_ok = false;
+    // What the tables say is a function of the group: read once for each group of a machine.
+    type Roots = [Option<Doc>; 6];
+    let mut roots: crate::idmap::FxHashMap<usize, Roots> = Default::default();
     for wo in machines {
         let Some(group) = game.wos.get(&wo).map(|w| w.group) else { continue };
-        let f = |ty: &str| root(game, group, ty);
-        let (harvestable, vegetation, linked, autocrafter, disintegrator, optimizer) = (f("MachineGrowerVegetationHarvestable"), f("MachineGrowerVegetationStatic"), f("MachineGrowerIfLinkedGroup"), f("MachineAutoCrafter"), f("MachineDisintegrator"), f("MachineOptimizer"));
+        let [harvestable, vegetation, linked, autocrafter, disintegrator, optimizer] = roots.entry(group).or_insert_with(|| {
+            let f = |ty: &str| root(game, group, ty);
+            [f("MachineGrowerVegetationHarvestable"), f("MachineGrowerVegetationStatic"), f("MachineGrowerIfLinkedGroup"), f("MachineAutoCrafter"), f("MachineDisintegrator"), f("MachineOptimizer")]
+        });
         let Some(m) = game.ext.machines.list.get_mut(&wo) else { continue };
-        if let (Some(h), Some(f)) = (m.harvestable.as_mut(), &harvestable) {
+        if let (Some(h), Some(f)) = (m.existing_parts_mut().and_then(|p| p.harvestable.as_mut()), &*harvestable) {
             h.refresh(f);
         }
-        if let (Some(v), Some(f)) = (m.vegetation.as_mut(), &vegetation) {
+        if let (Some(v), Some(f)) = (m.existing_parts_mut().and_then(|p| p.vegetation.as_mut()), &*vegetation) {
             v.refresh(f);
         }
-        if let (Some(l), Some(f)) = (m.linked_grower.as_mut(), &linked) {
+        if let (Some(l), Some(f)) = (m.existing_parts_mut().and_then(|p| p.linked_grower.as_mut()), &*linked) {
             l.refresh(f);
         }
-        if let (Some(a), Some(f)) = (m.autocrafter.as_mut(), &autocrafter) {
+        if let (Some(a), Some(f)) = (m.existing_parts_mut().and_then(|p| p.autocrafter.as_mut()), &*autocrafter) {
             a.refresh(f);
         }
-        if let (Some(d), Some(f)) = (m.disintegrator.as_mut(), &disintegrator) {
+        if let (Some(d), Some(f)) = (m.existing_parts_mut().and_then(|p| p.disintegrator.as_mut()), &*disintegrator) {
             d.refresh(f);
         }
-        if let (Some(o), Some(f)) = (m.optimizer.as_mut(), &optimizer) {
+        if let (Some(o), Some(f)) = (m.existing_parts_mut().and_then(|p| p.optimizer.as_mut()), &*optimizer) {
             o.refresh(f);
         }
     }
@@ -187,10 +418,10 @@ pub fn refresh_from_tables(game: &mut Game) {
 
 /// GetComponent<MachineRocketBackAndForth>() (its trade and interplanetary subclasses).
 fn is_rocket_platform(game: &Game, group: usize) -> bool {
-    crate::rockets::PLATFORM_CLASSES.iter().any(|class| root(game, group, class).is_some())
+    crate::rockets::PLATFORM_CLASSES.iter().any(|class| !components(game, group, class, true).is_empty())
 }
 
-fn f32_of(v: &Value, key: &str) -> f32 {
+fn f32_of(v: &Doc, key: &str) -> f32 {
     v[key].as_f64().unwrap_or(0.0) as f32
 }
 
@@ -336,29 +567,10 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, _behaviour: u16, name: &st
 pub fn on_instantiated(game: &mut Game, wo: i32) {
     let Some(w) = game.wos.get(&wo) else { return };
     let (group, linked, position) = (w.group, w.linked_inventory, w.position);
-    let mut m = Machine {
-        linked: 0,
-        grow_multiplier: 1.0,
-        growers: Vec::new(),
-        generator: None,
-        linked_grower: None,
-        converter: None,
-        vegetation: None,
-        harvestable: None,
-        autocrafter: None,
-        disintegrator: None,
-        optimizer: None,
-        destruct_if_full: false,
-        unit_generation: Vec::new(),
-        unit_multipliers: Vec::new(),
-        floater: None,
-    };
+    let mut m = Machine::new();
     // MachineGrowerBase and its subclasses on the root, in component order (growth fuses).
-    for c in game.data.group_prefabs[&game.data.groups[group].id]["components"].as_array().into_iter().flatten() {
-        if c["path"] != "" {
-            continue;
-        }
-        match c["type"].as_str().unwrap_or("") {
+    for ty in game.data.group_prefabs.root_types(&game.data.groups[group].id) {
+        match ty {
             "MachineGrowerBase" | "MachineGrowerVegetationStatic" | "MachineGrowerVegetationHarvestable" => m.growers.push(true),
             "MachineGrowerIfLinkedGroup" | "MachineFlockSpawner" => m.growers.push(false),
             _ => {}
@@ -368,13 +580,13 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     // Awake.
     if let Some(f) = root(game, group, "MachineAutoCrafter") {
         game.ext.machines.autocrafters += 1;
-        m.autocrafter = Some(production::AutoCrafter::new(&f, now, game.ext.machines.autocrafters));
+        m.parts_mut().autocrafter = Some(production::AutoCrafter::new(&f, now, game.ext.machines.autocrafters));
     }
     if let Some(f) = root(game, group, "MachineGrowerIfLinkedGroup") {
-        m.linked_grower = Some(growers::LinkedGrower::new(&f, now));
+        m.parts_mut().linked_grower = Some(growers::LinkedGrower::new(&f, now));
     }
     if root(game, group, "MachineConvertRecipe").is_some() {
-        m.converter = Some(now);
+        m.parts_mut().converter = Some(now);
     }
     let harvestable = root(game, group, "MachineGrowerVegetationHarvestable");
     // RequireEnergy (WorldObjectAssociated.SetWorldObject -> AddToRequester, which checks the
@@ -390,22 +602,24 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     }
     // MachineGrowerVegetationStatic.SetWorldObjectForGrower.
     if let Some(f) = root(game, group, "MachineGrowerVegetationStatic") {
-        m.vegetation = Some(growers::Vegetation::new(&f, wo, now));
+        m.parts_mut().vegetation = Some(growers::Vegetation::new(&f, wo, now));
     }
     m.destruct_if_full = root(game, group, "MachineDestructInventoryIfFull").is_some();
     // MachineFloater.Start: those not marked notOnWater follow the water surface. One on a child
     // moves the world object of its parent too (GetComponentInParent<WorldObjectAssociated>).
     let floaters = components(game, group, "MachineFloater", false);
     let interval = floaters.iter().filter(|f| f["notOnWater"].as_bool() != Some(true)).map(|f| f32_of(f, "updateWaterSurfaceInterval")).find(|i| *i > 0.0);
-    m.floater = interval.map(|i| (i, now + i));
+    if let Some(i) = interval {
+        m.parts_mut().floater = Some((i, now + i));
+    }
     if let Some(f) = harvestable {
-        m.harvestable = Some(growers::Harvestable::new(&f));
+        m.parts_mut().harvestable = Some(growers::Harvestable::new(&f));
     }
     // InventoryAssociated.SetInventory.
     if linked != 0 && game.inventories.contains_key(&linked) {
         m.linked = linked;
         if let Some(f) = root(game, group, "InventoryAuthorizedGroups") {
-            set_authorized_groups(game, linked, &f);
+            set_authorized_groups(game, linked, group, &f);
         }
         if let Some(f) = root(game, group, "MachineGenerator") {
             // TryToCastRay casts only while the machine is active: one on another planet keeps
@@ -414,22 +628,24 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
             if cast {
                 veins::cast(game, wo, &f);
             }
-            m.generator = Some(production::Generator::new(game, &f, wo, now, cast));
+            m.parts_mut().generator = Some(production::Generator::new(game, &f, wo, now, cast));
         }
         if let Some(f) = root(game, group, "MachineDisintegrator") {
-            m.disintegrator = Some(production::Disintegrator::new(&f, now));
+            m.parts_mut().disintegrator = Some(production::Disintegrator::new(&f, now));
         }
         if let Some(f) = root(game, group, "MachineOptimizer") {
-            m.optimizer = Some(production::Optimizer::new(&f));
+            m.parts_mut().optimizer = Some(production::Optimizer::new(&f));
         }
         for f in components(game, group, "WorldUnitGenerationViaInventory", true) {
-            m.unit_generation.extend(f["worldUnitType"].as_str().and_then(unit_name));
+            if let Some(unit) = f["worldUnitType"].as_str().and_then(unit_name) {
+                m.parts_mut().unit_generation.push(unit);
+            }
         }
         // The space multipliers' WorldUnitMultiplierViaInventory is the rockets port's.
         let space = game.data.groups[group].id.starts_with("SpaceMultiplier");
         for f in components(game, group, "WorldUnitMultiplierViaInventory", true).into_iter().filter(|_| !space) {
             if let Some(u) = f["worldUnitType"].as_str().and_then(unit_name) {
-                m.unit_multipliers.push((u, f["influencedByHunger"].as_bool().unwrap_or(false)));
+                m.parts_mut().unit_multipliers.push((u, f["influencedByHunger"].as_bool().unwrap_or(false)));
             }
         }
         game.ext.machines.listening.insert(linked, wo);
@@ -440,7 +656,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
     let wants_start = has_harvestable;
     let grows = m.growers.iter().any(|g| *g);
     game.ext.machines.next_due = GameTime::PAST;
-    game.ext.machines.list.insert(wo, m);
+    game.ext.machines.insert(wo, m);
     // Rules: growth speed, as a growth fuse would add it.
     if grows && game.rules.speed.growth != 1.0 {
         production::add_growth_speed(game, wo, game.rules.speed.growth - 1.0);
@@ -478,8 +694,14 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
 pub fn on_destroyed(game: &mut Game, wo: &WorldObject) {
     let machines = &mut game.ext.machines;
     machines.energy.swap_remove(&wo.id);
-    if machines.list.shift_remove(&wo.id).is_some() {
+    if machines.remove(&wo.id) {
         machines.listening.retain(|_, m| *m != wo.id);
+    }
+    // The plants whose items were destroyed with their game objects left (objects.rs destroy_world_object)
+    // are the machine's children: they go with it.
+    let orphans: Vec<u64> = game.ext.machines.grab.iter().filter(|(item, (machine, _))| *machine == wo.id && !game.wos.contains_key(item)).map(|(_, (_, net))| *net).collect();
+    for net in orphans {
+        game.net.despawn(net);
     }
     // ConstructibleProxy.OnDestroy: WorldObjectsHandler.onConstructibleDestroyed.
     production::constructible_destroyed(game, wo.id);
@@ -537,7 +759,12 @@ pub fn inventory_changed(game: &mut Game, inventory: i32, wo: i32, added: bool) 
 impl Machines {
     /// Whether the item is a plant a grower holds for harvest (see `grabbed`).
     pub fn grabbable(&self, wo: i32) -> bool {
-        self.grab.contains_key(&wo)
+        self.grower_of(wo).is_some()
+    }
+
+    /// The grower that holds the plant.
+    pub fn grower_of(&self, wo: i32) -> Option<i32> {
+        self.grab.get(&wo).map(|(machine, _)| *machine)
     }
 }
 
@@ -580,6 +807,11 @@ pub fn planet_loaded(game: &mut Game) {
     }
 }
 
+/// The earliest time `tick` has something to do for this machine.
+fn due_of(m: &Machine) -> GameTime {
+    production::next_due(m).min(growers::next_due(m)).min(m.floater.map_or(GameTime::NEVER, |(_, due)| due))
+}
+
 pub fn tick(game: &mut Game) {
     veins::ensure(game);
     // Start / `yield return null`: the frame after instantiation.
@@ -605,15 +837,43 @@ pub fn tick(game: &mut Game) {
     if now < game.ext.machines.next_due {
         return;
     }
-    let next_due = |m: &Machine| production::next_due(m).min(growers::next_due(m)).min(m.floater.map_or(GameTime::NEVER, |(_, due)| due));
+    let next_due = due_of;
     let mut earliest = GameTime::NEVER;
     game.ext.machines.next_due = GameTime::NEVER;
     let mut ids = std::mem::take(&mut game.ext.machines.ids);
     ids.clear();
     ids.extend(game.ext.machines.list.keys());
-    for &wo in &ids {
+    game.ext.machines.refresh_dues(next_due);
+    let structure = game.ext.machines.structure;
+    let mut k = 0;
+    while k < ids.len() {
+        // Machines nothing has changed, nothing due: the array says it (the common case, in one run).
+        // (Not once a machine was added or removed in this walk: the ids are the list before.)
+        let m = &game.ext.machines;
+        if m.dues_ok && m.structure == structure && m.dirty.is_empty() {
+            let rest = &m.dues[k..];
+            let stop = rest.iter().position(|d| now >= *d).unwrap_or(rest.len());
+            earliest = rest[..stop].iter().fold(earliest, |e, d| e.min(*d));
+            k += stop;
+            if k >= ids.len() {
+                break;
+            }
+        }
+        let wo = ids[k];
         // Nothing due at its turn: the ticks below would do nothing.
-        let Some(due) = game.ext.machines.list.get(&wo).map(next_due) else { continue };
+        let due = if game.ext.machines.dues_ok && game.ext.machines.structure == structure {
+            game.ext.machines.refresh_dues(next_due);
+            game.ext.machines.dues[k]
+        } else {
+            match game.ext.machines.list.get(&wo).map(next_due) {
+                Some(due) => due,
+                None => {
+                    k += 1;
+                    continue;
+                }
+            }
+        };
+        k += 1;
         if now < due {
             earliest = earliest.min(due);
             continue;
@@ -622,7 +882,7 @@ pub fn tick(game: &mut Game) {
         growers::tick(game, wo, now);
         if let Some((interval, due)) = game.ext.machines.list.get(&wo).and_then(|m| m.floater) {
             if now >= due {
-                game.ext.machines.get_mut(&wo).unwrap().floater = Some((interval, now + interval));
+                game.ext.machines.get_mut(&wo).unwrap().parts_mut().floater = Some((interval, now + interval));
                 float_on_water(game, wo);
             }
         }
@@ -655,22 +915,27 @@ fn float_on_water(game: &mut Game, wo: i32) {
 // ---- inventory listeners ----------------------------------------------------------------
 
 /// InventoryAssociated.SetInventory: InventoryAuthorizedGroups on the inventory.
-fn set_authorized_groups(game: &mut Game, inventory: i32, f: &Value) {
-    let groups = |categories: &str, sub_categories: &str| -> Vec<usize> {
-        let list = |k: &str| f[k].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
-        let mut out: Vec<usize> = Vec::new();
-        let items = || game.data.groups.iter().enumerate().filter(|(_, g)| !g.constructible);
-        for c in list(categories) {
-            out.extend(items().filter(|(i, g)| g.str("itemCategory") == c && !out.contains(i)).map(|(i, _)| i).collect::<Vec<_>>());
-        }
-        for c in list(sub_categories) {
-            out.extend(items().filter(|(i, g)| g.str("itemSubCategory") == c && !out.contains(i)).map(|(i, _)| i).collect::<Vec<_>>());
-        }
-        out
-    };
-    let authorized = groups("authorizedItemCategories", "authorizedItemSubCategories");
-    let unauthorized = groups("unauthorizedItemCategories", "unauthorizedItemSubCategories");
-    let equipment = authorized.first().is_some_and(|g| game.data.groups[*g].str("itemCategory") == "Equipment");
+fn set_authorized_groups(game: &mut Game, inventory: i32, group: usize, f: &Doc) {
+    // The same for every building of a group: worked out once (the tables do not change).
+    if !game.ext.machines.authorized.contains_key(&group) {
+        let groups = |categories: &str, sub_categories: &str| -> Vec<usize> {
+            let list = |k: &str| f[k].as_array().into_iter().flatten().filter_map(Doc::as_str).map(str::to_string).collect::<Vec<_>>();
+            let mut out: Vec<usize> = Vec::new();
+            let items = || game.data.groups.iter().enumerate().filter(|(_, g)| !g.constructible);
+            for c in list(categories) {
+                out.extend(items().filter(|(i, g)| g.str("itemCategory") == c && !out.contains(i)).map(|(i, _)| i).collect::<Vec<_>>());
+            }
+            for c in list(sub_categories) {
+                out.extend(items().filter(|(i, g)| g.str("itemSubCategory") == c && !out.contains(i)).map(|(i, _)| i).collect::<Vec<_>>());
+            }
+            out
+        };
+        let authorized = groups("authorizedItemCategories", "authorizedItemSubCategories");
+        let unauthorized = groups("unauthorizedItemCategories", "unauthorizedItemSubCategories");
+        let equipment = authorized.first().is_some_and(|g| game.data.groups[*g].str("itemCategory") == "Equipment");
+        game.ext.machines.authorized.insert(group, (authorized, unauthorized, equipment));
+    }
+    let (authorized, unauthorized, equipment) = game.ext.machines.authorized[&group].clone();
     if let Some(inv) = game.inventories.get_mut(&inventory) {
         inv.authorized = authorized;
         inv.unauthorized = unauthorized;
@@ -749,7 +1014,7 @@ pub fn deconstruct_status(game: &Game, wo: i32) -> i32 {
 
 /// CheckSomethingInsideIfNeeded: no other building (but base building parts) inside the
 /// detection collider, and no underground panels other than plain walls and floors.
-fn something_inside_check(game: &Game, w: &WorldObject, action: &Value) -> bool {
+fn something_inside_check(game: &Game, w: &WorldObject, action: &Doc) -> bool {
     let mut result = true;
     if action["checkInsideBeforeDeconstruction"].as_bool() == Some(true) {
         if let Some(bounds) = inside_bounds(game, w) {
@@ -837,6 +1102,7 @@ fn inside_bounds(game: &Game, w: &WorldObject) -> Option<Bounds> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use serde_json::Value;
 
     /// A server on an empty Prime save, with every placed object's machines wired.
     pub fn game() -> Option<Game> {

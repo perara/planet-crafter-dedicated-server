@@ -1,0 +1,83 @@
+[plugin]
+id = "claims"
+name = "Claims"
+version = "0.1.0"
+description = "Players claim ground with !claim; others cannot build or take things apart inside a claim unless trusted"
+authors = ["Planet Crafter dedicated server contributors"]
+license = "MIT"
+kind = "wasm"
+entry = "plugin.wasm"
+abi = 1
+# event.rpc + rpc.veto: the two build and take-apart requests are checked before they run.
+# world.read: where players stand, who is online, where an object is. chat.say: the answers.
+capabilities = ["event.chat", "event.rpc", "rpc.veto", "world.read", "chat.say"]
+
+[budget]
+fuel_per_event = 200000
+fuel_per_save = 10000000
+
+[events]
+subscribe = ["rpc_before"]
+rpc = ["GroupNetworkBase.DeconstructServerRpc", "WorldObjectsHandler.CreateAndInstantiateWorldObjectServerRpc"]
+
+[[command]]
+name = "claim"
+help = "claim the ground around you; only you and players you trust can build or take apart there"
+usage = "[radius]"
+max_args = 1
+
+[[command]]
+name = "unclaim"
+help = "give up the claim you are standing in"
+max_args = 0
+
+[[command]]
+name = "trust"
+help = "let another player (online now) build and take apart in your claims"
+usage = "<player name>"
+min_args = 1
+max_args = 8
+
+[[command]]
+name = "untrust"
+help = "take that access back"
+usage = "<player name>"
+min_args = 1
+max_args = 8
+
+[[command]]
+name = "claims"
+help = "list your claims"
+max_args = 0
+
+[[config]]
+key = "max_radius"
+description = "the largest radius of a claim, in metres"
+type = "int"
+default = 50
+min = 5
+max = 200
+
+[[config]]
+key = "min_radius"
+description = "the smallest radius of a claim, in metres"
+type = "int"
+default = 5
+min = 1
+max = 100
+
+[[config]]
+key = "default_radius"
+description = "the radius !claim takes when the player gives none (kept between min_radius and max_radius)"
+type = "int"
+default = 20
+min = 1
+max = 200
+
+[[config]]
+key = "max_claims"
+description = "how many claims one player may have"
+type = "int"
+default = 3
+min = 1
+max = 20

@@ -143,7 +143,7 @@ mod tests {
         assert_eq!(queued, [(1, Some("Ann".to_string()), "!kit iron".to_string(), Some("kit".to_string()), vec!["iron".to_string()]), (9, None, "from nobody".to_string(), None, vec![])]);
         // Other kinds of event never reach the hooks.
         let before = g.ext.chat.outbox.len();
-        crate::events::player_left(&mut g, 1, "Ann");
+        crate::events::player_left(&mut g, 1, "Ann", 1);
         crate::events::world_saved(&mut g, true);
         assert_eq!(g.ext.chat.outbox.len(), before);
     }

@@ -324,7 +324,7 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
             // answer (and a log line) rather than a wrong one.
             let Some(w) = wo.and_then(|w| game.wos.get(&w)) else { return true };
             let group = game.data.groups[w.group].id.clone();
-            let nth = game.net.objects.get(&object).and_then(|o| o.behaviours.iter().filter(|b| b.class == "InventoryAssociatedProxy").position(|b| b.index == behaviour));
+            let nth = game.net.objects.get(&object).and_then(|o| o.behaviours().filter(|b| b.class == "InventoryAssociatedProxy").position(|b| b.index == behaviour));
             // A group without a prefab of its own is spawned in GroupNetworkContainerWithInventory,
             // whose one proxy keeps the default index (-1: the linked inventory).
             let container = game.data.layouts.get(&group).is_some_and(|l| l.prefab.starts_with("GroupNetworkContainer"));
@@ -377,8 +377,7 @@ pub fn change_panel(game: &mut Game, object: u64, index: u16, sub_type: i32, ref
     }
     if refresh {
         let panels: Vec<i32> = game.net.objects[&object]
-            .behaviours
-            .iter()
+            .behaviours()
             .filter(|b| b.class == "Panel")
             .map(crate::panels::sub_type)
             .collect();
@@ -693,7 +692,7 @@ mod tests {
         let Some((mut g, _)) = world() else { return };
         let group = group_with(&g, &["Panel"], true);
         let (id, net) = place(&mut g, &group, [570.0, 3.0, 500.0]);
-        let panels: Vec<u16> = g.net.objects[&net].behaviours.iter().filter(|b| b.class == "Panel").map(|b| b.index).collect();
+        let panels: Vec<u16> = g.net.objects[&net].behaviours().filter(|b| b.class == "Panel").map(|b| b.index).collect();
         let (handler, _) = g.net.find_class("WorldObjectsHandler").unwrap();
         let counted = |g: &crate::game::Game, t: i32| list(g, handler, "WorldObjectsHandler", "_constructedPanelTypes").iter().find(|i| i32::from_le_bytes(i[0..4].try_into().unwrap()) == t).map(|i| i32::from_le_bytes(i[4..8].try_into().unwrap())).unwrap_or(0);
         let before = counted(&g, 7);
@@ -784,7 +783,7 @@ mod tests {
         let building = group_with(&g, &["Panel"], true);
         let (_, net) = place(&mut g, &container, [570.0, 3.0, 500.0]);
         let (_, panel) = place(&mut g, &building, [580.0, 3.0, 500.0]);
-        let index = g.net.objects[&panel].behaviours.iter().find(|b| b.class == "Panel").unwrap().index;
+        let index = g.net.objects[&panel].behaviours().find(|b| b.class == "Panel").unwrap().index;
         let (handler, _) = g.net.find_class("WorldObjectsHandler").unwrap();
         let constructed = |g: &crate::game::Game| list(g, handler, "WorldObjectsHandler", "_constructedPanelTypes").len();
         let before = constructed(&g);
@@ -933,7 +932,7 @@ mod tests {
         for group in ["FusionGenerator1", "WreckEntryLocked1"] {
             let gi = g.data.group(group).unwrap();
             let (id, net) = g.create_and_instantiate(gi, [565.0, 3.0, 500.0], [0.0, 0.0, 0.0, 1.0], false, true, false);
-            let proxy = g.net.objects[&net].behaviours.iter().find(|b| b.class == "InventoryAssociatedProxy").unwrap().index;
+            let proxy = g.net.objects[&net].behaviours().find(|b| b.class == "InventoryAssociatedProxy").unwrap().index;
             g.net.out.clear();
             super::rpc(&mut g, 1, net, proxy, "InventoryAssociatedProxy.GetInventoryIdServerRpc", &Args(vec![]));
             let rpc = crate::testkit::one(&g, "InventoryAssociatedProxy.GetInventoryIdClientRpc");
@@ -950,7 +949,7 @@ mod tests {
         let truck = g.data.group("VehicleTruck").unwrap();
         let (id, net) = g.create_and_instantiate(truck, [565.0, 3.0, 500.0], [0.0, 0.0, 0.0, 1.0], false, true, false);
         let expected = [g.wos[&id].linked_inventory, g.wos[&id].secondary_inventories[0]];
-        let proxies: Vec<u16> = g.net.objects[&net].behaviours.iter().filter(|b| b.class == "InventoryAssociatedProxy").map(|b| b.index).collect();
+        let proxies: Vec<u16> = g.net.objects[&net].behaviours().filter(|b| b.class == "InventoryAssociatedProxy").map(|b| b.index).collect();
         assert_eq!(proxies.len(), 2);
         for (behaviour, inventory) in proxies.into_iter().zip(expected) {
             g.net.out.clear();

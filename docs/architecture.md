@@ -39,7 +39,7 @@ paid (so the list only gets shorter). `scripts/check-layers` runs that test alon
 
 | Layer | Modules | May use | What it is |
 |---|---|---|---|
-| base | `tables` `wire` `idmap` `geometry` `world` `save` `oldsave` `data` `protocol` `rpcspec` `transform` `gamedata` `model` `ipc` `msg` `worlds` `utp` `routes` `bincodec` `util` `dotnet_sort` `tessera` `tokens` `clock` `logging` | base | Bytes, ids, the game's tables as data, the framing of the transports, the typed bodies of the frames between the front and the banks (`msg`), the world files' names and places (`worlds`), the lookup of a route table (`routes`: the bank's admin requests and the front's use one type), the game's algorithms that need no game (the .NET sort, the Tessera solver), the store of scoped tokens (`tokens`), the log (`logging`: one writer for every line of the front and the bank, with the format and level of the rules `log.format` and `log.level` and the secrets it never writes). No game, no process, no sockets of their own. |
+| base | `tables` `wire` `idmap` `geometry` `world` `save` `oldsave` `data` `protocol` `rpcspec` `transform` `gamedata` `model` `ipc` `msg` `worlds` `utp` `routes` `bincodec` `compact` `doc` `util` `dotnet_sort` `tessera` `tokens` `clock` `logging` | base | Bytes, ids, the game's tables as data, the framing of the transports, the typed bodies of the frames between the front and the banks (`msg`), the world files' names and places (`worlds`), the lookup of a route table (`routes`: the bank's admin requests and the front's use one type), the values the long-lived collections are made of (`compact`: interned words and short byte strings; `doc`: the game's tables as parsed documents, a quarter of the room of a `serde_json::Value`), the game's algorithms that need no game (the .NET sort, the Tessera solver), the store of scoped tokens (`tokens`), the log (`logging`: one writer for every line of the front and the bank, with the format and level of the rules `log.format` and `log.level` and the secrets it never writes). No game, no process, no sockets of their own. |
 | world | `net` | base | The game's network state: objects, variables, RPC messages. |
 | core | `game` `handlers` `hooks` `ext` `scene` `status` `gauges` `units` `energy` `water` `machines` `logistics` `meteo` `rockets` `planets` `animals` `genetics` `players` `inventories` `instances` `objects` `panels` `deconstruct` `equipment` `toxic` `unlocks` `access` `rules` `config` `chathooks` `handoff` | base, world, core, extension | The game logic, ported class by class, with no I/O: files and sockets are not in it, and the only thread is the wreck solver's (`instances`: a pure function of the tables and a seed, answered between ticks). A subsystem is free functions over `&mut Game`, reached through `hooks.rs`. |
 | extension | `events` `plugins` | base, world, core, extension | What the world tells the outside (`events`) and the host of the plugins that listen (`plugins`). |
@@ -172,7 +172,12 @@ for anything but the log lines the server already prints, an environment variabl
 - The bank prepares the plugins (reads, validates, compiles) while it loads its tables and
   before it says HELLO, so a hot update spends its time in the world's stop only on starting
   them, not on compiling them.
-- Inside `plugins/`: `net.rs` (a plugin's outbound HTTP: the allow list, the address checks, the
+- Inside `plugins/` (ABI 1.3): `history.rs` (a plugin's last log lines, faults and cost by kind of event),
+  `scenario.rs` (the stand-in world and the scenario runner behind `pcds plugin test`: the same `Host`, a made-up
+  `World`/`Sink`), `pack.rs` (the `.pcdsplugin` package and the index file), `check.rs` (`pcds plugin check`), `abi13_tests.rs`,
+  `fuzz_tests.rs`, `production_tests.rs` and `cookbook_tests.rs` (the host against hostile modules, generated ones, a
+  hundred reloads, and the example plugins in the real game); `cli/plugin_dev.rs` holds the commands around a
+  plugin's files and life (`test`, `logs`, `stats`, `watch`, `pack`, `search`, `install SOURCE`). `net.rs` (a plugin's outbound HTTP: the allow list, the address checks, the
   worker threads; answers come back as `http_done` events through `plugins::poll`), `config.rs` (the
   values the admin sets for a plugin), `sign.rs` (signatures and the keys the admin trusts) and
   `approvals::standing` (what an approval, a signature and the keys make of a plugin). `tokens.rs`

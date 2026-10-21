@@ -15,7 +15,7 @@ use crate::{access, config, rules, save};
 /// The world from the save, as a start of the whole server loads it. Exits on what stops a
 /// start (no save, an old save format, rules that do not hold up).
 pub(super) fn load(dir: &str, save_path: &str, net_data: crate::data::NetData, data: crate::gamedata::GameData, spec: crate::rpcspec::Spec, scenes: crate::Scenes) -> Game {
-    let save = SaveFile::load(save_path).unwrap_or_else(|e| {
+    let save = SaveFile::load_deferred(save_path).unwrap_or_else(|e| {
         match e.kind() {
             std::io::ErrorKind::NotFound => error!("no save {save_path}: make a new world with `pcds new-save {save_path} {dir}`"),
             _ => error!("{save_path}: {e}"),

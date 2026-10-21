@@ -327,3 +327,7 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../../fuzz/targets/backup.rs"]
+pub mod fuzz;

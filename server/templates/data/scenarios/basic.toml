@@ -1,0 +1,13 @@
+name = "welcome"
+
+[[player]]
+client = 1
+name = "Ann"
+
+[[step]]
+join = { client = 2, name = "Bo" }
+expect = [{ say = true, contains = "Welcome, Bo" }]
+
+[[step]]
+chat = { client = 1, text = "!hello" }
+expect = [{ tell = 1, equals = "Hello Ann!" }]

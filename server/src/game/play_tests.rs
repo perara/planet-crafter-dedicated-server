@@ -463,6 +463,10 @@ fn invariants(g: &Game) -> Vec<String> {
     for o in g.net.objects.values().filter(|o| !o.scene && !crate::animals::spawn::is_animal(g, o.id)) {
         if let Some(w) = o.wo {
             match g.wos.get(&w) {
+                // A plant of a grower whose item was destroyed keeps its network object on purpose (the game's
+                // own: objects.rs destroy_world_object, the parity sweep): it is the machine's child and goes
+                // with the machine.
+                None if g.ext.machines.grower_of(w).is_some_and(|m| g.wos.contains_key(&m)) => {}
                 None => bad.push(format!("net object {} stands for world object {w}, which is gone", o.id)),
                 Some(wo) if wo.net != Some(o.id) => bad.push(format!("net object {} stands for world object {w} ({}), whose net is {:?}", o.id, g.data.groups[wo.group].id, wo.net)),
                 _ => {}
@@ -495,6 +499,8 @@ fn hostile_rpcs_on_a_real_world_keep_it_whole() {
     let mut names: Vec<String> = table.as_object().unwrap().values().filter(|r| r["to"] == "server").filter_map(|r| r["name"].as_str().map(String::from)).filter(|n| n != "PlayerMainController.PlayerReadyServerRpc").collect();
     names.sort();
     let (mut t, mut sent) = (10.0, 0);
+    // PCDS_FUZZ_LOG=file: every RPC sent, to find what led to a failure.
+    let mut log = std::env::var("PCDS_FUZZ_LOG").ok().and_then(|p| std::fs::File::create(p).ok());
     for round in 0..rounds {
         let name = names[(next() % names.len() as u64) as usize].clone();
         let pools: [Vec<i64>; 4] = [
@@ -528,6 +534,10 @@ fn hostile_rpcs_on_a_real_world_keep_it_whole() {
         let mut w = Writer::new();
         w.packed_u64(client).packed_u64(object).packed_u16(behaviour).packed_u32(hash).bytes(&body);
         let line = format!("{round} c{client} {name} {}", Value::Array(args));
+        if let Some(log) = log.as_mut() {
+            use std::io::Write;
+            let _ = writeln!(log, "{line}");
+        }
         sent += 1;
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             g.incoming_rpc(client, &w.0);

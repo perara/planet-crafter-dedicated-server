@@ -1,0 +1,75 @@
+name = "discord: batching, mentions, failure and back-off"
+
+[config]
+webhook = "123456/secret-token"
+style = "discord"
+flush_seconds = 3
+
+[[step]]
+join = { client = 1, name = "Ann" }
+
+[[step]]
+chat = { client = 1, text = "hello @everyone <@123>" }
+expect = [
+  { http = true, count = 0 },
+]
+
+[[step]]
+note = "the first tick sends the lines gathered so far, in one request"
+advance = "1s"
+expect = [
+  { http = true, contains = "POST https://discord.com/api/webhooks/${config.webhook} " },
+  { http = true, contains = "**Ann** joined" },
+  { http = true, contains = "hello @​everyone" },
+  { http = true, contains = "\"allowed_mentions\":{\"parse\":[]}" },
+  { http = true, count = 1 },
+]
+
+[[step]]
+note = "commands are not conversation"
+chat = { client = 1, text = "!home" }
+
+[[step]]
+http_done = { ticket = 1, status = 500 }
+expect = [{ log = true, contains = "HTTP 500" }]
+
+[[step]]
+note = "after one failure the wait is 6 s: nothing at 5 s"
+advance = "5s"
+expect = [{ http = true, count = 0 }]
+
+[[step]]
+advance = "1s"
+expect = [{ http = true, contains = "**Ann** joined" }]
+
+[[step]]
+http_done = { ticket = 2, status = 204 }
+
+[[step]]
+chat = { client = 1, text = "later" }
+
+[[step]]
+advance = "3s"
+expect = [{ http = true, contains = "**Ann**: later" }]
+
+[[step]]
+note = "Discord says wait 30 s: the lines stay, the wait is at least that"
+http_done = { ticket = 3, status = 429, headers = { "retry-after" = "30" } }
+expect = [{ log = true, contains = "next try in 30 s" }]
+
+[[step]]
+note = "a hot update with lines waiting: they are in the saved state"
+flip = true
+
+[[step]]
+note = "the first tick of a new instance has since_ms = the whole game time (the host counts from 0), so the wait is over and the kept line goes at once"
+advance = "1s"
+expect = [{ http = true, contains = "**Ann**: later", count = 1 }]
+
+[[step]]
+http_done = { ticket = 4, status = 204 }
+
+[[step]]
+note = "the leave of the last player is sent at once: an empty world has no ticks"
+leave = 1
+expect = [{ http = true, contains = "**Ann** left" }]

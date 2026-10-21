@@ -1,0 +1,16 @@
+[vars]
+discord = "discord.gg/x"
+[[command]]
+name = "rules"
+reply = "Be kind, {name}. {discord} ({players} on {planet}, {time}) {args} {arg1}"
+cooldown_seconds = 10
+[[on_join]]
+say = "Welcome {name}"
+tell = "Try !rules {{braces}}"
+[[every]]
+seconds = 60
+say = "Join {discord}"
+[[when_players]]
+at_least = 3
+set_rules = { speed = { growth = 2.0 } }
+otherwise_rules = { speed = { growth = 1.0 } }

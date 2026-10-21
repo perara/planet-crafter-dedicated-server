@@ -75,6 +75,7 @@ mod access;
 mod admin;
 mod bank;
 mod bincodec;
+mod compact;
 mod clock;
 mod chathooks;
 mod cli;
@@ -89,6 +90,7 @@ mod testkit;
 mod config;
 mod dashboard;
 mod data;
+mod doc;
 mod deconstruct;
 mod dotnet_sort;
 mod energy;
@@ -214,37 +216,116 @@ pub struct Scenes {
     /// Planet id -> its scene dump. The free planets' are always there; a DLC planet's is there
     /// when the extraction read it from an install that has the planet (`pcds extract` always
     /// does) and not in tables from before DLC support (planets::ground_missing says so).
-    pub planets: HashMap<String, PlanetScene>,
+    pub planets: Planets,
+}
+
+/// The scene dumps by planet. Parsed, a dump is four times the size of its text (8.8 MiB for the
+/// six), and the server reads one when a planet's water, ore veins and portals are made: at a start
+/// or a travel. So each is kept as compact text (all of them checked when the tables load) and
+/// parsed the first time a planet asks, and then kept.
+#[derive(Default, Clone)]
+pub struct Planets(HashMap<String, Dump>);
+
+#[derive(Clone)]
+struct Dump {
+    text: Arc<str>,
+    parsed: Arc<std::sync::OnceLock<PlanetScene>>,
+}
+
+impl Planets {
+    /// The planet's scene dump; None for a planet the tables have none of.
+    pub fn get(&self, planet: &str) -> Option<&PlanetScene> {
+        let dump = self.0.get(planet)?;
+        Some(dump.parsed.get_or_init(|| read_dump(&dump.text).unwrap_or_else(|e| panic!("scenes/{planet}.json read fine when the tables loaded: {e}"))))
+    }
+
+    pub fn contains_key(&self, planet: &str) -> bool {
+        self.0.contains_key(planet)
+    }
+
+    /// The dumps parsed so far (a planet the world has been on).
+    #[cfg(test)]
+    pub fn parsed(&self) -> usize {
+        self.0.values().filter(|d| d.parsed.get().is_some()).count()
+    }
+
+    /// Every dump, parsed.
+    #[cfg(test)]
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &PlanetScene)> {
+        self.0.keys().filter_map(|k| Some((k, self.get(k)?)))
+    }
+
+    #[cfg(test)]
+    pub fn values(&self) -> impl Iterator<Item = &PlanetScene> {
+        self.iter().map(|(_, s)| s)
+    }
+
+    #[cfg(test)]
+    pub fn insert(&mut self, planet: String, scene: PlanetScene) {
+        let parsed = std::sync::OnceLock::new();
+        let _ = parsed.set(scene);
+        self.0.insert(planet, Dump { text: "".into(), parsed: Arc::new(parsed) });
+    }
+
+    #[cfg(test)]
+    pub fn remove(&mut self, planet: &str) -> Option<PlanetScene> {
+        let scene = self.get(planet)?.clone();
+        self.0.remove(planet);
+        Some(scene)
+    }
+
+    #[cfg(test)]
+    pub fn get_mut(&mut self, planet: &str) -> Option<&mut PlanetScene> {
+        self.get(planet)?;
+        let dump = self.0.get_mut(planet)?;
+        Arc::make_mut(&mut dump.parsed).get_mut()
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Index<&str> for Planets {
+    type Output = PlanetScene;
+    fn index(&self, planet: &str) -> &PlanetScene {
+        self.get(planet).unwrap_or_else(|| panic!("no scene dump for {planet}"))
+    }
 }
 
 /// The parts of scenes/<planet>.json the server reads.
 #[derive(Clone)]
 pub struct PlanetScene {
-    pub water_volumes: Vec<serde_json::Value>,
-    pub ore_veins: Vec<serde_json::Value>,
+    pub water_volumes: Vec<doc::Doc>,
+    pub ore_veins: Vec<doc::Doc>,
     /// ToxicArea components (Toxicity only; empty elsewhere).
-    pub toxic_areas: Vec<serde_json::Value>,
+    pub toxic_areas: Vec<doc::Doc>,
     pub instance_scenes: HashMap<String, Arc<instances::generate::InstanceScene>>,
 }
 
-/// scenes/<planet>.json: what the planet's scene files hold that the server runs.
-fn planet_scene(dir: &str, planet: &str, data: &GameData) -> Result<PlanetScene, String> {
+/// What a scene dump's text says that the server runs.
+fn read_dump(text: &str) -> Result<PlanetScene, serde_json::Error> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Dump {
-        water_volumes: Vec<serde_json::Value>,
-        ore_veins: Vec<serde_json::Value>,
+        water_volumes: Vec<doc::Doc>,
+        ore_veins: Vec<doc::Doc>,
         #[serde(default)]
-        toxic_areas: Vec<serde_json::Value>,
+        toxic_areas: Vec<doc::Doc>,
         instance_scenes: HashMap<String, instances::generate::InstanceScene>,
     }
+    let dump: Dump = serde_json::from_str(text)?;
+    Ok(PlanetScene { water_volumes: dump.water_volumes, ore_veins: dump.ore_veins, toxic_areas: dump.toxic_areas, instance_scenes: dump.instance_scenes.into_iter().map(|(k, v)| (k, Arc::new(v))).collect() })
+}
+
+/// scenes/<planet>.json: read and checked now, so that a broken file stops the start; kept as
+/// text (the parse is dropped).
+fn planet_scene(dir: &str, planet: &str, data: &GameData) -> Result<Dump, String> {
     let path = format!("{dir}/scenes/{planet}.json");
-    let dump: Dump = serde_json::from_str(&std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?).map_err(|e| format!("{path}: {e}"))?;
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+    let dump = read_dump(&text).map_err(|e| format!("{path}: {e}"))?;
     let asset = format!("PlanetData:PlanetData-{planet}");
     let planet_data = data.asset(&asset).ok_or(format!("gamedata.json: no {asset}"))?;
     // A planet without portals has no instance data (null); one with it lists its scenes.
     let names: Vec<&str> = match &planet_data["instanceScenesData"] {
-        serde_json::Value::Null => Vec::new(),
+        doc::Doc::Null => Vec::new(),
         r => {
             let names = r.as_str().and_then(|r| data.asset(r)).and_then(|d| d["instanceSceneNames"].as_array());
             let names = names.ok_or(format!("gamedata.json: {asset}.instanceScenesData {r} has no instanceSceneNames"))?;
@@ -255,8 +336,7 @@ fn planet_scene(dir: &str, planet: &str, data: &GameData) -> Result<PlanetScene,
         return Err(format!("{path}: no world instance scene {missing}"));
     }
     check_scene(&dump.water_volumes, &dump.ore_veins, &dump.toxic_areas, data).map_err(|e| format!("{path}: {e}"))?;
-    let instance_scenes = dump.instance_scenes.into_iter().map(|(k, v)| (k, Arc::new(v))).collect();
-    Ok(PlanetScene { water_volumes: dump.water_volumes, ore_veins: dump.ore_veins, toxic_areas: dump.toxic_areas, instance_scenes })
+    Ok(Dump { text: Arc::from(&*util::compact_json(&text)), parsed: Default::default() })
 }
 
 /// wrecks.json and scenes/<planet>.json of every planet in DATA_DIR, with every world instance
@@ -277,13 +357,13 @@ fn try_scene_tables(dir: &str, net: &NetData, data: &GameData) -> Result<Scenes,
         }
         planets.insert(planet.id.clone(), planet_scene(dir, &planet.id, data)?);
     }
-    Ok(Scenes { wrecks: Arc::new(wrecks), planets })
+    Ok(Scenes { wrecks: Arc::new(wrecks), planets: Planets(planets) })
 }
 
 /// What water.rs, veins.rs and toxic.rs read from a scene dump is complete: story interpolations
 /// with their world object, offset and easing; ore vein groups that name groups; toxic areas
 /// with a place, a time and scene objects of known groups.
-fn check_scene(water: &[serde_json::Value], veins: &[serde_json::Value], toxic: &[serde_json::Value], data: &GameData) -> Result<(), String> {
+fn check_scene(water: &[doc::Doc], veins: &[doc::Doc], toxic: &[doc::Doc], data: &GameData) -> Result<(), String> {
     for (i, v) in water.iter().enumerate() {
         let s = &v["storyInterpolation"];
         let offset = s["offset"].as_array().is_some_and(|o| o.len() == 3 && o.iter().all(|x| x.is_number()));

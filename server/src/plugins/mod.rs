@@ -38,10 +38,13 @@ pub mod check;
 pub mod config;
 pub mod ctx;
 mod data;
+pub mod history;
 pub mod limits;
 pub mod manifest;
 pub mod net;
+pub mod pack;
 mod runtime;
+pub mod scenario;
 pub mod sign;
 pub mod state;
 pub mod stream;
@@ -49,11 +52,19 @@ mod view;
 mod wasm;
 
 #[cfg(test)]
+mod abi13_tests;
+#[cfg(test)]
+mod cookbook_tests;
+#[cfg(test)]
 mod cost;
+#[cfg(test)]
+mod fuzz_tests;
 #[cfg(test)]
 mod game_tests;
 #[cfg(test)]
 mod net_tests;
+#[cfg(test)]
+mod production_tests;
 #[cfg(test)]
 mod sign_tests;
 #[cfg(test)]
@@ -75,6 +86,10 @@ pub trait Sink: World {
     fn apply(&mut self, plugin: &str, actions: Vec<Action>) -> Applied;
     /// What chat commands begin with.
     fn command_prefix(&self) -> String;
+    /// Whether the client is one of the server's operators (`access.operators`).
+    fn operator(&self, _client: u64) -> bool {
+        false
+    }
 }
 
 impl Sink for crate::game::Game {
@@ -83,6 +98,9 @@ impl Sink for crate::game::Game {
     }
     fn command_prefix(&self) -> String {
         self.rules.chat.command_prefix.clone().filter(|p| !p.is_empty()).unwrap_or_else(|| "!".into())
+    }
+    fn operator(&self, client: u64) -> bool {
+        view::is_operator(self, client)
     }
 }
 
@@ -105,6 +123,11 @@ pub struct Slot {
     /// The newest stream event the front was told of (`stream_bell`).
     #[serde(skip)]
     pub rung: u64,
+    /// The client whose request the game is handling right now (0: none), so that the events of what
+    /// it causes (an object built, an object taken apart) can say who did it. Set by `Game::rpc` and by
+    /// the end of a deconstruction; never in the snapshot.
+    #[serde(skip)]
+    pub actor: u64,
     pub saved: state::Saved,
 }
 
@@ -197,6 +220,10 @@ pub struct Stats {
     pub shed: u64,
     pub last_error: Option<String>,
     pub last_fault_unix: Option<u64>,
+    /// What each kind of event cost (indexed by the kind's number).
+    pub by_event: [history::KindStats; 16],
+    /// The last `FAULTS_KEPT` faults, newest last.
+    pub fault_log: VecDeque<history::FaultRecord>,
     /// `net.http`: requests started, answered by a server (any status), without an answer
     /// (refused by the guard, DNS, connection, TLS, timeout, size), and the bytes of bodies sent and taken.
     pub http_requests: u64,
@@ -230,6 +257,8 @@ pub struct Loaded {
     checkpoint: Option<Blob>,
     next_tick: i64,
     last_tick: i64,
+    /// Whether this instance has had a tick: its first one says no time has passed (`since_ms` 0), not the whole game time.
+    ticked: bool,
     faults: VecDeque<Instant>,
     last_slow_log: Option<Instant>,
     pub stats: Stats,
@@ -246,6 +275,27 @@ pub struct Loaded {
     config: config::Values,
     /// Who signed these files: `plugin.sig` checked against the files and the trusted keys.
     pub signed: sign::Signed,
+    /// The approval these files were judged by (None: never approved), for the capability diff.
+    pub approval: Option<Approval>,
+    /// The plugin's own settings: the keys that are not secrets, as set or as their defaults say.
+    pub settings: Arc<Vec<(String, String)>>,
+    /// The last log lines of the plugin and of the host about it.
+    pub logs: Arc<history::LogRing>,
+    /// Capabilities the plugin used without having been granted them, in the order it first did.
+    pub denied_caps: Vec<&'static str>,
+    /// New files on disk that wait for approval while this version goes on: what they ask for.
+    pub incoming: Option<Incoming>,
+    /// What the plugin asked for while it loaded; the host applies it once the game is its own again.
+    boot_queue: Vec<Action>,
+}
+
+/// The files that wait for the admin, as far as the admin needs to judge them.
+#[derive(Debug, Clone)]
+pub struct Incoming {
+    pub version: String,
+    pub requested: Vec<String>,
+    pub allow: Vec<String>,
+    pub digest: String,
 }
 
 impl Loaded {
@@ -268,6 +318,7 @@ impl Loaded {
             checkpoint: None,
             next_tick: 0,
             last_tick: 0,
+            ticked: false,
             faults: VecDeque::new(),
             last_slow_log: None,
             stats: Stats::default(),
@@ -277,6 +328,12 @@ impl Loaded {
             net: None,
             config: config::Values::new(),
             signed: sign::Signed::No,
+            approval: None,
+            settings: Arc::default(),
+            logs: Arc::default(),
+            denied_caps: Vec::new(),
+            incoming: None,
+            boot_queue: Vec::new(),
         }
     }
 
@@ -362,7 +419,26 @@ impl Loaded {
         p.grant = Grant::from_names(granted.iter().map(String::as_str));
         // net.http: the allow list is the manifest's (pinned by the digest), and the local network
         // is open only with both capabilities granted. Values are the admin's, for the declared keys.
+        p.approval = approval.cloned();
         p.config = values.map(|v| m.config.iter().filter_map(|k| Some((k.key.clone(), v.get(&k.key)?.clone()))).collect()).unwrap_or_default();
+        // The settings the plugin reads: each key that is not a secret, set or by default. A stored value
+        // that the manifest's declaration refuses (the declaration changed since it was set) is not
+        // quietly replaced by the default: the plugin does not start until the admin sets it again.
+        let mut settings = Vec::new();
+        for k in m.config.iter().filter(|k| !k.is_secret()) {
+            match p.config.get(&k.key) {
+                Some(v) => match k.check(v) {
+                    Ok(text) => settings.push((k.key.clone(), text)),
+                    Err(e) => {
+                        p.status = Status::Invalid(format!("the stored setting {e}: set it again with pcds plugin config set {} {}", m.id(), k.key));
+                        p.manifest = Some(m);
+                        return p;
+                    }
+                },
+                None => settings.extend(k.default_text().map(|d| (k.key.clone(), d))),
+            }
+        }
+        p.settings = Arc::new(settings);
         if approved && p.grant.has(caps::NET_HTTP)
             && let Some(net) = &m.net
         {
@@ -434,23 +510,44 @@ impl Loaded {
     }
 
     /// Instantiates and starts what `inspect` prepared. On failure the plugin is `Failed`.
-    fn start(&mut self, engine: &wasmi::Engine, gauge: &Arc<wasm::Gauge>, saved: &state::Saved, world: &str) {
+    fn start(&mut self, engine: &wasmi::Engine, gauge: &Arc<wasm::Gauge>, saved: &state::Saved, world: &str, boot: Option<Boot>) {
         let Some(pending) = self.pending.take() else { return };
         let state = self.starting_state(saved, world);
         let mut ctx = Ctx::new(&self.id, self.grant);
         ctx.net = self.net.clone();
+        ctx.settings = self.settings.clone();
+        ctx.logs = self.logs.clone();
         let made: Result<Box<dyn Runtime>, String> = match pending {
             Pending::Wasm(module) => wasm::Wasm::new(engine, &module, ctx, self.limits, gauge.clone()).map(|w| Box::new(w) as Box<dyn Runtime>),
             Pending::Data(rules) => Ok(Box::new(data::Data::new(rules, ctx))),
         };
-        let started = made.and_then(|mut rt| rt.start(state.as_ref()).map(|()| rt).map_err(|f| format!("start failed: {f}")));
+        let mut queued = Vec::new();
+        let started = made.and_then(|mut rt| {
+            // The world as it is, for the plugin's `load` to read (the start of a game, a reload, a hot update).
+            if let Some(b) = boot {
+                // SAFETY: `b` was made from a live reference by the caller, which holds it for this whole call.
+                rt.ctx().begin(unsafe { &*b.0 }, b.1);
+            }
+            let result = rt.start(state.as_ref());
+            if boot.is_some() {
+                queued = rt.ctx().end();
+            }
+            result.map(|()| rt).map_err(|f| self.explain_start(&f))
+        });
         match started {
-            Ok(rt) => self.rt = Some(rt),
+            Ok(rt) => {
+                self.rt = Some(rt);
+                self.boot_queue = queued;
+            }
             Err(e) => {
                 warn!("plugin {}: {e}", self.id);
                 self.status = Status::Failed(clean(&e));
             }
         }
+    }
+
+    fn explain_start(&self, fault: &Fault) -> String {
+        format!("start failed: {}", self.explain(fault, "starting"))
     }
 
     /// Whether the same files, approved the same way, were meant: a reload leaves it as it is.
@@ -467,7 +564,7 @@ impl Loaded {
         self.retire_due = false;
         let Some(mut rt) = self.rt.take() else { return self.status.clone() };
         let was = std::mem::replace(&mut self.status, Status::Unloading);
-        info!("plugin {}: unloading ({why})", self.id);
+        self.note(pcds_plugin_api::Level::Info, &format!("unloading ({why})"));
         match rt.unload() {
             Ok(()) => match rt.save() {
                 Ok(blob) => self.checkpoint = blob,
@@ -498,21 +595,53 @@ impl Loaded {
         was
     }
 
+    /// A line in the server's log about this plugin, and in the plugin's own history.
+    fn note(&self, level: pcds_plugin_api::Level, text: &str) {
+        let text = clean(text);
+        match level {
+            pcds_plugin_api::Level::Error | pcds_plugin_api::Level::Warn => warn!("plugin {}: {text}", self.id),
+            _ => info!("plugin {}: {text}", self.id),
+        }
+        self.logs.push(level, &text);
+    }
+
+    /// What a fault says, in words that tell the author what to do. The fuel a call may use depends on
+    /// what the call is: an event, a save, the start.
+    fn explain(&self, fault: &Fault, during: &str) -> String {
+        match fault {
+            Fault::OutOfFuel => {
+                let (budget, knob) = match during {
+                    "saving its state" | "unloading" => (self.limits.fuel_per_save, format!("budget.fuel_per_save, at most {}", limits::MAX_FUEL_PER_SAVE)),
+                    "starting" => (limits::FUEL_LOAD, "not adjustable: starting is limited to this".to_string()),
+                    _ => (self.limits.fuel_per_event, format!("budget.fuel_per_event, at most {}", limits::MAX_FUEL_PER_EVENT)),
+                };
+                format!("out of fuel: the call used all {budget} fuel it is allowed (raise {knob}, or do less work per call)")
+            }
+            Fault::Trap(t) if t.contains("unreachable") => format!("trap: {t} (a panic in Rust compiles to this; build with panic = \"abort\" and look for unwrap, expect, an index out of range or a division by zero)"),
+            other => other.to_string(),
+        }
+    }
+
     /// A fault: counted, logged, the instance restarted from the last checkpoint; five in a
     /// minute switch the plugin off.
     fn faulted(&mut self, fault: &Fault, during: &str) {
         let now = Instant::now();
+        let text = self.explain(fault, during);
         self.stats.faults += 1;
-        self.stats.last_error = Some(clean(&format!("{during}: {fault}")));
+        self.stats.last_error = Some(clean(&format!("{during}: {text}")));
         self.stats.last_fault_unix = Some(approvals::now());
+        if self.stats.fault_log.len() >= limits::FAULTS_KEPT {
+            self.stats.fault_log.pop_front();
+        }
+        self.stats.fault_log.push_back(history::FaultRecord { unix: approvals::now(), during: during.to_string(), text: clean(&text) });
         self.faults.push_back(now);
         while self.faults.front().is_some_and(|t| now.duration_since(*t) > limits::FAULT_WINDOW) {
             self.faults.pop_front();
         }
-        warn!("plugin {}: {during}: {fault}", self.id);
+        self.note(pcds_plugin_api::Level::Error, &format!("{during}: {text}"));
         if self.faults.len() >= limits::MAX_FAULTS {
-            let why = format!("switched off after {} faults in {} s; the last, in {during}: {fault}", self.faults.len(), limits::FAULT_WINDOW.as_secs());
-            warn!("plugin {}: {why} (pcds plugin reload {} starts it again)", self.id, self.id);
+            let why = format!("switched off after {} faults in {} s; the last, in {during}: {text}", self.faults.len(), limits::FAULT_WINDOW.as_secs());
+            self.note(pcds_plugin_api::Level::Error, &format!("{why} (pcds plugin reload starts it again)"));
             // No more events from now on; the instance is held until the host has made its last
             // call and saved its state (`Host::settle`, between events).
             self.status = Status::Failed(clean(&why));
@@ -525,7 +654,7 @@ impl Loaded {
             && let Err(e) = rt.restart(checkpoint.as_ref())
         {
             let why = format!("could not restart after a fault: {e}");
-            warn!("plugin {}: {why}", self.id);
+            self.note(pcds_plugin_api::Level::Error, &why);
             self.rt = None;
             self.status = Status::Failed(clean(&why));
         }
@@ -566,6 +695,24 @@ pub struct Host {
     pub sig: Sig,
     /// `net.http`: the workers and the answers waiting to be delivered.
     pub net: net::Net,
+    /// A host that sends nothing (`pcds plugin test`, `check`): the requests plugins make are kept here
+    /// instead of going to the workers.
+    pub offline: Option<Vec<net::Fetch>>,
+    boot: Option<Boot>,
+}
+
+/// The world as it is while plugins are being started (`pcds_load` may ask about it), for the length of
+/// one `start_all_in` or `rescan_in`: set there, cleared there.
+#[derive(Clone, Copy)]
+struct Boot(*const dyn World, i64);
+
+// SAFETY: made and used inside one call on the game's thread (`Host::start_all_in`, `rescan_in`), then dropped.
+unsafe impl Send for Boot {}
+unsafe impl Sync for Boot {}
+
+fn erase(world: &dyn World) -> *const dyn World {
+    // SAFETY: only the lifetime is erased; `Boot` is used and dropped inside the call that made it.
+    unsafe { std::mem::transmute::<&dyn World, &'static dyn World>(world) as *const dyn World }
 }
 
 /// Size and modification time of the files that decide what plugins there are: a change in any is
@@ -663,7 +810,7 @@ pub fn prepare(dir: &Path, world: &str) -> Host {
 impl Host {
     /// A host with no plugin.
     pub fn empty(dir: &Path, world: &str) -> Host {
-        Host { dir: dir.to_path_buf(), world: world.to_string(), engine: wasm::engine(), plugins: Vec::new(), commands: HashMap::new(), interest: 0, rotate: 0, approvals_error: None, keys_error: None, gauge: Arc::default(), sig: Vec::new(), net: net::Net::default() }
+        Host { dir: dir.to_path_buf(), world: world.to_string(), engine: wasm::engine(), plugins: Vec::new(), commands: HashMap::new(), interest: 0, rotate: 0, approvals_error: None, keys_error: None, gauge: Arc::default(), sig: Vec::new(), net: net::Net::default(), offline: None, boot: None }
     }
 
     /// The folder's files that matter, as they are now.
@@ -714,6 +861,7 @@ impl Host {
     /// folder merely changed elsewhere. Returns the summary line.
     pub fn rescan(&mut self, saved: &mut state::Saved, explicit: bool) -> String {
         let before = self.states();
+        let boot = self.boot;
         let (fresh, error, keys_error) = scan(&self.engine, &self.dir);
         self.approvals_error = error;
         self.keys_error = keys_error;
@@ -722,7 +870,7 @@ impl Host {
         let mut next: Vec<Loaded> = Vec::new();
         for mut p in fresh {
             let Some(i) = old.iter().position(|q| q.id == p.id) else {
-                p.start(&self.engine, &self.gauge, saved, &world);
+                p.start(&self.engine, &self.gauge, saved, &world, boot);
                 next.push(p);
                 continue;
             };
@@ -730,6 +878,7 @@ impl Host {
             if prev.same_files(&p) && (prev.running() || (!explicit && matches!(prev.status, Status::Failed(_)))) {
                 // Nothing changed for it: the running one stays, with its counters.
                 prev.notice = None;
+                prev.incoming = None;
                 next.push(prev);
                 continue;
             }
@@ -744,7 +893,8 @@ impl Host {
                     None => prev.checkpoint.clone(),
                 };
                 p.checkpoint = handed;
-                p.start(&self.engine, &self.gauge, saved, &world);
+                p.logs = prev.logs.clone();
+                p.start(&self.engine, &self.gauge, saved, &world, boot);
                 if p.rt.is_some() {
                     p.stats.restarts = prev.stats.restarts;
                     if let Some(b) = &p.checkpoint {
@@ -774,6 +924,7 @@ impl Host {
                     other => format!("its new files do not hold up: {}", other.detail().unwrap_or("")),
                 };
                 prev.notice = Some(format!("{why}; the old version keeps running"));
+                prev.incoming = p.manifest.as_ref().map(|m| Incoming { version: m.plugin.version.clone(), requested: p.requested.clone(), allow: m.net.as_ref().map(|n| n.allow.clone()).unwrap_or_default(), digest: p.digest.clone() });
                 next.push(prev);
                 continue;
             }
@@ -791,7 +942,7 @@ impl Host {
             }
             // A plugin that is to run starts (an explicit reload of a failed one, or an enable).
             if p.pending.is_some() && p.status == Status::Running {
-                p.start(&self.engine, &self.gauge, saved, &world);
+                p.start(&self.engine, &self.gauge, saved, &world, boot);
             }
             next.push(p);
         }
@@ -838,18 +989,49 @@ impl Host {
 
     fn recompute(&mut self) {
         self.interest = self.plugins.iter().filter(|p| p.running()).fold(0, |m, p| m | p.kinds);
+        // Timers are counted out in game ticks: a plugin that may set one wants the tick, though it did not subscribe to it.
+        if self.plugins.iter().any(|p| p.running() && p.grant.has(caps::EVENT_TIMER)) {
+            self.interest |= Kind::Tick.bit();
+        }
         // A command is delivered as its own kind, found in chat messages: both bits are wanted.
         if self.plugins.iter().any(|p| p.running() && p.kinds & Kind::Command.bit() != 0) {
             self.interest |= Kind::Chat.bit();
         }
     }
 
+    /// `start_all`, with the world there for the plugins' `load` to read. What they ask for in `load`
+    /// is applied by `flush_boot` once the game is free.
+    pub fn start_all_in(&mut self, saved: &state::Saved, world: &dyn World, game_ms: i64) {
+        self.boot = Some(Boot(erase(world), game_ms));
+        self.start_all(saved);
+        self.boot = None;
+    }
+
+    /// `rescan`, with the world there for the new plugins' `load`.
+    pub fn rescan_in(&mut self, saved: &mut state::Saved, explicit: bool, world: &dyn World, game_ms: i64) -> String {
+        self.boot = Some(Boot(erase(world), game_ms));
+        let line = self.rescan(saved, explicit);
+        self.boot = None;
+        line
+    }
+
+    /// Applies what plugins asked for while they loaded (a `say`, a `give`, a request).
+    pub fn flush_boot(&mut self, sink: &mut dyn Sink) {
+        for i in 0..self.plugins.len() {
+            let queued = std::mem::take(&mut self.plugins[i].boot_queue);
+            if !queued.is_empty() {
+                self.dispatch_actions(i, sink, queued);
+            }
+        }
+    }
+
     /// Starts every approved plugin with its state (from `saved`, else from disk).
     fn start_all(&mut self, saved: &state::Saved) {
+        let boot = self.boot;
         let (engine, world) = (self.engine.clone(), self.world.clone());
         let gauge = self.gauge.clone();
         for p in &mut self.plugins {
-            p.start(&engine, &gauge, saved, &world);
+            p.start(&engine, &gauge, saved, &world, boot);
         }
         self.index_commands();
         self.recompute();
@@ -876,11 +1058,17 @@ impl Host {
             if !self.plugins[i].wants(event, game_ms) {
                 continue;
             }
-            // Command events go only to the plugin that owns the command.
-            if let Event::Command { command, .. } = event
-                && self.commands.get(&command.to_lowercase()) != Some(&i)
-            {
-                continue;
+            // Command events go only to the plugin that owns the command, and only when the player may
+            // use it and typed it as the manifest says; otherwise the player is told why, by the host.
+            if let Event::Command { command, client, args, .. } = event {
+                if self.commands.get(&command.to_lowercase()) != Some(&i) {
+                    continue;
+                }
+                if let Some(reply) = self.command_refusal(i, sink, command, *client, args.len()) {
+                    let id = self.plugins[i].id.clone();
+                    sink.apply(&id, vec![Action::Tell(*client, reply)]);
+                    continue;
+                }
             }
             if is_tick && started.elapsed() > limits::TICK_BUDGET {
                 self.plugins[i].stats.shed += 1;
@@ -895,8 +1083,8 @@ impl Host {
             }
             // A tick comes with the game time since the plugin's last one.
             let owned;
-            let event = if let Event::Tick { game_ms, tick, players, .. } = event {
-                owned = Event::Tick { game_ms: *game_ms, tick: *tick, players: *players, since_ms: (*game_ms - p.last_tick).clamp(0, u32::MAX as i64) as u32 };
+            let event = if let Event::Tick { game_ms, tick, players, unix_ms, .. } = event {
+                owned = Event::Tick { game_ms: *game_ms, tick: *tick, players: *players, unix_ms: *unix_ms, since_ms: if p.ticked { (*game_ms - p.last_tick).clamp(0, u32::MAX as i64) as u32 } else { 0 } };
                 if payload.is_some() {
                     let mut w = Writer::new();
                     owned.encode(&mut w);
@@ -912,7 +1100,75 @@ impl Host {
                 break;
             }
         }
+        if is_tick {
+            self.fire_timers(sink, game_ms, started);
+        }
         verdict
+    }
+
+    /// One event of the game to the plugins: `run`, then, for a chat message that begins with the
+    /// command prefix and names a plugin's command, that command. The verdict is the RPC's. (The caller
+    /// then gives a plugin switched off for faults its last call: `settle`.)
+    pub fn deliver(&mut self, sink: &mut dyn Sink, event: &Event<'_>, game_ms: i64) -> Verdict {
+        let verdict = self.run(sink, event, game_ms);
+        if let Event::Chat { client, name, text, player_id } = event
+            && self.interest & Kind::Command.bit() != 0
+        {
+            let prefix = sink.command_prefix();
+            if let Some((command, args)) = crate::chathooks::command(Some(&prefix), text) {
+                // The name is matched without regard to case; the plugin is given it in lower case.
+                let command = command.to_lowercase();
+                let command = Event::Command { client: *client, name, command: &command, args: args.iter().map(String::as_str).collect(), text, player_id: *player_id };
+                self.run(sink, &command, game_ms);
+            }
+        }
+        verdict
+    }
+
+    /// Why a player may not use a command as typed, in words for the player; None if they may.
+    fn command_refusal(&self, i: usize, sink: &dyn Sink, command: &str, client: u64, args: usize) -> Option<String> {
+        let c = self.plugins[i].manifest.as_ref()?.commands.iter().find(|c| c.name.eq_ignore_ascii_case(command))?;
+        let prefix = sink.command_prefix();
+        if c.permission == manifest::Permission::Operator && !sink.operator(client) {
+            return Some(format!("{prefix}{} is for the server's operators.", c.name));
+        }
+        let (least, most) = (c.min_args.unwrap_or(0) as usize, c.max_args.map_or(usize::MAX, |m| m as usize));
+        if args < least || args > most {
+            let usage = if c.usage.is_empty() { String::new() } else { format!(" {}", c.usage) };
+            return Some(format!("Use: {prefix}{}{usage}", c.name));
+        }
+        None
+    }
+
+    /// Delivers the timers that are due to the plugins that set them: after the tick's own events, within
+    /// the tick's budget (a plugin left out keeps its due timers for the next tick), at most
+    /// `TIMER_EVENTS_PER_TICK` for each plugin.
+    fn fire_timers(&mut self, sink: &mut dyn Sink, game_ms: i64, started: Instant) {
+        for i in 0..self.plugins.len() {
+            if !self.plugins[i].running() || !self.plugins[i].grant.has(caps::EVENT_TIMER) {
+                continue;
+            }
+            let Some(rt) = self.plugins[i].rt.as_mut() else { continue };
+            if rt.ctx().timers.is_empty() {
+                continue;
+            }
+            if started.elapsed() > limits::TICK_BUDGET {
+                self.plugins[i].stats.shed += 1;
+                continue;
+            }
+            let due = rt.ctx().timers_due(game_ms, limits::TIMER_EVENTS_PER_TICK);
+            for (id, late_ms) in due {
+                let event = Event::Timer { id, game_ms, late_ms };
+                let mut w = Writer::new();
+                event.encode(&mut w);
+                self.call(i, sink, &event, &w.0, game_ms);
+                // A fault restarts the instance, which sets its timers again in `load`: the rest of
+                // this round belonged to the one that was.
+                if !self.plugins[i].running() || self.plugins[i].rt.as_mut().is_none_or(|rt| rt.ctx().timers.is_empty()) {
+                    break;
+                }
+            }
+        }
     }
 
     /// One call of plugin `i` with an event (`bytes`: the event as a module reads it), and what
@@ -922,14 +1178,26 @@ impl Host {
         let mut verdict = Verdict::Continue;
         let p = &mut self.plugins[i];
         let Some(rt) = p.rt.as_mut() else { return verdict };
-        rt.ctx().begin(&*sink);
+        rt.ctx().begin(&*sink, game_ms);
         let t = Instant::now();
-        let result = rt.event(event, bytes);
+        // A panic in the host's own code while it serves this plugin (a bug in a host function or in the world's view) is this plugin's
+        // fault, counted as one: the plugin is restarted, the game goes on. (The actions are applied below, outside this: a panic in the
+        // game's own code is the bank's to contain.)
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rt.event(event, bytes))) {
+            Ok(r) => r,
+            Err(p) => {
+                let what = p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+                Err(Fault::Trap(format!("the server panicked while it served this plugin ({}): the plugin is restarted", clean(&what))))
+            }
+        };
         let spent = t.elapsed();
         let (queued, denied, refused) = {
             let c = rt.ctx();
             (c.end(), std::mem::take(&mut c.denied), std::mem::take(&mut c.refused))
         };
+        if rt.ctx().denied_caps.len() != p.denied_caps.len() {
+            p.denied_caps = rt.ctx().denied_caps.clone();
+        }
         p.stats.calls += 1;
         p.stats.nanos += spent.as_nanos() as u64;
         p.stats.max_nanos = p.stats.max_nanos.max(spent.as_nanos() as u64);
@@ -939,16 +1207,18 @@ impl Host {
             p.stats.slow += 1;
             if p.last_slow_log.is_none_or(|t| t.elapsed() > Duration::from_secs(10)) {
                 p.last_slow_log = Some(Instant::now());
-                warn!("plugin {}: {} took {} ms (slow calls are counted; the fuel limit stops runaways)", p.id, event.kind().name(), spent.as_millis());
+                p.note(pcds_plugin_api::Level::Warn, &format!("{} took {} ms (slow calls are counted; the fuel limit stops runaways)", event.kind().name(), spent.as_millis()));
             }
         }
         if is_tick {
             p.last_tick = game_ms;
+            p.ticked = true;
             p.next_tick = game_ms + p.limits.tick_every_ms as i64;
         }
         match result {
             Ok((v, cost)) => {
                 p.stats.fuel += cost.fuel;
+                p.stats.by_event[event.kind() as usize & 15].add(cost.fuel, spent.as_nanos() as u64);
                 if v == Verdict::Veto {
                     if event.kind() == Kind::RpcBefore && p.grant.has(caps::RPC_VETO) {
                         p.stats.vetoes += 1;
@@ -965,7 +1235,12 @@ impl Host {
                 return Verdict::Continue;
             }
         }
-        // HTTP requests go to the workers; the rest is applied to the game.
+        self.dispatch_actions(i, sink, queued);
+        verdict
+    }
+
+    /// What plugin `i` asked for in a call: its HTTP requests go to the workers, the rest is applied to the game.
+    fn dispatch_actions(&mut self, i: usize, sink: &mut dyn Sink, queued: Vec<Action>) {
         let (http, queued): (Vec<Action>, Vec<Action>) = queued.into_iter().partition(|a| matches!(a, Action::Http(_)));
         if !http.is_empty() {
             let p = &mut self.plugins[i];
@@ -974,7 +1249,10 @@ impl Host {
                     let Action::Http(fetch) = action else { continue };
                     p.stats.http_requests += 1;
                     p.stats.http_bytes_out += fetch.body.len() as u64;
-                    self.net.submit(&p.id, fetch, net.policy.clone(), net.in_flight.clone());
+                    match self.offline.as_mut() {
+                        Some(kept) => kept.push(fetch),
+                        None => self.net.submit(&p.id, fetch, net.policy.clone(), net.in_flight.clone()),
+                    }
                 }
             }
         }
@@ -982,12 +1260,18 @@ impl Host {
         let p = &mut self.plugins[i];
         p.stats.actions += applied.done as u64;
         p.stats.refused += applied.refused as u64;
-        verdict
     }
 
     /// Whether requests of plugins are out and their answers not taken yet.
     pub fn net_waiting(&self) -> bool {
         self.net.outstanding > 0
+    }
+
+    /// One event straight to plugin `i`, whatever it subscribed to (the answer to its own HTTP request, in a test).
+    pub fn send(&mut self, i: usize, sink: &mut dyn Sink, event: &Event<'_>, game_ms: i64) {
+        let mut w = Writer::new();
+        event.encode(&mut w);
+        self.call(i, sink, event, &w.0, game_ms);
     }
 
     /// Hands finished HTTP requests to the plugins that made them, as `HttpDone` events, at most
@@ -1065,24 +1349,34 @@ impl Host {
 /// no plugin there is no host at all, and the game pays nothing. The folder may have changed since
 /// the plugins were prepared (an approval given during a hot update, say): it is looked at once
 /// more here, so the set that runs is the folder's at this moment, not at the compile.
-pub fn attach(game: &mut crate::game::Game, mut host: Host) {
-    let slot = &mut game.ext.plugins;
-    slot.place = Some((host.dir.clone(), host.world.clone()));
+pub fn attach(game: &mut crate::game::Game, mut host: Host, flipped: bool) {
+    game.ext.plugins.place = Some((host.dir.clone(), host.world.clone()));
     let changed = host.signature() != host.sig;
+    let game_ms = (game.time.secs() * 1000.0) as i64;
+    // The state of the plugins is a part of the game: it is taken out while they start, which they do reading the world.
+    let mut saved = std::mem::take(&mut game.ext.plugins.saved);
     if !host.is_empty() {
-        host.start_all(&slot.saved);
+        host.start_all_in(&saved, &*game, game_ms);
         // State of plugins that are gone is not carried on.
         let ids: HashSet<&str> = host.plugins.iter().map(|p| p.id.as_str()).collect();
-        slot.saved.states.retain(|id, _| ids.contains(id.as_str()));
+        saved.states.retain(|id, _| ids.contains(id.as_str()));
         info!("{}", host.summary_line());
         host.announce(&HashMap::new());
     }
     if changed {
-        host.rescan(&mut slot.saved, false);
+        host.rescan_in(&mut saved, false, &*game, game_ms);
     }
-    slot.scan = Scan { next: Some(Instant::now() + POLL_EVERY), seen: host.sig.clone(), settling: None };
-    slot.host = (!host.is_empty()).then(|| Box::new(host));
-    slot.refresh();
+    game.ext.plugins.saved = saved;
+    host.flush_boot(game);
+    game.ext.plugins.scan = Scan { next: Some(Instant::now() + POLL_EVERY), seen: host.sig.clone(), settling: None };
+    game.ext.plugins.host = (!host.is_empty()).then(|| Box::new(host));
+    game.ext.plugins.refresh();
+    // A hot update: the plugins that asked hear that they were carried over, once, before the world runs on.
+    if flipped && let Some(mut host) = game.ext.plugins.host.take() {
+        host.run(game, &Event::Flip { game_ms, server_version: env!("CARGO_PKG_VERSION") }, game_ms);
+        game.ext.plugins.host = Some(host);
+        game.ext.plugins.refresh();
+    }
 }
 
 /// The doorbell for the front's long polls of the event stream (`ipc::STREAM`): the body to send when
@@ -1111,16 +1405,7 @@ pub fn dispatch(game: &mut crate::game::Game, event: &Event<'_>) -> Verdict {
         return verdict;
     };
     let game_ms = (game.time.secs() * 1000.0) as i64;
-    verdict = host.run(game, event, game_ms);
-    if let Event::Chat { client, name, text } = event
-        && host.interest & Kind::Command.bit() != 0
-    {
-        let prefix = Sink::command_prefix(game);
-        if let Some((command, args)) = crate::chathooks::command(Some(&prefix), text) {
-            let command = Event::Command { client: *client, name, command: &command, args: args.iter().map(String::as_str).collect(), text };
-            host.run(game, &command, game_ms);
-        }
-    }
+    verdict = host.deliver(game, event, game_ms);
     if host.plugins.iter().any(|p| p.retire_due) {
         host.settle(&mut game.ext.plugins.saved);
     }
@@ -1156,7 +1441,11 @@ pub fn reload(game: &mut crate::game::Game) -> Result<String, String> {
 fn rescan_game(game: &mut crate::game::Game, explicit: bool) -> Result<String, String> {
     let (dir, world) = game.ext.plugins.place.clone().ok_or("the plugin host has not started")?;
     let mut host = game.ext.plugins.host.take().map(|h| *h).unwrap_or_else(|| Host::empty(&dir, &world));
-    let line = host.rescan(&mut game.ext.plugins.saved, explicit);
+    let game_ms = (game.time.secs() * 1000.0) as i64;
+    let mut saved = std::mem::take(&mut game.ext.plugins.saved);
+    let line = host.rescan_in(&mut saved, explicit, &*game, game_ms);
+    game.ext.plugins.saved = saved;
+    host.flush_boot(game);
     game.ext.plugins.scan.seen = host.sig.clone();
     game.ext.plugins.scan.settling = None;
     game.ext.plugins.host = (!host.is_empty()).then(|| Box::new(host));
@@ -1245,12 +1534,7 @@ pub(crate) fn read_regular(path: &Path, max: usize) -> std::io::Result<Vec<u8>> 
     Ok(bytes)
 }
 
-/// Text an author chose, made safe to put on a terminal and in a log: a control character (an escape
-/// sequence that hides, redraws or sets the clipboard; a line break that forges a line), a mark that
-/// turns the text around (U+202E) and the zero-width ones become `?`. Plain text is returned as it is.
-pub fn clean(s: &str) -> String {
-    s.chars().map(|c| if c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}') { '?' } else { c }).collect()
-}
+pub use crate::util::clean;
 
 /// The same, with the keys the admin trusts (for the signature to be judged).
 pub fn read_folder_with(folder: &Path, keys: &sign::Keys) -> Loaded {
@@ -1291,7 +1575,8 @@ pub fn approve_digest(dir: &Path, id: &str, grant: Option<Vec<String>>, expect: 
     let mut all = Approvals::load(dir)?;
     let limits = all.0.get(id).map(|a| a.limits.clone()).unwrap_or_default();
     let signer = found.signed.trusted().map(|k| k.id.clone());
-    let approval = Approval { enabled: true, grant, digest: found.digest, limits, approved_at: approvals::now(), signer };
+    let allow = found.manifest.as_ref().and_then(|m| m.net.as_ref()).map(|n| n.allow.clone()).unwrap_or_default();
+    let approval = Approval { enabled: true, grant, digest: found.digest, limits, approved_at: approvals::now(), signer, asked: found.requested.clone(), allow };
     all.0.insert(id.to_string(), approval.clone());
     all.save(dir)?;
     Ok(approval)
@@ -1304,7 +1589,7 @@ pub fn disable(dir: &Path, id: &str) -> Result<(), String> {
     if !all.0.contains_key(id) && (!manifest::valid_id(id) || !dir.join(id).is_dir()) {
         return Err(format!("{id} is not an installed plugin"));
     }
-    let a = all.0.entry(id.to_string()).or_insert_with(|| Approval { enabled: false, grant: Vec::new(), digest: String::new(), limits: Default::default(), approved_at: approvals::now(), signer: None });
+    let a = all.0.entry(id.to_string()).or_insert_with(|| Approval { enabled: false, grant: Vec::new(), digest: String::new(), limits: Default::default(), approved_at: approvals::now(), signer: None, asked: Vec::new(), allow: Vec::new() });
     a.enabled = false;
     all.save(dir)
 }
@@ -1313,3 +1598,7 @@ pub fn disable(dir: &Path, id: &str) -> Result<(), String> {
 pub fn wants_rpc(game: &crate::game::Game, name: &str) -> bool {
     game.ext.plugins.host.as_ref().is_some_and(|h| h.plugins.iter().any(|p| p.running() && p.rpc.contains(name)))
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../../fuzz/targets/wasmhost.rs"]
+pub mod fuzz_wasm;

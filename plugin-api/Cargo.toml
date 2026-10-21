@@ -1,16 +1,33 @@
 [package]
 name = "pcds-plugin-api"
-# The API's own version: major.minor here is the ABI's (docs/plugins-api.md, "Versioning").
-version = "0.1.0"
+# The API's own version: major.minor here tracks the ABI's (docs/plugins-api.md, "Versioning"):
+# ABI 1.3 is crate 0.2. A 0.x minor may change Rust signatures; the ABI's wire format is only
+# ever extended within major 1.
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
-description = "The plugin API of the Planet Crafter dedicated server: the events, queries and actions a WebAssembly plugin sees, and the codec both sides share"
+description = "Plugin API for the Planet Crafter dedicated server: events, host calls and the codec for WebAssembly plugins, plus a mock host for native tests"
 # Permissive on purpose: a plugin that includes this crate stays under its author's own licence
 # (docs/plugins.md, "Licensing"). The server itself is GPL-3.0-or-later.
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/perara/planet-crafter-dedicated-server"
+homepage = "https://github.com/perara/planet-crafter-dedicated-server"
+documentation = "https://docs.rs/pcds-plugin-api"
+readme = "README.md"
+keywords = ["planet-crafter", "plugin", "wasm", "game-server", "no-std"]
+categories = ["wasm", "no-std", "game-development"]
+exclude = ["Cargo.lock", "/target"]
+# False on purpose until the owner decides to publish to crates.io.
 publish = false
 
 [features]
-# For the server and for tests on a PC: nothing here needs it (the crate is no_std + alloc).
+# Links the standard library. Nothing in the API needs it (the crate is no_std + alloc).
 std = []
+# The `testing` module: a mock host and a harness to run a plugin in `cargo test`. For
+# dev-dependencies; it needs std.
+testing = ["std"]
+
+[package.metadata.docs.rs]
+all-features = true
+# The default target first; the second shows `Wasm`, the host a module gets inside the server.
+targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]

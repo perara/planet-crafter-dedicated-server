@@ -195,6 +195,20 @@ pub fn render(m: &Value) -> String {
     ] {
         o.family(Family { name, kind: "counter", help, samples: per_plugin(key) });
     }
+    // By kind of event (the plugin's own cost table), its HTTP traffic, its last fault and its budget.
+    let per_event = |key: &str| -> Vec<(Vec<(&str, String)>, f64)> {
+        plugins
+            .iter()
+            .flat_map(|p| p["stats"]["byEvent"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(move |e| Some((vec![("plugin", text(&p["id"])), ("event", text(&e["event"]))], num(&e[key])?))))
+            .collect()
+    };
+    o.family(Family { name: "pcds_plugin_event_calls_total", kind: "counter", help: "Calls of the plugin, by kind of event.", samples: per_event("calls") });
+    o.family(Family { name: "pcds_plugin_event_fuel_total", kind: "counter", help: "WebAssembly fuel the plugin has spent, by kind of event.", samples: per_event("fuel") });
+    o.family(Family { name: "pcds_plugin_event_fuel_max", kind: "gauge", help: "The most fuel one call of this kind has used (compare with pcds_plugin_fuel_budget).", samples: per_event("maxFuel") });
+    o.family(Family { name: "pcds_plugin_http_requests_total", kind: "counter", help: "HTTP requests the plugin has made (net.http).", samples: plugins.iter().filter_map(|p| Some((vec![("plugin", text(&p["id"]))], num(&p["stats"]["http"]["requests"])?))).collect() });
+    o.family(Family { name: "pcds_plugin_http_failed_total", kind: "counter", help: "Requests that got no answer (refused, timed out, connection failed).", samples: plugins.iter().filter_map(|p| Some((vec![("plugin", text(&p["id"]))], num(&p["stats"]["http"]["failed"])?))).collect() });
+    o.family(Family { name: "pcds_plugin_last_fault_timestamp_seconds", kind: "gauge", help: "When the plugin last faulted, seconds since 1970 (absent if it never did).", samples: plugins.iter().filter_map(|p| Some((vec![("plugin", text(&p["id"]))], num(&p["stats"]["lastFaultAt"])?))).collect() });
+    o.family(Family { name: "pcds_plugin_fuel_budget", kind: "gauge", help: "The fuel one call of the plugin may use.", samples: plugins.iter().filter_map(|p| Some((vec![("plugin", text(&p["id"]))], num(&p["limits"]["fuelPerEvent"])?))).collect() });
     o.family(Family {
         name: "pcds_plugin_running",
         kind: "gauge",
@@ -204,123 +218,125 @@ pub fn render(m: &Value) -> String {
     o.text
 }
 
+#[cfg(any(test, fuzzing, pcds_corpus))]
+/// A strict reader of the text format: what a scraper would refuse, this refuses. Returns
+/// (family, labels, value) for every sample.
+pub fn parse(text: &str) -> Result<Vec<(String, std::collections::BTreeMap<String, String>, f64)>, String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let name_ok = |n: &str, colon: bool| !n.is_empty() && !n.as_bytes()[0].is_ascii_digit() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || (colon && b == b':'));
+    if !text.ends_with('\n') {
+        return Err("the text must end with a line break".into());
+    }
+    let (mut helps, mut types, mut done, mut series) = (BTreeSet::new(), BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
+    let (mut open, mut samples) = (None::<String>, Vec::new());
+    for (n, line) in text.lines().enumerate() {
+        let at = |e: &str| format!("line {}: {e}: {line:?}", n + 1);
+        if line.is_empty() {
+            return Err(at("empty line"));
+        }
+        if let Some(rest) = line.strip_prefix("# HELP ") {
+            let (name, help) = rest.split_once(' ').ok_or_else(|| at("HELP without text"))?;
+            if !name_ok(name, true) || !helps.insert(name.to_string()) {
+                return Err(at("bad or repeated HELP"));
+            }
+            // Only \\ and \n are escapes in help text.
+            let mut chars = help.chars();
+            while let Some(c) = chars.next() {
+                if c == '\\' && !matches!(chars.next(), Some('\\' | 'n')) {
+                    return Err(at("bad escape in help"));
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("# TYPE ") {
+            let (name, kind) = rest.split_once(' ').ok_or_else(|| at("TYPE without a type"))?;
+            if !name_ok(name, true) || !["counter", "gauge", "histogram", "summary", "untyped"].contains(&kind) || types.insert(name.to_string(), kind.to_string()).is_some() {
+                return Err(at("bad or repeated TYPE"));
+            }
+            if kind == "counter" && !name.ends_with("_total") {
+                return Err(at("a counter's name ends in _total"));
+            }
+            if !helps.contains(name) {
+                return Err(at("TYPE before HELP"));
+            }
+        } else if line.starts_with('#') {
+            return Err(at("a comment other than HELP and TYPE"));
+        } else {
+            let name_end = line.find(['{', ' ']).ok_or_else(|| at("no value"))?;
+            let name = &line[..name_end];
+            if !name_ok(name, true) || !types.contains_key(name) {
+                return Err(at("a sample of a family with no TYPE"));
+            }
+            if open.as_deref() != Some(name) {
+                if let Some(prev) = open.replace(name.to_string()) {
+                    done.insert(prev);
+                }
+                if done.contains(name) {
+                    return Err(at("the samples of a family are not together"));
+                }
+            }
+            let mut labels = BTreeMap::new();
+            let mut rest = &line[name_end..];
+            if let Some(inner) = rest.strip_prefix('{') {
+                let (bytes, mut start) = (inner.as_bytes(), 0);
+                loop {
+                    let eq = inner[start..].find('=').ok_or_else(|| at("label without ="))? + start;
+                    let key = &inner[start..eq];
+                    if !name_ok(key, false) || key.starts_with("__") || labels.contains_key(key) {
+                        return Err(at("bad or repeated label name"));
+                    }
+                    if bytes.get(eq + 1) != Some(&b'"') {
+                        return Err(at("label value not quoted"));
+                    }
+                    let (mut value, mut i) = (String::new(), eq + 2);
+                    loop {
+                        match bytes.get(i).ok_or_else(|| at("label value not closed"))? {
+                            b'"' => break,
+                            b'\\' => {
+                                value.push(match bytes.get(i + 1) {
+                                    Some(b'\\') => '\\',
+                                    Some(b'"') => '"',
+                                    Some(b'n') => '\n',
+                                    _ => return Err(at("bad escape in a label value")),
+                                });
+                                i += 2;
+                            }
+                            b'\n' => return Err(at("raw line break in a label value")),
+                            _ => {
+                                let c = inner[i..].chars().next().unwrap();
+                                value.push(c);
+                                i += c.len_utf8();
+                            }
+                        }
+                    }
+                    labels.insert(key.to_string(), value);
+                    match bytes.get(i + 1) {
+                        Some(b',') => start = i + 2,
+                        Some(b'}') => {
+                            rest = &inner[i + 2..];
+                            break;
+                        }
+                        _ => return Err(at("expected , or } after a label")),
+                    }
+                }
+            }
+            let value = rest.strip_prefix(' ').ok_or_else(|| at("no space before the value"))?;
+            let value: f64 = value.parse().map_err(|_| at("the value is not a number"))?;
+            if !value.is_finite() {
+                return Err(at("NaN and infinities are not written"));
+            }
+            if !series.insert(format!("{name}{labels:?}")) {
+                return Err(at("the same series twice"));
+            }
+            samples.push((name.to_string(), labels, value));
+        }
+    }
+    Ok(samples)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet};
-
-    /// A strict reader of the text format: what a scraper would refuse, this refuses. Returns
-    /// (family, labels, value) for every sample.
-    pub fn parse(text: &str) -> Result<Vec<(String, BTreeMap<String, String>, f64)>, String> {
-        let name_ok = |n: &str, colon: bool| !n.is_empty() && !n.as_bytes()[0].is_ascii_digit() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || (colon && b == b':'));
-        if !text.ends_with('\n') {
-            return Err("the text must end with a line break".into());
-        }
-        let (mut helps, mut types, mut done, mut series) = (BTreeSet::new(), BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
-        let (mut open, mut samples) = (None::<String>, Vec::new());
-        for (n, line) in text.lines().enumerate() {
-            let at = |e: &str| format!("line {}: {e}: {line:?}", n + 1);
-            if line.is_empty() {
-                return Err(at("empty line"));
-            }
-            if let Some(rest) = line.strip_prefix("# HELP ") {
-                let (name, help) = rest.split_once(' ').ok_or_else(|| at("HELP without text"))?;
-                if !name_ok(name, true) || !helps.insert(name.to_string()) {
-                    return Err(at("bad or repeated HELP"));
-                }
-                // Only \\ and \n are escapes in help text.
-                let mut chars = help.chars();
-                while let Some(c) = chars.next() {
-                    if c == '\\' && !matches!(chars.next(), Some('\\' | 'n')) {
-                        return Err(at("bad escape in help"));
-                    }
-                }
-            } else if let Some(rest) = line.strip_prefix("# TYPE ") {
-                let (name, kind) = rest.split_once(' ').ok_or_else(|| at("TYPE without a type"))?;
-                if !name_ok(name, true) || !["counter", "gauge", "histogram", "summary", "untyped"].contains(&kind) || types.insert(name.to_string(), kind.to_string()).is_some() {
-                    return Err(at("bad or repeated TYPE"));
-                }
-                if kind == "counter" && !name.ends_with("_total") {
-                    return Err(at("a counter's name ends in _total"));
-                }
-                if !helps.contains(name) {
-                    return Err(at("TYPE before HELP"));
-                }
-            } else if line.starts_with('#') {
-                return Err(at("a comment other than HELP and TYPE"));
-            } else {
-                let name_end = line.find(['{', ' ']).ok_or_else(|| at("no value"))?;
-                let name = &line[..name_end];
-                if !name_ok(name, true) || !types.contains_key(name) {
-                    return Err(at("a sample of a family with no TYPE"));
-                }
-                if open.as_deref() != Some(name) {
-                    if let Some(prev) = open.replace(name.to_string()) {
-                        done.insert(prev);
-                    }
-                    if done.contains(name) {
-                        return Err(at("the samples of a family are not together"));
-                    }
-                }
-                let mut labels = BTreeMap::new();
-                let mut rest = &line[name_end..];
-                if let Some(inner) = rest.strip_prefix('{') {
-                    let (bytes, mut start) = (inner.as_bytes(), 0);
-                    loop {
-                        let eq = inner[start..].find('=').ok_or_else(|| at("label without ="))? + start;
-                        let key = &inner[start..eq];
-                        if !name_ok(key, false) || key.starts_with("__") || labels.contains_key(key) {
-                            return Err(at("bad or repeated label name"));
-                        }
-                        if bytes.get(eq + 1) != Some(&b'"') {
-                            return Err(at("label value not quoted"));
-                        }
-                        let (mut value, mut i) = (String::new(), eq + 2);
-                        loop {
-                            match bytes.get(i).ok_or_else(|| at("label value not closed"))? {
-                                b'"' => break,
-                                b'\\' => {
-                                    value.push(match bytes.get(i + 1) {
-                                        Some(b'\\') => '\\',
-                                        Some(b'"') => '"',
-                                        Some(b'n') => '\n',
-                                        _ => return Err(at("bad escape in a label value")),
-                                    });
-                                    i += 2;
-                                }
-                                b'\n' => return Err(at("raw line break in a label value")),
-                                _ => {
-                                    let c = inner[i..].chars().next().unwrap();
-                                    value.push(c);
-                                    i += c.len_utf8();
-                                }
-                            }
-                        }
-                        labels.insert(key.to_string(), value);
-                        match bytes.get(i + 1) {
-                            Some(b',') => start = i + 2,
-                            Some(b'}') => {
-                                rest = &inner[i + 2..];
-                                break;
-                            }
-                            _ => return Err(at("expected , or } after a label")),
-                        }
-                    }
-                }
-                let value = rest.strip_prefix(' ').ok_or_else(|| at("no space before the value"))?;
-                let value: f64 = value.parse().map_err(|_| at("the value is not a number"))?;
-                if !value.is_finite() {
-                    return Err(at("NaN and infinities are not written"));
-                }
-                if !series.insert(format!("{name}{labels:?}")) {
-                    return Err(at("the same series twice"));
-                }
-                samples.push((name.to_string(), labels, value));
-            }
-        }
-        Ok(samples)
-    }
 
     fn running() -> Value {
         json!({
@@ -338,7 +354,7 @@ mod tests {
                 "update": {"available": true}
             },
             "plugins": [
-                {"id": "welcome", "status": "running", "stats": {"calls": 10, "faults": 0, "restarts": 0, "slow": 1, "shed": 0, "denied": 2, "refused": 0, "actions": 5, "vetoes": 0, "fuel": 123456}},
+                {"id": "welcome", "status": "running", "limits": {"fuelPerEvent": 500000}, "stats": {"calls": 10, "faults": 0, "restarts": 0, "slow": 1, "shed": 0, "denied": 2, "refused": 0, "actions": 5, "vetoes": 0, "fuel": 123456, "lastFaultAt": 1_792_000_050, "http": {"requests": 7, "failed": 2}, "byEvent": [{"event": "chat", "calls": 6, "fuel": 1200, "maxFuel": 400}, {"event": "tick", "calls": 4, "fuel": 122256, "maxFuel": 60000}]}},
                 {"id": "broken", "status": "failed", "stats": {"calls": 3, "faults": 3, "restarts": 2, "slow": 0, "shed": 0, "denied": 0, "refused": 0, "actions": 0, "vetoes": 0, "fuel": 99}}
             ],
             "front": {"connections": {"ip": 1, "steam": 1}, "memory": {"front": 50_000_000, "bank": 80_000_000, "next_bank": null}, "flipsFailed": 1, "lastStandMillis": 12.5, "crashes": 4, "watchdogKills": 2, "queue": {"waitingBytes": 10, "droppedClients": 1, "droppedBytes": 17_000_000}},
@@ -365,6 +381,9 @@ mod tests {
         assert_eq!((v("pcds_watchdog_kills_total", &[]), v("pcds_queue_dropped_bytes_total", &[]), v("pcds_update_available", &[])), (2.0, 17_000_000.0, 1.0));
         assert_eq!((v("pcds_plugins", &[("state", "running")]), v("pcds_plugins", &[("state", "failed")]), v("pcds_plugins", &[("state", "pending")])), (1.0, 1.0, 0.0));
         assert_eq!((v("pcds_plugin_fuel_total", &[("plugin", "welcome")]), v("pcds_plugin_faults_total", &[("plugin", "broken")]), v("pcds_plugin_running", &[("plugin", "broken")])), (123456.0, 3.0, 0.0));
+        assert_eq!((v("pcds_plugin_event_fuel_total", &[("plugin", "welcome"), ("event", "tick")]), v("pcds_plugin_event_fuel_max", &[("plugin", "welcome"), ("event", "tick")]), v("pcds_plugin_event_calls_total", &[("plugin", "welcome"), ("event", "chat")])), (122256.0, 60000.0, 6.0));
+        assert_eq!((v("pcds_plugin_http_requests_total", &[("plugin", "welcome")]), v("pcds_plugin_http_failed_total", &[("plugin", "welcome")]), v("pcds_plugin_fuel_budget", &[("plugin", "welcome")]), v("pcds_plugin_last_fault_timestamp_seconds", &[("plugin", "welcome")])), (7.0, 2.0, 500000.0, 1_792_000_050.0));
+        assert!(value(&samples, "pcds_plugin_fuel_budget", &[("plugin", "broken")]).is_none(), "no budget known, no series");
         // The labels with quotes and backslashes come back as they went in.
         let world = samples.iter().find(|s| s.0 == "pcds_world_info").unwrap();
         assert_eq!((world.1["world"].as_str(), world.1["planet"].as_str()), ("my \"base\"\\x", "Prime"));
@@ -505,3 +524,7 @@ mod tests {
         assert!(parsed["panels"].as_array().is_some_and(|p| p.len() > 10) && parsed["uid"] == "pcds-server");
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../../fuzz/targets/prom.rs"]
+pub mod fuzz;

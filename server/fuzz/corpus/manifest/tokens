@@ -1,0 +1,1 @@
+{"tokens": [{"id": "abcd1234", "name": "relay", "hash": "abababababababababababababababababababababababababababababababab", "scopes": ["events.read"], "ratePerMinute": 60, "createdAt": 3}]}

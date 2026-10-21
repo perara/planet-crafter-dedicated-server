@@ -73,77 +73,38 @@ impl Plugin for Hello {
 
 export!(Hello);
 
-/// A plugin is plain Rust against the `Host` trait: its tests run on a PC with a mock host, no server
-/// and no WebAssembly. (`cargo test --target x86_64-unknown-linux-gnu` if your .cargo/config.toml
-/// sets the wasm target.)
+/// A plugin is plain Rust against the `Host` trait: its tests run on a PC with the mock server of
+/// `pcds_plugin_api::testing`, no server and no WebAssembly (`cargo test`, or `make test` where there is a Makefile).
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use pcds_plugin_api::testing::{Harness, MockHost};
 
-    #[derive(Default)]
-    struct Mock {
-        told: RefCell<Vec<(u64, String)>>,
-    }
-
-    impl Host for Mock {
-        fn log(&self, _: Level, _: &str) {}
-        fn world(&self) -> Result<WorldInfo, Error> {
-            Ok(WorldInfo { planet: "Prime".into(), players: 3, game_ms: 3_725_000, terraformation: 1500.4, ..Default::default() })
-        }
-        fn players(&self) -> Result<Vec<PlayerInfo>, Error> {
-            Ok(vec![])
-        }
-        fn rules(&self) -> Result<String, Error> {
-            Ok("{}".into())
-        }
-        fn say(&self, _: &str) -> Result<(), Error> {
-            Ok(())
-        }
-        fn tell(&self, client: u64, text: &str) -> Result<(), Error> {
-            self.told.borrow_mut().push((client, text.to_string()));
-            Ok(())
-        }
-        fn kick(&self, _: u64, _: &str) -> Result<(), Error> {
-            Err(Error::Denied)
-        }
-        fn teleport(&self, _: u64, _: [f32; 3]) -> Result<(), Error> {
-            Err(Error::Denied)
-        }
-        fn rules_patch(&self, _: &str) -> Result<(), Error> {
-            Err(Error::Denied)
-        }
-        fn http_request(&self, _: &HttpRequest<'_>) -> Result<u64, Error> {
-            Err(Error::Denied)
-        }
-    }
-
-    fn command<'a>(name: &'a str) -> Event<'a> {
-        Event::Command { client: 7, name: "Ann", command: name, args: vec![], text: "" }
+    fn world() -> MockHost {
+        MockHost::new().with_world(WorldInfo { planet: "Prime".into(), game_ms: 3_725_000, terraformation: 1500.4, ..Default::default() })
     }
 
     #[test]
     fn stats_tells_the_asker_the_worlds_numbers() {
-        let host = Mock::default();
-        let mut plugin = Hello::load(&host, None);
-        assert_eq!(plugin.event(&host, &command("stats")), Verdict::Continue);
-        let told = host.told.borrow();
+        let mut plugin = Harness::<Hello>::start(world());
+        plugin.join(7, "Ann");
+        plugin.command(7, "stats", &[]);
+        let told = plugin.mock().told();
         assert_eq!(told[0].0, 7);
-        assert!(told[0].1.contains("Prime: 3 players") && told[0].1.contains("1h 02m"), "{}", told[0].1);
+        assert!(told[0].1.contains("Prime: 1 players") && told[0].1.contains("1h 02m"), "{}", told[0].1);
     }
 
     #[test]
-    fn the_counters_survive_a_save_and_the_old_state_version_is_migrated() {
-        let host = Mock::default();
-        let mut plugin = Hello::load(&host, None);
-        plugin.event(&host, &command("stats"));
-        plugin.event(&host, &command("uses"));
-        let saved = plugin.save().unwrap();
-        let mut again = Hello::load(&host, Some(State { version: saved.version, bytes: &saved.bytes }));
-        again.event(&host, &command("uses"));
-        assert_eq!(host.told.borrow().last().unwrap().1, "!stats was used 1 times, !uses 2 times on this world");
+    fn the_counters_survive_a_reload_and_the_old_state_version_is_migrated() {
+        let mut plugin = Harness::<Hello>::start(world());
+        plugin.join(7, "Ann");
+        plugin.command(7, "stats", &[]);
+        plugin.command(7, "uses", &[]);
+        plugin.reload();
+        plugin.command(7, "uses", &[]);
+        assert_eq!(plugin.mock().told().last().unwrap().1, "!stats was used 1 times, !uses 2 times on this world");
         // Version 1 had one counter, which counted !stats.
-        let old = Hello::load(&host, Some(State { version: 1, bytes: &[5, 0, 0, 0] }));
+        let old = Hello::load(plugin.mock(), Some(State { version: 1, bytes: &[5, 0, 0, 0] }));
         assert_eq!((old.stats_uses, old.uses_uses), (5, 0));
     }
 }

@@ -255,8 +255,12 @@ fn classify_v4(a: Ipv4Addr) -> Class {
     match o {
         // The cloud metadata services (AWS, Azure, GCP, OpenStack: 169.254.169.254; Alibaba: 100.100.100.200)
         // hand the machine's credentials to whoever asks from it: not a "local network" a plugin may be
-        // granted, whatever net.http.local says.
-        [169, 254, 169, 254] | [100, 100, 100, 200] => Class::Never,
+        // granted, whatever net.http.local says. The others are the services of the same kind that
+        // are not 169.254.169.254: Azure's WireServer (168.63.129.16, a *public* address that only
+        // the machine reaches: it hands out the extensions' settings and secrets), the container
+        // credentials of AWS ECS (169.254.170.2) and EKS Pod Identity (169.254.170.23), Tencent's
+        // metadata (169.254.0.23).
+        [169, 254, 169, 254] | [100, 100, 100, 200] | [168, 63, 129, 16] | [169, 254, 170, 2] | [169, 254, 170, 23] | [169, 254, 0, 23] => Class::Never,
         [127, ..] | [10, ..] | [169, 254, ..] | [192, 168, ..] => Class::Local,
         [172, b, ..] if (16..32).contains(&b) => Class::Local,
         [100, b, ..] if (64..128).contains(&b) => Class::Local,
@@ -272,8 +276,8 @@ fn classify_v6(a: Ipv6Addr) -> Class {
         return Class::Local;
     }
     let s = a.segments();
-    // AWS's IPv6 metadata address (see classify_v4).
-    if s == [0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254] {
+    // AWS's IPv6 metadata address, its Pod Identity Agent's, and Google's (see classify_v4).
+    if s == [0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254] || s == [0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x23] || s == [0xfd20, 0xce, 0, 0, 0, 0, 0, 0x254] {
         return Class::Never;
     }
     // fc00::/7 unique-local, fe80::/10 link-local: this network.
@@ -344,7 +348,7 @@ fn expand(text: &str, config: &BTreeMap<String, String>) -> Result<String, Rejec
         let after = &rest[at + 2..];
         let end = after.find('}').ok_or_else(|| Reject::Bad("a ${ without its }".into()))?;
         let key = after[..end].strip_prefix("config.").ok_or_else(|| Reject::Bad("only ${config.KEY} can be put in a request".into()))?;
-        let value = config.get(key).ok_or_else(|| Reject::Bad(format!("config {key} is not declared in the manifest, or the admin has not set it (pcds plugin config set ID {key})")))?;
+        let value = config.get(key).ok_or_else(|| Reject::Bad(format!("config {key} is not declared in the manifest, or has no value yet (the admin sets it: pcds plugin config set ID {key}; in a scenario: the [config] table)")))?;
         out.push_str(value);
         rest = &after[end + 1..];
     }
@@ -876,7 +880,7 @@ mod tests {
             assert!(!public.ip_ok(ip), "{ip} is local and must be refused");
             assert!(local.ip_ok(ip), "{ip} is local and net.http.local allows it");
         }
-        for ip in ["169.254.169.254", "::ffff:169.254.169.254", "100.100.100.200", "fd00:ec2::254", "0.0.0.0", "0.1.2.3", "224.0.0.1", "239.255.255.255", "255.255.255.255", "240.0.0.1", "192.0.2.1", "198.51.100.7", "203.0.113.9", "198.18.0.1", "192.88.99.1", "::", "ff02::1", "2001:db8::1", "2001::1", "2002:7f00:1::1", "64:ff9b::7f00:1", "::ffff:224.0.0.1", "3fff::1", "1::1"] {
+        for ip in ["169.254.169.254", "::ffff:169.254.169.254", "100.100.100.200", "fd00:ec2::254", "168.63.129.16", "::ffff:168.63.129.16", "169.254.170.2", "169.254.170.23", "169.254.0.23", "fd00:ec2::23", "fd20:ce::254", "0.0.0.0", "0.1.2.3", "224.0.0.1", "239.255.255.255", "255.255.255.255", "240.0.0.1", "192.0.2.1", "198.51.100.7", "203.0.113.9", "198.18.0.1", "192.88.99.1", "::", "ff02::1", "2001:db8::1", "2001::1", "2002:7f00:1::1", "64:ff9b::7f00:1", "::ffff:224.0.0.1", "3fff::1", "1::1"] {
             let ip: IpAddr = ip.parse().unwrap();
             assert!(!public.ip_ok(ip) && !local.ip_ok(ip), "{ip} is never a peer");
         }
@@ -933,3 +937,7 @@ mod tests {
         assert_eq!(join("https://a.example:8443/x", "//b.example/q").as_deref(), Some("https://b.example/q"));
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../../fuzz/targets/pluginnet.rs"]
+pub mod fuzz;

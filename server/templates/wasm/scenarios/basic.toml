@@ -1,0 +1,21 @@
+# `pcds plugin test .` runs this against the built module, in the real host, with a made-up world.
+name = "hello"
+
+[config]
+greeting = "Hi"
+
+[[player]]
+client = 1
+name = "Ann"
+
+[[step]]
+chat = { client = 1, text = "!hello" }
+expect = [{ tell = 1, contains = "Hi Ann" }]
+
+[[step]]
+note = "a hot update: the counter survives"
+flip = true
+
+[[step]]
+chat = { client = 1, text = "!hello" }
+expect = [{ tell = 1, contains = "2 times" }]

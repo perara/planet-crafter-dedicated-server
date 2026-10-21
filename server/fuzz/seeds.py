@@ -67,3 +67,88 @@ put("game", "start", bytes(range(0, 64)))
 put("front", "split", "Split3")
 put("front", "chat", json.dumps({"webhooks": ["https://example.com/h"], "timeoutSeconds": 5}))
 # handoff is seeded by the target itself: PCDS_FUZZ_SEED_OUT=snapshot.json (a snapshot of the test world).
+
+# ---- the targets of round 3 (docs/audits.md) ------------------------------------------------------
+
+# oldsave: the 2022 layout (nine sections: unit levels, one player, objects, inventories, stats,
+# messages, story events, a game mode, colour layers), and the layout between the two (tokens in the first).
+old_sections = [
+    '{"unitOxygenLevel":15.5,"unitHeatLevel":1.0,"unitPressureLevel":2.0,"unitBiomassLevel":3.0}',
+    '{"playerPosition":"1,2,3","playerRotation":"0,0,0,1","unlockedGroups":"Pod4x,BootsSpeed1","playerGaugeOxygen":370.0,"playerGaugeThirst":99.0,"playerGaugeHealth":98.0}',
+    '{"id":208716012,"gId":"EscapePod","liId":0,"pos":"4,5,6","rot":"0,0,0,1","wear":0,"grwth":0}|\n{"id":107604566,"gId":"ice","liId":0,"pos":"0,0,0","wear":0}',
+    '{"id":1,"woIds":"208716012","size":35}|\n{"id":2,"woIds":"","size":12}',
+    '{"craftedObjects":765,"totalSaveFileLoad":0,"totalSaveFileTime":0}',
+    '{"stringId":"Message_YouAreAConvict","isRead":true}',
+    '{"stringId":"StoryEvent-FirstRain"}',
+    '{"mode":"Standard","hasPlayedIntro":false}',
+    '{"layerId":"PCLayer1","colorBase":"0.2-0.7-0.2-1","colorCustom":"1-1-1-1","colorBaseLerp":100,"colorCustomLerp":0}',
+]
+old = "".join("\n%s\n@" % s for s in old_sections)
+put("oldsave", "oldest", old)
+put("oldsave", "between", old.replace('"unitBiomassLevel":3.0}', '"unitBiomassLevel":3.0,"terraTokens":5,"allTimeTerraTokens":9,"unlockedGroups":"Pod4x,Jetpack2"}', 1).replace('"unlockedGroups":"Pod4x,BootsSpeed1",', "", 1))
+put("oldsave", "hardcore", old.replace('"mode":"Standard"', '"mode":"Hardcore","planetId":"Selenea"'))
+
+# savelayout: the current layout (the save target's seed) and the same cut after the eighth section.
+put("savelayout", "world", open(os.path.join(root, "save", "world"), "rb").read())
+
+# manifest: the first byte picks the parser (0 manifest, 1 data rules, 2 JSON files, 3 signature and keys).
+put("manifest", "wasm", b"\x00" + b'[plugin]\nid = "hello-stats"\nname = "Hello"\nversion = "0.1.0"\nkind = "wasm"\nentry = "plugin.wasm"\nabi = 1\ncapabilities = ["event.chat", "event.tick", "world.read", "chat.say"]\n[events]\nsubscribe = ["tick"]\n[[command]]\nname = "stats"\n')
+put("manifest", "net", b"\x00" + b'[plugin]\nid = "notify"\nname = "Notify"\nversion = "0.1.0"\nkind = "wasm"\nentry = "plugin.wasm"\nabi = 1\ncapabilities = ["event.chat", "net.http"]\n[events]\nsubscribe = ["chat"]\n[net]\nallow = ["https://discord.com", "https://*.example.com:8443"]\ntimeout_ms = 5000\nmax_response_bytes = 4096\n[[config]]\nkey = "hook"\ndescription = "the webhook path"\n')
+put("manifest", "rules", b"\x01" + b'[vars]\ndiscord = "discord.gg/x"\n[[command]]\nname = "rules"\nreply = "Be kind, {name}. {discord} ({players} on {planet}, {time}) {args} {arg1}"\ncooldown_seconds = 10\n[[on_join]]\nsay = "Welcome {name}"\ntell = "Try !rules {{braces}}"\n[[every]]\nseconds = 60\nsay = "Join {discord}"\n[[when_players]]\nat_least = 3\nset_rules = { speed = { growth = 2.0 } }\notherwise_rules = { speed = { growth = 1.0 } }\n')
+put("manifest", "approved", b"\x02" + json.dumps({"hello": {"enabled": True, "grant": ["chat.say"], "digest": "ab" * 32, "limits": {"fuelPerEvent": 1000}, "approvedAt": 5, "signer": "k"}}).encode())
+put("manifest", "keys", b"\x02" + json.dumps({"keys": [{"id": "d6d9b10b298c53f9fe73f4c9d8570e69", "publicKey": "00" * 32, "name": "Acme", "grant": ["chat.say"], "addedAt": 1}], "revoked": [{"id": "x", "name": "Old", "at": 2}]}).encode())
+put("manifest", "tokens", b"\x02" + json.dumps({"tokens": [{"id": "abcd1234", "name": "relay", "hash": "ab" * 32, "scopes": ["events.read"], "ratePerMinute": 60, "createdAt": 3}]}).encode())
+put("manifest", "sig", b"\x03" + json.dumps({"publicKey": "00" * 32, "signature": "00" * 64, "digest": "ab" * 32}).encode())
+
+# pluginnet: which function (0 pattern, 1 URL, 2 redirect, 3 request, 4 expansion, 5 address), then its input.
+put("pluginnet", "pattern", b"\x00https://*.example.com:8443")
+put("pluginnet", "url", b"\x01https://Discord.com:443/api/webhooks/1/x?wait=true")
+put("pluginnet", "redirect", b"\x02https://a.example/x/y?z=1\n../q")
+put("pluginnet", "expand", b"\x04https://discord.com/${config.hook}?k=${config.a}")
+put("pluginnet", "metadata-azure", bytes([5, 168, 63, 129, 16]))
+put("pluginnet", "metadata-ecs", bytes([5, 169, 254, 170, 2]))
+put("pluginnet", "metadata-aws", bytes([5, 169, 254, 169, 254]))
+put("pluginnet", "v6-mapped", bytes([0x83]) + bytes([0] * 10 + [0xff, 0xff, 169, 254, 169, 254]))
+
+# adminhttp: requests as a client sends them.
+put("adminhttp", "status", b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer fuzz-admin-token-0123456789\r\n\r\n")
+put("adminhttp", "post", b"POST /api/rules HTTP/1.1\r\nAuthorization: Bearer fuzz-admin-token-0123456789\r\nContent-Length: 28\r\n\r\n" + b'{"speed": {"growth": 2.0}}  ')
+put("adminhttp", "page", b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+put("adminhttp", "folded", b"GET /api/status HTTP/1.1\r\nX: a\r\n Authorization: Bearer fuzz-admin-token-0123456789\r\n\r\n")
+put("adminhttp", "bare-lf", b"POST /api/kick HTTP/1.1\nAuthorization: Bearer fuzz-admin-token-0123456789\nContent-Length: 9\n\n{\"id\": 1}\n")
+
+# msg: which message (0 BankInfo ... 11 ChatEvent), then its JSON.
+put("msg", "info", b"\x00" + json.dumps({"version": "0.8.0", "protocol": 5, "format": 7, "tablesFormat": 2, "tag": "v0.8.0", "installed": 5, "from": "build"}).encode())
+put("msg", "hello", b"\x01" + json.dumps({"version": "0.8.0", "protocol": 5, "gameVersion": "2.103"}).encode())
+put("msg", "admin", b"\x07" + json.dumps({"method": "POST", "path": "/api/kick", "body": {"id": 3}}).encode())
+
+# names: world names as typed.
+put("names", "plain", "Standard-1.json")
+put("names", "path", "/home/me/saves/../x.json")
+
+# adminroutes: a request or several (the bytes pick the method, path and body).
+put("adminroutes", "any", bytes(range(1, 90)))
+# toxic, tessera, bincodec, wasmhost, loadsave, twin: bytes of any kind are inputs.
+put("toxic", "keys", struct.pack("<iiiii", 0, 0, 5, 1000, -2147483648))
+put("tessera", "seed", b"\x00" + struct.pack("<i", 12345))
+put("loadsave", "ops", bytes(range(1, 60)))
+put("twin", "ops", bytes(range(1, 120)))
+put("wasmhost", "calls", bytes(range(1, 200)))
+put("bincodec", "world-object", b"\x02" + bytes(range(1, 50)))
+
+# prom: the metrics input of the front (status, plugins, front counters, bank numbers) of a running world.
+put("prom", "running", '{"status":{"state":"running","serverVersion":"0.8.0","gameVersion":"2.103","save":"my \\"base\\"\\\\x","planet":"Prime","held":false,"uptimeSeconds":3600,"players":[{"id":1},{"id":2}],"tick":{"samples":1000,"p50Micros":150,"p99Micros":900,"maxMicros":4000},"busyPercent":12.5,"longestLoopMicros":5000,"fps":200,"process":{"cpuSeconds":12.5},"objects":{"world":33583,"network":1200,"inventories":2246},"traffic":{"bytesIn":100,"bytesOut":2000},"lastSave":{"ok":true,"at":1792000000,"error":null},"backup":{"enabled":true,"lastOkAt":1792000100,"error":null},"s3":{"enabled":true,"uploading":false,"last":{"ok":false,"at":1792000200,"error":"no"}},"banks":{"flips":3,"crashes":1,"frontProtocol":3,"live":{"bank":"a","version":"0.8.0","format":7}},"update":{"available":true}},"plugins":[{"id":"welcome","status":"running","stats":{"calls":10,"faults":0,"restarts":0,"slow":1,"shed":0,"denied":2,"refused":0,"actions":5,"vetoes":0,"fuel":123456}},{"id":"broken","status":"failed","stats":{"calls":3,"faults":3,"restarts":2,"slow":0,"shed":0,"denied":0,"refused":0,"actions":0,"vetoes":0,"fuel":99}}],"front":{"connections":{"ip":1,"steam":1},"memory":{"front":50000000,"bank":80000000,"next_bank":null},"flipsFailed":1,"lastStandMillis":12.5,"crashes":4,"watchdogKills":2,"queue":{"waitingBytes":10,"droppedClients":1,"droppedBytes":17000000}},"bank":{"maxPlayers":16,"saveMillis":250.0,"backupVerify":{"file":"w-1","ok":false,"at":1792000300,"worldObjects":0,"error":"x"}}}')
+put("prom", "stopped", '{"status": {"state": "stopped"}, "plugins": [], "front": {}, "bank": {}}')
+
+# logline: flags (json, journald, level), then message, a secret, a second secret, split by 0xff.
+put("logline", "text", b"\x08client 7: name\rforged\x1b[2J Authorization: Bearer abc123def and pcdst_0123abcd and hunter2secret\xffhunter2secret\xff")
+put("logline", "json", b"\x07a \"quoted\" line\nsecond line with secretvalue\xffsecretvalue\xff")
+# s3resp: a listing (the bucket's XML) and an error body, then keys split by NUL for the round trip.
+put("s3resp", "listing", "<ListBucketResult><IsTruncated>true</IsTruncated><Contents><Key>pcds/world-20261020-170930.json</Key></Contents><Contents><Key>pcds/a&amp;b.json</Key></Contents><NextContinuationToken>tok/en+1</NextContinuationToken></ListBucketResult>")
+put("s3resp", "error", "<Error><Code>AccessDenied</Code><Message>Access &lt;Denied&gt;\x1b[31m</Message></Error>")
+put("s3resp", "keys", b"pcds/world-1.json\x00a&lt;b\x00\x00tok")
+# backup: the world's name, the file names in backups/, the NAME typed.
+put("backup", "names", b"world\xffworld-20261001-000000.json\xffworld-20261003-000000.json\xffworld-2-20261005-000000.json\xffworld-20261001-000000.json.tmp\xff20261003-000000")
+put("backup", "path", b"world\xffworld-20261001-000000.json\xff../x.json")
+# doctor: server.env, rules.json, access.json, the world, approved.json, backup names, then two unit paths.
+put("doctor", "files", b"PCDS_WORLD=world\n\xff{\"save\":{\"backupsKept\":3}}\xff{\"banned\":[\"Ann\"]}\xff{}\xff{}\xffworld-20261001-000000.json\nworld-20261003-000000.json\xff/srv/50%/run\"x\xffunit")

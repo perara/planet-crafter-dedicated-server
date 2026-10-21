@@ -50,6 +50,9 @@ pub const FUEL_PER_BYTE: u64 = 1;
 pub const FUEL_PER_PARSED_BYTE: u64 = 16;
 pub const MAX_TEXT_BYTES: usize = 4096;
 pub const MAX_PATCH_BYTES: usize = 64 << 10;
+/// A query's argument, and an item's name in `give`.
+pub const MAX_QUERY_ARG: usize = 64;
+pub const MAX_ITEM_NAME_BYTES: usize = 64;
 
 /// Bytes a module's bulk memory operation (memory.fill, memory.copy) moves for one unit of fuel
 /// (wasmi's default is 64; see wasm.rs `engine`).
@@ -69,6 +72,29 @@ pub const SAY_CHARS: usize = 500;
 pub const MAX_STATE_BYTES: usize = 1 << 20;
 /// What a query answer or an event payload may hold.
 pub const MAX_PAYLOAD: usize = 1 << 20;
+
+/// `player.give` and `world.tokens`: how many of one item a single call gives, how many gives a
+/// plugin may queue in a second, the most Terra tokens one call adds or takes, and how many such
+/// calls in a second. A backpack that has no room refuses the rest when the action is applied.
+pub const MAX_GIVE_COUNT: u32 = 50;
+pub const GIVES_PER_SECOND: u32 = 10;
+pub const MAX_TOKENS_PER_ACTION: i32 = 10_000;
+pub const TOKEN_CHANGES_PER_SECOND: u32 = 2;
+
+/// `event.timer`: timers one plugin may have, the shortest repeat, the longest delay (seven days),
+/// and how many timer events one plugin gets in a game tick (the rest wait for the next).
+pub const MAX_TIMERS: usize = 16;
+pub const MIN_TIMER_REPEAT_MS: u32 = 100;
+pub const MAX_TIMER_DELAY_MS: u32 = 604_800_000;
+pub const TIMER_EVENTS_PER_TICK: usize = 4;
+
+/// The scan of `Q_NEARBY` goes through every object in the world; each one it looks at costs this
+/// much fuel (about 3 ns), so a world of 50,000 objects costs 400,000 fuel a query.
+pub const FUEL_PER_SCANNED_OBJECT: u64 = 8;
+
+/// Log lines and faults kept for each plugin (`pcds plugin logs`, the dashboard).
+pub const LOG_KEPT: usize = 200;
+pub const FAULTS_KEPT: usize = 20;
 
 /// `net.http` (docs/plugins.md): requests a plugin may have alive (queued or running) and may start
 /// in a second; the threads that serve every plugin and the queue before them; redirects followed.

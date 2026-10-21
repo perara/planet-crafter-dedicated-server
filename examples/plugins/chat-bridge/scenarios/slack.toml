@@ -1,0 +1,40 @@
+name = "slack: text payload and no allowed_mentions"
+
+[config]
+webhook = "123456/secret-token"
+style = "slack"
+send_chat = true
+send_joins = false
+
+[[player]]
+client = 1
+name = "Ann & Bo"
+
+[[step]]
+chat = { client = 1, text = "<!channel> *hi*" }
+
+[[step]]
+note = "a hot update before the first request: the buffer goes through save and load, nothing is lost"
+flip = true
+
+[[step]]
+advance = "1s"
+expect = [
+  { http = true, contains = "POST https://hooks.slack.com/services/${config.webhook} " },
+  { http = true, contains = "{\"text\":\"*Ann &amp; Bo*: ‹!channel› ∗hi∗\"}" },
+  { http = true, contains = "allowed_mentions", count = 0 },
+]
+
+[[step]]
+note = "the request was out when the update came: its answer is lost with the old instance, so the line is sent again (at least once, never lost)"
+flip = true
+
+[[step]]
+advance = "1s"
+expect = [{ http = true, contains = "*Ann &amp; Bo*: ‹!channel›", count = 1 }]
+
+[[step]]
+http_done = { ticket = 2, status = 200, body = "ok" }
+
+[[step]]
+save = true

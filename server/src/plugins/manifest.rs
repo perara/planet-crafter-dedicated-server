@@ -45,19 +45,190 @@ pub struct Net {
     pub max_response_bytes: Option<u32>,
 }
 
+/// One setting a plugin declares: a name, a type, and what values are good. The admin sets it
+/// (`pcds plugin config set`, the admin API, the dashboard); the host checks the value against the
+/// declaration before it is stored. A key that is not a secret is readable by the plugin
+/// (`Host::config`); a secret is only ever put into an HTTP request by the host.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigKey {
     pub key: String,
     #[serde(default)]
     pub description: String,
-    /// A secret is never shown: not by the listing, not by the log, not to the plugin. The default.
-    #[serde(default = "yes")]
-    pub secret: bool,
+    /// A secret is never shown: not by the listing, not by the log, not to the plugin. The default
+    /// for a text (`type = "string"`); a number or a yes/no is never a secret.
+    pub secret: Option<bool>,
+    /// "string" (the default), "int", "float" or "bool".
+    #[serde(rename = "type", default)]
+    pub kind: ConfigType,
+    /// What the plugin sees when the admin set nothing. A secret has none.
+    pub default: Option<toml::Value>,
+    /// Bounds of an "int" or a "float" (inclusive).
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    /// The longest a "string" may be, in characters (200 by default).
+    pub max_len: Option<usize>,
+    /// The only values a "string" or an "int" may have.
+    pub choices: Option<Vec<toml::Value>>,
 }
 
-fn yes() -> bool {
-    true
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfigType {
+    #[default]
+    String,
+    Int,
+    Float,
+    Bool,
+}
+
+impl ConfigType {
+    pub fn name(self) -> &'static str {
+        match self {
+            ConfigType::String => "string",
+            ConfigType::Int => "int",
+            ConfigType::Float => "float",
+            ConfigType::Bool => "bool",
+        }
+    }
+}
+
+impl ConfigKey {
+    pub fn is_secret(&self) -> bool {
+        self.secret.unwrap_or(self.kind == ConfigType::String)
+    }
+
+    /// A value as text in the form the plugin reads it, or why it is not good.
+    pub fn check(&self, value: &str) -> Result<String, String> {
+        let bad = |why: String| Err(format!("{}: {why}", self.key));
+        let text = match self.kind {
+            ConfigType::String => {
+                let most = self.max_len.unwrap_or(if self.is_secret() { 2048 } else { 200 });
+                if value.chars().count() > most {
+                    return bad(format!("{} characters; at most {most}", value.chars().count()));
+                }
+                value.to_string()
+            }
+            ConfigType::Int => match value.trim().parse::<i64>() {
+                Ok(n) => n.to_string(),
+                Err(_) => return bad(format!("{value:?} is not a whole number")),
+            },
+            ConfigType::Float => match value.trim().parse::<f64>() {
+                Ok(n) if n.is_finite() => n.to_string(),
+                _ => return bad(format!("{value:?} is not a number")),
+            },
+            ConfigType::Bool => match value.trim().to_ascii_lowercase().as_str() {
+                "true" | "yes" | "on" | "1" => "true".to_string(),
+                "false" | "no" | "off" | "0" => "false".to_string(),
+                _ => return bad(format!("{value:?} is not yes or no (true or false)")),
+            },
+        };
+        if matches!(self.kind, ConfigType::Int | ConfigType::Float) {
+            let n: f64 = text.parse().unwrap_or(0.0);
+            if let Some(min) = self.min.filter(|m| n < *m) {
+                return bad(format!("{text} is below the least, {min}"));
+            }
+            if let Some(max) = self.max.filter(|m| n > *m) {
+                return bad(format!("{text} is above the most, {max}"));
+            }
+        }
+        if let Some(choices) = &self.choices {
+            let shown: Vec<String> = choices.iter().map(toml_text).collect();
+            if !shown.contains(&text) {
+                return bad(format!("{text:?} is not one of: {}", shown.join(", ")));
+            }
+        }
+        Ok(text)
+    }
+
+    /// The declared default as text, if there is one.
+    pub fn default_text(&self) -> Option<String> {
+        self.default.as_ref().map(toml_text)
+    }
+
+    /// Checks the declaration itself (a default that does not fit its own rules, a bound on a text).
+    fn validate(&self) -> Result<(), String> {
+        let k = &self.key;
+        if self.is_secret() && self.kind != ConfigType::String {
+            return Err(format!("config key {k:?}: only a string can be a secret"));
+        }
+        if self.is_secret() && self.default.is_some() {
+            return Err(format!("config key {k:?}: a secret has no default (the plugin could not be kept from it)"));
+        }
+        if self.kind == ConfigType::String && (self.min.is_some() || self.max.is_some()) {
+            return Err(format!("config key {k:?}: min and max are for an int or a float (a string has max_len)"));
+        }
+        if self.kind != ConfigType::String && self.max_len.is_some() {
+            return Err(format!("config key {k:?}: max_len is for a string"));
+        }
+        if self.min.zip(self.max).is_some_and(|(a, b)| a > b) {
+            return Err(format!("config key {k:?}: min is above max"));
+        }
+        if self.choices.as_ref().is_some_and(|c| c.is_empty() || c.len() > 32) {
+            return Err(format!("config key {k:?}: choices has 1 to 32 values"));
+        }
+        if let Some(d) = &self.default {
+            let text = toml_text(d);
+            let typed = matches!((self.kind, d), (ConfigType::String, toml::Value::String(_)) | (ConfigType::Int, toml::Value::Integer(_)) | (ConfigType::Float, toml::Value::Float(_) | toml::Value::Integer(_)) | (ConfigType::Bool, toml::Value::Boolean(_)));
+            if !typed {
+                return Err(format!("config key {k:?}: the default {text} is not a {}", self.kind.name()));
+            }
+            self.check(&text).map_err(|e| format!("config key {e} (that is the default)"))?;
+        }
+        Ok(())
+    }
+}
+
+/// A TOML value as the text a plugin reads it as.
+pub fn toml_text(v: &toml::Value) -> String {
+    match v {
+        toml::Value::String(s) => s.clone(),
+        toml::Value::Integer(n) => n.to_string(),
+        toml::Value::Float(f) => f.to_string(),
+        toml::Value::Boolean(b) => b.to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// The word of `candidates` that `word` is most likely a misspelling of, if any is close.
+pub fn suggest<'a>(word: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let limit = (word.chars().count() / 3).clamp(1, 3);
+    candidates.into_iter().map(|c| (edit_distance(word, c), c)).filter(|(d, _)| *d <= limit).min_by_key(|(d, _)| *d).map(|(_, c)| c)
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (above + 1).min(row[j] + 1).min(diagonal + usize::from(ca != cb));
+            diagonal = above;
+        }
+    }
+    row[b.len()]
+}
+
+/// " (did you mean `x`?)" for a name that is almost one of `known`, else nothing.
+pub fn hint<'a>(word: &str, known: impl IntoIterator<Item = &'a str>) -> String {
+    did_you_mean(word, known)
+}
+
+fn did_you_mean<'a>(word: &str, known: impl IntoIterator<Item = &'a str>) -> String {
+    suggest(word, known).map(|s| format!(" (did you mean `{s}`?)")).unwrap_or_default()
+}
+
+/// A TOML error with the hint a plain `deny_unknown_fields` message lacks: for an unknown key, the
+/// key it is probably meant to be.
+pub(super) fn improve(error: String) -> String {
+    let Some(start) = error.find("unknown field `") else { return error };
+    let rest = &error[start + "unknown field `".len()..];
+    let Some((word, tail)) = rest.split_once('`') else { return error };
+    let expected: Vec<&str> = tail.split("expected ").nth(1).map(|e| e.trim_start_matches("one of ").split('`').skip(1).step_by(2).collect()).unwrap_or_default();
+    let hint = did_you_mean(word, expected.iter().copied());
+    if hint.is_empty() { error } else { format!("{error}\nunknown key `{word}`{hint}") }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -127,6 +298,25 @@ pub struct Command {
     pub name: String,
     #[serde(default)]
     pub help: String,
+    /// How it is typed, for the reply to a player who gets it wrong: `<player> [reason]`. One line.
+    #[serde(default)]
+    pub usage: String,
+    /// The fewest and the most arguments. The host answers a player who gives fewer or more with the
+    /// usage line and does not call the plugin.
+    pub min_args: Option<u32>,
+    pub max_args: Option<u32>,
+    /// Who may use it: everyone (the default) or the server's operators (`access.operators`). The
+    /// host answers anyone else and does not call the plugin.
+    #[serde(default)]
+    pub permission: Permission,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Permission {
+    #[default]
+    Everyone,
+    Operator,
 }
 
 pub fn valid_id(id: &str) -> bool {
@@ -145,7 +335,7 @@ pub fn version_triple(v: &str) -> Option<(u64, u64, u64)> {
 impl Manifest {
     pub fn parse(text: &str) -> Result<Manifest, String> {
         // A TOML error quotes the line it stumbled on: whatever the author put there.
-        let m: Manifest = toml::from_str(text).map_err(|e| super::clean(&e.to_string()))?;
+        let m: Manifest = toml::from_str(text).map_err(|e| super::clean(&improve(e.to_string())))?;
         m.validate()?;
         Ok(m)
     }
@@ -177,6 +367,13 @@ impl Manifest {
         }
         for c in &self.commands {
             line("[[command]] help", &c.help, 200)?;
+            line("[[command]] usage", &c.usage, 100)?;
+            if c.min_args.zip(c.max_args).is_some_and(|(a, b)| a > b) {
+                return Err(format!("command {:?}: min_args is above max_args", c.name));
+            }
+            if c.min_args.is_some_and(|n| n > 32) || c.max_args.is_some_and(|n| n > 32) {
+                return Err(format!("command {:?}: min_args and max_args are at most 32", c.name));
+            }
         }
         for k in &self.config {
             line("[[config]] description", &k.description, 200)?;
@@ -194,7 +391,7 @@ impl Manifest {
         }
         for c in &p.capabilities {
             if !caps::known(c) {
-                return Err(format!("plugin.capabilities: {c:?} is not a capability (known: {})", caps::ALL.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")));
+                return Err(format!("plugin.capabilities: {c:?} is not a capability{} (known: {})", did_you_mean(c, caps::ALL.iter().map(|(n, _)| *n)), caps::ALL.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")));
             }
         }
         if p.capabilities.iter().collect::<BTreeSet<_>>().len() != p.capabilities.len() {
@@ -202,7 +399,7 @@ impl Manifest {
         }
         let wants = |cap: &str| p.capabilities.iter().any(|c| c == cap);
         for name in &self.events.subscribe {
-            let kind = Kind::from_name(name).filter(|k| *k != Kind::Command && *k != Kind::HttpDone).ok_or_else(|| format!("events.subscribe: {name:?} is not an event to subscribe to (known: {}; commands come from [[command]], and http_done is delivered for the requests the plugin made)", names_without_command()))?;
+            let kind = Kind::from_name(name).filter(|k| !matches!(k, Kind::Command | Kind::HttpDone | Kind::Timer)).ok_or_else(|| format!("events.subscribe: {name:?} is not an event to subscribe to{} (known: {}; commands come from [[command]], http_done is delivered for the requests the plugin made, timer for the timers it set)", did_you_mean(name, Kind::ALL.iter().map(|k| k.name())), names_without_command()))?;
             if !wants(caps::for_event(kind)) {
                 return Err(format!("events.subscribe has {name:?}, which needs the capability {}: add it to plugin.capabilities", caps::for_event(kind)));
             }
@@ -266,8 +463,8 @@ impl Manifest {
                 return Err(format!("net.max_response_bytes: 1 to {}", crate::plugins::limits::MAX_HTTP_RESPONSE));
             }
         }
-        if self.config.len() > 8 {
-            return Err("at most 8 [[config]] keys".into());
+        if self.config.len() > 16 {
+            return Err("at most 16 [[config]] keys".into());
         }
         let mut seen = BTreeSet::new();
         for c in &self.config {
@@ -278,6 +475,7 @@ impl Manifest {
             if !seen.insert(&c.key) {
                 return Err(format!("config key {:?} is declared twice", c.key));
             }
+            c.validate()?;
         }
         Ok(())
     }
@@ -297,7 +495,7 @@ impl Manifest {
 }
 
 fn names_without_command() -> String {
-    Kind::ALL.iter().filter(|k| **k != Kind::Command && **k != Kind::HttpDone).map(|k| k.name()).collect::<Vec<_>>().join(", ")
+    Kind::ALL.iter().filter(|k| !matches!(k, Kind::Command | Kind::HttpDone | Kind::Timer)).map(|k| k.name()).collect::<Vec<_>>().join(", ")
 }
 
 #[cfg(test)]
@@ -372,7 +570,7 @@ mod tests {
     fn net_access_is_declared_with_its_hosts_and_its_keys() {
         let m = Manifest::parse(NET).unwrap();
         assert_eq!(m.net.as_ref().unwrap().allow.len(), 2);
-        assert!(m.config[0].secret, "a key is a secret unless the manifest says otherwise");
+        assert!(m.config[0].is_secret(), "a key is a secret unless the manifest says otherwise");
         let bad = |from: &str, to: &str| Manifest::parse(&NET.replace(from, to)).unwrap_err();
         assert!(bad("\"event.chat\", \"net.http\"", "\"event.chat\"").contains("[net] needs the capability net.http"));
         assert!(bad("\n        [net]\n", "\n        [nnet]\n").contains("unknown field"));
@@ -409,3 +607,7 @@ mod tests {
         assert_eq!(version_triple("1.2.3.4"), None);
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../../fuzz/targets/manifest.rs"]
+pub mod fuzz;

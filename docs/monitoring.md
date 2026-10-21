@@ -139,6 +139,13 @@ the world is stopped, and `pcds_world_running` is 0.
 | `pcds_plugin_actions_total` | counter | `plugin` | Actions the plugin did in the world (chat, kicks, rule changes). |
 | `pcds_plugin_vetoes_total` | counter | `plugin` | Events the plugin vetoed. |
 | `pcds_plugin_fuel_total` | counter | `plugin` | WebAssembly fuel the plugin has spent. |
+| `pcds_plugin_event_calls_total` | counter | `event`, `plugin` | Calls of the plugin, by kind of event. |
+| `pcds_plugin_event_fuel_total` | counter | `event`, `plugin` | WebAssembly fuel the plugin has spent, by kind of event. |
+| `pcds_plugin_event_fuel_max` | gauge | `event`, `plugin` | The most fuel one call of this kind has used (compare with pcds_plugin_fuel_budget). |
+| `pcds_plugin_http_requests_total` | counter | `plugin` | HTTP requests the plugin has made (net.http). |
+| `pcds_plugin_http_failed_total` | counter | `plugin` | Requests that got no answer (refused, timed out, connection failed). |
+| `pcds_plugin_last_fault_timestamp_seconds` | gauge | `plugin` | When the plugin last faulted, seconds since 1970 (absent if it never did). |
+| `pcds_plugin_fuel_budget` | gauge | `plugin` | The fuel one call of the plugin may use. |
 | `pcds_plugin_running` | gauge | `plugin`, `state` | 1 if the plugin runs, 0 in any other state. |
 <!-- /metrics -->
 

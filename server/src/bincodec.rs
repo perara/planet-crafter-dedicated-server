@@ -835,34 +835,14 @@ mod tests {
     #[ignore]
     fn speed() {
         use crate::model::WorldObject;
-        let wo = |i: i32| WorldObject {
-            id: i,
-            group: 17,
-            position: [i as f32, 2.0, 3.0],
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            color: [0.0; 4],
-            text: String::new(),
-            linked_groups: None,
-            linked_inventory: 0,
-            secondary_inventories: vec![],
-            panels: None,
-            growth: 0.0,
-            setting: 0,
-            trait_type: 0,
-            trait_value: 0,
-            hunger: 0.0,
-            pet_time: crate::clock::GameTime::ZERO,
-            count: [0, 0],
-            linked_wo: 0,
-            dont_save: false,
-            lock_time: crate::clock::GameTime::ZERO,
-            energy: 1.0,
-            from_db: false,
-            planet: 5,
-            planet_linked: 0,
-            unit_generation: [0.5; 8],
-            unit_multiplier: [0.0; 8],
-            net: Some(i as u64),
+        let wo = |i: i32| {
+            let mut w = WorldObject::bare(i, 17);
+            w.position = [i as f32, 2.0, 3.0];
+            w.rotation = [0.0, 0.0, 0.0, 1.0];
+            w.planet = 5;
+            w.unit_generation = [0.5; 8];
+            w.net = Some(i as u64);
+            w
         };
         let items: Vec<Option<(i32, WorldObject)>> = (0..100_000).map(|i| Some((i, wo(i)))).collect();
         // This thread's CPU time: the host is shared, wall time is not the code's.
@@ -884,3 +864,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(any(fuzzing, pcds_corpus))]
+#[path = "../fuzz/targets/bincodec.rs"]
+pub mod fuzz;

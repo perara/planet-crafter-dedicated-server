@@ -138,7 +138,7 @@ pub fn world_restore(save_path: &str, backup: &str, name: &str) -> Result<Value,
         return Err(format!("world {name} exists: pick another name"));
     }
     // A backup this server cannot read (an old layout, cut short) is not made a world.
-    crate::save::SaveFile::load(&from.to_string_lossy()).map_err(|e| format!("backup {backup}: {e}"))?;
+    crate::save::SaveFile::check_file(&from.to_string_lossy()).map_err(|e| format!("backup {backup}: {e}"))?;
     let text = std::fs::read(&from).map_err(|e| format!("{}: {e}", from.display()))?;
     crate::save::write_atomic(&to.to_string_lossy(), &text).map_err(|e| format!("{}: {e}", to.display()))?;
     info!("backup {backup} restored as world {name} (admin)");

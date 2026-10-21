@@ -1,0 +1,131 @@
+name = "playtime: a board of 10 is full; the one with the least time who is away is dropped"
+
+[config]
+board_size = 10
+
+[[player]]
+client = 1
+name = "Ann"
+
+
+[[step]]
+join = { client = 2, name = "V2" }
+
+[[step]]
+advance = "121s"
+
+[[step]]
+leave = 2
+
+[[step]]
+join = { client = 3, name = "V3" }
+
+[[step]]
+advance = "181s"
+
+[[step]]
+leave = 3
+
+[[step]]
+join = { client = 4, name = "V4" }
+
+[[step]]
+advance = "241s"
+
+[[step]]
+leave = 4
+
+[[step]]
+join = { client = 5, name = "V5" }
+
+[[step]]
+advance = "301s"
+
+[[step]]
+leave = 5
+
+[[step]]
+join = { client = 6, name = "V6" }
+
+[[step]]
+advance = "361s"
+
+[[step]]
+leave = 6
+
+[[step]]
+join = { client = 7, name = "V7" }
+
+[[step]]
+advance = "421s"
+
+[[step]]
+leave = 7
+
+[[step]]
+join = { client = 8, name = "V8" }
+
+[[step]]
+advance = "481s"
+
+[[step]]
+leave = 8
+
+[[step]]
+join = { client = 9, name = "V9" }
+
+[[step]]
+advance = "541s"
+
+[[step]]
+leave = 9
+
+[[step]]
+join = { client = 10, name = "V10" }
+
+[[step]]
+advance = "601s"
+
+[[step]]
+leave = 10
+
+[[step]]
+join = { client = 11, name = "V11" }
+
+[[step]]
+advance = "661s"
+
+[[step]]
+leave = 11
+
+[[step]]
+join = { client = 12, name = "V12" }
+
+[[step]]
+advance = "721s"
+
+[[step]]
+leave = 12
+
+[[step]]
+join = { client = 13, name = "V13" }
+
+[[step]]
+advance = "781s"
+
+[[step]]
+leave = 13
+
+[[step]]
+note = "twelve visitors came, the board holds ten (Ann is one of them, she is online): the two with the least time are gone"
+chat = { client = 1, text = "!top 10" }
+expect = [
+  { tell = 1, equals = "1. Ann 1h 30m" },
+  { tell = 1, equals = "2. V13 0h 13m" },
+  { tell = 1, equals = "10. V5 0h 05m" },
+  { tell = 1, count = 10 },
+]
+
+[[step]]
+chat = { client = 1, text = "!playtime V2" }
+expect = [{ tell = 1, equals = "No player named V2 is online or on the board." }]

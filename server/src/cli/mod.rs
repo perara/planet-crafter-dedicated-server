@@ -5,9 +5,12 @@
 mod api;
 mod backup;
 mod doctor;
+#[cfg(any(fuzzing, pcds_corpus))]
+pub use {backup::fuzz as fuzz_backup, doctor::fuzz as fuzz_doctor};
 mod env;
 mod extract;
 mod plugin;
+mod plugin_dev;
 mod setup;
 mod steam;
 mod systemd;
