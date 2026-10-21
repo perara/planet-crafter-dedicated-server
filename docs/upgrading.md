@@ -1,6 +1,7 @@
 # Upgrading to 0.8 (from 0.6.x or 0.7.0)
 
-A step-by-step runbook for moving a running server to this release, and for going back. It was
+A step-by-step runbook for moving a running server to this release, and for going back. (Written and
+rehearsed with 0.8.0; the steps are the same for 0.8.1, which is what the commands name.) It was
 rehearsed for real: the published 0.6.2 and 0.7.0 releases were installed, played on by three
 scripted players, and upgraded and rolled back with `pcds upgrade` on a systemd user unit and in
 Docker (numbers below). The general rules of upgrading (banks, hot updates, `update.auto`) are in
@@ -8,7 +9,7 @@ the README's [Upgrading](../README.md#upgrading) and [Updating in Docker](../REA
 how a hot update works inside is in [hot-update.md](hot-update.md).
 
 **The short version.** Back up. Take the old `PCDS_*` lines out of `server.env` (this release
-refuses to start with them). Run `pcds upgrade v0.8.0 --restart`. Check `pcds status`. Players are
+refuses to start with them). Run `pcds upgrade v0.8.1 --restart`. Check `pcds status`. Players are
 disconnected for about a second and join again. If anything is wrong, `pcds upgrade --rollback --restart`.
 
 ## What players see
@@ -95,12 +96,12 @@ Check the file once more: nothing it prints should be left.
 ## 3. Upgrade
 
 ```bash
-pcds upgrade v0.8.0 --restart       # name the tag; without it you get the latest release
+pcds upgrade v0.8.1 --restart       # name the tag; without it you get the latest release
 ```
 
 What it prints, and when the server is down:
 
-1. `downloading v0.8.0 into bank b` ... `installed in bank b (sha256 checked)`: the server keeps playing.
+1. `downloading v0.8.1 into bank b` ... `installed in bank b (sha256 checked)`: the server keeps playing.
 2. `reading the game tables ...`: this release reads another tables format, so they are read again
    from your game folder (it must be installed on this machine; Docker: mounted at `/game`). The
    server keeps playing; this took 10 to 16 seconds.
@@ -131,7 +132,7 @@ bank had the world running 0.3 s after it started.
 pcds status           # both banks listed; the new one marked [active, running]; "world ... on <planet>"
 pcds players          # who is back
 pcds code             # the new invite code (Steam), if you use one
-pcds logs             # nothing red; "bank b (pcds 0.8.0) running the world"
+pcds logs             # nothing red; "bank b (pcds 0.8.1) running the world"
 ```
 
 Look at the world too: join the game, or `pcds api GET /api/status` and compare `objects` with what
@@ -152,7 +153,7 @@ it (the same one second of downtime) after reading the game tables once more in 
 0.6 and 0.7 do not share with 0.8, so use `--restart`. The world file written by 0.8 loaded in
 0.6.2 (the bench world) and in 0.7.0 (the late-game world with its three planets).
 
-To try again after a rollback, `pcds upgrade v0.8.0 --restart` installs it again (no need to remove anything).
+To try again after a rollback, `pcds upgrade v0.8.1 --restart` installs it again (no need to remove anything).
 
 **If the server does not come back**, whichever way you went:
 
@@ -172,7 +173,7 @@ The same two steps apply, in the folder you mount at `/data`:
    in the environment they do not stop the start, they are **ignored**, with one line in the container log
    (`ignored in the environment: PCDS_AUTOSAVE is the rule save.autosaveMinutes now`). Your 0.6 values would
    silently be the defaults.
-3. `docker compose pull && docker compose up -d` (or `docker compose exec pcds pcds upgrade v0.8.0 --restart`
+3. `docker compose pull && docker compose up -d` (or `docker compose exec pcds pcds upgrade v0.8.1 --restart`
    to install the release into `/data/bin` and restart in place: the container is not recreated).
    A hot update without `--restart` is refused for this jump, as above.
 4. Check: `docker compose exec pcds pcds status` and `docker compose logs --tail 30 pcds`.
@@ -226,7 +227,7 @@ a save in the game's old layout (2022, one planet) is refused with a message (`p
 
 | You are on | Go to 0.8 with | Players |
 |---|---|---|
-| 0.6.x, 0.7.0 | `pcds upgrade v0.8.0 --restart` | disconnected, about a second |
+| 0.6.x, 0.7.0 | `pcds upgrade v0.8.1 --restart` | disconnected, about a second |
 | 0.8 and later, same formats | `pcds upgrade` (or `update.auto`) | stay connected |
 | 0.8 back to 0.6.x or 0.7.0 | `pcds upgrade --rollback --restart` | disconnected, about a second |
 

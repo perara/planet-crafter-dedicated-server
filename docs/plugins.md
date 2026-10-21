@@ -833,7 +833,7 @@ Three numbers, and what each promises:
 |---|---|---|
 | plugin ABI | `1.3` (`pcds_abi` in the module, `abi = 1` in the manifest) | the **major** changes. The minor only adds |
 | the crate `pcds-plugin-api` | `0.2.0` | any `0.x` change may change a Rust signature; its minor follows the ABI's additions (ABI 1.3 is crate 0.2). From the day the ABI major is 2, the crate's major is 2 |
-| the server | `0.8.0` | never by itself: a plugin states the oldest server it needs (`min_server`) and the ABI it speaks |
+| the server | `0.8.1` | never by itself: a plugin states the oldest server it needs (`min_server`) and the ABI it speaks |
 
 *A minor never breaks a plugin.* A server speaking 1.3 runs modules built for 1.0, 1.1, 1.2 and 1.3 (tests load one of each,
 and the new fields at the end of events are ignored by the old code). A module built for a newer minor than the server's is

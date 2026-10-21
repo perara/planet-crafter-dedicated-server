@@ -13,7 +13,7 @@ body:
     attributes:
       label: Server version
       description: Output of `pcds --version` (in Docker, `docker exec pcds pcds --version`).
-      placeholder: pcds 0.8.0
+      placeholder: pcds 0.8.1
     validations:
       required: true
   - type: dropdown
