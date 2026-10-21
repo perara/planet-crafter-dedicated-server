@@ -1,6 +1,10 @@
 """Probe scripts for a late-game save, made from the objects the save really has.
 
-    python3 gen.py DATA_DIR SAVE.json OUT_DIR
+    python3 gen.py DATA_DIR SAVE.json OUT_DIR [PLANET]
+
+PLANET (Prime, Selenea, Aqualis, Humble...) is the planet whose objects the scripts use: by default the planet of the
+save's host record, and the players stand where that host stands (on Prime, at the sweep's STAND). A late-game world
+saved on a DLC planet is therefore scripted on that planet (lg_travel is for Prime and is not written elsewhere).
 
 Writes OUT_DIR/lg_*.json, for `pcds probe` (README "Parity with the game") against the real game
 host and this server, both started from the same save (sweep.sh does that; the save needs a host
@@ -27,6 +31,8 @@ sys.path.insert(0, os.path.dirname(HERE))
 import sweep  # noqa: E402  (the sweep's script builder and table reader)
 
 PRIME_HASH = -1140328421
+PLANET = 'Prime'  # set in main(): the planet the world is on (argv[4] or the host record's planetId)
+STAND = None      # where the scripts' players stand: Prime's STAND, else the host record's position
 INV = sweep.INV
 WOH = sweep.WOH
 
@@ -41,6 +47,7 @@ class World:
     def __init__(self, path, tables):
         s = load_save(path)
         self.t = tables
+        self.planet_hash = {p['id']: p['hash'] for p in json.load(open(f'{tables.data_dir}/netdata.json'))['planets']}[PLANET]
         self.objects = s[3]
         self.inventories = {i['id']: i for i in s[4]}
         self.by_group = {}
@@ -54,7 +61,7 @@ class World:
         return [int(w) for w in str(inv['woIds']).split(',') if w] if inv else []
 
     def on_prime(self, o):
-        return 'pos' in o and o.get('planet') == PRIME_HASH
+        return 'pos' in o and o.get('planet') == self.planet_hash
 
     def pick(self, group, n=1, with_content=None):
         """Up to n objects of a group standing on Prime, the ones with something inside first
@@ -77,7 +84,7 @@ def tag(g, what):
 
 
 def script_idle(player_id):
-    s = sweep.Script('lg_idle5', player_id)
+    s = sweep.Script('lg_idle5', player_id, STAND)
     s.wait(300000)
     return s
 
@@ -108,7 +115,7 @@ def read_pass(s, w, picks, label):
 
 
 def script_real(w, player_id):
-    s = sweep.Script('lg_real', player_id)
+    s = sweep.Script('lg_real', player_id, STAND)
     sweep.prelude(s)
     groups = present_buildings(w)
     picks = [(g, o) for g in groups for o in w.pick(g, 1, True)]
@@ -122,7 +129,7 @@ def script_real(w, player_id):
         for b in w.t.behaviour(g, 'SettingProxy'):
             s.call('SettingProxy.SetSettingServerRpc', [tgt, b], [1], tag(g, 'setting'))
         for b in w.t.behaviour(g, 'LinkedPlanetProxy'):
-            s.call('LinkedPlanetProxy.SetLinkedPlanetServerRpc', [tgt, b], [f'#{sweep.PRIME}'], tag(g, 'linked planet'))
+            s.call('LinkedPlanetProxy.SetLinkedPlanetServerRpc', [tgt, b], [f'#{PLANET}'], tag(g, 'linked planet'))
         for b in w.t.behaviour(g, 'ActionnableInteractiveProxy'):
             s.call('ActionnableInteractiveProxy.BroadcastToAllClientsServerRpc', [tgt, b], [], tag(g, 'interactive state'))
         cp = w.t.behaviour(g, 'ConstructibleProxy')
@@ -150,7 +157,7 @@ CONTAINERS = ['Container1', 'Container2', 'Container3', 'Locker1', 'Vault1', 'Fr
 
 
 def script_inventories(w, player_id):
-    s = sweep.Script('lg_inventories', player_id)
+    s = sweep.Script('lg_inventories', player_id, STAND)
     sweep.prelude(s)
     for g in CONTAINERS:
         for o in w.pick(g, 2, True):
@@ -171,7 +178,7 @@ def script_inventories(w, player_id):
         s.wait(300)
     # by group, as the game finds the first inventory of a group (per planet)
     for g in CONTAINERS:
-        s.call(f'{INV}.GetInventoryFromFirstWorldObjectOfGroupServerRpc', INV, [f'#{g}', f'#{sweep.PRIME}'], tag(g, 'first of the group'))
+        s.call(f'{INV}.GetInventoryFromFirstWorldObjectOfGroupServerRpc', INV, [f'#{g}', f'#{PLANET}'], tag(g, 'first of the group'))
     s.wait(30000)
     sweep.retrieve(s, '$bin', 'player|final inventory')
     return s
@@ -179,7 +186,7 @@ def script_inventories(w, player_id):
 
 def script_logistics(w, player_id):
     """Demand on one real container and supply on another, the drones left to carry between them."""
-    s = sweep.Script('lg_logistics', player_id)
+    s = sweep.Script('lg_logistics', player_id, STAND)
     sweep.prelude(s)
     s.call('LogisticManager.RetrieveDronesCountServerRpc', 'LogisticManager', [], 'logistics|drones before')
     s.call('LogisticManager.RetrieveSupplyAndDemandGroupsServerRpc', 'LogisticManager', [], 'logistics|groups before')
@@ -203,7 +210,7 @@ def script_logistics(w, player_id):
 
 
 def script_rockets(w, player_id):
-    s = sweep.Script('lg_rockets', player_id)
+    s = sweep.Script('lg_rockets', player_id, STAND)
     sweep.prelude(s)
     for g in ('LaunchPlatform', 'TradePlatform1', 'InterplanetaryExchangePlatform1', 'DeparturePlatform', 'PlanetaryDeliveryDepot1'):
         for o in w.pick(g, 1, True):
@@ -263,7 +270,7 @@ def script_travel(w, player_id):
 def script_pair(w, ids):
     """Two players at one real container: the second watches it while the first changes it and takes
     from it, then takes the rest; and both sort a second one."""
-    a, b = sweep.Script('lg_pair.A', ids[0]), sweep.Script('lg_pair.B', ids[1])
+    a, b = sweep.Script('lg_pair.A', ids[0], STAND), sweep.Script('lg_pair.B', ids[1], STAND)
     boxes = [o for o in w.pick('Container3', 400, True) if o.get('liId') and len(w.content(o)) >= 3][:2]
     c1, c2 = boxes
     g = 'Container3'
@@ -290,14 +297,27 @@ def script_pair(w, ids):
 
 
 def main():
+    global PLANET, STAND
     data_dir, save, out = sys.argv[1:4]
+    if len(sys.argv) > 4:
+        PLANET = sys.argv[4]
+    else:  # the planet of the save's host record
+        host = next(p for p in load_save(save)[2] if p.get('host'))
+        PLANET = host['planetId']
+    STAND = list(sweep.STAND) if PLANET == 'Prime' else None
+    if STAND is None:
+        host = next(p for p in load_save(save)[2] if p.get('host') and p['planetId'] == PLANET)
+        STAND = [float(v) for v in host['playerPosition'].split(',')]
     t = sweep.Tables(data_dir)
     t.data_dir = data_dir
     w = World(save, t)
     os.makedirs(out, exist_ok=True)
     scripts = [script_idle(76561197999990100), script_real(w, 76561197999990101), script_inventories(w, 76561197999990102),
-               script_logistics(w, 76561197999990103), script_rockets(w, 76561197999990104), script_travel(w, 76561197999990107)]
-    names = ['lg_idle5', 'lg_real', 'lg_inventories', 'lg_logistics', 'lg_rockets', 'lg_travel']
+               script_logistics(w, 76561197999990103), script_rockets(w, 76561197999990104)]
+    names = ['lg_idle5', 'lg_real', 'lg_inventories', 'lg_logistics', 'lg_rockets']
+    if PLANET == 'Prime':  # lg_travel is Prime -> Selenea -> Aqualis -> Prime
+        scripts.append(script_travel(w, 76561197999990107))
+        names.append('lg_travel')
     for name, s in zip(names, scripts):
         json.dump(s.json(), open(f'{out}/{name}.json', 'w'))
         print(f'{name}: {len(s.steps)} steps, {len(s.rows)} rows')
