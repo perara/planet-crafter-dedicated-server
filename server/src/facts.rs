@@ -13,6 +13,9 @@ use crate::rpcspec::Spec;
 /// Groups the code looks up by name outside the tests (the space multipliers, which it looks up
 /// by the ids of rockets::SPACE_MULTIPLIERS, are checked too).
 pub const REQUIRED_GROUPS: &[&str] = &[
+    // rockets/server_flight.rs: the launch cue and moving-container visual
+    "Flare",
+    "Iron",
     // animals/spawn.rs: the animals' DNA, and the traits on it
     "DNASequence",
     crate::genetics::TRAIT_GROUP,
