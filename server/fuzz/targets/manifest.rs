@@ -55,18 +55,18 @@ pub fn run(data: &[u8]) {
             let mut d = crate::plugins::data::Data::new(rules, Ctx::new("t", Grant::from_names(["chat.say", "world.read", "rules.write"])));
             let world = Fixed(3);
             let mut events: Vec<Event<'_>> = vec![
-                Event::PlayerJoin { client: 1, name: "Ann", steam_id: "1" },
-                Event::PlayerLeave { client: 1, name: "Ann" },
-                Event::Tick { game_ms: 1000, tick: 1, players: 1, since_ms: 5 },
-                Event::Tick { game_ms: 100_000_000, tick: 2, players: 9, since_ms: 5 },
-                Event::Tick { game_ms: 4_000_000_000_000, tick: 3, players: 0, since_ms: 5 },
+                Event::PlayerJoin { client: 1, name: "Ann", steam_id: "1", player_id: 1 },
+                Event::PlayerLeave { client: 1, name: "Ann", player_id: 1 },
+                Event::Tick { game_ms: 1000, tick: 1, players: 1, since_ms: 5, unix_ms: 1_700_000_000_000 },
+                Event::Tick { game_ms: 100_000_000, tick: 2, players: 9, since_ms: 5, unix_ms: 1_700_000_000_000 },
+                Event::Tick { game_ms: 4_000_000_000_000, tick: 3, players: 0, since_ms: 5, unix_ms: 1_700_000_000_000 },
             ];
             for n in &names {
                 let command: &'static str = Box::leak(n.clone().into_boxed_str());
-                events.push(Event::Command { client: 2, name: "Bo", command, args: vec!["{name}", "}", "{"], text: "!x" });
+                events.push(Event::Command { client: 2, name: "Bo", command, args: vec!["{name}", "}", "{"], text: "!x", player_id: 2 });
             }
             for e in &events {
-                d.ctx().begin(&world);
+                d.ctx().begin(&world, 0);
                 let _ = d.event(e, &[]);
                 for a in d.ctx().end() {
                     if let crate::plugins::ctx::Action::Say(t) | crate::plugins::ctx::Action::Tell(_, t) = &a {

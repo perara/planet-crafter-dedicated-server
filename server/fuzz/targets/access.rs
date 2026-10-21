@@ -12,7 +12,7 @@ pub fn run(data: &[u8]) {
         let _ = access.name_allowed(rule_text, Some(76561198000000001));
         let _ = access.name_allowed(rule_text, None);
         let _ = access.steam_id_banned(76561198000000001);
-        let lists = Lists { allowed_ips: access.lists.allowed_ips.clone(), whitelist: access.lists.whitelist.clone(), banned_names: access.lists.banned_names.clone(), banned_ips: access.lists.banned_ips.clone() };
+        let lists = Lists { allowed_ips: access.lists.allowed_ips.clone(), whitelist: access.lists.whitelist.clone(), banned_names: access.lists.banned_names.clone(), banned_ips: access.lists.banned_ips.clone(), operators: access.lists.operators.clone() };
         let _ = access.set(lists);
         let _ = access.ban(rule_text, Some(76561198000000002), Some(ip));
         let _ = access.unban(rule_text);

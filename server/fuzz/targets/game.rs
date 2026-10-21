@@ -201,7 +201,7 @@ fn pass(g: &mut Game, n: usize, dt: f64) {
 
 fn finite_world(g: &Game) -> Option<String> {
     let bad = |v: &[f32]| v.iter().any(|x| !x.is_finite());
-    g.net.objects.values().find(|o| bad(&o.position) || bad(&o.rotation)).map(|o| format!("network object {} ({:?}) at {:?} {:?}", o.id, o.behaviours.iter().map(|b| b.class.as_str()).collect::<Vec<_>>(), o.position, o.rotation))
+    g.net.objects.values().find(|o| bad(&o.position) || bad(&o.rotation)).map(|o| format!("network object {} ({:?}) at {:?} {:?}", o.id, o.behaviours().map(|b| b.class.as_str()).collect::<Vec<_>>(), o.position, o.rotation))
         .or_else(|| g.wos.values().find(|w| bad(&w.position) || bad(&w.rotation)).map(|w| format!("world object {} at {:?} {:?}", w.id, w.position, w.rotation)))
 }
 

@@ -85,7 +85,7 @@ pub fn run(data: &[u8]) {
                 }
             }
             let mut game = world(t, crate::game::fuzz::save());
-            super::plugins_glue::attach(&mut game, super::plugins_glue::prepare(&save_path));
+            super::plugins_glue::attach(&mut game, super::plugins_glue::prepare(&save_path), false);
             *g = Some((game, 0));
         }
         let (game, n) = g.as_mut().unwrap();

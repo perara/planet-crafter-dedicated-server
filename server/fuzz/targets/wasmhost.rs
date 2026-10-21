@@ -131,10 +131,10 @@ pub fn run(data: &[u8]) {
     let started = Instant::now();
     let Ok(mut w) = Wasm::new(engine, &module, ctx, limits, gauge.clone()) else { return };
     let _ = w.start(Some(&crate::plugins::state::Blob { version: 3, bytes: data.iter().take(2048).copied().collect() }));
-    for ev in [Event::Chat { client: 1, name: "Ann", text: "hi" }, Event::Tick { game_ms: 5, tick: 1, players: 1, since_ms: 5 }] {
+    for ev in [Event::Chat { client: 1, name: "Ann", text: "hi", player_id: 1 }, Event::Tick { game_ms: 5, tick: 1, players: 1, since_ms: 5, unix_ms: 1_700_000_000_000 }] {
         let mut out = Writer::new();
         ev.encode(&mut out);
-        w.ctx().begin(&Still);
+        w.ctx().begin(&Still, 0);
         let r = w.event(&ev, &out.0);
         let actions = w.ctx().end();
         assert!(actions.len() <= crate::plugins::limits::ACTIONS_PER_CALL);
@@ -144,6 +144,8 @@ pub fn run(data: &[u8]) {
                 Action::Teleport(_, p) => assert!(p.iter().all(|v| v.is_finite() && v.abs() <= 100_000.0)),
                 Action::Http(f) => assert!(f.url.starts_with("https://discord.com") || f.url.starts_with("http://127.0.0.1:9")),
                 Action::RulesPatch(v) => assert!(v.is_object()),
+                // Bounded and checked by the host (ctx.rs); the fuzz asks only that they come out.
+                Action::Give(..) | Action::Tokens(_) => {}
             }
         }
         if let Ok((_, cost)) = r {
