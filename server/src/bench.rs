@@ -245,6 +245,12 @@ fn act(g: &mut Game, client: u64, player: u64, p: &mut Player, seq: u64) {
     p.rng ^= p.rng << 13;
     p.rng ^= p.rng >> 7;
     p.rng ^= p.rng << 17;
+    if let Ok(only) = std::env::var("PCDS_SOAK_ONLY") {
+        let kind = match p.rng % 100 { 0..=24 => "item", 25..=39 => "drop", 40..=54 => "pick", 55..=59 => "build", 60..=64 => "eat", 65..=69 => "drink", 70..=79 => "mine", 80..=89 => "chat", _ => "sort" };
+        if !only.split(',').any(|k| k == kind) {
+            return;
+        }
+    }
     match p.rng % 100 {
         0..=24 if items.len() < 10 => call(g, client, player, "InventoriesHandler.AddNewItemToInventoryServerRpc", &[json!(iron), json!(inventory)]),
         0..=24 => call(g, client, player, "InventoriesHandler.RemoveItemFromInventoryServerRpc", &[json!(items[0]), json!(inventory), json!(true)]),
@@ -684,13 +690,14 @@ fn soak_growth() {
     let Some(mut e) = env() else { return };
     let var = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(d);
     let (seconds, step, report) = (var("PCDS_SOAK_SECONDS", 3600.0), var("PCDS_SOAK_STEP", 0.05), var("PCDS_SOAK_REPORT", 900.0));
-    e.players = 2;
+    e.players = var("PCDS_SOAK_PLAYERS", 2.0) as u64;
     let mut g = load(&e);
     g.sim_time = Some(0.0);
     let objects: Vec<u64> = (1..=e.players).map(|c| join(&mut g, c, &format!("Soak{c}"))).collect();
     let mut players: Vec<Player> = (1..=e.players).map(|c| Player { rng: 0x9e37_79b9_7f4a_7c15 ^ c.wrapping_mul(0x2545_f491_4f6c_dd1d), ..Default::default() }).collect();
     let (mut t, mut next_act, mut next_report, mut seq) = (0.0, 1.0, 0.0, 0);
     let mut first: Option<std::collections::BTreeMap<String, usize>> = None;
+    let mut age_line: Option<(usize, usize)> = None;
     while t < seconds {
         t += step;
         g.sim_time = Some(e.start + t);
@@ -704,6 +711,8 @@ fn soak_growth() {
         g.tick();
         g.net.out.clear();
         g.kicks.clear();
+        // What the bank's loop sends on to the front every time round (bank/forward.rs).
+        g.ext.chat.outbox.clear();
         if t >= next_report {
             next_report += report;
             let doc = serde_json::to_value(&g).unwrap();
@@ -737,7 +746,64 @@ fn soak_growth() {
             let differs = |a: &str, b: &str| a.split(['\n']).zip(b.split(['\n'])).filter(|(x, y)| x != y).map(|(x, y)| format!("{} / {}", x.chars().take(240).collect::<String>(), y.chars().take(240).collect::<String>())).take(3).collect::<Vec<_>>();
             println!("soak save fixpoint: live vs loaded {} lines differ, loaded vs loaded-again {} lines differ {:?}", first.split('\n').zip(second.split('\n')).filter(|(x, y)| x != y).count(), second.split('\n').zip(third.split('\n')).filter(|(x, y)| x != y).count(), differs(&second, &third));
             println!("soak t={t:.0}s: wos {} inv {} net {} strays {strays} total {} bytes; grown: {}", g.wos.len(), g.inventories.len(), g.net.objects.len(), sizes.values().sum::<usize>(), grown.join(", "));
+            // What an operator would watch at that age; printed below, once the temporaries of this report are gone.
+            let snapshot = crate::handoff::snapshot(&mut g).map(|s| s.len()).unwrap_or(0);
+            age_line = Some((first.len(), snapshot));
         }
+        if let Some((save, snapshot)) = age_line.take() {
+            println!("soak age {:.2} days: heap {} MiB, rss {} MiB, save {save} bytes, snapshot {snapshot} bytes, players {}, clock {:.3} s, tick count {}, wire tick {}", (e.start + t) / 86_400.0, heap_bytes() >> 20, rss_kib() >> 10, g.clients.len(), g.time.secs(), g.tick_count(), g.tick_number());
+        }
+    }
+    // PCDS_SOAK_PARTS=1: at the end, what each part of the game holds on the heap (taken out and dropped one at a time).
+    if std::env::var("PCDS_SOAK_PARTS").is_ok() {
+        let mut parts = Vec::new();
+        let heap_before = heap_bytes();
+        macro_rules! part {
+            ($name:expr, $field:expr) => {{
+                let before = heap_bytes();
+                drop(std::mem::take(&mut $field));
+                parts.push((before.saturating_sub(heap_bytes()), $name));
+            }};
+        }
+        part!("save.objects", g.save.objects);
+        part!("save.inventories", g.save.inventories);
+        part!("save.players", g.save.players);
+        part!("save.messages", g.save.messages);
+        part!("save.story_events", g.save.story_events);
+        part!("save.procedural", g.save.procedural);
+        part!("limits", g.limits);
+        part!("units", g.units);
+        part!("constructed", g.constructed);
+        part!("pickables", g.pickables);
+        part!("wos", g.wos);
+        part!("inventories", g.inventories);
+        part!("holders", g.holders);
+        part!("net.objects", g.net.objects);
+        part!("saved_players", g.saved_players);
+        part!("watchers", g.watchers);
+        part!("clients", g.clients);
+        part!("total_crafted", g.total_crafted);
+        part!("all_time_tokens", g.all_time_tokens);
+        part!("timers", g.timers);
+        part!("kicks", g.kicks);
+        part!("ext.gauges", g.ext.gauges);
+        part!("ext.status", g.ext.status);
+        part!("ext.destroy_when_empty", g.ext.destroy_when_empty);
+        part!("ext.machines", g.ext.machines);
+        part!("ext.energy", g.ext.energy);
+        part!("ext.water", g.ext.water);
+        part!("ext.meteo", g.ext.meteo);
+        part!("ext.logistics", g.ext.logistics);
+        part!("ext.rockets", g.ext.rockets);
+        part!("ext.planets", g.ext.planets);
+        part!("ext.toxic", g.ext.toxic);
+        part!("ext.animals", g.ext.animals);
+        part!("ext.first_item_linked", g.ext.first_item_linked);
+        part!("ext.default_colors", g.ext.default_colors);
+        part!("ext.chat", g.ext.chat);
+        parts.sort_by(|a, b| b.cmp(a));
+        println!("soak parts: heap {:.1} MiB before, {:.1} MiB after all taken out", heap_before as f64 / 1048576.0, heap_bytes() as f64 / 1048576.0);
+        println!("soak parts (MiB of heap): {}", parts.iter().map(|(b, n)| format!("{n} {:.2}", *b as f64 / 1048576.0)).collect::<Vec<_>>().join(", "));
     }
 }
 

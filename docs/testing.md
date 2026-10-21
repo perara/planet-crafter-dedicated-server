@@ -278,7 +278,7 @@ repository) gives, with `PCDS_RNG_SEED=1`, 4 players and 300 s:
 | Players | Fingerprint |
 |---|---|
 | only walk (`PCDS_BENCH_ACTION_MS` unset) | `15c299165b6b3eb0` |
-| act every 200 ms (`PCDS_BENCH_ACTION_MS=200`) | `4e119fd2aacba604` |
+| act every 200 ms (`PCDS_BENCH_ACTION_MS=200`) | `eab3e8e67a9290d9` (was `4e119fd2aacba604` before a failed pick-up stopped leaving its object behind) |
 
 A change that alters the game on purpose changes the fingerprint; say so in the commit and record the
 new one in the places that quote it. The ages (`PCDS_BENCH_START_DAYS`) give a fingerprint of their
@@ -292,8 +292,11 @@ Times on a shared machine are not the code's: compare **instructions** (the benc
 `perf stat -e instructions:u` for a process) and allocations. docs/performance.md has the numbers of
 a build, how to profile and the budgets below.
 
-Ignored soak tests in the same spirit: `soak_growth` (`PCDS_SOAK_SECONDS`, `PCDS_SOAK_STEP`,
-`PCDS_SOAK_REPORT`: what grows over a long game), `drone_farm_runs_for_hours` (`PCDS_FARM_STATIONS`,
+Ignored soak tests in the same spirit: `soak_growth` (`PCDS_SOAK_SECONDS`, `PCDS_SOAK_STEP` (at most a third of a
+second: the loop's longest frame, docs/clock.md), `PCDS_SOAK_REPORT`, `PCDS_SOAK_PLAYERS`, `PCDS_BENCH_START_DAYS` (the age of the server),
+`PCDS_SOAK_ONLY` (which actions), `PCDS_SOAK_PARTS` (the heap each part holds): what grows over a long game; each report prints the age
+in days, the heap, the resident memory, the save and the snapshot size and the wire tick. On the 2,565-object bench world with 2 players a game year takes
+under two hours; on the late-game world a game day takes more than an hour), `drone_farm_runs_for_hours` (`PCDS_FARM_STATIONS`,
 `_DRONES`, `_PAIRS`, `_SECONDS`: stations, drones and a supply and demand that never end; prints per game
 minute the worst tick, the sizes of what could grow and the memory) and `perf_logistics_and_destroy`
 (`PCDS_REVIEW_STATIONS`, `PCDS_REVIEW_SECONDS`: the cost of the logistics search in a world with tens of
@@ -348,7 +351,7 @@ clients the program has:
   batches up to 256 MiB; the server's own limit on the batches it receives is 1 MiB), so `pcds load` joins a 200,000-object world.
 
 The scripts that start a scratch server, run these and check the server afterwards are in
-`tools/chaos/` (chaos, soak, churn, stress, stall, limits, disk full) and `tools/perf/` (load runs
+`tools/chaos/` (chaos, soak, long soak, pressure, Docker memory, churn, stress, stall, limits, disk full) and `tools/perf/` (load runs
 with CPU and memory sampling, profiles, A/B runs): see [tools/README.md](../tools/README.md) for what
 each does and what a pass looks like. None of them is in CI.
 
@@ -389,4 +392,4 @@ one of every building and six players. It is by hand because it needs the tables
 release checklist, with the gate's meaning, is in
 [hot-update.md](hot-update.md) (under "As built": the paragraphs "The flip gate" and "Release checklist"): follow that list before tagging; this file does not repeat it.
 
-The last full run of all of this on a build, with the numbers and what it found, is [soak-report.md](soak-report.md).
+The last full runs of all of this on a build, with the numbers and what they found, are in [soak-report.md](soak-report.md) (round 1, and round 2: `tools/chaos/longsoak.py`, `pressure.py`, `dockermem.py`, `tools/perf/trend.py` and the long `soak_growth` runs).

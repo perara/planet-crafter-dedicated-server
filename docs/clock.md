@@ -197,7 +197,7 @@ inventory, growth, machine product and message is equal. What differs:
   of it, so a tie goes either way when the sums are f64 and not f32.
 
 The handoff proof is `EQUAL` at the first hour (`bench::handoff`) and the bench fingerprints of the first
-hour are those of the parent: 15c299165b6b3eb0 (walking) and 4e119fd2aacba604 (acting every 200 ms).
+hour are those of the parent: 15c299165b6b3eb0 (walking) and eab3e8e67a9290d9 (acting every 200 ms; it was 4e119fd2aacba604 until the pick-up fix of the second soak round: a failed pick-up of an object the world had not got left it behind, and the ids that followed were one higher).
 
 ## What is not the same
 

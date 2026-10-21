@@ -1,5 +1,7 @@
 # Soak report: the build that follows 0.7.0
 
+*Round 2 (a soak with an hourly timetable, years of game time, resource pressure, Docker under a memory limit) is at the end of this page: [Round 2](#round-2-12-h).*
+
 The release candidate (0.7.0 plus the consolidation and the DLC planets) was run hard before it was
 called ready: three hours on a real late-game world, 800 chaos actions in both supervision modes,
 the abuse tools, 64 and 128 simulated players, and the exact procedure the owner will use to update
@@ -299,3 +301,287 @@ On the final tree (the commits of branch `final-soak`):
 * Chaos in unit mode with a disk-full or an S3 failure at the same time as a kill: each fault is drawn on its
   own, on top of the churn; `diskfull.sh` runs by itself.
 * `make gate` (a hot update from the published release into this build): skipped on purpose, the formats differ.
+
+## Round 2: 12 h
+
+The second round asked a harder question than the first: not "does it run for three hours" but "does it
+degrade, over hours and over simulated years, when the conditions keep changing". It had four parts: a long
+soak with an hourly timetable of everything an operator's week holds, the virtual-clock soak for years of game
+time, resource pressure (one resource taken away at a time) and the real Docker image under memory limits. It
+found **two server bugs, both fixed** (a memory growth that only a long game shows, and a watchdog that killed a
+healthy game process after the front itself had been stopped), one bug in a shipped example plugin (fixed), and one memory step in the second soak that is **not explained**
+(R2.2).
+
+Everything ran on scratch servers (units `pcds-qa-soak2-*`, ports 8640 to 8659), on copies of the late-game save of
+the first round (33,583 world objects, 2,246 inventories, planet Humble, `world.dlcPlanets=Humble`, tables format 4).
+Nothing of the save's players is quoted here.
+
+**What actually ran, and the gaps.** The plan was one soak of 12 h on v0.8.0. What exists is: **part A**, the release build `v0.8.0` (commit c5ca29e), 7.6 h (27,300 s,
+910 samples, no gap over 45 s); **part B**, a second soak of 8.0 h on the build of `integrate` as it was then (with `pcds doctor`, `/api/metrics`, structured logging; section R2.2), started when
+part A was at 4.8 h and run beside it for the next 2.8 h; and **a third soak, R2.6, of the final code** (everything merged) at twice the pace. The agent driving the work was stopped by an API rate limit
+twice (once for about 70 minutes after the 4 h 26 min mark of part A, once for about 8 hours while part B finished). The soaks are transient systemd units of their own and went on
+unobserved: neither lost a sample (the sample files have no gap over 45 s) or a scheduled event. Part A was ended by hand at 7.6 h, after its fourth kill of the bank (a clean stop by `POST /api/stop`, exit status 0, the unit's
+Result=success, then the orchestrator stopped); part B ran its 8 hours to the end. Nothing was restarted from zero because of the interruptions.
+
+**The host was not quiet, again.** One 32-core machine shared with other sessions; load average 25 to 125 while these ran
+(the soaks, the growth runs, test suites and builds of this session were part of it). Counts, sizes, trends and checks
+are not affected; latency tails are, and are marked "host" below. The best hours of part A (4, 6 and 7) had a median
+longest loop of 36 to 76 ms and a tick p99 of 1.7 to 3.8 ms; the worst (2 and 5) 380 and 350 ms. The virtual-clock
+numbers do not depend on the load.
+
+### Verdict
+
+| | Result |
+|---|---|
+| 1. Soak, part A (v0.8.0, 7.6 h, 8 to 32 players, 25 hot flips, 4 kills, a SIGSTOP) | No leak. Memory, threads and descriptors flat; what grows is what the bots build (9,035 containers). One unexplained 16.9 s gap of a game loop in a flip during a 32-player burst on a loaded host. |
+| 2. Soak, part B (an early build of `integrate`: doctor, metrics, JSON log; 8.0 h) | The ops features hold: 1,916 scrapes of `/api/metrics` valid, `pcds doctor` ok every hour, every log line JSON, 26 hand-overs, 4 kills, a SIGSTOP. **But from hour 3.2 the game process started each time at 100 to 120 MB instead of 40 to 50 and the front stayed at 27 to 36 MB after a churn: unexplained.** A `net.http` plugin copy of the `discord-notify` example ran out of fuel 158 times (fixed in the example). |
+| 3. Virtual-clock soak, 60 and 400 days, and 825 to 835 days (the wrap of the wire tick) | **One server bug found and fixed** (below). After the fix: flat for 400 days. |
+| 4. Resource pressure | **One server bug found and fixed** (the watchdog). CPU, disk, memory, descriptors, many worlds, failing hooks and S3 and a frozen front: graceful, with the limits named below. |
+| 5. The final code (all branches merged), the timetable at twice the pace, 2.2 h | Flat where part B stepped: front 8.1 to 8.7 MB, bank 19 to 40 MB, 14 hand-overs with the world standing 22 ms at the median (quiet host), metrics and doctor and JSON log clean. Too short to call the part B step gone (R2.6). |
+| 6. Docker under `--memory` | Starts and plays down to 112 MB; the flip refuses cleanly under about 160 MB; the restart install works at every size; the kernel killed nothing. |
+
+### R2.1 Part A: the soak on v0.8.0
+
+`tools/chaos/longsoak.py` (new): the server runs as the unit `pcds run` under systemd (`Restart=on-failure`), autosave every minute,
+a backup every 10 minutes (24 kept) copied to a fake S3, chat hooks to a fake webhook, the plugins `hello-stats`,
+`welcome-rules` and a `net.http` plugin that posts to a local fake (built from `discord-notify` with its URL changed), a
+dashboard-like client reading `/api/status` once a second (and plugins, worlds, map, logs less often), a sample
+every 30 s. The same timetable runs every hour: 8 players acting every 200 ms (`rejoin` bots, which come back when
+dropped); :05 pause 60 s; :07, :22, :37, :52 another set of live rules; :10, :30, :50 a hot flip to the other bank (a copy of the
+binary with a changed tag); :15 and :45 plugins reloaded; :22 to :34 16 players, :40 to :52 32 players, :53 to :59 24 workers
+of join and leave churn; hours 3 and 7 a real update from a local feed (download, install, flip); kill -9 of the bank at :35 of
+the odd hours; one SIGSTOP of the bank for 30 s at hour 6 :12; a 10-minute S3 outage in hours 1 and 5, a 5-minute
+webhook outage in hours 2 and 6. Every hour the save is checked for its invariants.
+
+What the timetable did in 7.6 h: 4,191 sessions of bots that got in, 25 hot hand-overs (23 flips, 2 real updates), 4 kills of the bank, 1 SIGSTOP of the bank,
+75 backups copied to the fake S3 (110 MB), 179,594 chat-hook posts, 1,770 plugin posts, 15 plugin reloads, 8 pauses, 30 rule changes.
+
+**Incidents and checks.**
+
+| | |
+|---|---|
+| kill -9 of the bank (4, at hours 1, 3, 5, 7) | the world was back in 0.6, 0.7, 1.2 and 0.8 s; the 8 players were back after 2.8, 2.7, 3.3 and 2.8 s; no acknowledged container lost; invariants held after each |
+| SIGSTOP of the bank for 30 s (hour 6) | the same bank (pid unchanged), no crash counted, the status answered again after 0.2 s, 8 players still in. The watchdog did not trigger |
+| 25 hot hand-overs | all `ok`; no flip dropped a player. World stood (front's clock): p50 141 ms, p95 1.37 s, max 1.78 s (host; the first round measured 31 ms median on a quieter host, with 8 players). Snapshot p50 45 ms, restore p50 96 ms. The snapshot grew from 4.0 MB to 8.3 MB, as the world did |
+| S3 outages, webhook outages | the server went on; the doctor, the log and the status say so; recovered after each |
+| hourly checks of the save | 8 of 8 passed (unique ids, items held once, links resolve; the original's one dangling link excepted) |
+| the status read once a second | 47 calls of 27,000 were slow (over 1 s) or failed: 8 of them during the SIGSTOP of the bank and the final stop (500 "the game loop did not answer", by design), the rest the host |
+| the final stop | rc 0 (a clean stop on `POST /api/stop`), the unit ended with Result=success; the final save loads |
+| panics | none |
+
+**Trends** (`tools/perf/trend.py`, Theil-Sen; the first 10 % dropped; the steady 8-player samples only, so the load is the same in each sample;
+the "all samples" table is in the soak's folder). Tau is the share of pairs of samples that agree on the direction.
+
+| | median | slope per hour | drift over the run | verdict |
+|---|---|---|---|---|
+| front RSS | 8.0 MB | -122 KB | -10.6 % (tau -0.32) | **flat** (falling) |
+| bank RSS (all samples; a new process every 20 min) | 51 MB | +1.9 MB | +25.6 % (tau +0.43) | follows the players (see below) |
+| bank RSS, inside each of the 22 processes of 12 to 19 minutes | | median -4.6 MB/h | median -1.7 % | **flat**: 11 flat, 9 falling, 2 creeping |
+| front threads / descriptors | 4 / 9 | 0 | 0 | **flat** |
+| bank threads / descriptors | 5 / 4 (1 to 8 as a save, an upload or a churn comes and goes) | 0 | 0 | **flat** (median of the first third equals the last's; in each process too) |
+| admin connections open at a sample | 0 | | | **flat** |
+| front CPU | 2.05 % of a core | -0.03 %/h | | **flat** (first third 111 s of CPU an hour, last third 108) |
+| bank CPU | 6.0 % of a core | -0.08 %/h | | **flat** |
+| tick p50 | 41 µs | | first hour 46, last 42 | **flat** |
+| tick p99 (host) | 5.1 ms | | first hour 4.4 ms, last 2.4 ms | **flat**, falling as the host calmed |
+| busy percent (host) | 8.9 | -0.6 /h | | **flat** |
+| log | 13,200 lines, 0.55 MB an hour | | last third 0.91 of the first | **flat**; the lines are the sessions (connected, ready, left: 5,764 "connected" and 5,710 "left the game" in 7.6 h), no spam |
+| backups on disk | 24 (the rule) | | reached at hour 3.7 | **capped** (82 MB) |
+| home folder | 96 MB median | | 18 to 117 MB while the backups filled | **capped**: it stops at 117 MB |
+| messages in the save | 56 | | 56 at the end | **capped** |
+| world objects | 39,660 | +1,277/h | 33,583 to 43,778 | **growth, and it is the bots**: 9,035 of the 10,195 new objects are `Container1` (the bots build up to 20 in each session; 4,191 sessions), the rest items they made. The save grew 2.4 to 3.9 MB with them. Not a leak: the same load on a world with no new sessions is flat |
+| inventories, network objects | | | 2,246 to 11,368; 3,160 to 12,490 | the same containers |
+| saved players | 67 | | 3 to 67 | **capped by the bots' names** (they reuse 64 names). A server with ever new visitors grows by 1.2 KB each until `players.forgetAfterDays` |
+
+The bank's RSS in all samples follows the players: the same hour with 8 players has 44 MB, with 32 players 58 to 79 MB, and a bank
+that has had a 24-worker churn is 60 to 80 MB for the minutes after it. Each new process starts at 38 to 48 MB. The two creeping
+processes (+17 and +22 MB in 19 minutes) are the ones the SIGSTOP of the bank and the 32-player burst fell in: a stopped bank queues what the players send.
+
+**The 16.9 s gap.** One gap of a game loop: at hour 6 :50, in a flip during the 32-player burst, after "the running bank is told to hand the world over"
+(the front's own clock says the world stood 1.37 s; the old bank took 1.18 s to answer, 1,521 client frames were held; the log of the game says
+"the game loop was away 16.9 s", and the status that second says longest loop 16.9 s). The other 30 such lines of the run are 1.3 to 5.7 s
+(all in churn or burst phases of the busy hours; one is the 30 s SIGSTOP). It was not seen again and could not be reproduced; the
+cause is unknown. Treat it as the host (a 17 s starvation of a process on a machine with a load of 60 to 120) until a quiet host
+says otherwise. Nothing was lost: the world's time went on by a third of a second only (docs/clock.md), the save is sound.
+
+### R2.2 Part B: the same timetable on the build of `integrate`
+
+Built from the branch `integrate` as it was after its first ops-ready commits (`pcds doctor`, `/api/metrics`, structured logging, snapshot
+format 8) with this round's two fixes, **before** the memory diet and the other work that `integrate` has now; `--ops` of `longsoak.py` turns on what that release
+adds: `log.format=json`, `save.verifyBackups=true`, a scrape of `/api/metrics` every 15 s checked as Prometheus text (every value finite, no series twice, only `pcds_` names,
+no counter that goes back) and `pcds doctor` in the third minute of each hour. The timetable is part A's, from a fresh start. It ran 8.0 hours
+(28,813 s; 959 samples, no gap over 31 s) while the first soak was still running (2.8 h of overlap on one host).
+
+| | Result |
+|---|---|
+| kill -9 of the bank (hours 1, 3, 5, 7) | world back after 0.6, 0.5, 0.5, 0.4 s; 8 players back after 2.6, 2.5, 2.5, 2.4 s |
+| SIGSTOP of the bank 30 s (hour 6) | the same pid, no crash counted, status again after 0.0 s |
+| 26 hot hand-overs (24 flips, 2 real updates) | all ok, none dropped a player; the world stood p50 49 ms, p95 237 ms, max 369 ms (the later hours were quiet: tick p99 under 1 ms); snapshot p50 6.9 ms, restore p50 42 ms |
+| `/api/metrics` | 1,916 scrapes (every 15 s): 79 to 87 series, 8.8 to 10.5 KB, median 3 ms (max 5.1 s, in the SIGSTOP); every one parsed, every value finite, no duplicate series, no counter went back. Two scrapes got HTTP 500 ("the game loop did not answer") while the bank was stopped: the harness counts them as failures, they are the stopped bank. The memory the metrics report (`pcds_memory_resident_bytes`) is the process's own RSS to the kilobyte |
+| `pcds doctor` | 8 runs, exit status 0 each time; the warnings are the harness's (the rules file is 644, the open-files limit 1024, the fake update feed answers nothing, the unit is transient), the S3 failure of the outage and "the release in bank a was rolled back" (the soak flips with rollback) |
+| log | 21 MB, 113,677 lines, **all JSON** (0 lines that are not); 2.35 MB an hour with JSON (0.55 MB as text) at the same 12,700 lines an hour |
+| `save.verifyBackups` | on for the whole run; the backups verified, nothing in the log |
+| hourly checks of the save | 8 of 8 passed |
+| panics, final stop | none; rc 0 |
+
+**Trend** (steady 8-player samples): thread and descriptor counts flat; per-hour medians of the front's and the bank's resident memory:
+
+| hour | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|---|
+| front RSS (MB) | 7.7 | 7.6 | 7.4 | 8.1 | 27.6 | 28.8 | 35.3 | 36.2 |
+| bank RSS (MB) | 45.8 | 44.9 | 45.7 | 74.4 | 111 | 115 | 119 | 123 |
+| world objects | 33,702 | 35,728 | 37,074 | 38,192 | 39,564 | 40,752 | 42,085 | 43,242 |
+| busy percent (host), median | 20 | 7 | 6.7 | 3.8 | 3.1 | 2.8 | 2.8 | 2.8 |
+
+**This is a finding that is not explained.** In the first three hours the game processes behaved as part A's: a new bank (every 20 minutes) starts at 38 to 50 MB and stays
+within about 10 MB of that. **From the flip at 3 h 10 min every new bank started at 100 to 120 MB and stayed there** (the per-process table: 0.4 to 3 h:
+first sample 40 to 65 MB; 3 h 10 min on: 99 to 127 MB, flat within each process, "thr 1"), and the front, which came back to 7 MB after each of the first three churns,
+stayed at 27 MB after the third (3 h 54 min) and reached 36 MB at hour 7. The world had grown by 13 % in that time, not by a factor of 2.5, and part A's bank of the same size
+stayed at 52 to 58 MB. Nothing in the log marks the step; in the minutes before it the plugin `net-soak` was switched off for faults (below). Metrics
+and doctor agree with the process numbers, and nothing else grew: threads, descriptors, backups, the hand-overs' times, the tick are flat.
+What was checked afterwards: **on the build `integrate` has now (with the memory diet), a server on the same late-game world with `save.verifyBackups` on and off, a backup every minute and 8 players for 10 minutes holds
+33 MB in the bank and 9 to 10 MB in the front, flat, identical with the rule on and off**, so the rule is not the cause there; a 90-second churn with the plugin failing leaves the bank at 13 MB
+on the bench world. A soak of the final build at twice the pace is in R2.6 (flat, but only 2.2 h). Until it says otherwise: **creeping, step-wise, cause not found, not reproduced on the final build in the short probes.**
+
+**Found on the way: the `discord-notify` example switched itself off during an outage.** The soak's `net.http` plugin is a copy of that example with its URL pointed at the
+fake. The fake was not listening on the port the plugin names (the soak ran on other ports than the one compiled into it), so every post was refused, the lines piled up,
+and each tick, which builds a message of up to 1,900 characters from them, used all the fuel an event may use: 158 faults and 31 switch-offs in 8 hours ("tick: out of fuel: the call used all 1000000
+fuel it is allowed"), the host contained every one of them (the game never noticed: tick p99 and the status are those of part A) and the plugin never sent what it held. The manifest of the
+shipped example now asks for 4,000,000 fuel an event and is signed again; the same plugin against the same absent webhook for 130 s: 5 faults before, 0 after.
+
+
+### R2.3 The virtual clock: years of game time
+
+`bench::soak_growth` (the ignored test of docs/testing.md) plays scripted players that act every game second (craft, drop, pick up, build, eat,
+drink, mine, chat, sort) in steps of a third of a second of game time (the longest frame, docs/clock.md), starting at any age of the
+server (`PCDS_BENCH_START_DAYS`), and at each report prints the age, the heap, the resident memory, the size of the save and of the
+hand-over snapshot, the wire tick, and the sizes of every part of the state that grew; it also loads and saves twice (the save must
+reach a fixpoint). New in this round: `PCDS_SOAK_PLAYERS`, `PCDS_SOAK_ONLY` (which actions), `PCDS_SOAK_PARTS` (the heap each part holds), and the report
+prints after its own temporaries are gone (they made the first numbers look like a leak of 1 GB: the report held the serialised world, a
+second and a third copy of the game).
+
+The speed decides what can be run: on the 2,565-object bench world with 2 players 400 days in 1 h 43 min (about 230 days an hour) and 60 days with 8 players in 23 minutes; on the 33,000-object
+late-game world a game day takes 1.3 to 1.5 hours (the host loaded). So the years ran on the small world and the late world ran for days.
+
+| Run (all with the fix below unless it says) | Game time | Players | Heap / RSS at the end | Save / snapshot at the end | Verdict |
+|---|---|---|---|---|---|
+| bench world, **before the fix** | 70 days | 2 | 376 MB RSS (start 129) | 169 KB / **2.5 MB** (start 433 KB) | **leak**: about 650 world objects a day that nothing holds |
+| bench world, **before the fix** | 28 days | 8 | 549 MB RSS | 191 KB / **3.77 MB** | the same, four times as fast |
+| bench world | 400 days | 2 | 59 MiB heap, 101 MB RSS (start 59, 129) | 169 KB / 452 KB (start 433) | **flat** from day 1; wire tick 1,036,800,007 |
+| bench world | 60 days | 8 | 63 MiB, 103 MB RSS | 191 KB / 523 KB (start 447) | **flat** after the first 8 days (the players build their 20 containers each) |
+| bench world, **clock started at 825 days** | 7 days (to day 832) | 2 | 59 MiB, 100 MB | 169 KB / 453 KB | **flat**; the wire tick wraps to -2,139,719,291 at 828 days and nothing notices |
+| bench world, **clock started at 826 days** | 9 days (to day 835) | 8 | 63 MiB, 104 MB | 191 KB / 525 KB | **flat** across the wrap |
+| late-game world | 2.75 days | 4 | 370 MiB, 551 MB RSS (start 356, 571) | 2.43 MB / 3.95 MB (start 2.40 / 3.74) | **flat** from the first half day (the logistics tasks settle at 380 KB of state) |
+| late-game world, **clock started at 400 days** | 0.75 day | 4 | 370 MiB, 554 MB | 2.43 / 3.95 MB | **flat**, the same numbers as day 0 |
+
+In every run the save reached its fixpoint (a save loaded and saved again is the same text), the network objects without a world object stayed at
+what the save started with (0 on the bench world, 9 on the late one), and no run panicked. Timers, counters and the clock are tested by `timetravel`
+(docs/clock.md: the same steps at 0, 1, 3, 7, 25, 60, 200, 400 and 900 days); the runs here add that a 400-day-old world with players, saves, loads and the
+growth of the world behaves like a young one, and that the wrap of the wire tick at 828 days is not noticed by a server whose scripted players are connected through it
+(a real game client's resync was not tried, as in docs/clock.md).
+
+**Bug found and fixed: a pick-up that no inventory takes left a world object behind.** `AddWorldObjectToInventoryServerRpc` makes the world
+object when the world does not have the id (a dropped item that had despawned, or an id a client made up). When the inventory was full the object stayed: held by
+nobody, placed nowhere, never saved, never freed. The scripted players do it about 650 times a day each pair; a hostile client could do it as fast as its
+RPC budget allows, and the world's memory grows with it until the server restarts. Found by `PCDS_SOAK_ONLY` (only item, drop, pick grew) and `PCDS_SOAK_PARTS`;
+fixed in `inventories.rs` (the object made for the request is taken away when the request fails); test
+`inventories::tests::a_pick_up_that_fails_leaves_no_world_object_behind` (it fails without the fix).
+Not a bug: what the soak's first reports looked like (a chat outbox that grew by 6 MiB a day) was the test harness, which did not empty
+what the bank's loop sends on to the front; the harness does it now.
+
+
+### R2.4 Resource pressure
+
+`tools/chaos/pressure.py` (new): one resource taken away at a time with the unit's cgroup, on the late-game world, each scenario
+on a server of its own, sampled every 5 s, one JSON line each. Windows are 6 to 15 minutes. Latency numbers are "host" numbers (load 25 to 125).
+
+| Scenario | What was done | What the server did | Result |
+|---|---|---|---|
+| CPU free / `CPUQuota=100%` / 2 cores (`AllowedCPUs`) | 32 players acting every 200 ms, 10 min each | all 32 stayed; the bank uses 8 % of a core (front 4 %), so the quotas did not bind. Longest loop p95 435 / 333 / 345 ms (host), status never unanswered | pass |
+| `CPUQuota=12 %` | the same, 6 min: below what 32 players need | busy 52 % at the median, longest loop p50 423 ms, p95 644 ms, tick p99 73 ms; 32 players stayed, status 27 ms | pass: slow, not broken |
+| `CPUQuota=6 %` | half of what is needed | busy 119 %, longest loop p50 0.97 s, p95 1.7 s, max 2.3 s, tick p99 0.9 s; the 32 players stayed, the status answered (p50 162 ms, max 1.7 s); 17 "the game loop was away" lines, the world's time goes on by a third of a second only per gap | pass: degrades by getting slow, drops nobody |
+| Slow disk, writes (`IOWriteBandwidthMax=512K`) | 8 players, autosave and backup every minute, 8 min | longest loop p95 779 ms against 510 ms for the same server unthrottled (host); saves and backups never reach the tick (the writer is a thread) | pass |
+| Slow disk, reads as well (`IOReadBandwidthMax=512K`) | the same, 8 more minutes | longest loop p95 3.1 s, max 3.5 s; one status unanswered for 10 s; the game thread waits in `folio_wait_bit_common` for pages of its own program (found by sampling `/proc/PID/wchan`: up to 8.8 s at a time) | **limit, not fixed**: a disk that reads 512 KB/s makes every first touch of a rarely used page of the binary a stall. Writes are harmless. Pinning the program in memory needs `RLIMIT_MEMLOCK`, which the unit does not have by default |
+| `MemoryHigh=128M` / `96M`, no swap (the server holds 90 to 105 MB with its cache) | 8 players, 8 min each | 128M: nothing (0 events). 96M: 8,292 `high` events, status max 4.2 s, longest loop p95 587 ms, max 2.6 s; 8 players stayed; no OOM kill. At 64M the start did not finish in 90 s (the kernel makes every allocation wait) | pass above 96M; below the working set it is the kernel's throttle, not the server |
+| `LimitNOFILE=256` | 100 players, then 300 idle connections to the admin port for 60 s | all 100 stayed; the front never used more than 7 descriptors (one UDP socket serves all players); the idle connections are capped at 64 by the admin server (the others are refused: 5 status calls in the flood got no answer), no spin (front CPU 9.9 % before and during), 1 log line, normal again 10 s after they closed | pass |
+| 20 worlds, 200 switches | `POST /api/world/switch` at random | 200 of 200 ended in the world asked for; 0.27 s (first third) and 0.30 s (last third) a switch, max 0.72 s; the front 8.8 to 10.9 MB, threads 3, descriptors 7 before and after; no `.tmp`; 5 log lines a switch | pass |
+| Chat hook that answers 500, hangs 8 s, drops the connection (15 min each), 16 players with 1,500-character chat lines | 75 min | nothing stopped: the status never unanswered, loop p95 252 / 813 / 554 ms (host), front 8.8 to 11 MB, 4 to 5 threads; the hook is skipped "for 60 s" after its failures and gets events again; 231 log lines in all; the save's messages stay at 56 | pass |
+| S3 returns 500, hangs 8 s, drops the connection (10 min each), backups every minute | 50 min | one attempt per backup (8 to 10 in 10 minutes), never a queue; the bank 52 MB throughout; the log has the failures (10 + 10 lines); S3 worked again at the first backup after | pass |
+| Front frozen (SIGSTOP) 60 s with 8 players | | **before the fix**: on SIGCONT the front found the bank silent for 60 s and killed it ("said nothing for 60 s ... it is hung; killed"), the world restarted from the save. **After**: the bank is the same process, the 8 players are back 0.1 s after the CONT | **bug fixed** (below) |
+| Backups stamped in the future | 5 files dated 2099 in `backups/`, rule keeps 3, backup every minute | the future ones were pruned first, 3 real backups remain | pass |
+
+**Bug found and fixed: a front that was stopped killed the healthy bank.** The watchdog counts the time since the bank's last frame. The front stopped
+for longer than `limits.bankWatchdogSeconds` (SIGSTOP, a paused virtual machine, a suspended or starved host) took its own absence for the
+bank's silence, and its first look afterwards killed the bank and restarted the world from the last save, every player gone and up to a minute of
+play lost. The watchdog now notes when it last looked, and after a gap of more than 5 s (it looks many times a second) starts the bank's clock again.
+Test `front::supervise::tests::a_front_that_was_away_does_not_blame_the_bank_for_the_time`; verified on the late world with the front
+stopped for 60 s.
+
+### R2.5 Docker under a memory limit
+
+The image was built from the real Dockerfile (`docker build -t pcds-qa-soak2 .`, rootless daemon); `tools/chaos/dockermem.py` ran it with
+`--memory M --memory-swap M` on the late-game world and a made-up game folder (as `docker/test.sh`), 8 players on the host, 5 minutes of play, then
+`pcds upgrade vA` (hot) and `pcds upgrade vB --restart` inside the container. The cgroup's own `memory.peak` and `oom_kill` were read.
+
+| `--memory` | start (peak) | hot update | restart update | OOM kills |
+|---|---|---|---|---|
+| 2 GB / 1 GB / 512 MB | 2.4 to 5.9 s (119 to 138 MB) | flipped, 8 players kept, world stood 53 to 103 ms; peak 173 to 202 MB | worked in 1.9 to 2.4 s | 0 |
+| 256 MB / 224 MB / 192 MB | 2.1 to 2.6 s (122 to 131 MB) | flipped (peaks 179, 191, 180 MB) | worked | 0 |
+| 160 MB | 3.2 s | **refused**: "... Raise the memory limit to at least 225 MB (docker run --memory, Compose mem_limit, a Kubernetes memory limit), or restart instead (pcds upgrade --restart VERSION), which needs no extra memory and disconnects every player"; server and players untouched. (An earlier run of the same size flipped, squeezing against the limit: the check depends on what the cache holds at that moment) | worked in 3.9 s | 0 |
+| 144 MB | 4.2 s | flipped at the limit (174 `memory.max` events: the page cache was reclaimed) | worked | 0 |
+| 128 MB / 112 MB | 4.8 / 8.1 s | refused, the same message (232 MB for 112 MB) | worked (4.5 s at 112 MB) | 0 |
+
+The server needs about 125 MB to start on this world and works down to a container of 112 MB, with the file cache given up. The check that refuses
+a hand-over which would not fit works as built (`front/metrics.rs`), and the restart install, the way out it names, works at every size.
+One harness fault on the way: the fake release feed answered without `Connection: close` and the updater met a closed socket once ("Peer disconnected");
+fixed in the tool, as in the first round.
+
+### R2.6 The final code, at twice the pace
+
+After the work of the other branches was merged (`integrate`: ops-ready, plugin-eco, perf-final, bughunt2, mem-diet) the soak was run again on that build, with the timetable at half
+an hour to the hour (`--scale 0.5`: flips every 10 minutes, a burst or a churn every half hour, the real updates after 1.5 and 3.5 hours, the SIGSTOP after 3 hours), so that the third hour, where part B changed,
+was passed in 1.5 hours of wall time: 2.2 hours (8,000 s; 266 samples) of wall time, which is 4.4 timetable hours, passing the 3.2-hour mark where part B changed after 1.6 hours.
+
+| | Result |
+|---|---|
+| front RSS | 8.1, 8.4, 8.7 MB in the three clock hours; Theil-Sen +0.3 MB/h, tau +0.14: **flat** (part B: 7.7 then 27 to 36) |
+| bank RSS | a new process every 10 minutes starts at 19 to 40 MB and stays within 2 to 15 MB of it; per clock hour 22.9, 29.2, 33.1 MB as the world grows from 33.6k to 38.6k objects (part A's banks of the same size: 43 to 53 MB; this build's compact objects hold about half). No step to 100 MB |
+| threads, descriptors | front 4 and 9, bank 5 and 4: flat |
+| hand-overs | 14 (13 flips, 1 real update), all ok, no player dropped; the world stood **p50 22 ms, p95 49 ms, max 49 ms** (snapshot p50 8 ms, restore p50 15 ms): the host was quiet (busy 2.1 %, tick p99 0.77 ms, longest loop median 27 ms). The first round's 31 ms median is the same figure |
+| kill -9 of the bank (2) | world back after 0.2 and 0.5 s, 8 players back after 2.2 and 2.6 s |
+| `/api/metrics` | 532 scrapes, 0 bad, 114 series (13 KB: the final build has more), counters never go back |
+| `pcds doctor` | 5 runs, exit 0 each |
+| log | all JSON lines; 5.5 MB in 2.2 h (2.5 MB an hour), 13,700 lines an hour |
+| plugins | the `net.http` plugin delivered 466 posts and was never switched off (0 fuel faults; part B: 158) |
+| "the game loop was away" | 0 lines |
+| incidents | two false alarms of the harness ("the unit was not running", `Result` none: systemd's moment between two states while a kill was handled; no restart counted) |
+| final stop | rc 0 |
+
+Not tested here: the SIGSTOP of the bank (hour 6 of the timetable, past the end), the second kill pair, 3.2 clock hours. A 10-minute probe of the same build with a backup every minute and `save.verifyBackups` on and off holds
+the bank at 33 MB in both. What this run shows is that the final code does not step at the 3.2-hour mark of the *timetable*; it does not show that the part B step was something an old commit had and the merge removed, and
+the cause of the step is **open** until a soak of the final build with a quiet hour-by-hour timetable passes 4 real hours.
+
+### Checks of the final tree
+
+On the merge of the second round with `integrate` (the commits of branch `soak-long`):
+
+| Check | Result |
+|---|---|
+| `cargo test --release --locked --no-fail-fast` with the tables (format 4) | 800 unit tests, `layers` 1, `cli` 23, `hot_update` 25 (3 ignored), `admin_golden` 4: all ok |
+| the same as CI runs it (`PCDS_TEST_DATA=none PCDS_GAME_DIR=none`) | all ok |
+| `cargo clippy --release --locked` | 0 warnings |
+| `map.py check` | 732 groups, 208 RPCs, 165 components, 0 problems |
+| bench fingerprint, bench world, 4 players, 300 s | walking `15c299165b6b3eb0` as before, handoff `EQUAL`; acting every 200 ms **`eab3e8e67a9290d9`** (was `4e119fd2aacba604`: it changes on purpose with the pick-up fix, the scripted players' failed pick-ups left objects whose ids pushed the next ones up by one), handoff `EQUAL` |
+| the watchdog test and the plugin tests | `front::supervise` 3 ok; `plugins::` 143 ok (the signed example is current) |
+
+### What was not covered in round 2
+
+* **One 12 h soak on one build.** What ran is part A (v0.8.0, 7.6 h), part B (an early build of `integrate`, 8.0 h) and the final build at twice the pace (2.2 h of the 3.5 h planned: it was ended to stay near the two hours the owner gave for finishing); no single 12-hour stretch. The rate limits
+  of the session that drove them cost no run (the soaks are units of their own), but they cost the 12 h plan: the first soak was ended at 7.6 h to make room for part B.
+* **A quiet host.** Part A's first hours and every tail latency are from a machine with a load of 25 to 125. The virtual-clock numbers are not.
+* **The late-game world for 60 days.** It plays a day in 1.3 to 1.5 hours; 2.75 days ran. The 60 and 400 days ran on the 2,565-object bench world (which has machines, plants, animals, logistics and a day and night cycle, but 13 times fewer objects).
+* **A real game client** through the wrap of the wire tick at 828 days, and through a front that was frozen.
+* **S3 and the webhook "for hours".** The outages were 10 and 5 minutes in the soaks and 10 minutes a phase (50 and 75 minutes) in the pressure runs; the S3 uploader makes one attempt per backup and keeps no queue, which is why the length does not matter, but a failure that only shows after hours of retries was not looked for.
+* **A network blackhole of the UDP port** (iptables needs root): the frozen front stood in for it. A slow or lossy client network.
+* **Chaos in unit mode with these faults at the same time.** The round-1 chaos tool was not run again.
+* **The cause of part B's step in memory** (R2.2).

@@ -13,6 +13,10 @@ capabilities = ["event.player", "event.chat", "event.tick", "chat.say", "net.htt
 
 [budget]
 tick_every_ms = 5000
+# One flush builds a message of up to 1900 characters from the lines waiting; with Discord down it does that
+# every tick, and a message that size costs more than the default budget (found by the long soak, which
+# switched the plugin off for good during a 10 minute outage).
+fuel_per_event = 4000000
 
 [events]
 subscribe = ["player_join", "player_leave", "tick"]

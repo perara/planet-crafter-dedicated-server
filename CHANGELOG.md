@@ -246,6 +246,28 @@ matches on `Event` fields by name. The plugin changes add nothing to the snapsho
   and left out; `bench::budget` has a test of the memory of a world object, a network object, a machine
   and an inventory.
 
+### Fixed
+
+* **The `discord-notify` example switched itself off for good during an outage.** With Discord down its lines
+  pile up, and a flush builds a message of up to 1,900 characters from them at every tick, which costs more
+  than the default fuel of one event: the plugin ran out of fuel, was switched off after five faults in a
+  minute, and started again at a reload only to fault again, so the lines were never sent once Discord came
+  back. The example's manifest now asks for 4,000,000 fuel an event (and is signed again). Found by the
+  long soak's `net.http` plugin, a copy of it, against a webhook that was not there.
+* **A front that had been stopped killed the healthy game process when it ran again.** The watchdog
+  (`limits.bankWatchdogSeconds`) counted the time since the game process last spoke; a front stopped for
+  longer than the rule (SIGSTOP, a paused virtual machine, a suspended or starved host) took its own
+  absence for the game's silence, killed the game at its first look and started the world again from the
+  last save with every player gone. The watchdog now notes when it last looked and, after a gap of more than
+  5 seconds, starts the game's clock again.
+* **A pick-up that no inventory takes left a world object behind.** `AddWorldObjectToInventoryServerRpc`
+  makes the world object when the world does not have the id (an item that had despawned, or an id a
+  client made up); when the inventory was full or refused it, the object stayed in the world, held by
+  nobody, placed nowhere, never saved and never freed. A long-uptime run of the virtual-clock soak
+  (two scripted players on a mid-game world, 70 days of game time) grew the snapshot from 0.43 MB to
+  2.5 MB and the process's memory to 380 MB; a client that asks again and again with a full inventory
+  could do the same. The object is taken away again when the request fails.
+
 ### Security
 
 * **The systemd unit is sandboxed** ([docs/hardening.md](docs/hardening.md)): no new privileges,

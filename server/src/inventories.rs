@@ -697,6 +697,16 @@ impl Game {
                     self.dirty_inventory(inv, client, false);
                     self.add_or_remove_result(client, true);
                 } else {
+                    // A world object made for this request (an id the client names and the world does not have) that no
+                    // inventory took would stay for good: not held, not placed, not saved. A client that asks again and
+                    // again with a full inventory grows the world by one object each time (found by the 12 h soak's
+                    // bots, which pick up what has despawned).
+                    if created {
+                        self.destroy_world_object(id, false);
+                        if self.wos.remove(&id).is_some() {
+                            self.pickables.remove(&id);
+                        }
+                    }
                     self.add_or_remove_result(client, false);
                 }
             }
@@ -1059,6 +1069,29 @@ mod tests {
         // Already in an inventory (not placed): refused.
         send_scene(&mut g, 1, "InventoriesHandler.AddWorldObjectToInventoryServerRpc", &[json!(dropped), json!(ice), json!(bag), json!(true)]);
         assert!(!result(&mut g));
+    }
+
+    /// A pick-up of an object the world does not have (it despawned, or the client made the id up) into an inventory that
+    /// is full makes the object for the request and must take it away again when no inventory takes it: a world object
+    /// in no inventory and at no place is never freed.
+    #[test]
+    fn a_pick_up_that_fails_leaves_no_world_object_behind() {
+        let Some((mut g, _)) = world() else { return };
+        let chest = g.create_inventory(1, 0, 0, &[], &[]);
+        give(&mut g, "Iron", chest);
+        let iron = hash(&g, "Iron");
+        let before = g.wos.len();
+        for id in [300_000_001, 101_000_007] {
+            send_scene(&mut g, 1, "InventoriesHandler.AddWorldObjectToInventoryServerRpc", &[json!(id), json!(iron), json!(chest), json!(true)]);
+            assert!(!result(&mut g), "the chest is full");
+            assert!(!g.wos.contains_key(&id), "{id} was made for the request and nothing holds it");
+        }
+        assert_eq!(g.wos.len(), before);
+        // With room it is made and held, as before.
+        g.inventories.get_mut(&chest).unwrap().size = 2;
+        send_scene(&mut g, 1, "InventoriesHandler.AddWorldObjectToInventoryServerRpc", &[json!(300_000_001), json!(iron), json!(chest), json!(true)]);
+        assert!(result(&mut g));
+        assert!(g.inventories[&chest].items.contains(&300_000_001));
     }
 
     /// An item dropped without being taken out of its inventory first (the game's client takes

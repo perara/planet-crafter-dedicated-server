@@ -106,6 +106,9 @@ Read by test builds and tools, never by an installation. Set by hand for the ben
 | `PCDS_SOAK_SECONDS` | soak_growth: game seconds to run (default 3600). |
 | `PCDS_SOAK_STEP` | soak_growth: seconds of game time per step (default 0.05). |
 | `PCDS_SOAK_REPORT` | soak_growth: seconds of game time between reports (default 900). |
+| `PCDS_SOAK_PLAYERS` | soak_growth: players that act every game second (default 2). |
+| `PCDS_SOAK_ONLY` | soak_growth: only these actions, comma-separated (item, drop, pick, build, eat, drink, mine, chat, sort); finds which action grows what. |
+| `PCDS_SOAK_PARTS` | soak_growth: at the end, the heap each part of the game holds. |
 | `PCDS_SOLVER_SEEDS` | solver_time_by_seed (ignored): the seeds tried for each wreck generator (default 300). |
 | `PCDS_SOLVER_FROM` | solver_time_by_seed: the first seed (default 0). |
 | `PCDS_FUZZ_ROUNDS` | The RPC fuzz test's rounds (default 1500). |

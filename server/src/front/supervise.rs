@@ -42,11 +42,31 @@ impl CrashWindow {
 pub(super) struct Watchdog {
     pub limit: Duration,
     pinged: Option<Instant>,
+    /// When the watchdog last looked.
+    looked: Instant,
 }
+
+/// The front looks at the bank many times a second. A gap this long between two looks means the front itself
+/// was not running (SIGSTOP, a paused virtual machine, a suspended host): the bank's silence in that time is
+/// the front's, not the bank's.
+const FRONT_AWAY: Duration = Duration::from_secs(5);
 
 impl Watchdog {
     pub fn new(seconds: u64) -> Watchdog {
-        Watchdog { limit: Duration::from_secs(seconds), pinged: None }
+        Watchdog { limit: Duration::from_secs(seconds), pinged: None, looked: Instant::now() }
+    }
+
+    /// Whether the front was away since the last look (and this is the first one after it): then the bank's clock
+    /// starts again, as a bank that spoke just now. Without that a front stopped for a minute killed a healthy
+    /// bank the moment it ran again, found by the pressure run's frozen front.
+    pub(super) fn front_was_away(&mut self, now: Instant) -> bool {
+        let gap = now.saturating_duration_since(self.looked);
+        self.looked = now;
+        let away = gap > FRONT_AWAY;
+        if away {
+            self.pinged = None;
+        }
+        away
     }
 }
 
@@ -199,9 +219,15 @@ impl Front {
     /// an admin request every bank answers from its loop).
     fn watch_bank(&mut self) {
         let now = Instant::now();
+        let away = self.watch.front_was_away(now);
         let saving = self.admin.waits_for(saves);
         let phase = self.phase;
         let Some(live) = self.live.as_mut() else { return };
+        if away {
+            eprintln!("the front was away for more than {} s (stopped, or the machine was): the bank's silence in that time is not counted", FRONT_AWAY.as_secs());
+            live.heard = now;
+            return;
+        }
         match watch_verdict(phase, now.saturating_duration_since(live.heard), self.watch.limit, saving, self.watch.pinged.map(|t| now.saturating_duration_since(t))) {
             Watch::Rest => {
                 live.heard = now;
@@ -301,6 +327,21 @@ mod tests {
         // The default is a minute.
         assert_eq!(crate::rules::Rules::default().limits.bank_watchdog_seconds, 60);
         assert_eq!(super::super::tests::test_front().watch.limit, s(60));
+    }
+
+    /// A front that was stopped (SIGSTOP, a paused machine) does not find the bank silent for as long as it was
+    /// stopped itself: its first look after the gap starts the bank's clock again, an ordinary gap does not.
+    #[test]
+    fn a_front_that_was_away_does_not_blame_the_bank_for_the_time() {
+        let mut w = Watchdog::new(60);
+        let t0 = w.looked;
+        assert!(!w.front_was_away(t0 + Duration::from_millis(50)), "the loop's own pace");
+        assert!(!w.front_was_away(t0 + Duration::from_secs(4)), "a slow round");
+        assert!(w.front_was_away(t0 + Duration::from_secs(70)), "stopped for a minute");
+        assert!(!w.front_was_away(t0 + Duration::from_secs(70) + Duration::from_millis(100)), "once");
+        w.pinged = Some(t0);
+        assert!(w.front_was_away(t0 + Duration::from_secs(200)));
+        assert!(w.pinged.is_none());
     }
 
     /// More than five endings within ten minutes are too many; older ones fall out of the window.
