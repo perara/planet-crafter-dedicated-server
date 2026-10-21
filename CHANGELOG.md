@@ -241,6 +241,12 @@ matches on `Event` fields by name. The plugin changes add nothing to the snapsho
 
 ### Fixed
 
+* **The `discord-notify` example switched itself off for good during an outage.** With Discord down its lines
+  pile up, and a flush builds a message of up to 1,900 characters from them at every tick, which costs more
+  than the default fuel of one event: the plugin ran out of fuel, was switched off after five faults in a
+  minute, and started again at a reload only to fault again, so the lines were never sent once Discord came
+  back. The example's manifest now asks for 4,000,000 fuel an event (and is signed again). Found by the
+  long soak's `net.http` plugin, a copy of it, against a webhook that was not there.
 * **A front that had been stopped killed the healthy game process when it ran again.** The watchdog
   (`limits.bankWatchdogSeconds`) counted the time since the game process last spoke; a front stopped for
   longer than the rule (SIGSTOP, a paused virtual machine, a suspended or starved host) took its own
