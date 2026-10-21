@@ -27,12 +27,20 @@ pub struct Rules {
     pub limits: Limits,
     pub world: World,
     pub drones: Drones,
+    pub rockets: Rockets,
     pub players: Players,
     pub chat: Chat,
     pub backup: Backup,
     pub save: Save,
     pub update: Update,
     pub log: Log,
+}
+
+/// Changes apply to the next launch; existing server-controlled flights finish normally.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct Rockets {
+    pub server_flight: bool,
 }
 
 /// The format 7 binary layout is frozen; new rules travel by name in the snapshot header.
@@ -63,6 +71,7 @@ pub mod snapshot {
         Ok(Rules {
             meteo, gauges, speed, death, loot, limits, world, players, chat, backup, update,
             drones: Drones::default(),
+            rockets: Rockets::default(),
             save: Save { autosave_minutes: save.autosave_minutes, backups_kept: save.backups_kept, backup_minutes: save.backup_minutes, ..Default::default() },
             log: Log { trace, ..Default::default() },
         })
@@ -485,8 +494,19 @@ impl Rules {
         }
     }
 
+    /// Omit the disabled extension so older banks can still read the file and snapshot header.
+    pub fn persisted(&self) -> Result<Value, serde_json::Error> {
+        let mut value = serde_json::to_value(self)?;
+        if !self.rockets.server_flight {
+            value.as_object_mut().unwrap().remove("rockets");
+        }
+        Ok(value)
+    }
+
     pub fn save(&self, path: &str) -> std::io::Result<()> {
-        crate::save::write_atomic(path, (serde_json::to_string_pretty(self).unwrap_or_default() + "\n").as_bytes())
+        let value = self.persisted().map_err(std::io::Error::other)?;
+        let text = serde_json::to_string_pretty(&value).map_err(std::io::Error::other)?;
+        crate::save::write_atomic(path, (text + "\n").as_bytes())
     }
 
     /// limits.maxPlayers, else 16.

@@ -7,6 +7,7 @@
 
 mod back_and_forth;
 mod interplanetary;
+mod server_flight;
 
 use indexmap::IndexMap;
 use serde_json::json;
@@ -65,6 +66,9 @@ pub struct State {
     interplanetary: interplanetary::State,
     /// Game time of the previous tick (Time.deltaTime for MachineRocketLand).
     last_tick: GameTime,
+    /// Last network tick sent by the experimental visual (a cache, not save or handoff state).
+    #[serde(skip)]
+    flight_tick: Option<u64>,
     /// back_and_forth::tick's list of platforms (kept to reuse its allocation).
     #[serde(skip)]
     ids: Vec<i32>,
@@ -114,6 +118,7 @@ pub fn tick(game: &mut Game) {
     let dt = game.time - game.ext.rockets.last_tick;
     game.ext.rockets.last_tick = game.time;
     despawn_ignited_rockets(game);
+    server_flight::tick(game, dt);
     departures_tick(game);
     back_and_forth::tick(game, dt);
 }
@@ -206,6 +211,10 @@ fn object_at(game: &Game, spot: [f32; 3]) -> Option<i32> {
 
 /// ConstructibleProxy.SendInSpaceServerRpc with ActionSendInSpace.SendRocket.
 fn send_in_space(game: &mut Game, client: u64, object: u64) {
+    send_in_space_using(game, client, object, game.rules.rockets.server_flight);
+}
+
+fn send_in_space_using(game: &mut Game, client: u64, object: u64, server_flight: bool) {
     let Some(platform) = wo_of(game, object) else { return };
     // GetComponentInChildren<ActionSendInSpace>() on anything else throws: no reply.
     if !game.wos.get(&platform).is_some_and(|w| has_component(game, w.group, "ActionSendInSpace")) {
@@ -224,12 +233,31 @@ fn send_in_space(game: &mut Game, client: u64, object: u64) {
         game.net.rpc(Target::Only(client), object, "ConstructibleProxy.SendInSpaceDisplayErrorClientRpc", &[]);
         return;
     };
+    let proxy = if server_flight {
+        match server_flight::prepare(game, rocket) {
+            Ok(proxy) => Some(proxy),
+            Err(why) => {
+                warn!("experimental server rocket launch refused: {why}");
+                game.net.rpc(Target::Only(client), object, "ConstructibleProxy.SendInSpaceDisplayErrorClientRpc", &[]);
+                return;
+            }
+        }
+    } else { None };
     let w = game.wos.get_mut(&rocket).unwrap();
     w.reset_position();
     let (group, net) = (w.group, w.net);
     send_something_in_space(game, group, platform_position);
     handle_rocket_multiplier(game, rocket);
-    game.net.rpc(Target::All, object, "ConstructibleProxy.SendInSpaceClientRpc", &[]);
+    let net = if let Some(proxy) = proxy {
+        server_flight::launch_effect(game, object, proxy.position);
+        if let Some(net) = net { game.net.despawn(net); }
+        let net = game.net.spawn(proxy);
+        game.set_wo_net(rocket, Some(net));
+        Some(net)
+    } else {
+        game.net.rpc(Target::All, object, "ConstructibleProxy.SendInSpaceClientRpc", &[]);
+        net
+    };
     // The server's own run of SendInSpaceClientRpc ignites the rocket (MachineRocket.Ignite),
     // which despawns its network object later.
     if let Some(net) = net {

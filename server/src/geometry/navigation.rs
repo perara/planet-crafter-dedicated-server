@@ -207,6 +207,57 @@ impl Grid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires the installed game's private drone-navigation.json"]
+    fn extracted_map_routes_clear_every_planet_and_building_prefab() {
+        let dir = std::path::Path::new(crate::test_data().expect("game tables required"));
+        let data: Data = serde_json::from_slice(&std::fs::read(dir.join("drone-navigation.json")).unwrap()).unwrap();
+        data.validate(&std::fs::read_to_string(dir.join("buildid")).unwrap()).unwrap();
+        assert!(!data.planets.is_empty());
+        let mut routes = 0;
+        for (planet, bounds) in &data.planets {
+            let mut grid = Grid::new(bounds.clone());
+            let candidates: Vec<_> = bounds.iter().filter(|b| {
+                b.max[1] > 10.0 && b.max[1] < 300.0 && (2.0..100.0).contains(&(b.max[0] - b.min[0]))
+                    && (2.0..100.0).contains(&(b.max[2] - b.min[2]))
+            }).collect();
+            assert!(candidates.len() >= 10, "planet {planet} has no representative terrain");
+            for b in candidates.iter().step_by((candidates.len() / 10).max(1)).take(10) {
+                let x = (b.min[0] + b.max[0]) * 0.5;
+                let z = (b.min[2] + b.max[2]) * 0.5;
+                let (from, to) = ([x - 80.0, b.max[1] - 2.0, z], [x + 80.0, b.max[1] - 2.0, z]);
+                let route = grid.route(from, to);
+                assert_eq!(route.len(), 3, "the direct flight intersects the selected terrain");
+                // Independent full scan for this axis-aligned flight, without the grid or slab query.
+                let highest = bounds.iter().filter(|b| {
+                    b.min[0] - 3.0 <= to[0] && b.max[0] + 3.0 >= from[0]
+                        && b.min[2] - 3.0 <= z && b.max[2] + 3.0 >= z
+                }).map(|b| b.max[1]).fold(f32::NEG_INFINITY, f32::max);
+                assert!(route[0][1] > highest + 3.0, "planet {planet}: cruise misses an obstacle");
+                assert_eq!(route[0][0], from[0]);
+                assert_eq!(route[1], [to[0], route[0][1], z]);
+                assert_eq!(route[2], to);
+                routes += 1;
+            }
+        }
+        println!("extracted map: {routes} obstructed routes across {} planets cleared an independent full scan", data.planets.len());
+        assert!(!data.buildings.is_empty());
+        for (name, local) in &data.buildings {
+            let bounds: Vec<_> = local.iter().map(|b| b.transformed([2000.0, 500.0, 3000.0], super::super::from_euler_y(90.0))).collect();
+            let first = &bounds[0];
+            let z = (first.min[2] + first.max[2]) * 0.5;
+            let y = (first.min[1] + first.max[1]) * 0.5;
+            let from = [bounds.iter().map(|b| b.min[0]).fold(f32::INFINITY, f32::min) - 8.0, y, z];
+            let to = [bounds.iter().map(|b| b.max[0]).fold(f32::NEG_INFINITY, f32::max) + 8.0, y, z];
+            let highest = bounds.iter().filter(|b| b.min[2] - 3.0 <= z && b.max[2] + 3.0 >= z)
+                .map(|b| b.max[1]).fold(f32::NEG_INFINITY, f32::max);
+            let route = Grid::new(Vec::new()).route_with(Some(&mut Grid::new(bounds)), from, to);
+            assert_eq!(route.len(), 3, "{name}: an obstructed building-only route must detour");
+            assert!(route[0][1] > highest + 3.0, "{name}: transformed building crossed");
+        }
+        println!("extracted map: {} rotated building prefabs cleared with no terrain", data.buildings.len());
+    }
     #[test]
     fn extreme_dynamic_bounds_cannot_wrap_the_cell_count() {
         let bounds = Bounds { min: [-1.0; 3], max: [1.0; 3] }

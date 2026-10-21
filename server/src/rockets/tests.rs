@@ -194,6 +194,136 @@ fn rocket_sent_to_space_multiplies_oxygen() {
     assert!(matches!(g.net.out.last(), Some((crate::net::Target::Only(1), _, _))));
 }
 
+#[test]
+fn overlapping_buildings_do_not_block_rocket_bonuses_events_or_cleanup_on_the_server() {
+    for (rocket_group, multiplier_group) in [
+        ("RocketOxygen1", "SpaceMultiplierOxygen"),
+        ("RocketHeat1", "SpaceMultiplierHeat"),
+        ("RocketPressure1", "SpaceMultiplierPressure"),
+    ] {
+        let (platform, rocket, roof) = (210_000_010, 210_000_011, 210_000_012);
+        let Some(mut g) = game(vec![
+            placed(platform, "LaunchPlatform", "200,10,200", "Prime", json!({})),
+            placed(roof, "Foundation", "197,18,184.042294", "Prime", json!({})),
+            placed(rocket, rocket_group, "197,15.556,184.042294", "Prime", json!({})),
+        ], vec![]) else { return };
+        let net = g.wos[&rocket].net.unwrap();
+        let queued = g.ext.meteo.queue.len();
+        assert!(rpc(&mut g, platform, "ConstructibleProxy.SendInSpaceServerRpc"));
+        assert!(!g.wos[&rocket].is_placed(), "{rocket_group} must count as launched");
+        let group = g.data.group(multiplier_group).unwrap();
+        let multiplier = g.wos.values().find(|w| w.group == group).unwrap();
+        assert!(g.inventories[&multiplier.linked_inventory].items.contains(&rocket));
+        assert_eq!(g.ext.meteo.queue.len(), queued + 1, "{rocket_group}: space event must start independently of local flight physics");
+        assert!(run_until(&mut g, 41.0, |g| !g.net.objects.contains_key(&net)).is_some());
+        assert!(g.wos.contains_key(&roof), "the obstruction is preserved");
+    }
+}
+
+#[test]
+fn experimental_server_rocket_clips_obstructions_and_survives_handoff() {
+    let Some(tables) = game(vec![], vec![]) else { return };
+    let groups: Vec<_> = tables.data.groups.iter().enumerate()
+        .filter(|(g, data)| data.id.starts_with("Rocket") && super::has_component(&tables, *g, "MachineRocket") && !super::has_component(&tables, *g, "MachineDepartureRocket"))
+        .map(|(_, g)| g.id.clone()).collect();
+    assert!(groups.len() >= 21, "include all launch-platform rockets, satellites and later tiers");
+    for rocket_group in groups {
+        let (platform, rocket, roof) = (210_000_010, 210_000_011, 210_000_012);
+        let objects = vec![
+            placed(platform, "LaunchPlatform", "200,10,200", "Prime", json!({})),
+            placed(roof, "Foundation", "197,18,184.042294", "Prime", json!({})),
+            placed(rocket, &rocket_group, "197,15.556,184.042294", "Prime", json!({})),
+        ];
+        let mut vanilla = game(objects.clone(), vec![]).unwrap();
+        let mut g = game(objects, vec![]).unwrap();
+        let original = g.wos[&rocket].net.unwrap();
+        let platform_net = g.wos[&platform].net.unwrap();
+        let start = g.net.out.len();
+        super::send_in_space_using(&mut g, 1, platform_net, true);
+        let vanilla_platform = vanilla.wos[&platform].net.unwrap();
+        super::send_in_space_using(&mut vanilla, 1, vanilla_platform, false);
+        assert_eq!(g.ext.meteo.queue, vanilla.ext.meteo.queue, "{rocket_group}: unchanged space event");
+        let queued_events = g.ext.meteo.queue.len();
+        assert_eq!(g.wos.len(), vanilla.wos.len(), "cosmetics must not create free world items");
+        assert_eq!(sent(&g, start).iter().filter(|s| *s == "ConstructibleProxy.StartCraftAnimationClientRpc").count(), 1);
+        let effect = g.ext.rockets.despawns.iter().find(|(_, wo, _)| *wo == 0).unwrap().2;
+        assert!(g.net.objects[&effect].wo.is_none());
+        let multipliers = |game: &Game| game.wos.values().filter(|w| game.data.groups[w.group].id.starts_with("SpaceMultiplier"))
+            .map(|w| (game.data.groups[w.group].id.clone(), w.unit_multiplier)).collect::<Vec<_>>();
+        assert_eq!(multipliers(&g), multipliers(&vanilla), "{rocket_group}: unchanged bonuses");
+        let net = g.wos[&rocket].net.unwrap();
+        assert_ne!(net, original);
+        assert!(!g.net.objects.contains_key(&original));
+        assert!(!sent(&g, start).iter().any(|s| s == "ConstructibleProxy.SendInSpaceClientRpc"), "must not start the client's local Rigidbody");
+        assert!(g.net.behaviour_index(net, "ClientNetworkTransform").is_some());
+        assert_eq!(g.net.objects[&net].owner, 0);
+        let hash = crate::wire::Reader::new(match g.net.get(net, "GroupNetworkContainer", "_groupHash").unwrap() {
+            VarValue::Plain(b) => b, _ => panic!(),
+        }).packed_i32().unwrap();
+        assert_eq!(hash, g.data.groups[g.wos[&rocket].group].hash);
+        let initial = g.net.objects[&net].position;
+        let mut packets = 0;
+        for i in 1..=400 {
+            let t = i as f64 * 0.005;
+            g.sim_time = Some(t);
+            g.time = crate::clock::GameTime::at(t);
+            super::tick(&mut g);
+            for (_, kind, body) in std::mem::take(&mut g.net.out) {
+                if kind == crate::protocol::NETWORK_TRANSFORM {
+                    let update = crate::transform::update(&body).unwrap();
+                    assert_eq!(update.object, net);
+                    assert_eq!(update.position[0], Some(initial[0]));
+                    assert_eq!(update.position[2], Some(initial[2]));
+                    assert!(update.position[1].unwrap() > initial[1]);
+                    packets += 1;
+                }
+            }
+        }
+        assert_eq!(packets, 61, "one initial pose and 60 network ticks, not every game-loop iteration");
+        assert!(g.net.objects[&net].position[1] > 30.0, "the obstruction did not stop ascent");
+        g.net.set(net, "GroupNetworkContainer", "_transformSync", crate::net::enc::bool(false));
+        let planet = g.planet;
+        g.planet = (planet + 1) % g.net_data.planets.len();
+        super::tick(&mut g);
+        assert!(matches!(g.net.get(net, "GroupNetworkContainer", "_active"), Some(VarValue::Plain(b)) if b == &[0]));
+        g.planet = planet;
+        super::tick(&mut g);
+        assert!(matches!(g.net.get(net, "GroupNetworkContainer", "_active"), Some(VarValue::Plain(b)) if b == &[1]));
+        assert!(matches!(g.net.get(net, "GroupNetworkContainer", "_transformSync"), Some(VarValue::Plain(b)) if b == &[1]));
+        let before = g.net.objects[&net].position;
+        let snapshot = crate::handoff::snapshot(&mut g).unwrap();
+        let (_, _, spec) = crate::tables(crate::test_data().unwrap());
+        let mut restored = crate::handoff::restore(g.net_data.clone(), g.data.clone(), spec, &snapshot, g.scenes.clone()).unwrap();
+        assert_eq!(restored.net.objects[&net].position, before);
+        let wo_count = restored.wos.len();
+        restored.time += 0.1;
+        super::tick(&mut restored);
+        assert!(restored.net.objects[&net].position[1] > before[1]);
+        assert_eq!(restored.wos.len(), wo_count);
+        assert!(run_until(&mut restored, 40.0, |g| !g.net.objects.contains_key(&net)).is_some());
+        assert_eq!(restored.wos[&rocket].net, None);
+        assert!(!restored.net.objects.contains_key(&effect), "the temporary effect is cleaned up too");
+        assert!(restored.wos.contains_key(&roof));
+        assert_eq!(restored.ext.meteo.queue.len(), queued_events, "{rocket_group}: no repeated space event across the handoff");
+    }
+}
+
+#[test]
+fn experimental_rocket_refuses_missing_movable_prefab_before_consuming_it() {
+    let (platform, rocket) = (210_000_010, 210_000_011);
+    let Some(mut g) = game(vec![
+        placed(platform, "LaunchPlatform", "200,10,200", "Prime", json!({})),
+        placed(rocket, "RocketHeat1", "197,15.556,184.042294", "Prime", json!({})),
+    ], vec![]) else { return };
+    std::sync::Arc::make_mut(&mut g.data.layouts).remove("Iron");
+    let net = g.wos[&rocket].net;
+    let platform_net = g.wos[&platform].net.unwrap();
+    super::send_in_space_using(&mut g, 1, platform_net, true);
+    assert!(g.wos[&rocket].is_placed());
+    assert_eq!(g.wos[&rocket].net, net);
+    assert!(g.ext.meteo.queue.is_empty());
+}
+
 /// With the craft spawn's place in the tables, only the world object exactly on it goes (the
 /// real host refused a rocket 15 m off the spawn that we used to take as the nearest).
 #[test]
@@ -435,4 +565,34 @@ fn rocket_check_refilling_after_toggle_recovers() {
     assert_eq!(g.wos[&210_000_001].growth, 0.0, "enabled but one short: no launch");
     assert!(g.add_existing_item(item, 50, true, 0));
     assert_eq!(g.wos[&210_000_001].growth, 1.0, "removing and replacing one item triggers launch");
+}
+
+#[test]
+fn server_flight_rule_changes_the_next_launch_and_keeps_existing_flights_moving() {
+    let objects = (0..3).flat_map(|i| {
+        let x = 200.0 + i as f32 * 50.0;
+        [placed(210_000_100 + i * 2, "LaunchPlatform", &format!("{x},10,200"), "Prime", json!({})),
+         placed(210_000_101 + i * 2, "RocketHeat1", &format!("{},15.556,184.042294", x - 3.0), "Prime", json!({}))]
+    }).collect();
+    let Some(mut g) = game(objects, vec![]) else { return };
+    let mut flight = None;
+    for (i, enabled) in [false, true, false].into_iter().enumerate() {
+        let rule = g.rules.patched(&json!({"rockets": {"serverFlight": enabled}})).unwrap();
+        crate::rules::set(&mut g, rule).unwrap();
+        assert_eq!(g.rules.persisted().unwrap().get("rockets").is_some(), enabled, "disabled extension must allow old-bank rollback");
+        let platform = 210_000_100 + i as i32 * 2;
+        let rocket = platform + 1;
+        let old = g.wos[&rocket].net.unwrap();
+        let from = g.net.out.len();
+        assert!(rpc(&mut g, platform, "ConstructibleProxy.SendInSpaceServerRpc"));
+        let net = g.wos[&rocket].net.unwrap();
+        assert_eq!(net != old, enabled);
+        assert_eq!(sent(&g, from).iter().any(|r| r == "ConstructibleProxy.SendInSpaceClientRpc"), !enabled);
+        if enabled { flight = Some(net); }
+    }
+    let net = flight.unwrap();
+    let y = g.net.objects[&net].position[1];
+    g.time += 0.1;
+    super::tick(&mut g);
+    assert!(g.net.objects[&net].position[1] > y, "disabling changes new launches, without freezing a flight already started");
 }

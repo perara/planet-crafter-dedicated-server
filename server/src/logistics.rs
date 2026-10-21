@@ -1045,8 +1045,7 @@ fn assign_idle_drones_nearest(game: &mut Game) {
     }
 }
 
-/// drones.nearestFirst, last frame: each free task gets a drone from the nearest station that has
-/// one, counting the parked drones once rather than sorting all stations for every item.
+/// drones.nearestFirst: highest priority, then the shortest pickup from an available station.
 fn release_drones_nearest(game: &mut Game) {
     game.ext.logistics.updating = 0;
     if non_attributed_task(game, 0).is_none() {
@@ -1057,27 +1056,51 @@ fn release_drones_nearest(game: &mut Game) {
         let count = items(game, s.inventory).iter().filter(|wo| game.wos.get(wo).is_some_and(|w| s.groups.contains(&w.group))).count();
         (count > 0).then(|| (*st, s.planet, station_position(game, *st), count))
     }).collect();
-    let tasks: Vec<u32> = game.ext.logistics.all_tasks.iter().map(|(_, uid)| *uid).collect();
-    for uid in tasks {
-        let Some(t) = game.ext.logistics.tasks.get(&uid) else { continue };
+    struct Job {
+        uid: u32,
+        order: usize,
+        priority: i32,
+        planet: i32,
+        from: V3,
+        station: Option<usize>,
+        distance: f32,
+    }
+    let mut tasks: Vec<_> = game.ext.logistics.all_tasks.iter().enumerate().filter_map(|(order, (_, uid))| {
+        let t = game.ext.logistics.tasks.get(uid)?;
         if t.state != State::NotAttributed || (!t.spawned && t.supply_wo.is_none()) {
-            continue;
+            return None;
         }
-        let planet = task_planet(game, t);
-        let from = wo_position(game, if t.spawned { t.wo } else { t.supply_wo.unwrap() });
-        while let Some(i) = available.iter().enumerate().filter(|(_, s)| s.1 == planet)
-            .min_by(|(_, a), (_, b)| motion::distance_sq(a.2, from).total_cmp(&motion::distance_sq(b.2, from)))
-            .map(|(i, _)| i) {
+        Some(Job {
+            uid: *uid, order,
+            priority: game.inventories.get(&t.demand)?.logistic.priority,
+            planet: task_planet(game, t),
+            from: wo_position(game, if t.spawned { t.wo } else { t.supply_wo.unwrap() }),
+            station: None, distance: f32::INFINITY,
+        })
+    }).collect();
+    while !available.is_empty() && !tasks.is_empty() {
+        for t in &mut tasks {
+            t.station = available.iter().enumerate().filter(|(_, s)| s.1 == t.planet)
+                .min_by(|(_, a), (_, b)| motion::distance_sq(a.2, t.from).total_cmp(&motion::distance_sq(b.2, t.from)))
+                .map(|(i, _)| i);
+            t.distance = t.station.map_or(f32::INFINITY, |i| motion::distance_sq(available[i].2, t.from));
+        }
+        // Pop the best job; these ranks stay valid until a station runs out of drones.
+        tasks.sort_unstable_by(|a, b| a.priority.cmp(&b.priority)
+            .then_with(|| b.distance.total_cmp(&a.distance)).then_with(|| b.order.cmp(&a.order)));
+        while let Some(t) = tasks.pop() {
+            let Some(i) = t.station else { continue };
             if let Some(d) = release_one_drone(game, available[i].0) {
                 available[i].3 -= 1;
-                if available[i].3 == 0 { available.remove(i); }
                 add_to_fleet(game, d, false);
-                set_task(game, d, Some(uid));
-                break;
+                set_task(game, d, Some(t.uid));
+                if available[i].3 > 0 { continue; }
+            } else {
+                tasks.push(t);
             }
             available.remove(i);
+            break;
         }
-        if available.is_empty() { break; }
     }
 }
 
