@@ -194,6 +194,32 @@ fn rocket_sent_to_space_multiplies_oxygen() {
     assert!(matches!(g.net.out.last(), Some((crate::net::Target::Only(1), _, _))));
 }
 
+#[test]
+fn overlapping_buildings_do_not_block_rocket_bonuses_events_or_cleanup_on_the_server() {
+    for (rocket_group, multiplier_group) in [
+        ("RocketOxygen1", "SpaceMultiplierOxygen"),
+        ("RocketHeat1", "SpaceMultiplierHeat"),
+        ("RocketPressure1", "SpaceMultiplierPressure"),
+    ] {
+        let (platform, rocket, roof) = (210_000_010, 210_000_011, 210_000_012);
+        let Some(mut g) = game(vec![
+            placed(platform, "LaunchPlatform", "200,10,200", "Prime", json!({})),
+            placed(roof, "Foundation", "197,18,184.042294", "Prime", json!({})),
+            placed(rocket, rocket_group, "197,15.556,184.042294", "Prime", json!({})),
+        ], vec![]) else { return };
+        let net = g.wos[&rocket].net.unwrap();
+        let queued = g.ext.meteo.queue.len();
+        assert!(rpc(&mut g, platform, "ConstructibleProxy.SendInSpaceServerRpc"));
+        assert!(!g.wos[&rocket].is_placed(), "{rocket_group} must count as launched");
+        let group = g.data.group(multiplier_group).unwrap();
+        let multiplier = g.wos.values().find(|w| w.group == group).unwrap();
+        assert!(g.inventories[&multiplier.linked_inventory].items.contains(&rocket));
+        assert_eq!(g.ext.meteo.queue.len(), queued + 1, "{rocket_group}: space event must start independently of local flight physics");
+        assert!(run_until(&mut g, 41.0, |g| !g.net.objects.contains_key(&net)).is_some());
+        assert!(g.wos.contains_key(&roof), "the obstruction is preserved");
+    }
+}
+
 /// With the craft spawn's place in the tables, only the world object exactly on it goes (the
 /// real host refused a rocket 15 m off the spawn that we used to take as the nearest).
 #[test]
