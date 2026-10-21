@@ -696,6 +696,10 @@ into `run/worlds/backups/` (the newest of this world without a name), for a new 
 - **Old saves are imported, not opened.** The game converts a save of its old layouts (2022 and
   before) when it opens one; this server refuses such a save at every entry and
   `pcds world import SAVE.json` converts it first (see "Worlds and backups").
+- **Machines do not switch off when no player is near.** The game switches off a machine with a
+  `RequireEnergy` radius (219 objects on the late-game Humble, 25 to 320 m) when every player is
+  further away than that; the server keeps every machine running (measured: the same extractors
+  produced with one player at the base and with seventeen spread over the planet).
 - **No physics on the server.** What a host game simulates itself (items still falling, parked
   vehicles, wild animals) is handed to the nearest player, by the game's own hand-over rules.
   Meteor impacts land where a player's game computes them.
