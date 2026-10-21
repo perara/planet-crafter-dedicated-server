@@ -428,11 +428,11 @@ fn rocket_check_loading_full_enabled_rocket_launches() {
 fn rocket_check_refilling_after_toggle_recovers() {
     let Some(mut g) = rocket_check_fixture(0, 25) else { return };
     let net = g.wos[&210_000_001].net.unwrap();
-    crate::handlers::rpc(&mut g, 1, net, 0, "SettingProxy.SetSettingServerRpc", &Args(vec![json!(1)]));
     let item = g.inventories[&50].items[0];
     assert!(g.inventory_remove(50, item));
     g.propagate(50, item, false);
-    assert_eq!(g.wos[&210_000_001].growth, 0.0);
+    crate::handlers::rpc(&mut g, 1, net, 0, "SettingProxy.SetSettingServerRpc", &Args(vec![json!(1)]));
+    assert_eq!(g.wos[&210_000_001].growth, 0.0, "enabled but one short: no launch");
     assert!(g.add_existing_item(item, 50, true, 0));
     assert_eq!(g.wos[&210_000_001].growth, 1.0, "removing and replacing one item triggers launch");
 }
