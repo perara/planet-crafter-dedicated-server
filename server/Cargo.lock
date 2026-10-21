@@ -239,7 +239,7 @@ version = "0.2.0"
 
 [[package]]
 name = "pcds-server"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "ctrlc",
  "indexmap",

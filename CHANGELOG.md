@@ -19,12 +19,46 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-10-22
+
+### Breaking changes
+
+None. Front protocol 3, snapshot format 7 and game tables format 4 are unchanged.
+New behavior remains opt-in; existing rocket launches are unchanged with the rule off.
+
+### Added
+
+* **Live rule `rockets.serverFlight` (off).** All 21 orbital launch-platform rocket types
+  can use server-controlled, collision-free ascent without a client mod, keeping their
+  normal bonuses and space events. Travel and trading rockets retain their existing behavior.
+  Toggle the rule while the server runs; it affects the next launch, and active flights
+  finish normally after disabling it.
+* The optional rocket ascent includes six seconds of orange flare smoke/light at the pad
+  and the game's Crafting sound near the console (within 10 m). These approximate launch
+  effects; the original engine flame and roar do not follow the rocket.
+
 ### Fixed
 
 * With `drones.nearestFirst` enabled, parked drones now choose jobs by demand priority and
   shortest available pickup distance. Previously only airborne idle drones chose the nearest
   job; parked drones took jobs in registration order. Distances are reconsidered when a
   station releases its last drone. The rule remains off by default.
+
+
+### Upgrade
+
+From 0.8.2, use `pcds upgrade v0.8.3` for a hot update without disconnecting players.
+Enable `rockets.serverFlight` through `pcds rules` or `POST /api/rules`; no restart is needed.
+Existing drone rules and navigation maps continue to work.
+
+Before a binary rollback to 0.8.2, disable `rockets.serverFlight` and let any active
+server-controlled flights finish (40 game seconds). Disabling omits the new rocket setting
+from persisted rules and handoff headers so 0.8.2 can read them. A rollback while the new
+setting is enabled is refused safely and the current bank continues serving.
+
+Validation includes all 21 rocket types, a real Unity client observing collision crossing,
+smoke/light and audio playback, and a cross-release handoff with six scripted players.
+Human visual/listening acceptance and a long real multiplayer soak remain open.
 
 ## [0.8.2] - 2026-10-21
 
@@ -872,7 +906,9 @@ None; the first release.
 
 Not applicable.
 
-[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.2...v0.8.3
+[0.8.2]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.6.2...v0.7.0
