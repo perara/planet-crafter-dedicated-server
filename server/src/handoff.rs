@@ -442,11 +442,43 @@ pub fn restore_timed(net_data: NetData, data: GameData, spec: Spec, snapshot: &[
 /// Err names the first part that differs. PCDS_DEV=flip-verify runs it at every flip (tests).
 pub fn verify(g: &Game, snapshot: &[u8]) -> Result<(), String> {
     use serde_json::Value;
+    // The order of an array's elements is by a hash of each canonical element, not by its text: the text of
+    // every element of every array (33 000 world objects, twice) took 2.5 to 3.9 s on the late-game
+    // world, inside the front's 5 s to be ready, and failed the flips it was to verify.
+    fn hashed(v: &Value, h: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        match v {
+            Value::Null => 0u8.hash(h),
+            Value::Bool(b) => (1u8, b).hash(h),
+            Value::Number(n) => match (n.as_i64(), n.as_u64()) {
+                (Some(i), _) => (2u8, i).hash(h),
+                (None, Some(u)) => (3u8, u).hash(h),
+                _ => (4u8, n.as_f64().map(f64::to_bits)).hash(h),
+            },
+            Value::String(s) => (5u8, s).hash(h),
+            Value::Array(a) => {
+                (6u8, a.len()).hash(h);
+                a.iter().for_each(|x| hashed(x, h));
+            }
+            Value::Object(o) => {
+                (7u8, o.len()).hash(h);
+                o.iter().for_each(|(k, x)| {
+                    k.hash(h);
+                    hashed(x, h);
+                });
+            }
+        }
+    }
     fn canon(v: &mut Value) {
         match v {
             Value::Array(a) => {
                 a.iter_mut().for_each(canon);
-                a.sort_by_cached_key(|x| x.to_string());
+                a.sort_by_cached_key(|x| {
+                    use std::hash::Hasher;
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    hashed(x, &mut h);
+                    h.finish()
+                });
             }
             Value::Object(o) => {
                 o.values_mut().for_each(canon);
