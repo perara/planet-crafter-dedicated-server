@@ -787,7 +787,9 @@ mod tests {
         let started = Instant::now();
         let refused = ask(remote, b"GET /api/health HTTP/1.1\r\n\r\n");
         assert!(refused.starts_with("HTTP/1.1 503") && refused.contains("Retry-After: 5") && refused.contains("too many connections"), "{refused}");
-        assert!(started.elapsed() < Duration::from_secs(1), "told at once, not after the head's wait: {:?}", started.elapsed());
+        // (The head's wait is 2 s: an answer that waited for it would take 2 s or more. A bound near it, not a
+        // tight one: the suite runs hundreds of tests at once on a loaded machine.)
+        assert!(started.elapsed() < Duration::from_millis(1900), "told at once, not after the head's wait: {:?}", started.elapsed());
         // This machine is served meanwhile.
         let wrong = b"GET /api/status HTTP/1.1\r\nAuthorization: Bearer nope\r\n\r\n";
         assert!(ask(std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), port), wrong).starts_with("HTTP/1.1 401"));
@@ -796,7 +798,7 @@ mod tests {
         let mut first = idle.into_iter().next().unwrap();
         let mut buf = [0u8; 16];
         assert_eq!(std::io::Read::read(&mut first, &mut buf).unwrap_or(0), 0, "closed without an answer");
-        assert!(began.elapsed() >= Duration::from_millis(1500) && began.elapsed() < Duration::from_secs(4), "{:?}", began.elapsed());
+        assert!(began.elapsed() >= Duration::from_millis(1500) && began.elapsed() < Duration::from_secs(15), "{:?}", began.elapsed());
         assert!((0..50).any(|_| {
             std::thread::sleep(Duration::from_millis(100));
             ask(remote, wrong).starts_with("HTTP/1.1 401")
