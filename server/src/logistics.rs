@@ -153,6 +153,9 @@ pub struct Logistics {
     check_busy: Vec<i32>,
     #[serde(skip)]
     navigation: HashMap<i32, crate::geometry::navigation::Grid>,
+    /// The map, and the index of each planet's terrain, made when a drone first flies there.
+    #[serde(skip)]
+    navigation_map: Option<std::sync::Arc<crate::geometry::navigation::Data>>,
     #[serde(skip)]
     terrain_navigation: HashMap<i32, crate::geometry::navigation::Grid>,
     #[serde(skip)]
@@ -489,7 +492,7 @@ fn refresh_navigation(game: &mut Game) {
     let Ok(data) = map else {
         let l = &mut game.ext.logistics;
         if !l.navigation.is_empty() || !l.terrain_navigation.is_empty() {
-            (l.navigation, l.terrain_navigation, l.navigation_dirty) = Default::default();
+            (l.navigation, l.terrain_navigation, l.navigation_map, l.navigation_dirty) = Default::default();
             for d in l.drones.values_mut() {
                 (d.route, d.route_goal) = Default::default();
             }
@@ -498,9 +501,7 @@ fn refresh_navigation(game: &mut Game) {
     };
     game.ext.logistics.navigation_failed = false;
     if !game.ext.logistics.navigation_dirty && !game.ext.logistics.navigation.is_empty() { return; }
-    if game.ext.logistics.terrain_navigation.is_empty() {
-        game.ext.logistics.terrain_navigation = data.planets.iter().map(|(p,bounds)| (*p,crate::geometry::navigation::Grid::new(bounds.clone()))).collect();
-    }
+    game.ext.logistics.navigation_map = Some(data.clone());
     let mut planets: HashMap<_, Vec<_>> = data.planets.keys().map(|p| (*p,Vec::new())).collect();
     for id in &game.constructed {
         let Some(w) = game.wos.get(id).filter(|w| w.net.is_some()) else { continue };
@@ -512,6 +513,13 @@ fn refresh_navigation(game: &mut Game) {
     l.navigation = planets.into_iter().map(|(p, bounds)| (p, crate::geometry::navigation::Grid::new(bounds))).collect();
     l.navigation_dirty = false;
     l.navigation_epoch = l.navigation_epoch.wrapping_add(1);
+}
+
+/// A planet's terrain index, made the first time a drone flies there (the six planets' are 730 000
+/// boxes together; a world uses one or two).
+fn terrain_grid<'a>(map: &Option<std::sync::Arc<crate::geometry::navigation::Data>>, grids: &'a mut HashMap<i32, crate::geometry::navigation::Grid>, planet: i32) -> Option<&'a mut crate::geometry::navigation::Grid> {
+    let bounds = map.as_ref()?.planets.get(&planet)?;
+    Some(grids.entry(planet).or_insert_with(|| crate::geometry::navigation::Grid::new(bounds.clone())))
 }
 
 /// LogisticManager.Update: drones the job found at their target act, then the job moves the
@@ -559,7 +567,7 @@ fn update(game: &mut Game) {
             l.at_target.push_back(i);
             continue;
         }
-        if let Some(grid) = l.terrain_navigation.get_mut(&a.planet).filter(|_| avoid) {
+        if let Some(grid) = avoid.then(|| terrain_grid(&l.navigation_map, &mut l.terrain_navigation, a.planet)).flatten() {
             if dr.route_goal != Some(a.target) || dr.route_epoch != l.navigation_epoch {
                 if routes_left == 0 { continue; }
                 routes_left -= 1;
@@ -938,6 +946,12 @@ fn set_logistic_tasks(game: &mut Game) {
     }
     let held: HashSet<u32> = l.all_tasks.iter().map(|(_, uid)| *uid).chain(l.drones.values().filter_map(|d| d.task)).collect();
     l.tasks.retain(|uid, _| held.contains(uid));
+}
+
+/// The drones and the tasks the world has now (the bench prints them).
+#[cfg(test)]
+pub(crate) fn counts(game: &Game) -> (usize, usize) {
+    (game.ext.logistics.drones.len(), game.ext.logistics.all_tasks.len())
 }
 
 /// SetLogisticTasks, second frame: drones already flying take free tasks.

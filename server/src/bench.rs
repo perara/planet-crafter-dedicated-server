@@ -472,6 +472,57 @@ fn bench() {
     }
 }
 
+/// Drones and rockets on a late-game world (PCDS_BENCH_SAVE; the world is on Humble, so the DLC
+/// rule is stated here; PCDS_TEST_DATA holds a drone-navigation.json for the last two modes, else
+/// they are skipped). Per mode of the drone rules: the user instructions per tick, the slowest tick,
+/// and how many items ended in another container than they began in, which is what the drones
+/// delivered. Then a trade platform of the world is filled and switched to launch when full.
+/// `cargo test --release drones_on_a_late_world -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn drones_on_a_late_world() {
+    let Some(e) = env() else { return };
+    let holders = |g: &Game| -> HashMap<i32, i32> { g.inventories.iter().flat_map(|(id, i)| i.items.iter().map(move |wo| (*wo, *id))).collect() };
+    for (name, nearest, avoid) in [("the game's order and flight", false, false), ("drones.nearestFirst", true, false), ("drones.avoidObstacles", false, true), ("both rules", true, true)] {
+        let mut g = load(&e);
+        g.rules.world.dlc_planets = vec!["Humble".into()];
+        g.rules.drones = crate::rules::Drones { nearest_first: nearest, avoid_obstacles: avoid };
+        if avoid && let Err(why) = g.data.drone_navigation.get() {
+            println!("drones: {name}: skipped, {why}");
+            continue;
+        }
+        let before = holders(&g);
+        let (drones, tasks) = crate::logistics::counts(&g);
+        let r = run(g, &e, f64::INFINITY, |g| g, None);
+        let after = holders(&r.game);
+        let moved = after.iter().filter(|(wo, inv)| before.get(wo).is_some_and(|b| b != *inv)).count();
+        let mut sorted = r.tick_ns.clone();
+        sorted.sort_unstable();
+        let at = |p: f64| sorted[((sorted.len() - 1) as f64 * p) as usize] as f64 / 1e3;
+        println!(
+            "drones: {name}: {drones} drones, {tasks} tasks at the start; {:.0} instructions per tick, ticks p50 {:.1} us, p99 {:.1} us, p99.9 {:.1} us, max {:.2} ms; {moved} items changed container in {} s",
+            r.instructions.map_or(0.0, |i| i as f64 / r.ticks.len() as f64),
+            at(0.5),
+            at(0.99),
+            at(0.999),
+            at(1.0) / 1e3,
+            e.seconds
+        );
+    }
+    // Rockets: automatic launch on a full trade rocket of the world.
+    let mut g = load(&e);
+    g.rules.world.dlc_planets = vec!["Humble".into()];
+    let platform = g.wos.values().find(|w| g.data.groups[w.group].id.starts_with("TradePlatform") && w.net.is_some() && w.linked_inventory != 0).map(|w| (w.id, w.net.unwrap(), w.linked_inventory));
+    let Some((wo, net, inventory)) = platform else { return println!("rockets: this world has no trade platform") };
+    let food = g.data.group("astrofood2").unwrap();
+    g.wos.get_mut(&wo).unwrap().setting = 0;
+    g.wos.get_mut(&wo).unwrap().growth = 0.0;
+    while !g.inventories[&inventory].is_full() && g.add_new_item(food, inventory, 0).0 {}
+    let full = g.inventories[&inventory].is_full();
+    crate::handlers::rpc(&mut g, 1, net, 0, "SettingProxy.SetSettingServerRpc", &crate::game::Args(vec![json!(1)]));
+    println!("rockets: a trade platform of the world, inventory full {full}, switched to launch when full: growth {} (a launch is above 0)", g.wos[&wo].growth);
+}
+
 /// The first tick two runs differ in, with the messages only one of them sent then.
 fn divergence(a: &Run, b: &Run, rerun: impl FnOnce(Option<usize>) -> (Run, Run)) -> String {
     let Some(first) = a.ticks.iter().zip(&b.ticks).position(|(x, y)| x != y) else {
