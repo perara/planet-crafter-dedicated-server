@@ -19,7 +19,8 @@ impl Ctx {
     /// sets some there), else the default (docs/env.md). The commands that talk to the running
     /// server use this, so a server.env that lists only what differs works with them.
     pub fn effective(&self, key: &str) -> Option<String> {
-        self.env_get(key).or_else(|| crate::env(key)).or_else(|| crate::config::knob_for(key).map(|k| k.default.to_string()).filter(|d| !d.is_empty()))
+        // (No server.env at all is no server set up here, not a server on the defaults.)
+        self.env_get(key).or_else(|| crate::env(key)).or_else(|| crate::config::knob_for(key).map(|k| k.default.to_string()).filter(|d| !d.is_empty() && self.env_file.is_file()))
     }
 
     /// server.env, and the environment under it, as the server will check them at its start: Err
