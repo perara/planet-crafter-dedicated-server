@@ -225,7 +225,11 @@ Differences left, none a bug:
 - **Algae seeds** (165 on the game and here) and the growth and rotation of the growables: the game's randomness and timing (class d).
 - **Floating buildings** (AlgaeGenerator, TreeSpreader0, WaterCollector2: the water-only ones) are 0.6094 higher on the game: it floats
   them to the water level of today's terraformation, which is higher than the one the 2022 save was made at; no physics here
-  ("No physics on the server").
+  ("No physics on the server"). Measured again on the late-game save (22 of 24 floaters of Prime's lakes): this
+  server floats them (`float_on_water`) 0.609 m lower than the saved position, 1.131 m on the high lake, and the game
+  keeps the saved position (the same at v0.6.2).
+- **The saved host flag** moves to the first probe player here (`players::mark_host`); the real game keeps its
+  hidden Extractor host. Seen in `lg_real`'s save.
 - **Signs** get the default colour here (COMPLETENESS gap 11) and **teleporters without an order number**: the game's
   `ActionUseTeleporter` numbers them from a client's script at the first spawn (`set`); here the first real client does.
 - `pcdsCurrentPlanet` in the first section (see "Save layout").

@@ -145,7 +145,7 @@ planets removed** (`nodlc.py`); the full save is run once for the record.
 | lg_inventories | 13 kinds of container, 2 each: watch, empty into a backpack, fill again, sort, lock, first of a group | 230 | invalid inventory id answered here, ignored by the game (gap 10); ids of new items | same |
 | lg_logistics | demand on one box, supply on another, 90 s of drones | 25 | drone state counts (time); the supply and demand lists have the same 170 and 206 groups | same |
 | lg_rockets | launch platform without a rocket, trade and exchange platform | 35 | none | same |
-| lg_travel | Prime, Selenea, Aqualis, Prime; inventories read on arrival and a minute later | 130 | wild animals the game's own player spawns on arrival (5 crabs), animation state sent to animals (class b) | same |
+| lg_travel | Prime, Selenea, Aqualis, Prime; inventories read on arrival and a minute later | 130 | wild animals the game's own player spawns on arrival (37 objects over the three arrivals: Selenea 20, Aqualis 5, Prime 12; re-measured in the acceptance run, docs/acceptance.md), animation state sent to animals (class b) | same |
 | lg_pair.A/B | two players at one real box | 13 + 9 | the other player's object comes later on the game (class b) | same |
 
 `MATRIX.md` and `completeness/*.csv` hold the rest. The full list of what each run did not touch is in the gap list.
@@ -215,8 +215,8 @@ Severity is how likely a normal player or server owner meets it times how bad it
 | 9 | Escape pods can be deconstructed by a client that sends the call; the game ignores it. | lg_real: the world's pod is gone here, still there on the game. Known, EXPECTED.md "A second escape pod"; no game client sends it. | Treat the groups whose `ActionDeconstructible` sits under `WorldContainer` as not deconstructible. |
 | 10 | Idle cost: 3.9 % of a core with no player, a slowest loop of 14 to 27 ms every second on this save. | nf run. | Find what the 14 ms second-by-second job is (a scan of 33 000 objects?). |
 | 11 | A loaded colourless Sign gets the default colour `0,0,0,1` at load; the game leaves `0,0,0,0`. Cosmetic; unexplained (the Sign's colour child is hidden on some platforms). | 18 Signs on Prime, every run. | Check on a Steam-platform host before changing. |
-| 12 | A call about an inventory id that does not exist is answered here and ignored by the game (`TransferAllItems`, `LockInventoryContent`). | lg_inventories, inventory 603. | Return silently. |
-| 13 | The game's own player spawns wild animals on arrival (five crabs on Aqualis); here animals appear when a real client reports its spawner. | lg_travel. Probably the same with real clients: not verified. | Verify with a real client. |
+| 12 | A call about an inventory id that does not exist is answered here and ignored by the game (`TransferAllItems`, `LockInventoryContent`). It is wider than first written: every empty inventory (7 in lg_inventories, whose ids the game never gave out) and every inventory of an unloaded wreck. | lg_inventories (169 against 185 RPCs). | Return silently. |
+| 13 | The game's own player spawns wild animals on arrival (37 objects in lg_travel: Selenea 20, Aqualis 5, Prime 12); here animals appear when a real client reports its spawner. | lg_travel. Probably the same with real clients: not verified. | Verify with a real client. |
 | 14 | Documented limits: no physics (the nearest player owns what falls and drives), every player sees every animal, endings do not restart the session, sleeping does not skip the night. | README "Differences". | None planned. |
 | 15 | `NetworkTransform.SetStateServerRpc` is not handled. | No game code sends it. | None. |
 
