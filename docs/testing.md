@@ -392,4 +392,4 @@ one of every building and six players. It is by hand because it needs the tables
 release checklist, with the gate's meaning, is in
 [hot-update.md](hot-update.md) (under "As built": the paragraphs "The flip gate" and "Release checklist"): follow that list before tagging; this file does not repeat it.
 
-The last full run of all of this on a build, with the numbers and what it found, is [soak-report.md](soak-report.md).
+The last full runs of all of this on a build, with the numbers and what they found, are in [soak-report.md](soak-report.md) (round 1, and round 2: `tools/chaos/longsoak.py`, `pressure.py`, `dockermem.py`, `tools/perf/trend.py` and the long `soak_growth` runs).
