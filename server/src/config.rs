@@ -99,7 +99,7 @@ pub static KNOBS: &[Knob] = &[
     rule("speed.terraformation", Type::Float, "×", "What buildings add to every unit but energy, times this, on top of the world's pace.").range(MULTIPLIER.0, MULTIPLIER.1),
     // A machine or plant at speed 0 would never be due again: from 0.01.
     rule("speed.machines", Type::Float, "×", "Extractors, collectors, auto-crafters and recyclers work this many times faster.").range(0.01, MULTIPLIER.1),
-    rule("speed.growth", Type::Float, "×", "Plants in vegetubes, spreaders, farms and vegetable growers grow this many times faster (the clients see the same growth). Incubators keep their time.").range(0.01, MULTIPLIER.1),
+    rule("speed.growth", Type::Float, "×", "Plants in vegetubes, spreaders, farms and vegetable growers grow this many times faster than a grower with no growth fuse (the speed is added to the fuses' speed, as a growth fuse adds its own: a grower with fuses worth F grows (F + this) / F times faster; the clients see the same growth). Incubators keep their time.").range(0.01, MULTIPLIER.1),
     rule("death.consequences", Type::Enum, "", "What dying costs. Unset: the world's own setting.").values(&crate::rules::CONSEQUENCES),
     rule("death.dropChance", Type::Float, "%", "With DropSomeItems: the percent chance each item is dropped (with 4 items or fewer, all go). Unset: the game's 50.").range(0.0, 100.0),
     rule("loot.amount", Type::Float, "×", "Items in generated containers (wreck safes, crates), times this, up to the size of the container.").range(MULTIPLIER.0, MULTIPLIER.1),

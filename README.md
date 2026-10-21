@@ -443,7 +443,7 @@ reason in `./pcds logs`.
 | `gauges.noDeath` | `false` | oxygen, water and health never go below 1 |
 | `speed.terraformation` | `1` | what buildings add to every unit but energy, times this |
 | `speed.machines` | `1` | extractors, collectors, auto-crafters and recyclers work this many times faster |
-| `speed.growth` | `1` | plants in vegetubes, spreaders, farms and vegetable growers grow this many times faster (clients see the same growth). Incubators keep their time |
+| `speed.growth` | `1` | plants in vegetubes, spreaders, farms and vegetable growers grow this many times faster than one with no growth fuse: the speed is added to the fuses' speed, as a growth fuse adds its own (a grower whose fuses are worth F grows (F + this) / F times faster; clients see the same growth). Incubators keep their time |
 | `death.consequences` | world's | `NoConsequences`, `DropSomeItems`, `DropAllItems` or `DeleteSaveFile` |
 | `death.dropChance` | `50` | with `DropSomeItems`: the percent chance each item drops (with 4 items or fewer, all drop) |
 | `loot.amount` | `1` | items in generated containers (wreck safes, crates), times this, up to the container's size |
