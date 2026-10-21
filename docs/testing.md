@@ -278,7 +278,7 @@ repository) gives, with `PCDS_RNG_SEED=1`, 4 players and 300 s:
 | Players | Fingerprint |
 |---|---|
 | only walk (`PCDS_BENCH_ACTION_MS` unset) | `15c299165b6b3eb0` |
-| act every 200 ms (`PCDS_BENCH_ACTION_MS=200`) | `4e119fd2aacba604` |
+| act every 200 ms (`PCDS_BENCH_ACTION_MS=200`) | `eab3e8e67a9290d9` (was `4e119fd2aacba604` before a failed pick-up stopped leaving its object behind) |
 
 A change that alters the game on purpose changes the fingerprint; say so in the commit and record the
 new one in the places that quote it. The ages (`PCDS_BENCH_START_DAYS`) give a fingerprint of their
