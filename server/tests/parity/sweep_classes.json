@@ -209,8 +209,21 @@
   "class": "c",
   "script": "^sweep_system$",
   "tag": "^Elevator\\|scene interpolation$",
-  "line": "StartInterpolationClientRpc\", \"object\": \"scene:WorldObjectsHandler\"|\"args\": \\[0, 0\\.0, 0\\.25",
+  "line": "\"args\": \\[0, 0\\.0, 0\\.25.*StartInterpolationClientRpc",
   "why": "a StartInterpolation for world object id 0 is not run here: the game creates a fresh scene world object for it (saved, not a scene object) on each such call once the last has finished; a client could grow the save at will (safety, EXPECTED.md)"
+ },
+ {
+  "class": "c",
+  "script": "^sweep_system$",
+  "tag": "^Elevator\\|scene interpolation$",
+  "line": "\"args\": \\[\"WO@[0-9.]+\", 0\\.0, 0\\.25.*StartInterpolationClientRpc",
+  "why": "a StartInterpolation for an Elevator the probe built (a player-made id) is not run here: only a scene object's move is started, at most 1024 at once (hardening 573d45a, EXPECTED.md); the game's Elevator prefab is a scene object and the late-game save's 29 Elevators all have scene ids"
+ },
+ {
+  "class": "c",
+  "script": "^sweep_system$",
+  "line": "^worldObjects\\[\\d+\\] field order: ref \\['id', 'gId', 'pos', 'rot', 'planet', 'grwth'\\] ours \\['id', 'gId', 'pos', 'rot', 'planet'\\]$",
+  "why": "the built Elevator's move was not started here (above), so it has no growth field in the save"
  },
  {
   "class": "c",

@@ -1162,7 +1162,7 @@ def noise_keys(run, script):
 
 def alike(sides, ignore):
     """Both sides created the object, and alike in everything but the fields in `ignore`."""
-    if set(sides) < {'-', '+'}:
+    if set(sides) != {'-', '+'}:
         return False
     strip = lambda b: {k: v for k, v in b.items() if k not in ignore}
     return strip(sides['-']) == strip(sides['+'])

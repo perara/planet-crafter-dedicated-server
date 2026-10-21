@@ -134,6 +134,12 @@ energy: the grower's random state).
   starts a move on it; each call after a move has ended makes one more, so a client could grow
   the save at will. The reference does this (`sweep_system`: one more Elevator counted).
 
+- **StartInterpolation for a world object a player built** is ignored: only a scene object's move
+  is started (id below the players' range), speed at least 1e-4, at most 1024 running at once
+  (`animals/interpolation.rs`). The game starts the move of any world object. The Elevator
+  prefab carries a scene id and no recipe, all 29 Elevators of the late-game save have scene ids, so
+  no real client asks for the move of a built one (`sweep_system`: the probe's built Elevator).
+
 - **Other players' backpacks and equipment** are refused (TransferAll, GetOrCreate,
   AddNewItem... on inventory 3 in `inventories.json`): AddOrRemoveItem false, an empty
   RetrieveInventory. The game's host takes them from anyone.

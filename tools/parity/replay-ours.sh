@@ -86,6 +86,7 @@ for p in "${pids[@]}"; do wait "$p" || status=1; done
 for ((i = 0; i < workers; i++)); do
   [[ -d $work/w$i ]] || continue
   for f in "$work/w$i"/*; do
+    [[ -f $f ]] || continue
     case $f in *.ref.* | *.ref2.* | *.noise | *.savenoise) ;; *) cp -f "$f" "$out/" ;; esac
   done
   cp -f "$work/w$i.log" "$out/replay-w$i.log"
