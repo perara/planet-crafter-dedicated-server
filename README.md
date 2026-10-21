@@ -94,7 +94,7 @@ workflow run built it. With the [GitHub CLI](https://cli.github.com/):
 ```bash
 sha256sum -c pcds-v*-linux-x86_64.tar.gz.sha256
 gh attestation verify pcds-v*-linux-x86_64.tar.gz --repo perara/planet-crafter-dedicated-server
-gh attestation verify oci://ghcr.io/perara/planet-crafter-dedicated-server:0.8.3 --repo perara/planet-crafter-dedicated-server   # the Docker image
+gh attestation verify oci://ghcr.io/perara/planet-crafter-dedicated-server:0.8.4 --repo perara/planet-crafter-dedicated-server   # the Docker image
 ```
 
 `up` takes the same options as `setup`. Step by step:
@@ -413,6 +413,37 @@ To run a second server on the same machine, give it its own folder and unit name
 `PCDS_HOME=/srv/world2 PCDS_UNIT=pcds-world2 PCDS_LISTEN=0.0.0.0:7778 PCDS_ADMIN=127.0.0.1:7783
 ./pcds setup ...` (the two ports only seed its first `server.env`; `PCDS_HOME` and `PCDS_UNIT`
 again for every later `pcds` command).
+
+## Server admins and chat commands
+
+In the dashboard's **Players** page, use **Make admin** or **Remove admin** on a player card.
+Admins show an **Admin** badge. The player must join through a Steam invite code: admin access
+is tied to their verified SteamID, and direct-IP names or claimed SteamIDs cannot grant it.
+The existing `access.operators` setting also manages SteamIDs while players are offline.
+Changes are saved immediately in `access.json` and survive reconnects and hot updates.
+
+Admins can type these in game chat (the configured command prefix replaces `!`):
+
+```text
+!admin help
+!admin rule rockets.serverFlight=true
+!admin rule speed.growth=2
+!admin save
+!admin kick Player Name
+!admin ban Player Name
+!admin unban NAME_OR_STEAMID_OR_IP
+!admin tp Player Name 560 3 500
+```
+
+A player target can also be `#` followed by their client id. Replies stay private to the admin;
+ordinary chat and other plugin commands keep their normal behavior. `!admin` is reserved for
+these built-in commands. Save requests use the normal save queue; the dashboard reports their
+result. A ban may include several entries (name, verified SteamID, or IP); `unban` removes the
+matching entry, and the dashboard's bans list shows any others that must also be removed.
+
+Chat admins can change gameplay, drone, rocket, save and update rules. Host programs, webhook
+secrets, backup credentials, DLC ownership and admin membership remain dashboard/console settings.
+Revocation takes effect on the next command, without a restart.
 
 ## Server rules
 

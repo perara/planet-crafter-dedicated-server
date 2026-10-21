@@ -185,6 +185,8 @@ fn every_route_answers_with_the_keys_it_always_did() {
         ("POST", "/api/plugins/tokens/revoke", json!({})),
         ("POST", "/api/pause", json!({"paused": false})),
         ("POST", "/api/pause", json!({})),
+        ("POST", "/api/operator", json!({"id": 99, "enabled": true})),
+        ("POST", "/api/operator", json!({})),
         ("POST", "/api/kick", json!({"id": 99})),
         ("POST", "/api/kick", json!({})),
         ("POST", "/api/ban", json!({"name": "Nobody"})),

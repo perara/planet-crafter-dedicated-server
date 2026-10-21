@@ -1,6 +1,8 @@
 //! The small server RPCs: the world-object proxies (text, color, setting, linked groups and
 //! planet, panels), chat, messages, tokens, and the player animations shared with others.
 
+mod adminchat;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::json;
@@ -297,6 +299,7 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
         "GroupNetworkBase.DeconstructServerRpc" => crate::deconstruct::deconstruct(game, client, object, a.f(0)),
         "ChatHandler.SendChatMessageServerRpc" => {
             let message: String = a.s(0).unwrap_or_default().chars().take(MAX_CHAT).collect();
+            if adminchat::handle(game, client, &message) { return true; }
             game.net.rpc_scene(Target::All, "ChatHandler.ReceiveChatMessageClientRpc", &[json!(client), json!(message)]);
             crate::events::chat(game, client, &message);
         }
@@ -774,6 +777,25 @@ mod tests {
         let Some((mut g, _)) = world() else { return };
         send_scene(&mut g, 1, "ChatHandler.SendChatMessageServerRpc", &[json!("hello")]);
         assert_eq!(sent(&g, "ChatHandler.ReceiveChatMessageClientRpc").into_iter().map(|s| (s.to, s.args)).collect::<Vec<_>>(), vec![(Target::All, vec![json!(1), json!("hello")])]);
+    }
+
+    #[test]
+    fn admin_commands_apply_through_chat_rpcs_without_broadcast_or_hooks() {
+        let Some((mut g, _)) = world() else { return };
+        let steam = 76561198000000001u64;
+        g.clients.get_mut(&1).unwrap().verified_steam_id = Some(steam);
+        g.access.lists.operators.push(steam.to_string());
+        g.net.out.clear();
+        send_scene(&mut g, 1, "ChatHandler.SendChatMessageServerRpc", &[json!("!admin rule rockets.serverFlight=true")]);
+        assert!(g.rules.rockets.server_flight);
+        let said = sent(&g, "ChatHandler.ReceiveChatMessageClientRpc");
+        assert_eq!(said.len(), 1);
+        assert_eq!(said[0].to, Target::Only(1));
+        assert_eq!(said[0].args[0], json!(0));
+        assert!(g.ext.chat.outbox.is_empty());
+        g.access.lists.operators.clear();
+        send_scene(&mut g, 1, "ChatHandler.SendChatMessageServerRpc", &[json!("!admin rule rockets.serverFlight=false")]);
+        assert!(g.rules.rockets.server_flight, "revocation applies to the next command");
     }
 
     /// What a client sends into a NetworkList is bounded: a panel type the game has none of

@@ -28,6 +28,7 @@ thread, never held by the game loop), the front's loop (the process: updates, st
 | `GET /api/metrics` | bank | nothing | The numbers for a monitor in the Prometheus text format (version 0.0.4, `text/plain`), not JSON: players online and the limit, tick times, loop load, memory of the front and the game, objects, saves, backups, the off-site copies, hand-overs, crashes, the watchdog, the waiting queue, plugins by state and what each costs. The scoped token scope `metrics.read` allows this route alone (docs/monitoring.md). |
 | `GET /api/ping` | bank | nothing | Any answer is a game loop that runs (the front's watchdog asks it). |
 | `POST /api/save` | bank | nothing | Saves the world now (and its backup, when they are on). |
+| `POST /api/operator` | bank | `{"id": N, "enabled": bool}` | Grants or revokes admin/operator access for an online player with a verified Steam identity. Takes effect immediately and persists in access.json. |
 | `POST /api/kick` | bank | `{"id": N}` or `{"name": "..."}` | Kicks a player. |
 | `POST /api/ban` | bank | `{"id": N}` or `{"name": "..."}` | Bans a player (their name, SteamID and IP) and kicks them. |
 | `POST /api/unban` | bank | `{"value": "..."}` | Lifts a ban. |

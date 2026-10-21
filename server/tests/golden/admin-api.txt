@@ -25,6 +25,8 @@ POST /api/plugins/tokens {} -> 400 {error:str}
 POST /api/plugins/tokens/revoke {} -> 400 {error:str}
 POST /api/pause {"paused":false} -> 200 {paused:bool}
 POST /api/pause {} -> 400 {error:str}
+POST /api/operator {"id":99,"enabled":true} -> 400 {error:str}
+POST /api/operator {} -> 400 {error:str}
 POST /api/kick {"id":99} -> 400 {error:str}
 POST /api/kick {} -> 400 {error:str}
 POST /api/ban {"name":"Nobody"} -> 200 {ok:bool}

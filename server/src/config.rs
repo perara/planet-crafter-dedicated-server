@@ -138,7 +138,7 @@ pub static KNOBS: &[Knob] = &[
     list("access.whitelist", "Names or SteamID64s that may play; empty: everyone. SteamIDs count only for invite-code players, where they are verified."),
     list("access.bannedNames", "Banned names and SteamID64s."),
     list("access.bannedIPs", "Banned addresses or CIDR ranges (direct-IP players)."),
-    list("access.operators", "SteamID64s of your operators: the players that plugins let use their operator commands. Only a player who joined through Steam (invite code) can be one: the id is verified there."),
+    list("access.operators", "SteamID64s of your admins: they can use !admin commands in game chat and operator-only plugin commands. Only a player who joined through Steam (invite code) can be one: the id is verified there."),
     env("PCDS_LISTEN", Type::String, "", "0.0.0.0:7777", "Direct-IP address (UDP) players join; off disables it."),
     env("PCDS_STEAM", Type::Enum, "", "on", "Invite codes through Steam; off disables them.").values(&["on", "off"]),
     Knob { source: Source::Secret, ..env("PCDS_STEAM_TOKEN", Type::String, "", "", "A Steam game server login token (app 1284190): keeps the invite code the same across restarts.") },

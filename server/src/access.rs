@@ -136,6 +136,16 @@ pub fn same_name(a: &str, b: &str) -> bool {
     fold_name(a) == fold_name(b)
 }
 
+/// An online name must identify exactly one player; callers may instead use a client id.
+pub fn named_client(game: &Game, name: &str) -> Result<Option<u64>, String> {
+    let found: Vec<u64> = game.clients.values().filter(|c| c.ready.as_ref().is_some_and(|s| same_name(&s.name, name))).map(|c| c.id).collect();
+    match found[..] {
+        [] => Ok(None),
+        [one] => Ok(Some(one)),
+        _ => Err(format!("{} players online are named {name}: give the client id", found.len())),
+    }
+}
+
 fn clean(values: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for v in values.into_iter().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {

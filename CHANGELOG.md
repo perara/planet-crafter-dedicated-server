@@ -19,6 +19,39 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-10-22
+
+### Breaking changes
+
+* Existing `access.operators` entries also authorize the new built-in server controls. Review
+  the operator list before upgrading if those users previously had only plugin permissions.
+* The chat command `!admin` (or `admin` with the configured prefix) is reserved for built-in
+  server administration. Rename any plugin command using that name.
+* Front protocol 3, snapshot format 7 and tables format 4 are unchanged; no restart is required.
+
+### Added
+
+* Player cards in the dashboard can grant and revoke admin access, show the current role,
+  and explain when a player lacks a verified Steam identity. The existing `access.operators`
+  list stores the roles; changes apply immediately and persist across reconnects and hot updates.
+* Private `!admin` commands: `help`, `rule SECTION.RULE=VALUE`, `save`, `kick PLAYER`,
+  `ban PLAYER`, `unban ENTRY`, and `tp PLAYER X Y Z`. Names with spaces and explicit
+  `#client-id` targets are supported. Commands check the caller's current verified SteamID;
+  a direct-IP name, claimed id or local trust cannot impersonate an admin.
+* Chat rule changes use the existing validation and persistence. Host programs, secrets,
+  backup credentials, DLC ownership and admin grants remain dashboard/console-only settings.
+
+### Upgrade
+
+From 0.8.3 use `pcds upgrade v0.8.4` to hot-update without disconnecting players, then refresh
+an open dashboard page. In **Players**, click **Make admin** for a player who joined through a
+Steam invite code, then use `!admin help` in game. Existing operator roles continue working.
+Use **Remove admin** to revoke access immediately. The ordinary dashboard settings still
+manage offline SteamIDs through `access.operators`.
+
+Rollback to 0.8.3 retains the saved operator list; its plugin permissions still apply, while
+built-in admin chat commands and the player-card controls are unavailable.
+
 ## [0.8.3] - 2026-10-22
 
 ### Breaking changes
@@ -906,7 +939,8 @@ None; the first release.
 
 Not applicable.
 
-[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.0...v0.8.1

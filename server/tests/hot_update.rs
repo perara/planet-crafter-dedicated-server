@@ -692,6 +692,9 @@ fn a_hot_update_from_the_release_before_works() {
     // The front is the release before too: what runs on a server when its owner updates.
     let server = start_with(&previous, &dir, &data, &banks, "http://127.0.0.1:9/releases", false);
     assert_eq!(server.live()["version"], before["version"], "the release before runs the world");
+    let old_has_rocket_rule = server.api("GET", "/api/rules", json!({})).1["rules"]["rockets"]["serverFlight"].is_boolean();
+    let operator = "76561198000000001";
+    assert_eq!(server.api("POST", "/api/config", json!({"access.operators": [operator]})).0, 200);
     let players = load(&server, &data, 6, 30);
     std::thread::sleep(Duration::from_secs(8));
     let (_, status) = server.api("GET", "/api/status", json!({}));
@@ -706,6 +709,8 @@ fn a_hot_update_from_the_release_before_works() {
     assert_eq!(server.api("POST", "/api/save", json!({})).0, 200, "{}", server.log());
     let log = server.log();
     assert!(!log.contains("restore failed") && !log.contains("panicked"), "{log}");
+    assert_eq!(server.api("GET", "/api/status", json!({})).1["access"]["operators"], json!([operator]));
+    assert_eq!(server.api("POST", "/api/operator", json!({"id": 99999, "enabled": true})).0, 400, "the new role route passes through the older front");
     // The new launch rule changes live through an older front, without replacing the bank.
     let pid = server.live()["pid"].clone();
     for enabled in [true, false] {
@@ -713,7 +718,7 @@ fn a_hot_update_from_the_release_before_works() {
         let (_, rules) = server.api("GET", "/api/rules", json!({}));
         assert_eq!(rules["rules"]["rockets"]["serverFlight"], enabled);
         assert_eq!(server.live()["pid"], pid, "toggle must not restart the bank");
-        if enabled {
+        if enabled && !old_has_rocket_rule {
             let refused = server.update(json!({"rollback": true}));
             assert_eq!(refused["ok"], false, "old bank must refuse an enabled new-only rule");
             assert_eq!(server.live()["pid"], pid, "refused rollback must resume the current bank");
