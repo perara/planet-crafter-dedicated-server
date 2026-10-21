@@ -110,6 +110,7 @@ impl DroneMap {
     }
 
     /// A map that is already in memory (tests).
+    #[cfg(test)]
     pub fn of(map: crate::geometry::navigation::Data) -> DroneMap {
         DroneMap { files: None, data: std::sync::OnceLock::from(Ok(Arc::new(map))) }
     }
