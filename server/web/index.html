@@ -403,6 +403,7 @@
           <input id="playerSearch" type="search" placeholder="Filter by name, SteamID, IP or client id" aria-label="Filter players" style="max-width:380px">
           <span class="muted" id="playersCount"></span>
         </div>
+        <p class="sub">Admins can use <code>!admin help</code> in game chat. Admin access requires a verified Steam connection through an invite code; names and direct-IP identities cannot grant it.</p>
         <div class="players" id="playerGrid"></div>
         <div class="card empty" id="playersEmpty" hidden>Nobody online. Players appear here as they join.</div>
       </section>
@@ -1002,21 +1003,29 @@ function playerCard(p) {
   refs.name = h('div', { class: 'nm' }); refs.id = h('div', { class: 'id' }); refs.chip = h('span', { class: 'chip' });
   refs.gauges = GAUGES.map(([cls, label]) => { const fill = h('i'), val = h('span', { class: 'val' }); return { el: h('div', { class: 'gauge ' + cls }, h('span', { class: 't' }, label), h('div', { class: 'bar' }, fill), val), fill, val, cls }; });
   refs.pos = h('span', { class: 'num' }); refs.online = h('span');
+  refs.role = h('span', { class: 'chip ok', hidden: true }, 'Admin');
+  refs.admin = h('button', { class: 'small', onclick: e => act('Admin access updated', () => api('POST', '/api/operator', { id: p.id, enabled: refs.admin.dataset.enabled !== 'true' }), e.currentTarget) }, 'Make admin');
   const el = h('div', { class: 'card pc' },
-    h('div', { class: 'who' }, refs.avatar, h('div', {}, refs.name, refs.id), refs.chip),
+    h('div', { class: 'who' }, refs.avatar, h('div', {}, refs.name, refs.id), refs.role, refs.chip),
     h('div', { class: 'gauges' }, refs.gauges.map(g => g.el)),
     h('div', { class: 'meta' }, h('span', {}, 'Position ', refs.pos), refs.online),
     h('div', { class: 'row' },
       h('button', { class: 'small', onclick: () => { show('map'); mapSelect(p.id, true); } }, 'Show on map'),
       h('button', { class: 'small', onclick: () => teleportDialog(p.id) }, 'Teleport…'),
+      refs.admin,
       h('button', { class: 'small', style: 'margin-left:auto', onclick: () => kick(p.id) }, 'Kick'),
       h('button', { class: 'small danger', onclick: () => ban(p.id) }, 'Ban')));
   return { el, refs };
 }
-function updateCard(c, p) {
+function updateCard(c, p, operators) {
   const r = c.refs, name = playerName(p);
   r.avatar.textContent = initials(name); r.avatar.style.background = playerColor(p);
   r.name.textContent = name;
+  const admin = p.verified && operators.includes(p.steamId);
+  r.role.hidden = !admin;
+  r.admin.dataset.enabled = String(admin); r.admin.textContent = admin ? 'Remove admin' : 'Make admin';
+  r.admin.disabled = !p.verified;
+  r.admin.title = p.verified ? 'Admins can use !admin help in game chat; changes apply immediately' : 'Admin access requires a verified Steam connection (invite code)';
   r.id.textContent = [p.steamId ? `Steam ${p.steamId}` : `client ${p.id}`, p.verified ? 'invite code' : p.ip === 'steam' ? 'Steam' : p.ip].filter(Boolean).join(' · ');
   r.chip.textContent = p.status; r.chip.className = 'chip ' + (p.status === 'ready' ? 'ok' : p.status === 'dying' ? 'bad' : 'warn');
   const v = p.gauges || [], m = p.gaugeMax || [];
@@ -1036,7 +1045,7 @@ function renderPlayers(s) {
     seen.add(p.id);
     let c = cards.get(p.id);
     if (!c) { c = playerCard(p); cards.set(p.id, c); grid.append(c.el); }
-    updateCard(c, p);
+    updateCard(c, p, s.access.operators || []);
     const match = !q || `${p.name || ''} ${p.steamId || ''} ${p.ip || ''} ${p.id}`.toLowerCase().includes(q);
     c.el.hidden = !match; if (match) shown++;
   }

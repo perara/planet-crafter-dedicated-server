@@ -1,6 +1,6 @@
 [package]
 name = "pcds-server"
-version = "0.8.3"
+version = "0.8.4"
 edition = "2024"
 # Edition 2024 and let chains (1.88); clippy::incompatible_msrv checks the std APIs against it.
 rust-version = "1.88"

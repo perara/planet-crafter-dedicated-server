@@ -121,6 +121,7 @@ pub const ROUTES: &[Route] = &[
     route("GET", "/api/metrics", Owner::Bank, "", "The numbers for a monitor in the Prometheus text format (version 0.0.4, `text/plain`), not JSON: players online and the limit, tick times, loop load, memory of the front and the game, objects, saves, backups, the off-site copies, hand-overs, crashes, the watchdog, the waiting queue, plugins by state and what each costs. The scoped token scope `metrics.read` allows this route alone (docs/monitoring.md)."),
     route("GET", "/api/ping", Owner::Bank, "", "Any answer is a game loop that runs (the front's watchdog asks it)."),
     route("POST", "/api/save", Owner::Bank, "", "Saves the world now (and its backup, when they are on)."),
+    route("POST", "/api/operator", Owner::Bank, "`{\"id\": N, \"enabled\": bool}`", "Grants or revokes admin/operator access for an online player with a verified Steam identity. Takes effect immediately and persists in access.json."),
     route("POST", "/api/kick", Owner::Bank, "`{\"id\": N}` or `{\"name\": \"...\"}`", "Kicks a player."),
     route("POST", "/api/ban", Owner::Bank, "`{\"id\": N}` or `{\"name\": \"...\"}`", "Bans a player (their name, SteamID and IP) and kicks them."),
     route("POST", "/api/unban", Owner::Bank, "`{\"value\": \"...\"}`", "Lifts a ban."),

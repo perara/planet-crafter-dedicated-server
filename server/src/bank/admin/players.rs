@@ -25,14 +25,28 @@ fn who(body: &serde_json::Value) -> Result<Who, Reply> {
 fn find_client(game: &Game, who: &Who) -> Result<Option<u64>, Reply> {
     match who {
         Who::Id(id) => Ok(game.clients.contains_key(id).then_some(*id)),
-        Who::Name(name) => {
-            let found: Vec<u64> = game.clients.values().filter(|c| c.ready.as_ref().is_some_and(|s| crate::access::same_name(&s.name, name))).map(|c| c.id).collect();
-            match found[..] {
-                [] => Ok(None),
-                [one] => Ok(Some(one)),
-                _ => Err(error(400, format!("{} players online are named {name}: give the client id", found.len()))),
-            }
-        }
+        Who::Name(name) => crate::access::named_client(game, name).map_err(|e| error(400, e)),
+    }
+}
+
+/// An atomic role change, bound to the verified identity of this connected player.
+pub(super) fn operator(game: &mut Game, r: &Request) -> Reply {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Change { id: u64, enabled: bool }
+    let change: Change = match serde_json::from_value(r.body.clone()) {
+        Ok(v) => v,
+        Err(e) => return error(400, e.to_string()),
+    };
+    let Some(steam_id) = game.clients.get(&change.id).and_then(|c| c.verified_steam_id) else {
+        return error(400, "admin access requires an online player with a verified Steam identity (join through the invite code)");
+    };
+    let mut lists = game.access.lists.clone();
+    lists.operators.retain(|id| id.trim().parse::<u64>().ok() != Some(steam_id));
+    if change.enabled { lists.operators.push(steam_id.to_string()); }
+    match game.access.set(lists) {
+        Ok(()) => { info!("admin: operator {steam_id} {}", if change.enabled { "granted" } else { "revoked" }); ok() }
+        Err(e) => error(500, e),
     }
 }
 
@@ -117,6 +131,49 @@ mod tests {
     use super::super::call;
     use crate::{access, game, protocol, wire};
     use serde_json::json;
+
+    #[test]
+    fn admin_assignment_is_bound_to_verified_identity_and_persists() {
+        let Some(mut g) = game::test_game(game::tests::save()) else { return };
+        game::tests::join(&mut g, 1, "Ann");
+        game::tests::join(&mut g, 2, "Bob");
+        let steam = 76561198000000001u64;
+        let other = "76561198000000002";
+        let dir = std::env::temp_dir().join(format!("pcds-admin-access-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("access.json");
+        g.access = crate::access::Access::load(Some(path.to_string_lossy().into_owned()));
+        g.access.lists.operators.push(other.into());
+        // A matching claimed id or name over direct IP cannot grant admin access.
+        g.clients.get_mut(&1).unwrap().ready.as_mut().unwrap().id = steam;
+        assert_eq!(call(&mut g, "POST", "/api/operator", json!({"id": 1, "enabled": true})).0, 400);
+        g.clients.get_mut(&1).unwrap().verified_steam_id = Some(steam);
+        for _ in 0..2 { assert_eq!(call(&mut g, "POST", "/api/operator", json!({"id": 1, "enabled": true})).0, 200); }
+        assert_eq!(g.access.lists.operators, [other.to_string(), steam.to_string()]);
+        assert!(crate::access::Access::load(Some(path.to_string_lossy().into_owned())).is_operator(Some(steam)));
+        assert!(crate::handlers::rpc(&mut g, 1, 0, 0, "ChatHandler.SendChatMessageServerRpc", &game::Args(vec![json!("!admin rule rockets.serverFlight=true")])));
+        assert!(g.rules.rockets.server_flight, "a dashboard grant enables the next chat command");
+        assert_eq!(call(&mut g, "POST", "/api/operator", json!({"id": 1, "enabled": false})).0, 200);
+        assert!(!g.access.is_operator(Some(steam)));
+        assert!(crate::handlers::rpc(&mut g, 1, 0, 0, "ChatHandler.SendChatMessageServerRpc", &game::Args(vec![json!("!admin rule rockets.serverFlight=false")])));
+        assert!(g.rules.rockets.server_flight, "a dashboard revocation disables the next chat command");
+        assert_eq!(g.access.lists.operators, [other]);
+        for bad in [json!({}), json!({"id": 99, "enabled": true}), json!({"id": 2, "enabled": true}), json!({"id": 1, "enabled": "true"}), json!({"id": 1, "enabled": true, "name": "Ann"})] {
+            assert_eq!(call(&mut g, "POST", "/api/operator", bad).0, 400);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_role_change_that_cannot_be_saved_does_not_apply() {
+        let Some(mut g) = game::test_game(game::tests::save()) else { return };
+        game::tests::join(&mut g, 1, "Ann");
+        let steam = 76561198000000001u64;
+        g.clients.get_mut(&1).unwrap().verified_steam_id = Some(steam);
+        g.access = crate::access::Access::load(Some("/dev/null/pcds-access.json".into()));
+        assert_eq!(call(&mut g, "POST", "/api/operator", json!({"id": 1, "enabled": true})).0, 500);
+        assert!(!g.access.is_operator(Some(steam)));
+    }
 
     #[test]
     fn unbanning_what_is_not_banned_is_said() {

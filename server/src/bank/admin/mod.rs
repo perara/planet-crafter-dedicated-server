@@ -53,6 +53,7 @@ const ROUTES: &[Route<Handler>] = &[
     // The save, and what became of its backup: a backup that failed is the answer's, too.
     route("POST", "/api/save", world::save),
     route("*", "/api/plugins*", world::plugins),
+    route("POST", "/api/operator", players::operator),
     route("POST", "/api/kick", players::kick),
     route("POST", "/api/ban", players::ban),
     route("POST", "/api/unban", players::unban),
