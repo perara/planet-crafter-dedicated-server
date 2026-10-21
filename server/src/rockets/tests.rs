@@ -72,6 +72,14 @@ fn departure_switches_planet_after_the_launch() {
     let (platform, rocket) = (210_000_040, 210_000_041);
     let Some(mut g) = game(vec![placed(platform, "DeparturePlatform", "300,10,300", "Prime", json!({})), placed(rocket, "RocketTravel1", "300,11,301", "Prime", json!({"liId": 70}))], vec![json!({"id": 70, "woIds": "", "size": 20})]) else { return };
     let net = g.wos[&platform].net.unwrap();
+    // The game finds the rocket at the platform's craft spawn (MachineGetInRange, 22 m from the pivot), where the
+    // crafter puts it; one at the pivot is no rocket of the platform. The real geometry: the rocket stands at the pivot
+    // plus the pose turned with the platform.
+    let centre = super::get_in_range_centre(&g, platform).unwrap();
+    let pivot = g.wos[&platform].position;
+    assert!(centre.iter().zip(pivot).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt() > 20.0, "{centre:?}");
+    assert_eq!(super::rocket_on(&g, platform, "MachineRocket"), None, "the rocket by the pivot is not at the craft spawn");
+    g.wos.get_mut(&rocket).unwrap().position = centre;
     let args = Args(vec![json!(super::INTERPLANETARY_TRAVEL), json!(stable_hash("Humble")), json!(0)]);
     let from = g.net.out.len();
     assert!(super::rpc(&mut g, 1, net, 1, "MachineDeparturePlatform.StartDepartureSequenceServerRpc", &args));

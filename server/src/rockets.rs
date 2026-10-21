@@ -49,7 +49,7 @@ const ROCKET_DESPAWN_AFTER: f32 = 40.0;
 /// MachineDeparturePlatform.DepartureType.InterplanetaryTravel.
 const INTERPLANETARY_TRAVEL: i32 = 9;
 /// MachineDeparturePlatform's MachineGetInRange around its craft spawn: the nearest rocket
-/// within this distance of the platform.
+/// within this distance of it (`get_in_range_centre`, not the platform's pivot).
 const ROCKET_ON_PLATFORM_RANGE: f32 = 8.0;
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -154,11 +154,24 @@ pub fn inventory_changed(game: &mut Game, inventory: i32, wo: i32, added: bool) 
 
 // ---- ActionSendInSpace -------------------------------------------------------------------
 
+/// Where the platform's MachineGetInRange looks: its pose in the prefab, turned and moved with the
+/// platform (the DeparturePlatform's is its craft spawn, 22 m from the pivot; a prefab without a pose
+/// looks around the pivot).
+fn get_in_range_centre(game: &Game, platform: i32) -> Option<[f32; 3]> {
+    let p = game.wos.get(&platform)?;
+    let prefab = &game.data.group_prefabs[game.data.groups[p.group].id.as_str()];
+    let component = prefab["components"].as_array().into_iter().flatten().find(|c| c["type"] == "MachineGetInRange");
+    let pose = component.and_then(|c| c["pose"]["position"].as_array()).filter(|a| a.len() == 3);
+    let offset = pose.map_or([0.0; 3], |a| [0, 1, 2].map(|i| a[i].as_f64().unwrap_or(0.0) as f32));
+    let d = crate::geometry::rotate(p.rotation, offset);
+    Some([0, 1, 2].map(|i| p.position[i] + d[i]))
+}
+
 /// The rocket standing on a platform: the nearest placed world object with a network object
-/// and a `component` on its prefab (see ROCKET_ON_PLATFORM_RANGE).
+/// and a `component` on its prefab (see ROCKET_ON_PLATFORM_RANGE) to the platform's MachineGetInRange.
 fn rocket_on(game: &Game, platform: i32, component: &str) -> Option<i32> {
     let p = game.wos.get(&platform)?;
-    let (position, planet) = (p.position, p.planet_hash());
+    let (position, planet) = (get_in_range_centre(game, platform)?, p.planet_hash());
     game.wos
         .values()
         .filter(|w| w.id != platform && w.net.is_some() && w.is_placed() && w.planet_hash() == planet && has_component(game, w.group, component))
