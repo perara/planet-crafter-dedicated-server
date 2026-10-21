@@ -890,6 +890,28 @@ mod tests {
         assert!(client.join().unwrap().starts_with("HTTP/1.1 200"));
     }
 
+    /// The page's check of whether a rollback can be live reads only fields a bank's info has (it read
+    /// `reads`, which no status ever had, so it said every rollback needs a restart).
+    #[test]
+    fn the_page_reads_only_the_fields_a_banks_info_has() {
+        let page = include_str!("../web/index.html");
+        let start = page.find("function rollbackBlocked").unwrap();
+        let body = &page[start..start + page[start..].find("\n}\n").unwrap()];
+        let mut fields = std::collections::BTreeSet::new();
+        for (at, _) in body.match_indices("i.") {
+            if body[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '.') {
+                continue;
+            }
+            fields.insert(body[at + 2..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect::<String>());
+        }
+        let info = serde_json::to_value(crate::msg::BankInfo { version: Some("1".into()), protocol: Some(1), format: Some(1), tables_format: Some(1), tag: Some("t".into()), ..Default::default() }).unwrap();
+        let known: Vec<&str> = info.as_object().unwrap().keys().map(String::as_str).collect();
+        assert!(!fields.is_empty());
+        for f in &fields {
+            assert!(known.contains(&f.as_str()), "the page reads info.{f}, which a bank's info does not have ({known:?})");
+        }
+    }
+
     /// The page may talk to this server and nobody else, load nothing from elsewhere and not be kept
     /// by a cache; the API's answers carry the framing and caching rules but not the page's policy.
     #[test]

@@ -1656,7 +1656,7 @@ function rollbackBlocked(s) {
   if (i.protocol !== b.frontProtocol) return `pcds ${i.version} speaks another front protocol (${i.protocol}, this front speaks ${b.frontProtocol})`;
   const mine = ((b.installed || []).find(x => x.bank === live.bank) || {}).info || {};
   if (i.tablesFormat !== mine.tablesFormat) return `pcds ${i.version} reads game tables of format ${i.tablesFormat ?? 'none'}, the running server's are of format ${mine.tablesFormat ?? 'none'}`;
-  if (!(i.reads || []).includes(live.format)) return `pcds ${i.version} reads snapshot formats ${(i.reads || []).join(', ')}, and the running world is in format ${live.format}`;
+  if (i.format !== live.format) return `pcds ${i.version} reads snapshot format ${i.format ?? 'none'}, and the running world is in format ${live.format}`;
   return null;
 }
 $('updRollback').onclick = async e => {
