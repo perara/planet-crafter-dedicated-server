@@ -1209,6 +1209,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn wrapped_send_queue_preserves_chunks_and_unsent_bytes() {
+        for bytes in [1, CHUNK, CHUNK + 1, CHUNK * 6 + 7] {
+            let mut server = Utp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let (from, token) = ("127.0.0.1:9".parse().unwrap(), [23; 8]);
+            handshake(&mut server, from, token);
+            let c = server.connections.get_mut(&token).unwrap();
+            c.data_seen = true;
+            c.queued = VecDeque::with_capacity(8192);
+            c.queued.extend((0..8190).map(|i| i as u8));
+            c.queued.drain(..8176);
+            c.queued.extend((0..bytes).map(|i| i as u8));
+            let expected: Vec<_> = c.queued.iter().copied().collect();
+            if bytes > 2 { assert!(!c.queued.as_slices().1.is_empty()); }
+            server.flush();
+            let c = &server.connections[&token];
+            let sent = expected.len().min(CHUNK * INITIAL_WINDOW);
+            let chunks: Vec<_> = c.in_flight.iter().map(|(_, p, _)| p.as_slice()).collect();
+            assert_eq!(chunks, expected[..sent].chunks(CHUNK).collect::<Vec<_>>());
+            assert_eq!(c.queued.iter().copied().collect::<Vec<_>>(), expected[sent..]);
+        }
+    }
+
     /// A late-game world is several MiB: taking one packet's bytes off the queue must not move
     /// everything behind them (once per packet, that is gigabytes of copying per join).
     #[test]
