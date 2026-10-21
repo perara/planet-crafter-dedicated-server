@@ -19,6 +19,52 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+### Breaking changes
+
+* **Snapshot format 9.** Two rules were added (`drones.nearestFirst`, `drones.avoidObstacles`) and the
+  rules are part of the state a hot update hands over, so 0.8.1 cannot hand a running world to this
+  release, and this release cannot hand one back. `pcds upgrade` refuses the hot update and names
+  `pcds upgrade VERSION --restart`; every player joins again once. The game tables (format 4) and the
+  front protocol (3) are unchanged.
+* **Where this server now differs from the game, on purpose.** A drone's undelivered cargo, a launch
+  or a destruction switched on while the rocket or destructor is already full, a building that was
+  built while an optimizer's fuse was in, and a few counts behave as described under **Fixed**; the
+  game itself loses the cargo and waits for the next item. [docs/codex-integration.md](docs/codex-integration.md)
+  gives each one with the game's own code.
+
+### Added
+
+* **Rule `drones.nearestFirst` (off).** Drones choose their work by distance and priority instead of in
+  the game's task order: an idle drone takes the job of the highest priority and, among those, the
+  nearest pickup; a demand takes from the supply nearest to it; the nearest station with a parked
+  drone sends it; a drone arrives by its own distance; a drone with nothing to do on one planet no
+  longer stops the other drones getting jobs.
+* **Rule `drones.avoidObstacles` (off) and `pcds drone-map GAME_DIR TABLES_DIR`.** The command reads
+  the colliders of the terrain (including its heightmaps) and of the buildings from your own game into
+  `drone-navigation.json` beside the tables; with the rule on, drones climb, cross above everything on
+  their route and descend to dock instead of flying through terrain and walls. The rule is refused
+  while the map is missing, malformed or of another game build, and the file is read only when the
+  rule is on. Planning is limited
+  to 16 drones a tick. See the README, "Differences from hosting in the game".
+
+### Fixed
+
+* Enabling automatic launch on an already-full trading or interplanetary exchange rocket launches it
+  at once, without having to take an item out and put it back.
+* Switching a destructor to destroy when full, while it is already full, empties it at once.
+* Deconstruction checks the building's contents again when the animation ends: a chest that something
+  was put in meanwhile is not taken down (the player gets the "not empty" message, no materials are
+  refunded and the neighbouring panels stay as they were) instead of destroying what was put in.
+* A drone whose delivery fails (the demand filled or went away) drops its cargo on the ground, on its
+  own planet, where it can be picked up again, instead of deleting it.
+* A rocket platform, generator or grower built after an optimizer's fuse was put in gets the fuse's
+  boost without the fuse being taken out and put back; a joining player is told every grower's current
+  growth boost.
+* Picking up, moving or dropping a saved object no longer counts it again in the totals of objects of
+  its group; replacing an object, saving it differently and deleting it keep the totals right.
+* A joining player sees the other players' names and map markers: the other players' proxies are
+  restarted for the joiner once the joiner's name is known (and the joiner's for the others).
+
 ## [0.8.1] - 2026-10-21
 
 The operator's release. One command checks the setup (`pcds doctor`), the server has numbers and a

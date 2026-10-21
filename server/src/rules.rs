@@ -383,8 +383,8 @@ impl Rules {
                 return Err(format!("world.dlcPlanets: {name} is listed twice"));
             }
         }
-        if self.drones.avoid_obstacles && data.drone_navigation.is_none() {
-            return Err("drones.avoidObstacles: the game tables have no collision map (drone-navigation.json); make it with `pcds drone-map GAME_DIR TABLES_DIR`".into());
+        if self.drones.avoid_obstacles {
+            data.drone_navigation.get().map_err(|e| format!("drones.avoidObstacles: {e}"))?;
         }
         for group in self.limits.buildings.keys() {
             if !data.group(group).is_some_and(|g| data.groups[g].constructible) {
@@ -684,7 +684,7 @@ mod tests {
         assert!(Rules::default().patched(&serde_json::json!({"limits": {"buildings": {"Drill1": 2}}})).unwrap().validate(&data).is_ok());
         assert!(Rules::default().patched(&serde_json::json!({"drones": {"nearestFirst": true}})).unwrap().validate(&data).is_ok());
         let mut mapped = data.clone();
-        mapped.drone_navigation = Some(Default::default());
+        mapped.drone_navigation = std::sync::Arc::new(crate::gamedata::DroneMap::of(Default::default()));
         let avoid = Rules::default().patched(&serde_json::json!({"drones": {"avoidObstacles": true}})).unwrap();
         assert!(avoid.validate(&mapped).is_ok(), "with the map the rule is allowed");
         // The watchdog: off, or 10 s to an hour.

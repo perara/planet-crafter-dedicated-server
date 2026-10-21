@@ -935,7 +935,7 @@ mod tests {
         let Some(dir) = crate::test_data() else { return };
         let (_, mut data, _) = crate::tables(dir);
         // drones.avoidObstacles is refused without a collision map (rules::tests: out_of_range_rules_are_refused).
-        data.drone_navigation = Some(Default::default());
+        data.drone_navigation = std::sync::Arc::new(crate::gamedata::DroneMap::of(Default::default()));
         for k in rule_knobs() {
             let takes = |v: Value| {
                 let (section, field) = k.key.split_once('.').unwrap();

@@ -1,6 +1,7 @@
 //! Conservative aerial clearance. Docking shafts may cross walls; cruise never crosses bounds.
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 type V3 = [f32; 3];
 const CELL: f32 = 64.0;
@@ -57,7 +58,8 @@ impl Bounds {
 pub struct Data {
     pub format: u32,
     pub build_id: String,
-    pub planets: HashMap<i32, Vec<Bounds>>,
+    /// Shared with the terrain grids built from them, which would each copy the 18 MB.
+    pub planets: HashMap<i32, Arc<[Bounds]>>,
     pub buildings: HashMap<String, Vec<Bounds>>,
 }
 impl Data {
@@ -65,7 +67,7 @@ impl Data {
         if self.format != 1 || self.build_id != build.trim() {
             return Err("drone collision map format or game build differs; regenerate with pcds drone-map".into());
         }
-        if !self.planets.values().chain(self.buildings.values()).flatten().all(Bounds::valid) {
+        if !self.planets.values().map(AsRef::as_ref).chain(self.buildings.values().map(Vec::as_slice)).flatten().all(Bounds::valid) {
             return Err("drone collision map contains invalid bounds".into());
         }
         Ok(())
@@ -74,7 +76,7 @@ impl Data {
 
 #[derive(Default)]
 pub struct Grid {
-    bounds: Vec<Bounds>,
+    bounds: Arc<[Bounds]>,
     cells: HashMap<(i32, i32), Vec<usize>>,
     large: Vec<usize>,
     visits: Vec<u32>,
@@ -84,7 +86,8 @@ fn cell(x: f32) -> i32 {
     (x / CELL).floor() as i32
 }
 impl Grid {
-    pub fn new(bounds: Vec<Bounds>) -> Self {
+    pub fn new(bounds: impl Into<Arc<[Bounds]>>) -> Self {
+        let bounds = bounds.into();
         let mut grid = Self { visits: vec![0; bounds.len()], bounds, ..Default::default() };
         for (i, b) in grid.bounds.iter().enumerate() {
             let (x0, x1, z0, z1) = (
@@ -184,6 +187,17 @@ impl Grid {
 mod tests {
     use super::*;
     #[test]
+    fn terrain_bounds_are_shared_and_map_json_is_unchanged() {
+        let text = r#"{"format":1,"build_id":"abc","planets":{"1":[{"min":[10.0,0.0,-4.0],"max":[20.0,40.0,4.0]}]},"buildings":{}}"#;
+        let data: Data = serde_json::from_str(text).unwrap();
+        let bounds = &data.planets[&1];
+        let mut shared = Grid::new(bounds.clone());
+        assert!(Arc::ptr_eq(bounds, &shared.bounds));
+        let mut copied = Grid::new(bounds.to_vec());
+        assert_eq!(shared.route([0.0, 5.0, 0.0], [60.0, 5.0, 0.0]), copied.route([0.0, 5.0, 0.0], [60.0, 5.0, 0.0]));
+        assert_eq!(serde_json::to_value(&data).unwrap(), serde_json::from_str::<serde_json::Value>(text).unwrap());
+    }
+    #[test]
     fn cruise_clears_all_bounds_and_docking_is_vertical() {
         let bounds = vec![
             Bounds {
@@ -219,7 +233,7 @@ mod tests {
         assert_eq!(overhead.route(from, to), vec![to], "the original low route passes below the building");
         let route = terrain.route_with(Some(&mut overhead), from, to);
         assert!(route[0][1] > 83.0, "the raised cruise also must clear overhead geometry");
-        assert!(terrain.bounds.iter().chain(&overhead.bounds).all(|b| !b.intersects(route[0], route[1], &[0, 1, 2])));
+        assert!(terrain.bounds.iter().chain(overhead.bounds.iter()).all(|b| !b.intersects(route[0], route[1], &[0, 1, 2])));
     }
 
     #[test]
@@ -298,7 +312,8 @@ mod tests {
             vec![Bounds {
                 min: [f32::NAN; 3],
                 max: [0.0; 3],
-            }],
+            }]
+            .into(),
         );
         assert!(d.validate("abc").is_err());
     }

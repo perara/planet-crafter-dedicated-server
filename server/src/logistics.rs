@@ -161,6 +161,9 @@ pub struct Logistics {
     navigation_epoch: u64,
     #[serde(skip)]
     navigation_cursor: usize,
+    /// drones.avoidObstacles was on with no usable map (said once).
+    #[serde(skip)]
+    navigation_failed: bool,
 }
 
 // ---- small lookups ------------------------------------------------------------------------
@@ -475,7 +478,15 @@ fn frame(game: &mut Game, tick: u64) {
 /// drones.avoidObstacles: rebuild only after construction/destruction; routes are cached between
 /// target changes. With the rule off the indexes are dropped.
 fn refresh_navigation(game: &mut Game) {
-    let Some(data) = game.data.drone_navigation.as_ref().filter(|_| game.rules.drones.avoid_obstacles) else {
+    // The rules were checked against the map (Rules::validate); a map that cannot be read now (new tables after a hot update) is said once.
+    let map = if game.rules.drones.avoid_obstacles { game.data.drone_navigation.get() } else { Err(String::new()) };
+    if let Err(why) = &map
+        && game.rules.drones.avoid_obstacles
+        && !std::mem::replace(&mut game.ext.logistics.navigation_failed, true)
+    {
+        error!("drones.avoidObstacles is on but the collision map is not usable, so the drones fly straight: {why}");
+    }
+    let Ok(data) = map else {
         let l = &mut game.ext.logistics;
         if !l.navigation.is_empty() || !l.terrain_navigation.is_empty() {
             (l.navigation, l.terrain_navigation, l.navigation_dirty) = Default::default();
@@ -485,6 +496,7 @@ fn refresh_navigation(game: &mut Game) {
         }
         return;
     };
+    game.ext.logistics.navigation_failed = false;
     if !game.ext.logistics.navigation_dirty && !game.ext.logistics.navigation.is_empty() { return; }
     if game.ext.logistics.terrain_navigation.is_empty() {
         game.ext.logistics.terrain_navigation = data.planets.iter().map(|(p,bounds)| (*p,crate::geometry::navigation::Grid::new(bounds.clone()))).collect();

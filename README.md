@@ -729,10 +729,11 @@ into `run/worlds/backups/` (the newest of this world without a name), for a new 
   pcds drone-map "/path/to/The Planet Crafter" "/path/to/data/2.103"
   ```
 
-  The map is `drone-navigation.json` beside `gamedata.json`. Its game build must match the tables,
-  a stale or malformed map is refused at start, and it must be made again after a game update or a
-  fresh `pcds extract`. It holds geometry read from the game: keep it with your private tables,
-  never in a repository. The map is conservative bounding boxes, including scene colliders that
+  The map is `drone-navigation.json` beside `gamedata.json` (about 55 MB for the six planets, 18 MB
+  in memory). The server reads it only when the rule is on, and refuses the rule (when you set it,
+  and at start) while the map is missing, malformed or of another game build than the tables; make
+  it again after a game update or a fresh `pcds extract`. It holds geometry read from the game:
+  keep it with your private tables, never in a repository. The map is conservative bounding boxes, including scene colliders that
   are inactive and may appear as the planet is terraformed, and terrain heightmaps cut into
   patches (holes stay covered), so a mountain can make a drone fly high and long. It is aerial
   clearance, not a shortest-path or doorway navigation: indoor pickup and docking may still cross

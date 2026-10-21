@@ -84,7 +84,51 @@ pub struct GameData {
     /// every panel look (panels.rs).
     pub panels: Arc<Doc>,
     pub singletons: Arc<Doc>,
-    pub drone_navigation: Option<Arc<crate::geometry::navigation::Data>>,
+    /// The collision map for drones.avoidObstacles, read from its file when something first needs it.
+    pub drone_navigation: Arc<DroneMap>,
+}
+
+/// The optional drone collision map (`pcds drone-map`, geometry::navigation) beside the tables. It
+/// is 55 MB of JSON for the six planets and 18 MB parsed, so it is read, checked against the
+/// tables' game build and kept only when a rule or the drones first need it: a server that has the
+/// file and does not use the rule pays nothing for it.
+#[derive(Default)]
+pub struct DroneMap {
+    /// The map's file and the tables' `buildid` it must match; None: there is no map.
+    files: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    data: std::sync::OnceLock<Result<Arc<crate::geometry::navigation::Data>, String>>,
+}
+
+impl DroneMap {
+    /// The map next to `path`, if the file is there (an unreadable one is an error, a missing one is none).
+    fn beside(path: &std::path::Path) -> Result<DroneMap, String> {
+        match std::fs::metadata(path) {
+            Ok(_) => Ok(DroneMap { files: Some((path.to_path_buf(), path.with_file_name("buildid"))), data: Default::default() }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(DroneMap::default()),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        }
+    }
+
+    /// A map that is already in memory (tests).
+    pub fn of(map: crate::geometry::navigation::Data) -> DroneMap {
+        DroneMap { files: None, data: std::sync::OnceLock::from(Ok(Arc::new(map))) }
+    }
+
+    /// The map, read and checked the first time (the answer, error included, is kept).
+    pub fn get(&self) -> Result<Arc<crate::geometry::navigation::Data>, String> {
+        self.data
+            .get_or_init(|| {
+                let Some((file, build)) = &self.files else {
+                    return Err("the game tables have no collision map (drone-navigation.json); make it with `pcds drone-map GAME_DIR TABLES_DIR`".into());
+                };
+                let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+                let map: crate::geometry::navigation::Data = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
+                let build = std::fs::read_to_string(build).map_err(|e| format!("collision map buildid: {e}"))?;
+                map.validate(&build)?;
+                Ok(Arc::new(map))
+            })
+            .clone()
+    }
 }
 
 /// NetworkTransformState's position bits (x, y, z).
@@ -273,16 +317,7 @@ impl GameData {
         let by_hash = groups.iter().enumerate().map(|(i, g)| (g.hash, i)).collect();
         let layouts = serde_json::from_str(root.layouts.get()).map_err(|e| format!("{path}: layouts: {e}"))?;
         let map_path = std::path::Path::new(path).with_file_name("drone-navigation.json");
-        let drone_navigation = match std::fs::read_to_string(&map_path) {
-            Ok(text) => {
-                let map: crate::geometry::navigation::Data = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", map_path.display()))?;
-                let build = std::fs::read_to_string(map_path.with_file_name("buildid")).map_err(|e| format!("collision map buildid: {e}"))?;
-                map.validate(&build)?;
-                Some(Arc::new(map))
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(format!("{}: {e}", map_path.display())),
-        };
+        let drone_navigation = Arc::new(DroneMap::beside(&map_path)?);
         Ok(GameData {
             groups,
             by_id,
@@ -365,20 +400,26 @@ mod tests {
         assert_eq!(state("VehicleTruck"), state("FloorAngleGlass"));
     }
     #[test]
-    fn optional_drone_maps_load_only_for_matching_tables() {
+    fn optional_drone_maps_are_read_when_needed_and_only_for_matching_tables() {
         let dir = std::env::temp_dir().join(format!("pcds-drone-map-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("gamedata.json");
         std::fs::write(&path, r#"{"layouts":{}}"#).unwrap();
-        let load = || GameData::load(path.to_str().unwrap());
-        assert!(load().unwrap().drone_navigation.is_none());
+        let load = || GameData::load(path.to_str().unwrap()).unwrap();
+        assert!(load().drone_navigation.get().is_err_and(|e| e.contains("pcds drone-map")), "no file, no map");
         std::fs::write(dir.join("buildid"), "abc").unwrap();
         std::fs::write(dir.join("drone-navigation.json"), r#"{"format":1,"build_id":"abc","planets":{},"buildings":{}}"#).unwrap();
-        assert!(load().unwrap().drone_navigation.is_some());
+        assert!(load().drone_navigation.get().is_ok());
         std::fs::write(dir.join("buildid"), "different").unwrap();
-        assert!(load().is_err());
+        let stale = load();
+        assert!(stale.drone_navigation.get().is_err_and(|e| e.contains("pcds drone-map")), "the map of another build");
+        std::fs::write(dir.join("buildid"), "abc").unwrap();
         std::fs::write(dir.join("drone-navigation.json"), "bad json").unwrap();
-        assert!(load().is_err());
+        let bad = load();
+        assert!(bad.drone_navigation.get().is_err(), "a malformed map");
+        // The start does not read the file: a server that does not use the rule never pays for it.
+        std::fs::write(dir.join("drone-navigation.json"), r#"{"format":1,"build_id":"abc","planets":{},"buildings":{}}"#).unwrap();
+        assert!(bad.drone_navigation.get().is_err(), "the answer is kept");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

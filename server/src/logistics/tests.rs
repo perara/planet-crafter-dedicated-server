@@ -791,7 +791,7 @@ fn clearance_routes_deliver_cargo_and_rebuild_after_construction_and_snapshot() 
             vec![Bounds {
                 min: [20.0, 0.0, 30.0],
                 max: [30.0, 20.0, 40.0],
-            }],
+            }].into(),
         )]),
         buildings: HashMap::from([(
             "Container1".into(),
@@ -801,7 +801,7 @@ fn clearance_routes_deliver_cargo_and_rebuild_after_construction_and_snapshot() 
             }],
         )]),
     };
-    game.data.drone_navigation = Some(std::sync::Arc::new(map));
+    game.data.drone_navigation = std::sync::Arc::new(crate::gamedata::DroneMap::of(map));
     let start = game.ext.logistics.last_tick;
     let mut checked_cruise = false;
     for tick in 1..=80 * 30 {
@@ -865,7 +865,7 @@ fn route_planning_is_bounded_and_fair_across_the_fleet() {
     let Some(mut game) = game() else { return };
     game.rules.drones.avoid_obstacles = true;
     build(&mut game,"EnergyGenerator6",[40.0,2.0,0.0]);
-    game.data.drone_navigation=Some(std::sync::Arc::new(Data { planets:HashMap::from([(game.planet_hash(),vec![])]),..Default::default() }));
+    game.data.drone_navigation=std::sync::Arc::new(crate::gamedata::DroneMap::of(Data { planets:HashMap::from([(game.planet_hash(),Vec::new().into())]),..Default::default() }));
     let mut drones=Vec::new();
     for i in 0..40 {
         let d=build(&mut game,"Drone1",[10.0+i as f32,4.0,10.0]);
@@ -919,7 +919,7 @@ fn with_the_drone_rules_off_dispatch_and_flight_are_the_games() {
     // A collision map is not used while the rule is off: the drone flies straight.
     use crate::geometry::navigation::{Bounds, Data};
     let planet = game.planet_hash();
-    game.data.drone_navigation = Some(std::sync::Arc::new(Data { format: 1, build_id: "t".into(), planets: HashMap::from([(planet, vec![Bounds { min: [0.0; 3], max: [2000.0, 500.0, 2000.0] }])]), buildings: HashMap::new() }));
+    game.data.drone_navigation = std::sync::Arc::new(crate::gamedata::DroneMap::of(Data { format: 1, build_id: "t".into(), planets: HashMap::from([(planet, vec![Bounds { min: [0.0; 3], max: [2000.0, 500.0, 2000.0] }].into())]), buildings: HashMap::new() }));
     let start = game.ext.logistics.last_tick;
     for t in 1..=10 {
         frame(&mut game, start + t);

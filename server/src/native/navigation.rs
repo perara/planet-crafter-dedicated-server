@@ -149,7 +149,7 @@ pub fn extract(game: &Path, tables: &Path) -> Result<Data, String> {
             return Err(format!("{id}: no terrain colliders found"));
         }
         eprintln!("drone-map: {id}: {} collider bounds", bounds.len());
-        out.planets.insert(crate::data::stable_hash(id), bounds);
+        out.planets.insert(crate::data::stable_hash(id), bounds.into());
     }
     out.validate(&expected)?;
     Ok(out)
