@@ -706,6 +706,19 @@ fn a_hot_update_from_the_release_before_works() {
     assert_eq!(server.api("POST", "/api/save", json!({})).0, 200, "{}", server.log());
     let log = server.log();
     assert!(!log.contains("restore failed") && !log.contains("panicked"), "{log}");
+    // The new launch rule changes live through an older front, without replacing the bank.
+    let pid = server.live()["pid"].clone();
+    for enabled in [true, false] {
+        assert_eq!(server.api("POST", "/api/rules", json!({"rockets": {"serverFlight": enabled}})).0, 200);
+        let (_, rules) = server.api("GET", "/api/rules", json!({}));
+        assert_eq!(rules["rules"]["rockets"]["serverFlight"], enabled);
+        assert_eq!(server.live()["pid"], pid, "toggle must not restart the bank");
+        if enabled {
+            let refused = server.update(json!({"rollback": true}));
+            assert_eq!(refused["ok"], false, "old bank must refuse an enabled new-only rule");
+            assert_eq!(server.live()["pid"], pid, "refused rollback must resume the current bank");
+        }
+    }
     // And back, which is a rollback of the update just made: the release before reads this world.
     let back = server.update(json!({"rollback": true}));
     assert_eq!(back["ok"], true, "the way back into pcds {}: {back}\n{}", before["version"], server.log());

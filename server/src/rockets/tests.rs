@@ -566,3 +566,33 @@ fn rocket_check_refilling_after_toggle_recovers() {
     assert!(g.add_existing_item(item, 50, true, 0));
     assert_eq!(g.wos[&210_000_001].growth, 1.0, "removing and replacing one item triggers launch");
 }
+
+#[test]
+fn server_flight_rule_changes_the_next_launch_and_keeps_existing_flights_moving() {
+    let objects = (0..3).flat_map(|i| {
+        let x = 200.0 + i as f32 * 50.0;
+        [placed(210_000_100 + i * 2, "LaunchPlatform", &format!("{x},10,200"), "Prime", json!({})),
+         placed(210_000_101 + i * 2, "RocketHeat1", &format!("{},15.556,184.042294", x - 3.0), "Prime", json!({}))]
+    }).collect();
+    let Some(mut g) = game(objects, vec![]) else { return };
+    let mut flight = None;
+    for (i, enabled) in [false, true, false].into_iter().enumerate() {
+        let rule = g.rules.patched(&json!({"rockets": {"serverFlight": enabled}})).unwrap();
+        crate::rules::set(&mut g, rule).unwrap();
+        assert_eq!(g.rules.persisted().unwrap().get("rockets").is_some(), enabled, "disabled extension must allow old-bank rollback");
+        let platform = 210_000_100 + i as i32 * 2;
+        let rocket = platform + 1;
+        let old = g.wos[&rocket].net.unwrap();
+        let from = g.net.out.len();
+        assert!(rpc(&mut g, platform, "ConstructibleProxy.SendInSpaceServerRpc"));
+        let net = g.wos[&rocket].net.unwrap();
+        assert_eq!(net != old, enabled);
+        assert_eq!(sent(&g, from).iter().any(|r| r == "ConstructibleProxy.SendInSpaceClientRpc"), !enabled);
+        if enabled { flight = Some(net); }
+    }
+    let net = flight.unwrap();
+    let y = g.net.objects[&net].position[1];
+    g.time += 0.1;
+    super::tick(&mut g);
+    assert!(g.net.objects[&net].position[1] > y, "disabling changes new launches, without freezing a flight already started");
+}

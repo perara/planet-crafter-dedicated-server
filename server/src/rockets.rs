@@ -211,7 +211,7 @@ fn object_at(game: &Game, spot: [f32; 3]) -> Option<i32> {
 
 /// ConstructibleProxy.SendInSpaceServerRpc with ActionSendInSpace.SendRocket.
 fn send_in_space(game: &mut Game, client: u64, object: u64) {
-    send_in_space_using(game, client, object, crate::config::dev("server-rocket-flight").is_some());
+    send_in_space_using(game, client, object, game.rules.rockets.server_flight);
 }
 
 fn send_in_space_using(game: &mut Game, client: u64, object: u64, server_flight: bool) {

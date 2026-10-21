@@ -90,6 +90,7 @@ impl Knob {
 const MULTIPLIER: (f64, f64) = (0.0, 100.0);
 
 pub static KNOBS: &[Knob] = &[
+    rule("rockets.serverFlight", Type::Bool, "", "Server-controlled orbital rocket visuals pass through obstacles. Adds six seconds of orange flare smoke/light at the pad and its existing crafting sound. Default off; changes the next launch without restarting; existing flights finish normally. No client mod needed."),
     rule("meteo.eventChance", Type::Float, "×", "The chance of a random weather or meteor event at each try, times this; 0 stops them. Events players cause (rockets sent to space) still come.").range(MULTIPLIER.0, MULTIPLIER.1),
     rule("meteo.materialDespawnSeconds", Type::Float, "s", "Seconds before the materials a meteor drops disappear; 0: they stay. Unset: the game's own time. The rocks of an impact are drawn by each game itself and keep their time.").range(0.0, 86_400.0),
     rule("gauges.oxygenDrain", Type::Float, "×", "Oxygen use, times this, on top of the world's own gauge drain setting.").range(MULTIPLIER.0, MULTIPLIER.1),
@@ -172,7 +173,6 @@ pub static PROCESS_ENV: &[Var] = &[
 /// PCDS_DEV's hooks: what the end-to-end tests and the load and probe tools need from the
 /// production program. An unknown one stops the start.
 pub static DEV_HOOKS: &[(&str, &str)] = &[
-    ("server-rocket-flight", "Experimental server-driven rocket visual, temporary flare and craft sound; skips local rocket physics. Test clients only; not an installation setting."),
     ("flip-verify", "A bank that restores a snapshot checks its state equals the snapshot's (every flip)."),
     ("test-faults", "POST /api/update takes failForTest, to make the next bank fail on purpose."),
     ("trust-loopback", "Believe the SteamID a direct-IP client from 127.0.0.1 claims. Never behind a UDP relay, where every player comes from 127.0.0.1."),

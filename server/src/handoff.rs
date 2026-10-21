@@ -201,7 +201,7 @@ pub fn snapshot_to(g: &mut Game, w: &mut impl std::io::Write) -> Result<(), Stri
 /// time the encoding took per kind of part is there too, named with a dot in front.
 pub fn snapshot_timed(g: &mut Game, w: &mut impl std::io::Write, phases: &mut Vec<(&'static str, f64)>) -> Result<(), String> {
     let mut laps = Laps::new(phases);
-    let head = Head { format: FORMAT.into(), game_version: g.net_data.game_version.clone(), rules: Some(serde_json::to_value(&g.rules).map_err(|e| e.to_string())?), access: Some(serde_json::to_value(&g.access.lists).map_err(|e| e.to_string())?) };
+    let head = Head { format: FORMAT.into(), game_version: g.net_data.game_version.clone(), rules: Some(g.rules.persisted().map_err(|e| e.to_string())?), access: Some(serde_json::to_value(&g.access.lists).map_err(|e| e.to_string())?) };
     let mut cpu = [0.0; KINDS];
     let parts = encode(g, &mut cpu)?;
     laps.lap("serialize");
@@ -444,6 +444,7 @@ fn restore_settings(g: &mut Game, head: Head) -> Result<(), String> {
         let rules = crate::rules::Rules::parse(&rules.to_string())?;
         let mut expected = g.rules.clone();
         expected.drones.clone_from(&rules.drones);
+        expected.rockets.clone_from(&rules.rockets);
         expected.save.verify_backups = rules.save.verify_backups;
         expected.log.format.clone_from(&rules.log.format);
         expected.log.level.clone_from(&rules.log.level);
@@ -618,6 +619,7 @@ mod tests {
         g.rules.speed.growth = 2.0;
         g.rules.drones.nearest_first = true;
         g.rules.drones.keep_cargo = true;
+        g.rules.rockets.server_flight = true;
         g.rules.drones.avoid_obstacles = true;
         g.rules.save.verify_backups = true;
         g.access.lists.operators = vec!["76561198000000001".into()];
@@ -655,6 +657,7 @@ mod tests {
         assert_eq!(back.rules.speed.growth, 2.0);
         assert!(!back.rules.save.verify_backups);
         assert_eq!(back.rules.drones, crate::rules::Drones::default());
+        assert!(!back.rules.rockets.server_flight);
         assert!(back.access.lists.operators.is_empty());
         assert_eq!(back.access.lists.banned_names, g.access.lists.banned_names);
         assert_eq!(back.rules.log.format, "text");
