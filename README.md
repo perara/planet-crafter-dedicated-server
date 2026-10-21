@@ -451,7 +451,7 @@ reason in `./pcds logs`.
 | `limits.bankWatchdogSeconds` | `60` | a game process that says nothing (to a player, an admin request or the front's ping) for this long is killed and the world starts again from the last snapshot or save, as after a crash (it counts toward the crash limit). Not during a flip, a world stop or a save you asked for. `0`: never; else `10` to `3600` |
 | `save.autosaveMinutes` | `5` | minutes between saves; `0` saves only on stop |
 | `save.backupsKept` | `24` | save backups kept in `run/worlds/backups/`; `0` keeps none |
-| `save.backupMinutes` | `60` | minutes between those backups |
+| `save.backupMinutes` | `60` | minutes between those backups: a save makes one when the last is older than this, so with `save.autosaveMinutes` 0 only the saves you ask for (and the stop) make one |
 | `save.verifyBackups` | `false` | read each new backup back after it is written (on a thread of its own) and say in the log and the metrics whether it loads; `./pcds backup verify` does the full check on demand |
 | `update.auto` | `false` | install each new server release and hand the world over to it (see [Upgrading](#upgrading)); off: nothing contacts GitHub on its own |
 | `update.checkHours` | `24` | hours between those checks |
@@ -615,7 +615,9 @@ cannot download (`--steam-user` installs) fails `pcds update`, so the hourly uni
 - `./pcds new [OPTIONS] --force` replaces the running world with a new one; the old one is kept.
 - `run/worlds/backups/` keeps timestamped copies of each world (one per `save.backupMinutes`,
   the newest `save.backupsKept`), named by UTC time. Each start also backs up the world as it was
-  before the server touched it, at most once per 10 minutes. `/api/status` (`backup`) and the
+  before the server touched it, at most once per 10 minutes. The name has the second in it: a
+  backup you ask for in the same second as the last (`POST /api/backup` twice) replaces it with the
+  newer state. `/api/status` (`backup`) and the
   dashboard say when the last one was made and why one failed.
 - `./pcds backup list` shows them. `./pcds backup verify` loads the newest three (`--count N`,
   `--all`) the way the server loads a world and says what each holds and whether the server would
