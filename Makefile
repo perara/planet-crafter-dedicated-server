@@ -7,7 +7,7 @@
 #   make bench       the tick benchmark: make bench SAVE=run/worlds/world.json [PLAYERS=4]
 #                    (PCDS_BENCH_SECONDS: the game time it runs, default 300)
 #   make gate        the flip gate: the last release hot-updated into this build (by hand before every tag;
-#                    needs PCDS_TEST_DATA; skipped, loudly, when the formats differ: docs/hot-update.md)
+#                    needs PCDS_TEST_DATA; fails when the formats differ: docs/hot-update.md)
 #   make plugin-bench  what plugins cost (needs the game tables; PCDS_BENCH_SAVE adds the tick cost on a world)
 #   make lint        clippy and shellcheck
 #   make docker      the Docker image (IMAGE=...)

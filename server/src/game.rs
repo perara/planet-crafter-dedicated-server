@@ -238,6 +238,7 @@ pub struct Game {
     /// Clients the transport should drop, with the reason they are shown.
     pub kicks: Vec<(u64, String)>,
     pub access: crate::access::Access,
+    #[serde(with = "crate::rules::snapshot")]
     pub rules: crate::rules::Rules,
     /// Where set() keeps the rules (None: not kept, as in tests).
     pub rules_path: Option<String>,

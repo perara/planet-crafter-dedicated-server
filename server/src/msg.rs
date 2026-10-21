@@ -138,6 +138,11 @@ pub struct SnapshotNote {
 pub struct SnapshotHead {
     pub format: u64,
     pub game_version: String,
+    /// Named rules added after format 7; old readers ignore this optional header extension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<Value>,
 }
 
 /// The body of CONNECTED: a new client, by SteamID (Steam, verified) or IP (direct); `trusted`:
@@ -262,7 +267,7 @@ mod tests {
         assert_eq!(text(&AdminAnswer { status: Some(200), body: Some("{}".into()) }), r#"{"status":200,"body":"{}"}"#);
         let ops = Ops { autosave_minutes: Some(5), auto_update: Some(false), update_check_hours: Some(24), bank_watchdog_seconds: Some(60), log_format: Some("json".into()), log_level: Some("warn".into()) };
         assert_eq!(text(&ops), r#"{"autosaveMinutes":5,"autoUpdate":false,"updateCheckHours":24,"bankWatchdogSeconds":60,"logFormat":"json","logLevel":"warn"}"#);
-        assert_eq!(text(&SnapshotHead { format: 5, game_version: "2.103".into() }), r#"{"format":5,"game_version":"2.103"}"#);
+        assert_eq!(text(&SnapshotHead { format: 5, game_version: "2.103".into(), rules: None, access: None }), r#"{"format":5,"game_version":"2.103"}"#);
     }
 
     /// The notes in the banks' folder keep the keys they were written with, and an owner's rollback

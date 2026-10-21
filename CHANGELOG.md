@@ -19,19 +19,19 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-10-21
+
 ### Breaking changes
 
-* **Snapshot format 9.** Three rules were added (`drones.nearestFirst`, `drones.avoidObstacles`,
-  `drones.keepCargo`) and the rules are part of the state a hot update hands over, so 0.8.1 cannot hand a running world to this
-  release, and this release cannot hand one back. `pcds upgrade` refuses the hot update and names
-  `pcds upgrade VERSION --restart`; every player joins again once. The game tables (format 4) and the
-  front protocol (3) are unchanged.
 * **Where this server now differs from the game, on purpose.** A launch or a destruction switched on
   while the rocket or destructor is already full, a building that is built after an optimizer's fuse
   was put in, a deconstruction that something was put into meanwhile, a joiner's growth boost and a few
   counts behave as described under **Fixed**; the game itself waits for the next item and the like.
   What drones do differently (their order, their flights, their lost cargo) is behind rules that are
   off. [docs/codex-integration.md](docs/codex-integration.md) gives each one with the game's own code.
+
+* The published 0.8.1 snapshot format 8 is not accepted. A server already on 0.8.1 needs a
+  restart install; servers still on 0.8.0 can hot-update directly to this release.
 
 ### Added
 
@@ -50,6 +50,10 @@ Every release has two parts a reader can rely on:
   while the map is missing, malformed or of another game build, and the file is read only when the
   rule is on. Planning is limited to 16 drones a tick. See the README, "Differences from hosting in the game".
 
+### Changed
+
+* Reuse network-delta and poll buffers, avoid repeated energy-list allocation, and use compact drone clearance indexes. Existing timer deadlines and packet bytes stay unchanged.
+
 ### Fixed
 
 * Enabling automatic launch on an already-full trading or interplanetary exchange rocket launches it
@@ -65,6 +69,29 @@ Every release has two parts a reader can rely on:
   its group; replacing an object, saving it differently and deleting it keep the totals right.
 * A joining player sees the other players' names and map markers: the other players' proxies are
   restarted for the joiner once the joiner's name is known (and the joiner's for the others).
+* Steam shutdown keeps its server login alive while relay initialization completes, after closing connections and the listen socket. Cleanup is bounded to 15 seconds; stalled upstream initialization can still warn after that deadline. The fix requires a front restart.
+
+* **Hot update from 0.8.0 works again.** The binary world state retains snapshot format 7;
+  the added logging, backup verification and drone rules travel by name in an
+  optional snapshot header. Operator permissions use the same extension while existing bans,
+  whitelists and IP restrictions retain their old binary layout. The new bank accepts old snapshots with their original defaults
+  and preserves the new settings through later handoffs. Invalid extensions, conflicting
+  old rules and damaged snapshots are refused before the new bank becomes ready.
+* The cross-release flip test keeps its players connected through the update and rollback.
+  The flip gate fails on an incompatible format instead of exiting successfully without testing.
+
+### Upgrade
+
+From a running 0.8.0 server, skip 0.8.1 and use `pcds upgrade v0.8.2` once this release is
+published. This updates the game bank while the existing front retains its sockets and players.
+The front's Steam shutdown fix, monitoring routes, logging and service hardening require `pcds upgrade v0.8.2 --restart` to take effect; that restart disconnects players once.
+An unmodified 0.8.1 front requires a restart to cross from its snapshot format 8; this release
+refuses format 8 bodies rather than misreading them as format 7. Do not replace published
+0.8.1 assets with this build.
+
+A rollback to 0.8.0 can read the world state, but refuses rules.json if it contains the new
+settings (or access.json contains `operators`). That failed handoff resumes the current bank.
+Remove unsupported entries from rules.json and access.json before retrying; existing game rules and the world need no conversion.
 
 ## [0.8.1] - 2026-10-21
 

@@ -12,8 +12,9 @@ flips. The network front plays the bootloader: it stays up through the flip and 
 sockets and the Steam connections. The old bank keeps running until the new one has
 confirmed it is healthy, so a failed flip is a flip back with nobody disconnected. The world
 crosses the flip as a serialized snapshot of a separate state module, in a versioned format
-that only the release that wrote it reads (no migration: a release that changes the format is
-installed with `pcds upgrade --restart`, which disconnects every player).
+that every compatible release reads. A release that changes the binary format needs
+`pcds upgrade --restart`, which disconnects every player; named header extensions preserve
+settings and operator permissions added after format 7 without changing that binary layout.
 
 ## As built
 
@@ -150,8 +151,7 @@ an update or a rollback is answered 409 "the world is stopped" (start it first, 
 `--restart`), and the dashboard's buttons are off.
 
 **State and the next release.** A snapshot is the whole serialized `Game`. The release that
-restores it is another program than the one that wrote it. There is no legacy support: a
-snapshot is read in full by the format it was written in, or refused. The rules:
+restores it is another program than the one that wrote it. The binary state is read in full by the format it was written in, or refused. The rules:
 - Any change to what is serialized (a field added, removed, renamed or retyped, a different
   encoding) bumps `handoff::FORMAT`. There are no `#[serde(default)]`s to keep an older snapshot
   readable, no `migrate` and no list of older formats: `format` in `pcds bank-info` (and
@@ -166,16 +166,24 @@ snapshot is read in full by the format it was written in, or refused. The rules:
   (Generator: spawn_every, speed, groups) must be added there when its table values are read
   differently. State (timers, what is growing, a random sequence, what the rays found) stays
   the snapshot's.
-- `rules` are in the snapshot and are `deny_unknown_fields`: a new rule is a change of state,
-  so it bumps `FORMAT` like any other.
+- The binary `Game.rules` keeps the format 7 layout through `rules::snapshot`. Added rules
+  travel by name in the optional header `rules` object, so adding a setting need not move
+  any binary state. The old bank ignores the extension; a new bank defaults its missing
+  fields. The header must agree with every rule in the binary state. Keep the adapter's
+  field order frozen when changing a rules section, and preserve extensions in `restore_settings`.
+  Both banks reread and validate rules.json before becoming ready. Rolling back to a release
+  that refuses new settings fails the restore and resumes the current bank; remove unsupported
+  settings from rules.json before retrying that rollback. Access lists use the same pattern:
+  `access::snapshot` retains the four old lists and the named header carries operators;
+  an older release refuses an access.json containing that new field.
 
 **The flip gate.** Every flip in `tests/hot_update.rs` is between banks of this build. The one
 thing they cannot show is a flip from the program of the last release, which is another binary.
 `make gate` (`tools/flip-gate.sh`) fetches the last published release that is not this
 version and compares its `bank-info` with this build's (`format`, `protocol`, `tablesFormat`).
 When they differ it prints "format changed: ... is not hot-update compatible" between rows of
-`#` and exits 0 without testing: that release is a restart install by design (the release notes
-say so). When they are equal that release runs a front and a bank on a world with one of every
+`#` and exits 1 without testing. A format change cannot count as a passing hot-update gate;
+a deliberate restart release needs separate restart acceptance and explicit release notes. When they are equal that release runs a front and a bank on a world with one of every
 building the game has and 6 players, and this build's bank takes the world over live
 (`hot_update::a_hot_update_from_the_release_before_works`, ignored by default because it needs
 the download). It fails when the flip fails after the front accepted it, a player drops, a
@@ -632,11 +640,11 @@ acceptance test passed):
 | the tables inside `Game` and `Net` | not state | skipped (given `Default`), reloaded |
 | the scaled generation in the tables | derived from the world's settings at load | `restore` runs `change_generation_for_groups` again |
 | `ext.toxic` (format 7) | the toxic areas are derived from a planet's scene and the world objects | only the clients' registrations are in the snapshot; the areas are `#[serde(skip)]` and read again at the first tick after the restore, the cleaned scene objects counted from the world objects as at a start |
-| `rules` (formats 8 and 9) | the rules are state too (`Game.rules`), and a struct is its fields back to back: a rule added or removed moves every field after it | the format is bumped with the rule: format 8 is the rules `log.format`, `log.level` and `save.verifyBackups`, format 9 the rules `drones.nearestFirst`, `drones.avoidObstacles` and `drones.keepCargo`. The flip gate (`make gate`, a hot update from the last release) is what catches it: it failed with `24 is no bool` (the old `backups_kept` read as the new bool) before the bump |
+| `rules` | existing rules retain the format 7 binary layout; added settings are named header fields | `rules::snapshot` freezes the binary layout; the optional header `rules` preserves `log.format`, `log.level`, `save.verifyBackups` and the three `drones` rules. A missing extension gets the old defaults. Access lists likewise retain their old layout, with operators in the named `access` header. Header/body disagreements and invalid rules or access lists are refused. Published 0.8.1 used format 8; 0.8.2 restores format 7 compatibility with 0.8.0, without treating a format 8 body as format 7 |
 
 ### The snapshot format and its versions
 
-A snapshot is a head line `{"format":9,"game_version":"2.103"}` and the state in the binary
+A snapshot is a head line `{"format":7,"game_version":"2.103","rules":{...}}` and the state in the binary
 codec of `bincodec.rs` (serde's data model with no names and no tags: a struct is its fields back
 to back; integers of two bytes and more, lengths and variants are LEB128, zigzag when signed;
 floats and bytes are fixed width; a float array that is all zeros is one byte; a `Value` is its
@@ -656,7 +664,7 @@ so state crosses a flip only serialized, never as shared memory. `restore` (`han
   says to use `pcds upgrade --restart VERSION` (the world then loads from the save); a rollback
   across a format bump is refused the same way. A snapshot kept on disk by an older release is
   moved aside (`world.json.snapshot.unusable-*`) and the world starts from the save;
-- needs a field added to the state to be added in the format as well: there are no defaults, a
+- needs a field added to the binary state to be added in the format as well: there are no defaults, a
   snapshot is read in full or refused. `tests::a_snapshot_restores_only_in_its_format_and_on_its_tables`
   checks the refusals.
 

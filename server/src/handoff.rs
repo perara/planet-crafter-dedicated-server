@@ -42,7 +42,7 @@ use crate::rpcspec::Spec;
 /// across formats, and `pcds upgrade --restart` installs the release, the world then loading from
 /// the save). The format is the binary codec of bincodec.rs, written and read in parts on several
 /// threads.
-pub const FORMAT: u32 = 9;
+pub const FORMAT: u32 = 7;
 
 /// The snapshot's first line (msg::SnapshotHead): its format, and the tables it is for (state
 /// holds indices into them, so it is only valid on the same game version).
@@ -201,7 +201,7 @@ pub fn snapshot_to(g: &mut Game, w: &mut impl std::io::Write) -> Result<(), Stri
 /// time the encoding took per kind of part is there too, named with a dot in front.
 pub fn snapshot_timed(g: &mut Game, w: &mut impl std::io::Write, phases: &mut Vec<(&'static str, f64)>) -> Result<(), String> {
     let mut laps = Laps::new(phases);
-    let head = Head { format: FORMAT.into(), game_version: g.net_data.game_version.clone() };
+    let head = Head { format: FORMAT.into(), game_version: g.net_data.game_version.clone(), rules: Some(serde_json::to_value(&g.rules).map_err(|e| e.to_string())?), access: Some(serde_json::to_value(&g.access.lists).map_err(|e| e.to_string())?) };
     let mut cpu = [0.0; KINDS];
     let parts = encode(g, &mut cpu)?;
     laps.lap("serialize");
@@ -317,8 +317,8 @@ fn decode(body: &[u8], phases: &mut Vec<(&'static str, f64)>) -> Result<Game, St
         Machines(Box<crate::machines::Machines>),
         Water(Box<crate::water::Water>),
     }
-    let e = |e: crate::bincodec::Error| e.to_string();
     let done = in_parallel(&jobs, |(kind, bytes, out)| -> Result<(Done, u8, f64), String> {
+        let e = |e: crate::bincodec::Error| format!("snapshot part {kind}: {e}");
         let started = thread_cpu_ms();
         let out = out.lock().unwrap_or_else(|e| e.into_inner()).take();
         let done = match (*kind, out) {
@@ -419,9 +419,11 @@ pub fn restore_timed(net_data: NetData, data: GameData, spec: Spec, snapshot: &[
     }
     laps.lap("head");
     let mut g = decode(state, laps.phases)?;
+    restore_settings(&mut g, head)?;
     laps.lap("parse");
     g.net_data = net_data;
     g.data = data;
+    g.rules.validate(&g.data)?;
     g.net.spec = spec;
     g.scenes = scenes;
     g.rebuild_holders();
@@ -434,6 +436,33 @@ pub fn restore_timed(net_data: NetData, data: GameData, spec: Spec, snapshot: &[
     g.change_generation_for_groups();
     laps.lap("generation");
     Ok(g)
+}
+
+/// Extensions may add rules, but cannot disagree with the format 7 state old banks read.
+fn restore_settings(g: &mut Game, head: Head) -> Result<(), String> {
+    if let Some(rules) = head.rules {
+        let rules = crate::rules::Rules::parse(&rules.to_string())?;
+        let mut expected = g.rules.clone();
+        expected.drones.clone_from(&rules.drones);
+        expected.save.verify_backups = rules.save.verify_backups;
+        expected.log.format.clone_from(&rules.log.format);
+        expected.log.level.clone_from(&rules.log.level);
+        if expected != rules {
+            return Err("snapshot header rules disagree with its binary state".into());
+        }
+        g.rules = rules;
+    }
+    if let Some(lists) = head.access {
+        let lists: crate::access::Lists = serde_json::from_value(lists).map_err(|_| "snapshot header has invalid access lists")?;
+        lists.check()?;
+        let mut expected = g.access.lists.clone();
+        expected.operators.clone_from(&lists.operators);
+        if expected != lists {
+            return Err("snapshot header access lists disagree with its binary state".into());
+        }
+        g.access.lists = lists;
+    }
+    Ok(())
 }
 
 /// Whether a restored game holds exactly the state of the snapshot it came from: both written
@@ -501,7 +530,9 @@ pub fn verify(g: &Game, snapshot: &[u8]) -> Result<(), String> {
         return Err(format!("a snapshot of format {}", head.format));
     }
     // Through the text, as the restored game below: a float is its shortest text, not its f64.
-    let mut sent: Value = serde_json::from_str(&serde_json::to_string(&decode(body, &mut Vec::new())?).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let mut decoded = decode(body, &mut Vec::new())?;
+    restore_settings(&mut decoded, head)?;
+    let mut sent: Value = serde_json::from_str(&serde_json::to_string(&decoded).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     let mut restored: Value = serde_json::from_str(&serde_json::to_string(g).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     state(&mut sent);
     state(&mut restored);
@@ -579,6 +610,59 @@ mod tests {
             let (n, d, s, scenes) = tables();
             assert!(super::restore(n, d, s, &text[..cut], scenes).is_err(), "cut at {cut}");
         }
+    }
+
+    #[test]
+    fn named_rules_preserve_extensions_and_old_snapshots_keep_their_defaults() {
+        let Some(mut g) = test_game(save()) else { return };
+        g.rules.speed.growth = 2.0;
+        g.rules.drones.nearest_first = true;
+        g.rules.drones.keep_cargo = true;
+        g.rules.save.verify_backups = true;
+        g.access.lists.operators = vec!["76561198000000001".into()];
+        g.access.lists.banned_names = vec!["Mallory".into()];
+        g.rules.log.format = "json".into();
+        g.rules.log.level = "warn".into();
+        let bytes = super::snapshot(&mut g).unwrap();
+        let (head, body) = super::split(&bytes).unwrap();
+        assert_eq!(head.format, 7);
+        let (n, d, s, scenes) = crate::game::test_tables().unwrap();
+        let back = super::restore(n, d, s, &bytes, scenes).unwrap();
+        assert_eq!(back.rules, g.rules);
+        assert_eq!(back.access.lists.operators, g.access.lists.operators);
+        assert_eq!(back.access.lists.banned_names, g.access.lists.banned_names);
+        super::verify(&back, &bytes).unwrap();
+
+        // The old binary layout remains readable without the optional header rules.
+        let mut old_head = serde_json::to_value(&head).unwrap();
+        old_head.as_object_mut().unwrap().remove("rules");
+        old_head.as_object_mut().unwrap().remove("access");
+        let old = [old_head.to_string().as_bytes(), b"\n", body].concat();
+        let (n, d, s, scenes) = crate::game::test_tables().unwrap();
+        let back = super::restore(n, d, s, &old, scenes).unwrap();
+        assert_eq!(back.rules.speed.growth, 2.0);
+        assert!(!back.rules.save.verify_backups);
+        assert_eq!(back.rules.drones, crate::rules::Drones::default());
+        assert!(back.access.lists.operators.is_empty());
+        assert_eq!(back.access.lists.banned_names, g.access.lists.banned_names);
+        assert_eq!(back.rules.log.format, "text");
+        assert_eq!(back.rules.log.level, "info");
+        super::verify(&back, &old).unwrap();
+
+        // Both readers must see the same old rules; malformed extensions fail closed.
+        for patch in [serde_json::json!({"speed": {"growth": 3.0}}), serde_json::json!({"log": {"level": "invalid"}})] {
+            let mut bad_head = serde_json::to_value(&head).unwrap();
+            for (section, fields) in patch.as_object().unwrap() {
+                for (field, value) in fields.as_object().unwrap() {
+                    bad_head["rules"][section][field] = value.clone();
+                }
+            }
+            let bad = [bad_head.to_string().as_bytes(), b"\n", body].concat();
+            let (n, d, s, scenes) = crate::game::test_tables().unwrap();
+            assert!(super::restore(n, d, s, &bad, scenes).is_err(), "{patch}");
+        }
+        let (n, d, s, scenes) = crate::game::test_tables().unwrap();
+        assert!(super::restore(n, d, s, &with_head(&bytes, "\"format\":7", "\"format\":8"), scenes).is_err(), "the published format 8 is a different layout");
     }
 
     /// The binary codec carries what JSON could not: a position that is not a number comes

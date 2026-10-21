@@ -472,3 +472,34 @@ stopped or asked. Disclosures:
   stayed held by `docker-agents.service`), which pushed later Docker runs to another port.
 * Loosening the three caps was refused by the permission system of this session (security-weakening change); they are
   listed above for the owner.
+
+
+## 0.8.2 targeted hot-update follow-up (2026-10-21)
+
+Candidate based on `45053b2` (0.8.1 plus the format 7 compatibility patch), binary SHA-256
+`06aa20b75bde8e38450138696bea4e26853a1ccba148100d15b75e9be6d403ae`.
+This follows up only the live handoff; the earlier acceptance results above retain their original scope.
+
+* 37 unit checks covering snapshots, rules, access, message shape and settings reread, plus all
+  four architecture checks: PASS. New settings and operators survive; missing extensions take
+  the old defaults; damaged bodies, inconsistent rules and format 8 are refused.
+* Copy of the installed 0.8.0 binary (`1dfea0eedaa0ba21597daa76aa24c4b41ab2294d3da2d269bb6f135fcf3f23d8`)
+  as both front and old bank: 0.8.0 -> 0.8.2 -> 0.8.0, six scripted direct-IP players connected
+  through both handoffs, a world with every constructible group (376 objects at the sample): PASS.
+  The forward pause measured 3.2 ms in this run, on the shared host.
+* Newer Steam-fixed installed 0.8.0, source `aaf1c18`, binary
+  `578eb725ac719fb7aaa59f58e2eb4c5d71d12523eb1e9c247f9cfa2ca7adaf89`:
+  the same six-player round trip passed (376 sampled objects; forward pause 7.1 ms).
+* Published v0.8.0 release (archive checked against its published SHA-256), the same round trip,
+  fixture and six-player acceptance: PASS. The forward pause measured 3.1 ms in that run.
+* Installed 0.8.0 -> candidate, then save new settings and try an unsafe rollback: the old bank
+  refuses the rules, the candidate's same PID resumes, four players stay, rules persist and the
+  world saves: PASS. The initial negative probe also exposed the new access.operators field;
+  both its binary layout and the rules layout are now kept compatible.
+
+The gate was also run against published v0.8.1: its format 8 was refused with exit status 1,
+without running the handoff test. Production activation, real Steam/game clients and a long
+soak were not run. The next gate is integration with the coordinating release chat's latest
+bugfix/performance/Steam work, validation of that combined binary, then publication and deployment; a front binary update
+or a transition from unmodified format 8 still requires a restart. The local patch, package and
+command receipts accompany this candidate in the task outputs.

@@ -700,8 +700,6 @@ fn a_hot_update_from_the_release_before_works() {
     let done = server.update(json!({"rollback": true}));
     assert_eq!(done["ok"], true, "the flip from pcds {} into this build failed: {done}\n{}", before["version"], server.log());
     assert_eq!(server.live()["version"], version(&candidate), "this build runs the world");
-    let (ok, said) = finish(players);
-    assert!(ok, "every player stayed connected through the flip:\n{said}\n{}", server.log());
     let (_, status) = server.api("GET", "/api/status", json!({}));
     assert!(status["objects"]["world"].as_u64().unwrap() >= objects, "no building lost in the flip: {} before, {}", objects, status["objects"]);
     // The world saves from its new bank, and goes on.
@@ -711,10 +709,47 @@ fn a_hot_update_from_the_release_before_works() {
     // And back, which is a rollback of the update just made: the release before reads this world.
     let back = server.update(json!({"rollback": true}));
     assert_eq!(back["ok"], true, "the way back into pcds {}: {back}\n{}", before["version"], server.log());
+    let (ok, said) = finish(players);
+    assert!(ok, "every player stayed connected through the update and rollback:\n{said}\n{}", server.log());
     assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
     let mut server = server;
     assert!(server.child.wait().unwrap().success(), "{}", server.log());
     println!("gate: pcds {} -> pcds {} and back, {objects} world objects, the world stood {} ms", before["version"], version(&candidate), done["stoodMs"]);
+    drop(server);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A format 7 front can retain its sockets while new-only settings make a rollback unsafe.
+#[test]
+#[ignore = "needs a format 7 release without the new rules: PCDS_PREVIOUS_RELEASE"]
+fn a_format_7_update_preserves_new_rules_and_a_failed_rollback_keeps_players() {
+    let data = tables().expect("the gate needs game tables");
+    let previous = previous_release();
+    let dir = rich_dir("format7-rules", &data);
+    let candidate = PathBuf::from(PCDS);
+    let banks = banks_of(&dir, &previous, &candidate);
+    let server = start_with(&previous, &dir, &data, &banks, "http://127.0.0.1:9/releases", false);
+    let players = load(&server, &data, 4, 20);
+    std::thread::sleep(Duration::from_secs(4));
+    let done = server.update(json!({"rollback": true}));
+    assert_eq!(done["ok"], true, "{done}\n{}", server.log());
+    let live = server.live();
+    let patch = json!({"save": {"verifyBackups": true}, "log": {"format": "json", "level": "warn"}});
+    assert_eq!(server.api("POST", "/api/rules", patch).0, 200);
+    let back = server.update(json!({"rollback": true}));
+    assert_eq!(back["ok"], false, "the older bank cannot read the persisted new rules: {back}");
+    assert_eq!(server.live()["pid"], live["pid"], "the current bank resumed");
+    let (_, rules) = server.api("GET", "/api/rules", json!({}));
+    assert_eq!(rules["rules"]["save"]["verifyBackups"], true, "{rules}");
+    assert_eq!(rules["rules"]["log"]["format"], "json", "{rules}");
+    assert_eq!(rules["rules"]["log"]["level"], "warn", "{rules}");
+    let (ok, said) = finish(players);
+    assert!(ok, "players stayed through the update and refused rollback: {said}\n{}", server.log());
+    assert_eq!(server.api("POST", "/api/save", json!({})).0, 200);
+    assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+    let mut server = server;
+    assert!(server.child.wait().unwrap().success(), "{}", server.log());
+    println!("format 7: update accepted, new rules kept, unsafe rollback refused, 4 players stayed");
     drop(server);
     std::fs::remove_dir_all(&dir).unwrap();
 }

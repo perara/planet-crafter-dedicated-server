@@ -12,7 +12,7 @@ use crate::game::Game;
 
 pub const REFUSED: &str = "You are not allowed on this server";
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Lists {
     #[serde(default, rename = "allowedIPs")]
@@ -32,8 +32,30 @@ pub struct Lists {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Access {
+    #[serde(with = "snapshot")]
     pub lists: Lists,
     path: Option<String>,
+}
+
+/// Freeze the format 7 lists; operator permissions travel in the named header extension.
+mod snapshot {
+    use super::*;
+
+    pub fn serialize<S: serde::Serializer>(v: &Lists, s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() {
+            v.serialize(s)
+        } else {
+            (&v.allowed_ips, &v.whitelist, &v.banned_names, &v.banned_ips).serialize(s)
+        }
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Lists, D::Error> {
+        if d.is_human_readable() {
+            return Lists::deserialize(d);
+        }
+        let (allowed_ips, whitelist, banned_names, banned_ips) = Deserialize::deserialize(d)?;
+        Ok(Lists { allowed_ips, whitelist, banned_names, banned_ips, ..Default::default() })
+    }
 }
 
 /// An address; an IPv4-mapped IPv6 one (a dual-stack socket's IPv4 client) as IPv4.

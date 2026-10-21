@@ -35,6 +35,40 @@ pub struct Rules {
     pub log: Log,
 }
 
+/// The format 7 binary layout is frozen; new rules travel by name in the snapshot header.
+pub mod snapshot {
+    use super::*;
+
+    #[derive(Serialize, Deserialize)]
+    struct Save7 {
+        autosave_minutes: u32,
+        backups_kept: u32,
+        backup_minutes: u32,
+    }
+
+    pub fn serialize<S: serde::Serializer>(r: &Rules, s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() {
+            return r.serialize(s);
+        }
+        let save = Save7 { autosave_minutes: r.save.autosave_minutes, backups_kept: r.save.backups_kept, backup_minutes: r.save.backup_minutes };
+        (&r.meteo, &r.gauges, &r.speed, &r.death, &r.loot, &r.limits, &r.world, &r.players, &r.chat, &r.backup, save, &r.update, r.log.trace).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Rules, D::Error> {
+        if d.is_human_readable() {
+            return Rules::deserialize(d);
+        }
+        let (meteo, gauges, speed, death, loot, limits, world, players, chat, backup, save, update, trace):
+            (Meteo, Gauges, Speed, Death, Loot, Limits, World, Players, Chat, Backup, Save7, Update, bool) = Deserialize::deserialize(d)?;
+        Ok(Rules {
+            meteo, gauges, speed, death, loot, limits, world, players, chat, backup, update,
+            drones: Drones::default(),
+            save: Save { autosave_minutes: save.autosave_minutes, backups_kept: save.backups_kept, backup_minutes: save.backup_minutes, ..Default::default() },
+            log: Log { trace, ..Default::default() },
+        })
+    }
+}
+
 /// How often the world is saved and backed up (the backups' off-site copies are `Backup`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]

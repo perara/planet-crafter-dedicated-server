@@ -6,8 +6,8 @@
 # CI has.
 #
 # A release whose snapshot format, front protocol or tables format differs from this build's
-# cannot be hot-updated into it: that is a restart install by design (no legacy support), and
-# the gate says so loudly and skips. It tests a flip only between releases of one format.
+# cannot be hot-updated into it: the gate fails. A deliberate restart release needs
+# separate restart acceptance.
 #
 #   tools/flip-gate.sh [TAG]      TAG: the release to flip from (default: the last one before this version)
 #   needs PCDS_TEST_DATA: a game tables folder (the gate runs a real world on them)
@@ -37,7 +37,7 @@ tar -xzf "$work/$name.tar.gz" -C "$work"
 # The program finds libsteam_api.so next to itself in a release; in the build tree it is in the
 # steamworks crate's output.
 cd server
-cargo build --release --locked
+cargo test --release --locked --test hot_update --no-run
 lib=$(dirname "$(ls -t target/release/build/steamworks-sys-*/out/libsteam_api.so | head -1)")
 export LD_LIBRARY_PATH="$PWD/$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
@@ -47,14 +47,14 @@ before=$(shape "$work/$name/pcds")
 now=$(shape target/release/pcds)
 if [ "$before" != "$now" ]; then
   echo "################################################################"
-  echo "flip gate SKIPPED - format changed: $tag is not hot-update compatible with v$version"
+  echo "flip gate FAILED - format changed: $tag is not hot-update compatible with v$version"
   echo "  $tag: $before"
   echo "  v$version: $now"
   echo "Install with 'pcds upgrade --restart' (the world is saved and loads from the save);"
   echo "say so in the release notes. Nothing was tested."
   echo "################################################################"
-  exit 0
+  exit 1
 fi
 
 export PCDS_PREVIOUS_RELEASE="$work/$name"
-cargo test --release --locked --test hot_update a_hot_update_from_the_release_before_works -- --ignored --nocapture
+cargo test --release --locked --test hot_update a_hot_update_from_the_release_before_works -- --ignored --nocapture --test-threads=1
