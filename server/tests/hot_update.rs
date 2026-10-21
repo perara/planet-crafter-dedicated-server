@@ -734,7 +734,7 @@ fn a_format_7_update_preserves_new_rules_and_a_failed_rollback_keeps_players() {
     let done = server.update(json!({"rollback": true}));
     assert_eq!(done["ok"], true, "{done}\n{}", server.log());
     let live = server.live();
-    let patch = json!({"save": {"verifyBackups": true}, "log": {"format": "json", "level": "warn"}});
+    let patch = json!({"save": {"verifyBackups": true}, "log": {"format": "json", "level": "warn"}, "drones": {"nearestFirst": true, "keepCargo": true}});
     assert_eq!(server.api("POST", "/api/rules", patch).0, 200);
     let back = server.update(json!({"rollback": true}));
     assert_eq!(back["ok"], false, "the older bank cannot read the persisted new rules: {back}");
@@ -743,6 +743,8 @@ fn a_format_7_update_preserves_new_rules_and_a_failed_rollback_keeps_players() {
     assert_eq!(rules["rules"]["save"]["verifyBackups"], true, "{rules}");
     assert_eq!(rules["rules"]["log"]["format"], "json", "{rules}");
     assert_eq!(rules["rules"]["log"]["level"], "warn", "{rules}");
+    assert_eq!(rules["rules"]["drones"]["nearestFirst"], true, "{rules}");
+    assert_eq!(rules["rules"]["drones"]["keepCargo"], true, "{rules}");
     let (ok, said) = finish(players);
     assert!(ok, "players stayed through the update and refused rollback: {said}\n{}", server.log());
     assert_eq!(server.api("POST", "/api/save", json!({})).0, 200);

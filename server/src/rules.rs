@@ -695,7 +695,8 @@ mod tests {
     #[test]
     fn out_of_range_rules_are_refused() {
         let Some(dir) = crate::test_data() else { return };
-        let (_, data, _) = crate::tables(dir);
+        let (_, mut data, _) = crate::tables(dir);
+        data.drone_navigation = Default::default();
         assert!(Rules::default().validate(&data).is_ok());
         for patch in [
             serde_json::json!({"speed": {"machines": 0}}),

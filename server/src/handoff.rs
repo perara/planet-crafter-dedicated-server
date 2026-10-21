@@ -618,6 +618,7 @@ mod tests {
         g.rules.speed.growth = 2.0;
         g.rules.drones.nearest_first = true;
         g.rules.drones.keep_cargo = true;
+        g.rules.drones.avoid_obstacles = true;
         g.rules.save.verify_backups = true;
         g.access.lists.operators = vec!["76561198000000001".into()];
         g.access.lists.banned_names = vec!["Mallory".into()];
@@ -626,19 +627,30 @@ mod tests {
         let bytes = super::snapshot(&mut g).unwrap();
         let (head, body) = super::split(&bytes).unwrap();
         assert_eq!(head.format, 7);
-        let (n, d, s, scenes) = crate::game::test_tables().unwrap();
+        let (n, mut d, s, scenes) = crate::game::test_tables().unwrap();
+        d.drone_navigation = std::sync::Arc::new(crate::gamedata::DroneMap::of(Default::default()));
         let back = super::restore(n, d, s, &bytes, scenes).unwrap();
         assert_eq!(back.rules, g.rules);
         assert_eq!(back.access.lists.operators, g.access.lists.operators);
         assert_eq!(back.access.lists.banned_names, g.access.lists.banned_names);
         super::verify(&back, &bytes).unwrap();
 
+        let mut repeated = back;
+        for _ in 0..2 {
+            let bytes = super::snapshot(&mut repeated).unwrap();
+            let (n, mut d, s, scenes) = crate::game::test_tables().unwrap();
+            d.drone_navigation = std::sync::Arc::new(crate::gamedata::DroneMap::of(Default::default()));
+            repeated = super::restore(n, d, s, &bytes, scenes).unwrap();
+            assert_eq!(repeated.rules, g.rules);
+        }
+
         // The old binary layout remains readable without the optional header rules.
         let mut old_head = serde_json::to_value(&head).unwrap();
         old_head.as_object_mut().unwrap().remove("rules");
         old_head.as_object_mut().unwrap().remove("access");
         let old = [old_head.to_string().as_bytes(), b"\n", body].concat();
-        let (n, d, s, scenes) = crate::game::test_tables().unwrap();
+        let (n, mut d, s, scenes) = crate::game::test_tables().unwrap();
+        d.drone_navigation = std::sync::Arc::new(crate::gamedata::DroneMap::of(Default::default()));
         let back = super::restore(n, d, s, &old, scenes).unwrap();
         assert_eq!(back.rules.speed.growth, 2.0);
         assert!(!back.rules.save.verify_backups);
@@ -658,10 +670,12 @@ mod tests {
                 }
             }
             let bad = [bad_head.to_string().as_bytes(), b"\n", body].concat();
-            let (n, d, s, scenes) = crate::game::test_tables().unwrap();
+            let (n, mut d, s, scenes) = crate::game::test_tables().unwrap();
+        d.drone_navigation = std::sync::Arc::new(crate::gamedata::DroneMap::of(Default::default()));
             assert!(super::restore(n, d, s, &bad, scenes).is_err(), "{patch}");
         }
-        let (n, d, s, scenes) = crate::game::test_tables().unwrap();
+        let (n, mut d, s, scenes) = crate::game::test_tables().unwrap();
+        d.drone_navigation = std::sync::Arc::new(crate::gamedata::DroneMap::of(Default::default()));
         assert!(super::restore(n, d, s, &with_head(&bytes, "\"format\":7", "\"format\":8"), scenes).is_err(), "the published format 8 is a different layout");
     }
 
