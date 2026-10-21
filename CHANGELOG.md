@@ -19,373 +19,262 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
-An operator's release: one command that checks the setup (`pcds doctor`), numbers and a health route
-for monitoring, a log that can be filtered and shipped, a sandboxed service, backups that are checked
-and restored from the command line, and limits on the admin port. Five new documents:
-[monitoring.md](docs/monitoring.md), [hardening.md](docs/hardening.md),
-[disaster-recovery.md](docs/disaster-recovery.md), [reverse-proxy.md](docs/reverse-proxy.md), and the
-dashboard [grafana/pcds.json](docs/grafana/pcds.json).
+## [0.8.1] - 2026-10-21
 
-Plugins grew up by being used (the plugin parts below). Fourteen example plugins were written and tested against the real game, and what
-hurt while writing them is fixed: plugin ABI 1.3 (a stable player id, the wall clock, who built or destroyed
-something, timers, a backpack and nearby-objects query, giving items and Terra tokens, typed settings, operator
-commands), a runner that tests a plugin in the real host without a game, a log and a cost table for each plugin, a way
-to share a plugin as one file, and a dashboard page that shows what a plugin did and what a new version asks for.
+The operator's release. One command checks the setup (`pcds doctor`), the server has numbers and a
+health route for monitoring, the log can be filtered and shipped, the systemd service and the Docker
+container are sandboxed, backups are checked and restored from the command line, and the admin port
+has limits. The server uses about half to a third of the memory and the late-game world costs a
+fraction of the CPU it did. Plugins can do much more, and ten new example plugins show how. A third
+round of fuzzing and review (13 findings), an acceptance run of every feature on a late-game world and
+a 12-hour soak found and fixed the bugs listed under **Fixed** and **Security**. New documents:
+[monitoring.md](docs/monitoring.md), [hardening.md](docs/hardening.md),
+[disaster-recovery.md](docs/disaster-recovery.md), [reverse-proxy.md](docs/reverse-proxy.md),
+[performance.md](docs/performance.md), [acceptance.md](docs/acceptance.md) and the Grafana dashboard
+[docs/grafana/pcds.json](docs/grafana/pcds.json).
 
 ### Breaking changes
 
-* **Snapshot format 8.** The rules are part of the state a hot update hands over, and three rules
-  were added (`log.format`, `log.level`, `save.verifyBackups`), so 0.8.0 cannot hand a running world to
-  this release (`make gate` found it: the new game process could not read the old snapshot). `pcds
-  upgrade` refuses the hot update and names `pcds upgrade VERSION --restart`; every player joins again
-  once. The game tables (format 4) and the front protocol (3) are unchanged: nothing is read again.
-* **Log lines start with a time, a level and a component** (see Changed), which breaks a program that
-  matched the start of a line. `log.format=json` is the format for programs.
-* **`pcds run` and the server no longer rewrite the systemd unit.** `pcds restart`, `start`, `install-service`
-  and `upgrade --restart` do.
-
-* **Plugin ABI 1.3, crate `pcds-plugin-api` 0.2.0.** A module built for 1.0, 1.1 or 1.2 runs unchanged. Rust source that
-  names every field of `Event::Tick`, `PlayerJoin`, `PlayerLeave`, `Chat`, `Command`, `ObjectPlaced`, `ObjectDestroyed`
-  or builds a `WorldInfo`/`PlayerInfo` must add the new fields (or use `..`); the bytes an old module receives are
-  unchanged apart from fields at the end that it ignores.
-* **`Event::Command::command` is lower case**, whatever the player typed.
-* **A string setting in `[[config]]` is a secret unless it says `secret = false`** (it was always the default); a number or a
-  yes/no is never a secret. A setting of type `int`, `float`, `bool` or with `choices` is checked when it is set, and a stored value that
-  no longer fits makes the plugin `invalid` instead of running with a value nobody meant.
-* **`[[every]]` in a rules file** takes a text or a list; **`[[when_players]]`** has `at_most`. Files that worked still work.
-
-### Upgrade
-
-1. Back up: `pcds backup verify` finds a backup that loads, `tar czf pcds-settings.tar.gz -C run server.env
-   rules.json access.json plugins` keeps the settings ([disaster-recovery.md](docs/disaster-recovery.md)).
-2. `pcds upgrade vX.Y.Z --restart`. It installs the release, writes the new unit (the sandbox of
-   [hardening.md](docs/hardening.md)) and restarts the server; players join again. Then `pcds doctor`.
-3. In Docker: `docker compose pull && docker compose up -d`, with the new `compose.yaml` if you want
-   its hardening (a read-only root needs the `tmpfs` for `/tmp`; docs/hardening.md); a hot update inside the
-   container is refused for the same reason as above (`docker exec pcds pcds upgrade vX.Y.Z --restart`).
-4. A hook program that writes outside `run/`, or is written in Node or Java and was started with
-   `MemoryDenyWriteExecute` set by you, is affected by the sandbox: docs/hardening.md, "What a hook
-   program or a plugin sees".
-5. Back to 0.8.0: `pcds upgrade v0.8.0 --restart`; the unit of 0.8.0 is written again by it.
-
-Nothing to do for a server that runs no plugin, or plugins built for ABI 1.0 to 1.2: they load as they were. `POST /api/plugins/logs` is
-a route of the front (which a hot update does not replace): `pcds plugin logs` and the dashboard's log work after `pcds upgrade --restart`. Rebuild a Rust plugin that
-matches on `Event` fields by name. The plugin changes add nothing to the snapshot (format 8 in this release comes from the rules being part of the state).
+* **Snapshot format 8.** The rules are part of the state a hot update hands over, and three rules were
+  added (`log.format`, `log.level`, `save.verifyBackups`), so 0.8.0 cannot hand a running world to this
+  release, and this release cannot hand one back. `pcds upgrade` refuses the hot update and names
+  `pcds upgrade VERSION --restart`; every player joins again once. The game tables (format 4) and the
+  front protocol (3) are unchanged, so nothing is read from the game again.
+* **Log lines start with a time, a level and a component** (`2026-10-20T18:07:37.354Z INFO  front: ...`).
+  A program that matched the start of a line has to skip the prefix, or read `log.format=json`.
+* **The systemd unit is sandboxed, and only the command line writes it.** `pcds restart`, `start`,
+  `install-service` and `upgrade --restart` write the unit when a release changes it; the server no
+  longer rewrites its own unit at start (its home is read-only to it, which is the point). A chat hook
+  program that writes outside `run/`, or a Node or Java hook that you started with `MemoryDenyWriteExecute`
+  set yourself, is affected: [docs/hardening.md](docs/hardening.md), "What a hook program or a plugin sees".
+* **Docker and Compose are hardened by default.** `compose.yaml` sets `read_only: true` (with a `tmpfs` for
+  `/tmp`), `no-new-privileges`, `cap_drop: [ALL]` with the six capabilities the image needs (the five that
+  give `/data` to your user, and `KILL`, without which `docker stop` loses the world; see **Fixed**) and
+  `pids_limit: 1024`. The entrypoint runs the server with `setpriv --no-new-privs`. If you copied the
+  old compose file, take the new options or at least add `KILL`.
+* **New routes.** `GET /api/health` answers without a token (`{"ok":true}`, nothing else) and
+  `GET /api/metrics` needs a token; a proxy that exposes the admin port now exposes the health route too.
+* **Plugin ABI 1.3, crate `pcds-plugin-api` 0.2.0.** A module built for 1.0, 1.1 or 1.2 runs unchanged.
+  Rust source that names every field of `Event::Tick`, `PlayerJoin`, `PlayerLeave`, `Chat`, `Command`,
+  `ObjectPlaced`, `ObjectDestroyed`, or builds a `WorldInfo` or `PlayerInfo`, must add the new fields (or
+  use `..`). `Event::Command::command` is lower case, whatever the player typed. A setting in `[[config]]`
+  of type `int`, `float` or `bool`, or with `choices`, is checked when it is set (a stored value that no
+  longer fits makes the plugin `invalid`), and a number or a yes/no is never a secret, so the plugin can
+  read it; a text is a secret unless it says `secret = false`. `[[every]]` in a rules file takes a text
+  or a list, and `[[when_players]]` has `at_most`; files that worked still work.
 
 ### Added
 
-* **`pcds doctor`** checks everything an operator needs in one command and prints PASS, WARN or
-  FAIL with the line to type that fixes each problem: the game folder and its tables (build,
-  tables format, game version, the DLC ground when the world is on a DLC planet and the rule
-  `world.dlcPlanets`), the world file, `server.env`, `rules.json` and `access.json`, both ports
-  (free, or this server's) and whether the admin port is open to other machines, the modes of the
-  files that hold secrets, free disk against the world and its backups, whether the backups are on
-  and leave the machine, the clock (backups stamped in the future), the systemd unit, its sandbox
-  and lingering, Steam (login token, `steamclient.so`, network), both banks, the release feed,
-  plugins that wait or fail, the memory limit against the size a hot update needs, and the
-  open-files limit. With the server running it also asks the admin API (invite code, last save,
-  backups, S3, crashes). It changes nothing; the exit code is 1 when a check FAILs; `--json` is
-  for scripts.
-* **Metrics and health for monitoring.** `GET /api/metrics` answers in the Prometheus text format
-  (checked with `promtool check metrics`, and scraped by a real Prometheus): players online and
-  the limit, tick p50, p99 and max, how busy the loop is, memory of the front and the game,
-  objects, inventories, the last save (when, whether it worked, how long it took), backups and the
-  S3 copies, hand-overs (total, failed, how long the world stood), crashes, watchdog kills, the
-  queue of player traffic and what was dropped, plugins by state and what each one costs, and
-  version and format labels. `GET /api/health` needs no token and answers `{"ok":true}` while a
-  world is served and `503` while it is stopped, loading or starting again after a crash; a hot
-  update does not turn it red. `pcds health` is the command form. [docs/monitoring.md](docs/monitoring.md)
-  has the list of metrics (a test keeps it equal to what the server writes), a scrape
-  configuration, 18 alert rules (checked with `promtool check rules`) and the Grafana dashboard
-  [docs/grafana/pcds.json](docs/grafana/pcds.json) (all its queries run on a real Prometheus).
-* **A structured, filterable log.** The rule `log.format` (`text` or `json`) and `log.level`
-  (`error`, `warn`, `info`, `debug`) apply to the front and the game process at once and change
-  while the server runs. A JSON line has `timestamp`, `level`, `component`, `message` and
-  `fields` (the process, its pid, and the data of the event: client, name, path, ...); a text
-  line starts with its UTC time, level and component. Under systemd each line carries its priority,
-  so `journalctl -p warning` works. `pcds logs` takes `-n LINES`, `--since TIME`, `--grep PATTERN`
-  and `--follow`. [docs/monitoring.md](docs/monitoring.md) says how long journald, Docker and
-  Kubernetes keep the log and how to set that; [compose.yaml](compose.yaml) now rotates the
-  container's log.
-* **Backups can be checked and restored from the command line**
-  ([docs/disaster-recovery.md](docs/disaster-recovery.md)). `pcds backup list`; `pcds backup
-  verify` loads the newest backups (3 by default, `--count N`, `--all`) with the loader the server
-  uses, reports what each holds and whether the server would start it, checks the S3 copy of the
-  newest, and exits 1 when one does not load; `pcds backup restore NAME` loads the backup first,
-  asks, keeps the world it replaces and refuses while the server runs (`--as WORLD` makes a new
-  world instead); `pcds backup fetch [NAME]` copies one from the bucket (HEAD, GET and listing are
-  new in the S3 client, signed like the upload; the signer is checked against AWS's own examples,
-  and ran against a real S3 server). The new rule `save.verifyBackups` (off by default) reads each
-  new backup back on a thread of its own and says so in the log and in the metrics
-  `pcds_backup_verify_last_ok` and `pcds_backup_verify_last_timestamp_seconds`. The guide covers
-  what to keep, restoring on the same machine, on a new one, from the bucket and from a Docker
-  volume, and was rehearsed on a scratch installation: a late-game world restored from the bucket
-  into an empty installation on other ports, which a scripted player and two load players then
-  joined.
+* **`pcds doctor`** checks everything an operator needs in one command and prints PASS, WARN or FAIL
+  with the line to type that fixes each problem: the game folder and its tables, the world file,
+  `server.env`, `rules.json` and `access.json`, both ports (and whether the admin port is open to other
+  machines), the modes of the files that hold secrets, free disk against the world and its backups,
+  whether backups are on and leave the machine, the clock, the systemd unit and its sandbox, Steam
+  (login token, `steamclient.so`, network), both banks, the release feed, plugins that wait or fail, the
+  memory limit against what a hot update needs, and the open-files limit. With the server running it also
+  asks the admin API (invite code, last save, backups, S3, crashes). It changes nothing; the exit code
+  is 1 when a check FAILs; `--json` is for scripts.
+* **Metrics and a health route.** `GET /api/metrics` answers in the Prometheus text format: players,
+  tick p50, p99 and max, how busy the loop is, memory, objects, the last save (when, whether it worked,
+  how long), backups and S3 copies, hand-overs and how long the world stood, crashes, watchdog kills,
+  the queue of player traffic, plugins by state and cost, and version labels.
+  `GET /api/health` needs no token and answers `{"ok":true}` while a world is served, and `503` while it
+  is stopped, loading or starting again after a crash (a hot update does not turn it red). `pcds health`
+  is the command form. [docs/monitoring.md](docs/monitoring.md) lists the metrics (a test keeps the list
+  equal to what the server writes), a scrape configuration, 18 alert rules and a Grafana dashboard
+  ([docs/grafana/pcds.json](docs/grafana/pcds.json)).
 * **A scoped token for the scraper.** The scope `metrics.read` opens `GET /api/metrics` and nothing
   else (`pcds plugin token create prometheus --scope metrics.read`), so a monitor does not hold the
   admin token.
-* **docs/performance.md**: what the server costs (instructions, allocations, bytes, wake-ups), the
-  budgets a test holds the build to, how to profile it and read the tick histogram of `/api/status`, how
-  big a machine a world and its players need, the limits of the transport, and what was tried and left out.
-* **Efficiency budgets as tests** (docs/testing.md): allocations and user instructions per tick on a
-  world anyone can build (0, 400 and 1,600 buildings, 0 and 4 players), their growth with the world, the
-  bytes per world object of a snapshot, a save and a join, the instructions of a hot update's stand,
-  the transport's allocations (needs no game tables: CI runs it) and the wake-ups of an idle server.
-* `GET /api/status` `traffic.wire`: datagrams and bytes in and out, how many datagrams only
-  acknowledged, heartbeats and resends. `bench::bench` and `bench::flipbench` print user instructions
-  (where the kernel lets the process count them); `PCDS_BENCH_ALLOC_SITES` names where a tick allocates.
-  `tools/perf/loadrun.py` prints the wire; `PCDS_TOOLS_RULES` gives the tools' servers rules (a DLC planet).
-
-* **Plugins can** (ABI 1.3): read the world in `load`; know a player by a stable `player_id`; read the wall clock (`unix_ms`);
-  see who built or took apart an object (`client` on `object_placed` and `object_destroyed`); look up one player, a
-  player's backpack, the objects near a point, one object (a network object id from an RPC resolves to its position),
-  and their own settings; give items (`player.give`) and Terra tokens (`world.tokens`); set timers (`event.timer`);
-  hear that the world was handed over by a hot update (`flip`); declare commands with a usage line, an argument count and
-  a permission (`permission = "operator"`, the players in the new rule `access.operators`).
-* **`pcds plugin test`**: a scenario file (TOML) drives a plugin in the real host against a made-up world, with no game tables;
-  exit code 1 when an expectation fails. `scenario.rs` describes the format.
-* **`pcds plugin check`** shows the fuel of each event as a share of the budget, in a world of 16 players, and warns about a
-  secret setting the plugin cannot read.
-* **`pcds plugin watch`** (install each new build, approve it again if it asks for nothing new, state kept), **`logs`**, **`stats`**,
-  **`pack`**, **`search`**, **`install`** from a `.pcdsplugin` file, an https address (with `--sha256`) or an index entry; `plugin new`
-  has a C template, a Makefile and a justfile, and a scenario.
-* **`pcds-plugin-api`**: a `testing` feature (`MockHost`, `Harness`: ordinary `cargo test` for a plugin), a small `json` module, docs for every
-  item, package metadata and a README. It is not published.
-* **The dashboard's Plugins page** shows each plugin's log, faults, cost by event and settings (typed controls), a per-row
-  reload, and what a new version asks for beyond what you approved.
-* **`POST /api/plugins/logs`**; `GET /api/plugins` has `byEvent`, `faultLog`, `deniedCapabilities`, `changes`, typed settings and
-  `commandPrefix`; the event stream's chat and player events have `playerId`.
-* **Examples** (`examples/plugins/`): `afk-guard`, `playtime-board`, `quest-rewards`, `claims`, `restart-notice`, `chat-bridge`,
-  `prometheus-exporter`, `hello-c`, `server-motd`, `scaling-rules`, each with a README, scenarios and a test in the real game
-  (`server/src/plugins/cookbook_tests.rs`).
-* **Documentation**: docs/plugins-guide.md is a tutorial and a cookbook; docs/plugins-api.md has the host functions with their costs and
-  the delivery and ordering rules; docs/plugins.md has sharing, the licence, the versions, the measurements.
+* **A log that can be filtered and shipped.** The rules `log.format` (`text` or `json`) and `log.level`
+  (`error`, `warn`, `info`, `debug`) apply to the front and the game process at once and change while
+  the server runs. A JSON line has `timestamp`, `level`, `component`, `message` and `fields`. Under
+  systemd each line carries its priority, so `journalctl -p warning` works. `pcds logs` takes
+  `-n LINES`, `--since TIME`, `--grep PATTERN` and `--follow`. [compose.yaml](compose.yaml) now rotates
+  the container's log; docs/monitoring.md says how long journald, Docker and Kubernetes keep it.
+* **Backups from the command line** ([docs/disaster-recovery.md](docs/disaster-recovery.md)).
+  `pcds backup list`; `pcds backup verify` loads the newest backups with the loader the server uses and
+  checks the S3 copy of the newest (exit 1 when one does not load); `pcds backup restore NAME` loads the
+  backup first, keeps the world it replaces and refuses while the server runs (`--as WORLD` makes a new
+  world instead); `pcds backup fetch [NAME]` copies one from the bucket. The new rule
+  `save.verifyBackups` (off by default) reads each new backup back and reports it in the log and in
+  the metrics `pcds_backup_verify_last_ok` and `pcds_backup_verify_last_timestamp_seconds`.
+* **Three guides.** [docs/disaster-recovery.md](docs/disaster-recovery.md) (what to keep and how to restore
+  on the same machine, on a new one, from the bucket and from a Docker volume; rehearsed on a scratch
+  installation), [docs/hardening.md](docs/hardening.md) (the unit's sandbox, the Docker flags, Kubernetes,
+  what a hook program or a plugin sees) and [docs/reverse-proxy.md](docs/reverse-proxy.md) (Caddy and nginx
+  in front of the admin port, tried against a real server).
+* **Plugins can do more** (ABI 1.3): read the world in `load`; know a player by a stable `player_id`; read
+  the wall clock; see who built or took apart an object; look up one player, a backpack, the objects near a
+  point, or one object; read their own settings; give items (`player.give`) and Terra tokens
+  (`world.tokens`); set timers (`event.timer`); hear that a hot update handed the world over (`flip`);
+  declare commands with a usage line, an argument count and a permission (`permission = "operator"`, the
+  players in the new rule `access.operators`).
+* **Plugin tooling.** `pcds plugin new` (Rust and C templates, a scenario), `test` (a scenario file drives
+  the plugin in the real host against a made-up world, with no game tables), `check` (fuel of each event
+  in a world of 16 players, secret settings it cannot read), `watch` (installs each new build), `logs`,
+  `stats`, `pack` (one `.pcdsplugin` file), `search` and `install` (from a file, an https address with
+  `--sha256`, or an index entry). `pcds-plugin-api` has a `testing` feature (`MockHost`, `Harness`) for an
+  ordinary `cargo test`.
+* **The dashboard's Plugins page** shows each plugin's log, faults, cost by event and typed settings, a
+  per-row reload, and what a new version asks for beyond what you approved. `POST /api/plugins/logs`
+  and richer `GET /api/plugins` back it.
+* **Ten example plugins** in `examples/plugins/`: `afk-guard`, `playtime-board`, `quest-rewards`,
+  `claims`, `restart-notice`, `chat-bridge`, `prometheus-exporter`, `hello-c`, `server-motd` and
+  `scaling-rules`, each with a README and scenarios, and tested against the real game. New plugin
+  documents: [docs/plugins-guide.md](docs/plugins-guide.md) (tutorial and cookbook), and the host
+  functions with their costs in [docs/plugins-api.md](docs/plugins-api.md).
+* **Documents and tests for efficiency.** [docs/performance.md](docs/performance.md) says what the server
+  costs, how to profile it and how big a machine a world needs. Allocations, instructions per tick, bytes
+  per world object and the wake-ups of an idle server are held by tests (docs/testing.md).
+  `GET /api/status` has `traffic.wire`. [docs/acceptance.md](docs/acceptance.md) has every feature of the
+  server tested on the late-game world, with the result of each row.
 
 ### Changed
 
-* **Three limits that a real player could meet are wider** (found by the acceptance run, which
-  measured them against the traffic of a late-game join): the RPCs a client may have waiting for
-  later ticks are 65,536 (the 4 MiB bound stays; a late-game world sends about 7,000 while it
-  loads, and a burst of 12,000 lost 3,610 of them at 8,192), players of one address that may be
-  joining at once are 4 (a third player behind one address was refused), and new sessions per
-  address in 10 seconds are 6 (six players starting together from one address got four).
-
-* **Every line of the log starts with its time, level and component** (`2026-10-20T18:07:37.354Z
-  INFO  front: client 1: connected from ...`), also in `pcds logs`, where journald's own time is
-  not shown. Warnings and errors still go to standard error and the rest to standard output.
-  A program that parsed the old lines has to skip the prefix, or read `log.format=json`. Valve's
-  Steam library still writes a few plain lines of its own while the server logs in.
-* **The game's protocol noise is `debug`**: an RPC to an object without the class, a variable an
-  object does not carry. It is no longer in the log unless `log.level=debug`.
-* **The unit is written by the command line only.** The server can no longer rewrite its own unit
-  at start (its home is read-only to it, which is the point); `pcds start`, `pcds restart`,
-  `pcds install-service` and `pcds upgrade --restart` write it when a release changes it. After
-  the update that brings the sandbox, run `pcds restart` once (`pcds upgrade --restart` does it).
-* **The Docker health check and the Kubernetes probes use the health route.** The image's
-  `HEALTHCHECK` runs `pcds health` (it needed the admin token and a status request before), and
-  [docs/kubernetes.yaml](docs/kubernetes.yaml) probes `GET /api/health` over HTTP. The liveness
-  probe now waits five minutes for a world, since a crash is healed in seconds.
-* **The admin port waits 2 seconds, not 3,** for a request head.
-* **The world's tick costs a fraction on a big world.** The late-game save (33,000 world objects,
-  hundreds of machines, drones and logistics inventories), user instructions per simulated second:
-  idle 196 -> 24 M (8x), 4 players 203 -> 32 M, 32 players 226 -> 54 M, 100 players 329 -> 108 M, with
-  the same messages and the same save, byte for byte (the bench's fingerprints, every case). The
-  logistics search for tasks went through every supply for every demand and every dropped item; it
-  goes through the items left. The machines' walk reads a flat array of due times instead of every
-  machine. Scans of every world object (the machines' range, the autocrafters' items) look at the
-  few that have a network object, and de-duplicate by set. A message to one client is no longer looked
-  for by every client, and the drones' hiding is sets, not lists (100 players and the drones). Idle,
-  the live bank on that save used 380 M instructions a second and uses 45 M. On the bench world
-  and the grown 100k and 200k worlds the gain is 10 to 50% (they have little logistics).
-* **The hot update stands for 40% less work** (user instructions of a snapshot and its restore, all
-  threads): 385 -> 223 M at 33k objects, 1,080 -> 625 M at 100k, 2,130 -> 1,239 M at 200k. The
-  restore read the tables of every machine again, six lookups each, which was the largest part of it
-  (52 / 172 / 342 ms of the stand); it reads them once for each group. In time, in process on a loaded
-  host: 102 -> 32 ms at 33k, 276 -> 76 at 100k, 513 -> 162 at 200k (p50 of the better of two runs); with
-  the real front and two banks and no players: 105 to 118 -> 62 to 67 ms at 100k, 277 to 306 -> 95 to
-  129 ms at 200k.
-* **A start is faster**: the game from the save 341 -> 197 ms (33k), 508 -> 334 (100k), 973 -> 739
-  (200k) of CPU (the prefab components are found by an index, a group's authorized items worked out
-  once).
-* **The front costs a third at 64 players** (89 M of 266 M user instructions a second: a chunk of
-  the send queue was copied byte by byte; the sessions' timers are looked at when one can be silent,
-  not at every 5 ms frame) and wakes up 20 times a second idle, not 50 (its quiet frame is 50 ms; an
-  admin request waits up to that).
-* **`pcds load` and `pcds probe` take a batch of any size** (up to 256 MiB), as the game's client does,
-  so a world of 200,000 objects (a join of 2.4 MB) can be joined by them. The server's own limit on a
-  batch it receives is still 1 MiB. The test-only switch for it is gone.
-* **Left out, because the numbers did not support them**: the save text on several threads, a
-  two-level array for the machines' walk, delayed acknowledgements (docs/performance.md).
-
-* **A module is translated when it is read**, not when each function is first called. Translation was charged to the call as fuel,
-  so the first call of an instance cost up to five times the next ones and a budget that held the steady state could fault it, again and
-  again after each restart. Now translation is never charged to a call (the first call can still cost a little more, for the heap it grows), and a reload does its translation before it starts the plugin.
-* **A fault says what happened and what to do**: the event, the budget used and the knob that raises it (`chat: out of fuel: the call used all
-  500000 fuel...`), a Rust panic is named as such, a capability a plugin used without having it is named once in its log, and a manifest key,
-  capability or event that is misspelled names the one meant.
-* The first `tick` of an instance says `since_ms` 0 (it was the whole game time).
-* **The server uses a third of the memory.** The bank's resident memory, on the same worlds, with the
-  same messages, the same saves and the same snapshots, byte for byte (the bench's fingerprints, every
-  case; the hot update's snapshot is the same bytes): the bench world 43.8 -> 21.4 MiB, the late-game save
-  (33,000 world objects) 77 -> 33, 100,000 objects 122 -> 43, 200,000 objects 199 -> 66 MiB (a world object
-  beyond the bench world: 0.81 -> 0.23 KiB). The start peaks at 298 -> 87 MiB on 200,000 objects, and a hot update holds 437 -> 179 MiB
-  at its largest (264 -> 114 at 100,000). The tick costs the same (the late save: 32.7 against 32.8 M
-  instructions a second with 4 players; 100,000 objects 28.7 against 35.5) and a hot update's stand costs
-  no more (9,500 instructions a world object, 9,700 before). Where it went: nine in ten world objects of a big
-  world are items in an inventory and are 24 bytes (304 before), a machine without components is 48
-  bytes (584), a network object shares the names, types and order of its variables with every other of its
-  kind (1.7 KB -> 0.55), and the game's tables, parsed, are a quarter of what they were (26 -> 8 MiB; the
-  start also keeps a planet's scene dump as text until a planet needs it). The start reads the world from
-  the save's text one entry at a time (a tree of values of the whole save was 100 MB at 200,000 objects),
-  checking a backup or a world does the same, and malloc's mmap threshold is fixed at 128 KiB, so that
-  the frames of a world joined (2.4 MB) go back to the system (the front with 16 players on the 200,000-object
-  world: 21.5 -> 10.5 MiB, its anonymous memory 13.2 -> 1.4). A player costs the bank 6 KB (25 before) and
-  the front 35 to 50 KB. docs/performance.md has the byte accounting, the sizing
-  guide (a container for a hot update: three times the bank and the front still holds) and what was tried
-  and left out; `bench::budget` has a test of the memory of a world object, a network object, a machine
-  and an inventory.
+* **The late-game world costs a fraction of the CPU.** On a save of 33,000 world objects with hundreds of
+  machines, the idle bank uses about 8 times fewer user instructions (196 M to 24 M a second simulated; live
+  380 M to 45 M), 4 players 203 to 32 M, 100 players 329 to 108 M, with the same messages and the same
+  save, byte for byte. The logistics search for tasks and the scans of every world object were the cost.
+  On smaller and grown worlds the gain is 10 to 50%.
+* **The hot update stands for about 42% less work** (385 to 223 M instructions at 33k objects, 2,130 to
+  1,239 M at 200k), and a start is faster (the game from the save 341 to 197 ms at 33k).
+* **The server uses 50 to 67% less memory.** The game process on the same worlds: the bench world 43.8 to
+  21.5 MiB, the late-game save 77 to 33, 100,000 objects 122 to 43, 200,000 objects 199 to 66 MiB. A hot
+  update's peak is 52 to 59% lower on those worlds (the late-game save 154 to 74 MiB, 200,000 objects 437
+  to 179). The tick costs the same and the snapshot is the same bytes. The front costs a third less at 64
+  players and wakes up 20 times a second idle, not 50. [docs/performance.md](docs/performance.md) has the
+  numbers, the byte accounting and a sizing guide (a container for a hot update: three times the bank).
+* **Three limits a real player could meet are wider** (found by the acceptance run, from the traffic of a
+  late-game join): RPCs a client may have waiting for later ticks 65,536 (was 8,192; the 4 MiB bound
+  stays; a late-game world sends about 7,000 while it loads), players of one address joining at once 4
+  (was 2), and new sessions per address in 10 seconds 6 (was 4).
+* **The game's protocol noise is `debug`**: an RPC to an object without the class, a variable an object does
+  not carry. It is no longer in the log unless `log.level=debug`.
+* **The Docker health check and the Kubernetes probes use the health route.** The image's `HEALTHCHECK`
+  runs `pcds health`, and [docs/kubernetes.yaml](docs/kubernetes.yaml) probes `GET /api/health` over HTTP
+  (the liveness probe waits five minutes for a world). The admin port waits 2 seconds, not 3, for a
+  request head.
+* **`pcds load` and `pcds probe` take a batch of any size** (up to 256 MiB), as the game's client does, so
+  a world of 200,000 objects can be joined by them. The server's own limit on a batch it receives is
+  still 1 MiB.
+* **Plugin faults say what happened and what to do** (the event, the budget used and the knob that raises
+  it), and a module is translated when it is read, so the first call no longer costs several times the
+  next ones and faults a budget that holds the steady state.
 
 ### Fixed
 
-* **The `discord-notify` example switched itself off for good during an outage.** With Discord down its lines
-  pile up, and a flush builds a message of up to 1,900 characters from them at every tick, which costs more
-  than the default fuel of one event: the plugin ran out of fuel, was switched off after five faults in a
-  minute, and started again at a reload only to fault again, so the lines were never sent once Discord came
-  back. The example's manifest now asks for 4,000,000 fuel an event (and is signed again). Found by the
-  long soak's `net.http` plugin, a copy of it, against a webhook that was not there.
-* **A front that had been stopped killed the healthy game process when it ran again.** The watchdog
-  (`limits.bankWatchdogSeconds`) counted the time since the game process last spoke; a front stopped for
-  longer than the rule (SIGSTOP, a paused virtual machine, a suspended or starved host) took its own
-  absence for the game's silence, killed the game at its first look and started the world again from the
-  last save with every player gone. The watchdog now notes when it last looked and, after a gap of more than
-  5 seconds, starts the game's clock again.
-* **A pick-up that no inventory takes left a world object behind.** `AddWorldObjectToInventoryServerRpc`
-  makes the world object when the world does not have the id (an item that had despawned, or an id a
-  client made up); when the inventory was full or refused it, the object stayed in the world, held by
-  nobody, placed nowhere, never saved and never freed. A long-uptime run of the virtual-clock soak
-  (two scripted players on a mid-game world, 70 days of game time) grew the snapshot from 0.43 MB to
-  2.5 MB and the process's memory to 380 MB; a client that asks again and again with a full inventory
-  could do the same. The object is taken away again when the request fails.
+* **`docker stop` and `docker restart` lost the world under the hardened Docker flags.** With every
+  capability dropped but five, tini (PID 1, root) could not pass SIGTERM on to the server (another user):
+  exit 1 and no save. `KILL` is kept now, and `docker/test.sh` stops the container and wants exit 0 and a
+  saved world. If you copied the flags into your own compose file or Kubernetes manifest, add `KILL`.
+* **The game's own way to another planet did nothing.** A departure platform with the interplanetary
+  rocket on its craft spawn started the launch (the clients saw it) but never switched the planet: the
+  server looked for the rocket 22 m from where the game puts it. It looks at the craft spawn now.
+* **A pick-up that no inventory takes left a world object behind.** When the inventory was full or refused
+  the item, the object stayed in the world, held by nobody and never saved or freed (a long run with two
+  players grew the snapshot from 0.43 MB to 2.5 MB). It is taken away again when the request fails.
+* **A front that had been stopped killed the healthy game process when it ran again.** A front stopped
+  for longer than `limits.bankWatchdogSeconds` (SIGSTOP, a paused virtual machine, a starved host) took
+  its own absence for the game's silence and restarted the world from the last save. The watchdog starts
+  the game's clock again after a gap of more than 5 seconds.
+* **The `discord-notify` example switched itself off during a Discord outage.** A flush of the piled-up
+  lines cost more than the default fuel of one event, so the plugin faulted until it was switched off. Its
+  manifest now asks for 4,000,000 fuel an event.
+* **`PCDS_DEV=flip-verify` failed the flips of a big world** (its check took more than the 5 s a new game
+  process has to be ready). It is a test hook; production flips were not affected.
+* **A `server.env` that lists only what differs works with the commands.** `pcds health`, `selftest`,
+  `doctor`, `players`, `status` and `api` read the admin address, token and port as the server does. The
+  container's health check stayed "starting" for ever with a hand-written `server.env`.
+* `pcds rules reset` on a world standing on a DLC planet resets every rule but `world.dlcPlanets` and says
+  so (it was refused as a whole).
+* `pcds upgrade --restart` no longer says "the server is back" when the front went back to the other bank.
+* `POST /api/update` with a version that is not text is a 400 (it started an update to the latest release).
+* The dashboard's **Roll back** no longer says every rollback needs a restart.
+* After `pcds plugin untrust`, a running plugin lists its signature as revoked at once.
+* `world.tokens` accepted an amount of `i32::MIN`; `pcds plugin check` reported an error for a plugin that
+  reads its settings without `world.read`; a rules file's command with `cooldown_seconds` silently had no
+  cooldown without `world.read` (the check now says so).
+* A panic in the server's own code inside a plugin host function would have ended the whole process. Every
+  host function runs under `catch_unwind` now: the panic is that plugin's fault, the plugin restarts, the
+  game goes on.
+* The fuzz crate (`server/fuzz`) compiles again and CI checks it (`make fuzz-check`); fifteen new fuzz
+  targets exist (docs/testing.md).
 
 ### Security
 
-* **The systemd unit is sandboxed** ([docs/hardening.md](docs/hardening.md)): no new privileges,
-  no capabilities, everything but `run/` read-only (your home readable, not writable), a private
-  `/tmp`, no devices, no writing of `/proc/sys`, `/sys` or the cgroups, only the socket families a
-  server uses, a system call filter, files private to your user, and limits on open files and
-  tasks. `systemd-analyze --user security` scores the unit 2.1 (OK) where the 0.8 unit scored 9.4
-  (UNSAFE) (audit item I2). Each option was tried with the real server: Steam login and invite
-  code, players, saves and backups, a hot update, S3 copies, a signed webhook, hook programs
-  (shell with curl, Python, Node, Java), a plugin with `net.http`, and `steamcmd`. Left out because
-  they break something the server starts: `MemoryDenyWriteExecute` (Node and Java hooks,
-  `steamcmd`) and `SystemCallArchitectures=native` (`steamcmd` is 32-bit); the document says how to
-  add them. A machine that does not let a user service have a mount namespace gets the options that
-  need none, and `pcds install-service` and `pcds doctor` say so. The update check's unit gets the
-  options that need no mount.
-* **Docker**: the entrypoint runs the server with `setpriv --no-new-privs`; `compose.yaml` turns on
-  `read_only`, `no-new-privileges`, dropped capabilities (with the five the entrypoint needs to
-  give `/data` away) and a process limit; `docker/test.sh` runs its hot update with the same flags.
-  The base images are pinned by digest (audit item I1; Dependabot's `docker` entry proposes new
-  ones). The Kubernetes example mounts no service account token.
-* **The admin port, when it is open past the loopback** (audit item I9): other machines get 48 of
-  the 64 connection slots and one address 16, so the command line and a proxy on the machine always
-  find one; a connection over its share is answered `503` with `Retry-After` at once; a request head
-  that does not come within 2 seconds ends the connection. The start-up warning says that the token
-  can run programs on the machine (the rule `chat.exec`), and `pcds doctor` warns.
-  [docs/reverse-proxy.md](docs/reverse-proxy.md) has a Caddy and an nginx configuration, tried
-  against a real server.
-* **No secret in the log.** The admin token, the Steam token, the chat secret, webhook URLs and S3
-  keys are replaced by `***` wherever they appear in a line, and so is anything that looks like a
-  bearer token or a scoped token. The code did not print them; this is the net under it, with
-  tests in both formats and a check on a real server's log.
+* **The systemd unit is sandboxed** ([docs/hardening.md](docs/hardening.md)): no new privileges, no
+  capabilities, everything but `run/` read-only, a private `/tmp`, no devices, a system call filter, files
+  private to your user, and limits on open files and tasks. `systemd-analyze --user security` scores the
+  unit 2.1 (OK) where the 0.8.0 unit scored 9.4 (UNSAFE). Each option was tried with the real server (Steam
+  login, players, saves, a hot update, S3, hooks in shell, Python, Node and Java, a plugin with `net.http`,
+  `steamcmd`). Left out because they break something: `MemoryDenyWriteExecute` and
+  `SystemCallArchitectures=native`; the document says how to add them. A machine without user mount
+  namespaces gets the options that need none, and `pcds install-service` and `pcds doctor` say so.
+* **Docker and Kubernetes:** the base images are pinned by digest, `docker/test.sh` runs its hot update
+  with the hardened flags, and the Kubernetes example mounts no service account token.
+* **The admin port, when it is open past the loopback:** other machines get 48 of the 64 connection slots
+  and one address 16, so the command line and a proxy on the machine always find one; a connection over its
+  share is answered `503` with `Retry-After` at once; a request head that does not come within 2 seconds
+  ends the connection. The start-up warning says that the token can run programs on the machine, and
+  `pcds doctor` warns.
+* **No secret in the log.** The admin token, Steam token, chat secret, webhook URLs and S3 keys are replaced
+  by `***` wherever they appear in a line, and so is anything that looks like a bearer or scoped token.
+* **Round 3 of the audit** ([docs/audits.md](docs/audits.md): 503 million fuzzing executions of 34 targets,
+  property tests against references, sanitizers) found 13 things (R1 to R13); all are fixed with a test:
+  * `net.http` never reaches more of the cloud services that hand out credentials: Azure's WireServer
+    (168.63.129.16, a *public* address), AWS ECS and EKS container credentials, Tencent's metadata and
+    Google's IPv6 metadata server (R1).
+  * TLS: rustls-webpki 0.103.16 and webpki-roots 1.0.10 (RUSTSEC-2026-0382 and RUSTSEC-2026-0381): the
+    chain check accepted intermediates the root programs distrust. The updater, S3 and `net.http` use them (R13).
+  * A deconstructed Farm or VegetableGrower takes the network objects of its destroyed plants along; they
+    stayed in every client's scene, join and snapshot for good (R2).
+  * A save whose lists hold an entry that is no record (a string, a number) is refused at the start; it
+    loaded and then panicked at every autosave, so the world could never save (R3).
+  * Numbers in a save and in the messages between the front and the game read back as written (serde_json's
+    float parsing was an ulp off for one f64 in ten); a rules number past f32 is refused (R4).
+  * A rules file or change that is a JSON array is refused; it was read by position (R5).
+  * A toxic area's key can no longer overflow (R6).
+  * The admin HTTP reader: a line of blanks no longer ends the head, and a `Content-Length` with a sign is
+    refused (R7).
+  * A Steam library file nested without end is refused; it ended the process with a stack overflow (R8).
+  * The log cannot steer a terminal: control characters other than line breaks and tabs are written as
+    `\u{..}`, and the error text of an S3 request is plain text (R11, R12).
+  * Also: the fuzz crate builds again (R9), and the snapshot reader sets lengths to the count read (R10).
 
-* **`net.http` never reaches more of the cloud services that hand out credentials.** Besides
-  169.254.169.254, 100.100.100.200 and fd00:ec2::254 it now never reaches Azure's WireServer
-  (168.63.129.16: a *public* address, so a plugin with `net.http` and no `net.http.local` could
-  reach it through any name that resolved to it), the container credentials of AWS ECS and EKS
-  (169.254.170.2, 169.254.170.23, fd00:ec2::23), Tencent's metadata (169.254.0.23) and Google's
-  IPv6 metadata server (fd20:ce::254).
-* **TLS: rustls-webpki 0.103.16 and webpki-roots 1.0.10** (RUSTSEC-2026-0382, RUSTSEC-2026-0381, of
-  19 and 20 October): the chain check accepted intermediates that the root programs distrust (emSign).
-  The updater, the S3 copies and the plugins' `net.http` use them. `cargo audit` is clean again but
-  for the known `paste` warning.
-* **The admin API's HTTP reader is stricter about the head.** A line of blanks no longer ends the
-  head (a proxy in front reads it as a folded line), and a `Content-Length` with a sign
-  (`+5`) is refused.
+### Upgrade
 
-### Fixed
+Back up first: `pcds save`, then `pcds backup verify` finds a backup that loads, and `tar czf
+pcds-settings.tar.gz -C run server.env rules.json access.json plugins` keeps the settings
+([disaster-recovery.md](docs/disaster-recovery.md)). This release cannot be hot-updated from any
+earlier one: the world is saved as the server stops and every player joins again.
 
-* **`docker stop` and `docker restart` lost the world under the hardened Docker flags.** `compose.yaml`,
-  `docs/hardening.md` and `docker/test.sh` dropped every capability but five; tini (PID 1, root) could then not pass
-  SIGTERM on to the server (another user): `[FATAL tini (1)] ... Operation not permitted`, exit 1 and no save. `KILL` is
-  kept, and `docker/test.sh` now stops the container and wants exit 0 and a saved world. If you copied the flags into
-  your own compose file or Kubernetes manifest, add `KILL` to the capabilities you keep.
-* **The game's own way to another planet did nothing.** A departure platform with the interplanetary rocket on its
-  craft spawn started the sequence (the clients saw the launch) but never switched the planet: the server looked for
-  the rocket around the platform's pivot, 22 m from where the crafter puts it, and found none. It looks at the craft
-  spawn, as the game does. (Found on the late-game Humble world; the unit test now has the real geometry.)
-* **`PCDS_DEV=flip-verify` failed the flips of a big world** ("not ready within 5s"): its check took 2.5 to 3.9 s on 33 000
-  world objects, inside the 5 s a new game process has to be ready. It orders by a hash and takes about 1 s there.
-  (The check is a test hook; production flips were not affected.)
-* **A `server.env` that lists only what differs works with the commands.** `pcds health`, `selftest`, `doctor`,
-  `players`, `status` and `api` read the admin address, the token and the game port as the server does: `server.env`,
-  else the process environment, else the default. The container's health check stayed "starting" for ever with a
-  hand-written `server.env`, and `pcds selftest` panicked.
-* `pcds rules reset` on a world standing on a DLC planet resets every rule but `world.dlcPlanets` and says so (it was
-  refused as a whole, with nothing reset).
-* `pcds upgrade --restart` no longer says "the server is back" when the front went back to the other bank (for example
-  because the release refuses the `rules.json` a later release wrote); it names where to look.
-* `POST /api/update` with a version that is not text is a 400 (it started an update to the latest release).
-* The dashboard's **Roll back** no longer says every rollback needs a restart (it read a field no status has).
-* After `pcds plugin untrust`, a running plugin approved by its digest lists its signature as revoked at once, not after a
-  restart (the plugin keeps running: a signature only adds trust).
-* Parity tools: `tools/parity/replay-ours.sh` kept none of its results (a directory in the copy), `sweep.py report`
-  crashed on a shifted create, and a classification rule for StartInterpolation matched every call. Documented:
-  `speed.growth` is added to a grower's fuses, backups ride on saves, two backups within one second share a name, machines
-  keep running when no player is near, and three late-game numbers of docs/COMPLETENESS.md.
+**From 0.8.0:**
 
-* `world.tokens` accepted an amount of `i32::MIN`: `abs()` wraps in a release build, so the bound let it through. It is checked with `unsigned_abs`.
-* `pcds plugin check` no longer reports an error for a plugin that reads its settings without `world.read`.
-* A panic in the server's own code inside a plugin host function would have ended the whole process (the interpreter's frame cannot unwind).
-  Every host function now runs under `catch_unwind` and a panic is that plugin's fault: counted, the plugin restarted, the game goes on. No such
-  panic is known; 300 generated hostile modules in the tests found none.
-* A rules file's command with `cooldown_seconds` silently had no cooldown without `world.read` (the clock is the world's); the check now says the
-  rules need `world.read`, and a command without a cooldown no longer asks the world for the time.
-* **The fuzz crate (`server/fuzz`) compiles again.** It had stopped building when the game tables
-  became raw JSON (a missing `raw_value` feature) and when two test-only functions were used by
-  the targets, so none of the fuzz targets could run. CI now type-checks it (`make fuzz-check`).
-  Fifteen targets are new (`docs/testing.md`), and the game targets let game time pass.
-* **A toxic area's key can no longer overflow.** The key a client registers an area under is any
-  number; `i32::MIN` matched the area at the origin and `i32::MIN + 1` the one at `i32::MAX`
-  (a build with overflow checks panicked in the tick).
-* **Numbers in a save and in the messages between the front and the banks read back as they were
-  written.** serde_json's default float parsing is an ulp off for one f64 in ten, so a load moved
-  some of the world units' totals by an ulp and a save was not a fixpoint of load and save
-  (`float_roundtrip`). The late-game bench save's fingerprint moves with it; the bench world's
-  does not.
-* **A deconstructed grower takes the network objects of its destroyed plants along.** The plants
-  of a Farm or a VegetableGrower keep their network object when the items of the machine's
-  inventory are destroyed (as the game does: they are the machine's children), but nothing
-  removed them afterwards: they stayed in every client's scene, in every join and in every
-  snapshot for a world object that was gone, for good.
-* **A save whose lists hold something that is no record is refused at the start.** A string, a
-  number or an array after the first entry of the players, world objects, messages... loaded, and
-  the game's code that sets a field of such an entry panicked at the first autosave and every one
-  after it: a world that plays and can never save.
-* **A rules file or a rules change that is a JSON array is refused.** It was read as the sections'
-  fields in order (`[[0.5]]` set `meteo.eventChance`).
-* **A Steam library file nested without end** (`"a" {` a quarter of a million times) is refused
-  with an error; it ended the process with a stack overflow.
-* **The log cannot be used to steer a terminal.** The text format wrote a message as it came: a
-  carriage return in it (a name, a bucket's error text, a release feed's message) moved the cursor
-  over the line's own time and level, an escape sequence cleared or recoloured the screen of
-  `pcds logs`, `journalctl` and `docker logs`. Control characters other than line breaks and tabs are
-  now written as `\u{..}`. The error text of an S3 request is plain text too (control characters
-  `?`, entities read, 200 characters a field).
-* `make fuzz-check` and the CI job for it; `--features portable-dispatch` for the sanitizer
-  builds (wasmi's default dispatch needs the optimizer's tail calls, which the sanitizers
-  prevent).
+1. Back up (above).
+2. `pcds upgrade v0.8.1 --restart`. It installs the release, writes the new unit (the sandbox of
+   [hardening.md](docs/hardening.md)) and restarts the server. Your `server.env` needs no change.
+3. `pcds doctor` checks the setup; `pcds status` shows 0.8.1.
+4. If a hook program writes outside `run/`, see the sandbox note under **Breaking changes**.
+5. Back to 0.8.0: `pcds upgrade v0.8.0 --restart` (it writes the unit of 0.8.0 again).
+
+**From 0.7.0 or 0.6.x:** the old release cannot check what the new one refuses, so remove the retired
+`PCDS_` lines from `run/server.env` **before** `pcds upgrade --restart` (the list and what replaced each
+is in [docs/upgrading.md](docs/upgrading.md), step 2), then follow that runbook; use `v0.8.1` where it
+names the tag. The game has to be available to the server (it reads the tables from it), and a world on
+Humble or Toxicity needs `pcds rules set world.dlcPlanets=...` as in the 0.8.0 notes below.
+
+**Docker and Compose:**
+
+1. Stop the container and copy the folder you mount at `/data`; keep the game mounted at `/game`.
+2. Take the new [compose.yaml](compose.yaml)'s security options (`read_only` with the `tmpfs` for `/tmp`,
+   `no-new-privileges`, `cap_drop: [ALL]` with `cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER,
+   KILL]`, `pids_limit`). If you keep your own flags, **add `KILL`**: without it `docker stop` loses the
+   world. A Kubernetes manifest needs the same capability.
+3. `docker compose pull && docker compose up -d` (or `docker compose exec pcds pcds upgrade v0.8.1
+   --restart`; a hot update inside the container is refused for the reason above). The health check is
+   `pcds health` now; if you wrote your own, use that or `GET /api/health`.
+4. Check with `docker compose exec pcds pcds doctor`. Back: put the old image tag in the compose file.
 
 ## [0.8.0] - 2026-10-20
 
@@ -899,7 +788,8 @@ None; the first release.
 
 Not applicable.
 
-[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.6.1...v0.6.2
