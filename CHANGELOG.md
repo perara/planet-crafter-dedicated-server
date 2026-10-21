@@ -56,6 +56,7 @@ Every release has two parts a reader can rely on:
 
 ### Fixed
 
+* Short admin error responses are buffered before closing the socket, keeping the overload response body with its headers.
 * Enabling automatic launch on an already-full trading or interplanetary exchange rocket launches it
   at once, without having to take an item out and put it back.
 * Switching a destructor to destroy when full, while it is already full, empties it at once.
@@ -92,6 +93,8 @@ refuses format 8 bodies rather than misreading them as format 7. Do not replace 
 A rollback to 0.8.0 can read the world state, but refuses rules.json if it contains the new
 settings (or access.json contains `operators`). That failed handoff resumes the current bank.
 Remove unsupported entries from rules.json and access.json before retrying; existing game rules and the world need no conversion.
+
+Validation exercises scripted direct-IP players and native Steam login/shutdown; a real Steam-relay game-client session remains an acceptance gap.
 
 ## [0.8.1] - 2026-10-21
 

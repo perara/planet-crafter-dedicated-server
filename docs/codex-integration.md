@@ -172,8 +172,9 @@ it, kept from then on, and a planet's terrain index is made when a drone first f
 * `GameData` holds the map as a `DroneMap` (read when needed) and the terrain bounds are `Arc<[Bounds]>`
   (serde's `rc` feature), an idea of `4c55791` that main did not have: the terrain grids of the six
   planets share the one 18 MB instead of each copying their planet's.
-* The rules are part of the snapshot, so the snapshot format is 9 (`handoff::FORMAT`); 0.8.1 and this
-  release cannot hand a world to each other.
+* The staged integration originally used snapshot format 9 for the new drone rules.
+  The final 0.8.2 release freezes the format 7 binary layout and preserves those rules
+  in its named header. Stock 0.8.1 remains format 8 and needs a restart install.
 
 ### Defaults and what the rules cost (late-game save, 45 drones, 300 s, four players)
 

@@ -316,7 +316,9 @@ fn respond(stream: TcpStream, status: u16, content_type: &str, body: &str) -> st
 }
 
 /// `extra`: more header lines, each ending in CRLF.
-fn respond_with(mut stream: TcpStream, status: u16, content_type: &str, body: &str, extra: &str) -> std::io::Result<()> {
+fn respond_with(stream: TcpStream, status: u16, content_type: &str, body: &str, extra: &str) -> std::io::Result<()> {
+    // A busy socket closes without reading: keep its short response together before TCP resets it.
+    let mut stream = std::io::BufWriter::with_capacity(1024, stream);
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -335,7 +337,8 @@ fn respond_with(mut stream: TcpStream, status: u16, content_type: &str, body: &s
     // anywhere), load nothing from elsewhere and take no <base>; its script and style are inline.
     let policy = if content_type.starts_with("text/html") { PAGE_POLICY } else { "frame-ancestors 'none'" };
     let frames = format!("X-Frame-Options: DENY\r\nContent-Security-Policy: {policy}\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCache-Control: no-store\r\n");
-    write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{extra}{frames}Connection: close\r\n\r\n{body}", body.len())
+    write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{extra}{frames}Connection: close\r\n\r\n{body}", body.len())?;
+    stream.flush()
 }
 
 fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, web: Option<&str>, chat: &Feed, tokens: &Checker) -> std::io::Result<()> {
