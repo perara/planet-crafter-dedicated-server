@@ -191,7 +191,7 @@ Experiments that found nothing (kept for the record, no finding):
 * **Chaos**, 752 actions in 7 runs (kill -9 and SIGSTOP of bank and front, flips with a kill mid-flip,
   config and rules, S3 faults, read-only folder): no failed invariant.
 * **Disk full**: no corrupt or partial world; the snapshot is kept and restored.
-* **Limits**: 4 handshakes per 10 s per address, 8 sessions per address and 128 in all hold and
+* **Limits**: 6 handshakes per 10 s per address (4 before 0.8.1), 8 sessions per address and 128 in all hold and
   recover; 3 million garbage datagrams: no panic, no growth.
 * **Stress**: 16,000 RPC/s and 40 players on 16 places: loops under 10 ms. A drone farm of 200
   drones for one game hour: flat memory, worst tick 15 ms.

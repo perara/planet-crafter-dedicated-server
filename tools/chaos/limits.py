@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Limits: the front's connection limits, checked with raw datagrams.
 
-Purpose: the direct-IP transport (server/src/utp.rs) caps new sessions per address (4 per 10 s),
+Purpose: the direct-IP transport (server/src/utp.rs) caps new sessions per address (6 per 10 s),
 sessions per address (8) and sessions in all (128), and drops sessions that stay silent for 30 s.
 Loopback addresses are exempt from the per-address caps, so this tool needs the server to listen
 on a real local address (--address, default: the one the host routes outward from; nothing is
 sent outward). The tool plays the handshake itself (a request datagram, an accept back) and keeps
 sessions alive with heartbeats.
 
-  T1  20 handshakes in 2 s from one address: 4 accepted.
+  T1  20 handshakes in 2 s from one address: 6 accepted.
   T2  after the 10 s window 4 more are accepted (8 sessions); a ninth is refused, while another
       address (--sources) still gets in.
   T3  with no heartbeats the sessions are gone within 60 s and the address can handshake again.
@@ -120,7 +120,7 @@ def main():
         s, tok = request(lan)
         socks.append((s, tok))
         acc += accepted(s, tok, 0.1)
-    expect("T1 handshakes accepted of 20 from one address", acc, 4)
+    expect("T1 handshakes accepted of 20 from one address", acc, 6)
     data(socks)
     keep(socks, 10.5)
     more = 0

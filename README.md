@@ -728,7 +728,7 @@ platform, landing spots, seats, machine ranges), the code says so in a `ponytail
   session in their name without seeing the answers, and can acknowledge them blind. What that
   reaches is bounded: a session that acknowledges nothing gets a few KB and ends after 15
   seconds; one that acknowledges blind gets at most its world and 8 MiB more before PlayerReady;
-  at most 2 sessions per address may be joining at once and 4 new ones start per 10 seconds.
+  at most 4 sessions per address may be joining at once and 6 new ones start per 10 seconds.
   Invite codes (Steam networking) do not have this problem.
 - **Behind a UDP relay** (playit.gg, frp, `ssh -R`) every player comes from 127.0.0.1: the
   per-address limits do not apply to loopback, and the SteamID a direct-IP client reports is

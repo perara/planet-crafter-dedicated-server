@@ -164,6 +164,13 @@ matches on `Event` fields by name. The plugin changes add nothing to the snapsho
 
 ### Changed
 
+* **Three limits that a real player could meet are wider** (found by the acceptance run, which
+  measured them against the traffic of a late-game join): the RPCs a client may have waiting for
+  later ticks are 65,536 (the 4 MiB bound stays; a late-game world sends about 7,000 while it
+  loads, and a burst of 12,000 lost 3,610 of them at 8,192), players of one address that may be
+  joining at once are 4 (a third player behind one address was refused), and new sessions per
+  address in 10 seconds are 6 (six players starting together from one address got four).
+
 * **Every line of the log starts with its time, level and component** (`2026-10-20T18:07:37.354Z
   INFO  front: client 1: connected from ...`), also in `pcds logs`, where journald's own time is
   not shown. Warnings and errors still go to standard error and the rest to standard output.

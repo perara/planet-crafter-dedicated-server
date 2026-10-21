@@ -24,7 +24,7 @@ const FIRST_DYNAMIC_ID: u64 = 22;
 pub const START_INVENTORY_SIZE: i32 = 12;
 pub const START_EQUIPMENT_SIZE: i32 = 4;
 /// Approved clients from one address that are not players yet (see approve).
-const MAX_JOINING_PER_IP: usize = 2;
+const MAX_JOINING_PER_IP: usize = 4;
 /// The RPCs a game client sends while it loads, before its PlayerReady (the name and whitelist
 /// checks): what the objects of the world it was sent and the planet scene ask for as they
 /// spawn and start (GrowthProxy.InitGrowth, ConstructibleProxy.OnNetworkSpawn and
@@ -1254,10 +1254,10 @@ pub mod tests {
         assert!((e[0] - 10.0).abs() < 0.01 && (e[1] - 20.0).abs() < 0.01 && (e[2] - 30.0).abs() < 0.01, "{e:?}");
     }
 
-    /// Two sessions from one address may be joining at once; a third waits until one is in.
+    /// Four sessions from one address may be joining at once; a fifth waits until one is in.
     /// Loopback is exempt.
     #[test]
-    fn at_most_two_clients_from_one_address_are_joining() {
+    fn at_most_four_clients_from_one_address_are_joining() {
         let Some(mut g) = test_game(save()) else { return };
         let request = |g: &Game| {
             let data = format!("{}|0", g.net_data.game_version);
@@ -1265,19 +1265,19 @@ pub mod tests {
             w.packed_i32(0).u64(0).i32(data.len() as i32).bytes(data.as_bytes());
             w.0
         };
-        for (client, ip) in [(1, "10.0.0.5"), (2, "10.0.0.5"), (3, "10.0.0.5"), (4, "10.0.0.6"), (5, "127.0.0.1"), (6, "127.0.0.1"), (7, "127.0.0.1")] {
+        for (client, ip) in [(1, "10.0.0.5"), (2, "10.0.0.5"), (3, "10.0.0.5"), (4, "10.0.0.5"), (5, "10.0.0.5"), (6, "10.0.0.6"), (7, "127.0.0.1"), (8, "127.0.0.1"), (9, "127.0.0.1")] {
             g.connect(client, None, false, Some(ip.into()));
             let r = request(&g);
             g.approve(client, &r);
         }
         let approved: Vec<u64> = g.clients.values().filter(|c| c.approved).map(|c| c.id).collect();
-        assert_eq!(approved, [1, 2, 4, 5, 6, 7]);
-        assert_eq!(g.kicks.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [3]);
+        assert_eq!(approved, [1, 2, 3, 4, 6, 7, 8, 9]);
+        assert_eq!(g.kicks.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [5]);
         g.players_rpc(1, "PlayerMainController.PlayerReadyServerRpc", &Args(vec![json!(0), json!("Ann")]));
-        g.connect(8, None, false, Some("10.0.0.5".into()));
+        g.connect(10, None, false, Some("10.0.0.5".into()));
         let r = request(&g);
-        g.approve(8, &r);
-        assert!(g.clients[&8].approved, "Ann is in: one joining from her address");
+        g.approve(10, &r);
+        assert!(g.clients[&10].approved, "Ann is in: three joining from her address");
     }
 
     /// Sessions from other machines get the world at a bounded rate (a forged address makes the

@@ -18,7 +18,7 @@ const CHAT_EVERY: f32 = 1.0;
 /// RPC work per client per tick (most RPCs cost 1); the rest waits for the next ticks, in
 /// order, up to MAX_PENDING RPCs (more are dropped).
 const RPC_BUDGET: u32 = 32;
-const MAX_PENDING: usize = 8192;
+const MAX_PENDING: usize = 65_536;
 /// And the bytes of those: an RPC is up to a batch (1 MiB), so the count alone allowed gigabytes.
 const MAX_PENDING_BYTES: usize = 4 << 20;
 /// What a client may create before its PlayerReady: inventories and the items put in them as
