@@ -18,7 +18,7 @@ the kernel part). The wall-clock numbers are only comparable on an otherwise qui
 run both builds back to back and look at the instructions, which do not depend on the load.
 
 Run:  tools/perf/loadrun.py --world run/worlds/world.json [--players 8] [--seconds 40]
-          [--action-ms 200] [--idle-seconds 20] [--perf] [--bin PCDS]
+          [--action-ms 200] [--warmup-seconds 8] [--idle-seconds 20] [--perf] [--bin PCDS]
       Ports: --port (default 8430, admin 8431).
       To compare builds: run it once per --bin and compare the "instructions" lines.
 
@@ -77,12 +77,13 @@ def main():
     lib.add_server_args(ap, port=8430)
     ap.add_argument("--players", type=int, default=8, help="`pcds load` players (default %(default)s)")
     ap.add_argument("--seconds", type=int, default=40, help="length of the load run, at least 20 (default %(default)s)")
+    ap.add_argument("--warmup-seconds", type=int, default=8, help="load: warm-up before measurement (default %(default)s)")
     ap.add_argument("--action-ms", type=int, default=200, help="each player acts this often (default %(default)s)")
     ap.add_argument("--idle-seconds", type=int, default=20, help="the idle window (default %(default)s)")
     ap.add_argument("--perf", action="store_true", help="also count instructions and cycles with perf stat")
     args = ap.parse_args()
-    if args.seconds < 20:
-        ap.error("--seconds must be at least 20 (8 s of joining, 4 s of leaving, the rest measured)")
+    if args.warmup_seconds < 0 or args.seconds < args.warmup_seconds + 12:
+        ap.error("--seconds must leave at least 8 s of measurement after --warmup-seconds and 4 s of leaving")
     lib.check_inputs(args)
     os.makedirs(args.work, exist_ok=True)
     srv = lib.Srv("loadrun", args, banks=True, rules={"limits": {"maxPlayers": min(100, max(16, args.players))}})
@@ -104,10 +105,10 @@ def main():
     if args.perf:
         res["idle"]["instructions_M_per_s"] = {n: perf_read(os.path.join(srv.home, f"{n}-idle.txt"), args.idle_seconds) for n in ("front", "bank")}
 
-    # load: 8 s of joins, a steady window, 4 s of leaving
+    # load: warm-up (including joins), a steady window, 4 s of leaving
     load = lib.load_proc(srv, args, args.players, args.seconds, args.action_ms)
-    time.sleep(8)
-    steady = args.seconds - 12
+    time.sleep(args.warmup_seconds)
+    steady = args.seconds - args.warmup_seconds - 4
     ps = [perf_stat(p, steady, os.path.join(srv.home, f"{n}-load.txt")) for n, p in (("front", front), ("bank", bank))] if args.perf else []
     a = (snap(front), snap(bank))
     traffic0 = (srv.status()[1] or {}).get("traffic")

@@ -24,13 +24,14 @@ pub fn has_enough(game: &Game, planet: i32) -> bool {
 /// UpdateAllEnergyRequester: tell every machine whether it has energy.
 pub fn update_all_energy_requesters(game: &mut Game) {
     crate::units::define_energy(game);
-    let machines: Vec<i32> = game.ext.machines.with_energy();
     let mut water = Underwater::default();
-    for wo in machines {
+    // The water checks do not add/remove requesters: keep their order without copying IDs.
+    for index in 0..game.ext.machines.energy.len() {
+        let wo = *game.ext.machines.energy.get_index(index).unwrap().0;
         let Some(planet) = game.wos.get(&wo).map(|w| w.planet_hash()) else { continue };
         let enough = has_enough(game, planet);
         let runs = check_energy_status(game, wo, enough, &mut water);
-        crate::machines::set_has_energy(game, wo, runs);
+        *game.ext.machines.energy.get_index_mut(index).unwrap().1 = runs;
     }
 }
 

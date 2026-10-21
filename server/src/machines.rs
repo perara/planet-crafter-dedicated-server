@@ -126,9 +126,6 @@ impl Machines {
         }
     }
 
-    pub fn with_energy(&self) -> Vec<i32> {
-        self.energy.keys().copied().collect()
-    }
 }
 
 /// One world object's machine components. Nine in ten machines have none of the parts a building
@@ -709,14 +706,6 @@ pub fn on_destroyed(game: &mut Game, wo: &WorldObject) {
     }
     // ConstructibleProxy.OnDestroy: WorldObjectsHandler.onConstructibleDestroyed.
     production::constructible_destroyed(game, wo.id);
-}
-
-/// RequireEnergy.ChangeComponentsStatuts: every machine kind of the object (growers, flock
-/// spawners, generators, autocrafters, disintegrators) runs only while this is true.
-pub fn set_has_energy(game: &mut Game, wo: i32, enough: bool) {
-    if let Some(e) = game.ext.machines.energy.get_mut(&wo) {
-        *e = enough;
-    }
 }
 
 pub fn inventory_changed(game: &mut Game, inventory: i32, wo: i32, added: bool) {

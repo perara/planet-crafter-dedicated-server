@@ -20,10 +20,10 @@ frame pointers and symbols, otherwise the stacks are shallow or nameless:
 
 Run:  tools/perf/profile.py --world run/worlds/world.json --during load|save|idle
           [--players 32] [--seconds 40] [--action-ms 200] [--freq 999 | --instructions]
-          [--mmap-pages 2] [--out DIR]
+          [--warmup-seconds 10] [--call-graph fp] [--mmap-pages 2] [--out DIR]
       Ports: --port (default 8430, admin 8431).
 
-A pass: exit status 0 and the two .data files written and non-empty; the tool prints the
+A pass: exit status 0, successful load clients and CPU samples in both .data files; the tool prints the
 command that reads them.
 """
 import argparse
@@ -42,13 +42,17 @@ def main():
     lib.add_server_args(ap, port=8430)
     ap.add_argument("--during", choices=["load", "save", "idle"], default="load", help="what runs while recording (default %(default)s)")
     ap.add_argument("--players", type=int, default=32, help="load: `pcds load` players (default %(default)s)")
-    ap.add_argument("--seconds", type=int, default=40, help="load: length of the run; the recording is that minus 14 s; save/idle: the recording (default %(default)s)")
+    ap.add_argument("--seconds", type=int, default=40, help="load: length of the run; the recording excludes warm-up and 4 s of leaving; save/idle: the recording (default %(default)s)")
+    ap.add_argument("--warmup-seconds", type=int, default=10, help="load: warm-up before measurement (default %(default)s)")
     ap.add_argument("--action-ms", type=int, default=200, help="load: each player acts this often (default %(default)s)")
     ap.add_argument("--freq", type=int, default=999, help="samples per second (default %(default)s)")
     ap.add_argument("--instructions", action="store_true", help="sample every 100000 user instructions instead of by time")
+    ap.add_argument("--call-graph", default="fp", help="perf call graph method, e.g. dwarf,4096 for a release without frame pointers (default %(default)s)")
     ap.add_argument("--mmap-pages", type=int, default=2, help="perf's -m: a user may map only perf_event_mlock_kb of buffers; raise it if samples are lost (default %(default)s)")
     ap.add_argument("--out", default=None, help="where the .data files go (default: the work folder)")
     args = ap.parse_args()
+    if args.warmup_seconds < 0 or (args.during == "load" and args.seconds < args.warmup_seconds + 9):
+        ap.error("load must leave at least 5 s of measurement after warm-up and 4 s of leaving")
     lib.check_inputs(args)
     out = os.path.abspath(args.out or os.path.join(args.work, "profile"))
     os.makedirs(out, exist_ok=True)
@@ -60,13 +64,13 @@ def main():
     load = None
     if args.during == "load":
         load = lib.load_proc(srv, args, args.players, args.seconds, args.action_ms)
-        time.sleep(10)
-        length = max(5, args.seconds - 14)
+        time.sleep(args.warmup_seconds)
+        length = max(5, args.seconds - args.warmup_seconds - 4)
     else:
         length = args.seconds if args.during == "idle" else 8
     rec = []
     for name, pid in (("front", front), ("bank", bank)):
-        rec.append(subprocess.Popen(["perf", "record", *sample, "-m", str(args.mmap_pages), "--call-graph", "fp", "-p", str(pid), "-o", os.path.join(out, f"{name}.data"), "--", "sleep", str(length)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True))
+        rec.append(subprocess.Popen(["perf", "record", *sample, "-m", str(args.mmap_pages), "--call-graph", args.call_graph, "-p", str(pid), "-o", os.path.join(out, f"{name}.data"), "--", "sleep", str(length)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True))
     if args.during == "save":
         time.sleep(1)
         t = time.time()
@@ -77,11 +81,19 @@ def main():
     if load:
         load.communicate(timeout=args.seconds + 60)
     srv.stop()
-    bad = [n for n in ("front", "bank") if not os.path.exists(os.path.join(out, f"{n}.data")) or os.path.getsize(os.path.join(out, f"{n}.data")) == 0]
-    for n in bad:
-        print(f"FAIL: no {n}.data", file=sys.stderr)
+    bad = []
+    for name, proc, error in zip(("front", "bank"), rec, errors):
+        data = os.path.join(out, f"{name}.data")
+        samples = subprocess.run(["perf", "script", "-i", data, "-G", "-F", "pid"], capture_output=True, text=True)
+        count = len(samples.stdout.splitlines())
+        print(f"{name}: {count} samples; {error.strip()}")
+        if proc.returncode or samples.returncode or not count:
+            bad.append(f"{name}: recording failed or contained no samples: {samples.stderr.strip()}")
+    if load and load.returncode:
+        bad.append("pcds load failed")
+    for message in bad:
+        print("FAIL:", message, file=sys.stderr)
     if bad:
-        print("perf said:", " ".join(errors)[:600], file=sys.stderr)
         sys.exit(1)
     here = os.path.dirname(os.path.abspath(__file__))
     print(f"recorded {out}/front.data and {out}/bank.data; read them with:\n  {here}/pstack.py {out}/bank.data --top 30")

@@ -332,8 +332,8 @@ impl Utp {
         }
         self.inbox = inbox;
         if self.look_at.is_none_or(|t| now >= t) {
-            let stalled = |c: &Connection| c.closing.is_none() && !c.in_flight.is_empty() && now - c.progress > STALL;
-            let silent = |c: &Connection| now - c.last_receive > TIMEOUT || (!c.data_seen && now - c.opened > DATA_WITHIN) || stalled(c);
+            let stalled = |c: &Connection| c.closing.is_none() && !c.in_flight.is_empty() && now > c.progress + STALL;
+            let silent = |c: &Connection| now > c.last_receive + TIMEOUT || (!c.data_seen && now > c.opened + DATA_WITHIN) || stalled(c);
             let silent: Vec<Token> = if self.connections.values().any(silent) { self.connections.iter().filter(|(_, c)| silent(c)).map(|(t, _)| *t).collect() } else { Vec::new() };
             for token in silent {
                 if self.connections.get(&token).is_some_and(stalled) {
@@ -514,7 +514,7 @@ impl Utp {
             let before = self.outbox.len();
             let resend = RESEND * (1 << c.backoff.min(MAX_BACKOFF));
             for i in 0..c.in_flight.len() {
-                if now - c.in_flight[i].2 >= resend {
+                if now >= c.in_flight[i].2 + resend {
                     c.in_flight[i].2 = now;
                     let header = c.reliable_header(PAYLOAD, c.in_flight[i].0);
                     self.outbox.push((c.addr, packet(token, DATA, &[&[RELIABLE], &header, &c.in_flight[i].1])));
@@ -555,7 +555,7 @@ impl Utp {
             if c.queued.is_empty() && c.queued.capacity() > QUEUE_KEPT {
                 c.queued = VecDeque::new();
             }
-            if self.outbox.len() == before && now - c.last_send > HEARTBEAT_AFTER {
+            if self.outbox.len() == before && now > c.last_send + HEARTBEAT_AFTER {
                 self.outbox.push((c.addr, packet(token, HEARTBEAT, &[])));
                 heartbeats += 1;
             }

@@ -288,18 +288,20 @@ impl Front {
                 flip.relay_at = ipc::now_ns();
             }
             self.net.flush(frame || sent);
-            let mut fds = Vec::new();
-            let mut out = Vec::new();
+            let mut fds = [-1; 3];
+            let mut out = [false; 3];
+            let mut n = 0;
             if let Some(fd) = self.net.fd() {
-                fds.push(fd);
-                out.push(false);
+                fds[n] = fd;
+                n += 1;
             }
             for b in [&self.live, &self.next].into_iter().flatten() {
-                fds.push(b.link.fd());
-                out.push(b.link.pending());
+                fds[n] = b.link.fd();
+                out[n] = b.link.pending();
+                n += 1;
             }
             let every = if self.quiet() { IDLE_FRAME } else { crate::FRAME };
-            ipc::wait(&fds, &out, (frame_at + every).saturating_duration_since(Instant::now()));
+            ipc::wait(fds, out, (frame_at + every).saturating_duration_since(Instant::now()));
         }
         self.shutdown(0);
     }

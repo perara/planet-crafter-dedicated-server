@@ -4,7 +4,7 @@
 //! the updater against a release server on 127.0.0.1 (a good release, one whose sha256 does
 //! not match, one of another front protocol) and a rollback. Needs game tables
 //! (PCDS_TEST_DATA, else run/data/2.103; PCDS_TEST_DATA=none skips it, as the unit tests).
-//! Steam is off: nothing here touches Steam.
+//! Steam is off except in the explicitly ignored native SDK shutdown regression.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
@@ -165,6 +165,7 @@ fn start_once(program: &Path, dir: &Path, data: &str, banks: &Path, releases: &s
         dev += ",flip-verify";
     }
     let mut command = Command::new(program);
+    command.env("PCDS_STEAM", "off");
     for (name, value) in extra {
         match *name {
             "PCDS_DEV" => dev = format!("{dev},{value}"),
@@ -183,7 +184,6 @@ fn start_once(program: &Path, dir: &Path, data: &str, banks: &Path, releases: &s
         .env("PCDS_LISTEN", format!("127.0.0.1:{udp}"))
         .env("PCDS_ADMIN", format!("127.0.0.1:{admin}"))
         .env("PCDS_ADMIN_TOKEN", "t")
-        .env("PCDS_STEAM", "off")
         .env("PCDS_HOME", dir)
         .env("PCDS_RELEASES", releases)
         .stdout(out.try_clone().unwrap())
@@ -980,6 +980,38 @@ fn exit_within(server: &mut Server, secs: u64) -> Option<std::process::ExitStatu
         std::thread::sleep(Duration::from_millis(100));
     }
     None
+}
+
+/// Needs a real steamclient.so and Steam connectivity; a direct-IP fallback is a failure.
+#[test]
+#[ignore = "logs into Steam; run explicitly with the native SDK installed"]
+fn steam_shuts_down_cleanly_immediately_after_login() {
+    let Some(data) = tables() else { panic!("this test needs game tables") };
+    let dir = world_dir("steam-shutdown", &data);
+    let banks = banks(&dir);
+    for cycle in 0..4 {
+        let mut server = start_env(Path::new(PCDS), &dir, &data, &banks, "http://127.0.0.1:9", false, &[("PCDS_STEAM", "on")]);
+        let deadline = Instant::now() + Duration::from_secs(40);
+        loop {
+            let (_, status) = server.api("GET", "/api/status", json!({}));
+            if status["steam"] == true && status["network"] == "both" {
+                break;
+            }
+            assert!(Instant::now() < deadline, "Steam did not log in: {}", server.log());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if cycle == 3 {
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        assert_eq!(server.api("POST", "/api/stop", json!({})).0, 200);
+        assert!(exit_within(&mut server, 20).is_some_and(|s| s.success()), "{}", server.log());
+        let log = server.log();
+        for bad in ["Assertion Failed", "[S_API FAIL]", "still have sockets open", "panicked", "relay setup still pending"] {
+            assert!(!log.contains(bad), "{log}");
+        }
+        assert!(log.contains("saved "), "{log}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// This build behind a script that makes its game end 1 s after every READY: a release that flips

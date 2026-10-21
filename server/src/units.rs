@@ -373,7 +373,7 @@ pub fn tick(game: &mut Game) {
     let computes = game.units.next_compute.take_due(now, 0.1);
     if computes > 0 {
         // The same for all steps of the tick: nothing changes between them.
-        let factors: Vec<f32> = KINDS.iter().map(|k| multiplayer_factor(game, *k)).collect();
+        let factors = KINDS.map(|k| multiplayer_factor(game, k));
         for p in game.units.planets.iter_mut() {
             for (u, factor) in p.units.iter_mut().zip(&factors) {
                 u.compute(computes, 0.1, *factor, now);

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use steamworks::networking_sockets::{ListenSocket, NetConnection};
 use steamworks::networking_types::{AppNetConnectionEnd, ListenSocketEvent, NetConnectionEnd, NetworkingConfigEntry, NetworkingConfigValue, SendFlags};
-use steamworks::{Server, ServerMode, SteamServersConnected};
+use steamworks::{Server, ServerMode, SteamServersConnected, sys};
 
 use super::{Conn, Transport};
 use crate::utp;
@@ -29,7 +29,44 @@ pub(in crate::front) const MAX_SPLIT: usize = 1 << 20;
 const MAX_PER_STEAM_ID: usize = 4;
 
 /// The server's Steam login and the P2P socket invite codes point to.
-pub(super) type Login = (Server, ListenSocket);
+pub(in crate::front) struct Login {
+    server: Server,
+    listen: Option<ListenSocket>,
+}
+
+impl Drop for Login {
+    fn drop(&mut self) {
+        drop(self.listen.take());
+        // The global accessor tries a client context first, which warns on a dedicated server.
+        // SAFETY: this is the SDK's game-server accessor; self.server keeps it initialized.
+        let utils = unsafe { sys::SteamInternal_FindOrCreateGameServerInterface(0, sys::STEAMNETWORKINGUTILS_INTERFACE_VERSION.as_ptr().cast()) };
+        if utils.is_null() {
+            warn!("steam: game-server networking utilities unavailable during shutdown");
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_secs(15);
+        // Relay config can be ready while initialization still owns its HTTP request.
+        loop {
+            // SAFETY: zero is Unknown for each status enum; the SDK fills this live status.
+            let pending = unsafe {
+                let mut status: sys::SteamRelayNetworkStatus_t = std::mem::zeroed();
+                sys::SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus(utils.cast(), &mut status);
+                use sys::ESteamNetworkingAvailability::*;
+                status.m_bPingMeasurementInProgress != 0 || matches!(status.m_eAvailNetworkConfig, k_ESteamNetworkingAvailability_Attempting | k_ESteamNetworkingAvailability_Retrying)
+            };
+            if !pending {
+                break;
+            }
+            // shortcut: Steam exposes no relay-request cancellation; keep offline shutdown bounded.
+            if Instant::now() >= deadline {
+                warn!("steam: relay setup still pending after 15 s of shutdown; ending SDK cleanup");
+                break;
+            }
+            self.server.run_callbacks();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
 
 /// A connection that was just accepted, not yet in the table.
 pub(in crate::front) struct Joined {
@@ -55,9 +92,9 @@ impl Transport {
         }
         let session = crate::config::env_number("PCDS_SESSION") as u32;
         match login(game_version, session) {
-            Ok((steam, listen, code)) => {
+            Ok((login, code)) => {
                 self.invite_code = Some(code);
-                self.steam = Some((steam, listen));
+                self.steam = Some(login);
                 Ok(())
             }
             Err(e) if self.utp.is_some() => {
@@ -72,8 +109,9 @@ impl Transport {
     /// accepted or refused by the caps, new connections and ended ones are returned. None
     /// without Steam.
     pub(in crate::front) fn steam_poll(&mut self) -> Option<Poll> {
-        let (steam, listen) = self.steam.as_ref()?;
-        steam.run_callbacks();
+        let login = self.steam.as_ref()?;
+        let listen = login.listen.as_ref()?;
+        login.server.run_callbacks();
         let (mut joined, mut gone, mut accepted): (Vec<Joined>, Vec<u64>, Vec<u64>) = (Vec::new(), Vec::new(), Vec::new());
         while let Some(event) = listen.try_receive_event() {
             match event {
@@ -141,9 +179,11 @@ impl Transport {
     }
 }
 
-fn login(version: &str, session_number: u32) -> Result<(Server, ListenSocket, String), String> {
+fn login(version: &str, session_number: u32) -> Result<(Login, String), String> {
     let (steam, client) = Server::init(Ipv4Addr::UNSPECIFIED, 0, 0xFFFF, ServerMode::NoAuthentication, version)
         .map_err(|e| format!("Steam game server init failed ({e}); is steamclient.so in ~/.steam/sdk64? Install the Steam client, or run 'pcds setup' again to fetch it; PCDS_STEAM=off in server.env serves direct IP only"))?;
+    let mut login = Login { server: steam, listen: None };
+    let steam = &login.server;
     steam.set_product(APP_ID);
     steam.set_mod_dir("Planet Crafter");
     steam.set_game_description("Planet Crafter standalone server");
@@ -171,7 +211,8 @@ fn login(version: &str, session_number: u32) -> Result<(Server, ListenSocket, St
     let steam_id = steam.steam_id().raw();
     let code = format!("{}{:04}", crate::protocol::invite_code(steam_id), session_number);
     info!("steam: game server {steam_id}, invite code {code}{}", if crate::env("PCDS_STEAM_TOKEN").is_some() { "" } else { " (it changes at every start: PCDS_STEAM_TOKEN in server.env keeps it)" });
-    Ok((steam, listen, code))
+    login.listen = Some(listen);
+    Ok((login, code))
 }
 
 /// The game's Steam transport frames batches over 512 KiB as "Split<n>" plus n chunks. Its

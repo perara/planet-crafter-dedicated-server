@@ -80,7 +80,7 @@ fn wait_frame(b: &mut Bank, deadline: Instant) -> Option<Frame> {
             let _ = b.child.wait();
             return None;
         }
-        ipc::wait(&[b.link.fd()], &[b.link.pending()], Duration::from_millis(100));
+        ipc::wait([b.link.fd()], [b.link.pending()], Duration::from_millis(100));
         if !b.link.fill(usize::MAX) {
             let status = end(b);
             warn!("bank {} ended ({status})", b.name);
@@ -347,7 +347,7 @@ impl Front {
                 break;
             }
             // Its last batches still drain, so its writes never block its save.
-            if ipc::wait(&[b.link.fd()], &[b.link.pending()], Duration::from_millis(50))[0] && !b.link.fill(usize::MAX) {
+            if ipc::wait([b.link.fd()], [b.link.pending()], Duration::from_millis(50))[0] && !b.link.fill(usize::MAX) {
                 break;
             }
             while b.link.next().is_some() {}

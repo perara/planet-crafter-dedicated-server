@@ -359,12 +359,12 @@ fn wait_out(fd: RawFd) {
 
 /// Waits until a descriptor is ready or `timeout` passes; which ones are. `out[i]`: wait for
 /// writable too.
-pub fn wait(fds: &[RawFd], out: &[bool], timeout: Duration) -> Vec<bool> {
-    let mut p: Vec<libc::pollfd> = fds.iter().zip(out.iter().chain(std::iter::repeat(&false))).map(|(fd, o)| libc::pollfd { fd: *fd, events: libc::POLLIN | if *o { libc::POLLOUT } else { 0 }, revents: 0 }).collect();
+pub fn wait<const N: usize>(fds: [RawFd; N], out: [bool; N], timeout: Duration) -> [bool; N] {
+    let mut p: [libc::pollfd; N] = std::array::from_fn(|i| libc::pollfd { fd: fds[i], events: libc::POLLIN | if out[i] { libc::POLLOUT } else { 0 }, revents: 0 });
     let ts = libc::timespec { tv_sec: timeout.as_secs() as libc::time_t, tv_nsec: timeout.subsec_nanos() as libc::c_long };
     // SAFETY: valid pollfds and timespec for the call's duration; no signal mask.
     unsafe { libc::ppoll(p.as_mut_ptr(), p.len() as libc::nfds_t, &ts, std::ptr::null()) };
-    p.iter().map(|p| p.revents != 0).collect()
+    p.map(|p| p.revents != 0)
 }
 
 /// The most descriptors one read takes (a frame carries one); more in one message is a peer that
@@ -718,6 +718,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn wait_reports_read_write_hangup_and_ignores_unused_slots() {
+        let (a, mut b) = UnixStream::pair().unwrap();
+        let fd = a.as_raw_fd();
+        assert_eq!(wait([fd, -1], [false, false], Duration::ZERO), [false, false]);
+        assert_eq!(wait([fd, -1], [true, true], Duration::ZERO), [true, false]);
+        b.write_all(b"x").unwrap();
+        assert_eq!(wait([fd, -1], [false, false], Duration::ZERO), [true, false]);
+        drop(b);
+        assert_eq!(wait([fd], [false], Duration::ZERO), [true]);
+        assert!(wait([], [], Duration::ZERO).is_empty());
+    }
+
     /// A hostile client's datagrams hold hundreds of 1-byte batches each; the bank reads them
     /// all at once, so taking a frame off the inbox must not move everything behind it.
     #[test]
@@ -745,7 +758,7 @@ mod tests {
         let Some(path) = std::env::var_os("PCDS_IPC_ECHO") else { return };
         let mut l = Link::new(UnixStream::connect(path).unwrap());
         loop {
-            if !wait(&[l.fd()], &[], Duration::from_millis(5))[0] {
+            if !wait([l.fd()], [false], Duration::from_millis(5))[0] {
                 continue;
             }
             if !l.fill(usize::MAX) {

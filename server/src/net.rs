@@ -837,15 +837,17 @@ impl Net {
     /// NetworkVariableDelta messages for everything changed this tick.
     pub fn flush(&mut self) {
         const RELIABLE_FRAGMENTED_SEQUENCED: i32 = 4;
-        let mut messages = Vec::new();
         // In object order, as a walk over every object would find them.
         let mut dirty = std::mem::take(&mut self.dirty);
-        let mut at: Vec<usize> = dirty.drain(..).filter_map(|id| self.objects.get_index_of(&id)).collect();
-        at.sort_unstable();
-        at.dedup();
-        self.dirty = dirty;
-        for i in at {
-            let (_, o) = self.objects.get_index_mut(i).unwrap();
+        // Reuse the ID buffer for slot numbers until this flush is complete.
+        dirty.retain_mut(|id| match self.objects.get_index_of(id) {
+            Some(index) => { *id = index as u64; true }
+            None => false,
+        });
+        dirty.sort_unstable();
+        dirty.dedup();
+        for i in dirty.drain(..) {
+            let (_, o) = self.objects.get_index_mut(i as usize).unwrap();
             let Some(pending) = o.dirty.take() else { continue };
             for b in o.shape.behaviours.iter() {
                 let range = b.first as usize..(b.first + b.count) as usize;
@@ -872,10 +874,10 @@ impl Net {
                         }
                     }
                 }
-                messages.push((Target::All, NETWORK_VARIABLE_DELTA, w.0));
+                self.out.push((Target::All, NETWORK_VARIABLE_DELTA, w.0));
             }
         }
-        self.out.extend(messages);
+        self.dirty = dirty;
     }
 
     /// Moves an object; objects with a transform state in their sync data get it updated too.
@@ -1076,6 +1078,41 @@ mod tests {
         let (_, kind, body) = g.net.out.last().unwrap();
         assert_eq!(*kind, NETWORK_VARIABLE_DELTA);
         assert!(body.windows(8).any(|w| w == [1, 1, 2, 0, 0, 0, b'h', b'i']), "dirty, flag, string: {body:?}");
+    }
+
+    #[test]
+    fn flush_keeps_object_order_with_duplicates_removed_ids_and_a_reused_buffer() {
+        let mut net = Net::new(Spec::default(), 100);
+        for id in [90, 10, 50] {
+            let o: NetObj = serde_json::from_value(serde_json::json!({
+                "id": id, "hash": 0, "flags": 0, "owner": 0, "parent": null,
+                "position": [0.0, 0.0, 0.0], "rotation": [0.0, 0.0, 0.0, 1.0], "scale": [1.0, 1.0, 1.0],
+                "behaviours": [{"class": "Class", "index": 3, "vars": [{"name": "value", "ty": "NetworkVariable<Int32>",
+                    "value": {"Plain": enc::int(id as i32)}, "dirty": []}]}],
+                "tail": [], "tail_position": null, "wo": null, "scene": false
+            })).unwrap();
+            net.objects.insert(id, o);
+        }
+        net.objects.shift_remove(&10);
+        net.dirty = vec![50, 90, 10, 50];
+        let capacity = net.dirty.capacity();
+        net.out.push((Target::All, 999, vec![11]));
+        let expected = |id: u64, value: i32| {
+            let mut w = Writer::new();
+            w.packed_u64(id).packed_u16(3).i32(4).bool(true).bytes(&enc::int(value));
+            (Target::All, NETWORK_VARIABLE_DELTA, w.0)
+        };
+        net.flush();
+        assert_eq!(net.out, vec![(Target::All, 999, vec![11]), expected(90, 90), expected(50, 50)]);
+        assert!(net.dirty.is_empty());
+        assert_eq!(net.dirty.capacity(), capacity);
+        net.out.clear();
+        net.set(50, "Class", "value", enc::int(51));
+        net.flush();
+        assert_eq!(net.out, vec![expected(50, 51)]);
+        net.out.clear();
+        net.flush();
+        assert!(net.out.is_empty());
     }
 
     #[test]

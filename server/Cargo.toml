@@ -35,7 +35,7 @@ pcds-plugin-api = { path = "../plugin-api", features = ["std"] }
 ring = "0.17"
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.154", features = ["preserve_order", "raw_value", "float_roundtrip"] }
-steamworks = "0.13.1"
+steamworks = { version = "0.13.1", features = ["raw-bindings"] }
 # NFKC for the names the access lists compare (access.rs fold_name): fullwidth letters, ligatures
 # and the like are the letters they stand for. Pure Rust; its only dependency is tinyvec.
 unicode-normalization = { version = "0.1.25", default-features = false, features = ["std"] }

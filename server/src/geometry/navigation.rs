@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use crate::idmap::FxHashMap;
 
 type V3 = [f32; 3];
 const CELL: f32 = 64.0;
@@ -77,7 +78,8 @@ impl Data {
 #[derive(Default)]
 pub struct Grid {
     bounds: Arc<[Bounds]>,
-    cells: HashMap<(i32, i32), Vec<usize>>,
+    cells: FxHashMap<(i32, i32), std::ops::Range<usize>>,
+    indices: Box<[usize]>,
     large: Vec<usize>,
     visits: Vec<u32>,
     query: u32,
@@ -89,41 +91,62 @@ impl Grid {
     pub fn new(bounds: impl Into<Arc<[Bounds]>>) -> Self {
         let bounds = bounds.into();
         let mut grid = Self { visits: vec![0; bounds.len()], bounds, ..Default::default() };
-        for (i, b) in grid.bounds.iter().enumerate() {
+        let cells = |b: &Bounds| {
             let (x0, x1, z0, z1) = (
                 cell(b.min[0] - CLEARANCE),
                 cell(b.max[0] + CLEARANCE),
                 cell(b.min[2] - CLEARANCE),
                 cell(b.max[2] + CLEARANCE),
             );
-            if i64::from(x1 - x0 + 1) * i64::from(z1 - z0 + 1) > 4096 {
-                grid.large.push(i);
-                continue;
+            // Dynamic bounds can exceed the static map's limits (e.g. a client's rotation).
+            let (nx, nz) = (i64::from(x1) - i64::from(x0) + 1, i64::from(z1) - i64::from(z0) + 1);
+            if nx > 4096 || nz > 4096 || nx * nz > 4096 { None } else { Some((x0..=x1, z0..=z1)) }
+        };
+        // Count first: each cell gets an exact slice in one immutable allocation.
+        for (i, b) in grid.bounds.iter().enumerate() {
+            let Some((xs, zs)) = cells(b) else { grid.large.push(i); continue };
+            for x in xs {
+                for z in zs.clone() {
+                    grid.cells.entry((x, z)).or_insert(0..0).end += 1;
+                }
             }
-            for x in x0..=x1 {
-                for z in z0..=z1 {
-                    grid.cells.entry((x, z)).or_default().push(i);
+        }
+        let mut count = 0;
+        for range in grid.cells.values_mut() {
+            let end = count + range.end;
+            *range = count..count;
+            count = end;
+        }
+        grid.indices = vec![0; count].into_boxed_slice();
+        // Fill in the original bounds order; end is the write cursor until this is done.
+        for (i, b) in grid.bounds.iter().enumerate() {
+            let Some((xs, zs)) = cells(b) else { continue };
+            for x in xs {
+                for z in zs.clone() {
+                    let range = grid.cells.get_mut(&(x, z)).unwrap();
+                    grid.indices[range.end] = i;
+                    range.end += 1;
                 }
             }
         }
         grid
     }
-    fn candidates(&mut self, a: V3, b: V3) -> Vec<usize> {
+    fn candidates(&mut self, a: V3, b: V3, mut visit: impl FnMut(&Bounds)) {
         let (mut x, mut z, end_x, end_z) = (cell(a[0]), cell(a[2]), cell(b[0]), cell(b[2]));
         if i64::from(end_x).abs_diff(i64::from(x)) + i64::from(end_z).abs_diff(i64::from(z)) > 4096 {
-            return (0..self.bounds.len()).collect();
+            self.bounds.iter().for_each(visit);
+            return;
         }
         self.query = self.query.wrapping_add(1);
         if self.query == 0 {
             self.visits.fill(0);
             self.query = 1;
         }
-        let mut found = Vec::new();
         let mut collect = |items: &[usize]| {
             for &i in items {
                 if self.visits[i] != self.query {
                     self.visits[i] = self.query;
-                    found.push(i);
+                    visit(&self.bounds[i]);
                 }
             }
         };
@@ -135,14 +158,14 @@ impl Grid {
             }
         };
         loop {
-            if let Some(v) = self.cells.get(&(x, z)) { collect(v); }
+            if let Some(v) = self.cells.get(&(x, z)) { collect(&self.indices[v.clone()]); }
             if x == end_x && z == end_z { break; }
             let (tx, tz) = (if x == end_x { f64::INFINITY } else { crossing(0, x, dx) }, if z == end_z { f64::INFINITY } else { crossing(2, z, dz) });
             // Bounds are already padded in the index; only crossed cells are needed.
             // Include both side cells at a corner, even when floating point rounds the tie.
             if (tx - tz).abs() <= 1e-10 {
-                if let Some(v) = self.cells.get(&(x + dx, z)) { collect(v); }
-                if let Some(v) = self.cells.get(&(x, z + dz)) { collect(v); }
+                if let Some(v) = self.cells.get(&(x + dx, z)) { collect(&self.indices[v.clone()]); }
+                if let Some(v) = self.cells.get(&(x, z + dz)) { collect(&self.indices[v.clone()]); }
                 x += dx;
                 z += dz;
             } else if tx < tz {
@@ -151,7 +174,6 @@ impl Grid {
                 z += dz;
             }
         }
-        found
     }
     // shortcut: collider bounds overestimate some mountains; use mesh-level routing if detours dominate.
     pub fn route_with(&mut self, other: Option<&mut Self>, from: V3, to: V3) -> Vec<V3> {
@@ -167,13 +189,12 @@ impl Grid {
     fn clearance(&mut self, from: V3, to: V3) -> (bool, f32) {
         let mut blocked = false;
         let mut height = from[1].max(to[1]);
-        for i in self.candidates(from, to) {
-            let b = &self.bounds[i];
+        self.candidates(from, to, |b| {
             if b.intersects(from, to, &[0, 2]) {
                 height = height.max(b.max[1] + CLEARANCE + 0.1);
                 blocked |= b.intersects(from, to, &[0, 1, 2]);
             }
-        }
+        });
         (blocked, height)
     }
 
@@ -186,6 +207,19 @@ impl Grid {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn extreme_dynamic_bounds_cannot_wrap_the_cell_count() {
+        let bounds = Bounds { min: [-1.0; 3], max: [1.0; 3] }
+            .transformed([0.0; 3], [1e9, 0.0, 0.0, 1e9]);
+        assert!(bounds.min.iter().chain(&bounds.max).all(|v| v.is_finite()));
+        let mut grid = Grid::new(vec![bounds]);
+        assert!(grid.cells.is_empty());
+        assert!(grid.indices.is_empty());
+        assert_eq!(grid.large, vec![0]);
+        let route = grid.route([0.0, 5.0, 0.0], [60.0, 5.0, 60.0]);
+        assert!(route.iter().flatten().all(|v| v.is_finite()));
+    }
+
     #[test]
     fn terrain_bounds_are_shared_and_map_json_is_unchanged() {
         let text = r#"{"format":1,"build_id":"abc","planets":{"1":[{"min":[10.0,0.0,-4.0],"max":[20.0,40.0,4.0]}]},"buildings":{}}"#;
@@ -257,7 +291,9 @@ mod tests {
             let b = [3000.0, 10.0, 1600.0 - i as f32 * 63.0];
             assert_eq!(grid.route(a, b), full.route(a, b));
         }
-        assert!(grid.candidates([-100.0, 2.0, -100.0], [0.0, 2.0, 0.0]).len() < 100);
+        let mut candidates = 0;
+        grid.candidates([-100.0, 2.0, -100.0], [0.0, 2.0, 0.0], |_| candidates += 1);
+        assert!(candidates < 100);
     }
 
     #[test]

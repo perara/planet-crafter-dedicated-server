@@ -89,7 +89,7 @@ impl Bank {
             let work = woke.elapsed();
             turn.busy = (turn.busy.0 + work, turn.busy.1.max(work));
             let pause = turn.next_frame.saturating_duration_since(Instant::now());
-            if ipc::wait(&[self.link.fd()], &[], pause)[0] && !self.link.fill(usize::MAX) {
+            if ipc::wait([self.link.fd()], [false], pause)[0] && !self.link.fill(usize::MAX) {
                 info!("bank: the front is gone; saving and stopping");
                 std::process::exit(final_save(&mut self.game, &self.save_path));
             }

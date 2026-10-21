@@ -213,10 +213,7 @@ impl Transport {
         // them open at exit makes Steam's own shutdown assert ("we still have sockets open") and the
         // process end with a segmentation fault, a minidump in /tmp/dumps and a failed unit.
         self.conns.clear();
-        if let Some((server, listen)) = self.steam.take() {
-            drop(listen);
-            drop(server);
-        }
+        drop(self.steam.take());
     }
 }
 
