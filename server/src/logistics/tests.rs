@@ -245,11 +245,14 @@ fn drones_pick_up_produce_lying_in_the_world() {
     assert!(!game.wos[&produce].is_placed());
 }
 
-/// An interrupted delivery preserves its cargo, with or without another demand.
-#[test]
-fn a_drone_whose_demand_goes_preserves_its_load() {
+/// A drone carrying iron whose demand container is taken down loses its load, even with
+/// another demand for iron there: the game's FindDemandForDroneOrDestroyContent looks for one,
+/// but CreateNewTaskForWorldObject refuses a drone's own inventory as the source, so the load is
+/// always destroyed. With drones.keepCargo it is dropped on the ground instead.
+fn demand_goes(keep: bool) {
     for second_demand in [true, false] {
         let Some(mut game) = game() else { return };
+        game.rules.drones.keep_cargo = keep;
         build(&mut game, "EnergyGenerator6", [40.0, 2.0, 0.0]);
         let station = build(&mut game, "DroneStation1", [10.0, 2.0, 10.0]);
         let supply = build(&mut game, "Container1", [25.0, 2.0, 10.0]);
@@ -282,13 +285,30 @@ fn a_drone_whose_demand_goes_preserves_its_load() {
             t += 1;
             frame(&mut game, start + t);
         }
-        if let Some(inv) = other {
-            assert!(items(&game, inv).contains(&item) || game.wos[&item].is_placed());
+        if keep {
+            if let Some(inv) = other {
+                assert!(items(&game, inv).contains(&item) || game.wos[&item].is_placed());
+            }
+            assert!(game.wos.contains_key(&item), "cancelled delivery must preserve the cargo");
+            assert!(!game.wos[&item].dont_save);
+        } else {
+            if let Some(inv) = other {
+                assert!(items(&game, inv).is_empty());
+            }
+            assert!(!game.wos.contains_key(&item), "destroyed");
         }
-        assert!(game.wos.contains_key(&item), "cancelled delivery must preserve the cargo");
-        assert!(!game.wos[&item].dont_save);
         assert!(items(&game, game.ext.logistics.drones[&drone].inventory).is_empty());
     }
+}
+
+#[test]
+fn a_drone_whose_demand_goes_loses_its_load() {
+    demand_goes(false);
+}
+
+#[test]
+fn a_drone_whose_demand_goes_keeps_its_load_with_the_rule() {
+    demand_goes(true);
 }
 
 /// A drone item dropped on the floor is a drone (Drone.Awake); picked up again, its GameObject
@@ -634,6 +654,7 @@ fn the_search_for_tasks_makes_the_tasks_the_first_search_made_in_the_same_order(
 #[test]
 fn a_drone_preserves_cargo_if_destination_fills_during_flight() {
     let Some(mut game) = game() else { return };
+    game.rules.drones.keep_cargo = true;
     build(&mut game, "EnergyGenerator6", [40.0, 2.0, 0.0]);
     let station = build(&mut game, "DroneStation1", [10.0, 2.0, 10.0]);
     let supply = build(&mut game, "Container1", [25.0, 2.0, 10.0]);
@@ -666,6 +687,7 @@ fn a_drone_preserves_cargo_if_destination_fills_during_flight() {
 #[test]
 fn cancelled_drone_cargo_is_saved_on_its_own_planet() {
     let Some(mut g) = game() else { return };
+    g.rules.drones.keep_cargo = true;
     let drone = build(&mut g, "Drone1", [40.0, 6.0, 30.0]);
     add_to_fleet(&mut g, drone, false);
     let inventory = g.ext.logistics.drones[&drone].inventory;
@@ -926,4 +948,38 @@ fn with_the_drone_rules_off_dispatch_and_flight_are_the_games() {
         game.net.out.clear();
     }
     assert!(game.ext.logistics.navigation.is_empty() && game.ext.logistics.drones[&drone].route_goal.is_none());
+}
+
+/// Without drones.keepCargo the cargo of a delivery that fails is destroyed, as the game's
+/// EndAssignement does (the same flight as a_drone_preserves_cargo_if_destination_fills_during_flight).
+#[test]
+fn a_drone_loses_cargo_if_destination_fills_during_flight_as_in_the_game() {
+    let Some(mut game) = game() else { return };
+    build(&mut game, "EnergyGenerator6", [40.0, 2.0, 0.0]);
+    let station = build(&mut game, "DroneStation1", [10.0, 2.0, 10.0]);
+    let supply = build(&mut game, "Container1", [25.0, 2.0, 10.0]);
+    let demand = build(&mut game, "Container1", [25.0, 2.0, 30.0]);
+    let [station, supply, demand] = [station, supply, demand].map(|w| game.wos[&w].linked_inventory);
+    let iron = game.data.group("Iron").unwrap();
+    let cargo = add(&mut game, "Iron", supply);
+    game.inventories.get_mut(&supply).unwrap().logistic.supply = vec![iron];
+    game.inventories.get_mut(&demand).unwrap().logistic.demand = vec![iron];
+    set_dirty(&mut game, supply);
+    set_dirty(&mut game, demand);
+    let drone = add(&mut game, "Drone1", station);
+    let start = game.ext.logistics.last_tick;
+    let mut filled = false;
+    for t in 1..=40 * 30 {
+        frame(&mut game, start + t);
+        if !filled && game.ext.logistics.drones.get(&drone).is_some_and(|d| items(&game, d.inventory).contains(&cargo)) {
+            filled = true;
+            let capacity = game.inventories[&demand].size;
+            for _ in 0..capacity {
+                add(&mut game, "ice", demand);
+            }
+        }
+    }
+    assert!(filled, "control: the drone picked up the iron before the destination filled");
+    assert!(!game.wos.contains_key(&cargo), "the game destroys what the drone still carries");
+    assert!(items(&game, station).contains(&drone), "the drone still returns home");
 }

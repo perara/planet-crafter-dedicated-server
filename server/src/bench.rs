@@ -475,23 +475,23 @@ fn bench() {
 /// Drones and rockets on a late-game world (PCDS_BENCH_SAVE; the world is on Humble, so the DLC
 /// rule is stated here; PCDS_TEST_DATA holds a drone-navigation.json for the last two modes, else
 /// they are skipped). Per mode of the drone rules: the user instructions per tick, the slowest tick,
-/// and how many items ended in another container than they began in, which is what the drones
-/// delivered. Then a trade platform of the world is filled and switched to launch when full.
+/// and how many items ended in another container than they began in (what the drones delivered, and what
+/// the bots moved) and how many world objects the world gained (the cargo the game destroys is not one). Then a trade platform of the world is filled and switched to launch when full.
 /// `cargo test --release drones_on_a_late_world -- --ignored --nocapture`
 #[test]
 #[ignore]
 fn drones_on_a_late_world() {
     let Some(e) = env() else { return };
     let holders = |g: &Game| -> HashMap<i32, i32> { g.inventories.iter().flat_map(|(id, i)| i.items.iter().map(move |wo| (*wo, *id))).collect() };
-    for (name, nearest, avoid) in [("the game's order and flight", false, false), ("drones.nearestFirst", true, false), ("drones.avoidObstacles", false, true), ("both rules", true, true)] {
+    for (name, nearest, avoid, keep) in [("the game's order and flight", false, false, false), ("drones.nearestFirst", true, false, false), ("drones.avoidObstacles", false, true, false), ("drones.keepCargo", false, false, true), ("all three rules", true, true, true)] {
         let mut g = load(&e);
         g.rules.world.dlc_planets = vec!["Humble".into()];
-        g.rules.drones = crate::rules::Drones { nearest_first: nearest, avoid_obstacles: avoid };
+        g.rules.drones = crate::rules::Drones { nearest_first: nearest, avoid_obstacles: avoid, keep_cargo: keep };
         if avoid && let Err(why) = g.data.drone_navigation.get() {
             println!("drones: {name}: skipped, {why}");
             continue;
         }
-        let before = holders(&g);
+        let (before, objects) = (holders(&g), g.wos.len() as i64);
         let (drones, tasks) = crate::logistics::counts(&g);
         let r = run(g, &e, f64::INFINITY, |g| g, None);
         let after = holders(&r.game);
@@ -500,12 +500,13 @@ fn drones_on_a_late_world() {
         sorted.sort_unstable();
         let at = |p: f64| sorted[((sorted.len() - 1) as f64 * p) as usize] as f64 / 1e3;
         println!(
-            "drones: {name}: {drones} drones, {tasks} tasks at the start; {:.0} instructions per tick, ticks p50 {:.1} us, p99 {:.1} us, p99.9 {:.1} us, max {:.2} ms; {moved} items changed container in {} s",
+            "drones: {name}: {drones} drones, {tasks} tasks at the start; {:.0} instructions per tick, ticks p50 {:.1} us, p99 {:.1} us, p99.9 {:.1} us, max {:.2} ms; {moved} items changed container, {} world objects more at the end, in {} s",
             r.instructions.map_or(0.0, |i| i as f64 / r.ticks.len() as f64),
             at(0.5),
             at(0.99),
             at(0.999),
             at(1.0) / 1e3,
+            r.game.wos.len() as i64 - objects,
             e.seconds
         );
     }

@@ -21,19 +21,23 @@ Every release has two parts a reader can rely on:
 
 ### Breaking changes
 
-* **Snapshot format 9.** Two rules were added (`drones.nearestFirst`, `drones.avoidObstacles`) and the
-  rules are part of the state a hot update hands over, so 0.8.1 cannot hand a running world to this
+* **Snapshot format 9.** Three rules were added (`drones.nearestFirst`, `drones.avoidObstacles`,
+  `drones.keepCargo`) and the rules are part of the state a hot update hands over, so 0.8.1 cannot hand a running world to this
   release, and this release cannot hand one back. `pcds upgrade` refuses the hot update and names
   `pcds upgrade VERSION --restart`; every player joins again once. The game tables (format 4) and the
   front protocol (3) are unchanged.
-* **Where this server now differs from the game, on purpose.** A drone's undelivered cargo, a launch
-  or a destruction switched on while the rocket or destructor is already full, a building that was
-  built while an optimizer's fuse was in, and a few counts behave as described under **Fixed**; the
-  game itself loses the cargo and waits for the next item. [docs/codex-integration.md](docs/codex-integration.md)
-  gives each one with the game's own code.
+* **Where this server now differs from the game, on purpose.** A launch or a destruction switched on
+  while the rocket or destructor is already full, a building that is built after an optimizer's fuse
+  was put in, a deconstruction that something was put into meanwhile, a joiner's growth boost and a few
+  counts behave as described under **Fixed**; the game itself waits for the next item and the like.
+  What drones do differently (their order, their flights, their lost cargo) is behind rules that are
+  off. [docs/codex-integration.md](docs/codex-integration.md) gives each one with the game's own code.
 
 ### Added
 
+* **Rule `drones.keepCargo` (off).** What a drone carries when its delivery fails (the demand filled up
+  or was taken down) is dropped on the ground, on the drone's own planet, where it can be picked up
+  again, instead of being destroyed as the game does.
 * **Rule `drones.nearestFirst` (off).** Drones choose their work by distance and priority instead of in
   the game's task order: an idle drone takes the job of the highest priority and, among those, the
   nearest pickup; a demand takes from the supply nearest to it; the nearest station with a parked
@@ -44,8 +48,7 @@ Every release has two parts a reader can rely on:
   `drone-navigation.json` beside the tables; with the rule on, drones climb, cross above everything on
   their route and descend to dock instead of flying through terrain and walls. The rule is refused
   while the map is missing, malformed or of another game build, and the file is read only when the
-  rule is on. Planning is limited
-  to 16 drones a tick. See the README, "Differences from hosting in the game".
+  rule is on. Planning is limited to 16 drones a tick. See the README, "Differences from hosting in the game".
 
 ### Fixed
 
@@ -55,8 +58,6 @@ Every release has two parts a reader can rely on:
 * Deconstruction checks the building's contents again when the animation ends: a chest that something
   was put in meanwhile is not taken down (the player gets the "not empty" message, no materials are
   refunded and the neighbouring panels stay as they were) instead of destroying what was put in.
-* A drone whose delivery fails (the demand filled or went away) drops its cargo on the ground, on its
-  own planet, where it can be picked up again, instead of deleting it.
 * A rocket platform, generator or grower built after an optimizer's fuse was put in gets the fuse's
   boost without the fuse being taken out and put back; a joining player is told every grower's current
   growth boost.

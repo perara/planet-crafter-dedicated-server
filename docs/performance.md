@@ -230,6 +230,12 @@ more, and no instruction count wrong at all.
   save and memory on growing worlds), `tools/perf/flipbench.sh [--live]`, `tools/perf/startbench.sh`.
   A save on a DLC planet needs the rule: `PCDS_TOOLS_RULES='{"world":{"dlcPlanets":["Humble"]}}'`.
 * **Allocations.** The bench counts them per tick; `bench::scale` prints the heap by part.
+* **The drone rules on a late-game world.** `bench::drones_on_a_late_world` (`PCDS_BENCH_SAVE`, the tables
+  of `PCDS_TEST_DATA` with a `drone-navigation.json` from `pcds drone-map` for the clearance rows) plays the
+  same world in each mode of `drones.nearestFirst` and `drones.avoidObstacles` and prints the instructions
+  per tick, the tick percentiles and how many items ended in another container (what the drones delivered);
+  then it fills a trade platform of the world and switches it to launch when full. The numbers of the
+  Codex work are in [codex-integration.md](codex-integration.md).
 
 ## Reading the tick histogram
 

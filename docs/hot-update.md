@@ -632,7 +632,7 @@ acceptance test passed):
 | the tables inside `Game` and `Net` | not state | skipped (given `Default`), reloaded |
 | the scaled generation in the tables | derived from the world's settings at load | `restore` runs `change_generation_for_groups` again |
 | `ext.toxic` (format 7) | the toxic areas are derived from a planet's scene and the world objects | only the clients' registrations are in the snapshot; the areas are `#[serde(skip)]` and read again at the first tick after the restore, the cleaned scene objects counted from the world objects as at a start |
-| `rules` (formats 8 and 9) | the rules are state too (`Game.rules`), and a struct is its fields back to back: a rule added or removed moves every field after it | the format is bumped with the rule: format 8 is the rules `log.format`, `log.level` and `save.verifyBackups`, format 9 the rules `drones.nearestFirst` and `drones.avoidObstacles`. The flip gate (`make gate`, a hot update from the last release) is what catches it: it failed with `24 is no bool` (the old `backups_kept` read as the new bool) before the bump |
+| `rules` (formats 8 and 9) | the rules are state too (`Game.rules`), and a struct is its fields back to back: a rule added or removed moves every field after it | the format is bumped with the rule: format 8 is the rules `log.format`, `log.level` and `save.verifyBackups`, format 9 the rules `drones.nearestFirst`, `drones.avoidObstacles` and `drones.keepCargo`. The flip gate (`make gate`, a hot update from the last release) is what catches it: it failed with `24 is no bool` (the old `backups_kept` read as the new bool) before the bump |
 
 ### The snapshot format and its versions
 

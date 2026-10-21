@@ -210,11 +210,11 @@ Added: `/api/ping`, `/api/update`, `/api/world/start|stop|switch`, `/api/backup/
 
 **Formats.**
 
-| | 0.6.2 | 0.7.0 | 0.8 |
-|---|---|---|---|
-| world snapshot ("snapshot format" in the bank lines of `pcds status`) | 3 | 6 | 7 |
-| game tables | 2 | 3 | 4 |
-| front protocol | 3 | 3 | 3 |
+| | 0.6.2 | 0.7.0 | 0.8.0 | 0.8.1 | the next release |
+|---|---|---|---|---|---|
+| world snapshot ("snapshot format" in the bank lines of `pcds status`) | 3 | 6 | 7 | 8 | 9 |
+| game tables | 2 | 3 | 4 | 4 | 4 |
+| front protocol | 3 | 3 | 3 | 3 | 3 |
 
 A hot update needs the same snapshot format and tables format; across them `pcds upgrade` refuses and names
 `pcds upgrade --restart VERSION`. Tables of another format are not used: the restart reads them again from the

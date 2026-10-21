@@ -463,7 +463,8 @@ reason in `./pcds logs`.
 | `world.dlcPlanets` | none | the DLC planets (Humble, Toxicity) you own, as names: `./pcds rules set world.dlcPlanets=Humble,Toxicity`. The server cannot ask Steam about an account, so this is your statement of ownership, not a check. A world on a DLC planet does not start unless the planet is listed, and players can travel only to the DLC planets listed. `/api/status` shows them as `dlcPlanets` |
 | `world.pauseWhenEmpty` | `false` | with no player in the game the world stands still (time, day and night, growth, production, terraformation, meteo, timers and despawns, drones and vehicles) and goes on from there, with no catching up, when one is. A player counts once loaded in, as the game counts its players; one still loading sees the world as it stopped. An autosave of a world that stood still since the last one is skipped (no write, no backup) |
 | `drones.nearestFirst` | `false` | drones choose their work by distance, not in the game's task order: an idle drone takes the job of the highest priority and, among those, the nearest pickup; a demand takes from the supply nearest to it; the nearest station with a parked drone sends it; a drone arrives by its own distance (the game uses the last-added drone's for all); and a drone with nothing to do on one planet no longer stops the others from getting jobs. Off: the game's order (see "Differences from hosting in the game") |
-| `drones.avoidObstacles` | `false` | drones fly over the terrain and the buildings in their way (straight up, across, straight down) instead of through them, as the game's drones do. Needs the collision map that `pcds drone-map` makes from your own game; the rule is refused without it. Off: the game's straight flight |
+| `drones.avoidObstacles` | `false` | drones fly over the terrain and the buildings in their way (straight up, across, straight down); the game's drones fly straight through them. Needs the collision map that `pcds drone-map` makes from your own game; the rule is refused without it. Off: the game's straight flight |
+| `drones.keepCargo` | `false` | what a drone carries when its delivery fails (the demand filled up or was taken down) is dropped on the ground, on the drone's own planet, where it can be picked up again. Off: it is destroyed, as the game does (a late-game world lost 79 items in five minutes to this in a test) |
 
 ## Chat hooks
 
@@ -718,9 +719,10 @@ into `run/worlds/backups/` (the newest of this world without a name), for a new 
   game; the loot in its containers is rolled at random, as there. A flip of the server in the
   middle of a solve starts that wreck again in the new process. A world from an older version of
   the game's generator loses its wrecks, as in the game.
-- **Drones fly and choose as the game's do, unless you ask for better.** The game's drones go
-  straight through terrain and buildings and take jobs in the order of a .NET dictionary. Two rules
-  change that, both off by default. `drones.nearestFirst` makes dispatch go by distance and priority
+- **Drones fly, choose and lose cargo as the game's do, unless you ask for better.** The game's
+  drones go straight through terrain and buildings, take jobs in the order of a .NET dictionary and
+  delete what they carry when a delivery fails. Three rules change that, all off by default.
+  `drones.keepCargo` drops that cargo on the ground instead. `drones.nearestFirst` makes dispatch go by distance and priority
   (the rule's row in the table above says how). `drones.avoidObstacles` makes drones climb
   vertically, cross above the colliders on their route and descend vertically to dock. It needs a
   collision map made once from your own game, with the same installation that made the tables:
@@ -733,8 +735,8 @@ into `run/worlds/backups/` (the newest of this world without a name), for a new 
   in memory). The server reads it only when the rule is on, and refuses the rule (when you set it,
   and at start) while the map is missing, malformed or of another game build than the tables; make
   it again after a game update or a fresh `pcds extract`. It holds geometry read from the game:
-  keep it with your private tables, never in a repository. The map is conservative bounding boxes, including scene colliders that
-  are inactive and may appear as the planet is terraformed, and terrain heightmaps cut into
+  keep it with your private tables, never in a repository. The map is conservative bounding
+  boxes, including scene colliders that are inactive and may appear as the planet is terraformed, and terrain heightmaps cut into
   patches (holes stay covered), so a mountain can make a drone fly high and long. It is aerial
   clearance, not a shortest-path or doorway navigation: indoor pickup and docking may still cross
   walls, so enclosed storage works. Wreck interiors, moving scenery, vehicles, players and
@@ -744,12 +746,11 @@ into `run/worlds/backups/` (the newest of this world without a name), for a new 
   demolition, keeps the terrain index, and rebuilds the indexes after a hot update. Nothing of
   this is in the saved world or the snapshot.
 - **A few slips of the game are fixed, because they lose items or leave clients stale.** The game
-  deletes what a drone carries when its delivery fails (the demand filled or went away); the
-  server drops the cargo on the ground, on the drone's own planet, to be picked up again. The
-  game checks a building's contents only when deconstruction starts; the server checks again
+  checks a building's contents only when deconstruction starts; the server checks again
   when the animation ends and cancels (with the game's "not empty" message) if something was put
-  in meanwhile. The game's optimizer boosts only buildings that stand when a fuse goes in; the
-  server also boosts a rocket platform, generator or grower built later in its range. A joining
+  in meanwhile. The game's optimizer boosts a building that is built later only if it makes units
+  (a rocket platform, for one, does not, nor a grower without units); the server boosts a rocket
+  platform, generator or grower built later in its range as well. A joining
   client is told every grower's current growth boost. Switching a destructor, or a trading or
   exchange rocket's automatic launch, on while it is already full acts at once (the game waits for
   the next item to go in or out). A saved object picked up or moved is counted once in the object

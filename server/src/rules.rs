@@ -222,8 +222,8 @@ pub struct World {
     pub pause_when_empty: bool,
 }
 
-/// Where this server's drones differ from the game's. The game's dispatch and its straight flights
-/// are what both rules keep when off.
+/// Where this server's drones differ from the game's. The game's dispatch, its straight flights and
+/// its destroying of undelivered cargo are what the rules keep when off.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Drones {
@@ -231,6 +231,8 @@ pub struct Drones {
     pub nearest_first: bool,
     /// Drones fly over terrain and buildings, by the collision map `pcds drone-map` makes.
     pub avoid_obstacles: bool,
+    /// What a drone carries when its delivery fails is dropped on the ground instead of destroyed.
+    pub keep_cargo: bool,
 }
 
 /// What the save keeps of the people who have been in the world.
