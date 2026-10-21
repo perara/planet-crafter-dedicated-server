@@ -805,7 +805,7 @@ items (200): Algae1Growable, Amber, AnimalBones, AntiToxinsExplosive1, AntiToxin
 | GrowthProxy.ResetCurrentGrowthServerRpc | yes | 2 | 0 | 88 | animals::spawn machines rockets::back_and_forth |
 | InventoriesHandler.AddExistingItemToInventoryServerRpc | yes | 1 | 1 | 0 | inventories |
 | InventoriesHandler.AddNewItemToInventoryServerRpc | yes | 4 | 30 | 4284 | bench inventories load |
-| InventoriesHandler.AddWorldObjectToInventoryServerRpc | yes | 3 | 3 | 495 | bench inventories load |
+| InventoriesHandler.AddWorldObjectToInventoryServerRpc | yes | 4 | 3 | 495 | bench inventories load |
 | InventoriesHandler.BeginInventoryWatchServerRpc | yes | 2 | 7 | 4 | game inventories |
 | InventoriesHandler.CheckInventoryWatchAndDirtyServerRpc | yes | 1 | 1 | 364 | inventories |
 | InventoriesHandler.DirtyInventoryLogisticsServerRpc | yes | 2 | 3 | 0 | animals::vehicles inventories |

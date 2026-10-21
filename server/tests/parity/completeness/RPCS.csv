@@ -40,7 +40,7 @@ InventoriesHandler.AddExistingItemToInventoryServerRpc,InventoriesHandler,server
 InventoriesHandler.AddNewItemClientRpc,InventoriesHandler,client,sent,inventories load,,,,
 InventoriesHandler.AddNewItemToInventoryServerRpc,InventoriesHandler,server,yes,bench inventories load,4,30,4284,
 InventoriesHandler.AddOrRemoveItemClientRpc,InventoriesHandler,client,sent,inventories,,,,
-InventoriesHandler.AddWorldObjectToInventoryServerRpc,InventoriesHandler,server,yes,bench inventories load,3,3,495,
+InventoriesHandler.AddWorldObjectToInventoryServerRpc,InventoriesHandler,server,yes,bench inventories load,4,3,495,
 InventoriesHandler.BeginInventoryWatchServerRpc,InventoriesHandler,server,yes,game inventories,2,7,4,
 InventoriesHandler.CheckInventoryWatchAndDirtyServerRpc,InventoriesHandler,server,yes,inventories,1,1,364,
 InventoriesHandler.CloseInventoryOnWatchersClientRpc,InventoriesHandler,client,sent,inventories,,,,
