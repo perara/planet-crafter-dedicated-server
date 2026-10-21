@@ -110,6 +110,10 @@ impl Front {
     /// or {"rollback": true}: back to the other bank. The answer comes at once with the
     /// request's "seq"; GET /api/update has its outcome in "history" when done.
     pub(super) fn update_request(&mut self, body: &Value) -> (u16, String) {
+        // A wrong type is a mistake to say, not a request for the latest release.
+        if !body["version"].is_null() && !body["version"].is_string() {
+            return error(400, "version: a release tag as text (\"v0.8.1\"), or null for the latest");
+        }
         // No bank runs: there is no world to hand over. Said as it is (the dashboard says the same).
         if self.phase == Phase::Stopped {
             return (409, json!({"error": STOPPED_UPDATE, "stopped": true}).to_string());
@@ -271,6 +275,20 @@ fn answer_on_thread(tx: Sender<Done>, seq: u64, work: impl FnOnce() -> Result<Do
 mod tests {
     use super::super::tests::test_front;
     use super::*;
+
+    /// POST /api/update with a version that is not text is refused; it used to start an update to the latest release.
+    #[test]
+    fn an_update_with_a_version_that_is_not_text_is_refused() {
+        let mut front = test_front();
+        for version in [json!(5), json!(true), json!(["v0.8.1"]), json!({"tag": "v0.8.1"})] {
+            let (status, answer) = front.update_request(&json!({"version": version}));
+            assert_eq!(status, 400, "{answer}");
+            assert!(answer.contains("release tag as text"), "{answer}");
+        }
+        assert_eq!(front.updates.seq, 0, "no update was started");
+        assert_ne!(front.update_request(&json!({"version": "v0.8.1"})).0, 400);
+        assert_ne!(front.update_request(&json!({"version": null})).0, 400);
+    }
 
     /// The automatic check that failed (GitHub offline, a rate limit) is made again within the
     /// hour, not after the day of the check interval; one that finds the world busy within 10

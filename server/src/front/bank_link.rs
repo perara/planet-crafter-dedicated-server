@@ -252,7 +252,7 @@ impl Front {
             Some(fd) => b.link.queue(ipc::RESTORE, 0, &msg::body(&Restore { recover: true }), Some(fd), 0),
             None => b.link.queue(ipc::START, 0, &[], None, 0),
         }
-        let ready = wait_frame(&mut b, deadline).ok_or("it ended while loading the world (see above)")?;
+        let ready = wait_frame(&mut b, deadline).ok_or("it ended while loading the world: `pcds logs` says why and `pcds doctor` checks the usual causes (for example a world on a DLC planet needs `pcds rules set world.dlcPlanets=...`)")?;
         if ready.kind != ipc::READY {
             let _ = b.child.kill();
             let _ = b.child.wait();
