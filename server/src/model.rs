@@ -169,6 +169,7 @@ const _: () = assert!(std::mem::size_of::<WorldObject>() == 24 && std::mem::size
 /// The fields in the order and shape the snapshot always wrote them (bincodec.rs: back to back, no
 /// names): what `Serialize` and `Deserialize` of a world object stand for.
 #[derive(serde::Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 struct Flat {
     id: i32,
     group: usize,
@@ -920,5 +921,60 @@ mod tests {
         assert_eq!(g7(12345678.0), "1.234568E+07");
         assert_eq!(g7(0.0000012), "1.2E-06");
         assert_eq!(g7(0.00012), "0.00012");
+    }
+
+    #[test]
+    fn compact_objects_keep_flat_snapshot_bytes_and_float_bits() {
+        let mut w = WorldObject::bare(200_000_123, 17);
+        assert!(w.is_bare());
+        w.clear_lock_time();
+        w.set_net(None);
+        w.reset_position();
+        assert!(w.is_bare(), "clearing defaults allocates no detail");
+        for rich in [false, true] {
+            if rich {
+                w.position = [-0.0, 2.0, 3.0];
+                w.rotation = [0.0, 0.0, 0.0, 1.0];
+                w.color = [0.1, 0.2, 0.3, 0.4];
+                w.text = "sign \"å\"".into();
+                w.linked_groups = Some(vec![1, 2]);
+                w.linked_inventory = 42;
+                w.secondary_inventories = vec![7, 8];
+                w.panels = Some(vec![]);
+                w.growth = f32::from_bits(0x7fc0_0123);
+                w.setting = 3;
+                w.trait_type = 4;
+                w.trait_value = 5;
+                w.hunger = -0.0;
+                w.pet_time = GameTime::at(-0.0);
+                w.count = [6, 7];
+                w.linked_wo = 8;
+                w.dont_save = true;
+                w.lock_time = GameTime::NEVER;
+                w.energy = 0.5;
+                w.from_db = true;
+                w.planet = 9;
+                w.planet_linked = 10;
+                w.unit_generation = [1.0; 8];
+                w.unit_multiplier = [-0.0; 8];
+                w.set_net(Some(11));
+            }
+            let bytes = crate::bincodec::to_vec(&w).unwrap();
+            let flat: Flat = crate::bincodec::from_slice(&bytes).unwrap();
+            assert_eq!(bytes, crate::bincodec::to_vec(&flat).unwrap(), "the old flat layout writes the same bytes");
+            let back: WorldObject = crate::bincodec::from_slice(&crate::bincodec::to_vec(&flat).unwrap()).unwrap();
+            assert_eq!(bytes, crate::bincodec::to_vec(&back).unwrap());
+            assert_eq!(back.position[0].to_bits(), w.position[0].to_bits());
+            assert_eq!(back.growth.to_bits(), w.growth.to_bits());
+            assert_eq!(back.hunger.to_bits(), w.hunger.to_bits());
+            assert_eq!(back.pet_time.bits(), w.pet_time.bits());
+        }
+        let mut picked_up = WorldObject::bare(1, 2);
+        picked_up.position = [1.0, 2.0, 3.0];
+        picked_up.reset_position();
+        assert!(picked_up.is_bare());
+        picked_up.hunger = -0.0;
+        picked_up.reset_position();
+        assert!(!picked_up.is_bare(), "a negative zero must survive trimming");
     }
 }

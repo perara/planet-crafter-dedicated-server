@@ -425,4 +425,23 @@ mod tests {
             same(&serde_json::from_str(&text).unwrap(), &serde_json::from_str(&text).unwrap());
         }
     }
+
+    #[test]
+    fn state_documents_keep_the_old_json_codec_bytes() {
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Old(#[serde(with = "crate::bincodec::json_value")] Value);
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct New(#[serde(with = "crate::doc::json")] Doc);
+        for text in ["null", "[]", r#"{"b":[-0.0,18446744073709551615,-9223372036854775808,1e100],"a":"å \"text\""}"#] {
+            let old = Old(serde_json::from_str(text).unwrap());
+            let new = New(serde_json::from_str(text).unwrap());
+            let bytes = crate::bincodec::to_vec(&old).unwrap();
+            assert_eq!(bytes, crate::bincodec::to_vec(&new).unwrap());
+            let back: New = crate::bincodec::from_slice(&bytes).unwrap();
+            assert_eq!(bytes, crate::bincodec::to_vec(&back).unwrap());
+            let back: Old = crate::bincodec::from_slice(&crate::bincodec::to_vec(&new).unwrap()).unwrap();
+            assert_eq!(back.0, old.0);
+            assert_eq!(serde_json::to_string(&old).unwrap(), serde_json::to_string(&new).unwrap());
+        }
+    }
 }

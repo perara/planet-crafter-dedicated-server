@@ -382,4 +382,29 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[test]
+    fn cached_components_keep_order_root_filter_and_edits() {
+        let Some(dir) = crate::test_data() else { return };
+        let text = std::fs::read_to_string(format!("{dir}/gamedata.json")).unwrap();
+        let raw: Value = serde_json::from_str(&text).unwrap();
+        let mut data = GameData::load(&format!("{dir}/gamedata.json")).unwrap();
+        for (group, prefab) in raw["groupPrefabs"].as_object().unwrap() {
+            let components: Vec<_> = prefab["components"].as_array().into_iter().flatten().collect();
+            let types: std::collections::HashSet<_> = components.iter().filter_map(|c| c["type"].as_str()).chain(["NoSuchComponent"]).collect();
+            for ty in types {
+                for root in [false, true] {
+                    let expected: Vec<_> = components.iter().filter(|c| c["type"] == ty && (!root || c["path"] == "")).map(|c| c["fields"].clone()).collect();
+                    let actual: Vec<_> = data.group_prefabs.components(group, ty, root).iter().map(|c| c.to_value()).collect();
+                    assert_eq!(actual, expected, "{group}: {ty}, root={root}");
+                }
+            }
+        }
+        let prefabs = Arc::make_mut(&mut data.group_prefabs);
+        prefabs.edit("CacheTest", |p| *p = serde_json::json!({"components":[{"type":"A","path":"","fields":{"n":1}},{"type":"A","path":"child","fields":{"n":2}},{"type":"A","path":"","fields":{"n":3}}]}));
+        assert_eq!(prefabs.components("CacheTest", "A", false).iter().map(|c| c["n"].as_i64()).collect::<Vec<_>>(), vec![Some(1), Some(2), Some(3)]);
+        assert_eq!(prefabs.components("CacheTest", "A", true).len(), 2);
+        prefabs.edit("CacheTest", |p| p["components"][0]["type"] = serde_json::json!("B"));
+        assert_eq!(prefabs.components("CacheTest", "A", true)[0]["n"].as_i64(), Some(3));
+        assert_eq!(prefabs.components("CacheTest", "B", true)[0]["n"].as_i64(), Some(1));
+    }
 }
