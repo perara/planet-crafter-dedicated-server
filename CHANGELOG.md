@@ -287,6 +287,35 @@ matches on `Event` fields by name. The plugin changes add nothing to the snapsho
 
 ### Fixed
 
+* **`docker stop` and `docker restart` lost the world under the hardened Docker flags.** `compose.yaml`,
+  `docs/hardening.md` and `docker/test.sh` dropped every capability but five; tini (PID 1, root) could then not pass
+  SIGTERM on to the server (another user): `[FATAL tini (1)] ... Operation not permitted`, exit 1 and no save. `KILL` is
+  kept, and `docker/test.sh` now stops the container and wants exit 0 and a saved world. If you copied the flags into
+  your own compose file or Kubernetes manifest, add `KILL` to the capabilities you keep.
+* **The game's own way to another planet did nothing.** A departure platform with the interplanetary rocket on its
+  craft spawn started the sequence (the clients saw the launch) but never switched the planet: the server looked for
+  the rocket around the platform's pivot, 22 m from where the crafter puts it, and found none. It looks at the craft
+  spawn, as the game does. (Found on the late-game Humble world; the unit test now has the real geometry.)
+* **`PCDS_DEV=flip-verify` failed the flips of a big world** ("not ready within 5s"): its check took 2.5 to 3.9 s on 33 000
+  world objects, inside the 5 s a new game process has to be ready. It orders by a hash and takes about 1 s there.
+  (The check is a test hook; production flips were not affected.)
+* **A `server.env` that lists only what differs works with the commands.** `pcds health`, `selftest`, `doctor`,
+  `players`, `status` and `api` read the admin address, the token and the game port as the server does: `server.env`,
+  else the process environment, else the default. The container's health check stayed "starting" for ever with a
+  hand-written `server.env`, and `pcds selftest` panicked.
+* `pcds rules reset` on a world standing on a DLC planet resets every rule but `world.dlcPlanets` and says so (it was
+  refused as a whole, with nothing reset).
+* `pcds upgrade --restart` no longer says "the server is back" when the front went back to the other bank (for example
+  because the release refuses the `rules.json` a later release wrote); it names where to look.
+* `POST /api/update` with a version that is not text is a 400 (it started an update to the latest release).
+* The dashboard's **Roll back** no longer says every rollback needs a restart (it read a field no status has).
+* After `pcds plugin untrust`, a running plugin approved by its digest lists its signature as revoked at once, not after a
+  restart (the plugin keeps running: a signature only adds trust).
+* Parity tools: `tools/parity/replay-ours.sh` kept none of its results (a directory in the copy), `sweep.py report`
+  crashed on a shifted create, and a classification rule for StartInterpolation matched every call. Documented:
+  `speed.growth` is added to a grower's fuses, backups ride on saves, two backups within one second share a name, machines
+  keep running when no player is near, and three late-game numbers of docs/COMPLETENESS.md.
+
 * `world.tokens` accepted an amount of `i32::MIN`: `abs()` wraps in a release build, so the bound let it through. It is checked with `unsigned_abs`.
 * `pcds plugin check` no longer reports an error for a plugin that reads its settings without `world.read`.
 * A panic in the server's own code inside a plugin host function would have ended the whole process (the interpreter's frame cannot unwind).
