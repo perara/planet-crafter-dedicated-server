@@ -184,13 +184,13 @@ impl Game {
         if let Some(c) = self.clients.get_mut(&client) {
             c.ready = Some(state);
         }
-        self.refresh_remote_players(client);
+        self.announce_remote_players(client);
         crate::scene::player_count_changed(self);
         crate::events::player_joined(self, client);
     }
 
-    /// The client creates map markers only when a proxy starts with its roster entry present.
-    fn refresh_remote_players(&mut self, client: u64) {
+    /// Start each remote proxy once, after the roster, so names and map markers initialize too.
+    fn announce_remote_players(&mut self, client: u64) {
         let Some(player) = self.player_object(client) else { return };
         let peers: Vec<(u64, u64)> = self.clients.values().filter(|c| c.id != client && c.ready.is_some()).filter_map(|c| Some((c.id, c.player?))).collect();
         if peers.is_empty() {
@@ -202,8 +202,7 @@ impl Game {
                 let Some(o) = self.net.objects.get(&proxy) else { continue };
                 let mut w = crate::wire::Writer::new();
                 w.u8(1).bytes(&o.scene_object(self.net.scene_handle));
-                // NetworkHide/Show only on the observer: never despawn an owner's own player.
-                self.out_to(Target::Only(recipient), crate::protocol::destroy_object(proxy));
+                // Same-id destroy/create lets the old Unity OnDestroy unregister the new transform.
                 self.out_to(Target::Only(recipient), (crate::protocol::CREATE_OBJECT, w.0));
             }
         }
@@ -226,7 +225,7 @@ impl Game {
             crate::events::player_left(self, c.id, &state.name, state.id);
         }
         if let Some(object) = c.player {
-            self.net.despawn(object);
+            self.net.despawn_for(object, if c.ready.is_some() { Target::All } else { Target::Only(c.id) });
         }
         if let Some((list, _)) = self.net.find_class(PLAYERS) {
             if let Some(VarValue::List(items)) = self.net.get(list, PLAYERS, "_playersData") {
@@ -681,9 +680,9 @@ mod tests {
     }
 
     /// The game creates marker labels only in its player-start callback; position updates
-    /// ignore ids without a marker. Both sides need a start after the roster is synchronized.
+    /// ignore ids without a marker. Both sides get their first proxy after the roster is synchronized.
     #[test]
-    fn joining_refreshes_remote_players_after_their_names_are_available() {
+    fn joining_announces_remote_players_once_after_their_names_are_available() {
         use crate::protocol::{CREATE_OBJECT, DESTROY_OBJECT, NETWORK_VARIABLE_DELTA};
         use crate::wire::Reader;
         for late in [2, 3] {
@@ -707,9 +706,9 @@ mod tests {
                     } else { r.packed_u64()? };
                     (object == peer).then_some(i)
                 }).next_back();
-                let spawn = peer_message(CREATE_OBJECT).expect("the joining client must also get the older peer's refreshed proxy");
-                let despawn = peer_message(DESTROY_OBJECT).expect("refresh replaces the existing proxy");
-                assert!(data_at < despawn && despawn < spawn, "recipient {recipient}: name must arrive before proxy restart");
+                let spawn = peer_message(CREATE_OBJECT).expect("both observers get the peer's initial proxy");
+                assert!(peer_message(DESTROY_OBJECT).is_none(), "a joining player never destroys a live avatar");
+                assert!(data_at < spawn, "recipient {recipient}: name must arrive before the first proxy");
                 let mut r = Reader::new(&g.net.out[spawn].2);
                 assert_eq!(r.u8(), Some(1));
                 let object = crate::protocol::read_scene_object(&mut r).unwrap();
@@ -718,7 +717,7 @@ mod tests {
             }
             assert_eq!(g.clients[&1].player, Some(ann));
             assert_eq!(g.clients[&late].player, Some(bob));
-            assert_eq!(g.net.objects.values().filter(|o| o.hash == g.net_data.prefabs["Player"].hash).count(), 2, "only client proxies restart; the server players stay intact");
+            assert_eq!(g.net.objects.values().filter(|o| o.hash == g.net_data.prefabs["Player"].hash).count(), 2, "the server players stay intact");
             assert_eq!(list(&g, manager, PLAYERS, "_playersData").len(), 2);
             g.net.out.clear();
             send_on(&mut g, late, bob, "PlayerMainController.PlayerReadyServerRpc", &[json!(0), json!("Bob")]);
@@ -733,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_player_refresh_waits_for_ready_peers_and_preserves_the_roster() {
+    fn remote_player_announcement_waits_for_ready_peers_and_preserves_the_roster() {
         use crate::protocol::{CREATE_OBJECT, DESTROY_OBJECT};
         use crate::wire::Reader;
         let Some((mut g, ann)) = world() else { return };
@@ -743,8 +742,9 @@ mod tests {
         g.net.out.clear();
         send_on(&mut g, 2, bob, "PlayerMainController.PlayerReadyServerRpc", &[json!(0), json!("Bob")]);
         let proxies: Vec<_> = g.net.out.iter().filter(|(_, kind, _)| *kind == CREATE_OBJECT || *kind == DESTROY_OBJECT).collect();
-        assert_eq!(proxies.len(), 4);
-        assert!(proxies.iter().all(|(to, _, _)| !to.reaches(3)), "a loading peer is refreshed only after it is ready");
+        assert_eq!(proxies.len(), 2);
+        assert!(proxies.iter().all(|(_, kind, _)| *kind == CREATE_OBJECT), "no proxy teardown");
+        assert!(proxies.iter().all(|(to, _, _)| !to.reaches(3)), "a loading peer receives proxies only after it is ready");
         g.net.out.clear();
         send_on(&mut g, 3, cal, "PlayerMainController.PlayerReadyServerRpc", &[json!(0), json!("Cal")]);
         let spawned: Vec<_> = g.net.out.iter().filter(|(_, kind, _)| *kind == CREATE_OBJECT).map(|(to, _, body)| {
@@ -759,9 +759,33 @@ mod tests {
         assert_eq!(list(&g, manager, PLAYERS, "_playersData").len(), 3);
         g.disconnect(2);
         let roster = list(&g, manager, PLAYERS, "_playersData");
-        assert_eq!(roster.len(), 2, "restarting proxies does not duplicate roster entries");
+        assert_eq!(roster.len(), 2, "announcing proxies does not duplicate roster entries");
         assert!(!g.net.objects.contains_key(&bob));
         assert!(g.net.objects.contains_key(&ann) && g.net.objects.contains_key(&cal));
+    }
+
+    #[test]
+    fn approval_sends_only_the_owners_avatar_and_loading_disconnect_is_private() {
+        use crate::protocol::{CONNECTION_APPROVED, CREATE_OBJECT, DESTROY_OBJECT};
+        use crate::wire::Reader;
+        let Some((mut g, ann)) = world() else { return };
+        g.net.flush();
+        g.net.out.clear();
+        let bob = approve(&mut g, 2);
+        let cal = approve(&mut g, 3);
+        let hash = g.net_data.prefabs["Player"].hash;
+        for (client, player) in [(2, bob), (3, cal)] {
+            let approved = g.net.out.iter().find(|(to, kind, _)| *to == Target::Only(client) && *kind == CONNECTION_APPROVED).unwrap();
+            let (owner, objects) = crate::protocol::read_approved(&approved.2).unwrap();
+            assert_eq!(owner, client);
+            assert_eq!(objects.iter().filter(|o| o.hash == hash).map(|o| o.id).collect::<Vec<_>>(), vec![player], "remote avatars wait for identity initialization");
+        }
+        assert!(!g.net.out.iter().any(|(_, kind, body)| *kind == CREATE_OBJECT && crate::protocol::read_scene_object(&mut Reader::new(&body[1..])).is_some_and(|o| o.hash == hash)), "approval cannot start remote proxies early");
+        g.net.out.clear();
+        g.disconnect(2);
+        assert!(g.net.out.iter().filter(|(_, kind, _)| *kind == DESTROY_OBJECT).all(|(to, _, _)| *to == Target::Only(2)), "peers never saw the loading avatar");
+        assert!(g.net.objects.contains_key(&ann) && g.net.objects.contains_key(&cal));
+        assert!(!g.net.objects.contains_key(&bob));
     }
 
 }

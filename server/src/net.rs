@@ -694,13 +694,19 @@ impl Net {
     }
 
     /// Spawns an object for everyone; returns its network object id.
-    pub fn spawn(&mut self, mut o: NetObj) -> u64 {
+    pub fn spawn(&mut self, o: NetObj) -> u64 {
+        let id = self.spawn_unannounced(o);
+        let mut w = Writer::new();
+        w.u8(1).bytes(&self.objects[&id].scene_object(self.scene_handle));
+        self.out.push((Target::All, protocol::CREATE_OBJECT, w.0));
+        id
+    }
+
+    /// Registers an object whose observers will receive it once its initial state is ready.
+    pub fn spawn_unannounced(&mut self, mut o: NetObj) -> u64 {
         o.check();
         o.id = self.next_id;
         self.next_id += 1;
-        let mut w = Writer::new();
-        w.u8(1).bytes(&o.scene_object(self.scene_handle));
-        self.out.push((Target::All, protocol::CREATE_OBJECT, w.0));
         let id = o.id;
         // A respawned object (a parked drone) keeps changes made while it was away.
         if o.dirty.is_some() {
@@ -711,9 +717,13 @@ impl Net {
     }
 
     pub fn despawn(&mut self, id: u64) {
+        self.despawn_for(id, Target::All);
+    }
+
+    pub fn despawn_for(&mut self, id: u64, to: Target) {
         if self.objects.shift_remove(&id).is_some() {
             self.removed += 1;
-            self.out.push(protocol::destroy_object(id).into_target(Target::All));
+            self.out.push(protocol::destroy_object(id).into_target(to));
         }
     }
 

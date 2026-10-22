@@ -19,6 +19,12 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+### Fixed
+
+* Remote players are announced once after their names are ready. This preserves map
+  labels without destroying/recreating avatars, which could unregister their movement
+  updates in the stock client and leave players invisible at each other's positions.
+
 ## [0.8.4] - 2026-10-22
 
 ### Breaking changes
