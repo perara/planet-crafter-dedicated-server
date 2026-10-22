@@ -111,7 +111,7 @@ PlayerGaugesHandler.RemoveToxicServerRpc,PlayerGaugesHandler,server,yes,gauges,1
 PlayerGaugesHandler.SetHasRebreatherServerRpc,PlayerGaugesHandler,server,yes,gauges,1,1,2,
 PlayerGaugesHandler.UpdateGaugesDependingOnEquipmentServerRpc,PlayerGaugesHandler,server,yes,gauges,1,2,12,
 PlayerMainController.InitPlayerClientRpc,PlayerMainController,client,sent,load players probe,,,,
-PlayerMainController.PlayerReadyServerRpc,PlayerMainController,server,yes,game load players,5,0,0,
+PlayerMainController.PlayerReadyServerRpc,PlayerMainController,server,yes,game load players,4,0,0,
 PlayerShareState.InputOnJumpClientRpc,PlayerShareState,client,not sent by name,,,,,
 PlayerShareState.InputOnJumpServerRpc,PlayerShareState,server,yes,handlers,1,1,0,
 PlayerShareState.StartConstructingClientRpc,PlayerShareState,client,not sent by name,,,,,
