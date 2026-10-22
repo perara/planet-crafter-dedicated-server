@@ -609,8 +609,8 @@ impl Game {
         }
         let mut o = NetObj::from_layout(&self.net_data.prefabs["Player"].layout(self.tick_number()));
         o.owner = client;
-        let object = self.net.spawn(o);
-        // The spawn above went to everyone already approved; the joiner gets it in the list.
+        let object = self.net.spawn_unannounced(o);
+        // Only its owner needs the avatar before PlayerReady; peers get it after the roster.
         let mut connected = vec![0];
         connected.extend(self.clients.values().filter(|c| c.approved).map(|c| c.id));
         connected.push(client);
@@ -635,8 +635,10 @@ impl Game {
         clients.iter().for_each(|c| {
             w.u64(*c);
         });
-        w.u32(self.net.objects.len() as u32);
-        for o in self.net.objects.values() {
+        let player_hash = self.net_data.prefabs["Player"].hash;
+        let visible = |o: &&NetObj| o.hash != player_hash || o.owner == owner;
+        w.u32(self.net.objects.values().filter(visible).count() as u32);
+        for o in self.net.objects.values().filter(visible) {
             o.scene_object_into(&mut w, self.net.scene_handle);
         }
         w.0

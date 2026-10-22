@@ -19,6 +19,28 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-10-22
+
+### Breaking changes
+
+* None. Front protocol 3, snapshot format 7 and tables format 4 are unchanged.
+
+### Fixed
+
+* Remote players are announced once after their names are ready. This preserves map
+  labels without destroying/recreating avatars, which could unregister their movement
+  updates in the stock client and leave players invisible at each other's positions.
+* Players still loading are kept private until ready. Their departure does not tear down
+  avatars on observers who never received them.
+
+### Upgrade
+
+From 0.8.4 use the dashboard's server update or `pcds upgrade v0.8.5`. The world and
+settings are preserved, and the server can hot-update without a restart. Reconnect
+players who were already affected once after updating, to replace the frozen proxies
+in their clients. No client mod is required.
+
+
 ## [0.8.4] - 2026-10-22
 
 ### Breaking changes
@@ -939,7 +961,8 @@ None; the first release.
 
 Not applicable.
 
-[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.4...HEAD
+[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.5...HEAD
+[0.8.5]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.1...v0.8.2
