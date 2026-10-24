@@ -19,6 +19,13 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+### Fixed
+
+* Scene inventories retain their fixed scene IDs, so keycard doors (including
+  Selenea's three-card entry) stay open after revisiting a sector or reloading a
+  save. Existing inventories created under an incorrect ID need save-specific
+  recovery; the server cannot infer which door they originally belonged to.
+
 ## [0.8.5] - 2026-10-22
 
 ### Breaking changes
