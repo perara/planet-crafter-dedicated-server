@@ -1688,7 +1688,7 @@ function shown(k, v) {
   if (k.type === 'map') return Object.entries(v).map(([a, b]) => `${a} = ${b}`).join('\n');
   return String(v);
 }
-function put(el, k, v) { if (k.type === 'bool') el.checked = !!v; else el.value = shown(k, v); }
+function putControl(el, k, v) { if (k.type === 'bool') el.checked = !!v; else el.value = shown(k, v); }
 function read(el, k) {
   if (k.type === 'bool') return el.checked;
   const s = el.value.trim();
@@ -1712,7 +1712,7 @@ function control(k, card) {
     if (numeric) { el.step = k.type === 'int' ? '1' : 'any'; if (k.min !== undefined) { el.min = k.min; el.max = k.max; } }
   }
   el.id = 'knob-' + k.key;
-  put(el, k, k.value);
+  putControl(el, k, k.value);
   el.addEventListener(k.type === 'bool' || k.type === 'enum' ? 'change' : 'input', () => {
     const v = read(el, k);
     const err = errors.get(k.key);
@@ -1737,7 +1737,7 @@ function knobCard(k) {
   } else {
     const el = control(k, card);
     inputs.set(k.key, el);
-    const reset = h('button', { class: 'small', title: 'Back to the default (Save applies it)', disabled: same, onclick: () => { put(el, k, k.default); edits[k.key] = null; card.classList.add('dirty'); dirty(); } }, 'Reset');
+    const reset = h('button', { class: 'small', title: 'Back to the default (Save applies it)', disabled: same, onclick: () => { putControl(el, k, k.default); edits[k.key] = null; card.classList.add('dirty'); dirty(); } }, 'Reset');
     for (const ev of ['input', 'change']) el.addEventListener(ev, () => { reset.disabled = false; });
     body = h('div', { class: 'wu' }, el, k.unit ? h('span', { class: 'muted' }, k.unit) : null, reset);
   }
