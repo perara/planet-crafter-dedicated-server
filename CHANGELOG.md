@@ -19,6 +19,12 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-10-24
+
+### Breaking changes
+
+* None. Front protocol 3, snapshot format 7 and tables format 4 are unchanged.
+
 ### Fixed
 
 * Scene inventories retain their fixed scene IDs, so keycard doors (including
@@ -30,6 +36,19 @@ Every release has two parts a reader can rely on:
   reconnecting. It reuses an unlinked inventory of three stranded KeyCard2 items
   and refreshes the door on connected clients. Ambiguous recovery requires an
   explicit inventory ID; player/storage inventories and nonempty doors are preserved.
+
+### Upgrade
+
+From 0.8.5 use the dashboard's server update or `pcds upgrade v0.8.6`.
+The server can hot-update while players remain connected; no client mod is required.
+
+For the already-relocked three-card base on Selenea in game 2.103, a dashboard-assigned
+admin connected through Steam can run `!admin repair-keycards` in game chat while
+on Selenea. This is an explicit repair after updating, not an automatic unlock.
+It reuses the stranded cards, saves the correct inventory ID and refreshes the
+entry for connected players without a reconnect. If several inventories match,
+inspect the reported IDs before using `!admin repair-keycards INVENTORY_ID`.
+If no safe match exists, preserve the current save for investigation.
 
 ## [0.8.5] - 2026-10-22
 
@@ -973,7 +992,8 @@ None; the first release.
 
 Not applicable.
 
-[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.5...HEAD
+[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.6...HEAD
+[0.8.6]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.2...v0.8.3
