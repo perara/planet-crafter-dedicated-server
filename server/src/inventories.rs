@@ -243,8 +243,8 @@ impl Game {
                 self.tmp_inventory_id -= 1;
                 self.tmp_inventory_id + 1
             }
-            // Ids a client picks stay below the special ones and never replace an inventory.
-            other if other > 0 && other < SPECIAL_INVENTORY_IDS && !self.inventories.contains_key(&other) && self.inventory_player(other).is_none() => other,
+            // Scene inventories keep their WorldUniqueId; only allocated ids use the low range.
+            other if other > 0 && !self.inventories.contains_key(&other) && self.inventory_player(other).is_none() => other,
             _ => self.free_inventory_id(),
         };
         self.inventories.insert(id, Inventory::new(id, size));
@@ -300,6 +300,54 @@ impl Game {
             }
         }
         self.retrieve_inventory(Target::Only(client), inventory);
+    }
+
+    /// Operator recovery for Selenea's three-card door after the old scene-id bug.
+    pub fn repair_selenea_keycard_door(&mut self, source: Option<i32>) -> Result<String, String> {
+        const DOOR: i32 = 108_742_892;
+        if self.net_data.game_version != "2.103" {
+            return Err("this door recovery is verified for game 2.103 only; keep the save for investigation".into());
+        }
+        if self.planet_id() != "Selenea" {
+            return Err("travel to Selenea before repairing its three-card door".into());
+        }
+        if self.inventory_player(DOOR).is_some() {
+            return Err("the scene inventory ID is reserved by a player; keep the save for investigation".into());
+        }
+        let card = self.data.group("KeyCard2").ok_or("the game tables lack KeyCard2")?;
+        let group = self.data.group("WreckEntryLocked1").ok_or("the game tables lack WreckEntryLocked1")?;
+        let full = |inv: &Inventory| inv.size == 3 && inv.items.len() == 3 && inv.items.iter().all(|id| self.wos.get(id).is_some_and(|w| w.group == card) && self.holder(*id) == Some(inv.id));
+        let restored = self.inventories.get(&DOOR).is_some_and(full);
+        if !restored {
+            if self.inventories.get(&DOOR).is_some_and(|i| i.size != 3 || !i.items.is_empty()) {
+                return Err("the door inventory is not empty; refusing to replace its contents".into());
+            }
+            let candidates: Vec<i32> = self.inventories.values().filter(|i| i.id > 0 && i.id < SPECIAL_INVENTORY_IDS && full(i)
+                && self.inventory_player(i.id).is_none() && !i.is_equipment && !i.is_dna
+                && i.logistic.demand.is_empty() && i.logistic.supply.is_empty()
+                && !self.wos.values().any(|w| w.linked_inventory == i.id || w.secondary_inventories.contains(&i.id)))
+                .map(|i| i.id).collect();
+            let old = match source {
+                Some(id) if candidates.contains(&id) => id,
+                Some(_) => return Err("that inventory is not an unlinked three-KeyCard2 door inventory".into()),
+                None if candidates.len() == 1 => candidates[0],
+                None if candidates.is_empty() => return Err("no stranded three-KeyCard2 inventory found; keep the save for investigation".into()),
+                None => return Err(format!("multiple matching inventories: {candidates:?}; use repair-keycards INVENTORY_ID to choose one")),
+            };
+            self.close_inventory_on_watchers(old);
+            self.watchers.remove(&old);
+            let mut inventory = self.inventories.remove(&old).expect("the selected inventory exists");
+            inventory.id = DOOR;
+            self.inventories.insert(DOOR, inventory);
+            self.rebuild_holders();
+            info!("recovered Selenea keycard door {DOOR} from inventory {old}");
+        }
+        self.close_inventory_on_watchers(DOOR);
+        // Loaded clients still cache an obsolete inventory: remove just this scene entry now.
+        // Its canonical full inventory restores the normal open door on future fresh loads.
+        self.net.rpc_scene(Target::All, "WorldObjectsHandler.DestroyWorldObjectGOClientRpc", &[json!(DOOR), json!(self.data.groups[group].hash), json!(0.0)]);
+        self.save_requested = true;
+        Ok("Selenea's three-card door restored and refreshed for connected players. No reconnect is needed.".into())
     }
 
     /// InventoriesHandler.DestroyInventory; never a player's backpack or equipment (an object
@@ -798,6 +846,50 @@ mod tests {
 
     fn saved_items(g: &mut Game, inventory: i32) -> String {
         g.snapshot().inventories.iter().find(|i| i["id"] == inventory).map(|i| i["woIds"].as_str().unwrap().to_string()).unwrap()
+    }
+
+    /// Scene inventories are addressed by WorldUniqueId, including after a sector reload.
+    #[test]
+    fn scene_keycard_inventories_survive_revisits_and_a_save_reload() {
+        let Some((mut g, _)) = world() else { return };
+        // Selenea's level138: the three-card entry and one of its keycard containers.
+        let (door, loot) = (108_742_892, 104_271_330);
+        let card = hash(&g, "KeyCard2");
+        for (id, size, content) in [(door, 3, vec![]), (loot, 1, vec![card])] {
+            send_scene(&mut g, 1, "InventoriesHandler.GetOrCreateNewInventoryServerRpc", &[json!(true), json!(size), json!(id), json!(0), json!(content), json!([card])]);
+            assert_eq!(retrieved(&mut g)[1], json!(id), "keep the scene's fixed inventory id");
+        }
+        let backpack = g.clients[&1].ready.as_ref().unwrap().inventory;
+        let found = g.inventories[&loot].items[0];
+        send_scene(&mut g, 1, "InventoriesHandler.TransferItemServerRpc", &[json!(loot), json!(backpack), json!(found)]);
+        assert!(result(&mut g));
+        for item in [found, give(&mut g, "KeyCard2", backpack), give(&mut g, "KeyCard2", backpack)] {
+            send_scene(&mut g, 1, "InventoriesHandler.TransferItemServerRpc", &[json!(backpack), json!(door), json!(item)]);
+            assert!(result(&mut g));
+        }
+        let cards = g.inventories[&door].items.clone();
+        for reload in [false, true] {
+            if reload {
+                let save = crate::save::SaveFile::parse(&g.snapshot().to_text()).unwrap();
+                g = crate::game::test_game(save).unwrap();
+                join(&mut g, 1, "Ann");
+            }
+            join(&mut g, 2, "Bob");
+            let counts = (g.inventories.len(), g.wos.len());
+            for client in [1, 2] {
+                for (id, size, content, expected) in [(door, 3, vec![], cards.clone()), (loot, 1, vec![card], vec![])] {
+                    for create in [false, true] {
+                        g.net.out.clear();
+                        send_scene(&mut g, client, "InventoriesHandler.GetOrCreateNewInventoryServerRpc", &[json!(create), json!(size), json!(id), json!(0), json!(content), json!([card])]);
+                        let reply = retrieved(&mut g);
+                        assert_eq!((reply[0].clone(), reply[1].clone(), reply[3].clone()), (json!(size), json!(id), json!(expected)));
+                    }
+                }
+            }
+            assert_eq!((g.inventories.len(), g.wos.len()), counts, "no replacement inventory or regenerated keycards");
+        }
+        let allocated = g.create_inventory(1, 0, 0, &[], &[]);
+        assert!(allocated > 0 && allocated < SPECIAL_INVENTORY_IDS);
     }
 
     /// A client that is no player yet (before PlayerReady) makes a bounded number of inventories and

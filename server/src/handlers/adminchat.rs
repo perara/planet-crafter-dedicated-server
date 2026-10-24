@@ -40,7 +40,11 @@ fn execute(game: &mut Game, args: &[String], prefix: &str) -> Result<String, Str
     let command = args.first().map_or("help".into(), |s| s.to_ascii_lowercase());
     let rest = &args[usize::from(!args.is_empty())..];
     match command.as_str() {
-        "help" if rest.is_empty() => Ok(format!("Admin commands:\n{prefix}admin rule SECTION.RULE=VALUE\n{prefix}admin save\n{prefix}admin kick PLAYER\n{prefix}admin ban PLAYER\n{prefix}admin unban NAME_OR_STEAMID_OR_IP\n{prefix}admin tp PLAYER X Y Z\nUse a player's name or #client-id. Admins are managed in the dashboard.")),
+        "help" if rest.is_empty() => Ok(format!("Admin commands:\n{prefix}admin rule SECTION.RULE=VALUE\n{prefix}admin save\n{prefix}admin kick PLAYER\n{prefix}admin ban PLAYER\n{prefix}admin unban NAME_OR_STEAMID_OR_IP\n{prefix}admin tp PLAYER X Y Z\n{prefix}admin repair-keycards [INVENTORY_ID]\nUse a player's name or #client-id. Admins are managed in the dashboard.")),
+        "repair-keycards" if rest.len() <= 1 => {
+            let source = rest.first().map(|s| s.parse::<i32>().map_err(|_| "INVENTORY_ID must be an integer".to_string())).transpose()?;
+            game.repair_selenea_keycard_door(source)
+        }
         "rule" => {
             let assignment = rest.join(" ");
             let (key, value) = assignment.split_once('=').ok_or_else(|| "use rule SECTION.RULE=VALUE".to_string())?;
@@ -122,6 +126,77 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].to, Target::Only(1), "admin feedback is private");
         messages[0].args[1].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn keycard_door_repair_survives_a_hot_restore_without_a_reconnect() {
+        let Some(mut g) = world() else { return };
+        g.planet = g.net_data.planet_index("Selenea").unwrap();
+        let card = g.data.group("KeyCard2").unwrap();
+        let old = g.create_inventory(3, 0, 0, &[card; 3], &[]);
+        let cached_empty = g.create_inventory(3, 0, 0, &[], &[]);
+        g.watchers.entry(old).or_default().insert(1, 1);
+        g.watchers.entry(cached_empty).or_default().insert(2, 1);
+        let cards = g.inventories[&old].items.clone();
+        let counts = (g.wos.len(), g.inventories.len());
+        let players: Vec<_> = g.clients.values().map(|c| (c.id, c.player)).collect();
+        let snapshot = crate::handoff::snapshot(&mut g).unwrap();
+        let (n, d, s, scenes) = crate::game::test_tables().unwrap();
+        let mut g = crate::handoff::restore(n, d, s, &snapshot, scenes).unwrap();
+        g.net.out.clear();
+        crate::testkit::send_scene(&mut g, 1, "ChatHandler.SendChatMessageServerRpc", &[json!("!admin repair-keycards")]);
+        assert!(sent(&g, "ChatHandler.ReceiveChatMessageClientRpc")[0].args[1].as_str().unwrap().contains("restored"));
+        assert_eq!(g.inventories[&108_742_892].items, cards);
+        assert!(cards.iter().all(|id| g.holder(*id) == Some(108_742_892)));
+        assert!(!g.inventories.contains_key(&old));
+        assert_eq!((g.wos.len(), g.inventories.len()), counts, "no replacement or duplicated cards");
+        assert_eq!(g.clients.values().map(|c| (c.id, c.player)).collect::<Vec<_>>(), players);
+        assert!(g.kicks.is_empty() && g.save_requested);
+        let refresh = sent(&g, "WorldObjectsHandler.DestroyWorldObjectGOClientRpc");
+        assert_eq!(refresh.len(), 1);
+        assert_eq!((refresh[0].to, refresh[0].args.clone()), (Target::All, vec![json!(108_742_892), json!(crate::data::stable_hash("WreckEntryLocked1")), json!(0.0)]));
+        assert_eq!(sent(&g, "InventoriesHandler.CloseInventoryOnWatchersClientRpc")[0].to, Target::Only(1));
+        assert!(say(&mut g, "!admin repair-keycards").contains("restored"));
+        assert_eq!((g.wos.len(), g.inventories.len()), counts, "repeating recovery is idempotent");
+        let save = crate::save::SaveFile::parse(&g.snapshot().to_text()).unwrap();
+        let g = crate::game::test_game(save).unwrap();
+        assert_eq!(g.inventories[&108_742_892].items, cards);
+    }
+
+    #[test]
+    fn keycard_door_repair_requires_an_unlinked_unambiguous_inventory() {
+        let Some(mut g) = world() else { return };
+        let version = g.net_data.game_version.clone();
+        g.net_data.game_version = "future".into();
+        assert!(say(&mut g, "!admin repair-keycards").contains("verified for game 2.103 only"));
+        g.net_data.game_version = version;
+        assert!(say(&mut g, "!admin repair-keycards").contains("travel to Selenea"));
+        g.planet = g.net_data.planet_index("Selenea").unwrap();
+        assert!(say(&mut g, "!admin repair-keycards").contains("no stranded"));
+        assert!(say(&mut g, "!admin repair-keycards nope").contains("must be an integer"));
+        let card = g.data.group("KeyCard2").unwrap();
+        let a = g.create_inventory(3, 0, 0, &[card; 3], &[]);
+        let b = g.create_inventory(3, 0, 0, &[card; 3], &[]);
+        let cards = g.inventories[&a].items.clone();
+        assert!(say(&mut g, "!admin repair-keycards").contains("multiple matching"));
+        assert!(sent(&g, "WorldObjectsHandler.DestroyWorldObjectGOClientRpc").is_empty());
+        assert!(!g.inventories.contains_key(&108_742_892));
+        let wo = *g.wos.keys().next().unwrap();
+        g.wos.get_mut(&wo).unwrap().secondary_inventories.push(a);
+        assert!(say(&mut g, &format!("!admin repair-keycards {a}")).contains("not an unlinked"));
+        g.wos.get_mut(&wo).unwrap().secondary_inventories.clear();
+        g.create_inventory(3, 108_742_892, 0, &[card], &[]);
+        assert!(say(&mut g, &format!("!admin repair-keycards {b}")).contains("not empty"));
+        assert_eq!(g.inventories[&a].items, cards);
+        assert_eq!(g.inventories[&b].items.len(), 3);
+        g.destroy_inventory(108_742_892, false);
+        assert!(say(&mut g, &format!("!admin repair-keycards {b}")).contains("restored"));
+        assert_eq!(g.inventories[&a].items, cards, "explicit choice preserves other candidates");
+        g.clients.get_mut(&2).unwrap().ready.as_mut().unwrap().inventory = 108_742_892;
+        assert!(say(&mut g, "!admin repair-keycards").contains("reserved by a player"));
+        g.clients.get_mut(&1).unwrap().verified_steam_id = None;
+        assert!(say(&mut g, "!admin repair-keycards").contains("Only server admins"));
+        assert!(sent(&g, "WorldObjectsHandler.DestroyWorldObjectGOClientRpc").is_empty());
     }
 
     #[test]
