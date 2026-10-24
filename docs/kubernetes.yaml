@@ -72,7 +72,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: pcds
-          image: ghcr.io/perara/planet-crafter-dedicated-server:0.8.6
+          image: ghcr.io/perara/planet-crafter-dedicated-server:0.8.7
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
