@@ -94,7 +94,7 @@ workflow run built it. With the [GitHub CLI](https://cli.github.com/):
 ```bash
 sha256sum -c pcds-v*-linux-x86_64.tar.gz.sha256
 gh attestation verify pcds-v*-linux-x86_64.tar.gz --repo perara/planet-crafter-dedicated-server
-gh attestation verify oci://ghcr.io/perara/planet-crafter-dedicated-server:0.8.6 --repo perara/planet-crafter-dedicated-server   # the Docker image
+gh attestation verify oci://ghcr.io/perara/planet-crafter-dedicated-server:0.8.7 --repo perara/planet-crafter-dedicated-server   # the Docker image
 ```
 
 `up` takes the same options as `setup`. Step by step:

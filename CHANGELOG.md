@@ -19,6 +19,26 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-10-24
+
+### Breaking changes
+
+* None. Front protocol 3, snapshot format 7 and tables format 4 are unchanged.
+
+### Fixed
+
+* Opening dashboard Config no longer fails with `build is not a function`.
+  The config field setter has its own name, so the plugin renderer cannot
+  override it. Loading, saving, resetting and discarding settings work again.
+
+### Upgrade
+
+From 0.8.6 use the dashboard's server update or `pcds upgrade v0.8.7`.
+The server hot-updates while players stay connected; no restart is required.
+After the update completes, refresh the browser page to load the fixed dashboard.
+Save or discard any unsaved edits before refreshing. Already-open pages do not
+reload automatically. Game logic and the Selenea keycard repair command are unchanged.
+
 ## [0.8.6] - 2026-10-24
 
 ### Breaking changes
@@ -992,7 +1012,8 @@ None; the first release.
 
 Not applicable.
 
-[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.6...HEAD
+[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.7...HEAD
+[0.8.7]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.3...v0.8.4
