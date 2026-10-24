@@ -302,6 +302,54 @@ impl Game {
         self.retrieve_inventory(Target::Only(client), inventory);
     }
 
+    /// Operator recovery for Selenea's three-card door after the old scene-id bug.
+    pub fn repair_selenea_keycard_door(&mut self, source: Option<i32>) -> Result<String, String> {
+        const DOOR: i32 = 108_742_892;
+        if self.net_data.game_version != "2.103" {
+            return Err("this door recovery is verified for game 2.103 only; keep the save for investigation".into());
+        }
+        if self.planet_id() != "Selenea" {
+            return Err("travel to Selenea before repairing its three-card door".into());
+        }
+        if self.inventory_player(DOOR).is_some() {
+            return Err("the scene inventory ID is reserved by a player; keep the save for investigation".into());
+        }
+        let card = self.data.group("KeyCard2").ok_or("the game tables lack KeyCard2")?;
+        let group = self.data.group("WreckEntryLocked1").ok_or("the game tables lack WreckEntryLocked1")?;
+        let full = |inv: &Inventory| inv.size == 3 && inv.items.len() == 3 && inv.items.iter().all(|id| self.wos.get(id).is_some_and(|w| w.group == card) && self.holder(*id) == Some(inv.id));
+        let restored = self.inventories.get(&DOOR).is_some_and(full);
+        if !restored {
+            if self.inventories.get(&DOOR).is_some_and(|i| i.size != 3 || !i.items.is_empty()) {
+                return Err("the door inventory is not empty; refusing to replace its contents".into());
+            }
+            let candidates: Vec<i32> = self.inventories.values().filter(|i| i.id > 0 && i.id < SPECIAL_INVENTORY_IDS && full(i)
+                && self.inventory_player(i.id).is_none() && !i.is_equipment && !i.is_dna
+                && i.logistic.demand.is_empty() && i.logistic.supply.is_empty()
+                && !self.wos.values().any(|w| w.linked_inventory == i.id || w.secondary_inventories.contains(&i.id)))
+                .map(|i| i.id).collect();
+            let old = match source {
+                Some(id) if candidates.contains(&id) => id,
+                Some(_) => return Err("that inventory is not an unlinked three-KeyCard2 door inventory".into()),
+                None if candidates.len() == 1 => candidates[0],
+                None if candidates.is_empty() => return Err("no stranded three-KeyCard2 inventory found; keep the save for investigation".into()),
+                None => return Err(format!("multiple matching inventories: {candidates:?}; use repair-keycards INVENTORY_ID to choose one")),
+            };
+            self.close_inventory_on_watchers(old);
+            self.watchers.remove(&old);
+            let mut inventory = self.inventories.remove(&old).expect("the selected inventory exists");
+            inventory.id = DOOR;
+            self.inventories.insert(DOOR, inventory);
+            self.rebuild_holders();
+            info!("recovered Selenea keycard door {DOOR} from inventory {old}");
+        }
+        self.close_inventory_on_watchers(DOOR);
+        // Loaded clients still cache an obsolete inventory: remove just this scene entry now.
+        // Its canonical full inventory restores the normal open door on future fresh loads.
+        self.net.rpc_scene(Target::All, "WorldObjectsHandler.DestroyWorldObjectGOClientRpc", &[json!(DOOR), json!(self.data.groups[group].hash), json!(0.0)]);
+        self.save_requested = true;
+        Ok("Selenea's three-card door restored and refreshed for connected players. No reconnect is needed.".into())
+    }
+
     /// InventoriesHandler.DestroyInventory; never a player's backpack or equipment (an object
     /// linked to one, GenerateRandomAppearanceObjectServerRpc, took it with it).
     pub fn destroy_inventory(&mut self, id: i32, destroy_go: bool) {

@@ -23,8 +23,13 @@ Every release has two parts a reader can rely on:
 
 * Scene inventories retain their fixed scene IDs, so keycard doors (including
   Selenea's three-card entry) stay open after revisiting a sector or reloading a
-  save. Existing inventories created under an incorrect ID need save-specific
-  recovery; the server cannot infer which door they originally belonged to.
+  save. Inventories already created under an incorrect ID require explicit
+  recovery because their original scene association was not saved.
+* Dashboard-assigned Steam admins can use `!admin repair-keycards` on Selenea to
+  recover the three-card base after it has relocked, without restarting or
+  reconnecting. It reuses an unlinked inventory of three stranded KeyCard2 items
+  and refreshes the door on connected clients. Ambiguous recovery requires an
+  explicit inventory ID; player/storage inventories and nonempty doors are preserved.
 
 ## [0.8.5] - 2026-10-22
 

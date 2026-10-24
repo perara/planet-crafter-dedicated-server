@@ -6,7 +6,7 @@ ChatHandler.ReceiveChatMessageClientRpc,ChatHandler,client,sent,chathooks handle
 ChatHandler.ReceivePSServicePlayerLeftMessageClientRpc,ChatHandler,client,not sent by name,,,,,
 ChatHandler.ReceiveServicePlayerJoinedMessageClientRpc,ChatHandler,client,sent,players,,,,
 ChatHandler.ReceiveServicePlayerLeftMessageClientRpc,ChatHandler,client,sent,players status,,,,
-ChatHandler.SendChatMessageServerRpc,ChatHandler,server,yes,bench handlers load,1,3,0,
+ChatHandler.SendChatMessageServerRpc,ChatHandler,server,yes,bench handlers load,2,3,0,
 ColorProxy.SetColorServerRpc,ColorProxy,server,yes,handlers,1,2,37,
 ConstructibleProxy.MachineOptimizerUpdateClientRpc,ConstructibleProxy,client,sent,machines::production,,,,
 ConstructibleProxy.MachineOutsideGrowerUpdateStartClientRpc,ConstructibleProxy,client,sent,machines machines::growers,,,,

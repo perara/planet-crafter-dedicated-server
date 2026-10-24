@@ -433,6 +433,7 @@ Admins can type these in game chat (the configured command prefix replaces `!`):
 !admin ban Player Name
 !admin unban NAME_OR_STEAMID_OR_IP
 !admin tp Player Name 560 3 500
+!admin repair-keycards
 ```
 
 A player target can also be `#` followed by their client id. Replies stay private to the admin;
@@ -444,6 +445,14 @@ matching entry, and the dashboard's bans list shows any others that must also be
 Chat admins can change gameplay, drone, rocket, save and update rules. Host programs, webhook
 secrets, backup credentials, DLC ownership and admin membership remain dashboard/console settings.
 Revocation takes effect on the next command, without a restart.
+
+On Selenea in game 2.103, `!admin repair-keycards` repairs the known three-card base door after
+the old scene-inventory bug relocked it. It reuses three stranded KeyCard2 items,
+saves the corrected inventory ID, and refreshes the entry for connected players;
+no reconnect or restart is needed. It preserves player/storage inventories and
+refuses to replace a nonempty door inventory. If several unlinked three-card
+inventories match, it lists their IDs; use `!admin repair-keycards INVENTORY_ID`
+only after identifying the one to recover. This command does not repair other doors.
 
 ## Server rules
 

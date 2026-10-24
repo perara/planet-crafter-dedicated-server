@@ -26,6 +26,9 @@ pub const REQUIRED_GROUPS: &[&str] = &[
     // instances.rs
     "PortalGenerator1",
     "ProceduralWreckSafe",
+    // inventories.rs: repair of Selenea's stranded three-card door inventory
+    "KeyCard2",
+    "WreckEntryLocked1",
     // scene.rs: the starting pod of a planet without an EscapePod<planet> of its own
     "EscapePod",
 ];
