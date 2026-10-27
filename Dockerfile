@@ -5,7 +5,7 @@
 # tomorrow, and a changed base is a reviewed change. Dependabot's `docker` entry
 # (.github/dependabot.yml) proposes the new digest when the tag moves; to do it by hand:
 # `docker pull rust:1-trixie` and `docker image inspect --format '{{index .RepoDigests 0}}' rust:1-trixie`.
-FROM rust:1-trixie@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a AS build
+FROM rust:1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS build
 WORKDIR /src/server
 # .cargo/config.toml: the binary finds libsteam_api.so next to itself.
 COPY .cargo/ /src/.cargo/
