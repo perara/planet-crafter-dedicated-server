@@ -588,6 +588,7 @@ pub fn set(game: &mut Game, rules: Rules) -> Result<(), String> {
 
 /// What a change must reach at once; every other rule is read where it is used.
 fn changed(game: &mut Game, old: &Rules) {
+    crate::scene::sync_available_planets(game);
     if game.rules.speed.terraformation != old.speed.terraformation {
         let planets: Vec<i32> = game.units.planets.iter().map(|p| p.hash).collect();
         planets.into_iter().for_each(|p| game.units.force_reset(p));
@@ -845,6 +846,64 @@ mod tests {
     use crate::game::tests::{join, save};
     use crate::game::{test_game, Args};
     use serde_json::json;
+
+    fn destination_ids(g: &Game) -> Vec<String> {
+        let (object, _) = g.net.find_class("PlanetNetworkLoader").unwrap();
+        crate::testkit::list(g, object, "PlanetNetworkLoader", "_availablePlanets").iter().map(|b| {
+            g.net_data.planets[crate::wire::Reader::new(b).packed_i16().unwrap() as usize].id.clone()
+        }).collect()
+    }
+
+    #[test]
+    fn dlc_destinations_are_sent_after_saved_rules_start() {
+        let Some(mut g) = test_game(save()) else { return };
+        let free = destination_ids(&g);
+        assert!(!free.iter().any(|id| id == "Humble" || id == "Toxicity"));
+        let rules = Rules::default().patched(&json!({"world": {"dlcPlanets": ["Humble", "Toxicity"]}})).unwrap();
+        start(&mut g, rules, "unused-rules.json".into());
+        let destinations = destination_ids(&g);
+        assert!(destinations.iter().any(|id| id == "Humble"), "Humble missing from {destinations:?}");
+        assert!(destinations.iter().any(|id| id == "Toxicity"), "Toxicity missing from {destinations:?}");
+        assert_eq!(destinations.into_iter().filter(|id| id != "Humble" && id != "Toxicity").collect::<Vec<_>>(), free);
+    }
+
+    #[test]
+    fn dlc_destinations_change_live_with_a_client_list_delta() {
+        use crate::wire::Writer;
+        let Some(mut g) = test_game(save()) else { return };
+        join(&mut g, 1, "Ann");
+        let free = destination_ids(&g);
+        g.net.flush();
+        g.net.out.clear();
+        let rules = Rules::default().patched(&json!({"world": {"dlcPlanets": ["Humble", "Toxicity"]}})).unwrap();
+        set(&mut g, rules).unwrap();
+        g.net.flush();
+        let (object, behaviour) = g.net.find_class("PlanetNetworkLoader").unwrap();
+        let mut expected = Writer::new();
+        expected.packed_u64(object).packed_u16(behaviour).i32(4);
+        let indices: Vec<i16> = g.net_data.planets.iter().enumerate().filter(|(_, p)| free.contains(&p.id) || p.id == "Humble" || p.id == "Toxicity").map(|(i, _)| i as i16).collect();
+        for b in g.net.objects[&object].behaviours().filter(|b| b.index == behaviour) {
+            for (name, _, _) in b.vars() {
+                expected.bool(name == "_availablePlanets");
+                if name == "_availablePlanets" {
+                    expected.u16(indices.len() as u16 + 1).u8(5); // Clear, then Add each destination.
+                    for index in &indices {
+                        expected.u8(0).packed_i16(*index);
+                    }
+                }
+            }
+        }
+        assert!(g.net.out.iter().any(|(to, kind, body)| *to == crate::net::Target::All && *kind == crate::protocol::NETWORK_VARIABLE_DELTA && *body == expected.0), "connected clients did not receive the destination list delta");
+        assert!(destination_ids(&g).iter().any(|id| id == "Humble"));
+        assert!(destination_ids(&g).iter().any(|id| id == "Toxicity"));
+        g.net.out.clear();
+        let unchanged = g.rules.clone();
+        set(&mut g, unchanged).unwrap();
+        g.net.flush();
+        assert!(!g.net.out.iter().any(|(_, kind, _)| *kind == crate::protocol::NETWORK_VARIABLE_DELTA), "unchanged destinations need no client delta");
+        set(&mut g, Rules::default()).unwrap();
+        assert_eq!(destination_ids(&g), free, "disabling DLC preserves only the free planets");
+    }
 
     fn inventory(g: &Game, client: u64) -> i32 {
         g.clients[&client].ready.as_ref().unwrap().inventory

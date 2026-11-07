@@ -62,6 +62,23 @@ A few more conventions:
 - One test or one module: `cargo test --release units::` or `cargo test --release --bin pcds bank::`.
 - The tests set up their own folders under the system temp directory and use their own ports.
 
+### DLC destination regression (0.8.8)
+
+With your own tables, run `cargo test --manifest-path server/Cargo.toml --release
+--locked dlc_destinations -- --test-threads=2` from the repository root. These
+tests check saved-rule startup, the destination-list delta sent to connected
+clients, disabling DLC, unchanged rules, and restoration of an old snapshot with
+enabled DLC rules but a stale free-only list. They skip without tables.
+
+On game 2.104/build `d94f244bf8661a3d`, all three regression tests passed. The
+broader unit run had 869 passing, 3 failing and 32 ignored tests. The same three
+failures reproduced on the pre-fix binary: the two `handlers::adminchat::tests::
+keycard_door_repair_*` tests exercise the recovery restricted to game 2.103,
+and `newworld::tests::a_new_save_has_the_pod_the_inventories_and_the_settings`
+hardcodes `2.103` as the expected save version. These remain separate from the
+DLC fix; a green run on the 2.103 reference tables does not establish a green
+full suite on 2.104. No stock-client GUI acceptance is claimed by these tests.
+
 ### What the test environment variables are
 
 Variables that only tests and tools read are listed in [env.md](env.md) under "Tests and

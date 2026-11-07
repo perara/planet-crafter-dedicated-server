@@ -95,6 +95,7 @@ pub(super) fn reread(game: &mut Game, access_path: &str, rules_path: &str) -> Re
     if rules != game.rules {
         rules::set(game, rules)?;
     }
+    crate::scene::sync_available_planets(game);
     access::enforce(game);
     Ok(())
 }
@@ -148,6 +149,28 @@ pub(super) fn restore(f: &Frame, net_data: crate::data::NetData, data: crate::ga
 mod tests {
     use super::*;
     use crate::game;
+
+    #[test]
+    fn dlc_destinations_are_repaired_on_restore_with_unchanged_rules() {
+        let Some(mut game) = game::test_game(game::tests::save()) else { return };
+        // An old bank snapshot carries enabled DLC rules but its original free-only network list.
+        game.rules.world.dlc_planets = vec!["Humble".into(), "Toxicity".into()];
+        let snapshot = crate::handoff::snapshot(&mut game).unwrap();
+        let (net_data, data, spec, scenes) = game::test_tables().unwrap();
+        let mut game = crate::handoff::restore(net_data, data, spec, &snapshot, scenes).unwrap();
+        let dir = std::env::temp_dir().join(format!("pcds-dlc-restore-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rules = dir.join("rules.json");
+        game.rules.save(rules.to_str().unwrap()).unwrap();
+        reread(&mut game, dir.join("access.json").to_str().unwrap(), rules.to_str().unwrap()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let (object, _) = game.net.find_class("PlanetNetworkLoader").unwrap();
+        let destinations = crate::testkit::list(&game, object, "PlanetNetworkLoader", "_availablePlanets");
+        for id in ["Humble", "Toxicity"] {
+            let index = game.net_data.planet_index(id).unwrap() as i16;
+            assert!(destinations.contains(&crate::net::enc::short(index)), "{id} is still missing after restoring an old bank");
+        }
+    }
 
     /// A ban and a rules change written after a snapshot are in the game restored from it.
     #[test]
