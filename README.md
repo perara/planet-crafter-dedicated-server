@@ -94,7 +94,7 @@ workflow run built it. With the [GitHub CLI](https://cli.github.com/):
 ```bash
 sha256sum -c pcds-v*-linux-x86_64.tar.gz.sha256
 gh attestation verify pcds-v*-linux-x86_64.tar.gz --repo perara/planet-crafter-dedicated-server
-gh attestation verify oci://ghcr.io/perara/planet-crafter-dedicated-server:0.8.8 --repo perara/planet-crafter-dedicated-server   # the Docker image
+gh attestation verify oci://ghcr.io/perara/planet-crafter-dedicated-server:0.8.9 --repo perara/planet-crafter-dedicated-server   # the Docker image
 ```
 
 `up` takes the same options as `setup`. Step by step:
@@ -429,6 +429,9 @@ Admins can type these in game chat (the configured command prefix replaces `!`):
 !admin rule rockets.serverFlight=true
 !admin rule speed.growth=2
 !admin save
+!admin drones status
+!admin drones stop
+!admin drones resume
 !admin kick Player Name
 !admin ban Player Name
 !admin unban NAME_OR_STEAMID_OR_IP
@@ -445,6 +448,16 @@ matching entry, and the dashboard's bans list shows any others that must also be
 Chat admins can change gameplay, drone, rocket, save and update rules. Host programs, webhook
 secrets, backup credentials, DLC ownership and admin membership remain dashboard/console settings.
 Revocation takes effect on the next command, without a restart.
+
+**Drone stop and recall.** The dashboard's **World → Drone logistics** control
+and `!admin drones stop` stop new jobs on all planets. Assigned deliveries
+finish before drones return to stations with room; they need power to fly.
+`!admin drones recall` does the same, `!admin drones status` reports the global
+fleet and `!admin drones resume` enables jobs again. The state is saved with
+the world and survives restarts and hot updates. The game's own Stop/Recall
+button only changes the client and cannot control this dedicated server.
+The server console can also use `pcds api POST /api/drones/pause '{"paused":true}'`
+(`false` resumes); `pcds status --json` includes the `drones` state and counts.
 
 On Selenea in game 2.103, `!admin repair-keycards` repairs the known three-card base door after
 the old scene-inventory bug relocked it. It reuses three stranded KeyCard2 items,

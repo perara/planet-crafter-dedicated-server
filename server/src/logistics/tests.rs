@@ -34,6 +34,104 @@ fn group_items(game: &Game, inventory: i32, group: &str) -> usize {
     items(game, inventory).iter().filter(|w| game.wos[*w].group == g).count()
 }
 
+fn drone_control_loaded() -> Option<(Game, i32, i32, i32, i32, u64)> {
+    let mut g = crate::game::test_game(crate::game::tests::save())?;
+    crate::game::tests::join(&mut g, 1, "Operator");
+    g.clients.get_mut(&1).unwrap().verified_steam_id = Some(76561198000000001);
+    g.access.lists.operators.push("76561198000000001".into());
+    build(&mut g, "EnergyGenerator6", [40.0, 2.0, 0.0]);
+    let station = build(&mut g, "DroneStation1", [10.0, 2.0, 10.0]);
+    let supply = build(&mut g, "Container1", [25.0, 2.0, 10.0]);
+    let demand = build(&mut g, "Container1", [25.0, 2.0, 30.0]);
+    let (station, supply, demand) = (g.wos[&station].linked_inventory, g.wos[&supply].linked_inventory, g.wos[&demand].linked_inventory);
+    for _ in 0..3 { add(&mut g, "Iron", supply); }
+    let iron = g.data.group("Iron").unwrap();
+    g.inventories.get_mut(&supply).unwrap().logistic.supply = vec![iron];
+    set_dirty(&mut g, supply);
+    g.inventories.get_mut(&demand).unwrap().logistic.demand = vec![iron];
+    set_dirty(&mut g, demand);
+    let drone = add(&mut g, "Drone1", station);
+    let start = g.ext.logistics.last_tick;
+    for tick in start + 1..=start + 1200 {
+        frame(&mut g, tick);
+        if drone_task(&g, drone).is_some_and(|task| task_state(&g, task) == Some(State::ToDemand)) {
+            return Some((g, drone, station, supply, demand, tick));
+        }
+    }
+    panic!("the test drone never picked up its first delivery");
+}
+
+fn drone_control_chat(g: &mut Game, text: &str) {
+    crate::testkit::send_scene(g, 1, "ChatHandler.SendChatMessageServerRpc", &[json!(text)]);
+}
+
+#[test]
+fn drone_control_finishes_cargo_docks_persists_and_resumes() {
+    for nearest in [false, true] {
+        let Some((mut g, drone, station, supply, demand, mut tick)) = drone_control_loaded() else { return };
+        g.rules.drones.nearest_first = nearest;
+        let cargo = items(&g, g.ext.logistics.drones[&drone].inventory)[0];
+        let waiting = items(&g, supply);
+        assert_eq!(serde_json::to_value(control_status(&g)).unwrap(), json!({"paused": false, "flying": 1, "docked": 0, "returning": 0}));
+        drone_control_chat(&mut g, "!admin drones stop");
+        assert!(g.ext.logistics.paused, "the admin command must pause the server scheduler");
+        assert!(!g.held, "drone recall must not pause the world");
+        assert!(g.save_requested, "persist a toggle even while the world has not advanced");
+        for _ in 0..1200 { tick += 1; frame(&mut g, tick); }
+        assert_eq!(items(&g, demand), [cargo], "finish the cargo already in flight");
+        assert_eq!(items(&g, supply), waiting, "no new delivery while stopped");
+        assert!(items(&g, station).contains(&drone), "recall parks the drone");
+        assert!(g.ext.logistics.fleet.is_empty());
+        assert_eq!(serde_json::to_value(control_status(&g)).unwrap(), json!({"paused": true, "flying": 0, "docked": 1, "returning": 0}));
+        assert_eq!(g.snapshot().world["logisticsPaused"], true);
+        let cold = crate::testkit::reload(&mut g);
+        assert!(cold.ext.logistics.paused, "cold restart retains stop");
+        let snapshot = crate::handoff::snapshot(&mut g).unwrap();
+        let (n, d, s, scenes) = crate::game::test_tables().unwrap();
+        let mut g = crate::handoff::restore(n, d, s, &snapshot, scenes).unwrap();
+        assert!(g.ext.logistics.paused, "hot update retains stop");
+        drone_control_chat(&mut g, "!admin drones resume");
+        assert!(!g.ext.logistics.paused);
+        for _ in 0..2400 { tick += 1; frame(&mut g, tick); }
+        assert!(items(&g, supply).is_empty(), "resume takes the waiting work");
+        assert_eq!(group_items(&g, demand, "Iron"), 3);
+        assert!(g.wos.contains_key(&cargo), "recall/resume never destroys delivered cargo");
+        assert!(items(&g, station).contains(&drone));
+    }
+}
+
+#[test]
+fn drone_control_waits_for_full_station_without_losing_the_drone() {
+    let Some((mut g, drone, station, _supply, demand, mut tick)) = drone_control_loaded() else { return };
+    g.inventories.get_mut(&station).unwrap().size = 1;
+    let other = add(&mut g, "Drone1", station);
+    let cargo = items(&g, g.ext.logistics.drones[&drone].inventory)[0];
+    drone_control_chat(&mut g, "!admin drones recall");
+    assert!(g.ext.logistics.paused);
+    for _ in 0..1200 { tick += 1; frame(&mut g, tick); }
+    assert_eq!(items(&g, demand), [cargo]);
+    assert_eq!(items(&g, station), [other]);
+    assert!(g.ext.logistics.fleet.contains(&drone) && g.wos.contains_key(&drone), "a full dock must not delete a returning drone");
+    assert_eq!(serde_json::to_value(control_status(&g)).unwrap(), json!({"paused": true, "flying": 1, "docked": 1, "returning": 1}));
+    assert!(remove_item(&mut g, other, station));
+    g.destroy_world_object(other, false);
+    for _ in 0..300 { tick += 1; frame(&mut g, tick); }
+    assert_eq!(items(&g, station), [drone], "return after a dock slot opens");
+}
+
+#[test]
+fn drone_control_counts_include_docks_on_other_planets() {
+    let Some((mut g, _, _, _, _, _)) = drone_control_loaded() else { return };
+    let current = g.planet;
+    g.planet = g.net_data.planet_index("Selenea").unwrap();
+    let station = build(&mut g, "DroneStation1", [10.0, 2.0, 10.0]);
+    let inv = g.wos[&station].linked_inventory;
+    add(&mut g, "Drone1", inv);
+    add(&mut g, "Drone1", inv);
+    g.planet = current;
+    assert_eq!(serde_json::to_value(control_status(&g)).unwrap(), json!({"paused": false, "flying": 1, "docked": 2, "returning": 0}));
+}
+
 /// The oracle scenario: a station with one Drone1, a supply container with two iron and a
 /// demand container asking for iron. The drone carries both, one at a time, and goes home.
 #[test]

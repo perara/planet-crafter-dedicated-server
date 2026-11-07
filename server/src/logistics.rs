@@ -169,6 +169,36 @@ pub struct Logistics {
     navigation_failed: bool,
 }
 
+#[derive(serde::Serialize)]
+pub struct ControlStatus {
+    pub paused: bool,
+    pub flying: usize,
+    pub docked: usize,
+    pub returning: usize,
+}
+
+/// Global fleet counts, including drones on planets other than the one players are visiting.
+pub fn control_status(game: &Game) -> ControlStatus {
+    let l = &game.ext.logistics;
+    let docked = l.stations.iter().filter_map(|(_, station)| {
+        game.inventories.get(&station.inventory).map(|inv| inv.items.iter().filter(|id| {
+            game.wos.get(id).is_some_and(|w| station.groups.contains(&w.group))
+        }).count())
+    }).sum();
+    let returning = l.fleet.iter().filter(|id| l.drones.get(*id).is_some_and(|d| d.task.is_none())).count();
+    ControlStatus { paused: l.paused, flying: l.fleet.len(), docked, returning }
+}
+
+/// Stop new assignments; existing deliveries finish before the drones use their normal docking path.
+pub fn set_paused(game: &mut Game, paused: bool) {
+    if game.ext.logistics.paused != paused || game.save.world["logisticsPaused"].as_bool() != Some(paused) {
+        game.ext.logistics.paused = paused;
+        game.save.world["logisticsPaused"] = json!(paused);
+        // Save even when pauseWhenEmpty or the admin's world pause keeps autosave idle.
+        game.save_requested = true;
+    }
+}
+
 // ---- small lookups ------------------------------------------------------------------------
 
 fn tick_seconds(game: &Game) -> f32 {

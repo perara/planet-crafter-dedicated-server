@@ -75,6 +75,7 @@ const ROUTES: &[Route<Handler>] = &[
     route("POST", "/api/backup/s3", worlds::backup_to_s3),
     // The admin's pause: the world stands still (clock, machines, growth, gauges) until resumed.
     route("POST", "/api/pause", world::pause),
+    route("POST", "/api/drones/pause", world::pause_drones),
     route("GET", "/api/map", world::map),
 ];
 

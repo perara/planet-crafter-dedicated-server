@@ -51,6 +51,37 @@ If the new version fails, return to the previous bank with
 this restart. Keep the backup separately. Do not create a new world, remove the
 data volume, or use `docker compose down -v` during this update.
 
+## Drone stop and recall in 0.8.9
+
+Use the same offline `/data` backup procedure above. Start the existing
+container and wait for its world to run, then update it in place:
+
+```bash
+docker exec YOUR_CONTAINER pcds upgrade v0.8.9
+docker exec YOUR_CONTAINER pcds status --json
+```
+
+Keep the same data volume and world. Refresh the dashboard, open **World →
+Drone logistics**, and use **Stop & recall** or **Resume drones**. The status
+and counts cover all planets; current deliveries finish and returning drones
+wait if stations are full. Stop does not pause the world's clock. Verified
+Steam admins can also type `!admin drones stop`, `!admin drones status` and
+`!admin drones resume` (`recall` is an alias of `stop`). The stock game's
+Stop/Recall button does not control the server.
+
+These controls request a save even when nobody is playing. `logisticsPaused`
+in the existing save and `drones.paused` in status report the state; no save
+format conversion is needed. Before a rollback to 0.8.8, resume drones while
+the new controls are available:
+
+```bash
+docker exec YOUR_CONTAINER pcds api POST /api/drones/pause '{"paused":false}'
+docker exec YOUR_CONTAINER pcds upgrade --rollback --restart
+```
+
+Players reconnect after that rollback restart. Keep the backup separately;
+do not create a new world or delete the data volume.
+
 ## What runs where
 
 ```

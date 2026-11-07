@@ -156,6 +156,7 @@ pub struct Status<'a> {
     world: World<'a>,
     objects: Objects,
     held: bool,
+    drones: crate::logistics::ControlStatus,
     s3: crate::s3::Status<'a>,
     plugins: Value,
     last_save: Option<LastSave>,
@@ -192,6 +193,7 @@ pub(super) fn build<'a>(game: &'a Game, ctx: &Ctx<'a>, now: Instant) -> Status<'
         world: World { seed: &game.save.settings["worldSeed"], settings: &game.save.settings },
         objects: Objects { world: game.wos.len(), network: game.net.objects.len(), inventories: game.inventories.len() },
         held: game.held,
+        drones: crate::logistics::control_status(game),
         s3: crate::s3::status(&game.rules.backup),
         plugins: plugins::admin::summary(game),
         last_save: persist::last_save(),
@@ -336,6 +338,7 @@ mod tests {
             "world": {"seed": game.save.settings["worldSeed"], "settings": game.save.settings},
             "objects": {"world": game.wos.len(), "network": game.net.objects.len(), "inventories": game.inventories.len()},
             "held": game.held,
+            "drones": serde_json::to_value(crate::logistics::control_status(game)).unwrap(),
             "s3": serde_json::to_value(crate::s3::status(&game.rules.backup)).unwrap(),
             "plugins": plugins::admin::summary(game),
             "lastSave": old_last_save(),
@@ -401,7 +404,7 @@ mod tests {
         // Fields in the API's order.
         let v: Value = serde_json::from_str(&serde_json::to_string(&build(&game, &Ctx { ticks: &ticks, save_path: "w.json", build_id: None, data_dir: "", loop_rate: 0, busy: Default::default() }, now)).unwrap()).unwrap();
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, ["state", "gameVersion", "save", "autosaveMinutes", "tickRate", "rules", "fps", "busyPercent", "longestLoopMicros", "planet", "dlcPlanets", "terraformation", "stages", "gameTime", "units", "players", "access", "serverVersion", "tables", "world", "objects", "held", "s3", "plugins", "lastSave", "tick", "backup"]);
+        assert_eq!(keys, ["state", "gameVersion", "save", "autosaveMinutes", "tickRate", "rules", "fps", "busyPercent", "longestLoopMicros", "planet", "dlcPlanets", "terraformation", "stages", "gameTime", "units", "players", "access", "serverVersion", "tables", "world", "objects", "held", "drones", "s3", "plugins", "lastSave", "tick", "backup"]);
         assert_eq!(v["players"].as_array().map(Vec::len), Some(2));
         // The DLC planets the operator states they own (none by default).
         assert_eq!(v["dlcPlanets"], json!([]));

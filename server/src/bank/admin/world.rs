@@ -70,6 +70,16 @@ pub(super) fn map(game: &mut Game, _: &Request) -> Reply {
     (200, dashboard::map(game).to_string())
 }
 
+pub(super) fn pause_drones(game: &mut Game, r: &Request) -> Reply {
+    match r.body["paused"].as_bool() {
+        Some(paused) => {
+            crate::logistics::set_paused(game, paused);
+            json(200, &crate::logistics::control_status(game))
+        }
+        None => error(400, "'paused': true or false"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::request;
@@ -80,6 +90,29 @@ mod tests {
     use crate::save::SaveFile;
     use serde_json::{json, Value};
     use std::time::Duration;
+
+    #[test]
+    fn drone_control_api_is_validated_and_separate_from_world_pause() {
+        let Some(mut g) = game::test_game(game::tests::save()) else { return };
+        g.held = true;
+        for paused in [true, false] {
+            let (code, status) = super::super::call(&mut g, "POST", "/api/drones/pause", json!({"paused": paused}));
+            assert_eq!(code, 200, "{status}");
+            assert_eq!(status, json!({"paused": paused, "flying": 0, "docked": 0, "returning": 0}));
+            assert!(g.held, "drone controls do not change world pause");
+            assert_eq!(g.save.world["logisticsPaused"], paused);
+            let (_, status) = super::super::call(&mut g, "GET", "/api/status", json!({}));
+            assert_eq!(status["drones"]["paused"], paused);
+            g.save_requested = false;
+            assert_eq!(super::super::call(&mut g, "POST", "/api/drones/pause", json!({"paused": paused})).0, 200);
+            assert!(!g.save_requested, "an unchanged control does not queue redundant saves");
+        }
+        assert_eq!(super::super::call(&mut g, "GET", "/api/drones/pause", json!({})).0, 404);
+        for body in [json!({}), json!({"paused": "true"}), json!({"paused": 1}), json!({"paused": null})] {
+            assert_eq!(super::super::call(&mut g, "POST", "/api/drones/pause", body).0, 400);
+            assert_eq!(g.save.world["logisticsPaused"], false);
+        }
+    }
     /// The answers of save and pause print the bytes the json! macro made.
     #[test]
     fn the_answers_of_save_and_pause_print_what_the_json_macro_did() {
