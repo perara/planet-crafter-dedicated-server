@@ -82,6 +82,28 @@ docker exec YOUR_CONTAINER pcds upgrade --rollback --restart
 Players reconnect after that rollback restart. Keep the backup separately;
 do not create a new world or delete the data volume.
 
+## Station recall signs in 0.8.10
+
+Use the same existing `/data` mount. Follow the [offline backup steps](#updating-from-087-for-dlc-destinations)
+above before updating, then run `docker exec YOUR_CONTAINER pcds upgrade v0.8.10`
+and refresh the dashboard. No world conversion or new volume is needed.
+
+A **Sign within 4 metres** of a drone station's base, on the same planet, controls
+only the closest station. Its entire text can be `recall 1`, `recall 2`,
+`recall 3`, or `recall all` (T1/T2/T3/all tiers; case and extra whitespace ignored).
+Current deliveries finish before the selected drones return to their launch
+station. Clearing or removing the sign resumes those tiers. Other stations and
+tiers continue working. Multiple signs combine their tiers. A global manual
+stop stays active until an admin resumes it; a full or unpowered station can
+leave drones waiting. The dashboard reports active station recalls.
+
+Older flying drones without launch history use their last known or closest
+station. For a predictable first setup, use global **Stop & recall** once after
+upgrading, then **Resume drones** and use the signs. Saves and compatible hot
+updates retain signs and station associations. Older releases ignore the sign
+controls: before rollback, use the global manual stop if drones must remain
+recalled.
+
 ## What runs where
 
 ```

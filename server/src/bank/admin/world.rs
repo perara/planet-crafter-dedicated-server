@@ -98,7 +98,7 @@ mod tests {
         for paused in [true, false] {
             let (code, status) = super::super::call(&mut g, "POST", "/api/drones/pause", json!({"paused": paused}));
             assert_eq!(code, 200, "{status}");
-            assert_eq!(status, json!({"paused": paused, "flying": 0, "docked": 0, "returning": 0}));
+            assert_eq!(status, json!({"paused": paused, "flying": 0, "docked": 0, "returning": 0, "stationRecalls": []}));
             assert!(g.held, "drone controls do not change world pause");
             assert_eq!(g.save.world["logisticsPaused"], paused);
             let (_, status) = super::super::call(&mut g, "GET", "/api/status", json!({}));

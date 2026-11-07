@@ -19,6 +19,43 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+## [0.8.10] - 2026-11-08
+
+### Breaking changes
+
+* None. Front protocol 3, snapshot format 7 and tables format 4 are unchanged.
+  Station associations use optional JSON in the existing save world header;
+  the new runtime indexes are rebuilt on load, with no binary layout change.
+
+### Added
+
+* A native **Sign within 4 metres** of a drone station controls only the closest
+  station on the same planet. Its entire text can be `recall 1`, `recall 2`,
+  `recall 3`, or `recall all`: T1, T2, T3, or all drone tiers. Case and extra
+  whitespace are ignored. Other stations and unselected tiers keep working.
+* Selected drones finish assigned deliveries and return to their launch station,
+  waiting safely if it is full. Clearing or removing the sign resumes them;
+  several signs combine their tiers. Cargo, drones and other stored items are
+  preserved. Power is still required to fly and dock.
+* Sign controls and station associations survive saves, restarts and compatible
+  hot updates. Edits to control signs queue a save even in an idle/held world.
+  Ordinary labels do not trigger control saves. A manual global stop is separate
+  and still applies until resumed.
+* The dashboard shows active station recalls; API `drones.stationRecalls` lists
+  station IDs and recalled tiers. Global Resume and admin status explain when
+  station signs still apply. No client mod is needed: sign edits use the game's
+  existing `TextProxy.SetTextServerRpc`.
+
+### Upgrade
+
+Back up the existing `/data`, then run `pcds upgrade v0.8.10` (Docker:
+`docker exec CONTAINER pcds upgrade v0.8.10`) and refresh the dashboard. Keep the
+same world/data mount. Existing flying drones without launch history use their
+last known or closest station; for a predictable first setup, use global
+**Stop & recall** once, then **Resume drones** and use station signs. Before
+rollback to an older release, use the global manual stop if drones must stay
+recalled: older releases ignore sign controls. See [station sign update steps](docs/docker.md#station-recall-signs-in-0810).
+
 ## [0.8.9] - 2026-11-07
 
 ### Breaking changes
@@ -1069,7 +1106,8 @@ None; the first release.
 
 Not applicable.
 
-[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.9...HEAD
+[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.10...HEAD
+[0.8.10]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.9...v0.8.10
 [0.8.9]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.6...v0.8.7

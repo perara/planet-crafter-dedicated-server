@@ -456,6 +456,23 @@ finish before drones return to stations with room; they need power to fly.
 fleet and `!admin drones resume` enables jobs again. The state is saved with
 the world and survives restarts and hot updates. The game's own Stop/Recall
 button only changes the client and cannot control this dedicated server.
+**Recall one station from inside the game.** Place a **Sign within 4 metres** of
+that station's base position (on top or alongside it), on the same planet. Use
+`recall 1`, `recall 2`, `recall 3`, or `recall all` as its entire text: these mean
+T1, T2, T3, or all drone tiers. Case and extra whitespace do not matter. The sign
+binds only to the closest station; other stations and unselected tiers keep
+working. Several signs at one station combine their selected tiers.
+
+Selected drones finish current deliveries and return to the station that
+launched them. Clear the sign text, or remove the sign, to continue. A global
+admin/dashboard stop still applies until resumed. Full stations leave recalled
+drones waiting for a slot; power is still required. The dashboard shows how many
+stations have recall signs; `drones.stationRecalls` lists station IDs and tiers.
+Signs and launch/dock associations survive saves, restarts and hot updates.
+Drones already flying from an older save use their last known or closest station
+until their next docking. For a predictable first setup, use the global recall
+once after upgrading, then resume and use station signs.
+
 The server console can also use `pcds api POST /api/drones/pause '{"paused":true}'`
 (`false` resumes); `pcds status --json` includes the `drones` state and counts.
 

@@ -49,7 +49,7 @@ fn execute(game: &mut Game, args: &[String], prefix: &str) -> Result<String, Str
                 _ => return Err(format!("use {prefix}admin drones [status|stop|recall|resume]")),
             }
             let s = crate::logistics::control_status(game);
-            let state = if s.paused { "Stopped on all planets. Current deliveries finish before docking; stations need free space." } else { "Running on all planets. New deliveries are enabled." };
+            let state = if s.paused { "Stopped on all planets. Current deliveries finish before docking; stations need free space." } else if !s.station_recalls.is_empty() { "Global stop is off. Station recall signs still apply; clear their text to continue." } else { "Running on all planets. New deliveries are enabled." };
             Ok(format!("{state} Out of stations: {}; returning/waiting: {}; docked: {}.", s.flying, s.returning, s.docked))
         }
         "repair-keycards" if rest.len() <= 1 => {
