@@ -72,7 +72,7 @@ fn drone_control_finishes_cargo_docks_persists_and_resumes() {
         g.rules.drones.nearest_first = nearest;
         let cargo = items(&g, g.ext.logistics.drones[&drone].inventory)[0];
         let waiting = items(&g, supply);
-        assert_eq!(serde_json::to_value(control_status(&g)).unwrap(), json!({"paused": false, "flying": 1, "docked": 0, "returning": 0}));
+        assert_eq!(serde_json::to_value(control_status(&g)).unwrap(), json!({"paused": false, "flying": 1, "docked": 0, "returning": 0, "stationRecalls": []}));
         drone_control_chat(&mut g, "!admin drones stop");
         assert!(g.ext.logistics.paused, "the admin command must pause the server scheduler");
         assert!(!g.held, "drone recall must not pause the world");
@@ -82,7 +82,7 @@ fn drone_control_finishes_cargo_docks_persists_and_resumes() {
         assert_eq!(items(&g, supply), waiting, "no new delivery while stopped");
         assert!(items(&g, station).contains(&drone), "recall parks the drone");
         assert!(g.ext.logistics.fleet.is_empty());
-        assert_eq!(serde_json::to_value(control_status(&g)).unwrap(), json!({"paused": true, "flying": 0, "docked": 1, "returning": 0}));
+        assert_eq!(serde_json::to_value(control_status(&g)).unwrap(), json!({"paused": true, "flying": 0, "docked": 1, "returning": 0, "stationRecalls": []}));
         assert_eq!(g.snapshot().world["logisticsPaused"], true);
         let cold = crate::testkit::reload(&mut g);
         assert!(cold.ext.logistics.paused, "cold restart retains stop");
@@ -112,7 +112,7 @@ fn drone_control_waits_for_full_station_without_losing_the_drone() {
     assert_eq!(items(&g, demand), [cargo]);
     assert_eq!(items(&g, station), [other]);
     assert!(g.ext.logistics.fleet.contains(&drone) && g.wos.contains_key(&drone), "a full dock must not delete a returning drone");
-    assert_eq!(serde_json::to_value(control_status(&g)).unwrap(), json!({"paused": true, "flying": 1, "docked": 1, "returning": 1}));
+    assert_eq!(serde_json::to_value(control_status(&g)).unwrap(), json!({"paused": true, "flying": 1, "docked": 1, "returning": 1, "stationRecalls": []}));
     assert!(remove_item(&mut g, other, station));
     g.destroy_world_object(other, false);
     for _ in 0..300 { tick += 1; frame(&mut g, tick); }
@@ -129,7 +129,192 @@ fn drone_control_counts_include_docks_on_other_planets() {
     add(&mut g, "Drone1", inv);
     add(&mut g, "Drone1", inv);
     g.planet = current;
-    assert_eq!(serde_json::to_value(control_status(&g)).unwrap(), json!({"paused": false, "flying": 1, "docked": 2, "returning": 0}));
+    assert_eq!(serde_json::to_value(control_status(&g)).unwrap(), json!({"paused": false, "flying": 1, "docked": 2, "returning": 0, "stationRecalls": []}));
+}
+
+fn station_sign_set_text(g: &mut Game, sign: i32, text: &str) {
+    let net = g.wos[&sign].net.unwrap();
+    crate::testkit::send_on(g, 1, net, "TextProxy.SetTextServerRpc", &[json!(text)]);
+    assert_eq!(g.wos[&sign].text, text.trim_end_matches('\0'));
+}
+
+fn station_sign(g: &mut Game, station: i32, text: &str) -> i32 {
+    let mut position = station_position(g, station);
+    position[1] += 2.0;
+    let sign = build(g, "Sign", position);
+    station_sign_set_text(g, sign, text);
+    sign
+}
+
+#[test]
+fn station_sign_recall_finishes_cargo_returns_home_and_clearing_resumes() {
+    for nearest in [false, true] {
+        let Some((mut g, drone, inventory, supply, demand, mut tick)) = drone_control_loaded() else { return };
+        g.rules.drones.nearest_first = nearest;
+        let station = *g.ext.logistics.stations.iter().find(|(_, s)| s.inventory == inventory).unwrap().0;
+        let other = build(&mut g, "DroneStation1", [25.0, 2.0, 25.0]);
+        let other = g.wos[&other].linked_inventory;
+        build(&mut g, "EnergyGenerator6", [45.0, 2.0, 0.0]);
+        let cargo = items(&g, g.ext.logistics.drones[&drone].inventory)[0];
+        let waiting = items(&g, supply);
+        g.save_requested = false;
+        let mut position = station_position(&g, station);
+        position[1] += 2.0;
+        let sign = build(&mut g, "Sign", position);
+        let net = g.wos[&sign].net.unwrap();
+        crate::testkit::send_on(&mut g, 1, net, "TextProxy.SetTextServerRpc", &[json!("recall 1")]);
+        assert!(crate::energy::has_enough(&g, g.planet_hash()), "the two-station fixture must have enough power");
+        assert!(!g.ext.logistics.paused, "a station sign does not set the global manual stop");
+        assert!(g.save_requested, "persist native sign edits even while the world is held");
+        for _ in 0..1200 { tick += 1; frame(&mut g, tick); }
+        assert_eq!(items(&g, demand), [cargo], "finish the current delivery without taking a new job: nearest={nearest}, drone={:?}, cargo={:?}, task={:?}, fleet={:?}", g.ext.logistics.drones.get(&drone).map(|d| (d.position, d.target, d.task, d.access)), g.wos.get(&cargo).map(|w| (w.position, w.net)), drone_task(&g, drone).and_then(|t| g.ext.logistics.tasks.get(&t)), g.ext.logistics.fleet);
+        assert_eq!(items(&g, supply), waiting);
+        assert!(items(&g, inventory).contains(&drone), "return to the sign's station even if another is closer");
+        assert!(!items(&g, other).contains(&drone));
+        station_sign_set_text(&mut g, sign, "");
+        for _ in 0..2400 { tick += 1; frame(&mut g, tick); }
+        assert!(items(&g, supply).is_empty(), "clearing the sign automatically resumes deliveries");
+        assert_eq!(items(&g, demand).len(), 3);
+        assert!(g.wos.contains_key(&cargo), "recall never consumes cargo");
+    }
+}
+
+#[test]
+fn station_sign_recall_filters_each_tier_and_only_the_linked_station() {
+    for (command, allowed) in [("  ReCaLl   1 ", vec!["Drone2", "Drone3"]), ("recall 2", vec!["Drone1", "Drone3"]), ("recall 3", vec!["Drone1", "Drone2"]), ("recall all", vec![])] {
+        let Some((mut g, _, _, _, _, _)) = drone_control_loaded() else { return };
+        let station = build(&mut g, "DroneStation1", [80.0, 2.0, 10.0]);
+        let other = build(&mut g, "DroneStation1", [83.0, 2.0, 10.0]);
+        let inv = g.wos[&station].linked_inventory;
+        for group in ["Drone1", "Drone2", "Drone3"] { add(&mut g, group, inv); }
+        let other_inv = g.wos[&other].linked_inventory;
+        let other_drone = add(&mut g, "Drone1", other_inv);
+        station_sign(&mut g, station, command);
+        let mut released = Vec::new();
+        while let Some(drone) = release_one_drone(&mut g, station) { released.push(g.data.groups[g.wos[&drone].group].id.clone()); }
+        assert_eq!(released, allowed, "{command}");
+        assert_eq!(release_one_drone(&mut g, other), Some(other_drone), "nearby control must not stop another station");
+    }
+}
+
+#[test]
+fn station_sign_recall_ignores_far_cross_planet_and_other_labels() {
+    let Some((mut g, _, _, _, _, _)) = drone_control_loaded() else { return };
+    let station = build(&mut g, "DroneStation1", [80.0, 2.0, 10.0]);
+    let inv = g.wos[&station].linked_inventory;
+    let sign = build(&mut g, "Sign", [84.1, 2.0, 10.0]);
+    g.save_requested = false;
+    station_sign_set_text(&mut g, sign, "recall all");
+    assert!(!g.save_requested, "a far-away label must not trigger control saves");
+    let label = build(&mut g, "Container1", [80.0, 2.0, 10.0]);
+    station_sign_set_text(&mut g, label, "recall all");
+    let planet = g.planet;
+    g.planet = g.net_data.planet_index("Selenea").unwrap();
+    let foreign = build(&mut g, "Sign", [80.0, 2.0, 10.0]);
+    station_sign_set_text(&mut g, foreign, "recall all");
+    g.planet = planet;
+    let drone = add(&mut g, "Drone1", inv);
+    assert_eq!(release_one_drone(&mut g, station), Some(drone));
+    let local = station_sign(&mut g, station, "recall 4");
+    let drone = add(&mut g, "Drone1", inv);
+    assert_eq!(release_one_drone(&mut g, station), Some(drone));
+    station_sign_set_text(&mut g, local, "recall all");
+    add(&mut g, "Drone1", inv);
+    assert!(release_one_drone(&mut g, station).is_none(), "only a valid close sign recalls the station");
+}
+
+#[test]
+fn station_sign_recall_survives_save_and_snapshot_and_keeps_manual_stop() {
+    let Some((mut g, _, inventory, _, _, _)) = drone_control_loaded() else { return };
+    let station = *g.ext.logistics.stations.iter().find(|(_, s)| s.inventory == inventory).unwrap().0;
+    let sign = station_sign(&mut g, station, "recall all");
+    add(&mut g, "Drone2", inventory);
+    let mut cold = crate::testkit::reload(&mut g);
+    assert!(release_one_drone(&mut cold, station).is_none(), "cold load retains the sign control");
+    let snapshot = crate::handoff::snapshot(&mut g).unwrap();
+    let (n, d, s, scenes) = crate::game::test_tables().unwrap();
+    let mut g = crate::handoff::restore(n, d, s, &snapshot, scenes).unwrap();
+    crate::handoff::verify(&g, &snapshot).unwrap();
+    assert!(release_one_drone(&mut g, station).is_none(), "hot restore retains the sign control");
+    drone_control_chat(&mut g, "!admin drones stop");
+    station_sign_set_text(&mut g, sign, "");
+    assert!(g.ext.logistics.paused, "clearing a sign does not undo an admin's global stop");
+    drone_control_chat(&mut g, "!admin drones resume");
+    assert!(release_one_drone(&mut g, station).is_some());
+}
+
+#[test]
+fn station_sign_recall_combines_signs_and_removing_them_releases_each_tier() {
+    let Some((mut g, _, _, _, _, _)) = drone_control_loaded() else { return };
+    let station = build(&mut g, "DroneStation1", [80.0, 2.0, 10.0]);
+    let inv = g.wos[&station].linked_inventory;
+    let one = add(&mut g, "Drone1", inv);
+    let two = add(&mut g, "Drone2", inv);
+    let three = add(&mut g, "Drone3", inv);
+    let first = station_sign(&mut g, station, "recall 1");
+    let second = station_sign(&mut g, station, "recall 2");
+    assert_eq!(release_one_drone(&mut g, station), Some(three));
+    assert!(release_one_drone(&mut g, station).is_none());
+    station_sign_set_text(&mut g, first, "");
+    assert_eq!(release_one_drone(&mut g, station), Some(one));
+    assert!(release_one_drone(&mut g, station).is_none());
+    g.destroy_world_object(second, true);
+    assert_eq!(release_one_drone(&mut g, station), Some(two), "removing the remaining sign releases its tier");
+}
+
+#[test]
+fn station_sign_recall_leaves_other_tiers_and_other_stations_working() {
+    for nearest in [false, true] {
+        for other_station in [false, true] {
+            let Some((mut g, _, inventory, supply, demand, mut tick)) = drone_control_loaded() else { return };
+            g.rules.drones.nearest_first = nearest;
+            let station = if other_station {
+                build(&mut g, "EnergyGenerator6", [45.0, 2.0, 0.0]);
+                build(&mut g, "DroneStation1", [80.0, 2.0, 10.0])
+            } else { *g.ext.logistics.stations.iter().find(|(_, s)| s.inventory == inventory).unwrap().0 };
+            station_sign(&mut g, station, if other_station { "recall all" } else { "recall 2" });
+            for _ in 0..2400 { tick += 1; frame(&mut g, tick); }
+            assert!(items(&g, supply).is_empty(), "an unselected T1/station must keep delivering: nearest={nearest}, other_station={other_station}");
+            assert_eq!(items(&g, demand).len(), 3);
+        }
+    }
+}
+
+#[test]
+fn station_sign_recall_waits_at_its_full_home_without_consuming_items() {
+    let Some((mut g, drone, inventory, supply, demand, mut tick)) = drone_control_loaded() else { return };
+    let station = *g.ext.logistics.stations.iter().find(|(_, s)| s.inventory == inventory).unwrap().0;
+    build(&mut g, "EnergyGenerator6", [45.0, 2.0, 0.0]);
+    let other = build(&mut g, "DroneStation1", [25.0, 2.0, 25.0]);
+    let other = g.wos[&other].linked_inventory;
+    g.inventories.get_mut(&inventory).unwrap().size = 1;
+    let filler = add(&mut g, "Iron", inventory);
+    station_sign(&mut g, station, "recall 1");
+    for _ in 0..1200 { tick += 1; frame(&mut g, tick); }
+    assert_eq!(items(&g, demand).len(), 1);
+    assert_eq!(items(&g, inventory), [filler]);
+    assert!(g.ext.logistics.fleet.contains(&drone), "wait for a slot instead of deleting or transferring the drone");
+    assert!(items(&g, other).is_empty(), "recall must not move the drone to a different station");
+    assert!(remove_item(&mut g, filler, inventory));
+    assert!(g.add_existing_item(filler, supply, true, 0));
+    for _ in 0..300 { tick += 1; frame(&mut g, tick); }
+    assert_eq!(items(&g, inventory), [drone]);
+    assert!(g.wos.contains_key(&filler), "the control never consumes the station's other items");
+}
+
+#[test]
+fn station_sign_recall_freezes_legacy_home_before_cold_loaded_drones_join_the_fleet() {
+    let Some((mut g, drone, inventory, _, _, _)) = drone_control_loaded() else { return };
+    let station = *g.ext.logistics.stations.iter().find(|(_, s)| s.inventory == inventory).unwrap().0;
+    build(&mut g, "EnergyGenerator6", [45.0, 2.0, 0.0]);
+    build(&mut g, "DroneStation1", [80.0, 2.0, 10.0]);
+    station_sign(&mut g, station, "recall 1");
+    g.wos.get_mut(&drone).unwrap().position = [75.0, 4.0, 10.0];
+    g.save.world.as_object_mut().unwrap().remove("pcdsDroneStations");
+    let mut cold = crate::testkit::reload(&mut g);
+    assert!(control::recalled_station(&cold, drone).is_none(), "legacy drone starts at the un-recalled station");
+    cold.ext.logistics.drones.get_mut(&drone).unwrap().position = [11.0, 4.0, 10.0];
+    assert!(control::recalled_station(&cold, drone).is_none(), "flying past a different station must not change its cold-load association");
 }
 
 /// The oracle scenario: a station with one Drone1, a supply container with two iron and a

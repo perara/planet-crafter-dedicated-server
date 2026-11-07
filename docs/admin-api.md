@@ -45,7 +45,7 @@ thread, never held by the game loop), the front's loop (the process: updates, st
 | `POST /api/backup` | bank | nothing | Saves and makes a backup now, copied to S3 when that is set. |
 | `POST /api/backup/s3` | bank | nothing | Copies the newest backup to S3. |
 | `POST /api/pause` | bank | `{"paused": bool}` | The world stands still until resumed. |
-| `POST /api/drones/pause` | bank | `{"paused": bool}` | Stops new drone jobs on all planets, finishing current deliveries and returning to stations with room, or resumes jobs. Queues a world save; returns `paused`, `flying`, `docked`, `returning`. Requires the admin token. |
+| `POST /api/drones/pause` | bank | `{"paused": bool}` | Stops new drone jobs on all planets, finishing current deliveries and returning to stations with room, or resumes jobs. Queues a world save; returns `paused`, `flying`, `docked`, `returning`, and `stationRecalls` (station IDs and recalled tiers). Global resume leaves station signs in effect. Requires the admin token. |
 | `GET /api/map` | bank | nothing | The buildings on this planet, for the players' map. |
 | `GET /api/plugins` | bank | nothing | Every plugin with its status, capabilities, budgets and counters. |
 | `POST /api/plugins/reload` | bank | nothing | Reads the plugins' folder again. |

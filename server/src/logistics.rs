@@ -167,37 +167,12 @@ pub struct Logistics {
     /// drones.avoidObstacles was on with no usable map (said once).
     #[serde(skip)]
     navigation_failed: bool,
+    #[serde(skip)]
+    control: control::StationControls,
 }
 
-#[derive(serde::Serialize)]
-pub struct ControlStatus {
-    pub paused: bool,
-    pub flying: usize,
-    pub docked: usize,
-    pub returning: usize,
-}
-
-/// Global fleet counts, including drones on planets other than the one players are visiting.
-pub fn control_status(game: &Game) -> ControlStatus {
-    let l = &game.ext.logistics;
-    let docked = l.stations.iter().filter_map(|(_, station)| {
-        game.inventories.get(&station.inventory).map(|inv| inv.items.iter().filter(|id| {
-            game.wos.get(id).is_some_and(|w| station.groups.contains(&w.group))
-        }).count())
-    }).sum();
-    let returning = l.fleet.iter().filter(|id| l.drones.get(*id).is_some_and(|d| d.task.is_none())).count();
-    ControlStatus { paused: l.paused, flying: l.fleet.len(), docked, returning }
-}
-
-/// Stop new assignments; existing deliveries finish before the drones use their normal docking path.
-pub fn set_paused(game: &mut Game, paused: bool) {
-    if game.ext.logistics.paused != paused || game.save.world["logisticsPaused"].as_bool() != Some(paused) {
-        game.ext.logistics.paused = paused;
-        game.save.world["logisticsPaused"] = json!(paused);
-        // Save even when pauseWhenEmpty or the admin's world pause keeps autosave idle.
-        game.save_requested = true;
-    }
-}
+mod control;
+pub use control::{ControlStatus, control_status, restore_controls, set_paused, text_changed};
 
 // ---- small lookups ------------------------------------------------------------------------
 
@@ -354,6 +329,7 @@ pub fn init_late(game: &mut Game) {
     l.started = true;
     l.last_tick = tick;
     l.next_tasks = now + TASKS_EVERY;
+    restore_controls(game);
 }
 
 pub fn tick(game: &mut Game) {
@@ -418,6 +394,7 @@ pub fn on_instantiated(game: &mut Game, wo: i32) {
             game.ext.logistics.stations.insert(wo, station);
         }
     }
+    control::object_changed(game, id == "Sign" || game.ext.logistics.stations.contains_key(&wo));
 }
 
 /// A world object's GameObject was destroyed and the world object stays (a drone picked up):
@@ -427,6 +404,7 @@ pub fn on_go_destroyed(game: &mut Game, wo: i32) {
         drone_on_destroy(game, wo);
         game.ext.logistics.drones.shift_remove(&wo);
         game.ext.logistics.check_busy.retain(|d| *d != wo);
+        control::forget_drone(game, wo);
     }
 }
 
@@ -438,7 +416,10 @@ pub fn on_destroyed(game: &mut Game, wo: &WorldObject) {
         game.ext.logistics.drones.shift_remove(&wo.id);
         game.ext.logistics.check_busy.retain(|d| *d != wo.id);
     }
-    game.ext.logistics.stations.remove(&wo.id);
+    control::forget_drone(game, wo.id);
+    let station = game.ext.logistics.stations.remove(&wo.id).is_some();
+    if station { control::station_removed(game, wo.id); }
+    control::object_changed(game, station || game.data.groups[wo.group].id == "Sign");
 }
 
 /// Inventory.PropagateModification: nothing of the logistics listens (the interplanetary
@@ -489,6 +470,7 @@ fn remove_first(list: &mut Vec<i32>, v: i32) {
 // ---- one frame ------------------------------------------------------------------------------
 
 fn frame(game: &mut Game, tick: u64) {
+    control::persist_older_homes(game);
     // The wire has the game's int tick (Game::tick_number).
     send_transforms(game, tick as i32);
     update(game);
@@ -1011,7 +993,7 @@ fn assign_idle_drones_in_game_order(game: &mut Game) {
     game.ext.logistics.updating = 2;
     let mut i = 0;
     while i < game.ext.logistics.access.len() {
-        if let Some(d) = game.ext.logistics.access[i] {
+        if let Some(d) = game.ext.logistics.access[i].filter(|d| control::recalled_station(game, *d).is_none()) {
             let Some(task) = non_attributed_task(game, planet_of(game, d)) else { break };
             if drone_task(game, d).is_none() {
                 set_task(game, d, Some(task));
@@ -1083,7 +1065,7 @@ fn release_drones_nearest(game: &mut Game) {
     }
     // Count compatible parked drones once, rather than sorting all stations for every item.
     let mut available: Vec<_> = game.ext.logistics.stations.iter().filter_map(|(st, s)| {
-        let count = items(game, s.inventory).iter().filter(|wo| game.wos.get(wo).is_some_and(|w| s.groups.contains(&w.group))).count();
+        let count = items(game, s.inventory).iter().filter(|wo| game.wos.get(wo).is_some_and(|w| s.groups.contains(&w.group) && !control::station_recall_matches(game, *st, w.group))).count();
         (count > 0).then(|| (*st, s.planet, station_position(game, *st), count))
     }).collect();
     struct Job {
@@ -1149,6 +1131,7 @@ fn non_attributed_task(game: &Game, planet: i32) -> Option<u32> {
 /// The task a drone takes when it is free: the game's first free task of its planet, or with
 /// drones.nearestFirst the best one (next_task_for_drone).
 fn next_task(game: &Game, d: i32) -> Option<u32> {
+    if control::recalled_station(game, d).is_some() { return None; }
     if game.rules.drones.nearest_first { next_task_for_drone(game, d) } else { non_attributed_task(game, planet_of(game, d)) }
 }
 
@@ -1156,7 +1139,7 @@ fn next_task(game: &Game, d: i32) -> Option<u32> {
 /// task slot order.
 fn next_task_for_drone(game: &Game, d: i32) -> Option<u32> {
     let l = &game.ext.logistics;
-    if l.paused { return None; }
+    if l.paused || control::recalled_station(game, d).is_some() { return None; }
     let position = l.drones.get(&d)?.position;
     let planet = planet_of(game, d);
     l.all_tasks.iter().filter_map(|(_, uid)| {
@@ -1301,7 +1284,7 @@ fn release_one_drone(game: &mut Game, st: i32) -> Option<i32> {
         (s.inventory, s.groups.clone(), s.planet)
     };
     for wo in items(game, inventory) {
-        if !game.wos.get(&wo).is_some_and(|w| groups.contains(&w.group)) {
+        if !game.wos.get(&wo).is_some_and(|w| groups.contains(&w.group) && !control::station_recall_matches(game, st, w.group)) {
             continue;
         }
         remove_item(game, wo, inventory);
@@ -1312,10 +1295,9 @@ fn release_one_drone(game: &mut Game, st: i32) -> Option<i32> {
         w.rotation = motion::IDENTITY;
         w.planet = planet;
         let parked = game.ext.logistics.stations.get_mut(&st).is_some_and(|s| s.parked.remove(&wo));
-        if parked && respawn_drone(game, wo) {
-            return Some(wo);
-        }
-        return game.instantiate(wo, false, 0).map(|_| wo);
+        let released = (parked && respawn_drone(game, wo)) || game.instantiate(wo, false, 0).is_some();
+        if released { control::remember_station(game, wo, st); }
+        return released.then_some(wo);
     }
     None
 }
@@ -1327,6 +1309,7 @@ fn return_drone_to_station(game: &mut Game, st: i32, d: i32) -> bool {
         return false;
     }
     game.add_existing_item(d, inventory, true, 0);
+    control::remember_station(game, d, st);
     park_drone(game, d);
     if let Some(s) = game.ext.logistics.stations.get_mut(&st) {
         s.parked.insert(d);
@@ -1616,6 +1599,10 @@ fn drone_on_destroy(game: &mut Game, d: i32) {
 /// Drone.SetClosestAvailableDroneStation: the nearest station of its planet with room, else
 /// the one it had, else any of its planet.
 fn closest_available_station(game: &mut Game, d: i32) {
+    if let Some(station) = control::recalled_station(game, d) {
+        game.ext.logistics.drones.get_mut(&d).unwrap().station = Some(station);
+        return;
+    }
     let planet = planet_of(game, d);
     let Some(dr) = game.ext.logistics.drones.get(&d) else { return };
     let position = dr.position;

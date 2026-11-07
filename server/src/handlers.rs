@@ -254,6 +254,7 @@ pub fn rpc(game: &mut Game, client: u64, object: u64, behaviour: u16, name: &str
             if let Some(w) = wo.and_then(|w| game.wos.get_mut(&w)) {
                 w.text = text;
             }
+            if let Some(wo) = wo { crate::logistics::text_changed(game, wo); }
         }
         "ColorProxy.SetColorServerRpc" => set_color(game, object, a.q(0)),
         "SettingProxy.SetSettingServerRpc" => {

@@ -489,7 +489,7 @@
           <div class="head"><h2>Drone logistics</h2><div class="right"><span id="droneState" role="status" aria-live="polite"></span></div></div>
           <dl class="info" id="droneInfo"></dl>
           <div class="row" style="margin-top:14px"><button class="primary" id="toggleDrones" style="min-height:44px" disabled>Stop &amp; recall</button></div>
-          <p class="sub" id="droneHelp" style="margin:10px 0 0">All planets. Stop prevents new jobs; current deliveries finish before drones return. Drones need power and free station slots to dock. Use this control or admin chat; the game's own stop button does not stop server deliveries.</p>
+          <p class="sub" id="droneHelp" style="margin:10px 0 0">All planets. Stop prevents new jobs; current deliveries finish before drones return. Drones need power and free station slots to dock. Use this control or admin chat; the game's own stop button does not stop server deliveries. A Sign within 4 metres of a station can recall drones launched from it, by tier: recall 1, recall 2, recall 3, or recall all. Clear the sign to continue; a global stop still applies.</p>
         </div>
         <div class="card">
           <div class="head"><h2>Worlds</h2><div class="right"><button class="primary small" id="newWorld">New world</button><button class="small" id="worldsRefresh">Refresh</button></div></div>
@@ -1450,9 +1450,9 @@ function renderDroneControl(s) {
   const btn = $('toggleDrones');
   btn.disabled = !d || btn.classList.contains('busy');
   btn.textContent = d && d.paused ? 'Resume drones' : 'Stop & recall';
-  const label = !d ? (s.state === 'stopped' ? 'World stopped' : 'Update the server to use drone controls') : d.paused ? 'Stopped' : 'Running';
+  const label = !d ? (s.state === 'stopped' ? 'World stopped' : 'Update the server to use drone controls') : d.paused ? 'Stopped' : d.stationRecalls?.length ? 'Station recall active' : 'Running';
   if ($('droneState').textContent !== label) $('droneState').textContent = label;
-  $('droneInfo').replaceChildren(...(d ? pairs([['Out of stations', d.flying.toLocaleString()], ['Returning / waiting for a dock', d.returning.toLocaleString()], ['Docked', d.docked.toLocaleString()]]) : []));
+  $('droneInfo').replaceChildren(...(d ? pairs([['Out of stations', d.flying.toLocaleString()], ['Returning / waiting for a dock', d.returning.toLocaleString()], ['Docked', d.docked.toLocaleString()], ['Stations recalling by sign', (d.stationRecalls?.length || 0).toLocaleString()]]) : []));
 }
 let worldsData = null;
 async function loadWorlds() {
@@ -1593,7 +1593,7 @@ $('ovPause').onclick = e => setPaused(!(status && status.held), e.currentTarget)
 $('toggleDrones').onclick = async e => {
   const btn = e.currentTarget, d = status && status.state === 'running' && status.drones;
   if (!d || btn.classList.contains('busy')) return;
-  const r = await act(d.paused ? 'Drone deliveries resumed' : 'Drones stopped: finishing deliveries and returning to stations', () => api('POST', '/api/drones/pause', { paused: !d.paused }), btn);
+  const r = await act(d.paused ? r => r.stationRecalls?.length ? 'Global stop cleared; station recall signs still apply' : 'Drone deliveries resumed' : 'Drones stopped: finishing deliveries and returning to stations', () => api('POST', '/api/drones/pause', { paused: !d.paused }), btn);
   if (r && status) status.drones = r;
   if (status) renderDroneControl(status);
 };
