@@ -7,6 +7,50 @@ section is the short version. Everything marked "measured" was run for real in D
 Linux 7) against the images this repository builds and the published 0.6.0 to 0.6.2 ones; what was
 not run is listed at the end.
 
+## Updating from 0.8.7 for DLC destinations
+
+Version 0.8.8 repairs the travel rocket's missing Humble/Toxicity destinations,
+including the stale list inherited from a running 0.8.7 server. Keep the existing
+container and its `/data` mount. The world and settings need no conversion.
+
+First make an offline copy of the current data on the Docker host. This stop is
+for a consistent backup; the subsequent version update can run live. Replace
+`your-pcds-container` with the existing container's name:
+
+```bash
+C=your-pcds-container
+backup_dir="$PWD/pcds-backup-$(date +%Y%m%d-%H%M%S)"
+docker exec "$C" pcds save
+docker stop --time 90 "$C"
+mkdir -m 700 "$backup_dir"
+docker cp "$C":/data/. "$backup_dir/"
+test -d "$backup_dir/worlds"
+find "$backup_dir/worlds" -type f -name '*.json' -exec sha256sum {} + > "$backup_dir/world-save-sha256.txt"
+test -s "$backup_dir/world-save-sha256.txt"
+sha256sum -c "$backup_dir/world-save-sha256.txt"
+```
+
+Run each command only after the previous one succeeds. Confirm your current save
+is in `worlds/` in that backup, then start the same container. Wait until
+`pcds status` says the world is running before upgrading:
+
+```bash
+docker start "$C"
+docker exec "$C" pcds status
+docker exec "$C" pcds upgrade v0.8.8
+docker exec "$C" pcds status --json
+```
+
+The running bank must show `serverVersion: "0.8.8"`, your existing save name and
+planet, and `dlcPlanets: ["Humble", "Toxicity"]` if both were already enabled.
+Close and reopen the travel rocket's destination screen. From Aqualis its
+choices should include Prime, Humble, Selenea, Toxicity and Skeo.
+
+If the new version fails, return to the previous bank with
+`docker exec "$C" pcds upgrade --rollback --restart`; players reconnect after
+this restart. Keep the backup separately. Do not create a new world, remove the
+data volume, or use `docker compose down -v` during this update.
+
 ## What runs where
 
 ```

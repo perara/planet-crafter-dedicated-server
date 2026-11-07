@@ -816,8 +816,13 @@ pub mod tests {
         put_with(&banks, "b", &new, record, |_| false).unwrap();
         let log = log.into_inner();
         let names: Vec<String> = log.iter().map(|(p, _)| p.display().to_string()).collect();
-        // Both files, the web folder, the new folder (last of them), then the banks folder.
-        assert_eq!(names, [".b.new.1/web/index.html", ".b.new.1/web", ".b.new.1/pcds", ".b.new.1", ""].map(String::from).to_vec(), "{names:?}");
+        // read_dir may visit siblings in either order; children must precede their directories.
+        assert_eq!(names.len(), 5, "{names:?}");
+        assert_eq!(&names[3..], [".b.new.1", ""]);
+        assert!(names.iter().position(|p| p == ".b.new.1/web/index.html").unwrap() < names.iter().position(|p| p == ".b.new.1/web").unwrap());
+        let mut contents = names[..3].to_vec();
+        contents.sort();
+        assert_eq!(contents, [".b.new.1/pcds", ".b.new.1/web", ".b.new.1/web/index.html"]);
         assert!(log[..4].iter().all(|(_, bank)| bank == "old"), "flushed while the old bank stood: {log:?}");
         assert_eq!(log[4].1, "new", "the move flushed after it was made");
         assert_eq!(std::fs::read_to_string(banks.join("b/pcds")).unwrap(), "new");

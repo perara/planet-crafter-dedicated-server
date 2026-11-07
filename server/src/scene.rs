@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use crate::clock::GameTime;
 use crate::data::stable_hash;
 use crate::game::Game;
-use crate::net::{enc, Target, VarValue};
+use crate::net::{enc, ListEvent, Target, VarValue};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum Timer {
@@ -51,6 +51,17 @@ fn list_i32(items: impl Iterator<Item = i32>) -> Vec<Vec<u8>> {
 pub fn available_planets(game: &Game) -> Vec<usize> {
     let stated = &game.rules.world.dlc_planets;
     game.net_data.planets.iter().enumerate().filter(|(_, p)| p.steam_app_id == 0 || stated.contains(&p.id)).map(|(i, _)| i).collect()
+}
+
+/// Saved rules load after the scene; old bank snapshots can also carry a stale list.
+pub fn sync_available_planets(game: &mut Game) {
+    let Some((object, _)) = game.net.find_class("PlanetNetworkLoader") else { return };
+    let available: Vec<Vec<u8>> = available_planets(game).into_iter().map(|i| enc::short(i as i16)).collect();
+    if matches!(game.net.get(object, "PlanetNetworkLoader", "_availablePlanets"), Some(VarValue::List(current)) if *current == available) {
+        return;
+    }
+    let events = std::iter::once(ListEvent::Clear).chain(available.into_iter().map(ListEvent::Add)).collect();
+    game.net.list_events(object, "PlanetNetworkLoader", "_availablePlanets", events);
 }
 
 pub fn init(game: &mut Game) {

@@ -19,6 +19,30 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+## [0.8.8] - 2026-11-07
+
+### Breaking changes
+
+* None. Front protocol 3, snapshot format 7 and tables format 4 are unchanged.
+  Existing worlds, buildings, inventories and settings keep their current formats.
+
+### Fixed
+
+* Humble and Toxicity appear in the travel rocket when `world.dlcPlanets` lists
+  them. The destination list now refreshes after saved rules load and when the
+  rule changes live; previously only the status/settings reflected the change.
+* Updating from an affected release repairs the stale destination list carried
+  in its world snapshot, even when the saved DLC rule has not changed.
+
+### Upgrade
+
+From 0.8.7, save and back up the existing world/data folder, then use
+`pcds upgrade v0.8.8` (Docker: `docker exec CONTAINER pcds upgrade v0.8.8`).
+The update keeps players connected and retains the current world and settings.
+Close and reopen the travel rocket's destination screen after the update.
+List only the DLC planets you own in `world.dlcPlanets`; if already enabled,
+no further setting change is needed. See [the Docker backup and update steps](docs/docker.md#updating-from-087-for-dlc-destinations).
+
 ## [0.8.7] - 2026-10-24
 
 ### Breaking changes
@@ -1012,7 +1036,8 @@ None; the first release.
 
 Not applicable.
 
-[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.7...HEAD
+[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.8...HEAD
+[0.8.8]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.4...v0.8.5
