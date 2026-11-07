@@ -601,7 +601,7 @@ mod tests {
         assert!(client.join().unwrap().starts_with("HTTP/1.1 200"));
         // A scope it does not have, an endpoint no scope covers, the endpoints that manage tokens:
         // refused before the game loop hears of them.
-        for (method, path) in [("POST", "/api/kick"), ("GET", "/api/status"), ("POST", "/api/stop"), ("GET", "/api/logs"), ("POST", "/api/rules"), ("GET", "/api/plugins/tokens"), ("POST", "/api/plugins/tokens"), ("POST", "/api/plugins/tokens/revoke"), ("POST", "/api/plugins/enable"), ("POST", "/api/plugins/trust")] {
+        for (method, path) in [("POST", "/api/drones/pause"), ("POST", "/api/kick"), ("GET", "/api/status"), ("POST", "/api/stop"), ("GET", "/api/logs"), ("POST", "/api/rules"), ("GET", "/api/plugins/tokens"), ("POST", "/api/plugins/tokens"), ("POST", "/api/plugins/tokens/revoke"), ("POST", "/api/plugins/enable"), ("POST", "/api/plugins/trust")] {
             let answer = ask(addr, req(&relay, method, path).as_bytes());
             assert!(answer.starts_with("HTTP/1.1 403"), "{method} {path}: {answer}");
             assert!(!answer.contains(&relay), "a token is never echoed");

@@ -40,7 +40,18 @@ fn execute(game: &mut Game, args: &[String], prefix: &str) -> Result<String, Str
     let command = args.first().map_or("help".into(), |s| s.to_ascii_lowercase());
     let rest = &args[usize::from(!args.is_empty())..];
     match command.as_str() {
-        "help" if rest.is_empty() => Ok(format!("Admin commands:\n{prefix}admin rule SECTION.RULE=VALUE\n{prefix}admin save\n{prefix}admin kick PLAYER\n{prefix}admin ban PLAYER\n{prefix}admin unban NAME_OR_STEAMID_OR_IP\n{prefix}admin tp PLAYER X Y Z\n{prefix}admin repair-keycards [INVENTORY_ID]\nUse a player's name or #client-id. Admins are managed in the dashboard.")),
+        "help" if rest.is_empty() => Ok(format!("Admin commands:\n{prefix}admin rule SECTION.RULE=VALUE\n{prefix}admin save\n{prefix}admin drones [status|stop|recall|resume]\n{prefix}admin kick PLAYER\n{prefix}admin ban PLAYER\n{prefix}admin unban NAME_OR_STEAMID_OR_IP\n{prefix}admin tp PLAYER X Y Z\n{prefix}admin repair-keycards [INVENTORY_ID]\nUse a player's name or #client-id. Admins are managed in the dashboard.")),
+        "drones" if rest.len() <= 1 => {
+            match rest.first().map_or("status", String::as_str).to_ascii_lowercase().as_str() {
+                "stop" | "recall" => crate::logistics::set_paused(game, true),
+                "resume" => crate::logistics::set_paused(game, false),
+                "status" => {},
+                _ => return Err(format!("use {prefix}admin drones [status|stop|recall|resume]")),
+            }
+            let s = crate::logistics::control_status(game);
+            let state = if s.paused { "Stopped on all planets. Current deliveries finish before docking; stations need free space." } else { "Running on all planets. New deliveries are enabled." };
+            Ok(format!("{state} Out of stations: {}; returning/waiting: {}; docked: {}.", s.flying, s.returning, s.docked))
+        }
         "repair-keycards" if rest.len() <= 1 => {
             let source = rest.first().map(|s| s.parse::<i32>().map_err(|_| "INVENTORY_ID must be an integer".to_string())).transpose()?;
             game.repair_selenea_keycard_door(source)
@@ -126,6 +137,25 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].to, Target::Only(1), "admin feedback is private");
         messages[0].args[1].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn drone_control_checks_verified_operator_and_revocation() {
+        let Some(mut g) = world() else { return };
+        crate::testkit::send_scene(&mut g, 2, "ChatHandler.SendChatMessageServerRpc", &[json!("!admin drones stop")]);
+        assert_ne!(g.save.world["logisticsPaused"], true, "an ordinary player cannot stop drones");
+        assert!(say(&mut g, "!admin drones stop").contains("Stopped"));
+        assert_eq!(g.save.world["logisticsPaused"], true);
+        g.access.lists.operators.clear();
+        assert!(say(&mut g, "!admin drones resume").contains("Only server admins"));
+        assert_eq!(g.save.world["logisticsPaused"], true);
+        g.access.lists.operators.push(ADMIN.to_string());
+        assert!(say(&mut g, "!admin drones wrong").contains("use"));
+        assert_eq!(g.save.world["logisticsPaused"], true, "bad arguments cannot resume drones");
+        g.rules.chat.command_prefix = Some("$".into());
+        assert!(say(&mut g, "$admin drones status").contains("Stopped"));
+        assert!(say(&mut g, "$admin drones resume").contains("Running"));
+        assert_eq!(g.save.world["logisticsPaused"], false);
     }
 
     #[test]

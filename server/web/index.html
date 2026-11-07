@@ -486,6 +486,12 @@
           </div>
         </div>
         <div class="card">
+          <div class="head"><h2>Drone logistics</h2><div class="right"><span id="droneState" role="status" aria-live="polite"></span></div></div>
+          <dl class="info" id="droneInfo"></dl>
+          <div class="row" style="margin-top:14px"><button class="primary" id="toggleDrones" style="min-height:44px" disabled>Stop &amp; recall</button></div>
+          <p class="sub" id="droneHelp" style="margin:10px 0 0">All planets. Stop prevents new jobs; current deliveries finish before drones return. Drones need power and free station slots to dock. Use this control or admin chat; the game's own stop button does not stop server deliveries.</p>
+        </div>
+        <div class="card">
           <div class="head"><h2>Worlds</h2><div class="right"><button class="primary small" id="newWorld">New world</button><button class="small" id="worldsRefresh">Refresh</button></div></div>
           <p class="sub" id="worldsNote">Every world beside this one: one save file each in worlds/.</p>
           <div class="tw" id="worlds"></div>
@@ -1425,6 +1431,7 @@ function backupLine(b) {
 }
 function renderWorld(s) {
   const world = s.world || {};
+  renderDroneControl(s);
   $('worldState').replaceChildren(s.held ? h('span', { class: 'chip warn' }, 'paused') : h('span', { class: 'chip ok' }, 'running'));
   if (s.s3) renderS3(s.s3);
   $('worldInfo').replaceChildren(...pairs([['World', s.save], ['Planet', s.planet], ['World seed', String(world.seed ?? '–')],
@@ -1437,6 +1444,15 @@ function renderWorld(s) {
     $('worldSettings').dataset.sig = sig;
     $('worldSettings').replaceChildren(table(['Setting', 'Value'], settings.map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v) : String(v)]), 'No settings'));
   }
+}
+function renderDroneControl(s) {
+  const d = s.state === 'running' && s.drones;
+  const btn = $('toggleDrones');
+  btn.disabled = !d || btn.classList.contains('busy');
+  btn.textContent = d && d.paused ? 'Resume drones' : 'Stop & recall';
+  const label = !d ? (s.state === 'stopped' ? 'World stopped' : 'Update the server to use drone controls') : d.paused ? 'Stopped' : 'Running';
+  if ($('droneState').textContent !== label) $('droneState').textContent = label;
+  $('droneInfo').replaceChildren(...(d ? pairs([['Out of stations', d.flying.toLocaleString()], ['Returning / waiting for a dock', d.returning.toLocaleString()], ['Docked', d.docked.toLocaleString()]]) : []));
 }
 let worldsData = null;
 async function loadWorlds() {
@@ -1531,6 +1547,7 @@ $('backupNow').onclick = e => act(r => r.s3 ? `Backup ${r.backup} made; copying 
 $('s3Now').onclick = e => act(r => `Copying ${r.key} to S3`, () => api('POST', '/api/backup/s3'), e.currentTarget).then(() => setTimeout(loadWorlds, 1500));
 // ---- the world: stop, start, another one (the front does it; the page stays) ----
 function renderStopped(s) {
+  renderDroneControl(s);
   setPill('down', 'World stopped');
   $('hdrTitle').textContent = s.save || 'Planet Crafter Server';
   $('hdrSub').textContent = `The world is stopped · pcds ${s.serverVersion}`;
@@ -1573,6 +1590,13 @@ async function setPaused(paused, btn) {
 }
 $('pauseWorld').onclick = e => setPaused(!(status && status.held), e.currentTarget);
 $('ovPause').onclick = e => setPaused(!(status && status.held), e.currentTarget);
+$('toggleDrones').onclick = async e => {
+  const btn = e.currentTarget, d = status && status.state === 'running' && status.drones;
+  if (!d || btn.classList.contains('busy')) return;
+  const r = await act(d.paused ? 'Drone deliveries resumed' : 'Drones stopped: finishing deliveries and returning to stations', () => api('POST', '/api/drones/pause', { paused: !d.paused }), btn);
+  if (r && status) status.drones = r;
+  if (status) renderDroneControl(status);
+};
 $('stopServer').onclick = async () => {
   if (await ask({ title: 'Shut down the server?', body: 'The world is saved, then the whole server quits, this page with it. Start it again with pcds start on the host. To stop only the world and keep this page, use Stop world.', ok: 'Shut down', danger: true }))
     act('Stopping: the server saves, then quits', () => api('POST', '/api/stop'));

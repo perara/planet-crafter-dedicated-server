@@ -138,6 +138,7 @@ pub const ROUTES: &[Route] = &[
     route("POST", "/api/backup", Owner::Bank, "", "Saves and makes a backup now, copied to S3 when that is set."),
     route("POST", "/api/backup/s3", Owner::Bank, "", "Copies the newest backup to S3."),
     route("POST", "/api/pause", Owner::Bank, "`{\"paused\": bool}`", "The world stands still until resumed."),
+    route("POST", "/api/drones/pause", Owner::Bank, "`{\"paused\": bool}`", "Stops new drone jobs on all planets, finishing current deliveries and returning to stations with room, or resumes jobs. Queues a world save; returns `paused`, `flying`, `docked`, `returning`. Requires the admin token."),
     route("GET", "/api/map", Owner::Bank, "", "The buildings on this planet, for the players' map."),
     route("GET", "/api/plugins", Owner::Bank, "", "Every plugin with its status, capabilities, budgets and counters."),
     route("POST", "/api/plugins/reload", Owner::Bank, "", "Reads the plugins' folder again."),

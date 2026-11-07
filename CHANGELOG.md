@@ -19,6 +19,39 @@ Every release has two parts a reader can rely on:
 
 ## [Unreleased]
 
+## [0.8.9] - 2026-11-07
+
+### Breaking changes
+
+* None. Front protocol 3, snapshot format 7 and tables format 4 are unchanged.
+  The control uses the existing world's `logisticsPaused` field.
+
+### Added
+
+* **World → Drone logistics** has working server-side **Stop & recall** and
+  **Resume drones** controls, with global flying, returning/waiting and docked
+  counts. Stop prevents new jobs on every planet; current deliveries finish
+  before drones return to stations with room. The world's clock keeps its
+  existing pause state. Cargo and drone objects are not cancelled or deleted
+  by the control.
+* Verified server admins can use `!admin drones status`, `!admin drones stop`
+  (`recall` is an alias), and `!admin drones resume`. The dashboard/API and chat
+  use the same scheduler control, keep their existing access checks and queue
+  a world save. Stop/resume survives saves, restarts and hot updates.
+* `POST /api/drones/pause {"paused": true|false}` controls drones with the admin
+  token. `GET /api/status` adds `drones` with `paused`, `flying`, `docked` and
+  `returning`. The stock game's Stop/Recall button remains local to the client;
+  use the dashboard or admin chat for this dedicated server.
+
+### Upgrade
+
+Back up the existing data folder, then run `pcds upgrade v0.8.9` (Docker:
+`docker exec CONTAINER pcds upgrade v0.8.9`). The existing world, inventories,
+DLC settings and admin roles are retained; players can stay connected.
+Refresh the dashboard after updating to load the new World-page controls.
+Before rolling back to 0.8.8, resume drones: that release understands a saved
+stop but has no server control to resume them. See [Docker update steps](docs/docker.md#drone-stop-and-recall-in-089).
+
 ## [0.8.8] - 2026-11-07
 
 ### Breaking changes
@@ -1036,7 +1069,8 @@ None; the first release.
 
 Not applicable.
 
-[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.8...HEAD
+[Unreleased]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.9...HEAD
+[0.8.9]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/perara/planet-crafter-dedicated-server/compare/v0.8.5...v0.8.6
