@@ -15,7 +15,7 @@ COPY server/ ./
 RUN cargo build --release --locked \
   && cp "$(ls -t target/release/build/steamworks-sys-*/out/libsteam_api.so | head -1)" target/release/
 
-FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 LABEL org.opencontainers.image.source="https://github.com/perara/planet-crafter-dedicated-server" \
       org.opencontainers.image.description="The Planet Crafter dedicated server: hot updates inside the container (docs/docker.md)" \
       org.opencontainers.image.licenses="GPL-3.0-or-later"
